@@ -1137,18 +1137,22 @@ func rebuildStyles() {
 	ToolCallResult = ToolMessageStyle.Padding(0, 0, 0, 2)
 
 	// Input styles
+	claudeInputStyle := lipgloss.NewStyle()
+	claudeInputPlaceholderStyle := BaseStyle.Foreground(lipgloss.Color("246"))
 	InputStyle = textarea.Styles{
 		Focused: textarea.StyleState{
-			Base:        BaseStyle,
-			Placeholder: BaseStyle.Foreground(PlaceholderColor),
+			Base:        claudeInputStyle,
+			Text:        claudeInputStyle,
+			Placeholder: claudeInputPlaceholderStyle,
+			Prompt:      claudeInputStyle,
 		},
 		Blurred: textarea.StyleState{
-			Base:        BaseStyle,
-			Placeholder: BaseStyle.Foreground(PlaceholderColor),
+			Base:        claudeInputStyle,
+			Text:        claudeInputStyle,
+			Placeholder: claudeInputPlaceholderStyle,
+			Prompt:      claudeInputStyle,
 		},
-		Cursor: textarea.CursorStyle{
-			Color: Accent,
-		},
+		Cursor: textarea.CursorStyle{},
 	}
 
 	DialogInputStyle = textinput.Styles{
@@ -1165,7 +1169,7 @@ func rebuildStyles() {
 		},
 	}
 
-	EditorStyle = BaseStyle.Padding(1, AppPadding, 0, AppPadding)
+	EditorStyle = lipgloss.NewStyle().Padding(1, AppPadding, 0, AppPadding)
 	SuggestionGhostStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
 	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
 
@@ -1181,7 +1185,7 @@ func rebuildStyles() {
 	ThumbActiveStyle = lipgloss.NewStyle().Foreground(White).Background(BackgroundAlt)
 
 	// Resize handle styles
-	ResizeHandleStyle = BaseStyle.Foreground(BorderSecondary)
+	ResizeHandleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	ResizeHandleHoverStyle = BaseStyle.Foreground(Info).Bold(true)
 	ResizeHandleActiveStyle = BaseStyle.Foreground(White).Bold(true)
 
@@ -1212,10 +1216,10 @@ func rebuildStyles() {
 		BorderForeground(BorderSecondary).
 		Padding(0, 1)
 
-	CompletionNormalStyle = BaseStyle.Foreground(TextPrimary).Bold(true)
-	CompletionSelectedStyle = CompletionNormalStyle.Foreground(White).Background(MobyBlue)
-	CompletionDescStyle = BaseStyle.Foreground(TextSecondary)
-	CompletionSelectedDescStyle = CompletionDescStyle.Foreground(White).Background(MobyBlue)
+	CompletionNormalStyle = BaseStyle.Foreground(lipgloss.Color("246"))
+	CompletionSelectedStyle = CompletionNormalStyle.Foreground(lipgloss.Color("153"))
+	CompletionDescStyle = BaseStyle.Foreground(lipgloss.Color("246"))
+	CompletionSelectedDescStyle = CompletionDescStyle.Foreground(lipgloss.Color("153"))
 	CompletionNoResultsStyle = BaseStyle.Foreground(TextMuted).Italic(true).Align(lipgloss.Center)
 
 	// Agent badge styles

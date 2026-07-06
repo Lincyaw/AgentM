@@ -64,12 +64,16 @@ type Adapter struct {
 // The returned Adapter's App is ready to pass to tui.New; call Start to begin
 // pumping wire events into it.
 func New(client *wire.WireClient, id Identity, firstMessage string, appOpts ...app.Opt) *Adapter {
-	sess := session.New(session.WithTitle("agentm"))
+	wd, _ := os.Getwd()
+	sess := session.New(
+		session.WithTitle("agentm"),
+		session.WithWorkingDir(wd),
+		session.WithPermissions(app.LoadPermissionSettings(wd)),
+	)
 
 	// The child manager routes spawned sub-agent trajectories (bodies stamped
 	// with metadata.child_id) into their own switchable cagent tabs. Its
 	// working-dir label seeds child tab titles and the SpawnSessionMsg payload.
-	wd, _ := os.Getwd()
 	children := NewChildManager(wd, client, id)
 
 	// Build the App first so the Translator and Controller can reference it,
@@ -81,6 +85,7 @@ func New(client *wire.WireClient, id Identity, firstMessage string, appOpts ...a
 
 	opts := append([]app.Opt{app.WithController(ctrl)}, appOpts...)
 	a := app.New(context.Background(), sess, opts...)
+	a.SyncPermissionRules()
 	tr.app = a
 
 	// Seed the App's capability view from the welcome handshake so the model
@@ -126,8 +131,8 @@ func seedFromCapabilities(a *app.App, caps map[string]any) {
 }
 
 // capabilitySkills extracts the skill catalog from the welcome capability block.
-// Each entry is a {name, summary} map; the wire protocol carries no skill body,
-// so only Name/Description are populated.
+// Each entry is a {name, summary, source_dir} map; the wire protocol carries
+// no skill body, so only listing metadata is populated.
 func capabilitySkills(v any) []skills.Skill {
 	entries, ok := v.([]any)
 	if !ok {
@@ -144,7 +149,13 @@ func capabilitySkills(v any) []skills.Skill {
 			continue
 		}
 		summary, _ := m["summary"].(string)
-		out = append(out, skills.Skill{Name: name, Description: summary})
+		sourceDir, _ := m["source_dir"].(string)
+		out = append(out, skills.Skill{
+			Name:        name,
+			Description: summary,
+			BaseDir:     sourceDir,
+			Local:       sourceDir != "",
+		})
 	}
 	return out
 }
@@ -245,7 +256,11 @@ func (ad *Adapter) createTab(_ context.Context) (*app.App, *session.Session, fun
 	newKey := ad.rootKey + ":" + wire.NewID()
 
 	wd, _ := os.Getwd()
-	sess := session.New(session.WithTitle("agentm"))
+	sess := session.New(
+		session.WithTitle("agentm"),
+		session.WithWorkingDir(wd),
+		session.WithPermissions(app.LoadPermissionSettings(wd)),
+	)
 
 	tabID := newKey // identity for the child manager
 	childID := ad.baseID
@@ -259,6 +274,7 @@ func (ad *Adapter) createTab(_ context.Context) (*app.App, *session.Session, fun
 	ctrl := NewController(ad.client, childID, tr, "")
 
 	a := app.New(context.Background(), sess, app.WithController(ctrl))
+	a.SyncPermissionRules()
 	tr.app = a
 
 	seedFromCapabilities(a, ad.client.Capabilities())

@@ -49,8 +49,25 @@ func (m *appModel) handleOpenSessionBrowserWithData(sessions []session.Summary) 
 	if len(sessions) == 0 {
 		return m, notification.InfoCmd("No previous sessions found")
 	}
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSessionBrowserDialog(sessions),
+	return m, tea.Batch(
+		core.CmdHandler(dialog.OpenDialogMsg{
+			Model: dialog.NewSessionBrowserDialog(sessions),
+		}),
+		m.settleSessionBrowserControlCmd(),
+	)
+}
+
+func (m *appModel) settleSessionBrowserControlCmd() tea.Cmd {
+	sessionID := ""
+	if sess := m.application.Session(); sess != nil {
+		sessionID = sess.ID
+	}
+	agentName := ""
+	if m.sessionState != nil {
+		agentName = m.sessionState.CurrentAgentName()
+	}
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return runtime.StreamStopped(sessionID, agentName, "command")
 	})
 }
 
@@ -195,13 +212,38 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 		ed.Cleanup()
 	}
 
-	// Create a fresh session in the same app, preserving the working dir.
-	m.application.NewSession()
-	newSess := m.application.Session()
+	// Create a fresh visible session in the same app, preserving the working
+	// dir. The gateway still starts a fresh backend session, but /clear should
+	// not expose its /new implementation detail in the transcript.
+	oldSess := m.application.Session()
+	workingDir := ""
+	toolsApproved := false
+	if oldSess != nil {
+		workingDir = oldSess.WorkingDir
+		toolsApproved = oldSess.ToolsApproved
+	}
+	m.application.ClearSession()
+	m.suppressClearNoticeUntil = time.Now().Add(2 * time.Second)
+	newSess := session.New(session.WithWorkingDir(workingDir), session.WithToolsApproved(toolsApproved))
+	m.application.SetSession(newSess)
 
 	// Rebuild all per-session UI components.
 	m.initSessionComponents(activeID, m.application, newSess)
 	m.dialogMgr = dialog.New()
+	m.localPanelOpen = false
+	m.localPanelCommand = ""
+	m.localPanelDismissNotice = ""
+	m.localSettingsTab = settingsTabStatus
+	m.localSettingsBodyFocused = false
+	m.localConfigSelected = false
+	m.localConfigSearch = ""
+	m.localHelpTab = helpTabGeneral
+	m.localPermissionsTab = permissionsTabAllow
+	m.localPermissionsSelected = false
+	m.localPermissionsMode = permissionsModeList
+	m.localPermissionRuleInput = ""
+	m.localPermissionRuleDraft = ""
+	m.localPermissionSaveIndex = 0
 	m.supervisor.SetRunnerTitle(activeID, "")
 	m.sessionState.SetSessionTitle("")
 	m.sessionState.SetPreviousMessage(nil)
@@ -218,9 +260,11 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 	m.persistActiveTab(newSess.ID)
 
 	m.reapplyKeyboardEnhancements()
+	clearCmd := m.chatPage.AddLocalUserMessage("/clear")
 
 	return m, tea.Sequence(
 		m.chatPage.Init(),
+		clearCmd,
 		m.resizeAll(),
 		m.editor.Focus(),
 	)
@@ -249,6 +293,7 @@ func (m *appModel) handleSpawnSession(workingDir string, background bool) (tea.M
 
 	if background {
 		m.supervisor.SetBackground(sessionID, true)
+		m.markWorkflowSession(sessionID)
 		m.setWorkflowVisible(sessionID, true)
 
 		var cmds []tea.Cmd
@@ -348,6 +393,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	if runner == nil {
 		return m, notification.ErrorCmd("Session not found")
 	}
+	m.branchLabel = ""
 	if wasBackground {
 		m.setWorkflowVisible(sessionID, false)
 	} else {
@@ -406,6 +452,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		m.application = runner.App
 		m.sessionState = m.sessionStates[sessionID]
 		m.chatPage = m.chatPages[sessionID]
+		m.history = m.histories[sessionID]
 		m.editor = m.editors[sessionID]
 	}
 
@@ -559,6 +606,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 		delete(m.editors, sessionID)
 	}
 	delete(m.sessionStates, sessionID)
+	delete(m.histories, sessionID)
 	delete(m.pendingRestores, sessionID)
 	delete(m.pendingSidebarCollapsed, sessionID)
 	delete(m.stashedDialogs, sessionID)

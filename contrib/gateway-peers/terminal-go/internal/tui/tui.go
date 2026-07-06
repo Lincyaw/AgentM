@@ -3,16 +3,21 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/audio/transcribe"
+	cagentchat "github.com/AoyangSpace/agentm-terminal/internal/cagent/chat"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/history"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/paths"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
@@ -76,8 +81,9 @@ type appModel struct {
 	chatPage     chat.Page
 	editor       editor.Editor
 
-	// Shared history for command history across all editors
-	history *history.History
+	// history is the active tab's workspace-scoped prompt history.
+	history   *history.History
+	histories map[string]*history.History
 
 	// UI components
 	notification notification.Manager
@@ -94,7 +100,9 @@ type appModel struct {
 	transcriptCh chan string // bridges transcriber goroutine → Bubble Tea event loop
 
 	// Working state indicator (resize handle spinner)
-	workingSpinner spinner.Spinner
+	workingSpinner   spinner.Spinner
+	queuedInputCount int
+	branchLabel      string
 
 	// animFrame is the current animation frame, used to rotate the window
 	// title spinner so that tmux can detect pane activity.
@@ -117,22 +125,79 @@ type appModel struct {
 	// Focus state
 	focusedPanel FocusedPanel
 
-	lastExitRequest     time.Time
-	lastEscClearRequest time.Time
+	lastExitRequest          time.Time
+	lastExitClearedInput     time.Time
+	lastEscClearRequest      time.Time
+	lastEscClearedInput      time.Time
+	lastPromptStash          time.Time
+	stashedPrompt            string
+	lastModelSwitch          time.Time
+	lastPermissionCycle      time.Time
+	lastThinkingModeToggle   time.Time
+	suppressClearNoticeUntil time.Time
+	localPanelOpen           bool
+	localPanelCommand        string
+	localPanelDismissNotice  string
+	localSettingsTab         int
+	localSettingsBodyFocused bool
+	localConfigSelected      bool
+	localConfigSearch        string
+	localHelpTab             int
+	localHelpOffset          int
+	localPermissionsTab      int
+	localPermissionsSelected bool
+	localPermissionsMode     int
+	localPermissionRuleInput string
+	localPermissionRuleDraft string
+	localPermissionSaveIndex int
+	localSkillsDialog        dialog.Dialog
+	localExportIndex         int
+	localExportFilenameMode  bool
+	localExportFilename      string
+	modelSwitchStatus        string
+	sessionColorIndex        int
+	startedAt                time.Time
+	permissionMode           permissionFooterMode
+	thinkingModeEnabled      bool
+	thinkingLevel            string
+	autoCompactEnabled       bool
 
 	// Claude Code-style bottom activity surface. Background workflow sessions
 	// stay routed by supervisor, while shell/tool and monitor activity stays as
 	// rows instead of being promoted into tabs.
-	mainSessionID            string
-	bottomActivityRowsHidden bool
-	workflowTaskPickerOpen   bool
-	workflowTaskPickerIndex  int
-	workflowTranscripts      map[string]string
-	workflowVisible          map[string]bool
-	backgroundActivities     map[string]backgroundActivity
-	shortcutSheetOpen        bool
-	transcriptDetailed       bool
-	transcriptVerbose        bool
+	mainSessionID              string
+	bottomActivityRowsHidden   bool
+	workflowTaskPickerOpen     bool
+	workflowTaskPickerIndex    int
+	workflowTranscripts        map[string]string
+	workflowSessions           map[string]bool
+	workflowVisible            map[string]bool
+	workflowCompletedUntil     map[string]time.Time
+	backgroundActivities       map[string]backgroundActivity
+	backgroundActivityPrompt   bool
+	backgroundActivityDetail   bool
+	terminalWarnings           []string
+	shortcutSheetOpen          bool
+	shortcutSheetDismissed     bool
+	idleIDEContextExtraHidden  bool
+	idleFooterRightHidden      bool
+	streamCancelFooterHidden   bool
+	lastIdleFocusWarningReveal time.Time
+	lastEditorValueChangeAt    time.Time
+	agentsModeOpen             bool
+	agentsModeHelp             bool
+	agentsModeGrouped          bool
+	agentsModeReplyOpen        bool
+	agentsModeSelectedID       string
+	agentsModeDeleteConfirmID  string
+	agentsModeRenaming         bool
+	agentsModeRenameTargetID   string
+	agentsModeRenameDraft      string
+	agentsModePinned           map[string]bool
+	agentsModeTitles           map[string]string
+	agentsModePending          map[string]bool
+	transcriptDetailed         bool
+	transcriptVerbose          bool
 
 	// keyboardEnhancements stores the last keyboard enhancements message
 	keyboardEnhancements *tea.KeyboardEnhancementsMsg
@@ -325,15 +390,14 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		startupWarnings = append(startupWarnings, "TUI state unavailable; tabs won't persist.")
 	}
 
-	// Initialize shared command history
-	historyStore, err := history.NewAtDir(paths.GetDataDir())
+	initialSessionState := service.NewSessionState(initialApp.Session())
+	sessID := initialApp.Session().ID
+	initialHistory, err := promptHistoryForSession(initialWorkingDir, initialApp.Session())
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
 		startupWarnings = append(startupWarnings, "Command history unavailable.")
+		initialHistory = history.NewTransient()
 	}
-
-	initialSessionState := service.NewSessionState(initialApp.Session())
-	sessID := initialApp.Session().ID
 
 	m := &appModel{
 		buildCommandCategories: func(ctx context.Context, model tea.Model) []commands.Category {
@@ -356,7 +420,10 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		workflowTranscripts:           map[string]string{},
 		workflowVisible:               map[string]bool{},
 		backgroundActivities:          map[string]backgroundActivity{},
-		history:                       historyStore,
+		terminalWarnings:              terminalWarnings(),
+		agentsModeGrouped:             true,
+		history:                       initialHistory,
+		histories:                     map[string]*history.History{sessID: initialHistory},
 		pendingRestores:               make(map[string]string),
 		pendingSidebarCollapsed:       make(map[string]bool),
 		stashedDialogs:                make(map[string]stashedDialog),
@@ -368,6 +435,10 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		workingSpinner:                spinner.New(spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
 		focusedPanel:                  PanelEditor,
 		editorLines:                   minEditorLines,
+		startedAt:                     time.Now(),
+		thinkingModeEnabled:           true,
+		thinkingLevel:                 "high",
+		autoCompactEnabled:            true,
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "AgentM Terminal",
@@ -381,7 +452,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	}
 
 	// Create initial editor (after options are applied so command builder is set)
-	initialEditor := editor.New(historyStore, m.editorOpts()...)
+	initialEditor := editor.New(initialHistory, m.editorOpts()...)
 	m.editors[sessID] = initialEditor
 	m.editor = initialEditor
 
@@ -416,6 +487,10 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	}()
 
 	return m
+}
+
+func terminalWarnings() []string {
+	return nil
 }
 
 // Resolve implements dependency resolution for the appModel.
@@ -528,17 +603,46 @@ func (m *appModel) availableAgentDetails() []runtime.AgentDetails {
 }
 
 func (m *appModel) tabBarHeight() int {
+	if m.agentsModeOpen {
+		return 0
+	}
+	if m.activeIsWorkflowTask() {
+		return 0
+	}
+	if m.canCollapseAgentsTabChrome() {
+		return 0
+	}
 	if m.tabBar.CanCollapseIntoBackgroundChrome(m.mainSessionID) {
 		return 0
 	}
 	return m.tabBar.Height()
 }
 
+func (m *appModel) canCollapseAgentsTabChrome() bool {
+	if m.supervisor == nil || m.mainSessionID == "" {
+		return false
+	}
+	tabs, _ := m.supervisor.GetTabs()
+	if len(tabs) <= 1 {
+		return false
+	}
+	for _, tab := range tabs {
+		if tab.SessionID == m.mainSessionID {
+			continue
+		}
+		if tab.Background || m.workflowSessions[tab.SessionID] {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (m *appModel) statusBarHeight() int {
-	if m.completions.Open() {
+	if m.localPanelOpen || m.completions.Open() || m.shortcutSheetOpen {
 		return 0
 	}
-	return m.statusBar.Height()
+	return m.statusBar.Height() + len(m.footerExtraLines())
 }
 
 func (m *appModel) syncTabChrome(tabs []messages.TabInfo, activeIdx int) bool {
@@ -582,11 +686,7 @@ func (m *appModel) workflowBackgroundText() string {
 		}
 		return fmt.Sprintf("%d %s running (Ctrl+n)", running, noun)
 	default:
-		noun := "workflow"
-		if total != 1 {
-			noun = "workflows"
-		}
-		return fmt.Sprintf("%d %s done (Ctrl+n)", total, noun)
+		return ""
 	}
 }
 
@@ -599,19 +699,71 @@ func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session
 	m.application = a
 	m.sessionState = ss
 	m.chatPage = cp
+	m.history = m.histories[tabID]
 	m.editor = ed
 }
 
 func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *session.Session) (chat.Page, *service.SessionState, editor.Editor) {
 	ss := service.NewSessionState(sess)
 	cp := chat.New(a, ss, m.chatPageOpts()...)
-	ed := editor.New(m.history, m.editorOpts()...)
+	hist, err := promptHistoryForSession(sessionWorkingDir(sess), sess)
+	if err != nil {
+		slog.Warn("Failed to initialize command history", "error", err)
+		hist = history.NewTransient()
+	}
+	ed := editor.New(hist, m.editorOpts()...)
 
 	m.chatPages[tabID] = cp
 	m.sessionStates[tabID] = ss
+	m.histories[tabID] = hist
 	m.editors[tabID] = ed
 
 	return cp, ss, ed
+}
+
+func promptHistoryForSession(workingDir string, sess *session.Session) (*history.History, error) {
+	hist, err := history.NewAtDir(workspaceHistoryDir(workingDir))
+	if err != nil {
+		return nil, err
+	}
+	if sess == nil {
+		return hist, nil
+	}
+	for _, message := range sess.GetAllMessages() {
+		if message.Implicit || message.Message.Role != cagentchat.MessageRoleUser {
+			continue
+		}
+		content := strings.TrimSpace(message.Message.Content)
+		if content == "" {
+			continue
+		}
+		_ = hist.Add(content)
+	}
+	return hist, nil
+}
+
+func sessionWorkingDir(sess *session.Session) string {
+	if sess != nil && strings.TrimSpace(sess.WorkingDir) != "" {
+		return sess.WorkingDir
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return ""
+}
+
+func workspaceHistoryDir(workingDir string) string {
+	cleaned := strings.TrimSpace(workingDir)
+	if cleaned == "" {
+		cleaned = "."
+	}
+	if abs, err := filepath.Abs(cleaned); err == nil {
+		cleaned = abs
+	} else {
+		cleaned = filepath.Clean(cleaned)
+	}
+	sum := sha256.Sum256([]byte(cleaned))
+	return filepath.Join(paths.GetDataDir(), "histories", hex.EncodeToString(sum[:8]))
 }
 
 // initAndFocusComponents returns a batch of commands that initializes and focuses
@@ -647,7 +799,7 @@ func (m *appModel) Init() tea.Cmd {
 		tabID := m.pendingActiveTab
 		m.pendingActiveTab = ""
 		_, switchCmd := m.handleSwitchTab(tabID)
-		return m.withStartupWarnings(m.dialogMgr.Init(), switchCmd)
+		return m.withStartupWarnings(m.dialogMgr.Init(), switchCmd, startupFooterRefreshAfter())
 	}
 
 	// If the initial tab has a pending session restore, go through
@@ -668,7 +820,7 @@ func (m *appModel) Init() tea.Cmd {
 				cmd = tea.Batch(cmd, m.applySidebarCollapsed(activeID))
 				m.persistActiveTab(sess.ID)
 
-				return m.withStartupWarnings(m.dialogMgr.Init(), cmd)
+				return m.withStartupWarnings(m.dialogMgr.Init(), cmd, startupFooterRefreshAfter())
 			}
 		}
 	}
@@ -679,12 +831,14 @@ func (m *appModel) Init() tea.Cmd {
 		m.editor.Init(),
 		m.editor.Focus(),
 		m.application.SendFirstMessage(),
+		startupFooterRefreshAfter(),
 	)
 }
 
 // handleRoutedMsg processes messages routed to specific sessions.
 func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
 	activeID := m.supervisor.ActiveID()
+	m.handleAgentsModeRuntimeEvent(msg.SessionID, msg.Inner)
 	m.recordWorkflowTranscript(msg.SessionID, msg.Inner)
 	if ev, ok := msg.Inner.(*runtime.BackgroundActivityEvent); ok {
 		if ev.SessionID == "" {
@@ -730,6 +884,7 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 // handleWorkingStateChanged updates the editor working indicator and resize handle spinner.
 func (m *appModel) handleWorkingStateChanged(msg messages.WorkingStateChangedMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	m.queuedInputCount = msg.QueuedInputCount
 
 	// Update editor working/queued state
 	cmds = append(cmds,
@@ -769,35 +924,77 @@ func (m *appModel) resizeAll() tea.Cmd {
 	var cmds []tea.Cmd
 
 	width, height := m.width, m.height
-	innerWidth := width - appPaddingHorizontal
+	innerWidth := width
 
 	// Calculate chrome height (everything that isn't content or editor).
 	bottomSurfaceHeight := m.bottomSurfaceHeight(width)
+	if m.localPanelOpen {
+		bottomSurfaceHeight = 0
+	}
 	m.bottomSurfaceLayoutHeight = bottomSurfaceHeight
-	chromeHeight := m.tabBarHeight() + m.statusBarHeight() + bottomSurfaceHeight + 1 // +1 for resize handle
+	composerBottomBorderHeight := m.composerBottomBorderHeight()
+	resizeHandleHeight := 1
+	if m.agentsModeReplyOpen || m.localPanelOpen {
+		resizeHandleHeight = 0
+	}
+	chromeHeight := m.tabBarHeight() + m.statusBarHeight() + bottomSurfaceHeight + composerBottomBorderHeight + resizeHandleHeight
 
 	// Calculate editor height
 	minLines := minEditorLines
 	maxLines := max(minLines, (height-6)/2)
-	m.editorLines = max(minLines, min(m.editorLines, maxLines))
+	m.editorLines = max(minLines, min(max(m.editorLines, m.desiredEditorLines()), maxLines))
 
 	targetEditorHeight := m.editorLines - 1
+	if m.localPanelOpen || m.transcriptDetailed {
+		targetEditorHeight = 0
+	}
 	cmds = append(cmds, m.editor.SetSize(innerWidth, targetEditorHeight))
 	_, editorHeight := m.editor.GetSize()
-	// The editor's View() adds MarginBottom(1) which isn't included in GetSize(),
-	// so account for it in the layout calculation.
-	editorRenderedHeight := editorHeight + 1
+	editorRenderedHeight := editorHeight
+	if m.agentsModeReplyOpen {
+		editorRenderedHeight = agentsModeReplyComposerHeight + 1
+	}
+	if m.localPanelOpen || m.transcriptDetailed {
+		editorRenderedHeight = 0
+	}
 
 	// Content gets remaining space
 	m.contentHeight = max(1, height-chromeHeight-editorRenderedHeight)
+	m.chatPage.SetCompletionOpen(m.completions.Open())
 	cmds = append(cmds, m.chatPage.SetSize(width, m.contentHeight))
 
 	cmds = append(cmds, m.updateDialogCmd(tea.WindowSizeMsg{Width: width, Height: height}))
 
-	m.completions.SetEditorBottom(editorRenderedHeight + m.statusBarHeight() + bottomSurfaceHeight)
+	m.completions.SetEditorBottom(editorRenderedHeight + composerBottomBorderHeight + m.statusBarHeight() + bottomSurfaceHeight)
 	m.completions.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
 	m.notification.SetSize(width, height)
 
 	return tea.Batch(cmds...)
+}
+
+func (m *appModel) desiredEditorLines() int {
+	if m.editor == nil {
+		return minEditorLines
+	}
+	visualLines := editorVisualLineCount(m.editor.Value(), max(1, m.width))
+	if bannerHeight := m.editor.BannerHeight(); bannerHeight > 0 {
+		visualLines += bannerHeight
+	}
+	minLines := minEditorLines
+	maxLines := max(minLines, (m.height-6)/2)
+	return max(minLines, min(visualLines+1, maxLines))
+}
+
+func editorVisualLineCount(value string, width int) int {
+	if value == "" {
+		return 1
+	}
+	textWidth := max(1, width-2)
+	count := 0
+	for _, line := range strings.Split(value, "\n") {
+		lineWidth := lipgloss.Width(line)
+		count += max(1, (lineWidth+textWidth-1)/textWidth)
+	}
+	return count
 }

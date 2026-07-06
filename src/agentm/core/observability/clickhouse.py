@@ -257,11 +257,41 @@ def first_user_message(url: str, sid: str) -> str:
     )
     for r in rows:
         body = _parse_body(r.get("Body"))
-        if isinstance(body, dict) and body.get("role") == "user":
-            content = body.get("content", "")
-            if isinstance(content, str):
-                return content[:120]
+        if not isinstance(body, dict):
+            continue
+        raw_payload = body.get("payload")
+        payload = raw_payload if isinstance(raw_payload, dict) else body
+        if payload.get("role") != "user":
+            continue
+        content = payload.get("content", "")
+        if isinstance(content, str):
+            return content[:120]
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str):
+                        return text[:120]
     return ""
+
+
+def message_stats(url: str, sid: str) -> dict[str, int]:
+    """Return lightweight transcript stats for a session."""
+    rows = _query(
+        url,
+        "SELECT count() AS messages, sum(length(toString(Body))) AS bytes "
+        "FROM otel_logs "
+        "WHERE EventName = 'agentm.message.appended' "
+        "  AND LogAttributes['agentm.session.id'] = {sid:String}",
+        params={"sid": sid},
+    )
+    if not rows:
+        return {"messages": 0, "bytes": 0}
+    row = rows[0]
+    return {
+        "messages": int(row.get("messages") or 0),
+        "bytes": int(row.get("bytes") or 0),
+    }
 
 
 # ---------------------------------------------------------------------------

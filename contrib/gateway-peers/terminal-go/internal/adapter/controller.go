@@ -2,13 +2,19 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/shellpath"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/wire"
 )
@@ -38,6 +44,7 @@ type Controller struct {
 	scenarioSent bool
 	firstMessage string
 	hasFirstMsg  bool
+	thinkingMode string
 
 	// prevRunCtx tracks the ctx from the most recent Run/RunWithMessage/
 	// CompactSession call. When the TUI cancels it (ESC or new message) and a
@@ -135,6 +142,37 @@ func (c *Controller) sendInterrupt() {
 	c.sendInbound(map[string]any{"control": "interrupt"})
 }
 
+func (c *Controller) currentThinkingMode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.thinkingMode == "" {
+		return "high"
+	}
+	return c.thinkingMode
+}
+
+// SetThinkingMode records the Claude-style thinking toggle for future user
+// submissions. The gateway owns execution; this only stamps the wire request.
+func (c *Controller) SetThinkingMode(enabled bool) {
+	mode := "off"
+	if enabled {
+		mode = "high"
+	}
+	c.SetThinkingLevel(mode)
+}
+
+// SetThinkingLevel records the thinking level for future user submissions.
+func (c *Controller) SetThinkingLevel(level string) {
+	switch level {
+	case "off", "low", "medium", "high":
+	default:
+		level = "high"
+	}
+	c.mu.Lock()
+	c.thinkingMode = level
+	c.mu.Unlock()
+}
+
 // interruptIfPending checks whether the previous Run's ctx was cancelled by the
 // TUI (ESC or new-message-replaces-old). If so, sends an interrupt to the
 // gateway before the next message, ensuring the old turn is stopped promptly.
@@ -172,16 +210,40 @@ func (c *Controller) trackRun(ctx context.Context) {
 	}()
 }
 
+// Interrupt asks the gateway to stop the current turn. This is used as a
+// fallback when the TUI is still showing tool activity after the original
+// stream context has already been cleared.
+func (c *Controller) Interrupt() {
+	c.mu.Lock()
+	c.prevRunCtx = nil
+	c.mu.Unlock()
+	c.sendInterrupt()
+}
+
+// CancelBackground asks the gateway to stop a detached background_exec task.
+func (c *Controller) CancelBackground(taskID string) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+	c.sendInbound(map[string]any{
+		"action":  "cancel_background",
+		"task_id": taskID,
+	})
+}
+
 // Run sends one user turn to the gateway.
 func (c *Controller) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
 	_ = cancel
-	_ = attachments
 	if message == "" {
 		return
 	}
 	c.interruptIfPending()
-	c.echoUserMessage(message)
-	c.sendInbound(map[string]any{"content": message})
+	c.echoUserMessage(message, attachments)
+	c.sendInbound(map[string]any{
+		"content":  message,
+		"thinking": c.currentThinkingMode(),
+	})
 	c.trackRun(ctx)
 }
 
@@ -197,9 +259,10 @@ func (c *Controller) RunCooperative(ctx context.Context, cancel context.CancelFu
 		return
 	}
 	c.sendInbound(map[string]any{
-		"content": message,
-		"action":  "submit",
-		"policy":  "cooperative",
+		"content":  message,
+		"action":   "submit",
+		"policy":   "cooperative",
+		"thinking": c.currentThinkingMode(),
 	})
 }
 
@@ -210,11 +273,42 @@ func (c *Controller) RunCooperative(ctx context.Context, cancel context.CancelFu
 // this the user's own message never appears in the TUI. ReplaceLoadingWithUser
 // tolerates the absence of a loading placeholder, so a plain UserMessageEvent
 // is enough to paint the bubble.
-func (c *Controller) echoUserMessage(content string) {
+func (c *Controller) echoUserMessage(content string, attachments []messages.Attachment) {
 	if c.translator == nil || content == "" {
 		return
 	}
-	c.translator.emit(runtime.UserMessage(content, c.translator.sessionID(), nil))
+	c.translator.emit(runtime.UserMessage(userMessageTranscript(content, attachments), c.translator.sessionID(), nil))
+}
+
+func userMessageTranscript(content string, attachments []messages.Attachment) string {
+	var details []string
+	for _, attachment := range attachments {
+		if attachment.FilePath == "" {
+			continue
+		}
+		label := attachment.Name
+		if strings.TrimSpace(label) == "" {
+			label = filepath.Base(attachment.FilePath)
+		}
+		details = append(details, "⎿ \u00a0Read "+label+" ("+attachmentLineCountLabel(attachment.FilePath)+")")
+	}
+	if len(details) == 0 {
+		return content
+	}
+	return strings.TrimRight(content, "\n") + "\n" + strings.Join(details, "\n")
+}
+
+func attachmentLineCountLabel(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "file"
+	}
+	lines := strings.Count(string(data), "\n") + 1
+	label := "lines"
+	if lines == 1 {
+		label = "line"
+	}
+	return fmt.Sprintf("%d %s", lines, label)
 }
 
 // RunWithMessage sends a pre-built message. The wire protocol carries plain
@@ -229,8 +323,11 @@ func (c *Controller) RunWithMessage(ctx context.Context, cancel context.CancelFu
 		return
 	}
 	c.interruptIfPending()
-	c.echoUserMessage(content)
-	c.sendInbound(map[string]any{"content": content})
+	c.echoUserMessage(content, nil)
+	c.sendInbound(map[string]any{
+		"content":  content,
+		"thinking": c.currentThinkingMode(),
+	})
 	c.trackRun(ctx)
 }
 
@@ -242,9 +339,36 @@ func (c *Controller) CompactSession(ctx context.Context, cancel context.CancelFu
 		content += " " + additionalPrompt
 	}
 	c.interruptIfPending()
-	c.echoUserMessage(content)
+	c.echoUserMessage(content, nil)
 	c.sendInbound(map[string]any{"content": content})
 	c.trackRun(ctx)
+}
+
+// SetAutoCompact toggles backend automatic compaction for the current session
+// without echoing a slash command into the transcript.
+func (c *Controller) SetAutoCompact(enabled bool) {
+	c.sendInbound(map[string]any{
+		"action":     "set_config",
+		"request_id": wire.NewID(),
+		"raw": map[string]any{
+			"key":     "auto_compact",
+			"enabled": enabled,
+		},
+	})
+}
+
+// SetPermissionRule applies a session-scoped permission rule through the
+// gateway approval manager.
+func (c *Controller) SetPermissionRule(kind, pattern string) {
+	c.sendInbound(map[string]any{
+		"action":     "set_config",
+		"request_id": wire.NewID(),
+		"raw": map[string]any{
+			"key":     "permission_rule",
+			"kind":    kind,
+			"pattern": pattern,
+		},
+	})
 }
 
 // Resume delivers a tool-confirmation decision by sending an inbound carrying
@@ -264,8 +388,9 @@ func (c *Controller) Resume(req runtime.ResumeRequest) {
 		decision = "deny"
 	case runtime.ResumeTypeApproveSession:
 		decision = "approve_session"
-	case runtime.ResumeTypeApprove,
-		runtime.ResumeTypeApproveTool:
+	case runtime.ResumeTypeApproveTool:
+		decision = "approve_tool"
+	case runtime.ResumeTypeApprove:
 		decision = "approve"
 	}
 	c.sendInbound(map[string]any{"button_value": approvalID + ":" + decision})
@@ -285,30 +410,131 @@ func (c *Controller) UpdateSessionTitle(ctx context.Context, title string) error
 	return nil
 }
 
-// RunBangCommand forwards a shell command as a "!"-prefixed inbound so the
-// gateway scenario can run it. The terminal peer does not execute shell locally.
-func (c *Controller) RunBangCommand(ctx context.Context, command string) {
-	_ = ctx
+const maxBangCommandContextOutputRunes = 12000
+
+// RunBangCommand executes Claude-style bang commands locally, mirrors the
+// result through runtime events so the TUI uses its direct-shell renderer, then
+// submits the shell result to the gateway so the agent can respond to it.
+func (c *Controller) RunBangCommand(ctx context.Context, cancel context.CancelFunc, command string) {
+	_ = cancel
 	if command == "" {
 		return
 	}
-	c.echoUserMessage("!" + command)
-	c.sendInbound(map[string]any{"content": "!" + command})
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return
+	}
+	if c.translator == nil {
+		return
+	}
+
+	sessionID := c.translator.sessionID()
+	agentName := c.translator.agentName
+	content := "! " + command
+	c.interruptIfPending()
+	c.echoUserMessage(content, nil)
+	c.translator.emit(runtime.StreamStarted(sessionID, agentName))
+
+	toolDef := tools.Tool{
+		Name:        "bash",
+		Category:    "shell",
+		Description: "Execute a shell command in the session cwd.",
+	}
+	args, _ := json.Marshal(map[string]string{"cmd": command})
+	toolCallID := wire.NewID()
+	toolCall := tools.ToolCall{
+		ID:   toolCallID,
+		Type: tools.ToolType("function"),
+		Function: tools.FunctionCall{
+			Name:      "bash",
+			Arguments: string(args),
+		},
+	}
+	c.translator.emit(runtime.ToolCall(toolCall, toolDef, agentName))
+
+	shell, argsPrefix := shellpath.DetectShell()
+	cmdArgs := append(append([]string{}, argsPrefix...), command)
+	cmd := shellCommandContext(ctx, shell, cmdArgs...)
+	outputBytes, err := cmd.CombinedOutput()
+	output := string(outputBytes)
+	var meta any
+	if err != nil {
+		meta = map[string]string{"error": err.Error()}
+	}
+	result := &tools.ToolCallResult{
+		Output:  output,
+		IsError: err != nil,
+		Meta:    meta,
+	}
+	c.translator.emit(runtime.ToolCallResponse(toolCallID, toolDef, result, output, agentName))
+	reason := "normal"
+	if err != nil {
+		reason = "error"
+	}
+	if ctx.Err() != nil {
+		reason = "cancelled"
+	}
+	c.translator.emit(runtime.StreamStopped(sessionID, agentName, reason))
+	if ctx.Err() != nil {
+		return
+	}
+	c.sendInbound(map[string]any{
+		"content":  bangCommandContextMessage(command, output, err),
+		"action":   "submit",
+		"policy":   "interrupt_first",
+		"thinking": c.currentThinkingMode(),
+	})
+	c.trackRun(ctx)
+}
+
+func bangCommandContextMessage(command, output string, err error) string {
+	status := "success"
+	if err != nil {
+		status = "error: " + err.Error()
+	}
+	output = strings.TrimRight(output, "\r\n")
+	if output == "" {
+		output = "(no output)"
+	}
+	output = trimBangCommandContextOutput(output)
+	return "The user ran a local shell command via `!` shell mode. Use this result as context and respond normally.\n\nCommand:\n" +
+		command +
+		"\n\nStatus: " +
+		status +
+		"\n\nOutput:\n```text\n" +
+		output +
+		"\n```"
+}
+
+func trimBangCommandContextOutput(output string) string {
+	runes := []rune(output)
+	if len(runes) <= maxBangCommandContextOutputRunes {
+		return output
+	}
+	return "[... output truncated ...]\n" + string(runes[len(runes)-maxBangCommandContextOutputRunes:])
 }
 
 // NewSession starts a fresh gateway session via the /new command.
 func (c *Controller) NewSession() {
-	c.echoUserMessage("/new")
+	c.echoUserMessage("/new", nil)
 	c.sendInbound(map[string]any{"content": "/new"})
 }
 
-// SwitchModel asks the gateway to switch the active model profile by sending a
-// "/model <name>" command (the gateway's switch_model command). A blank name is
-// ignored so an empty picker selection is a no-op.
+// ClearSession starts a fresh gateway session without exposing the gateway's
+// /new implementation detail in the terminal transcript.
+func (c *Controller) ClearSession() {
+	c.sendInbound(map[string]any{"content": "/new"})
+}
+
+// SwitchModel asks the gateway to switch the active model profile without
+// echoing a slash command into the transcript. A blank name is ignored so an
+// empty picker selection is a no-op.
 func (c *Controller) SwitchModel(name string) {
 	if name == "" {
 		return
 	}
-	c.echoUserMessage("/model " + name)
-	c.sendInbound(map[string]any{"content": "/model " + name})
+	c.sendInbound(map[string]any{
+		"action":  "switch_model",
+		"content": name,
+	})
 }

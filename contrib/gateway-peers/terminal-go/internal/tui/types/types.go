@@ -25,6 +25,9 @@ const (
 	// MessageTypeSystem is a system notice — the output of a control command
 	// (/status, /help, ...). Rendered neutrally, with no agent author.
 	MessageTypeSystem
+	// MessageTypeNotice is a local, single-line transcript notice such as
+	// Claude Code's `⎿  Kept ...` feedback after canceling a dialog.
+	MessageTypeNotice
 )
 
 const (
@@ -57,6 +60,9 @@ type Message struct {
 	ToolDefinition tools.Tool            // Definition of the tool being called
 	ToolStatus     ToolStatus            // Status for tool calls
 	ToolResult     *tools.ToolCallResult // Result of tool call (when completed)
+	// DirectShell is true for tools launched through Claude-style `!` shell
+	// mode, where the user transcript already carries the command line.
+	DirectShell bool
 	// StartedAt records when a tool call entered ToolStatusRunning.
 	// Used to display elapsed time for long-running tool calls.
 	StartedAt *time.Time
@@ -120,6 +126,13 @@ func System(title, content string) *Message {
 	return &Message{
 		Type:    MessageTypeSystem,
 		Sender:  title,
+		Content: strings.ReplaceAll(content, "\t", "    "),
+	}
+}
+
+func Notice(content string) *Message {
+	return &Message{
+		Type:    MessageTypeNotice,
 		Content: strings.ReplaceAll(content, "\t", "    "),
 	}
 }

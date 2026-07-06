@@ -1,5 +1,0 @@
-backgrounded · 64269834 · tmux-bg-manager (idle — send a prompt to start)
-  claude agents             list sessions
-  claude attach 64269834    open in this terminal
-  claude logs 64269834      show recent output
-  claude stop 64269834      stop this session

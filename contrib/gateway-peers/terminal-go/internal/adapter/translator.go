@@ -41,9 +41,11 @@ const defaultAgentName = "agent"
 // Translator converts wire envelopes into runtime events and feeds them into an
 // *app.App, keeping the App's session view-model current as a side effect.
 type Translator struct {
-	app       *app.App
-	sess      *session.Session
-	agentName string
+	app        *app.App
+	sess       *session.Session
+	agentName  string
+	turnModels map[int64]string
+	lastModel  string
 
 	// streaming tracks whether a stream is currently open so we can synthesise
 	// StreamStarted / StreamStopped around the gateway's turn boundaries.
@@ -76,9 +78,10 @@ func (t *Translator) PendingApprovalID() string {
 // NewTranslator builds a Translator bound to an App and its session.
 func NewTranslator(a *app.App, sess *session.Session) *Translator {
 	return &Translator{
-		app:       a,
-		sess:      sess,
-		agentName: defaultAgentName,
+		app:        a,
+		sess:       sess,
+		agentName:  defaultAgentName,
+		turnModels: make(map[int64]string),
 	}
 }
 
@@ -168,6 +171,9 @@ func (t *Translator) handleOutbound(body map[string]any) {
 			t.emit(runtime.StreamStarted(t.sessionID(), t.agentName))
 		}
 
+	case "llm_request_start":
+		t.recordLLMRequestStart(meta)
+
 	case "stream_text":
 		t.ensureStreaming()
 		if content != "" {
@@ -197,8 +203,14 @@ func (t *Translator) handleOutbound(body map[string]any) {
 		// Not agent speech — render as a system notice with no author. The chat
 		// page also settles the working spinner the slash command triggered,
 		// since a control command runs no turn (no agent_end is coming).
+		if display, _ := meta["display"].(string); display == "notice" {
+			t.emit(runtime.Notice(content, t.sessionID()))
+			t.settleControlCommand()
+			return
+		}
 		title, _ := meta["title"].(string)
 		t.emit(runtime.SystemNote(content, t.sessionID(), title))
+		t.settleControlCommand()
 
 	case "tool_call":
 		t.emit(t.toolCallEvent(meta))
@@ -228,7 +240,14 @@ func (t *Translator) handleOutbound(body map[string]any) {
 		}
 
 	case "diagnostic_warning":
-		t.emit(runtime.Warning(content, t.agentName))
+		if source, _ := meta["source"].(string); source == "compaction" {
+			t.emit(runtime.SystemNote(content, t.sessionID(), ""))
+			t.settleControlCommand()
+			return
+		}
+		if !isQuietDiagnosticWarning(content) {
+			t.emit(runtime.Warning(content, t.agentName))
+		}
 		t.settleIdle()
 
 	case "diagnostic_error":
@@ -237,6 +256,9 @@ func (t *Translator) handleOutbound(body map[string]any) {
 
 	case "session_ready":
 		t.handleSessionReady(meta)
+
+	case "session_history":
+		t.handleSessionHistory(meta)
 
 	case "child_start":
 		// Fallback only: reached when this translator has no child manager
@@ -278,6 +300,8 @@ func (t *Translator) handleOutbound(body map[string]any) {
 
 	case "after_compact":
 		t.emit(t.afterCompactNote(meta, content))
+		t.emit(runtime.SessionCompaction(t.sessionID(), "completed", t.agentName))
+		t.settleControlCommand()
 
 	case "cost_budget_exceeded":
 		t.emit(t.costBudgetEvent(meta))
@@ -296,13 +320,18 @@ func (t *Translator) handleOutbound(body map[string]any) {
 
 	case "session_list":
 		t.handleSessionList(meta, content)
-		t.settleIdle()
+		t.settleControlCommand()
 
 	case "request_ack":
 		t.handleRequestAck(meta)
 
 	case "session_snapshot":
 		t.handleSessionSnapshot(meta)
+
+	case "config_update":
+		key, _ := meta["key"].(string)
+		enabled, _ := meta["enabled"].(bool)
+		t.emit(runtime.ConfigUpdate(t.sessionID(), key, enabled, t.agentName))
 
 	default:
 		// Truly unmapped kinds (ping/ack-adjacent noise, future additions):
@@ -342,7 +371,8 @@ func (t *Translator) handleSessionSnapshot(meta map[string]any) {
 	case "waiting_interaction":
 		t.emit(runtime.Warning("agent is waiting for your input", t.agentName))
 	case "interrupting":
-		t.emit(runtime.Warning("interrupt requested", t.agentName))
+		// Claude-style clients already expose interruption through the composer
+		// state, so the gateway ack should not become a visible warning toast.
 	case "errored":
 		if lastError == "" {
 			lastError = "agent session errored"
@@ -372,6 +402,14 @@ func (t *Translator) settleSnapshotIdle(reason string) {
 func (t *Translator) settleIdle() {
 	if t.streaming {
 		return
+	}
+	t.emit(runtime.StreamStopped(t.sessionID(), t.agentName, "command"))
+}
+
+func (t *Translator) settleControlCommand() {
+	if t.streaming {
+		t.streaming = false
+		t.sawStreamText = false
 	}
 	t.emit(runtime.StreamStopped(t.sessionID(), t.agentName, "command"))
 }
@@ -497,10 +535,14 @@ func (t *Translator) handleSessionList(meta map[string]any, textFallback string)
 				createdAt = parsed
 			}
 		}
+		numMessages := intFromAny(m["num_messages"])
+		sizeBytes := int64(intFromAny(m["size_bytes"]))
 		summaries = append(summaries, session.Summary{
-			ID:        sid,
-			Title:     title,
-			CreatedAt: createdAt,
+			ID:          sid,
+			Title:       title,
+			CreatedAt:   createdAt,
+			NumMessages: numMessages,
+			SizeBytes:   sizeBytes,
 		})
 	}
 	if len(summaries) == 0 {
@@ -509,6 +551,22 @@ func (t *Translator) handleSessionList(meta map[string]any, textFallback string)
 	}
 	if t.app != nil {
 		t.app.EmitEvent(messages.OpenSessionBrowserWithDataMsg{Sessions: summaries})
+	}
+}
+
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
 	}
 }
 
@@ -675,18 +733,21 @@ func historyToolResultMessage(raw any) *session.Message {
 }
 
 // extensionInstallEvent renders an extension_install frame. A non-empty error is
-// a warning; a successful install/registration is a quiet warning-styled notice.
+// a warning; successful install/registration diagnostics are internal startup
+// noise and are intentionally not surfaced in the Claude-style transcript.
 func (t *Translator) extensionInstallEvent(meta map[string]any) runtime.Event {
 	path, _ := meta["module_path"].(string)
-	phase, _ := meta["phase"].(string)
 	if errStr, _ := meta["error"].(string); errStr != "" {
 		return runtime.Warning("extension install failed ("+path+"): "+errStr, t.agentName)
 	}
-	msg := "extension installed: " + path
-	if phase != "" {
-		msg += " [" + phase + "]"
-	}
-	return runtime.Warning(msg, t.agentName)
+	return nil
+}
+
+func isQuietDiagnosticWarning(content string) bool {
+	content = strings.TrimSpace(content)
+	return strings.HasPrefix(content, "extension installed:") ||
+		strings.HasPrefix(content, "registered provider ") ||
+		strings.HasPrefix(content, "Azure OpenAI Chat Completions does not support ")
 }
 
 // extensionReloadEvent renders an extension_reload frame, making a self-modify
@@ -739,17 +800,11 @@ func (t *Translator) planSubmittedNote(meta map[string]any, content string) runt
 	return runtime.AgentChoice(t.agentName, t.sessionID(), header)
 }
 
-// afterCompactNote renders an after_compact frame: how many messages were kept
-// vs discarded, plus the summary content.
+// afterCompactNote renders an after_compact frame as Claude-style compact
+// command output. The full summary is durable backend state; the transcript
+// stays concise after a manual /compact.
 func (t *Translator) afterCompactNote(meta map[string]any, content string) runtime.Event {
-	kept := intField(meta, "kept")
-	discarded := intField(meta, "discarded")
-	msg := "🗜 history compacted: kept " + strconv.FormatInt(kept, 10) +
-		", discarded " + strconv.FormatInt(discarded, 10)
-	if content != "" {
-		msg += "\n" + content
-	}
-	return runtime.AgentChoice(t.agentName, t.sessionID(), msg)
+	return runtime.Notice("Compacted.", t.sessionID())
 }
 
 // costBudgetEvent renders a cost_budget_exceeded frame as a warning toast.
@@ -841,19 +896,64 @@ func (t *Translator) apiUserMessageNote(meta map[string]any, content string) run
 func (t *Translator) applyUsage(meta map[string]any) {
 	in := intField(meta, "input_tokens")
 	out := intField(meta, "output_tokens")
+	cacheRead := intField(meta, "cache_read")
+	cacheWrite := intField(meta, "cache_write")
+	cost := floatField(meta, "cost")
+	if cost == 0 {
+		cost = floatField(meta, "cost_usd")
+	}
+	model, _ := meta["model"].(string)
+	turnID := intField(meta, "turn_id")
+	if model == "" {
+		model = t.modelForTurn(turnID)
+	}
 	if t.sess != nil {
 		t.sess.InputTokens = in
 		t.sess.OutputTokens = out
 	}
+	lastMessageUsage := chat.Usage{
+		InputTokens:       in,
+		OutputTokens:      out,
+		CachedInputTokens: cacheRead,
+		CacheWriteTokens:  cacheWrite,
+	}
 	usage := &runtime.Usage{
 		InputTokens:   in,
 		OutputTokens:  out,
-		ContextLength: in + out,
-	}
-	if t.sess != nil {
-		usage.Cost = t.sess.OwnCost()
+		ContextLength: in + out + cacheRead + cacheWrite,
+		Cost:          cost,
+		LastMessage: &runtime.MessageUsage{
+			Usage: lastMessageUsage,
+			Cost:  cost,
+			Model: model,
+		},
 	}
 	t.emit(runtime.NewTokenUsageEvent(t.sessionID(), t.agentName, usage))
+}
+
+func (t *Translator) recordLLMRequestStart(meta map[string]any) {
+	model, _ := meta["model"].(string)
+	if model == "" {
+		return
+	}
+	t.lastModel = model
+	turnID := intField(meta, "turn_id")
+	if turnID >= 0 {
+		if t.turnModels == nil {
+			t.turnModels = make(map[int64]string)
+		}
+		t.turnModels[turnID] = model
+	}
+}
+
+func (t *Translator) modelForTurn(turnID int64) string {
+	if t.turnModels != nil {
+		if model := t.turnModels[turnID]; model != "" {
+			delete(t.turnModels, turnID)
+			return model
+		}
+	}
+	return t.lastModel
 }
 
 // --- small JSON helpers ----------------------------------------------------

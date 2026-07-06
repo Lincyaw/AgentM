@@ -1,10 +1,15 @@
 package tui
 
 import (
+	"strings"
+	"time"
+	"unicode"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/completion"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/editor"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/dialog"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/page/chat"
@@ -43,9 +48,75 @@ func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 
 // updateEditorCmd forwards a message to the editor and returns its cmd.
 func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
+	prevValue := m.editor.Value()
+	prevShellMode := m.editor.ShellMode()
+	prevHistorySearch := m.editor.IsHistorySearchActive()
+	var focusCmd tea.Cmd
+	if _, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == PanelEditor && !prevHistorySearch && !m.editor.Focused() {
+		// Long-lived terminals can leave the textarea blurred while parent focus
+		// still points at the editor; restore focus before routing the key.
+		focusCmd = m.editor.Focus()
+	}
 	updated, cmd := m.editor.Update(msg)
 	m.editor = updated.(editor.Editor)
-	return cmd
+	cmds := []tea.Cmd{focusCmd, cmd}
+	exitedHistorySearch := prevHistorySearch && !m.editor.IsHistorySearchActive()
+	if m.editor.Value() != prevValue ||
+		m.editor.ShellMode() != prevShellMode ||
+		m.editor.IsHistorySearchActive() != prevHistorySearch {
+		m.statusBar.InvalidateCache()
+	}
+	if m.editor.Value() != prevValue {
+		m.lastEditorValueChangeAt = time.Now()
+		m.lastIdleFocusWarningReveal = time.Time{}
+		m.lastExitClearedInput = time.Time{}
+		m.lastEscClearedInput = time.Time{}
+		m.streamCancelFooterHidden = false
+	}
+	if m.editor.Value() != prevValue || exitedHistorySearch {
+		if query, ok := editorCompletionQuery(m.editor.Value()); ok {
+			cmds = append(cmds, core.CmdHandler(completion.QueryMsg{Query: query}))
+			cmds = append(cmds, syncEditorCompletionQueryAfter(m.editor.Value(), query))
+		}
+	}
+	if m.width > 0 && m.height > 0 {
+		if desiredLines := m.desiredEditorLines(); desiredLines != m.editorLines {
+			m.editorLines = desiredLines
+			cmds = append(cmds, m.resizeAll())
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+type editorCompletionQuerySyncMsg struct {
+	value string
+	query string
+}
+
+func syncEditorCompletionQueryAfter(value, query string) tea.Cmd {
+	return tea.Tick(30*time.Millisecond, func(time.Time) tea.Msg {
+		return editorCompletionQuerySyncMsg{value: value, query: query}
+	})
+}
+
+func editorCompletionQuery(value string) (string, bool) {
+	trimmed := strings.TrimRightFunc(value, unicode.IsSpace)
+	if trimmed == "" {
+		return "", false
+	}
+	idx := strings.LastIndexFunc(trimmed, unicode.IsSpace)
+	word := trimmed
+	if idx >= 0 {
+		word = trimmed[idx+1:]
+	}
+	switch {
+	case strings.HasPrefix(word, "@"):
+		return strings.TrimPrefix(word, "@"), true
+	case strings.HasPrefix(word, "/"):
+		return strings.TrimPrefix(word, "/"), true
+	default:
+		return "", false
+	}
 }
 
 // updateDialogCmd forwards a message to the dialog manager and returns its cmd.

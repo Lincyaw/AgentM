@@ -68,6 +68,7 @@ from agentm.core.abi import (
     PlanSubmittedEvent,
     ResourceWriteEvent,
     SessionReadyEvent,
+    LlmRequestStartEvent,
     StreamDeltaEvent,
     TextContent,
     TextDelta,
@@ -133,6 +134,7 @@ MANIFEST = ExtensionManifest(
         "event:cost_budget_exceeded",
         "event:session_ready",
         "event:command_dispatched",
+        "event:llm_request_start",
     ),
     config_schema=WireDriverConfig,
     requires=(),
@@ -166,6 +168,14 @@ def _content_text(blocks: Any, limit: int = _PREVIEW_LIMIT) -> str:
 
 def _p_turn_start(ev: TurnStartEvent) -> ProjectorResult:
     return {"kind": "turn_start", "turn_id": ev.turn_id, "turn_index": ev.turn_index}
+
+def _p_llm_request_start(ev: LlmRequestStartEvent) -> ProjectorResult:
+    return {
+        "kind": "llm_request_start",
+        "turn_id": ev.turn_id,
+        "turn_index": ev.turn_index,
+        "model": ev.model_id,
+    }
 
 def _p_stream_delta(ev: StreamDeltaEvent) -> ProjectorResult:
     delta = ev.delta
@@ -369,6 +379,7 @@ def _p_command_dispatched(ev: CommandDispatchedEvent) -> ProjectorResult:
 # and backpressure on the streaming hot path.
 _ASYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
     (TurnStartEvent.CHANNEL, _p_turn_start),
+    (LlmRequestStartEvent.CHANNEL, _p_llm_request_start),
     (StreamDeltaEvent.CHANNEL, _p_stream_delta),
     (ToolCallEvent.CHANNEL, _p_tool_call),
     (ToolResultEvent.CHANNEL, _p_tool_result),
@@ -612,7 +623,12 @@ class _WireDriverRuntime:
         return handler
 
     async def _approval_gate(self, ev: ToolCallEvent) -> dict[str, Any] | None:
-        if self._approval_mgr is None or not self._approval_mgr.requires(ev.tool_name):
+        tool_args = dict(ev.args)
+        if self._approval_mgr is None or not self._approval_mgr.requires(
+            ev.tool_name,
+            session_key=self._session_key,
+            tool_args=tool_args,
+        ):
             return None
         ctx = self._turn_context or {}
         ok = await self._approval_mgr.request(
@@ -622,7 +638,8 @@ class _WireDriverRuntime:
             chat_id=str(ctx.get("chat_id") or ""),
             thread_id=ctx.get("thread_id"),
             tool_name=ev.tool_name,
-            tool_args=dict(ev.args),
+            tool_args=tool_args,
+            tool_call_id=ev.tool_call_id,
         )
         if not ok:
             return {

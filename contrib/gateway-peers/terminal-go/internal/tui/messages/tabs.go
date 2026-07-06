@@ -41,6 +41,7 @@ type TabInfo struct {
 	NeedsAttention bool   // Whether the tab needs user attention (e.g., tool confirmation)
 	Background     bool   // Whether this tab was spawned as background workflow activity
 	CreatedAt      int64  // Unix timestamp when this runtime tab was created
+	WorkingDir     string // Working directory for grouping agent sessions
 }
 
 // TabsUpdatedMsg is sent when the tab list has changed.

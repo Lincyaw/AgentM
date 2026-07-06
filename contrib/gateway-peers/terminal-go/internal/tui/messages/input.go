@@ -8,6 +8,18 @@ type (
 	// InsertFileRefMsg inserts @filepath reference into editor.
 	InsertFileRefMsg struct{ FilePath string }
 
+	// RestoreEditorInputMsg restores composer content after an interrupted run.
+	RestoreEditorInputMsg struct {
+		Content   string
+		ShellMode bool
+	}
+
+	// PopQueuedInputMsg moves queued prompts back into the composer.
+	PopQueuedInputMsg struct{}
+
+	// CancelStreamPreserveInputMsg interrupts the active stream without changing composer content.
+	CancelStreamPreserveInputMsg struct{}
+
 	// StartSpeakMsg starts speech-to-text transcription.
 	StartSpeakMsg struct{}
 

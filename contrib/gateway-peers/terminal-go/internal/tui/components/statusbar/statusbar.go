@@ -111,7 +111,11 @@ func (s *StatusBar) rebuild() {
 	var rightParts []string
 
 	if s.modeLineRight != "" {
-		rightParts = append(rightParts, styles.SecondaryStyle.Render(s.modeLineRight))
+		if strings.Contains(s.modeLineRight, "\x1b[") {
+			rightParts = append(rightParts, s.modeLineRight)
+		} else {
+			rightParts = append(rightParts, styles.SecondaryStyle.Render(s.modeLineRight))
+		}
 	}
 	if s.activity != "" {
 		rightParts = append(rightParts, styles.MutedStyle.Render(s.activity))
@@ -134,8 +138,12 @@ func (s *StatusBar) rebuild() {
 	var left string
 	var leftW int
 	if s.modeLine != "" {
-		left = " " + styles.SecondaryStyle.Render(s.modeLine)
-		leftW = pad + lipgloss.Width(left) - pad
+		if strings.Contains(s.modeLine, "\x1b[") {
+			left = "  " + s.modeLine
+		} else {
+			left = "  " + styles.SecondaryStyle.Render(s.modeLine)
+		}
+		leftW = lipgloss.Width(left)
 	} else if s.help != nil {
 		if help := s.help.Help(); help != nil {
 			var parts []string
@@ -154,13 +162,13 @@ func (s *StatusBar) rebuild() {
 					helpStr = ansi.Truncate(helpStr, maxHelpW, "...")
 					helpW = lipgloss.Width(helpStr)
 				}
-				left = " " + helpStr
-				leftW = pad + helpW
+				left = "  " + helpStr
+				leftW = lipgloss.Width(left)
 			}
 		}
 	}
 
-	gap := max(1, s.width-leftW-rightW-pad)
+	gap := max(1, s.width-leftW-rightW-2*pad)
 
 	s.cached = left + strings.Repeat(" ", gap) + right + " "
 }

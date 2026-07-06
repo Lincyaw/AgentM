@@ -24,7 +24,7 @@ atom falls back to neutral empty strings and emits a diagnostic.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -79,6 +79,9 @@ class LlmCompactionConfig(BaseModel):
     enabled: bool = True
     reserve_tokens: int = Field(default=16_384, gt=0)
     custom_instructions: str | None = None
+
+
+COMPACTION_CONTROL_SERVICE = "llm_compaction.control"
 
 
 MANIFEST = ExtensionManifest(
@@ -456,7 +459,7 @@ def prepare_compaction(
             file_ops.edited.update(p for p in modified_files if isinstance(p, str))
 
     new_turns = [turn for turn in all_turns if turn.index > covered_before]
-    if not new_turns:
+    if len(new_turns) < 2:
         return None
 
     for turn in new_turns:
@@ -574,6 +577,7 @@ class _LlmCompactionRuntime:
         self._custom_instructions = config.custom_instructions
 
     def install(self) -> None:
+        self._api.set_service(COMPACTION_CONTROL_SERVICE, _CompactionControl(self))
         self._api.on(BeforeSendToLlmEvent.CHANNEL, self.before_send_to_llm)
         self._api.register_command(
             "compact",
@@ -583,6 +587,13 @@ class _LlmCompactionRuntime:
             ),
         )
 
+    def set_auto_compaction_enabled(self, enabled: bool) -> bool:
+        self._settings = replace(self._settings, enabled=enabled)
+        return self._settings.enabled
+
+    @property
+    def auto_compaction_enabled(self) -> bool:
+        return self._settings.enabled
     async def _run_compaction(
         self,
         reason: str,
@@ -700,11 +711,23 @@ class _LlmCompactionRuntime:
             await self._api.events.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
-                    level="info",
+                    level="warning",
                     source="compaction",
-                    message="Nothing to compact yet.",
+                    message="Not enough messages to compact.",
                 ),
             )
+
+
+class _CompactionControl:
+    def __init__(self, runtime: _LlmCompactionRuntime) -> None:
+        self._runtime = runtime
+
+    def set_enabled(self, enabled: bool) -> bool:
+        return self._runtime.set_auto_compaction_enabled(enabled)
+
+    @property
+    def enabled(self) -> bool:
+        return self._runtime.auto_compaction_enabled
 
 
 def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:

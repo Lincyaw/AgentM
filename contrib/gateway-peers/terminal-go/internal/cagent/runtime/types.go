@@ -26,6 +26,9 @@ type ModelChoice struct {
 	Name string `json:"name"`
 	// Ref is the model reference used internally (e.g., "my_model" or "openai/gpt-4o")
 	Ref string `json:"ref"`
+	// SwitchRef is the backend model profile to send when this row is selected.
+	// It is UI-local metadata and is intentionally omitted from the wire format.
+	SwitchRef string `json:"-"`
 	// Provider is the provider name (e.g., "openai", "anthropic")
 	Provider string `json:"provider,omitempty"`
 	// Model is the specific model name (e.g., "gpt-4o", "claude-sonnet-4-0")

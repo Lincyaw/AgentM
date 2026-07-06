@@ -42,7 +42,7 @@ from loguru import logger
 import os
 import time
 from dataclasses import dataclass, fields, is_dataclass
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from .bus import EventBus
 from .events import (
@@ -215,12 +215,14 @@ def _llm_prompt_dump_payload(
     model: Model,
     tools: list[Tool],
     system: str | None,
+    thinking: Literal["off", "low", "medium", "high"],
     dry_run: bool,
 ) -> dict[str, Any]:
     return {
         "dry_run": dry_run,
         "turn_index": turn_index,
         "turn_id": turn_id,
+        "thinking": thinking,
         "model": _debug_jsonable(model),
         "system": _debug_jsonable(system or ""),
         "messages": _debug_jsonable(messages),
@@ -237,6 +239,7 @@ async def _emit_llm_prompt_dump(
     model: Model,
     tools: list[Tool],
     system: str | None,
+    thinking: Literal["off", "low", "medium", "high"],
     dry_run: bool,
 ) -> None:
     payload = _llm_prompt_dump_payload(
@@ -246,6 +249,7 @@ async def _emit_llm_prompt_dump(
         model=model,
         tools=tools,
         system=system,
+        thinking=thinking,
         dry_run=dry_run,
     )
     text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
@@ -519,6 +523,7 @@ class AgentLoop:
         tools: list[Tool],
         system: str | None = None,
         signal: asyncio.Event | None = None,
+        thinking: Literal["off", "low", "medium", "high"] = "off",
     ) -> list[AgentMessage]:
         """Drive the loop until termination.
 
@@ -611,6 +616,7 @@ class AgentLoop:
                         model=model,
                         tools=tools,
                         system=system,
+                        thinking=thinking,
                         dry_run=prompt_dry_run,
                     )
 
@@ -655,6 +661,7 @@ class AgentLoop:
                             tools=tools,
                             system=system,
                             signal=signal,
+                            thinking=thinking,
                         ):
                             stream_events.append(ev)
                             # Forward each chunk so presenters (TUI, JSON tap)

@@ -1431,10 +1431,13 @@ func (p *parser) renderParagraph() {
 		return
 	}
 
-	text := strings.Join(paraLines, " ")
-	rendered := p.renderInline(text)
-	wrapped := p.wrapText(rendered, p.width)
-	p.out.WriteString(wrapped + "\n\n")
+	renderedLines := make([]string, 0, len(paraLines))
+	for _, line := range paraLines {
+		rendered := p.renderInline(line)
+		wrapped := p.wrapText(rendered, p.width)
+		renderedLines = append(renderedLines, strings.Split(wrapped, "\n")...)
+	}
+	p.out.WriteString(strings.Join(renderedLines, "\n") + "\n\n")
 }
 
 // isBlockStart reports whether line could begin a new block element when

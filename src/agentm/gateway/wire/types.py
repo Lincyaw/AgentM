@@ -14,9 +14,25 @@ wire; ``Button`` is the typed mirror used gateway-side.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 ButtonStyle = Literal["primary", "danger", "default"]
+ThinkingLevel = Literal["off", "low", "medium", "high"]
+
+
+def _normalize_thinking(value: Any) -> ThinkingLevel | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "high" if value else "off"
+    text = str(value).strip().lower()
+    if text in {"true", "on", "enabled"}:
+        return "high"
+    if text in {"false", "off", "disabled"}:
+        return "off"
+    if text in {"low", "medium", "high"}:
+        return cast(ThinkingLevel, text)
+    return None
 
 # Discriminator for how a chat client renders an outbound (§2.5).
 #
@@ -50,6 +66,7 @@ OutboundMetaKind = Literal[
     "diagnostic_error",
     # -- ephemeral: conversation (live transcript) --
     "turn_start",
+    "llm_request_start",
     "stream_text",
     "stream_thinking",
     "tool_call",
@@ -70,6 +87,8 @@ OutboundMetaKind = Literal[
     "cost_budget_exceeded",
     "session_ready",
     "command_dispatched",
+    "background_activity",
+    "config_update",
 ]
 
 # Delivery-class partition of OutboundMetaKind. DURABLE = the reliability
@@ -90,6 +109,7 @@ DURABLE_OUTBOUND_KINDS: frozenset[str] = frozenset(
 EPHEMERAL_OUTBOUND_KINDS: frozenset[str] = frozenset(
     {
         "turn_start",
+        "llm_request_start",
         "stream_text",
         "stream_thinking",
         "tool_call",
@@ -109,6 +129,8 @@ EPHEMERAL_OUTBOUND_KINDS: frozenset[str] = frozenset(
         "cost_budget_exceeded",
         "session_ready",
         "command_dispatched",
+        "background_activity",
+        "config_update",
     }
 )
 
@@ -146,11 +168,12 @@ class InboundBody:
     sender_id: str = ""
     sender_name: str = ""
     request_id: str | None = None
+    task_id: str | None = None
+    thinking: ThinkingLevel | None = None
     button_value: str | None = None
-    # Out-of-band control verb that is NOT a conversational turn. Currently
-    # ``"interrupt"`` — preempt the in-flight prompt (the gateway routes it to
-    # AgentSession.interrupt() inline, never as a new turn). Distinct from
-    # ``content`` so an interrupt can't be mistaken for a user message.
+    # Out-of-band control verb that is NOT a conversational turn. Legacy
+    # clients currently use ``"interrupt"`` here; modern clients should prefer
+    # explicit ``action`` values such as ``"switch_model"``.
     control: str | None = None
     raw: dict[str, Any] | None = None
 
@@ -161,6 +184,8 @@ class InboundBody:
         policy = body.get("policy")
         interaction_id = body.get("interaction_id")
         request_id = body.get("request_id")
+        task_id = body.get("task_id")
+        thinking = _normalize_thinking(body.get("thinking"))
         control = body.get("control")
         raw = body.get("raw")
         normalized_action = (
@@ -193,6 +218,8 @@ class InboundBody:
             sender_id=str(body.get("sender_id") or ""),
             sender_name=str(body.get("sender_name") or ""),
             request_id=str(request_id) if request_id is not None else None,
+            task_id=str(task_id) if task_id is not None else None,
+            thinking=thinking,
             button_value=str(button) if button is not None else None,
             control=str(control) if control is not None else None,
             raw=raw if isinstance(raw, dict) else None,
@@ -212,6 +239,10 @@ class InboundBody:
             out["sender_name"] = self.sender_name
         if self.request_id is not None:
             out["request_id"] = self.request_id
+        if self.task_id is not None:
+            out["task_id"] = self.task_id
+        if self.thinking is not None:
+            out["thinking"] = self.thinking
         if self.button_value is not None:
             out["button_value"] = self.button_value
         if self.control is not None:
@@ -291,4 +322,5 @@ __all__ = [
     "InboundBody",
     "OutboundBody",
     "OutboundMetaKind",
+    "ThinkingLevel",
 ]

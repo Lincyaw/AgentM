@@ -366,6 +366,20 @@ func (g *groupedList) AddItem(line string) {
 	g.lineToItem = append(g.lineToItem, len(g.itemToLine)-1)
 }
 
+// AddItemLines appends a selectable item that spans multiple rendered lines.
+func (g *groupedList) AddItemLines(lines []string) {
+	if len(lines) == 0 {
+		g.AddItem("")
+		return
+	}
+	item := len(g.itemToLine)
+	g.itemToLine = append(g.itemToLine, len(g.lines))
+	for _, line := range lines {
+		g.lines = append(g.lines, line)
+		g.lineToItem = append(g.lineToItem, item)
+	}
+}
+
 // Lines returns the full ordered list of rendered lines.
 func (g *groupedList) Lines() []string { return g.lines }
 

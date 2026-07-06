@@ -8,6 +8,8 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/commands"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/completion"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/editor"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/dialog"
@@ -79,10 +81,6 @@ func (m *appModel) AllBindings() []key.Binding {
 			key.WithHelp("Ctrl+k", "commands"),
 		),
 		key.NewBinding(
-			key.WithKeys("ctrl+h"),
-			key.WithHelp("Ctrl+h", "help"),
-		),
-		key.NewBinding(
 			key.WithKeys("ctrl+y"),
 			key.WithHelp("Ctrl+y", "toggle yolo mode"),
 		),
@@ -96,18 +94,22 @@ func (m *appModel) AllBindings() []key.Binding {
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+s"),
-			key.WithHelp("Ctrl+s", "cycle agent"),
+			key.WithHelp("Ctrl+s", "stash prompt"),
 		),
 		key.NewBinding(
-			key.WithKeys("ctrl+m"),
-			key.WithHelp("Ctrl+m", "model picker"),
+			key.WithKeys("alt+p", "meta+p", "ctrl+m"),
+			key.WithHelp("Opt+p", "model picker"),
+		),
+		key.NewBinding(
+			key.WithKeys("alt+t", "meta+t"),
+			key.WithHelp("Opt+t", "thinking mode"),
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+z"),
 			key.WithHelp("Ctrl+z", "suspend"),
 		),
 		key.NewBinding(
-			key.WithKeys("shift+tab"),
+			key.WithKeys("shift+tab", "btab"),
 			key.WithHelp("Shift+Tab", "cycle thinking level"),
 		),
 	)
@@ -220,6 +222,41 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.dialogMgr.TopIsExitConfirmation() {
 			return m.forwardDialog(msg)
 		}
+		if m.agentsModeOpen && m.editor.Value() != "" {
+			now := time.Now()
+			m.focusedPanel = PanelEditor
+			m.editor.SetValue("")
+			m.editorLines = m.desiredEditorLines()
+			m.lastExitRequest = now
+			m.lastExitClearedInput = now
+			m.statusBar.InvalidateCache()
+			return m, tea.Batch(
+				core.CmdHandler(completion.CloseMsg{}),
+				m.editor.Focus(),
+				m.resizeAll(),
+				invalidateStatusBarAfter(2*time.Second),
+			)
+		}
+		if m.editor.Value() != "" {
+			now := time.Now()
+			m.focusedPanel = PanelEditor
+			if m.editor.ShellMode() {
+				m.editor.SetShellValue("")
+			} else {
+				m.editor.SetValue("")
+			}
+			m.editorLines = m.desiredEditorLines()
+			m.lastExitRequest = now
+			m.lastExitClearedInput = now
+			m.statusBar.InvalidateCache()
+			return m, tea.Batch(
+				core.CmdHandler(completion.CloseMsg{}),
+				m.closeInlineSurfaces(),
+				m.editor.Focus(),
+				m.resizeAll(),
+				invalidateStatusBarAfter(2*time.Second),
+			)
+		}
 		if m.dialogMgr.Open() {
 			return m, core.CmdHandler(dialog.OpenDialogMsg{
 				Model: dialog.NewExitConfirmationDialog(),
@@ -228,11 +265,16 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		now := time.Now()
 		if now.Sub(m.lastExitRequest) <= 2*time.Second {
 			m.cleanupAll()
-			return m, tea.Quit
+			return m, tea.Sequence(leaveFooterLineBeforeQuit(), tea.Quit)
 		}
 		m.lastExitRequest = now
 		m.statusBar.InvalidateCache()
-		return m, nil
+		return m, invalidateStatusBarAfter(2 * time.Second)
+	}
+	if !m.lastExitRequest.IsZero() {
+		m.lastExitRequest = time.Time{}
+		m.lastExitClearedInput = time.Time{}
+		m.statusBar.InvalidateCache()
 	}
 
 	// Dialog gets priority when open, EXCEPT for background dialogs, which
@@ -266,6 +308,88 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.backgroundActivityDetail {
+		switch msg.String() {
+		case "left":
+			m.backgroundActivityDetail = false
+			m.backgroundActivityPrompt = true
+			m.statusBar.InvalidateCache()
+			return m, m.resizeAll()
+		case "esc", "enter", " ":
+			m.backgroundActivityDetail = false
+			m.backgroundActivityPrompt = false
+			m.statusBar.InvalidateCache()
+			return m, m.resizeAll()
+		case "x":
+			if activity, ok := m.selectedBackgroundShellActivity(); ok && m.application != nil {
+				m.application.CancelBackground(backgroundShellTaskID(activity))
+			}
+			m.backgroundActivityDetail = false
+			m.backgroundActivityPrompt = false
+			m.statusBar.InvalidateCache()
+			return m, m.resizeAll()
+		}
+	}
+
+	if m.backgroundActivityPrompt {
+		switch msg.String() {
+		case "enter":
+			if _, ok := m.selectedBackgroundShellActivity(); !ok {
+				m.backgroundActivityPrompt = false
+				m.statusBar.InvalidateCache()
+				return m, m.resizeAll()
+			}
+			m.backgroundActivityPrompt = false
+			m.backgroundActivityDetail = true
+			m.statusBar.InvalidateCache()
+			return m, m.resizeAll()
+		case "esc":
+			m.backgroundActivityPrompt = false
+			m.statusBar.InvalidateCache()
+			return m, m.resizeAll()
+		}
+	}
+
+	if m.agentsModeOpen {
+		if m.agentsModeRenaming {
+			return m.handleAgentsModeRenameKey(msg)
+		}
+		switch msg.String() {
+		case "?":
+			return m, m.toggleAgentsModeHelp()
+		case "up":
+			return m, m.moveAgentsModeSelection(-1)
+		case "down":
+			return m, m.moveAgentsModeSelection(1)
+		case "ctrl+x":
+			return m.handleAgentsModeDelete()
+		case "ctrl+s":
+			return m, m.toggleAgentsModeGrouped()
+		case "ctrl+t":
+			return m, m.toggleAgentsModePinned()
+		case "ctrl+r":
+			return m, m.startAgentsModeRename()
+		case "right":
+			return m, m.closeAgentsMode()
+		case "esc":
+			return m.handleAgentsModeEscape()
+		case "enter":
+			return m.handleAgentsModeEnter()
+		case " ", "space":
+			return m.handleAgentsModeSpace(msg)
+		}
+		if index := parseAltNumberKey(msg); index >= 0 {
+			return m.handleAgentsModeOpenAtIndex(index)
+		}
+		return m.forwardEditor(msg)
+	}
+
+	if m.focusedPanel == PanelEditor && !m.editor.IsHistorySearchActive() && m.editor.Value() != "" {
+		if msg.String() == "ctrl+t" {
+			return m, nil
+		}
+	}
+
 	if msg.String() == "ctrl+t" && m.hasBottomActivityRows() {
 		return m, m.toggleBottomActivityRows()
 	}
@@ -281,6 +405,10 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.localPanelOpen {
+		return m.handleLocalPanelKey(msg)
+	}
+
 	// Tab bar keys (Ctrl+t, Ctrl+p, Ctrl+n, Ctrl+w) are suppressed during
 	// history search so that ctrl+n/ctrl+p cycle through matches instead.
 	// Ctrl+w (close tab) is disabled when the editor is focused so that the
@@ -294,15 +422,96 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Completion popup gets priority when open
 	if m.completions.Open() {
-		if core.IsNavigationKey(msg) {
+		if msg.String() == "enter" {
+			parser := commands.NewParser(m.commandCategories()...)
+			input := m.editor.Value()
+			if cmd := parser.Parse(input); cmd != nil {
+				m.editor.SetValue("")
+				m.editorLines = m.desiredEditorLines()
+				m.statusBar.InvalidateCache()
+				return m, tea.Batch(
+					core.CmdHandler(completion.CloseMsg{}),
+					m.resizeAll(),
+					cmd,
+				)
+			}
+			if time.Since(m.lastEditorValueChangeAt) < 120*time.Millisecond {
+				if cmd := parser.ParseUnknown(input); cmd != nil {
+					m.editor.SetValue("")
+					m.editorLines = m.desiredEditorLines()
+					m.statusBar.InvalidateCache()
+					return m, tea.Batch(
+						core.CmdHandler(completion.CloseMsg{}),
+						m.resizeAll(),
+						cmd,
+					)
+				}
+			}
+			if m.completions.HasSelection() {
+				return m.forwardCompletions(msg)
+			}
+			if cmd := parser.ParseUnknown(input); cmd != nil {
+				m.editor.SetValue("")
+				m.editorLines = m.desiredEditorLines()
+				m.statusBar.InvalidateCache()
+				return m, tea.Batch(
+					core.CmdHandler(completion.CloseMsg{}),
+					m.resizeAll(),
+					cmd,
+				)
+			}
+		}
+		completionKey := core.IsNavigationKey(msg) || msg.String() == "tab"
+		if completionKey && (msg.String() != "enter" || m.completions.HasSelection()) {
 			return m.forwardCompletions(msg)
 		}
 		// For all other keys (typing), send to both completion (for filtering) and editor
 		return m, tea.Batch(m.updateCompletionsCmd(msg), m.updateEditorCmd(msg))
 	}
 
+	if m.focusedPanel == PanelEditor && !m.editor.IsHistorySearchActive() {
+		if msg.String() == "up" && m.editor.Value() == "" && m.queuedInputCount > 0 {
+			return m.forwardChat(messages.PopQueuedInputMsg{})
+		}
+		switch msg.String() {
+		case "ctrl+b", "ctrl+f", "ctrl+e", "ctrl+k":
+			if m.editor.Value() != "" {
+				return m.forwardEditor(msg)
+			}
+		case "ctrl+y":
+			if m.editor.HasKillBuffer() {
+				return m.forwardEditor(msg)
+			}
+		}
+	}
+
 	// Global keyboard shortcuts (active even during history search)
 	switch {
+	case msg.String() == "ctrl+h" && m.focusedPanel == PanelEditor && m.editor.Value() == "":
+		m.idleIDEContextExtraHidden = true
+		m.statusBar.InvalidateCache()
+		return m, m.resizeAll()
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("f1", "ctrl+?"))) &&
+		m.focusedPanel == PanelEditor && m.editor.Value() == "":
+		m.idleIDEContextExtraHidden = true
+		m.idleFooterRightHidden = true
+		m.statusBar.InvalidateCache()
+		return m, m.resizeAll()
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+k"))) &&
+		m.focusedPanel == PanelEditor && !m.editor.ShellMode() && m.editor.Value() != "":
+		m.lastIdleFocusWarningReveal = time.Time{}
+		m.statusBar.InvalidateCache()
+		return m, m.resizeAll()
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+k"))) &&
+		m.focusedPanel == PanelEditor && m.editor.Value() == "":
+		m.shortcutSheetDismissed = true
+		m.lastIdleFocusWarningReveal = time.Now()
+		m.statusBar.InvalidateCache()
+		return m, tea.Batch(m.resizeAll(), invalidateStatusBarAfter(idleFocusWarningRevealTTL))
+
 	case msg.String() == "?" && m.focusedPanel == PanelEditor && m.editor.Value() == "":
 		return m, m.toggleShortcutSheet()
 
@@ -310,17 +519,25 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.openWorkflowTaskPicker()
 		return m, m.resizeAll()
 
+	case msg.String() == "down" && m.focusedPanel == PanelEditor && m.editor.Value() == "" && m.backgroundShellCount() > 0:
+		m.backgroundActivityPrompt = true
+		m.backgroundActivityDetail = false
+		m.shortcutSheetOpen = false
+		m.workflowTaskPickerOpen = false
+		m.statusBar.InvalidateCache()
+		return m, m.resizeAll()
+
 	case msg.String() == "left" && m.focusedPanel == PanelEditor && m.editor.Value() == "":
-		return m.handleCycleAgent()
+		return m, m.openAgentsMode()
+
+	case msg.String() == "x" && m.focusedPanel == PanelEditor && m.editor.Value() == "" && m.activeIsWorkflowTask():
+		if m.supervisor == nil {
+			return m, nil
+		}
+		return m.handleCloseTab(m.supervisor.ActiveID())
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+z"))):
 		return m, tea.Suspend
-
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+k"))):
-		categories := m.commandCategories()
-		return m, core.CmdHandler(dialog.OpenDialogMsg{
-			Model: dialog.NewCommandPaletteDialog(categories),
-		})
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+y"))):
 		return m, core.CmdHandler(messages.ToggleYoloMsg{})
@@ -332,17 +549,24 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.toggleTranscriptVerbose()
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+s"))):
-		return m.handleCycleAgent()
+		return m.handleStashPrompt()
 
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+m"))):
-		return m.handleOpenModelPicker()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("alt+p", "meta+p", "ctrl+m"))):
+		return m.handleOpenModelPicker(false)
 
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+h", "f1", "ctrl+?"))):
-		return m, m.toggleShortcutSheet()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("alt+t", "meta+t"))):
+		return m.handleOpenThinkingToggle()
 	}
 
 	// History search is a modal state — capture all remaining keys before normal routing
 	if m.focusedPanel == PanelEditor && m.editor.IsHistorySearchActive() {
+		if msg.String() == "enter" {
+			cmd := m.updateEditorCmd(msg)
+			sendCmd := m.editor.SendContent()
+			m.editorLines = m.desiredEditorLines()
+			m.statusBar.InvalidateCache()
+			return m, tea.Batch(cmd, sendCmd, m.resizeAll())
+		}
 		return m.forwardEditor(msg)
 	}
 
@@ -364,30 +588,55 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.forwardChat(msg)
 
-	// Shift+Tab cycles the current model's thinking-effort level
-	case key.Matches(msg, key.NewBinding(key.WithKeys("shift+tab"))):
-		return m.handleCycleThinkingLevel()
+	// Shift+Tab follows Claude Code's permission-mode footer cycle.
+	case key.Matches(msg, key.NewBinding(key.WithKeys("shift+tab", "btab"))):
+		return m.handleCyclePermissionMode()
 
-	// Focus switching: Tab key toggles between content and editor
+	// Plain Tab should not steal editor focus. Claude Code keeps the composer
+	// active, while completion popups handle Tab earlier in this function.
 	case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
-		return m.switchFocus()
+		if cmd := m.editor.AcceptSuggestion(); cmd != nil {
+			return m, cmd
+		}
+		if m.focusedPanel == PanelContent {
+			m.focusedPanel = PanelEditor
+			m.statusBar.InvalidateCache()
+			m.chatPage.BlurMessages()
+			return m, m.editor.Focus()
+		}
+		return m, nil
 
 	// Esc: interrupt/cancel. Sending while the agent is busy is handled by
 	// Enter via QueueIfBusy, so Esc never silently submits editor content.
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+		if m.focusedPanel == PanelEditor && m.editor.ShellMode() && m.editor.Value() == "" {
+			m.editor.SetValue("")
+			m.statusBar.InvalidateCache()
+			return m, nil
+		}
 		if cmd := m.closeInlineSurfaces(); cmd != nil {
 			return m, cmd
 		}
 		if m.focusedPanel == PanelEditor && m.editor.Value() != "" && !m.chatPage.IsWorking() {
 			now := time.Now()
 			if now.Sub(m.lastEscClearRequest) <= 2*time.Second {
-				m.editor.SetValue("")
+				if m.editor.ShellMode() {
+					m.editor.SetShellValue("")
+				} else {
+					m.editor.SetValue("")
+				}
+				m.editorLines = m.desiredEditorLines()
 				m.lastEscClearRequest = time.Time{}
-				return m, nil
+				m.lastEscClearedInput = now
+				return m, m.resizeAll()
 			}
 			m.lastEscClearRequest = now
 			m.statusBar.InvalidateCache()
-			return m, nil
+			return m, invalidateStatusBarAfter(2 * time.Second)
+		}
+		if m.focusedPanel == PanelEditor && m.editor.Value() != "" && m.chatPage.IsWorking() {
+			m.lastEscClearRequest = time.Time{}
+			return m.forwardChat(messages.CancelStreamPreserveInputMsg{})
 		}
 		m.lastEscClearRequest = time.Time{}
 		return m.forwardChat(msg)
@@ -399,21 +648,57 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.transcriptDetailed {
+		return m.forwardChat(msg)
+	}
+
 	// Focus-based routing
 	switch m.focusedPanel {
 	case PanelEditor:
 		return m.forwardEditor(msg)
 	case PanelContent:
+		if shouldReturnToEditorForTextInput(msg) {
+			m.focusedPanel = PanelEditor
+			return m, tea.Batch(m.editor.Focus(), m.updateEditorCmd(msg), m.resizeAll())
+		}
 		return m.forwardChat(msg)
 	}
 
 	return m, nil
 }
 
+func shouldReturnToEditorForTextInput(msg tea.KeyPressMsg) bool {
+	return msg.Key().Text != ""
+}
+
+func invalidateStatusBarAfter(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return messages.InvalidateStatusBarMsg{}
+	})
+}
+
+func leaveFooterLineBeforeQuit() tea.Cmd {
+	return func() tea.Msg {
+		_, _ = os.Stdout.Write([]byte("\n"))
+		return nil
+	}
+}
+
 // parseCtrlNumberKey checks if msg is ctrl+1 through ctrl+9 and returns the index (0-8), or -1 if not matched
 func parseCtrlNumberKey(msg tea.KeyPressMsg) int {
 	s := msg.String()
 	if len(s) == 6 && s[:5] == "ctrl+" && s[5] >= '1' && s[5] <= '9' {
+		return int(s[5] - '1')
+	}
+	return -1
+}
+
+func parseAltNumberKey(msg tea.KeyPressMsg) int {
+	s := msg.String()
+	if len(s) == 5 && s[:4] == "alt+" && s[4] >= '1' && s[4] <= '9' {
+		return int(s[4] - '1')
+	}
+	if len(s) == 6 && s[:5] == "meta+" && s[5] >= '1' && s[5] <= '9' {
 		return int(s[5] - '1')
 	}
 	return -1

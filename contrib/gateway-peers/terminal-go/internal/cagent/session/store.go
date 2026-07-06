@@ -81,6 +81,7 @@ type Summary struct {
 	CreatedAt   time.Time
 	Starred     bool
 	NumMessages int
+	SizeBytes   int64
 }
 
 // Store defines the interface for session storage

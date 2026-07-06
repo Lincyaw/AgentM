@@ -57,6 +57,11 @@ func NewAtDir(dir string) (*History, error) {
 	return h, nil
 }
 
+// NewTransient creates an in-memory history with no backing file.
+func NewTransient() *History {
+	return &History{}
+}
+
 // Add records a new message. Any prior occurrence of the same message is
 // removed and the new one becomes the most recent entry. The message is
 // scrubbed of secret material via [portcullis.Redact] before being stored
@@ -146,6 +151,9 @@ func (h *History) addInMemory(message string) {
 // append writes message to the persistent history file as one JSON-encoded
 // line.
 func (h *History) append(message string) error {
+	if h.path == "" {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(h.path), 0o700); err != nil {
 		return err
 	}

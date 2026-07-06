@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,14 +14,50 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/completion"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/internal/editorname"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
 )
 
 const (
 	workflowTaskPickerBaseFooter = "↑/↓ to select · Enter to view"
+	bypassPermissionsFooter      = "⏵⏵ bypass permissions on (shift+tab to cycle)"
+	workflowCompletionManageTTL  = 30 * time.Second
+	promptStashStatusTTL         = 4 * time.Second
+	modelSwitchStatusTTL         = 4 * time.Second
+	thinkingModeStatusTTL        = 2 * time.Second
+	idleFocusWarningRevealTTL    = 2 * time.Second
+	tmuxFocusWarningTTL          = 30 * time.Second
+	permissionCycleStatusTTL     = 6 * time.Second
 )
+
+var (
+	tmuxFocusEventsOnce    sync.Once
+	tmuxFocusEventsWarning string
+
+	claudeFooterAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("211"))
+	claudeFooterAutoStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	claudeFooterAcceptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("147"))
+	claudeFooterPlanStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("73"))
+	claudeFooterTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+)
+
+type permissionFooterMode int
+
+const (
+	permissionFooterBypass permissionFooterMode = iota
+	permissionFooterAuto
+	permissionFooterDefault
+	permissionFooterAcceptEdits
+	permissionFooterPlan
+	permissionFooterModeCount
+)
+
+type startupFooterRefreshMsg struct{}
+
+type modelSwitchFooterRefreshMsg struct{}
 
 type workflowRow struct {
 	sessionID      string
@@ -85,7 +125,7 @@ func (m *appModel) bottomActivityKind() bottomActivityKind {
 }
 
 func (m *appModel) hasWorkflowTasks() bool {
-	return m.bottomActivityKind().hasWorkflowTasks()
+	return len(m.workflowTaskManageableTabs()) > 0
 }
 
 func (m *appModel) hasBottomActivityRows() bool {
@@ -97,15 +137,25 @@ func (m *appModel) activeIsWorkflowTask() bool {
 		return false
 	}
 	activeID := m.supervisor.ActiveID()
-	for _, tab := range m.workflowTaskTabs() {
-		if tab.SessionID == activeID {
-			return true
-		}
+	if activeID == "" || activeID == m.mainSessionID {
+		return false
 	}
-	return false
+	tab, ok := m.workflowTabInfo(activeID)
+	return ok && tab.Background
 }
 
 func (m *appModel) workflowTaskTabs() []messages.TabInfo {
+	tabs := m.allWorkflowTaskTabs()
+	tasks := make([]messages.TabInfo, 0, len(tabs))
+	for _, tab := range tabs {
+		if m.workflowTaskVisible(tab) {
+			tasks = append(tasks, tab)
+		}
+	}
+	return tasks
+}
+
+func (m *appModel) allWorkflowTaskTabs() []messages.TabInfo {
 	if m.supervisor == nil {
 		return nil
 	}
@@ -115,15 +165,105 @@ func (m *appModel) workflowTaskTabs() []messages.TabInfo {
 		if tab.SessionID == m.mainSessionID {
 			continue
 		}
-		if tab.Background && m.workflowTaskVisible(tab) {
+		if tab.Background {
 			tasks = append(tasks, tab)
 		}
 	}
 	return tasks
 }
 
+func (m *appModel) workflowTaskManageableTabs() []messages.TabInfo {
+	tabs := m.allWorkflowTaskTabs()
+	tasks := make([]messages.TabInfo, 0, len(tabs))
+	for _, tab := range tabs {
+		if m.workflowTaskVisible(tab) || m.workflowTaskRecentlyCompleted(tab.SessionID) {
+			tasks = append(tasks, tab)
+		}
+	}
+	return tasks
+}
+
+func (m *appModel) workflowTabInfo(sessionID string) (messages.TabInfo, bool) {
+	if m.supervisor == nil || sessionID == "" {
+		return messages.TabInfo{}, false
+	}
+	tabs, _ := m.supervisor.GetTabs()
+	for _, tab := range tabs {
+		if tab.SessionID == sessionID {
+			return tab, true
+		}
+	}
+	return messages.TabInfo{}, false
+}
+
+func (m *appModel) markWorkflowSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	if m.workflowSessions == nil {
+		m.workflowSessions = map[string]bool{}
+	}
+	m.workflowSessions[sessionID] = true
+}
+
+func (m *appModel) workflowSessionKnown(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	if m.workflowSessions[sessionID] {
+		return true
+	}
+	tab, ok := m.workflowTabInfo(sessionID)
+	return ok && tab.Background
+}
+
 func (m *appModel) workflowTaskVisible(tab messages.TabInfo) bool {
 	return tab.IsRunning || tab.NeedsAttention || m.workflowVisible[tab.SessionID]
+}
+
+func (m *appModel) workflowTaskRecentlyCompleted(sessionID string) bool {
+	if sessionID == "" || len(m.workflowCompletedUntil) == 0 {
+		return false
+	}
+	until, ok := m.workflowCompletedUntil[sessionID]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(m.workflowCompletedUntil, sessionID)
+		return false
+	}
+	return true
+}
+
+func (m *appModel) workflowSessionIsBackground(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	for _, tab := range m.allWorkflowTaskTabs() {
+		if tab.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *appModel) markWorkflowRecentlyCompleted(sessionID string) {
+	if !m.workflowSessionIsBackground(sessionID) {
+		return
+	}
+	m.markWorkflowSession(sessionID)
+	if m.workflowCompletedUntil == nil {
+		m.workflowCompletedUntil = map[string]time.Time{}
+	}
+	m.workflowCompletedUntil[sessionID] = time.Now().Add(workflowCompletionManageTTL)
+}
+
+func (m *appModel) clearWorkflowRecentlyCompleted(sessionID string) {
+	if sessionID == "" || len(m.workflowCompletedUntil) == 0 {
+		return
+	}
+	delete(m.workflowCompletedUntil, sessionID)
 }
 
 func (m *appModel) setWorkflowVisible(sessionID string, visible bool) {
@@ -167,7 +307,26 @@ func (m *appModel) workflowRows() []workflowRow {
 		isMain:    true,
 		active:    activeID == m.mainSessionID,
 	}}
-	for _, tab := range m.workflowTaskTabs() {
+	tabs := m.workflowTaskTabs()
+	if m.workflowTaskPickerOpen {
+		tabs = m.workflowTaskManageableTabs()
+	}
+	if m.activeIsWorkflowTask() {
+		activeID := m.supervisor.ActiveID()
+		found := false
+		for _, tab := range tabs {
+			if tab.SessionID == activeID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if tab, ok := m.workflowTabInfo(activeID); ok {
+				tabs = append(tabs, tab)
+			}
+		}
+	}
+	for _, tab := range tabs {
 		createdAt := time.Time{}
 		if tab.CreatedAt > 0 {
 			createdAt = time.Unix(tab.CreatedAt, 0)
@@ -199,6 +358,8 @@ func (m *appModel) openWorkflowTaskPicker() {
 		return
 	}
 	m.workflowTaskPickerOpen = true
+	m.backgroundActivityPrompt = false
+	m.backgroundActivityDetail = false
 	m.shortcutSheetOpen = false
 	m.syncWorkflowTaskPickerIndex()
 	m.statusBar.InvalidateCache()
@@ -290,7 +451,7 @@ func (m *appModel) workflowTaskPickerFooterText() string {
 	if row.isMain {
 		return workflowTaskPickerBaseFooter
 	}
-	return workflowTaskPickerBaseFooter + " · x to stop task"
+	return "Enter to view · x to stop"
 }
 
 func (m *appModel) selectedWorkflowTaskRow(rows []workflowRow) (workflowRow, int, bool) {
@@ -321,9 +482,11 @@ func (m *appModel) trackWorkflowVisibility(sessionID string, msg tea.Msg) {
 	case *runtime.StreamStartedEvent,
 		*runtime.ToolCallConfirmationEvent,
 		*runtime.MaxIterationsReachedEvent:
+		m.clearWorkflowRecentlyCompleted(sessionID)
 		m.setWorkflowVisible(sessionID, true)
 	case *runtime.StreamStoppedEvent:
 		m.setWorkflowVisible(sessionID, false)
+		m.markWorkflowRecentlyCompleted(sessionID)
 	}
 }
 
@@ -348,29 +511,58 @@ func (m *appModel) toggleBottomActivityRows() tea.Cmd {
 	}
 	m.bottomActivityRowsHidden = !m.bottomActivityRowsHidden
 	m.workflowTaskPickerOpen = false
+	m.backgroundActivityPrompt = false
+	m.backgroundActivityDetail = false
 	m.statusBar.SetActivity(m.backgroundActivityText())
 	m.statusBar.InvalidateCache()
 	return m.resizeAll()
 }
 
 func (m *appModel) toggleShortcutSheet() tea.Cmd {
+	wasOpen := m.shortcutSheetOpen
 	m.shortcutSheetOpen = !m.shortcutSheetOpen
 	if m.shortcutSheetOpen {
+		m.shortcutSheetDismissed = false
+		m.agentsModeOpen = false
+		m.agentsModeHelp = false
+		m.agentsModeReplyOpen = false
+		m.agentsModeDeleteConfirmID = ""
+		m.cancelAgentsModeRename()
+		m.editor.SetPlaceholder("")
 		m.workflowTaskPickerOpen = false
+		m.backgroundActivityPrompt = false
+		m.backgroundActivityDetail = false
+	}
+	if wasOpen && !m.shortcutSheetOpen {
+		m.shortcutSheetDismissed = true
 	}
 	m.statusBar.InvalidateCache()
 	return m.resizeAll()
 }
 
 func (m *appModel) closeInlineSurfaces() tea.Cmd {
-	changed := m.shortcutSheetOpen || m.workflowTaskPickerOpen
+	completionWasOpen := m.completions.Open()
+	completionCmd := m.updateCompletionsCmd(completion.CloseMsg{})
+	editorCompletionCmd := m.updateEditorCmd(completion.ClosedMsg{})
+	changed := completionWasOpen || m.shortcutSheetOpen || m.agentsModeOpen || m.workflowTaskPickerOpen || m.backgroundActivityPrompt || m.backgroundActivityDetail
+	if m.shortcutSheetOpen {
+		m.shortcutSheetDismissed = true
+	}
 	m.shortcutSheetOpen = false
+	m.agentsModeOpen = false
+	m.agentsModeHelp = false
+	m.agentsModeReplyOpen = false
+	m.agentsModeDeleteConfirmID = ""
+	m.cancelAgentsModeRename()
+	m.editor.SetPlaceholder("")
 	m.workflowTaskPickerOpen = false
+	m.backgroundActivityPrompt = false
+	m.backgroundActivityDetail = false
 	if !changed {
-		return nil
+		return tea.Batch(completionCmd, editorCompletionCmd)
 	}
 	m.statusBar.InvalidateCache()
-	return m.resizeAll()
+	return tea.Batch(completionCmd, editorCompletionCmd, m.resizeAll())
 }
 
 func (m *appModel) toggleTranscriptDetailed() tea.Cmd {
@@ -379,39 +571,82 @@ func (m *appModel) toggleTranscriptDetailed() tea.Cmd {
 		m.transcriptVerbose = false
 	}
 	m.statusBar.InvalidateCache()
-	return core.CmdHandler(messages.SetTranscriptDetailMsg{
-		Detailed: m.transcriptDetailed,
-		Verbose:  m.transcriptVerbose,
-	})
+	return tea.Batch(
+		m.resizeAll(),
+		core.CmdHandler(messages.SetTranscriptDetailMsg{
+			Detailed: m.transcriptDetailed,
+			Verbose:  m.transcriptVerbose,
+		}),
+	)
 }
 
 func (m *appModel) toggleTranscriptVerbose() tea.Cmd {
 	if !m.transcriptDetailed {
-		m.transcriptDetailed = true
+		return nil
 	}
 	m.transcriptVerbose = !m.transcriptVerbose
 	m.statusBar.InvalidateCache()
-	return core.CmdHandler(messages.SetTranscriptDetailMsg{
-		Detailed: m.transcriptDetailed,
-		Verbose:  m.transcriptVerbose,
-	})
+	return tea.Batch(
+		m.resizeAll(),
+		core.CmdHandler(messages.SetTranscriptDetailMsg{
+			Detailed: m.transcriptDetailed,
+			Verbose:  m.transcriptVerbose,
+		}),
+	)
 }
 
 func (m *appModel) footerText() string {
 	activityKind := m.bottomActivityKind()
 	if time.Since(m.lastExitRequest) <= 2*time.Second {
-		return "Press Ctrl-C again to exit"
+		return claudeFooterTextStyle.Render("Press Ctrl-C again to exit")
 	}
 	switch {
+	case m.shortcutSheetOpen:
+		return ""
+	case m.agentsModeOpen && m.agentsModeHelp:
+		return "ctrl+r to rename          @ to mention            alt+1 to open    ? to close"
+	case m.agentsModeOpen:
+		return m.agentsModeFooterText()
 	case m.transcriptDetailed && m.transcriptVerbose:
-		return "Showing verbose transcript · ctrl+o to toggle · ctrl+e to collapse verbose"
+		return claudeFooterTextStyle.Render("Showing detailed transcript · ctrl+o to toggle · ctrl+e to collapse")
 	case m.transcriptDetailed:
-		return "Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all verbose"
+		return claudeFooterTextStyle.Render("Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all")
 	case m.workflowTaskPickerOpen:
 		return m.workflowTaskPickerFooterText()
 	case m.activeIsWorkflowTask():
-		return "ctrl+n/p to switch tabs · ↓ to manage tasks"
+		return "Enter to view · x to stop · ctrl+x ctrl+k to stop all agents"
+	case m.backgroundActivityDetail:
+		return "← to go back · Esc/Enter/Space to close · x to stop"
+	case m.backgroundActivityPrompt:
+		return joinBackgroundStatusParts(m.permissionModeFooterTextCompact(), m.backgroundShellText(), "Enter to view tasks")
+	case m.editor.IsHistorySearchActive():
+		searchText := m.editor.HistorySearchFooterText()
+		spacing := "  "
+		includeAgents := false
+		if searchText == "search prompts:" {
+			spacing = "   "
+			includeAgents = true
+		}
+		if m.editor.ShellMode() {
+			return searchText + spacing + claudeFooterAccentStyle.Render("! for shell mode")
+		}
+		return searchText + spacing + m.permissionModeFooterText(includeAgents)
+	case m.chatPage.IsWorking():
+		if m.focusedPanel == PanelEditor && !m.editor.ShellMode() && m.editor.Value() != "" {
+			return m.permissionModeFooterText(false)
+		}
+		if shellText := m.backgroundShellText(); shellText != "" {
+			return joinBackgroundStatusParts(m.permissionModeFooterTextCompact(), "esc to interrupt", shellText, "↓ to manage")
+		}
+		text := joinBackgroundStatusParts(m.permissionModeFooterText(false), "esc to interrupt", "← for agents")
+		if m.hasWorkflowTasks() {
+			text += " · ↓ to manage"
+		}
+		return text
 	case activityKind.hasRows():
+		if shellText := m.backgroundShellText(); shellText != "" {
+			return joinBackgroundStatusParts(m.permissionModeFooterTextCompact(), shellText, "← for agents", "↓ to manage")
+		}
 		verb := "hide"
 		if m.bottomActivityRowsHidden {
 			verb = "show"
@@ -421,11 +656,104 @@ func (m *appModel) footerText() string {
 			return "ctrl+t to " + verb + " " + target + " · ← for agents · ↓ to manage"
 		}
 		return "ctrl+t to " + verb + " " + target + " · ← for agents"
-	case m.sessionState != nil && m.sessionState.YoloMode():
-		return "bypass permissions on (shift+tab to cycle) · ← for agents"
+	case m.editor.PasteExpandHintVisible():
+		return claudeFooterTextStyle.Render("paste again to expand")
+	case m.editor.ShellMode():
+		return claudeFooterAccentStyle.Render("! for shell mode")
+	case m.editor.Value() != "":
+		return m.permissionModeFooterText(false)
 	default:
-		return "? for shortcuts · ← for agents"
+		return m.permissionModeFooterText(true)
 	}
+}
+
+func (m *appModel) permissionModeFooterText(includeAgents bool) string {
+	switch m.permissionMode {
+	case permissionFooterAuto:
+		return renderClaudePermissionFooter("⏵⏵ auto mode on", includeAgents, claudeFooterAutoStyle)
+	case permissionFooterDefault:
+		return renderClaudeFooterText("? for shortcuts", includeAgents)
+	case permissionFooterAcceptEdits:
+		return renderClaudePermissionFooter("⏵⏵ accept edits on", includeAgents, claudeFooterAcceptStyle)
+	case permissionFooterPlan:
+		return renderClaudePermissionFooter("⏸ plan mode on", includeAgents, claudeFooterPlanStyle)
+	default:
+		return renderClaudePermissionFooter("⏵⏵ bypass permissions on", includeAgents, claudeFooterAccentStyle)
+	}
+}
+
+func (m *appModel) permissionModeFooterTextCompact() string {
+	switch m.permissionMode {
+	case permissionFooterAuto:
+		return claudeFooterAutoStyle.Render("⏵⏵ auto mode on")
+	case permissionFooterDefault:
+		return claudeFooterTextStyle.Render("? for shortcuts")
+	case permissionFooterAcceptEdits:
+		return claudeFooterAcceptStyle.Render("⏵⏵ accept edits on")
+	case permissionFooterPlan:
+		return claudeFooterPlanStyle.Render("⏸ plan mode on")
+	default:
+		return claudeFooterAccentStyle.Render("⏵⏵ bypass permissions on")
+	}
+}
+
+func renderClaudePermissionFooter(prefix string, includeAgents bool, prefixStyle lipgloss.Style) string {
+	suffix := " (shift+tab to cycle)"
+	if includeAgents {
+		suffix += " · ← for agents"
+	}
+	return prefixStyle.Render(prefix) + claudeFooterTextStyle.Render(suffix)
+}
+
+func renderClaudeFooterText(text string, includeAgents bool) string {
+	if includeAgents {
+		text += " · ← for agents"
+	}
+	return claudeFooterTextStyle.Render(text)
+}
+
+func (m *appModel) agentsModeFooterText() string {
+	if m.agentsModeRenaming {
+		return "enter to save · esc to cancel"
+	}
+	if m.agentsModeReplyOpen {
+		if m.editor.Value() != "" {
+			return "enter to send · esc to close · ctrl+x to delete"
+		}
+		return "enter to open · space to close · ctrl+x to delete"
+	}
+	if m.agentsModeDeleteConfirmID != "" {
+		return "ctrl+x to confirm"
+	}
+	permission := m.agentsModePermissionFooterText()
+	if m.editor.Value() != "" {
+		return renderAgentsModeFooter(permission, "enter to create · esc to clear")
+	}
+	if m.agentsModeSelectedID != "" && m.agentsModeSelectedID != m.activeSessionID() {
+		return renderAgentsModeFooter(permission, "enter to open · space to reply · ctrl+x to delete · ? for shortcuts")
+	}
+	return renderAgentsModeFooter(permission, "enter to return · → to return · space to reply · ctrl+x to delete · ? for shortcuts")
+}
+
+func (m *appModel) agentsModePermissionFooterText() string {
+	if m.permissionMode == permissionFooterBypass {
+		return claudeFooterAccentStyle.Render("⏵⏵ bypass permissions")
+	}
+	return m.permissionModeFooterTextCompact()
+}
+
+func renderAgentsModeFooter(permission, suffix string) string {
+	if suffix == "" {
+		return agentsModeFooterModeStyle.Render(permission)
+	}
+	return agentsModeFooterModeStyle.Render(permission) + agentsModeRowTextStyle.Render(" · "+suffix)
+}
+
+func (m *appModel) footerActivityText() string {
+	if m.agentsModeOpen {
+		return ""
+	}
+	return m.backgroundActivityText()
 }
 
 func (m *appModel) ctrlTActionLabel() string {
@@ -433,10 +761,238 @@ func (m *appModel) ctrlTActionLabel() string {
 }
 
 func (m *appModel) footerRightText() string {
-	if time.Since(m.lastEscClearRequest) <= 2*time.Second {
-		return "Esc again to clear"
+	if m.shortcutSheetOpen {
+		return ""
 	}
-	return ""
+	if m.agentsModeOpen || m.workflowTaskPickerOpen || m.backgroundActivityPrompt || m.backgroundActivityDetail {
+		return ""
+	}
+	if m.editor.IsHistorySearchActive() {
+		if m.editor.HistorySearchStartedInShellMode() {
+			return m.effortFooterRightText()
+		}
+		return ""
+	}
+	if m.editor.HistoryNavigationHintVisible() {
+		return claudeFooterTextStyle.Render("ctrl+r to search history")
+	}
+	if time.Since(m.lastEscClearRequest) <= 2*time.Second {
+		return claudeFooterTextStyle.Render("Esc again to clear")
+	}
+	if m.editor.PasteExpandHintVisible() {
+		if ideText := styledIDEContextStatusText(); ideText != "" {
+			return ideText
+		}
+		return ""
+	}
+	if m.focusedPanel == PanelEditor && m.editor.ShowKillBufferHint() {
+		return "Ctrl+Y to paste deleted text"
+	}
+	if m.focusedPanel == PanelEditor && !m.editor.ShellMode() && m.editor.Value() != "" {
+		if strings.Contains(m.editor.Value(), "\n") {
+			return "ctrl+g to edit in " + editorname.FromEnv(os.Getenv("VISUAL"), os.Getenv("EDITOR"))
+		}
+		if !m.chatPage.IsWorking() {
+			return ""
+		}
+	}
+	if m.chatPage.IsWorking() {
+		return ""
+	}
+	if m.transcriptDetailed {
+		return claudeFooterTextStyle.Render("verbose")
+	}
+	if m.idleFocusWarningRevealActive() &&
+		!m.editor.ShellMode() && m.startupFocusWarningText() != "" {
+		return ""
+	}
+	if m.promptStashStatusActive() {
+		return m.stashedFooterRightText()
+	}
+	if m.modelSwitchStatusActive() {
+		return ""
+	}
+	if m.permissionCycleStatusActive() {
+		return ""
+	}
+	if m.editor.ShellMode() {
+		return ""
+	}
+	if m.streamCancelFooterHidden && m.focusedPanel == PanelEditor && m.editor.Value() == "" {
+		return ""
+	}
+	if !m.thinkingModeEnabled && m.editor.Value() == "" {
+		if m.thinkingModeStatusActive() {
+			return "Thinking off"
+		}
+		return ""
+	}
+	if m.thinkingModeEnabled && m.editor.Value() == "" && !m.lastThinkingModeToggle.IsZero() {
+		if m.thinkingModeStatusActive() {
+			return "Thinking on"
+		}
+	}
+	if m.idleFooterRightHidden && m.focusedPanel == PanelEditor && !m.editor.ShellMode() && m.editor.Value() == "" {
+		return ""
+	}
+	if m.shortcutSheetDismissed && m.focusedPanel == PanelEditor && !m.editor.ShellMode() && m.editor.Value() == "" {
+		if ideText := styledIDEContextStatusText(); ideText != "" {
+			return ideText
+		}
+		return m.effortFooterRightText()
+	}
+	if m.focusedPanel == PanelEditor && !m.editor.ShellMode() && m.editor.Value() == "" {
+		return m.effortFooterRightText()
+	}
+	if ideText := styledIDEContextStatusText(); ideText != "" {
+		return ideText
+	}
+	return m.effortFooterRightText()
+}
+
+func renderClaudeEffortFooterRight(level string) string {
+	level = strings.TrimSpace(level)
+	if level == "" {
+		level = "high"
+	}
+	return claudeFooterTextStyle.Render("● " + level + " · /effort")
+}
+
+func (m *appModel) effortFooterRightText() string {
+	if !m.thinkingModeEnabled {
+		return ""
+	}
+	return renderClaudeEffortFooterRight(m.thinkingLevel)
+}
+
+func (m *appModel) stashedFooterRightText() string {
+	return claudeFooterTextStyle.Render("› stashed")
+}
+
+func (m *appModel) footerExtraLines() []string {
+	if m.agentsModeOpen {
+		if m.agentsModeHelp {
+			return []string{"  ctrl+s to switch views    ctrl+t to pin to top    esc to quit"}
+		}
+		return nil
+	}
+	if m.modelSwitchStatusActive() {
+		return []string{rightAlignedFooterLine(m.width, styles.SecondaryStyle.Render(m.modelSwitchStatus))}
+	}
+	if m.escClearedInputActive() {
+		return nil
+	}
+	if time.Since(m.lastExitRequest) <= 2*time.Second {
+		if ideText := styledIDEContextStatusText(); ideText != "" {
+			return []string{rightAlignedFooterLine(m.width, ideText)}
+		}
+		return nil
+	}
+	if warning := m.startupFocusWarningText(); warning != "" &&
+		m.shouldShowFocusWarningLine() {
+		return []string{warningFooterLine(m.width, warning)}
+	}
+	if m.completions.Open() ||
+		m.shortcutSheetOpen ||
+		m.workflowTaskPickerOpen ||
+		m.backgroundActivityPrompt ||
+		m.backgroundActivityDetail ||
+		m.chatPage.IsWorking() ||
+		!m.chatPage.IsTranscriptEmpty() ||
+		m.editor.Value() != "" {
+		return nil
+	}
+	if m.permissionCycleStatusActive() {
+		return nil
+	}
+	return nil
+}
+
+func (m *appModel) shouldShowFocusWarningLine() bool {
+	return !m.editor.ShellMode() &&
+		!m.completions.Open() &&
+		!m.shortcutSheetOpen &&
+		!m.workflowTaskPickerOpen &&
+		!m.backgroundActivityPrompt &&
+		!m.backgroundActivityDetail &&
+		!m.chatPage.IsWorking()
+}
+
+func (m *appModel) permissionCycleStatusActive() bool {
+	return !m.lastPermissionCycle.IsZero() && time.Since(m.lastPermissionCycle) <= permissionCycleStatusTTL
+}
+
+func (m *appModel) thinkingModeStatusActive() bool {
+	return !m.lastThinkingModeToggle.IsZero() && time.Since(m.lastThinkingModeToggle) <= thinkingModeStatusTTL
+}
+
+func (m *appModel) idleFocusWarningRevealActive() bool {
+	return !m.lastIdleFocusWarningReveal.IsZero() && time.Since(m.lastIdleFocusWarningReveal) <= idleFocusWarningRevealTTL
+}
+
+func (m *appModel) exitRequestClearedInputActive() bool {
+	return !m.lastExitClearedInput.IsZero() &&
+		time.Since(m.lastExitRequest) <= 2*time.Second &&
+		m.editor.Value() == ""
+}
+
+func (m *appModel) escClearedInputActive() bool {
+	return !m.lastEscClearedInput.IsZero() && m.editor.Value() == ""
+}
+
+func (m *appModel) modelSwitchStatusActive() bool {
+	return m.modelSwitchStatus != "" &&
+		!m.lastModelSwitch.IsZero() &&
+		time.Since(m.lastModelSwitch) <= modelSwitchStatusTTL
+}
+
+func rightAlignedFooterLine(width int, content string) string {
+	padding := max(0, width-lipgloss.Width(content)-2)
+	return strings.Repeat(" ", padding) + content
+}
+
+func warningFooterLine(width int, content string) string {
+	text := ansi.Truncate(content, max(1, width-4), "…")
+	return "  " + styles.SecondaryStyle.Render(text)
+}
+
+func (m *appModel) shouldShowStartupFocusWarning() bool {
+	return !m.startedAt.IsZero() && time.Since(m.startedAt) <= tmuxFocusWarningTTL
+}
+
+func (m *appModel) startupFocusWarningText() string {
+	if !m.shouldShowStartupFocusWarning() {
+		return ""
+	}
+	return tmuxFocusEventsWarningText()
+}
+
+func tmuxFocusEventsWarningText() string {
+	if os.Getenv("TMUX") == "" {
+		return ""
+	}
+	tmuxFocusEventsOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "tmux", "show-options", "-gv", "focus-events").Output()
+		if err == nil && strings.TrimSpace(string(out)) == "on" {
+			return
+		}
+		tmuxFocusEventsWarning = "tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking"
+	})
+	return tmuxFocusEventsWarning
+}
+
+func startupFooterRefreshAfter() tea.Cmd {
+	return tea.Tick(tmuxFocusWarningTTL+100*time.Millisecond, func(time.Time) tea.Msg {
+		return startupFooterRefreshMsg{}
+	})
+}
+
+func modelSwitchFooterRefreshAfter() tea.Cmd {
+	return tea.Tick(modelSwitchStatusTTL+100*time.Millisecond, func(time.Time) tea.Msg {
+		return modelSwitchFooterRefreshMsg{}
+	})
 }
 
 func (m *appModel) bottomSurfaceHeight(width int) int {
@@ -449,11 +1005,22 @@ func (m *appModel) bottomSurfaceHeight(width int) int {
 
 func (m *appModel) renderBottomSurface(width int) string {
 	if m.completions.Open() {
-		return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(m.completions.View())
+		return m.completions.View()
+	}
+	if m.agentsModeOpen {
+		return ""
 	}
 	var parts []string
 	if m.shortcutSheetOpen {
 		parts = append(parts, m.renderShortcutSheet(width))
+	}
+	if warningRows := m.renderTerminalWarnings(width); warningRows != "" {
+		parts = append(parts, warningRows)
+	}
+	if m.backgroundActivityDetail {
+		if details := m.renderBackgroundShellDetails(width); details != "" {
+			parts = append(parts, details)
+		}
 	}
 	if rows := m.renderBottomActivityRows(width); rows != "" {
 		parts = append(parts, rows)
@@ -461,21 +1028,38 @@ func (m *appModel) renderBottomSurface(width int) string {
 	return strings.Join(parts, "\n")
 }
 
+func (m *appModel) promptStashStatusActive() bool {
+	return !m.lastPromptStash.IsZero() && time.Since(m.lastPromptStash) <= promptStashStatusTTL
+}
+
+func (m *appModel) renderTerminalWarnings(width int) string {
+	if len(m.terminalWarnings) == 0 || width <= 0 || m.shortcutSheetOpen {
+		return ""
+	}
+	innerWidth := max(20, width-appPaddingHorizontal)
+	lines := make([]string, 0, len(m.terminalWarnings))
+	for _, warning := range m.terminalWarnings {
+		line := " " + warning
+		lines = append(lines, styles.SecondaryStyle.Render(ansi.Truncate(line, innerWidth, "…")))
+	}
+	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(strings.Join(lines, "\n"))
+}
+
 func (m *appModel) renderShortcutSheet(width int) string {
 	innerWidth := max(20, width-appPaddingHorizontal)
 	rows := [][3]string{
 		{"! for shell mode", "double tap esc to clear input", "ctrl + shift + _ to undo"},
 		{"/ for commands", "shift + tab to auto-accept edits", "ctrl + z to suspend"},
-		{"@ for file paths", "ctrl + o for verbose output", "ctrl + v to paste images"},
-		{"/btw for side question", "ctrl + t to " + m.ctrlTActionLabel(), "opt + p to switch model"},
+		{"@ for file paths", "ctrl + o for verbose output", ""},
+		{"", "ctrl + t to toggle tasks", "opt + p to switch model"},
 		{"", "shift + ⏎ for newline", "ctrl + s to stash prompt"},
 		{"", "", "ctrl + g to edit in $EDITOR"},
-		{"", "", "/keybindings to customize"},
 	}
 	lines := make([]string, 0, len(rows))
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 	for _, row := range rows {
-		line := fmt.Sprintf("%-28s  %-36s  %s", row[0], row[1], row[2])
-		lines = append(lines, styles.SecondaryStyle.Render(ansi.Truncate(line, innerWidth, "")))
+		line := fmt.Sprintf(" %-22s  %-33s  %s", row[0], row[1], row[2])
+		lines = append(lines, style.Render(ansi.Truncate(line, innerWidth, "")))
 	}
 	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(strings.Join(lines, "\n"))
 }
@@ -507,11 +1091,21 @@ func (m *appModel) renderWorkflowDetail(width, height int) string {
 
 func (m *appModel) renderBottomActivityRows(width int) string {
 	activityKind := m.bottomActivityKind()
-	if !activityKind.hasRows() || (m.bottomActivityRowsHidden && !m.workflowTaskPickerOpen) {
+	activeWorkflow := m.activeIsWorkflowTask()
+	if !activityKind.hasRows() && !m.workflowTaskPickerOpen && !activeWorkflow {
+		return ""
+	}
+	if !m.workflowTaskPickerOpen && m.bottomActivityRowsHidden {
+		return ""
+	}
+	if m.backgroundActivityPrompt || m.backgroundActivityDetail {
+		return ""
+	}
+	if m.backgroundShellCount() > 0 && len(m.backgroundActivities) == m.backgroundShellCount() && !activeWorkflow && !m.workflowTaskPickerOpen {
 		return ""
 	}
 	var workflowRows []workflowRow
-	if activityKind.hasWorkflowTasks() {
+	if m.workflowTaskPickerOpen || activityKind.hasWorkflowTasks() || activeWorkflow {
 		workflowRows = m.workflowRows()
 	}
 	var activityRows []backgroundActivity

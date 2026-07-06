@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/chat"
@@ -32,7 +34,8 @@ const (
 	// toggleColumnWidth is the width of the sidebar toggle/resize handle column
 	toggleColumnWidth = 1
 	// appPaddingHorizontal is total horizontal padding from AppStyle (left + right)
-	appPaddingHorizontal = 2 * styles.AppPadding
+	appPaddingHorizontal    = 2 * styles.AppPadding
+	defaultWelcomeModelLine = "Opus 4.8 (1M context) with high effort · API Usage Billing"
 )
 
 // sidebarLayoutMode represents how the sidebar is displayed
@@ -84,6 +87,11 @@ type SidebarSettings struct {
 	PreferredWidth int
 }
 
+type queuedInput struct {
+	content     string
+	attachments []msgtypes.Attachment
+}
+
 // Page represents the main chat content area (messages + sidebar).
 // The editor and resize handle are owned by the parent (tui.Model).
 type Page interface {
@@ -97,8 +105,47 @@ type Page interface {
 	SetTitleRegenerating(regenerating bool) tea.Cmd
 	// ScrollToBottom scrolls the messages viewport to the bottom if auto-scroll is active.
 	ScrollToBottom() tea.Cmd
+	// ForceScrollToBottom scrolls to the bottom even after local panel navigation
+	// marked the transcript as manually scrolled.
+	ForceScrollToBottom() tea.Cmd
+	// AdjustBottomSlack reserves or releases blank transcript rows so newly
+	// appended local command rows can stay visible above centered overlays.
+	AdjustBottomSlack(delta int)
+	// TranscriptHeight returns the current rendered transcript height.
+	TranscriptHeight() int
+	// TranscriptMessageHeight returns the message-list height without the
+	// welcome header that may be visually prepended by chat page rendering.
+	TranscriptMessageHeight() int
+	// TranscriptViewportHeight returns the message viewport height.
+	TranscriptViewportHeight() int
+	// SetTranscriptTopContextLines prepends the trailing welcome/context rows
+	// above the message list while a Claude-style overlay is open.
+	SetTranscriptTopContextLines(lines int)
+	// AddLocalUserMessage appends a local transcript user row without
+	// starting an agent turn.
+	AddLocalUserMessage(content string) tea.Cmd
+	// AddLocalNoticeMessage appends a local transcript notice row without
+	// starting an agent turn.
+	AddLocalNoticeMessage(content string) tea.Cmd
+	// AddLocalSystemMessage appends a local system panel without routing
+	// through the runtime event bus.
+	AddLocalSystemMessage(content string) tea.Cmd
+	// RemoveLastSystemMessage removes the currently displayed local system
+	// panel when a Claude-style control dialog is dismissed.
+	RemoveLastSystemMessage() tea.Cmd
+	// SetWelcomeModelLine updates the Claude-style model subtitle shown in the
+	// compact welcome header.
+	SetWelcomeModelLine(content string)
 	// IsWorking returns whether the agent is currently working
 	IsWorking() bool
+	// IsTranscriptEmpty returns true before any visible conversation content exists.
+	IsTranscriptEmpty() bool
+	// NthLatestAssistantMessage returns the nth latest visible assistant text.
+	NthLatestAssistantMessage(index int) string
+	// AssistantMessageCount returns the number of visible assistant responses.
+	AssistantMessageCount() int
+	// ExportTranscript returns the plain-text visible conversation transcript.
+	ExportTranscript() string
 	// IsInlineEditing returns true if a past user message is being edited inline
 	IsInlineEditing() bool
 	// SetCommandParser replaces the slash-command parser for the chat page.
@@ -113,6 +160,8 @@ type Page interface {
 	GetSidebarSettings() SidebarSettings
 	// SetSidebarSettings applies sidebar display settings
 	SetSidebarSettings(settings SidebarSettings)
+	// SetCompletionOpen tells the chat page whether the inline completion surface is visible.
+	SetCompletionOpen(open bool)
 }
 
 // chatPage implements Page
@@ -126,13 +175,19 @@ type chatPage struct {
 	sessionState *service.SessionState
 
 	// State
-	working     bool
-	hideSidebar bool
+	working          bool
+	hideSidebar      bool
+	completionOpen   bool
+	welcomeModelLine string
 
-	msgCancel       context.CancelFunc
-	streamCancelled bool
-	streamDepth     int // nesting depth of active streams (incremented on StreamStarted, decremented on StreamStopped)
-	streamStartTime time.Time
+	msgCancel                  context.CancelFunc
+	streamCancelled            bool
+	streamDepth                int // nesting depth of active streams (incremented on StreamStarted, decremented on StreamStopped)
+	streamStartTime            time.Time
+	activeBangCommand          string
+	activeUserPrompt           string
+	activeUserPromptRestorable bool
+	transcriptTopContextLines  int
 
 	// Track whether we've received content from an assistant response
 	// Used by --exit-after-response to ensure we don't exit before receiving content
@@ -141,12 +196,7 @@ type chatPage struct {
 	// queuedInputs mirrors Claude Code's running-input UX: messages submitted
 	// while the agent is already working are rendered as queued rows above the
 	// composer instead of disappearing into a weak notification.
-	queuedInputs []string
-	// queuedInputPendingEvents counts locally queued rows whose real
-	// UserMessageEvent has not yet arrived. It lets us ignore the synchronous
-	// fallback echo used by some runtimes while still clearing the row when the
-	// queued turn is actually promoted.
-	queuedInputPendingEvents int
+	queuedInputs []queuedInput
 
 	// Editing state for branching sessions
 	editing          bool
@@ -182,8 +232,8 @@ func (p *chatPage) computeSidebarLayout() sidebarLayout {
 	if p.sidebarHidden() {
 		return sidebarLayout{
 			mode:       sidebarCollapsedNarrow,
-			innerWidth: innerWidth,
-			chatWidth:  innerWidth,
+			innerWidth: max(1, p.width),
+			chatWidth:  max(1, p.width),
 			chatHeight: max(1, p.height),
 		}
 	}
@@ -369,6 +419,15 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		slog.Debug(msg.Content)
 		return p.handleSendMsg(msg)
 
+	case msgtypes.PopQueuedInputMsg:
+		return p, p.popQueuedInput()
+
+	case msgtypes.CancelStreamPreserveInputMsg:
+		return p, p.cancelStreamPreservingInput(true)
+
+	case msgtypes.UnknownCommandMsg:
+		return p.handleUnknownCommand(msg)
+
 	case msgtypes.ToggleHideToolResultsMsg:
 		// Forward to messages component to invalidate cache and trigger redraw
 		model, cmd := p.messages.Update(messages.ToggleHideToolResultsMsg{})
@@ -492,10 +551,26 @@ func (p *chatPage) queuedInputView(width int) string {
 	available := max(1, width-lipgloss.Width(prefix))
 	rows := make([]string, 0, len(p.queuedInputs))
 	for _, input := range p.queuedInputs {
-		text := strings.ReplaceAll(input, "\n", " ")
+		text := strings.ReplaceAll(input.content, "\n", " ")
 		rows = append(rows, rowStyle.Render(prefix+lipgloss.NewStyle().MaxWidth(available).Render(text)))
 	}
 	return strings.Join(rows, "\n")
+}
+
+func (p *chatPage) popQueuedInput() tea.Cmd {
+	if len(p.queuedInputs) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(p.queuedInputs))
+	for _, input := range p.queuedInputs {
+		parts = append(parts, input.content)
+	}
+	p.queuedInputs = nil
+	return tea.Batch(
+		core.CmdHandler(msgtypes.RestoreEditorInputMsg{Content: strings.Join(parts, "\n")}),
+		p.emitQueuedInputState(),
+		p.messages.ScrollToBottom(),
+	)
 }
 
 func (p *chatPage) joinMessagesWithQueuedInput(messagesView, queuedView string, height int) string {
@@ -514,12 +589,223 @@ func (p *chatPage) joinMessagesWithQueuedInput(messagesView, queuedView string, 
 	return strings.Join(append(messageLines, queuedLines...), "\n")
 }
 
+func (p *chatPage) emptyWelcomeView(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	cwd := compactWorkingDirectory()
+	lines := p.claudeWelcomeLines(cwd, width)
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, width, "…")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (p *chatPage) claudeWelcomeLines(cwd string, width int) []string {
+	if shouldRenderWelcomeCard(width) {
+		return claudeWelcomeCardLines(cwd, width)
+	}
+	return compactClaudeWelcomeLines(cwd, p.currentWelcomeModelLine())
+}
+
+func (p *chatPage) currentWelcomeModelLine() string {
+	if strings.TrimSpace(p.welcomeModelLine) != "" {
+		return p.welcomeModelLine
+	}
+	return defaultWelcomeModelLine
+}
+
+func compactClaudeWelcomeLines(cwd, modelLine string) []string {
+	logo := lipgloss.NewStyle().Foreground(lipgloss.Color("174"))
+	logoFill := logo.Background(lipgloss.Color("16"))
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	bold := lipgloss.NewStyle().Bold(true)
+	return []string{
+		logo.Render(" ▐") + logoFill.Render("▛███▜") + logo.Render("▌") + "   " + bold.Render("Claude") + " " + bold.Render("Code") + " " + muted.Render("v2.1.201"),
+		logo.Render("▝▜") + logoFill.Render("█████") + logo.Render("▛▘") + "  " + muted.Render(modelLine),
+		logo.Render(" ") + " " + logo.Render("▘▘") + " " + logo.Render("▝▝") + "    " + muted.Render(cwd),
+		"",
+		"",
+	}
+}
+
+func shouldRenderWelcomeCard(width int) bool {
+	if width < 80 {
+		return false
+	}
+	info, err := os.Stat(".git")
+	return err == nil && info.IsDir()
+}
+
+func claudeWelcomeCardLines(cwd string, width int) []string {
+	leftWidth, rightWidth := welcomeCardColumnWidths(width)
+	logo := lipgloss.NewStyle().Foreground(lipgloss.Color("174"))
+	logoFill := logo.Background(lipgloss.Color("16"))
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	bold := lipgloss.NewStyle().Bold(true)
+	accentBold := lipgloss.NewStyle().Foreground(lipgloss.Color("174")).Bold(true)
+	border := lipgloss.NewStyle().Foreground(lipgloss.Color("174"))
+	middleBorder := border.Faint(true)
+	mutedItalic := muted.Italic(true)
+
+	leftRows := []string{
+		"",
+		bold.Render("Welcome back!"),
+		"",
+		logo.Render("▐") + logoFill.Render("▛███▜") + logo.Render("▌"),
+		logo.Render("▝▜") + logoFill.Render("█████") + logo.Render("▛▘"),
+		logo.Render("▘▘") + " " + logo.Render("▝▝"),
+		"",
+		muted.Render(defaultWelcomeModelLine),
+		" " + muted.Render(compactWelcomeCardDirectory(cwd, leftWidth-2)),
+	}
+	rightRows := []string{
+		"Tips for getting started",
+		"Run /init to create a CLAUDE.md file with …",
+		border.Render(strings.Repeat("─", max(1, rightWidth-2))),
+		accentBold.Render("What's new"),
+		"Claude Sonnet 5 sessions no longer use the…",
+		"Changed `AskUserQuestion` dialogs to no lo…",
+		`Changed the "default" permission mode to "…`,
+		mutedItalic.Render("/release-notes for more"),
+		"",
+	}
+
+	lines := []string{welcomeCardTopBorder(width, border)}
+	for i := range leftRows {
+		leftAlign := lipgloss.Center
+		if i == len(leftRows)-1 {
+			leftAlign = lipgloss.Left
+		}
+		left := welcomeCardCell(leftRows[i], leftWidth, leftAlign)
+		if leftAlign == lipgloss.Center {
+			left = welcomeCardCenterCell(leftRows[i], leftWidth, i != 7)
+		}
+		right := welcomeCardCell(" "+rightRows[i], rightWidth, lipgloss.Left)
+		lines = append(lines, border.Render("│")+left+middleBorder.Render("│")+right+border.Render("│"))
+	}
+	lines = append(lines, border.Render("╰"+strings.Repeat("─", max(0, width-2))+"╯"))
+	lines = append(lines, "", "")
+	return lines
+}
+
+func welcomeCardColumnWidths(width int) (left, right int) {
+	available := max(1, width-3)
+	left = min(52, max(30, available*52/97))
+	right = max(1, available-left)
+	return left, right
+}
+
+func welcomeCardTopBorder(width int, style lipgloss.Style) string {
+	prefix := "╭─── Claude Code v2.1.201 "
+	suffix := "╮"
+	fillWidth := max(0, width-lipgloss.Width(prefix)-lipgloss.Width(suffix))
+	return style.Render(prefix + strings.Repeat("─", fillWidth) + suffix)
+}
+
+func welcomeCardCell(text string, width int, align lipgloss.Position) string {
+	if width <= 0 {
+		return ""
+	}
+	text = ansi.Truncate(text, width, "…")
+	return lipgloss.PlaceHorizontal(width, align, text)
+}
+
+func welcomeCardCenterCell(text string, width int, leftBias bool) string {
+	if width <= 0 {
+		return ""
+	}
+	text = ansi.Truncate(text, width, "…")
+	padding := max(0, width-lipgloss.Width(text))
+	left := padding / 2
+	if leftBias {
+		left = (padding + 1) / 2
+	}
+	right := padding - left
+	return strings.Repeat(" ", left) + text + strings.Repeat(" ", right)
+}
+
+func compactWelcomeCardDirectory(cwd string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(cwd) <= width {
+		return cwd
+	}
+	if strings.HasPrefix(cwd, "~/") {
+		rest := strings.TrimPrefix(cwd, "~/")
+		if idx := strings.Index(rest, "/."); idx >= 0 {
+			candidate := "~/…" + rest[idx:]
+			if lipgloss.Width(candidate) <= width {
+				return candidate
+			}
+		}
+	}
+	return leftTruncate(cwd, width)
+}
+
+func leftTruncate(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	ellipsis := "…"
+	keep := max(1, width-lipgloss.Width(ellipsis))
+	runes := []rune(text)
+	for len(runes) > 0 && lipgloss.Width(string(runes)) > keep {
+		runes = runes[1:]
+	}
+	return ellipsis + string(runes)
+}
+
+func compactWorkingDirectory() string {
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		if cwd == home {
+			return "~"
+		}
+		prefix := home + "/"
+		if strings.HasPrefix(cwd, prefix) {
+			return "~/" + strings.TrimPrefix(cwd, prefix)
+		}
+	}
+	return cwd
+}
+
 // View renders the chat page (messages + sidebar only, no editor or resize handle)
 func (p *chatPage) View() string {
 	sl := p.computeSidebarLayout()
 
 	messagesView := p.messages.View()
 	queuedView := p.queuedInputView(sl.chatWidth)
+	compactEmptyWelcome := false
+	if strings.TrimSpace(messagesView) == "" && queuedView == "" && !p.working {
+		messagesView = p.emptyWelcomeView(sl.chatWidth)
+		compactEmptyWelcome = p.hideSidebar
+		if compactEmptyWelcome && p.completionOpen && shouldRenderWelcomeCard(sl.chatWidth) {
+			messagesView = dropLeadingRenderedLines(messagesView, 2)
+		}
+	} else if p.transcriptTopContextLines > 0 && p.hideSidebar && strings.TrimSpace(messagesView) != "" {
+		messagesView = p.prependTranscriptTopContext(messagesView, sl.chatWidth, p.transcriptTopContextLines)
+	} else if p.hideSidebar && strings.TrimSpace(messagesView) != "" {
+		welcomeView := p.emptyWelcomeView(sl.chatWidth)
+		if renderedLineCount(welcomeView)+renderedLineCount(messagesView) <= sl.chatHeight {
+			messagesView = welcomeView + "\n" + messagesView
+		}
+	}
+	if !compactEmptyWelcome &&
+		p.hideSidebar &&
+		strings.TrimSpace(messagesView) != "" &&
+		!strings.HasSuffix(messagesView, "\n") &&
+		renderedLineCount(messagesView) < sl.chatHeight {
+		messagesView += "\n"
+	}
 	if queuedView != "" {
 		messagesView = p.joinMessagesWithQueuedInput(messagesView, queuedView, sl.chatHeight)
 	}
@@ -546,11 +832,8 @@ func (p *chatPage) View() string {
 	case sidebarCollapsed, sidebarCollapsedNarrow:
 		switch {
 		case p.hideSidebar:
-			// Sidebar hidden: chat fills the full height, no sidebar header.
-			bodyContent = styles.ChatStyle.
-				Height(sl.chatHeight).
-				Width(sl.innerWidth).
-				Render(messagesView)
+			// Sidebar hidden: chat follows transcript height, no sidebar header.
+			bodyContent = styles.ChatStyle.Width(sl.innerWidth).Render(messagesView)
 		default:
 			sidebarRendered := p.renderCollapsedSidebar(sl)
 			chatView := styles.ChatStyle.
@@ -561,9 +844,97 @@ func (p *chatPage) View() string {
 		}
 	}
 
-	appStyle := styles.AppStyle
-	appStyle = appStyle.Height(p.height)
+	if p.hideSidebar {
+		return bodyContent
+	}
+	appStyle := styles.AppStyle.Height(p.height)
 	return appStyle.Render(bodyContent)
+}
+
+func renderedLineCount(view string) int {
+	if view == "" {
+		return 0
+	}
+	return len(strings.Split(view, "\n"))
+}
+
+func (p *chatPage) prependTranscriptTopContext(messagesView string, width, lines int) string {
+	if lines <= 0 {
+		return messagesView
+	}
+	welcomeLines := strings.Split(p.emptyWelcomeView(width), "\n")
+	if len(welcomeLines) == 0 {
+		return strings.Repeat("\n", lines) + messagesView
+	}
+	keep := min(lines, len(welcomeLines))
+	prefix := strings.Join(welcomeLines[len(welcomeLines)-keep:], "\n")
+	if lines > keep {
+		prefix = strings.Repeat("\n", lines-keep) + prefix
+	}
+	return prefix + "\n" + messagesView
+}
+
+func (p *chatPage) IsTranscriptEmpty() bool {
+	return p.messages.IsEmpty()
+}
+
+func (p *chatPage) NthLatestAssistantMessage(index int) string {
+	return p.messages.NthLatestAssistantMessage(index)
+}
+
+func (p *chatPage) AssistantMessageCount() int {
+	return p.messages.AssistantMessageCount()
+}
+
+func (p *chatPage) ExportTranscript() string {
+	body := strings.TrimSpace(p.messages.ExportTranscript())
+	if body == "" {
+		return ""
+	}
+	sl := p.computeSidebarLayout()
+	header := plainExportText(p.emptyWelcomeView(sl.chatWidth))
+	if header == "" {
+		return body
+	}
+	return trimExportTextBlock(header + "\n\n" + body)
+}
+
+func plainExportText(view string) string {
+	if view == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(ansi.Strip(line), " \t")
+	}
+	return trimExportTextBlock(strings.Join(lines, "\n"))
+}
+
+func trimExportTextBlock(text string) string {
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	start := 0
+	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	end := len(lines)
+	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	if start >= end {
+		return ""
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+func dropLeadingRenderedLines(view string, count int) string {
+	if count <= 0 || view == "" {
+		return view
+	}
+	lines := strings.Split(view, "\n")
+	if count >= len(lines) {
+		return ""
+	}
+	return strings.Join(lines[count:], "\n")
 }
 
 // renderSidebarHandle renders the sidebar toggle/resize handle.
@@ -637,18 +1008,53 @@ func (p *chatPage) Help() help.KeyMap {
 
 // cancelStream cancels the current stream and cleans up associated state
 func (p *chatPage) cancelStream(showCancelMessage bool) tea.Cmd {
-	if p.msgCancel == nil {
+	return p.cancelStreamWithOptions(showCancelMessage, true)
+}
+
+func (p *chatPage) cancelStreamPreservingInput(showCancelMessage bool) tea.Cmd {
+	return p.cancelStreamWithOptions(showCancelMessage, false)
+}
+
+func (p *chatPage) cancelStreamWithOptions(showCancelMessage bool, restoreBangInput bool) tea.Cmd {
+	if p.msgCancel == nil && !p.working {
 		return nil
 	}
 
-	p.msgCancel()
-	p.msgCancel = nil
+	if p.app != nil {
+		p.app.Interrupt()
+	}
+	if p.msgCancel != nil {
+		p.msgCancel()
+		p.msgCancel = nil
+	}
 	p.streamCancelled = true
 	p.streamDepth = 0
 	p.setPendingResponse(false)
+
+	showMessage := showCancelMessage
+	var restoreInputCmd tea.Cmd
+	if restoreBangInput && p.activeBangCommand != "" {
+		p.messages.RemoveLastUserMessage("! " + p.activeBangCommand)
+		showMessage = false
+		restoreInputCmd = core.CmdHandler(msgtypes.RestoreEditorInputMsg{
+			Content:   p.activeBangCommand,
+			ShellMode: true,
+		})
+	} else if p.activeUserPromptRestorable && p.activeUserPrompt != "" && !p.hasReceivedAssistantContent {
+		p.messages.RemoveLastUserMessage(p.activeUserPrompt)
+		showMessage = false
+		restoreInputCmd = core.CmdHandler(msgtypes.RestoreEditorInputMsg{
+			Content: p.activeUserPrompt,
+		})
+	}
+	p.activeBangCommand = ""
+	p.activeUserPrompt = ""
+	p.activeUserPromptRestorable = false
+
 	// Send StreamCancelledMsg to all components to handle cleanup
 	return tea.Batch(
-		core.CmdHandler(msgtypes.StreamCancelledMsg{ShowMessage: showCancelMessage}),
+		core.CmdHandler(msgtypes.StreamCancelledMsg{ShowMessage: showMessage}),
+		restoreInputCmd,
 		p.setWorking(false),
 	)
 }
@@ -661,7 +1067,10 @@ func (p *chatPage) parseImmediateCommand(content string) tea.Cmd {
 	if p.commandParser == nil {
 		return nil
 	}
-	return p.commandParser.Parse(content)
+	if cmd := p.commandParser.Parse(content); cmd != nil {
+		return cmd
+	}
+	return p.commandParser.ParseUnknown(content)
 }
 
 // SetCommandParser replaces the slash-command parser for the chat page.
@@ -700,13 +1109,16 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 	}
 
-	// QueueIfBusy: submit cooperatively to the gateway/core inbox and render the
-	// local Claude Code-style queued row while the current turn continues.
-	if msg.QueueIfBusy && (p.working || p.msgCancel != nil) {
-		p.queuedInputs = append(p.queuedInputs, msg.Content)
-		p.queuedInputPendingEvents++
+	// Active run: keep the message in a local Claude Code-style queue and
+	// submit it after the current stream stops. This check intentionally lives
+	// here, not only in the editor, because runtime events are the source of
+	// truth for whether a gateway turn is still active.
+	if p.working || p.msgCancel != nil {
+		p.queuedInputs = append(p.queuedInputs, queuedInput{
+			content:     msg.Content,
+			attachments: msg.Attachments,
+		})
 		return p, tea.Batch(
-			p.processCooperativeMessage(msg),
 			p.emitQueuedInputState(),
 			p.messages.ScrollToBottom(),
 		)
@@ -716,6 +1128,28 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	// submitting this message immediately.
 	cmd := p.processMessage(msg)
 	return p, cmd
+}
+
+func (p *chatPage) handleUnknownCommand(msg msgtypes.UnknownCommandMsg) (layout.Model, tea.Cmd) {
+	command := strings.TrimSpace(msg.Command)
+	if command == "" {
+		command = "/"
+	}
+	content := "Unknown command: " + command
+	if suggestion := strings.TrimSpace(msg.Suggestion); suggestion != "" {
+		content += ". Did you mean " + suggestion + "?"
+	}
+
+	agentName := "assistant"
+	if p.sessionState != nil && p.sessionState.CurrentAgentName() != "" {
+		agentName = p.sessionState.CurrentAgentName()
+	}
+	p.setPendingResponse(false)
+	return p, tea.Batch(
+		p.messages.AddAssistantTextMessage(agentName, content),
+		p.setWorking(false),
+		p.messages.ScrollToBottom(),
+	)
 }
 
 func (p *chatPage) handleEditUserMessage(msg msgtypes.EditUserMessageMsg) (layout.Model, tea.Cmd) {
@@ -847,15 +1281,40 @@ func (p *chatPage) processMessage(msg msgtypes.SendMsg) tea.Cmd {
 	}
 
 	if isBangCommand(msg.Content) {
-		p.app.RunBangCommand(context.Background(), msg.Content[1:])
-		return p.messages.ScrollToBottom()
+		command := strings.TrimSpace(msg.Content[1:])
+		if command == "" {
+			return nil
+		}
+		if p.msgCancel != nil {
+			p.msgCancel()
+		}
+		p.streamCancelled = false
+		p.streamDepth = 0
+		p.sidebar.ResetStreamTracking()
+		p.activeUserPrompt = ""
+		p.activeUserPromptRestorable = false
+		p.hasReceivedAssistantContent = false
+
+		var ctx context.Context
+		ctx, p.msgCancel = context.WithCancel(context.Background())
+		p.activeBangCommand = command
+		spinnerCmd := p.setWorking(true)
+
+		go p.app.RunBangCommand(ctx, p.msgCancel, command)
+
+		return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd)
 	}
 
 	if p.msgCancel != nil {
 		p.msgCancel()
 	}
 
+	p.streamCancelled = false
+	p.activeBangCommand = ""
+	p.activeUserPrompt = msg.Content
+	p.activeUserPromptRestorable = true
 	p.streamDepth = 0
+	p.hasReceivedAssistantContent = false
 	p.sidebar.ResetStreamTracking()
 
 	var ctx context.Context
@@ -944,6 +1403,10 @@ func (p *chatPage) SetSidebarSettings(settings SidebarSettings) {
 	p.sidebar.SetPreferredWidth(settings.PreferredWidth)
 }
 
+func (p *chatPage) SetCompletionOpen(open bool) {
+	p.completionOpen = open
+}
+
 // handleSidebarClickType checks what was clicked in the sidebar area.
 // Returns the click type and, for ClickAgent, the agent name.
 func (p *chatPage) handleSidebarClickType(x, y int) (sidebar.ClickResult, string) {
@@ -1018,4 +1481,70 @@ func (p *chatPage) BlurMessages() {
 // ScrollToBottom scrolls the messages viewport to the bottom if auto-scroll is active.
 func (p *chatPage) ScrollToBottom() tea.Cmd {
 	return p.messages.ScrollToBottom()
+}
+
+func (p *chatPage) ForceScrollToBottom() tea.Cmd {
+	return p.messages.ForceScrollToBottom()
+}
+
+func (p *chatPage) AdjustBottomSlack(delta int) {
+	p.messages.AdjustBottomSlack(delta)
+}
+
+func (p *chatPage) TranscriptHeight() int {
+	sl := p.computeSidebarLayout()
+	messageHeight := p.messages.RenderedHeight()
+	if messageHeight == 0 {
+		return renderedLineCount(p.emptyWelcomeView(sl.chatWidth))
+	}
+	if p.hideSidebar {
+		welcomeHeight := renderedLineCount(p.emptyWelcomeView(sl.chatWidth))
+		if welcomeHeight+messageHeight <= sl.chatHeight {
+			return welcomeHeight + messageHeight
+		}
+	}
+	return messageHeight
+}
+
+func (p *chatPage) TranscriptMessageHeight() int {
+	return p.messages.RenderedHeight()
+}
+
+func (p *chatPage) TranscriptViewportHeight() int {
+	return p.messages.ViewportHeight()
+}
+
+func (p *chatPage) SetTranscriptTopContextLines(lines int) {
+	p.transcriptTopContextLines = max(0, lines)
+}
+
+func (p *chatPage) AddLocalUserMessage(content string) tea.Cmd {
+	return p.messages.AddUserMessage(content)
+}
+
+func (p *chatPage) AddLocalNoticeMessage(content string) tea.Cmd {
+	return p.messages.AddNoticeMessage(content)
+}
+
+func (p *chatPage) AddLocalSystemMessage(content string) tea.Cmd {
+	return p.messages.AddSystemMessage("", content)
+}
+
+func (p *chatPage) RemoveLastSystemMessage() tea.Cmd {
+	return p.messages.RemoveLastSystemMessage()
+}
+
+func (p *chatPage) SetWelcomeModelLine(content string) {
+	p.welcomeModelLine = content
+}
+
+func welcomeModelLineForActiveModel(model string, thinkingEnabled bool) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if thinkingEnabled {
+		return model + " with high effort · API Usage Billing"
+	}
+	return model + " · API Usage Billing"
 }

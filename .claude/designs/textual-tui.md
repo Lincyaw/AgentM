@@ -95,11 +95,12 @@ so the client keys mutations to the right turn.
 | metadata.kind | source channel / payload type | body fields |
 |---|---|---|
 | `turn_start` | `turn_start` | turn_id, turn_index |
+| `llm_request_start` | `llm_request_start` | turn_id, turn_index, model |
 | `stream_text` | `stream_delta`·`TextDelta` | turn_id, text |
 | `stream_thinking` | `stream_delta`·`ThinkingDelta` | turn_id, text |
 | `tool_call` | `tool_call` | tool_call_id, name, args |
 | `tool_result` | `tool_result` / `tool_error` | tool_call_id, ok, duration_ms, preview |
-| `usage` | `llm_request_end` (+usage/cost source) | turn_id, tokens_in/out, cost, model, ctx_window |
+| `usage` | `turn_end` assistant usage | turn_id, tokens_in/out, cache_read/write, optional cost |
 | `child_start` / `child_end` | `child_session_start/end` | child_id, purpose, error? |
 
 **(b) Control / observability — ephemeral** (toasts, header counters, modal snapshots):
@@ -334,9 +335,9 @@ WS is a first-class explicit-opt-in transport the TUI fully supports.
 
 ## 11. Open questions
 
-1. **`usage` data source.** `llm_request_end` carries duration/chunk_count but not
-   token totals; usage likely rides on `MessageEnd.message` / provider usage. Confirm
-   the field at implementation before wiring the `usage` projector.
+1. **Cost source.** `usage` carries provider token counts; cost is present only
+   when an installed cost service can estimate it. Unpriced providers degrade to
+   token-only summaries.
 2. **Interrupt wire shape.** Reuse the inbound path with a control marker, or add a
    dedicated control frame? Lean on an inbound marker to avoid a new wire kind.
 3. **Tool-specific renderers.** MVP ships a generic ToolBlock + diff/bash/read

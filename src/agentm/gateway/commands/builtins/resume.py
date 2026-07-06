@@ -200,11 +200,17 @@ def _discover_clickhouse(
 
     rows = recent_sessions(url, cwd=cwd, limit=limit)
     titles: dict[str, str] = {}
+    stats: dict[str, dict[str, int]] = {}
     if with_titles and rows:
-        from agentm.core.observability.clickhouse import first_user_message
+        from agentm.core.observability.clickhouse import (
+            first_user_message,
+            message_stats,
+        )
 
         for r in rows:
-            titles[r["session_id"]] = first_user_message(url, r["session_id"])
+            sid = r["session_id"]
+            titles[sid] = first_user_message(url, sid)
+            stats[sid] = message_stats(url, sid)
 
     result: list[dict[str, Any]] = []
     for r in rows:
@@ -215,6 +221,8 @@ def _discover_clickhouse(
             "title": titles.get(sid, ""),
             "scenario": r.get("scenario") or "",
             "created_at": created,
+            "num_messages": stats.get(sid, {}).get("messages", 0),
+            "size_bytes": stats.get(sid, {}).get("bytes", 0),
         })
     return result
 
@@ -266,11 +274,14 @@ def _discover_jsonl(
             continue
         sid = identity.session_id or f.stem
         title = _first_user_message(reader) if with_titles else ""
+        num_messages, size_bytes = _jsonl_message_stats(reader) if with_titles else (0, 0)
         result.append({
             "session_id": sid,
             "title": title,
             "scenario": identity.scenario or "",
             "created_at": mtime,
+            "num_messages": num_messages,
+            "size_bytes": size_bytes,
         })
     return result
 
@@ -300,6 +311,21 @@ def _first_user_message(reader: Any) -> str:
     except Exception:
         logger.debug("failed to extract first user message from {}", reader.file_path)
     return ""
+
+
+def _jsonl_message_stats(reader: Any) -> tuple[int, int]:
+    count = 0
+    size = 0
+    try:
+        for record in reader.iter_log_records(name="agentm.message.appended"):
+            body = record.body
+            if not isinstance(body, dict):
+                continue
+            count += 1
+            size += len(str(body).encode("utf-8"))
+    except Exception:
+        logger.debug("failed to count messages from {}", reader.file_path)
+    return count, size
 
 
 # --- text fallback --------------------------------------------------------

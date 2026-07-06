@@ -42,6 +42,7 @@ var builders = map[string]builder{
 	toolschema.ToolNameDirectoryTree:      directorytree.New,
 	toolschema.ToolNameSearchFilesContent: searchfilescontent.New,
 	toolschema.ToolNameShell:              shell.New,
+	toolschema.ToolNameBash:               shell.New,
 	toolschema.ToolNameUserPrompt:         userprompt.New,
 	toolschema.ToolNameFetch:              api.New,
 	"category:api":                        api.New,
@@ -49,6 +50,7 @@ var builders = map[string]builder{
 	toolschema.ToolNameCreateTodos:        todotool.New,
 	toolschema.ToolNameUpdateTodos:        todotool.New,
 	toolschema.ToolNameListTodos:          todotool.New,
+	toolschema.ToolNameRead:               readfile.New,
 }
 
 // New returns the appropriate tool view for the given message.

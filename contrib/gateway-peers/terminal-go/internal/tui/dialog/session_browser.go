@@ -2,7 +2,6 @@ package dialog
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/clipboardutil"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/scrollview"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
@@ -32,10 +32,10 @@ type sessionBrowserKeyMap struct {
 	Delete     key.Binding
 }
 
-// Session browser dialog dimension constants
 const (
-	sessionBrowserListOverhead = 12 // title(1) + space(1) + input(1) + separator(1) + separator(1) + id(1) + space(1) + help(1) + borders(2) + extra(2)
-	sessionBrowserListStartY   = 6  // border(1) + padding(1) + title(1) + space(1) + input(1) + separator(1)
+	sessionBrowserTopRow       = 5
+	sessionBrowserIndent       = 2
+	sessionBrowserRowsPerEntry = 3
 )
 
 type sessionBrowserDialog struct {
@@ -49,6 +49,7 @@ type sessionBrowserDialog struct {
 	keyMap     sessionBrowserKeyMap
 	openedAt   time.Time // when dialog was opened, for stable time display
 	starFilter int       // 0 = all, 1 = starred only, 2 = unstarred only
+	listStartY int
 
 	// Double-click detection
 	lastClickTime  time.Time
@@ -333,144 +334,200 @@ func indexSessionSummary(sessions []session.Summary, sessionID string) int {
 // Returns -1 if the position is not on a session.
 func (d *sessionBrowserDialog) mouseYToSessionIndex(y int) int {
 	dialogRow, _ := d.Position()
-	visLines := d.scrollview.VisibleHeight()
-	listStartY := dialogRow + sessionBrowserListStartY
+	visEntries := d.scrollview.VisibleHeight()
+	listStartY := dialogRow + d.listStartY
 
-	if y < listStartY || y >= listStartY+visLines {
+	if d.listStartY <= 0 || y < listStartY || y >= listStartY+(visEntries*sessionBrowserRowsPerEntry) {
 		return -1
 	}
 	lineInView := y - listStartY
-	idx := d.scrollview.ScrollOffset() + lineInView
+	idx := d.scrollview.ScrollOffset() + (lineInView / sessionBrowserRowsPerEntry)
 	if idx < 0 || idx >= len(d.filtered) {
 		return -1
 	}
 	return idx
 }
 
-func (d *sessionBrowserDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
-	dialogWidth = d.ComputeDialogWidth(85, 60, 120)
-	maxHeight = min(d.Height()*70/100, 30)
-	contentWidth = dialogWidth - 6 - d.scrollview.ReservedCols()
-	return dialogWidth, maxHeight, contentWidth
+func (d *sessionBrowserDialog) contentWidth() int {
+	return max(1, d.Width()-(sessionBrowserIndent*2))
 }
 
 func (d *sessionBrowserDialog) View() string {
-	dialogWidth, _, contentWidth := d.dialogSize()
-	d.textInput.SetWidth(contentWidth)
+	width := max(20, d.Width())
+	contentWidth := d.contentWidth()
 
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-	visibleLines := d.scrollview.VisibleHeight()
+	searchLines := d.renderSearchBox(contentWidth)
+	d.listStartY = 1 + 1 + 1 + len(searchLines) + 1 + 1
+	visibleEntries := d.visibleEntryCount(len(searchLines))
+	d.scrollview.SetSize(width, visibleEntries)
+	row, _ := d.Position()
+	d.scrollview.SetPosition(0, row+d.listStartY)
 
-	// Set scrollview position for mouse hit-testing (auto-computed from dialog position)
-	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+sessionBrowserListStartY)
-
-	// Tell the scrollview the total content height; pass nil for lines
-	// because we render only the visible window below. Rendering every row
-	// on every keystroke is the dominant cost when there are many sessions.
-	// The follow-up SetScrollOffset call re-clamps the offset against the
-	// (possibly shrunk) total — it is intentionally not a no-op.
 	total := len(d.filtered)
 	d.scrollview.SetContent(nil, total)
 	d.scrollview.SetScrollOffset(d.scrollview.ScrollOffset())
 
-	var scrollableContent string
+	var listLines []string
 	if total == 0 {
-		// Empty state: render manually so "No sessions found" is centered
-		emptyLines := []string{"", styles.DialogContentStyle.
-			Italic(true).Align(lipgloss.Center).Width(contentWidth).
-			Render("No sessions found")}
-		for len(emptyLines) < visibleLines {
-			emptyLines = append(emptyLines, "")
+		listLines = []string{
+			sessionBrowserLine("", contentWidth),
+			sessionBrowserLine(styles.SecondaryStyle.Render("No sessions found"), contentWidth),
 		}
-		scrollableContent = d.scrollview.ViewWithLines(emptyLines)
 	} else {
 		offset := d.scrollview.ScrollOffset()
-		end := min(offset+visibleLines, total)
-		windowLines := make([]string, 0, end-offset)
+		end := min(offset+visibleEntries, total)
+		listLines = make([]string, 0, (end-offset)*sessionBrowserRowsPerEntry)
 		for i := offset; i < end; i++ {
-			windowLines = append(windowLines, d.renderSession(d.filtered[i], i == d.selected, contentWidth))
+			listLines = append(listLines, d.renderSessionLines(d.filtered[i], i == d.selected, contentWidth)...)
 		}
-		scrollableContent = d.scrollview.ViewWithLines(windowLines)
 	}
 
-	// Build title with session count and optional star-filter indicator.
-	// Show "filtered/total" when a search or star filter reduces the list.
-	var countLabel string
-	if len(d.filtered) == len(d.sessions) {
-		countLabel = strconv.Itoa(len(d.sessions))
-	} else {
-		countLabel = fmt.Sprintf("%d/%d", len(d.filtered), len(d.sessions))
+	lines := make([]string, 0, 10+len(searchLines)+len(listLines))
+	lines = append(lines, "")
+	lines = append(lines, styles.DialogSeparatorStyle.Render(strings.Repeat("─", width)))
+	lines = append(lines, sessionBrowserLine(styles.BaseStyle.Render(d.title()), contentWidth))
+	lines = append(lines, searchLines...)
+	lines = append(lines, sessionBrowserLine(styles.SecondaryStyle.Render("  AgentM"), contentWidth))
+	lines = append(lines, "")
+	lines = append(lines, listLines...)
+	lines = append(lines, "")
+	lines = append(lines, d.renderHelp(contentWidth)...)
+
+	return strings.Join(lines, "\n")
+}
+
+// SetSize sets the dialog dimensions and configures the scrollview region.
+func (d *sessionBrowserDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.scrollview.SetSize(max(20, width), max(1, height-sessionBrowserTopRow-8))
+	return cmd
+}
+
+func (d *sessionBrowserDialog) title() string {
+	position := 0
+	if len(d.filtered) > 0 && d.selected >= 0 {
+		position = d.selected + 1
 	}
-	title := fmt.Sprintf("Sessions (%s)", countLabel)
+	total := len(d.sessions)
+	if total == 0 {
+		total = len(d.filtered)
+	}
+	title := fmt.Sprintf("Resume session (%d of %d)", position, total)
 	switch d.starFilter {
 	case 1:
 		title += " " + styles.StarredStyle.Render("★")
 	case 2:
 		title += " " + styles.UnstarredStyle.Render("☆")
 	}
-
-	var filterDesc string
-	switch d.starFilter {
-	case 0:
-		filterDesc = "all"
-	case 1:
-		filterDesc = "★ only"
-	case 2:
-		filterDesc = "☆ only"
-	}
-
-	var idFooter string
-	if d.selected >= 0 && d.selected < len(d.filtered) {
-		idFooter = styles.MutedStyle.Render("ID: ") + styles.SecondaryStyle.Render(d.filtered[d.selected].ID)
-	}
-
-	content := NewContent(regionWidth).
-		AddTitle(title).
-		AddSpace().
-		AddContent(d.textInput.View()).
-		AddSeparator().
-		AddContent(scrollableContent).
-		AddSeparator().
-		AddContent(idFooter).
-		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "ctrl+s", "star", "ctrl+f", filterDesc, "ctrl+y", "copy id", "ctrl+d", "delete").
-		AddHelpKeys("enter", "load", "esc", "close").
-		Build()
-
-	return styles.DialogStyle.Width(dialogWidth).Render(content)
+	return title
 }
 
-// SetSize sets the dialog dimensions and configures the scrollview region.
-func (d *sessionBrowserDialog) SetSize(width, height int) tea.Cmd {
-	cmd := d.BaseDialog.SetSize(width, height)
-	_, maxHeight, contentWidth := d.dialogSize()
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-	visibleLines := max(1, maxHeight-sessionBrowserListOverhead)
-	d.scrollview.SetSize(regionWidth, visibleLines)
-	return cmd
+func (d *sessionBrowserDialog) visibleEntryCount(searchBoxLines int) int {
+	row, _ := d.Position()
+	fixedRows := 8 + searchBoxLines
+	availableRows := d.Height() - row - fixedRows
+	if availableRows < sessionBrowserRowsPerEntry {
+		return 1
+	}
+	return max(1, availableRows/sessionBrowserRowsPerEntry)
 }
 
-func (d *sessionBrowserDialog) renderSession(sess session.Summary, selected bool, maxWidth int) string {
-	titleStyle, timeStyle := styles.PaletteUnselectedActionStyle, styles.PaletteUnselectedDescStyle
+func (d *sessionBrowserDialog) renderSearchBox(contentWidth int) []string {
+	boxWidth := max(12, contentWidth)
+	innerWidth := max(1, boxWidth-4)
+	value := d.textInput.Value()
+	text := "⌕ Search…"
+	if value != "" {
+		text = "⌕ " + value
+	}
+	textStyle := styles.SecondaryStyle
+	if value != "" {
+		textStyle = styles.BaseStyle
+	}
+	if lipgloss.Width(text) > innerWidth {
+		text = toolcommon.TruncateText(text, innerWidth)
+	}
+	pad := strings.Repeat(" ", max(0, innerWidth-lipgloss.Width(text)))
+	borderStyle := styles.DialogSeparatorStyle
+	return []string{
+		sessionBrowserLine(borderStyle.Render("╭"+strings.Repeat("─", max(1, boxWidth-2))+"╮"), contentWidth),
+		sessionBrowserLine(borderStyle.Render("│ ")+textStyle.Render(text)+pad+borderStyle.Render(" │"), contentWidth),
+		sessionBrowserLine(borderStyle.Render("╰"+strings.Repeat("─", max(1, boxWidth-2))+"╯"), contentWidth),
+	}
+}
+
+func (d *sessionBrowserDialog) renderSessionLines(sess session.Summary, selected bool, maxWidth int) []string {
+	titleStyle := styles.BaseStyle
+	cursorStyle := styles.SecondaryStyle
 	if selected {
-		titleStyle, timeStyle = styles.PaletteSelectedActionStyle, styles.PaletteSelectedDescStyle
+		cursorStyle = styles.HighlightWhiteStyle
 	}
 
 	title := sess.Title
 	if title == "" {
 		title = "Untitled"
 	}
-
-	suffix := fmt.Sprintf(" • (%d msg) • %s", sess.NumMessages, d.timeAgo(sess.CreatedAt))
-
-	starWidth := 3
-	maxTitleLen := max(1, maxWidth-len(suffix)-starWidth)
-	if r := []rune(title); len(r) > maxTitleLen {
-		title = string(r[:maxTitleLen-1]) + "…"
+	if sess.Starred {
+		title = "★ " + title
 	}
+	cursor := " "
+	if selected {
+		cursor = "❯"
+	}
+	titleLine := cursorStyle.Render(cursor) + " " + titleStyle.Render(toolcommon.TruncateText(title, max(1, maxWidth-4)))
+	meta := fmt.Sprintf("%s · main · %s", d.timeAgo(sess.CreatedAt), d.sessionSizeLabel(sess))
+	metaLine := styles.SecondaryStyle.Render("  " + meta)
+	return []string{
+		sessionBrowserLine(titleLine, maxWidth),
+		sessionBrowserLine(metaLine, maxWidth),
+		sessionBrowserLine("", maxWidth),
+	}
+}
 
-	return styles.StarIndicator(sess.Starred) + titleStyle.Render(title) + timeStyle.Render(suffix)
+func (d *sessionBrowserDialog) sessionSizeLabel(sess session.Summary) string {
+	if sess.SizeBytes > 0 {
+		return formatSessionBrowserSize(sess.SizeBytes)
+	}
+	switch sess.NumMessages {
+	case 0:
+		return "0 messages"
+	case 1:
+		return "1 message"
+	default:
+		return fmt.Sprintf("%d messages", sess.NumMessages)
+	}
+}
+
+func formatSessionBrowserSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	kb := float64(bytes) / 1024
+	if kb < 10 {
+		return fmt.Sprintf("%.1fKB", kb)
+	}
+	return fmt.Sprintf("%.0fKB", kb)
+}
+
+func (d *sessionBrowserDialog) renderHelp(contentWidth int) []string {
+	lines := wrapModelPickerText(
+		"Type to search · Enter to load · Esc to cancel · Ctrl+S to star · Ctrl+F to filter starred",
+		contentWidth,
+	)
+	rendered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		rendered = append(rendered, sessionBrowserLine(styles.SecondaryStyle.Render(line), contentWidth))
+	}
+	return rendered
+}
+
+func sessionBrowserLine(content string, contentWidth int) string {
+	line := strings.Repeat(" ", sessionBrowserIndent) + content
+	maxWidth := contentWidth + sessionBrowserIndent
+	if lipgloss.Width(line) > maxWidth {
+		return toolcommon.TruncateText(line, maxWidth)
+	}
+	return line
 }
 
 func (d *sessionBrowserDialog) timeAgo(t time.Time) string {
@@ -490,6 +547,8 @@ func (d *sessionBrowserDialog) timeAgo(t time.Time) string {
 }
 
 func (d *sessionBrowserDialog) Position() (row, col int) {
-	dialogWidth, maxHeight, _ := d.dialogSize()
-	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
+	if d.Height() <= sessionBrowserTopRow+4 {
+		return 0, 0
+	}
+	return sessionBrowserTopRow, 0
 }

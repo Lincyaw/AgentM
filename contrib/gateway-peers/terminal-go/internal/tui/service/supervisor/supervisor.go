@@ -232,6 +232,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			NeedsAttention: runner.NeedsAttn,
 			Background:     runner.Background,
 			CreatedAt:      runner.CreatedAt.Unix(),
+			WorkingDir:     runner.WorkingDir,
 		})
 	}
 	return tabs

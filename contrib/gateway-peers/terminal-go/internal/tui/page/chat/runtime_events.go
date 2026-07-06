@@ -3,6 +3,7 @@ package chat
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -60,6 +61,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		p.msgCancel = nil
 		p.streamCancelled = false
 		p.streamDepth = 0
+		p.activeBangCommand = ""
+		p.activeUserPrompt = ""
+		p.activeUserPromptRestorable = false
 		p.setPendingResponse(false)
 		return true, tea.Batch(
 			p.messages.AddErrorMessage(msg.Error),
@@ -71,6 +75,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.handleRequestStatus(msg)
 
 	case *runtime.WarningEvent:
+		if isQuietRuntimeWarning(msg.Message) {
+			return true, nil
+		}
 		return true, notification.WarningCmd(msg.Message)
 
 	case *runtime.ModelFallbackEvent:
@@ -104,9 +111,19 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		// Control-command output (/status, /help, ...). Render as a system
 		// notice and settle any working state the slash command triggered —
 		// control commands run no agent turn, so no StreamStopped is coming.
+		p.messages.RemoveLoadingMessage()
 		p.setPendingResponse(false)
 		return true, tea.Batch(
 			p.messages.AddSystemMessage(msg.Title, msg.Content),
+			p.setWorking(false),
+			p.messages.ScrollToBottom(),
+		)
+
+	case *runtime.NoticeEvent:
+		p.messages.RemoveLoadingMessage()
+		p.setPendingResponse(false)
+		return true, tea.Batch(
+			p.messages.AddNoticeMessage(msg.Content),
 			p.setWorking(false),
 			p.messages.ScrollToBottom(),
 		)
@@ -134,6 +151,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	case *runtime.AgentInfoEvent:
 		sidebarCmd := p.sidebar.SetAgentInfo(msg.AgentName, msg.Model, msg.Description)
+		if line := welcomeModelLineForActiveModel(msg.Model, true); line != "" {
+			p.SetWelcomeModelLine(line)
+		}
 		p.messages.AddWelcomeMessage(msg.WelcomeMessage)
 		return true, sidebarCmd
 
@@ -158,7 +178,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			return true, tea.Batch(
 				p.setWorking(false),
 				p.setPendingResponse(false),
-				notification.SuccessCmd("Session compacted successfully."),
+				notification.SuccessCmd("Conversation compacted."),
 				p.messages.ScrollToBottom(),
 			)
 		}
@@ -227,6 +247,9 @@ func (p *chatPage) handleSessionHistory(msg *runtime.SessionHistoryEvent) tea.Cm
 	p.msgCancel = nil
 	p.streamCancelled = false
 	p.streamDepth = 0
+	p.activeBangCommand = ""
+	p.activeUserPrompt = ""
+	p.activeUserPromptRestorable = false
 	p.hasReceivedAssistantContent = false
 	return tea.Batch(
 		p.messages.LoadFromSession(msg.Session),
@@ -240,61 +263,50 @@ func (p *chatPage) handleRequestStatus(msg *runtime.RequestStatusEvent) tea.Cmd 
 	case "duplicate":
 		return notification.WarningCmd("Gateway already accepted this request")
 	case "accepted":
-		if msg.Action == "submit" {
-			return nil
-		}
-		if msg.Action == "interrupt" {
-			return notification.InfoCmd("Interrupt accepted by gateway")
-		}
-		if msg.Action != "" {
-			return notification.InfoCmd("Gateway accepted " + msg.Action)
-		}
+		return nil
 	}
 	return nil
 }
 
 func (p *chatPage) handleUserMessage(msg *runtime.UserMessageEvent) tea.Cmd {
-	if len(p.queuedInputs) > 0 {
-		if p.queuedInputPendingEvents > 0 {
-			p.queuedInputPendingEvents--
-			return p.emitQueuedInputState()
-		}
-		p.queuedInputs = p.queuedInputs[1:]
-		return tea.Batch(
-			p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition),
-			p.emitQueuedInputState(),
-		)
+	cmds := []tea.Cmd{p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)}
+	if p.streamDepth == 0 && p.activeBangCommand == "" {
+		cmds = append(cmds, p.messages.AddLoadingMessage("Accomplishing…"))
 	}
-	return p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
+	cmds = append(cmds, p.messages.ScrollToBottom())
+	return tea.Batch(cmds...)
+}
+
+func isQuietRuntimeWarning(message string) bool {
+	message = strings.TrimSpace(message)
+	return strings.HasPrefix(message, "extension installed:") ||
+		strings.Contains(message, "registered provider ")
 }
 
 func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent) tea.Cmd {
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
-	wasWorking := p.working
+	if p.streamCancelled && p.msgCancel == nil {
+		return nil
+	}
 	p.streamCancelled = false
 	p.streamDepth++
 	p.streamStartTime = time.Now()
+	p.messages.RemoveLoadingMessage()
 	spinnerCmd := p.setWorking(true)
-	pendingCmd := p.setPendingResponse(true)
+	var pendingCmd tea.Cmd
+	if p.activeBangCommand == "" {
+		pendingCmd = p.setPendingResponse(true)
+	}
 	sidebarCmd := p.forwardToSidebar(msg)
 
-	var promoteQueuedCmd tea.Cmd
-	if !wasWorking && len(p.queuedInputs) > 0 {
-		content := p.queuedInputs[0]
-		p.queuedInputs = p.queuedInputs[1:]
-		if p.queuedInputPendingEvents > 0 {
-			p.queuedInputPendingEvents--
-		}
-		promoteQueuedCmd = p.messages.ReplaceLoadingWithUser(content, -1)
-	}
-
-	return tea.Batch(pendingCmd, spinnerCmd, promoteQueuedCmd, p.emitQueuedInputState(), sidebarCmd)
+	return tea.Batch(pendingCmd, spinnerCmd, p.emitQueuedInputState(), sidebarCmd)
 }
 
 func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
 	if p.streamCancelled {
 		return nil
 	}
+	p.activeUserPromptRestorable = false
 	// Track that we've received assistant content
 	p.hasReceivedAssistantContent = true
 	// Clear pending response indicator - first chunk has arrived
@@ -306,6 +318,7 @@ func (p *chatPage) handleAgentChoiceReasoning(msg *runtime.AgentChoiceReasoningE
 	if p.streamCancelled {
 		return nil
 	}
+	p.activeUserPromptRestorable = false
 	p.setPendingResponse(false)
 	return p.messages.AppendReasoning(msg.AgentName, msg.Content)
 }
@@ -346,17 +359,25 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	}
 	p.msgCancel = nil
 	p.streamCancelled = false
-	var promoteQueuedCmd tea.Cmd
-	if len(p.queuedInputs) > 0 {
-		content := p.queuedInputs[0]
-		p.queuedInputs = p.queuedInputs[1:]
-		if p.queuedInputPendingEvents > 0 {
-			p.queuedInputPendingEvents--
-		}
-		promoteQueuedCmd = p.messages.ReplaceLoadingWithUser(content, -1)
-	}
-	spinnerCmd := p.setWorking(false)
+	p.messages.RemoveLoadingMessage()
 	p.setPendingResponse(false)
+	p.activeUserPrompt = ""
+	p.activeUserPromptRestorable = false
+	spinnerCmd := p.setWorking(false)
+
+	var sendQueuedCmd tea.Cmd
+	if len(p.queuedInputs) > 0 {
+		next := p.queuedInputs[0]
+		p.queuedInputs = p.queuedInputs[1:]
+		nextMsg := msgtypes.SendMsg{
+			Content:     next.content,
+			Attachments: next.attachments,
+		}
+		sendQueuedCmd = tea.Batch(
+			p.processMessage(nextMsg),
+			p.messages.ScrollToBottom(),
+		)
+	}
 
 	var exitCmd tea.Cmd
 	if p.app.ShouldExitAfterFirstResponse() && p.hasReceivedAssistantContent {
@@ -366,13 +387,17 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		})
 	}
 
-	return tea.Batch(p.messages.ScrollToBottom(), promoteQueuedCmd, spinnerCmd, sidebarCmd, exitCmd)
+	return tea.Batch(p.messages.ScrollToBottom(), sendQueuedCmd, spinnerCmd, p.emitQueuedInputState(), sidebarCmd, exitCmd)
 }
 
 // handlePartialToolCall processes partial tool call events by rendering each
 // tool call as it streams in. The tool call appears with its name and a static
 // "pending" indicator (not animated) to show it's receiving data.
 func (p *chatPage) handlePartialToolCall(msg *runtime.PartialToolCallEvent) tea.Cmd {
+	if p.streamCancelled {
+		return nil
+	}
+	p.activeUserPromptRestorable = false
 	p.setPendingResponse(false)
 	var toolDef tools.Tool
 	if msg.ToolDefinition != nil {
@@ -383,6 +408,9 @@ func (p *chatPage) handlePartialToolCall(msg *runtime.PartialToolCallEvent) tea.
 }
 
 func (p *chatPage) handleToolCallConfirmation(msg *runtime.ToolCallConfirmationEvent) tea.Cmd {
+	if p.streamCancelled {
+		return nil
+	}
 	spinnerCmd := p.setWorking(false)
 	toolCmd := p.messages.AddOrUpdateToolCall(msg.AgentName, msg.ToolCall, msg.ToolDefinition, types.ToolStatusConfirmation)
 	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
@@ -393,6 +421,10 @@ func (p *chatPage) handleToolCallConfirmation(msg *runtime.ToolCallConfirmationE
 }
 
 func (p *chatPage) handleToolCall(msg *runtime.ToolCallEvent) tea.Cmd {
+	if p.streamCancelled {
+		return nil
+	}
+	p.activeUserPromptRestorable = false
 	p.setPendingResponse(false)
 	spinnerCmd := p.setWorking(true)
 	sidebarCmd := p.forwardToSidebar(msg)
@@ -401,10 +433,18 @@ func (p *chatPage) handleToolCall(msg *runtime.ToolCallEvent) tea.Cmd {
 }
 
 func (p *chatPage) handleToolCallOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd {
+	if p.streamCancelled {
+		return nil
+	}
+	p.activeUserPromptRestorable = false
 	return tea.Batch(p.messages.AppendToolOutput(msg), p.messages.ScrollToBottom())
 }
 
 func (p *chatPage) handleToolCallResponse(msg *runtime.ToolCallResponseEvent) tea.Cmd {
+	if p.streamCancelled {
+		return nil
+	}
+	p.activeUserPromptRestorable = false
 	spinnerCmd := p.setWorking(true)
 	sidebarCmd := p.forwardToSidebar(msg)
 
@@ -413,6 +453,9 @@ func (p *chatPage) handleToolCallResponse(msg *runtime.ToolCallResponseEvent) te
 		status = types.ToolStatusError
 	}
 	toolCmd := p.messages.AddToolResult(msg, status)
+	if p.activeBangCommand != "" {
+		p.activeBangCommand = ""
+	}
 
 	// Update todo sidebar if this is a todo tool
 	if msg.ToolDefinition.Category == "todo" && !msg.Result.IsError {

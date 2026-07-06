@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -129,9 +131,36 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.InvalidateCache()
 		return m, nil
 
+	case startupFooterRefreshMsg:
+		m.statusBar.InvalidateCache()
+		return m, m.resizeAll()
+
+	case modelSwitchFooterRefreshMsg:
+		m.statusBar.InvalidateCache()
+		return m, m.resizeAll()
+
+	case editorCompletionQuerySyncMsg:
+		if m.editor.Value() != msg.value {
+			return m, nil
+		}
+		prevBottomSurfaceHeight := m.bottomSurfaceHeight(m.width)
+		cmd := m.updateCompletionsCmd(completion.QueryMsg{Query: msg.query})
+		if m.bottomSurfaceHeight(m.width) != prevBottomSurfaceHeight {
+			return m, tea.Batch(cmd, m.resizeAll())
+		}
+		return m, cmd
+
 	case completion.OpenMsg, completion.CloseMsg:
 		cmd := m.updateCompletionsCmd(msg)
 		return m, tea.Batch(cmd, m.resizeAll())
+
+	case completion.QueryMsg, completion.AppendItemsMsg, completion.ReplaceItemsMsg, completion.SetLoadingMsg:
+		prevBottomSurfaceHeight := m.bottomSurfaceHeight(m.width)
+		cmd := m.updateCompletionsCmd(msg)
+		if m.bottomSurfaceHeight(m.width) != prevBottomSurfaceHeight {
+			return m, tea.Batch(cmd, m.resizeAll())
+		}
+		return m, cmd
 
 	case completion.OpenedMsg:
 		return m, m.resizeAll()
@@ -156,11 +185,19 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Filter spurious FocusMsg: RestoreTerminal re-enables focus
 		// reporting which delivers a FocusMsg even when we never blurred.
 		if m.focused {
+			m.reapplyKeyboardEnhancements()
+			if m.focusedPanel == PanelEditor {
+				return m, m.editor.Focus()
+			}
 			return m, nil
 		}
 		m.focused = true
 
 		var cmds []tea.Cmd
+		m.reapplyKeyboardEnhancements()
+		if m.focusedPanel == PanelEditor {
+			cmds = append(cmds, m.editor.Focus())
+		}
 		if m.tickPaused {
 			// Re-arm the tick chain that died while we were blurred.
 			m.tickPaused = false
@@ -267,14 +304,35 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- Runtime event specializations ---
 
+	case *runtime.SystemNoteEvent:
+		if time.Now().Before(m.suppressClearNoticeUntil) &&
+			strings.Contains(msg.Content, "New session started. History cleared.") {
+			return m, nil
+		}
+		return m.forwardChat(msg)
+
+	case *runtime.NoticeEvent:
+		if label, ok := branchLabelFromNotice(msg.Content); ok {
+			m.branchLabel = label
+			m.statusBar.InvalidateCache()
+			chatModel, cmd := m.forwardChat(msg)
+			return chatModel, tea.Batch(cmd, m.resizeAll())
+		}
+		return m.forwardChat(msg)
+
 	case *runtime.TeamInfoEvent:
 		m.sessionState.SetAvailableAgents(msg.AvailableAgents)
 		m.sessionState.SetCurrentAgentName(msg.CurrentAgent)
-		return m.forwardChat(msg)
+		chatModel, cmd := m.forwardChat(msg)
+		if refreshCmd := m.refreshCommandInputs(); refreshCmd != nil {
+			return chatModel, tea.Batch(cmd, refreshCmd)
+		}
+		return chatModel, cmd
 
 	case *runtime.AgentInfoEvent:
 		m.sessionState.SetCurrentAgentName(msg.AgentName)
 		m.application.TrackCurrentAgentModel(msg.Model)
+		m.syncWelcomeModelLine()
 		chatModel, cmd := m.forwardChat(msg)
 		if refreshCmd := m.refreshCommandInputs(); refreshCmd != nil {
 			return chatModel, tea.Batch(cmd, refreshCmd)
@@ -285,6 +343,15 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionState.SetSessionTitle(msg.Title)
 		return m.forwardChat(msg)
 
+	case *runtime.ConfigUpdateEvent:
+		if msg.Key == "auto_compact" {
+			m.autoCompactEnabled = msg.Enabled
+			if m.localPanelOpen && m.localSettingsTab == settingsTabConfig {
+				return m, m.updateLocalSystemPanel(m.localSettingsContent())
+			}
+		}
+		return m, nil
+
 	case *runtime.BackgroundActivityEvent:
 		return m.handleBackgroundActivity(msg)
 
@@ -292,10 +359,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.NewSessionMsg:
 		// /new spawns a new tab when a session spawner is configured.
+		m.branchLabel = ""
 		return m.handleSpawnSession("", false)
 
 	case messages.ClearSessionMsg:
 		// /clear resets the current tab with a fresh session in the same working dir.
+		m.branchLabel = ""
 		return m.handleClearSession()
 
 	// --- Exit ---
@@ -313,10 +382,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupAll()
 		return m, tea.Quit
 
-	// --- SendMsg from editor ---
+		// --- SendMsg from editor ---
 
 	case messages.SendMsg:
 		// Forward send messages to the active content view
+		m.streamCancelFooterHidden = false
 		if m.history != nil && !msg.BypassQueue {
 			_ = m.history.Add(msg.Content)
 		}
@@ -324,12 +394,34 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- File attachments (routed to editor) ---
 
+	case messages.RestoreEditorInputMsg:
+		m.streamCancelFooterHidden = false
+		if msg.ShellMode {
+			m.editor.SetShellValue(msg.Content)
+		} else {
+			m.editor.SetValue(msg.Content)
+		}
+		m.focusedPanel = PanelEditor
+		m.chatPage.BlurMessages()
+		m.statusBar.InvalidateCache()
+		m.editorLines = m.desiredEditorLines()
+		return m, tea.Batch(
+			core.CmdHandler(completion.CloseMsg{}),
+			m.closeInlineSurfaces(),
+			m.resizeAll(),
+			m.editor.Focus(),
+		)
+
 	case messages.InsertFileRefMsg:
 		if err := m.editor.AttachFile(msg.FilePath); err != nil {
 			slog.Warn("failed to attach file", "path", msg.FilePath, "error", err)
 			return m, nil
 		}
 		return m, notification.SuccessCmd("File attached: " + msg.FilePath)
+
+	case messages.StreamCancelledMsg:
+		m.streamCancelFooterHidden = msg.ShowMessage
+		return m.forwardChat(msg)
 
 	// --- Agent management ---
 
@@ -345,6 +437,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleOpenSessionBrowserWithData(msg.Sessions)
 
 	case messages.LoadSessionMsg:
+		m.branchLabel = ""
 		return m.handleLoadSession(msg.SessionID)
 
 	case messages.BranchFromEditMsg:
@@ -371,10 +464,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCompactSession(msg.AdditionalPrompt)
 
 	case messages.CopySessionToClipboardMsg:
-		return m.handleCopySessionToClipboard()
-
-	case messages.CopyLastResponseToClipboardMsg:
-		return m.handleCopyLastResponseToClipboard()
+		return m.handleCopySessionToClipboard(msg.Argument)
 
 	case messages.UndoSnapshotMsg:
 		return m.handleUndoSnapshot()
@@ -387,6 +477,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.ExportSessionMsg:
 		return m.handleExportSession(msg.Filename)
+
+	case messages.ShowExportDialogMsg:
+		return m.handleShowExportDialog()
+
+	case messages.BackgroundSessionMsg:
+		return m.handleBackgroundSession()
 
 	case messages.ToggleSessionStarMsg:
 		sessionID := msg.SessionID
@@ -411,8 +507,26 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.ShowCostDialogMsg:
 		return m.handleShowCostDialog()
 
+	case messages.CycleSessionColorMsg:
+		return m.handleCycleSessionColor()
+
+	case messages.ShowConfigDialogMsg:
+		return m.handleShowConfigDialog()
+
+	case messages.ShowSettingsDialogMsg:
+		return m.handleShowSettingsDialog()
+
+	case messages.ShowContextDialogMsg:
+		return m.handleShowContextDialog()
+
+	case messages.ShowUsageDialogMsg:
+		return m.handleShowUsageDialog()
+
 	case messages.ShowPermissionsDialogMsg:
 		return m.handleShowPermissionsDialog()
+
+	case messages.ShowHelpMsg:
+		return m.handleShowHelp()
 
 	case messages.ShowToolsDialogMsg:
 		return m.handleShowToolsDialog()
@@ -420,8 +534,20 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.ShowSkillsDialogMsg:
 		return m.handleShowSkillsDialog()
 
+	case messages.ShowStatusMsg:
+		return m.handleShowStatus()
+
+	case messages.SetThinkingModeMsg:
+		return m.handleSetThinkingMode(msg.Enabled)
+
+	case messages.SetThinkingLevelMsg:
+		return m.handleSetThinkingLevel(msg)
+
 	case messages.AgentCommandMsg:
 		return m.handleAgentCommand(msg.Command)
+
+	case messages.UnknownCommandMsg:
+		return m.forwardChat(msg)
 
 	case messages.StartShellMsg:
 		return m.startShell()
@@ -429,10 +555,19 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Model picker ---
 
 	case messages.OpenModelPickerMsg:
-		return m.handleOpenModelPicker()
+		return m.handleOpenModelPicker(msg.ShowTranscript)
+
+	case messages.OpenEffortPickerMsg:
+		return m.handleOpenEffortPicker(msg.ShowTranscript)
+
+	case messages.ModelPickerCanceledMsg:
+		return m.handleModelPickerCanceled(msg.ShowTranscript)
+
+	case messages.EffortPickerCanceledMsg:
+		return m.handleEffortPickerCanceled(msg.ShowTranscript)
 
 	case messages.ChangeModelMsg:
-		return m.handleChangeModel(msg.ModelRef)
+		return m.handleChangeModel(msg)
 
 	// --- Theme picker ---
 

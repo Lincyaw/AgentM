@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/markdown"
@@ -17,7 +18,26 @@ import (
 const (
 	maxUserMessageLines       = 30
 	collapsedUserMessageLines = 5
+	claudeActivityLoadingText = "Accomplishing…"
 )
+
+var claudeActivityGlyphs = []string{"✻", "✢", "✳", "✶", "✽", "✦", "✧", "·"}
+
+var claudeActivityMessages = []string{
+	"Accomplishing",
+	"Cascading",
+	"Channeling",
+	"Computing",
+	"Determining",
+	"Envisioning",
+	"Gusting",
+	"Infusing",
+	"Manifesting",
+	"Nucleating",
+	"Tempering",
+	"Tinkering",
+	"Whisking",
+}
 
 // Model represents a view that can render a message
 type Model interface {
@@ -254,12 +274,10 @@ func (mv *messageModel) render(width int) string {
 	msg := mv.message
 	switch msg.Type {
 	case types.MessageTypeSpinner:
-		return mv.spinner.View()
+		return "\n" + renderClaudeWorking()
 	case types.MessageTypeUser:
-		// Choose style based on selection state
-		messageStyle := styles.UserMessageStyle
-		if mv.selected && msg.SessionPosition != nil {
-			messageStyle = styles.SelectedUserMessageStyle
+		if bang := formatBangTranscript(msg.Content); bang != "" {
+			return bang
 		}
 
 		formatUserContent := func(c string) string {
@@ -283,32 +301,10 @@ func (mv *messageModel) render(width int) string {
 			return c
 		}
 
-		if msg.SessionPosition == nil {
-			return messageStyle.Width(width).Render(formatUserContent(msg.Content))
-		}
-
-		// For editable messages, place the pencil icon in the top padding row
-		innerWidth := width - messageStyle.GetHorizontalFrameSize()
-		content := formatUserContent(msg.Content)
-
-		// Create the edit icon for the top row
-		editIcon := styles.MutedStyle.Render(types.UserMessageEditLabel)
-		iconWidth := ansi.StringWidth(types.UserMessageEditLabel)
-
-		// Create a top row with the icon pushed to the right edge
-		// This row replaces the top padding and becomes part of the content
-		topPadding := max(innerWidth-iconWidth, 0)
-		topRow := strings.Repeat(" ", topPadding) + editIcon
-
-		// Combine: icon row + content (icon row acts as the top padding)
-		contentWithIcon := topRow + "\n" + content
-
-		// Use a modified style with no top padding (our icon row replaces it)
-		noTopPaddingStyle := messageStyle.PaddingTop(0)
-		return noTopPaddingStyle.Width(width).Render(contentWithIcon)
+		return formatClaudeUserTranscript(formatUserContent(msg.Content), width+4)
 	case types.MessageTypeAssistant:
 		if msg.Content == "" {
-			return mv.spinner.View()
+			return "\n" + renderClaudeWorking()
 		}
 
 		messageStyle := styles.AssistantMessageStyle
@@ -317,19 +313,23 @@ func (mv *messageModel) render(width int) string {
 		}
 
 		innerRenderWidth := width - messageStyle.GetHorizontalFrameSize()
-		rendered, codeBlocks, err := mv.renderAssistantMarkdown(msg.Content, innerRenderWidth)
+		rendered, codeBlocks, err := mv.renderAssistantMarkdown(preserveLineBreaks(msg.Content), innerRenderWidth)
 		if err != nil {
 			rendered = msg.Content
 			codeBlocks = nil
 		}
 
-		var prefix string
+		prefixAssistant := false
 		if !mv.sameAgentAsPrevious(msg) {
-			prefix = mv.senderPrefix(msg.Sender)
+			prefixAssistant = msg.Sender != ""
 		}
 
 		innerWidth := width - messageStyle.GetHorizontalFrameSize()
 		body := rendered
+		if prefixAssistant {
+			body = addClaudeAssistantPrefix(body)
+			messageStyle = messageStyle.PaddingLeft(0).BorderLeft(false)
+		}
 		controlRows := 0
 		if mv.hovered || mv.selected {
 			copyIcon := styles.MutedStyle.Render(types.AssistantMessageCopyLabel)
@@ -339,16 +339,17 @@ func (mv *messageModel) render(width int) string {
 			body = topRow + "\n" + rendered
 			controlRows = 1
 		}
+		leadingRows := 0
+		if prefixAssistant && !strings.HasPrefix(body, "\n") {
+			body = "\n" + body
+			leadingRows = 1
+		}
 
 		// Translate the markdown-relative line indices into messageModel View()
 		// coordinates. The rendered markdown is preceded by the sender prefix
 		// (when shown) and the optional copy-control row, so the first line of
 		// `rendered` lands at this offset.
-		prefixLines := 0
-		if prefix != "" {
-			prefixLines = strings.Count(prefix, "\n")
-		}
-		lineOffset := prefixLines + controlRows
+		lineOffset := leadingRows + controlRows
 		if len(codeBlocks) > 0 {
 			mv.codeBlocks = make([]markdown.CodeBlock, len(codeBlocks))
 			for i, cb := range codeBlocks {
@@ -361,14 +362,14 @@ func (mv *messageModel) render(width int) string {
 			mv.codeBlocks = nil
 		}
 
-		return prefix + messageStyle.Width(width).Render(body)
+		return messageStyle.Width(width).Render(body)
 	case types.MessageTypeShellOutput:
 		if rendered, err := markdown.NewRenderer(width).Render(fmt.Sprintf("```console\n%s\n```", msg.Content)); err == nil {
 			return rendered
 		}
 		return msg.Content
 	case types.MessageTypeCancelled:
-		return styles.WarningStyle.Render("⚠ stream cancelled ⚠")
+		return renderNoticeMessage("Interrupted · What should Claude do instead?", width)
 	case types.MessageTypeWelcome:
 		messageStyle := styles.WelcomeMessageStyle
 		// Convert explicit newlines to markdown hard line breaks (two trailing spaces)
@@ -382,6 +383,9 @@ func (mv *messageModel) render(width int) string {
 		return messageStyle.Width(width - 1).Render(strings.TrimRight(rendered, "\n\r\t "))
 	case types.MessageTypeSystem:
 		messageStyle := styles.SystemMessageStyle
+		if isPreformattedSystemContent(msg.Content) && msg.Sender == "" {
+			return renderPreformattedSystemContent(msg.Content, width)
+		}
 		// preserveLineBreaks keeps single newlines (control-command output is
 		// often a `- key: value` list) from collapsing under markdown.
 		body := preserveLineBreaks(msg.Content)
@@ -393,21 +397,226 @@ func (mv *messageModel) render(width int) string {
 			rendered = msg.Content
 		}
 		return messageStyle.Width(width - 1).Render(strings.TrimRight(rendered, "\n\r\t "))
+	case types.MessageTypeNotice:
+		return renderNoticeMessage(msg.Content, width)
 	case types.MessageTypeError:
 		return styles.ErrorMessageStyle.Width(width - 1).Render(msg.Content)
 	case types.MessageTypeLoading:
-		// Show spinner with the loading description, truncated to fit width
-		spinnerView := mv.spinner.View()
-		spinnerWidth := ansi.StringWidth(spinnerView) + 1 // +1 for space separator
-		maxDescWidth := width - spinnerWidth
-		description := msg.Content
+		glyph, description := "✶", msg.Content
+		if msg.Content == claudeActivityLoadingText {
+			glyph, description = claudeActivityStatus(mv.spinner.FrameIndex(), mv.spinner.CurrentMessage())
+		}
+		prefix := styles.SpinnerDotsAccentStyle.Render(glyph)
+		prefixWidth := ansi.StringWidth(glyph) + 1
+		maxDescWidth := width - prefixWidth
 		if maxDescWidth > 0 && ansi.StringWidth(description) > maxDescWidth {
 			description = ansi.Truncate(description, maxDescWidth, "…")
 		}
-		return spinnerView + " " + styles.MutedStyle.Render(description)
+		return prefix + " " + styles.MutedStyle.Render(description)
 	default:
 		return msg.Content
 	}
+}
+
+func renderNoticeMessage(content string, width int) string {
+	content = strings.TrimRight(content, "\n\r\t ")
+	prefix := "  ⎿  "
+	continuation := strings.Repeat(" ", lipgloss.Width(prefix))
+	wrapWidth := max(1, width-lipgloss.Width(prefix)-1)
+	var out []string
+	first := true
+	for _, logicalLine := range strings.Split(content, "\n") {
+		wrapped := wrapNoticeLine(logicalLine, wrapWidth)
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		for _, line := range wrapped {
+			linePrefix := continuation
+			if first {
+				linePrefix = prefix
+				first = false
+			}
+			out = append(out, styles.MutedStyle.Render(linePrefix+line))
+		}
+	}
+	if len(out) == 0 {
+		return styles.MutedStyle.Render(prefix)
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapNoticeLine(line string, width int) []string {
+	line = strings.TrimRight(line, " ")
+	if line == "" {
+		return []string{""}
+	}
+	var wrapped []string
+	remaining := line
+	for remaining != "" {
+		if lipgloss.Width(remaining) <= width {
+			wrapped = append(wrapped, remaining)
+			break
+		}
+		cut := hardWrapCut(remaining, width)
+		if cut <= 0 {
+			wrapped = append(wrapped, ansi.Truncate(remaining, width, ""))
+			break
+		}
+		wrapped = append(wrapped, strings.TrimRight(remaining[:cut], " "))
+		remaining = strings.TrimLeft(remaining[cut:], " ")
+	}
+	return wrapped
+}
+
+func hardWrapCut(text string, width int) int {
+	cut := 0
+	currentWidth := 0
+	for idx, r := range text {
+		runeWidth := lipgloss.Width(string(r))
+		if currentWidth+runeWidth > width {
+			break
+		}
+		currentWidth += runeWidth
+		cut = idx + len(string(r))
+	}
+	return cut
+}
+
+func isPreformattedSystemContent(content string) bool {
+	trimmed := strings.TrimLeft(ansi.Strip(content), "\n\r\t ")
+	return strings.HasPrefix(trimmed, "Settings  Status") ||
+		strings.HasPrefix(trimmed, "Help  General") ||
+		strings.HasPrefix(trimmed, "Context Usage") ||
+		strings.HasPrefix(trimmed, "Export conversation") ||
+		strings.HasPrefix(trimmed, "Skills") ||
+		strings.Contains(trimmed, "\n  Skills\n") ||
+		strings.HasPrefix(trimmed, "Permissions  Recently denied") ||
+		strings.HasPrefix(trimmed, "Add allow permission rule") ||
+		strings.HasPrefix(trimmed, "Add ask permission rule") ||
+		strings.HasPrefix(trimmed, "Add deny permission rule") ||
+		strings.HasPrefix(trimmed, "Add workspace permission rule")
+}
+
+func indentPreformattedSystemContent(content string) string {
+	content = strings.TrimRight(content, "\n\r\t ")
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		lines[i] = "  " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderPreformattedSystemContent(content string, width int) string {
+	separator := strings.Repeat("─", max(1, width))
+	return separator + "\n" + indentPreformattedSystemContent(content)
+}
+
+func claudeActivityStatus(frame int, message string) (string, string) {
+	if frame < 0 {
+		frame = 0
+	}
+	glyph := claudeActivityGlyphs[frame%len(claudeActivityGlyphs)]
+	if message == "" {
+		message = claudeActivityMessages[0]
+	}
+	return glyph, message + "…"
+}
+
+func formatBangTranscript(content string) string {
+	content = strings.TrimRight(content, "\n\r\t ")
+	if !strings.HasPrefix(content, "! ") {
+		return ""
+	}
+	return content
+}
+
+func formatClaudeUserTranscript(content string, width int) string {
+	content = strings.TrimRight(content, "\n\r\t ")
+	if content == "" {
+		return "❯"
+	}
+	var out []string
+	first := true
+	for _, logicalLine := range strings.Split(content, "\n") {
+		prefix := "  "
+		if first {
+			prefix = "❯ "
+			first = false
+		}
+		wrapped := wrapTranscriptLine(logicalLine, max(1, width-lipgloss.Width(prefix)))
+		if len(wrapped) == 0 {
+			out = append(out, prefix)
+			continue
+		}
+		for i, line := range wrapped {
+			if i > 0 {
+				prefix = "  "
+			}
+			out = append(out, prefix+line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapTranscriptLine(line string, width int) []string {
+	line = strings.TrimRight(line, " ")
+	if line == "" {
+		return []string{""}
+	}
+	var wrapped []string
+	remaining := line
+	for remaining != "" {
+		if lipgloss.Width(remaining) <= width {
+			wrapped = append(wrapped, remaining)
+			break
+		}
+		cut := transcriptWrapCut(remaining, width)
+		if cut <= 0 {
+			wrapped = append(wrapped, ansi.Truncate(remaining, width, ""))
+			break
+		}
+		wrapped = append(wrapped, strings.TrimRight(remaining[:cut], " "))
+		remaining = strings.TrimLeft(remaining[cut:], " ")
+	}
+	return wrapped
+}
+
+func transcriptWrapCut(text string, width int) int {
+	cut := 0
+	lastSpace := -1
+	currentWidth := 0
+	for idx, r := range text {
+		runeWidth := lipgloss.Width(string(r))
+		if currentWidth+runeWidth > width {
+			break
+		}
+		currentWidth += runeWidth
+		next := idx + len(string(r))
+		cut = next
+		if r == ' ' {
+			lastSpace = next
+		}
+	}
+	if lastSpace > 0 {
+		return lastSpace
+	}
+	return cut
+}
+
+func addClaudeAssistantPrefix(rendered string) string {
+	rendered = strings.TrimLeft(rendered, " ")
+	if rendered == "" {
+		return styles.SecondaryStyle.Render("⏺")
+	}
+	lines := strings.Split(rendered, "\n")
+	lines[0] = styles.SecondaryStyle.Render("⏺") + " " + strings.TrimLeft(lines[0], " ")
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(ansi.Strip(lines[i])) == "" {
+			continue
+		}
+		lines[i] = "  " + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderAssistantMarkdown renders streamed assistant content using a per-message
@@ -451,6 +660,9 @@ func (mv *messageModel) sameAgentAsPrevious(msg *types.Message) bool {
 	if mv.previous == nil || mv.previous.Sender != msg.Sender {
 		return false
 	}
+	if standaloneAssistantNotice(mv.previous) || standaloneAssistantNotice(msg) {
+		return false
+	}
 	switch mv.previous.Type {
 	case types.MessageTypeAssistant,
 		types.MessageTypeAssistantReasoningBlock,
@@ -460,6 +672,12 @@ func (mv *messageModel) sameAgentAsPrevious(msg *types.Message) bool {
 	default:
 		return false
 	}
+}
+
+func standaloneAssistantNotice(msg *types.Message) bool {
+	return msg != nil &&
+		msg.Type == types.MessageTypeAssistant &&
+		strings.HasPrefix(strings.TrimSpace(msg.Content), "Unknown command: ")
 }
 
 // Height calculates the height needed for this message view. Render() is
@@ -531,6 +749,10 @@ func (mv *messageModel) Finalize() {
 		mv.mdRenderer = nil
 	}
 	mv.finalized = true
+}
+
+func renderClaudeWorking() string {
+	return styles.SpinnerDotsAccentStyle.Render("✻") + " " + styles.MutedStyle.Render("Working…")
 }
 
 // HasLiveRenderState reports whether this view still retains per-message

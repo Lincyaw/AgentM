@@ -41,8 +41,8 @@ var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 const (
 	// maxInlinePasteLines is the maximum number of lines for inline paste.
-	// Pastes exceeding this are buffered to a temp file attachment.
-	maxInlinePasteLines = 5
+	// Multi-line pastes mirror Claude Code's expandable placeholder flow.
+	maxInlinePasteLines = 1
 	// maxInlinePasteChars is the character limit for inline pastes.
 	// This catches very long single-line pastes that would clutter the editor.
 	maxInlinePasteChars = 500
@@ -54,6 +54,7 @@ type attachment struct {
 	label       string // Display label like "paste-1 (21.1 KB)"
 	sizeBytes   int
 	isTemp      bool // True for paste temp files that need cleanup
+	showBanner  bool // True when the attachment should render in the banner
 }
 
 // AttachmentPreview describes an attachment and its contents for dialog display.
@@ -67,6 +68,7 @@ type Editor interface {
 	layout.Model
 	layout.Sizeable
 	layout.Focusable
+	Focused() bool
 	SetWorking(working bool) tea.Cmd
 	SetQueuedInputCount(count int) tea.Cmd
 	AcceptSuggestion() tea.Cmd
@@ -75,6 +77,12 @@ type Editor interface {
 	Value() string
 	// SetValue updates the editor content
 	SetValue(content string)
+	// SetPlaceholder updates the empty-editor placeholder.
+	SetPlaceholder(placeholder string)
+	// SetShellValue updates the editor content and enters shell-command mode.
+	SetShellValue(content string)
+	// SetPromptColor changes the normal chat prompt color for this session.
+	SetPromptColor(color string)
 	// InsertText inserts text at the current cursor position
 	InsertText(text string)
 	// AttachFile adds a file as an attachment and inserts @filepath into the editor
@@ -89,6 +97,27 @@ type Editor interface {
 	IsRecording() bool
 	// IsHistorySearchActive returns true if the editor is in history search mode
 	IsHistorySearchActive() bool
+	// HistorySearchFooterText returns the Claude-style footer label for history search.
+	HistorySearchFooterText() string
+	// HistorySearchStartedInShellMode reports whether the active search began from shell mode.
+	HistorySearchStartedInShellMode() bool
+	// ShellEffortFooterSuppressed reports a transient shell footer state.
+	ShellEffortFooterSuppressed() bool
+	// HistoryNavigationHintVisible reports whether Up/Down history navigation
+	// should show the Ctrl-R hint in the footer.
+	HistoryNavigationHintVisible() bool
+	// HistoryNavigationLabel returns the active Up/Down history position label.
+	HistoryNavigationLabel() string
+	// HasKillBuffer reports whether Ctrl+Y can yank previously deleted text.
+	HasKillBuffer() bool
+	// ShowKillBufferHint reports whether the Ctrl+Y footer hint should render.
+	ShowKillBufferHint() bool
+	// YankKillBuffer inserts the last readline-style deleted text.
+	YankKillBuffer() tea.Cmd
+	// ShellMode returns true when the composer is collecting a shell command.
+	ShellMode() bool
+	// PasteExpandHintVisible reports whether a pasted-text placeholder can be expanded.
+	PasteExpandHintVisible() bool
 	// EnterHistorySearch activates incremental history search
 	EnterHistorySearch() (layout.Model, tea.Cmd)
 	// SendContent triggers sending the current editor content
@@ -113,9 +142,20 @@ type historySearchState struct {
 	query                    string
 	origTextValue            string
 	origTextPlaceholderValue string
+	origShellMode            bool
 	match                    string
 	matchIndex               int
 	failing                  bool
+}
+
+type inputUndoSnapshot struct {
+	value                string
+	shellMode            bool
+	attachments          []attachment
+	pendingFileRef       string
+	pasteCounter         int
+	lastPasteContent     string
+	lastPastePlaceholder string
 }
 
 // editor implements [Editor]
@@ -153,6 +193,32 @@ type editor struct {
 	placeholder string
 	// recordingDotPhase tracks the animation phase for the recording dots cursor
 	recordingDotPhase int
+	// shellMode switches the prompt from chat input to Claude-style shell input.
+	shellMode bool
+	// shellEffortFooterSuppressed hides the effort footer for shell previews
+	// accepted from normal-mode history search until the next editor key.
+	shellEffortFooterSuppressed bool
+	// historyNavigationHintVisible matches Claude's Up/Down history footer hint.
+	historyNavigationHintVisible bool
+	// historyNavigationIndex is the active Up/Down history cursor, or -1 when
+	// normal composer chrome should render.
+	historyNavigationIndex int
+	// promptColor is the lipgloss color used for the normal chat prompt.
+	promptColor string
+	// killBuffer stores the last readline-style deletion for Ctrl+Y yank.
+	killBuffer string
+	// killBufferHintVisible matches Claude's footer hint timing.
+	killBufferHintVisible bool
+	// lastKeyWasKill lets consecutive readline-style kills merge into one yank.
+	lastKeyWasKill bool
+	// pasteCounter increments Claude-style pasted text placeholders.
+	pasteCounter int
+	// lastPasteContent stores the content that can be expanded by pasting again.
+	lastPasteContent string
+	// lastPastePlaceholder stores the visible placeholder for lastPasteContent.
+	lastPastePlaceholder string
+	// inputUndo stores the first composer state before the current edit group.
+	inputUndo *inputUndoSnapshot
 
 	// fileLoadID is incremented each time we start a new file load to ignore stale results
 	fileLoadID uint64
@@ -217,9 +283,14 @@ func WithReadOnly() Option {
 
 // defaultPlaceholder is shown in an empty editor unless WithPlaceholder
 // overrides it.
-const defaultPlaceholder = "Type your message here…"
+const defaultPlaceholder = ""
 
 const queuedInputPlaceholder = "Press up to edit queued messages"
+
+const (
+	normalPrompt = "❯\u00a0"
+	shellPrompt  = "!\u00a0"
+)
 
 // WithPlaceholder sets the editor's placeholder text (shown while empty).
 func WithPlaceholder(placeholder string) Option {
@@ -234,7 +305,7 @@ func New(hist *history.History, opts ...Option) Editor {
 	ta := textarea.New()
 	ta.SetStyles(styles.InputStyle)
 	ta.Placeholder = defaultPlaceholder
-	ta.Prompt = ""
+	ta.Prompt = normalPrompt
 	ta.CharLimit = -1
 	ta.SetWidth(50)
 	ta.SetHeight(3) // Set minimum 3 lines for multi-line input
@@ -260,6 +331,7 @@ func New(hist *history.History, opts ...Option) Editor {
 		placeholder:                   defaultPlaceholder,
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		banner:                        newAttachmentBanner(),
+		historyNavigationIndex:        -1,
 	}
 
 	// Apply options
@@ -267,6 +339,7 @@ func New(hist *history.History, opts ...Option) Editor {
 		opt(e)
 	}
 
+	e.configurePrompt()
 	e.configureNewlineKeybinding()
 
 	return e
@@ -555,9 +628,7 @@ func deleteLastGraphemeCluster(s string) string {
 // refreshSuggestion clears any stale suggestion. History-based inline
 // suggestions are intentionally disabled — they were confusing when the
 // ghost text was hard to see against dark terminal backgrounds, and the
-// value for ordinary input was low. Completion-managed suggestions (e.g.
-// @file, /command) are set directly via completion.SelectionChangedMsg
-// and are unaffected.
+// value for ordinary input was low.
 func (e *editor) refreshSuggestion() {
 	e.clearSuggestion()
 }
@@ -571,6 +642,15 @@ func (e *editor) clearSuggestion() {
 	e.suggestion = ""
 }
 
+func (e *editor) setSuggestion(suggestion string) {
+	if suggestion == "" {
+		e.clearSuggestion()
+		return
+	}
+	e.hasSuggestion = true
+	e.suggestion = suggestion
+}
+
 // AcceptSuggestion applies the current suggestion into the textarea value and
 // returns a command to update the completion query, or nil if no suggestion was applied.
 func (e *editor) AcceptSuggestion() tea.Cmd {
@@ -578,6 +658,7 @@ func (e *editor) AcceptSuggestion() tea.Cmd {
 		return nil
 	}
 
+	e.captureInputUndoSnapshot()
 	current := e.textarea.Value()
 	e.textarea.SetValue(current + e.suggestion)
 	e.textarea.MoveToEnd()
@@ -607,6 +688,72 @@ func (e *editor) ScrollByWheel(delta int) {
 	}
 }
 
+func (e *editor) captureInputUndoSnapshot() {
+	if e.inputUndo != nil {
+		return
+	}
+	e.inputUndo = &inputUndoSnapshot{
+		value:                e.textarea.Value(),
+		shellMode:            e.shellMode,
+		attachments:          slices.Clone(e.attachments),
+		pendingFileRef:       e.pendingFileRef,
+		pasteCounter:         e.pasteCounter,
+		lastPasteContent:     e.lastPasteContent,
+		lastPastePlaceholder: e.lastPastePlaceholder,
+	}
+}
+
+func (e *editor) clearInputUndoSnapshot() {
+	e.inputUndo = nil
+}
+
+func (e *editor) restoreInputUndoSnapshot() tea.Cmd {
+	if e.inputUndo == nil {
+		return nil
+	}
+
+	snapshot := e.inputUndo
+	e.removeTempAttachmentsNotIn(snapshot.attachments)
+	e.attachments = slices.Clone(snapshot.attachments)
+	e.pendingFileRef = snapshot.pendingFileRef
+	e.pasteCounter = snapshot.pasteCounter
+	e.lastPasteContent = snapshot.lastPasteContent
+	e.lastPastePlaceholder = snapshot.lastPastePlaceholder
+	e.setShellMode(snapshot.shellMode)
+	e.textarea.SetValue(snapshot.value)
+	e.textarea.MoveToEnd()
+	e.userTyped = snapshot.value != ""
+	e.historyNavigationHintVisible = false
+	e.killBufferHintVisible = false
+	e.lastKeyWasKill = false
+	e.updateAttachmentBanner()
+	e.clearInputUndoSnapshot()
+	e.clearSuggestion()
+	e.refreshSuggestion()
+
+	return tea.Batch(textarea.Blink, e.updateCompletionQuery(), core.CmdHandler(completion.CloseMsg{}))
+}
+
+func (e *editor) removeTempAttachmentsNotIn(keep []attachment) {
+	if len(e.attachments) == 0 {
+		return
+	}
+
+	kept := make(map[string]struct{}, len(keep))
+	for _, att := range keep {
+		kept[att.path+"\x00"+att.placeholder] = struct{}{}
+	}
+	for _, att := range e.attachments {
+		if !att.isTemp {
+			continue
+		}
+		if _, ok := kept[att.path+"\x00"+att.placeholder]; ok {
+			continue
+		}
+		_ = os.Remove(att.path)
+	}
+}
+
 // resetAndSend prepares a message for sending: processes pending file refs,
 // collects attachments, resets editor state, and returns the SendMsg command.
 func (e *editor) resetAndSend(content string) tea.Cmd {
@@ -618,7 +765,7 @@ func (e *editor) resetAndSend(content string) tea.Cmd {
 	var pastes []messages.Attachment
 
 	for _, att := range attachments {
-		if att.Content != "" && strings.HasPrefix(att.Name, "paste-") {
+		if att.Content != "" {
 			pastes = append(pastes, att)
 		} else {
 			finalAttachments = append(finalAttachments, att)
@@ -632,11 +779,16 @@ func (e *editor) resetAndSend(content string) tea.Cmd {
 	})
 
 	for _, att := range pastes {
-		content = strings.ReplaceAll(content, "@"+att.Name, att.Content)
+		content = strings.ReplaceAll(content, att.Name, att.Content)
 	}
 
 	e.textarea.Reset()
 	e.userTyped = false
+	e.killBuffer = ""
+	e.killBufferHintVisible = false
+	e.lastKeyWasKill = false
+	e.clearInputUndoSnapshot()
+	e.clearPasteExpandState()
 	e.clearSuggestion()
 	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments})
 }
@@ -652,7 +804,7 @@ func (e *editor) resetAndSendQueued(content string) tea.Cmd {
 	var pastes []messages.Attachment
 
 	for _, att := range attachments {
-		if att.Content != "" && strings.HasPrefix(att.Name, "paste-") {
+		if att.Content != "" {
 			pastes = append(pastes, att)
 		} else {
 			finalAttachments = append(finalAttachments, att)
@@ -664,11 +816,16 @@ func (e *editor) resetAndSendQueued(content string) tea.Cmd {
 	})
 
 	for _, att := range pastes {
-		content = strings.ReplaceAll(content, "@"+att.Name, att.Content)
+		content = strings.ReplaceAll(content, att.Name, att.Content)
 	}
 
 	e.textarea.Reset()
 	e.userTyped = false
+	e.killBuffer = ""
+	e.killBufferHintVisible = false
+	e.lastKeyWasKill = false
+	e.clearInputUndoSnapshot()
+	e.clearPasteExpandState()
 	e.clearSuggestion()
 	return core.CmdHandler(messages.SendMsg{
 		Content:     content,
@@ -684,19 +841,52 @@ func (e *editor) resetAndSendDefault(content string) tea.Cmd {
 	return e.resetAndSend(content)
 }
 
+func (e *editor) setShellMode(enabled bool) {
+	e.shellMode = enabled
+	if !enabled {
+		e.shellEffortFooterSuppressed = false
+	}
+	if enabled {
+		e.textarea.Prompt = shellPrompt
+		return
+	}
+	e.textarea.Prompt = e.normalPrompt()
+}
+
+func (e *editor) submitShellCommand(content string) tea.Cmd {
+	command := strings.TrimSpace(content)
+	if command == "" {
+		e.setShellMode(false)
+		e.textarea.Reset()
+		e.userTyped = false
+		e.clearInputUndoSnapshot()
+		return nil
+	}
+	e.setShellMode(false)
+	return e.resetAndSendDefault("! " + command)
+}
+
 // configureNewlineKeybinding sets up the appropriate newline keybinding
 // based on terminal keyboard enhancement support.
 func (e *editor) configureNewlineKeybinding() {
-	// Configure textarea's InsertNewline binding based on terminal capabilities
-	if e.keyboardEnhancementsSupported {
-		// Modern terminals:
-		e.textarea.KeyMap.InsertNewline.SetKeys("shift+enter", "ctrl+j")
-		e.textarea.KeyMap.InsertNewline.SetEnabled(true)
-	} else {
-		// Legacy terminals:
-		e.textarea.KeyMap.InsertNewline.SetKeys("ctrl+j")
-		e.textarea.KeyMap.InsertNewline.SetEnabled(true)
+	e.textarea.KeyMap.InsertNewline.SetKeys("shift+enter", "ctrl+j")
+	e.textarea.KeyMap.InsertNewline.SetEnabled(true)
+}
+
+func (e *editor) configurePrompt() {
+	e.textarea.SetPromptFunc(lipgloss.Width(normalPrompt), func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return e.textarea.Prompt
+		}
+		return strings.Repeat(" ", lipgloss.Width(e.textarea.Prompt))
+	})
+}
+
+func (e *editor) normalPrompt() string {
+	if e.promptColor == "" {
+		return normalPrompt
 	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(e.promptColor)).Render(normalPrompt)
 }
 
 // Update handles messages and updates the component state
@@ -719,6 +909,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := e.tickRecordingDots()
 		return e, cmd
 	case tea.PasteMsg:
+		e.captureInputUndoSnapshot()
 		if e.handlePaste(msg.Content) {
 			return e, nil
 		}
@@ -757,6 +948,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// There is an execute function AND you hit enter, or there is an @ directive
 		if msg.Execute != nil && (msg.AutoSubmit || atCompletion) {
 			if idx >= 0 {
+				e.captureInputUndoSnapshot()
 				e.textarea.SetValue(currentValue[:idx] + currentValue[idx+len(triggerWord):])
 				e.textarea.MoveToEnd()
 			}
@@ -770,13 +962,24 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if idx >= 0 {
 				extraText = currentValue[idx+len(triggerWord):]
 			}
+			if e.currentCompletion.Trigger() == "/" && extraText != "" && !strings.HasPrefix(extraText, " ") {
+				return e, e.resetAndSendDefault(currentValue)
+			}
 			cmd := e.resetAndSend(msg.Value + extraText)
 			return e, cmd
 		}
 
 		// Insert standard completions (e.g., file paths or text pastes)
 		if idx >= 0 {
+			if atCompletion && strings.HasSuffix(msg.Value, "/") && !msg.AutoSubmit {
+				e.captureInputUndoSnapshot()
+				e.textarea.SetValue(currentValue[:idx] + msg.Value + currentValue[idx+len(triggerWord):])
+				e.textarea.MoveToEnd()
+				e.completionWord = strings.TrimPrefix(msg.Value, "@")
+				return e, e.updateCompletionQuery()
+			}
 			newValue := currentValue[:idx] + msg.Value + " " + currentValue[idx+len(triggerWord):]
+			e.captureInputUndoSnapshot()
 			e.textarea.SetValue(newValue)
 			e.textarea.MoveToEnd()
 		}
@@ -825,28 +1028,85 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			itemsCmd,
 		)
 	case completion.SelectionChangedMsg:
-		e.clearSuggestion()
+		if e.currentCompletion != nil {
+			e.clearSuggestion()
+		}
 		return e, nil
 	case tea.KeyPressMsg:
 		if e.historySearch.active {
 			return e.handleHistorySearchKey(msg)
 		}
+		e.shellEffortFooterSuppressed = false
+		e.historyNavigationHintVisible = false
+		e.historyNavigationIndex = -1
+
+		if !e.isKillKey(msg) {
+			e.lastKeyWasKill = false
+		}
+
+		if msg.String() == "ctrl+_" || msg.String() == "ctrl+/" {
+			return e, e.restoreInputUndoSnapshot()
+		}
 
 		if key.Matches(msg, e.textarea.KeyMap.Paste) {
+			e.captureInputUndoSnapshot()
 			return e.handleClipboardPaste()
+		}
+
+		if msg.String() == "!" && e.textarea.Value() == "" && !e.shellMode {
+			e.captureInputUndoSnapshot()
+			e.setShellMode(true)
+			e.userTyped = false
+			return e, nil
+		}
+
+		if e.shellMode && e.textarea.Value() == "" && key.Matches(msg, e.textarea.KeyMap.DeleteCharacterBackward) {
+			e.captureInputUndoSnapshot()
+			e.setShellMode(false)
+			return e, nil
 		}
 
 		// Handle backspace with grapheme cluster awareness.
 		// The default textarea.Model only deletes a single rune, which breaks
 		// multi-codepoint characters like emoji (e.g., ⚠️ = U+26A0 + U+FE0F).
 		if key.Matches(msg, e.textarea.KeyMap.DeleteCharacterBackward) {
+			e.captureInputUndoSnapshot()
 			return e.handleGraphemeBackspace()
+		}
+
+		if e.isKillKey(msg) {
+			e.captureInputUndoSnapshot()
+			return e.handleKillKey(msg)
+		}
+
+		if msg.String() == "ctrl+y" && e.killBuffer != "" {
+			e.captureInputUndoSnapshot()
+			return e, e.YankKillBuffer()
+		}
+
+		if e.isCaseTransformKey(msg) {
+			return e, nil
 		}
 
 		// Handle send/newline keys:
 		// - Enter: submit current input (if textarea inserted a newline, submit previous buffer).
 		// - Shift+Enter: insert newline when keyboard enhancements are supported.
 		// - Ctrl+J: fallback to insert '\n' when keyboard enhancements are not supported.
+		if msg.String() == "ctrl+j" || msg.String() == "shift+enter" {
+			if !e.textarea.Focused() {
+				return e, nil
+			}
+			prev := e.textarea.Value()
+			e.captureInputUndoSnapshot()
+			var cmd tea.Cmd
+			e.textarea, cmd = e.textarea.Update(msg)
+			if e.textarea.Value() != prev {
+				e.userTyped = true
+			}
+			e.refreshSuggestion()
+			return e, tea.Batch(cmd, e.updateCompletionQuery())
+		}
+
 		if msg.String() == "enter" || key.Matches(msg, e.textarea.KeyMap.InsertNewline) {
 			if !e.textarea.Focused() {
 				return e, nil
@@ -868,16 +1128,20 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				if prev != "" {
 					e.textarea.SetValue(prev)
 					e.textarea.MoveToEnd()
-					cmd := e.resetAndSendDefault(prev)
-					return e, cmd
+					if e.shellMode {
+						return e, e.submitShellCommand(prev)
+					}
+					return e, e.resetAndSendDefault(prev)
 				}
 				return e, nil
 			}
 
 			// Normal enter submit: send current value
 			if value != "" {
-				cmd := e.resetAndSendDefault(value)
-				return e, cmd
+				if e.shellMode {
+					return e, e.submitShellCommand(value)
+				}
+				return e, e.resetAndSendDefault(value)
 			}
 
 			return e, nil
@@ -886,52 +1150,80 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// Handle other special keys
 		switch msg.String() {
 		case "up":
-			// Only navigate history if the user hasn't manually typed content
-			if !e.userTyped && e.historyAvailable() {
-				e.textarea.SetValue(e.hist.Previous())
-				e.textarea.MoveToEnd()
+			// Claude treats Up/Down as prompt-history navigation from single-line
+			// composer text, even when the current draft is non-empty.
+			if e.shouldNavigatePromptHistory() {
+				e.applyHistoryNavigationMatch(e.hist.Previous())
+				e.userTyped = false
 				e.refreshSuggestion()
 				return e, nil
 			}
-			// Otherwise, let the textarea handle cursor navigation
+			// Otherwise, let the textarea handle cursor navigation.
+		case "ctrl+p":
+			if e.shouldNavigatePromptHistory() {
+				e.applyHistoryNavigationMatch(e.hist.Previous())
+				e.userTyped = false
+				e.refreshSuggestion()
+				return e, nil
+			}
 		case "down":
-			// Only navigate history if the user hasn't manually typed content
-			if !e.userTyped && e.historyAvailable() {
-				e.textarea.SetValue(e.hist.Next())
-				e.textarea.MoveToEnd()
+			if e.shouldNavigatePromptHistory() {
+				e.applyHistoryNavigationMatch(e.hist.Next())
+				e.userTyped = false
 				e.refreshSuggestion()
 				return e, nil
 			}
-			// Otherwise, let the textarea handle cursor navigation
+			// Otherwise, let the textarea handle cursor navigation.
+		case "ctrl+n":
+			if e.shouldNavigatePromptHistory() {
+				e.applyHistoryNavigationMatch(e.hist.Next())
+				e.userTyped = false
+				e.refreshSuggestion()
+				return e, nil
+			}
 		default:
-			for _, completion := range e.completions {
-				if msg.String() == completion.Trigger() {
-					if completion.RequiresEmptyEditor() && e.textarea.Value() != "" {
-						continue
+			if !e.shellMode {
+				for _, completion := range e.completions {
+					if msg.String() == completion.Trigger() {
+						if completion.RequiresEmptyEditor() && e.textarea.Value() != "" {
+							continue
+						}
+						cmds = append(cmds, e.startCompletion(completion))
 					}
-					cmds = append(cmds, e.startCompletion(completion))
 				}
 			}
 		}
 	}
 
 	prevValue := e.textarea.Value()
+	if isComposerEditKey(msg) {
+		e.captureInputUndoSnapshot()
+	}
 	var cmd tea.Cmd
 	e.textarea, cmd = e.textarea.Update(msg)
 	cmds = append(cmds, cmd)
 
-	// If the value changed due to user input (not history navigation), mark as user typed
-	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+	valueChanged := e.textarea.Value() != prevValue
+	keyMsg, isKeyPress := msg.(tea.KeyPressMsg)
+	if valueChanged && !isKeyPress {
+		e.userTyped = true
+	}
+	if e.textarea.Value() == "" {
+		e.userTyped = false
+	}
+
+	// If the value changed due to user input (not history navigation), mark as user typed.
+	if isKeyPress {
 		// Check if content changed and it wasn't a history navigation key
-		if e.textarea.Value() != prevValue && keyMsg.String() != "up" && keyMsg.String() != "down" {
+		if valueChanged && keyMsg.String() != "up" && keyMsg.String() != "down" {
 			e.userTyped = true
 		}
 
-		// Also check if textarea became empty - reset userTyped flag
-		if e.textarea.Value() == "" {
-			e.userTyped = false
+		if keyMsg.String() == "space" {
+			e.currentCompletion = nil
 		}
-
+	}
+	if isKeyPress || valueChanged {
 		currentWord := e.textarea.Word()
 
 		// Track manual @filepath refs - only runs when we're in/leaving an @ word
@@ -946,10 +1238,6 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		} else if e.pendingFileRef != "" && strings.HasPrefix(currentWord, "@") {
 			// Still in @ word but it changed (user typing more) - update tracking
 			e.pendingFileRef = currentWord
-		}
-
-		if keyMsg.String() == "space" {
-			e.currentCompletion = nil
 		}
 
 		cmds = append(cmds, e.updateCompletionQuery())
@@ -1040,6 +1328,94 @@ func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
 	return e, tea.Batch(textarea.Blink, e.updateCompletionQuery())
 }
 
+func (e *editor) isKillKey(msg tea.KeyPressMsg) bool {
+	return key.Matches(msg, e.textarea.KeyMap.DeleteBeforeCursor) ||
+		key.Matches(msg, e.textarea.KeyMap.DeleteAfterCursor) ||
+		key.Matches(msg, e.textarea.KeyMap.DeleteWordBackward) ||
+		key.Matches(msg, e.textarea.KeyMap.DeleteWordForward)
+}
+
+func (e *editor) handleKillKey(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	prevValue := e.textarea.Value()
+	var cmd tea.Cmd
+	e.textarea, cmd = e.textarea.Update(msg)
+	value := e.textarea.Value()
+	if deleted := deletedSubstring(prevValue, value); deleted != "" {
+		switch {
+		case e.lastKeyWasKill && e.isBackwardKillKey(msg):
+			e.killBuffer = deleted + e.killBuffer
+		case e.lastKeyWasKill:
+			e.killBuffer += deleted
+		default:
+			e.killBuffer = deleted
+		}
+		e.killBufferHintVisible = e.shouldShowKillBufferHint(msg, value)
+		e.lastKeyWasKill = true
+	} else {
+		e.lastKeyWasKill = false
+	}
+	e.userTyped = value != ""
+	e.refreshSuggestion()
+	return e, tea.Batch(cmd, e.updateCompletionQuery())
+}
+
+func (e *editor) isBackwardKillKey(msg tea.KeyPressMsg) bool {
+	return key.Matches(msg, e.textarea.KeyMap.DeleteBeforeCursor) ||
+		key.Matches(msg, e.textarea.KeyMap.DeleteWordBackward)
+}
+
+func (e *editor) isLineKillKey(msg tea.KeyPressMsg) bool {
+	return key.Matches(msg, e.textarea.KeyMap.DeleteBeforeCursor) ||
+		key.Matches(msg, e.textarea.KeyMap.DeleteAfterCursor)
+}
+
+func (e *editor) shouldShowKillBufferHint(msg tea.KeyPressMsg, value string) bool {
+	if value != "" || !e.isLineKillKey(msg) {
+		return false
+	}
+	if !e.shellMode {
+		return true
+	}
+	return key.Matches(msg, e.textarea.KeyMap.DeleteBeforeCursor)
+}
+
+func (e *editor) isCaseTransformKey(msg tea.KeyPressMsg) bool {
+	switch msg.String() {
+	case "alt+c", "meta+c", "alt+l", "meta+l", "alt+u", "meta+u":
+		return true
+	default:
+		return false
+	}
+}
+
+func isComposerEditKey(msg tea.Msg) bool {
+	_, ok := msg.(tea.KeyPressMsg)
+	return ok
+}
+
+func deletedSubstring(before, after string) string {
+	if before == after {
+		return ""
+	}
+
+	beforeRunes := []rune(before)
+	afterRunes := []rune(after)
+
+	prefix := 0
+	for prefix < len(beforeRunes) && prefix < len(afterRunes) && beforeRunes[prefix] == afterRunes[prefix] {
+		prefix++
+	}
+
+	beforeSuffix := len(beforeRunes)
+	afterSuffix := len(afterRunes)
+	for beforeSuffix > prefix && afterSuffix > prefix && beforeRunes[beforeSuffix-1] == afterRunes[afterSuffix-1] {
+		beforeSuffix--
+		afterSuffix--
+	}
+
+	return string(beforeRunes[prefix:beforeSuffix])
+}
+
 // updateCompletionQuery sends the appropriate completion message based on current editor state.
 // It returns a command that either updates the completion query or closes the completion popup.
 func (e *editor) updateCompletionQuery() tea.Cmd {
@@ -1059,6 +1435,26 @@ func (e *editor) updateCompletionQuery() tea.Cmd {
 			return tea.Batch(queryCmd, loadCmd)
 		}
 		return queryCmd
+	}
+
+	for _, candidate := range e.completions {
+		if !strings.HasPrefix(currentWord, candidate.Trigger()) {
+			continue
+		}
+		if candidate.RequiresEmptyEditor() && e.textarea.Value() != currentWord {
+			continue
+		}
+		e.completionWord = strings.TrimPrefix(currentWord, candidate.Trigger())
+		openCmd := e.startCompletion(candidate)
+		queryCmd := core.CmdHandler(completion.QueryMsg{Query: e.completionWord})
+		var loadCmd tea.Cmd
+		if candidate.Trigger() == "@" && e.completionWord != "" && !e.fileFullLoadStarted {
+			loadCmd = e.startFullFileLoad()
+		}
+		if loadCmd != nil {
+			return tea.Sequence(openCmd, queryCmd, loadCmd)
+		}
+		return tea.Sequence(openCmd, queryCmd)
 	}
 
 	e.completionWord = ""
@@ -1119,6 +1515,7 @@ func (e *editor) startCompletion(c completions.Completion) tea.Cmd {
 		openCmd := core.CmdHandler(completion.OpenMsg{
 			Items:     items,
 			MatchMode: c.MatchMode(),
+			Query:     e.completionWord,
 		})
 		return tea.Batch(openCmd, e.startInitialFileLoad())
 	}
@@ -1128,6 +1525,7 @@ func (e *editor) startCompletion(c completions.Completion) tea.Cmd {
 	return core.CmdHandler(completion.OpenMsg{
 		Items:     items,
 		MatchMode: c.MatchMode(),
+		Query:     e.completionWord,
 	})
 }
 
@@ -1181,6 +1579,9 @@ func (e *editor) getPasteCompletionItems() []completion.Item {
 		if !att.isTemp {
 			continue // Only show pastes, not file refs
 		}
+		if !att.showBanner {
+			continue
+		}
 		name := strings.TrimPrefix(att.placeholder, "@")
 		items = append(items, completion.Item{
 			Label:       name,
@@ -1205,11 +1606,7 @@ func (e *editor) View() string {
 		view = lipgloss.JoinVertical(lipgloss.Left, bannerView, view)
 	}
 
-	if e.historySearch.active {
-		view = lipgloss.JoinVertical(lipgloss.Left, view, e.searchInput.View())
-	}
-
-	return styles.RenderComposite(styles.EditorStyle.MarginBottom(1), view)
+	return styles.RenderComposite(e.viewStyle(), view)
 }
 
 // SetSize sets the dimensions of the component
@@ -1229,13 +1626,26 @@ func (e *editor) updateTextareaHeight() {
 	if e.banner != nil {
 		available -= e.banner.Height()
 	}
-	if e.historySearch.active {
-		available--
-	}
-
 	available = max(available, 1)
 
 	e.textarea.SetHeight(available)
+	e.resetTextareaViewportIfContentFits(available)
+}
+
+func (e *editor) resetTextareaViewportIfContentFits(height int) {
+	if e.textarea.ScrollYOffset() == 0 || e.textarea.LineCount() > height {
+		return
+	}
+
+	value := e.textarea.Value()
+	row := e.textarea.Line()
+	col := e.textarea.Column()
+	e.textarea.SetValue(value)
+	e.textarea.MoveToBegin()
+	for range row {
+		e.textarea.CursorDown()
+	}
+	e.textarea.SetCursorColumn(col)
 }
 
 // BannerHeight returns the current height of the attachment banner (0 if hidden)
@@ -1248,8 +1658,17 @@ func (e *editor) BannerHeight() int {
 
 // GetSize returns the rendered dimensions including EditorStyle padding.
 func (e *editor) GetSize() (width, height int) {
-	return e.width + styles.EditorStyle.GetHorizontalFrameSize(),
-		e.height + styles.EditorStyle.GetVerticalFrameSize()
+	style := e.viewStyle()
+	return e.width + style.GetHorizontalFrameSize(),
+		e.height + style.GetVerticalFrameSize()
+}
+
+func (e *editor) viewStyle() lipgloss.Style {
+	return styles.EditorStyle.
+		PaddingTop(0).
+		PaddingLeft(0).
+		PaddingRight(0).
+		MarginBottom(0)
 }
 
 // AttachmentAt returns preview information for the attachment rendered at the given X position.
@@ -1286,6 +1705,10 @@ func (e *editor) AttachmentAt(x int) (AttachmentPreview, bool) {
 // Focus gives focus to the component
 func (e *editor) Focus() tea.Cmd {
 	return e.textarea.Focus()
+}
+
+func (e *editor) Focused() bool {
+	return e.textarea.Focused()
 }
 
 // Blur removes focus from the component
@@ -1325,22 +1748,77 @@ func (e *editor) Value() string {
 
 // SetValue updates the editor content and moves cursor to end
 func (e *editor) SetValue(content string) {
+	if content == "" {
+		e.setShellMode(false)
+		e.killBuffer = ""
+		e.killBufferHintVisible = false
+	}
+	e.clearInputUndoSnapshot()
+	e.historyNavigationHintVisible = false
+	e.lastKeyWasKill = false
 	e.textarea.SetValue(content)
 	e.textarea.MoveToEnd()
 	e.userTyped = content != ""
 	e.refreshSuggestion()
 }
 
+// SetPlaceholder updates the empty-editor placeholder.
+func (e *editor) SetPlaceholder(placeholder string) {
+	e.placeholder = placeholder
+	e.refreshPlaceholder()
+}
+
+// SetShellValue updates the editor content and enters shell-command mode.
+func (e *editor) SetShellValue(content string) {
+	e.clearInputUndoSnapshot()
+	e.setShellMode(true)
+	e.historyNavigationHintVisible = false
+	e.textarea.SetValue(content)
+	e.textarea.MoveToEnd()
+	e.userTyped = content != ""
+	e.refreshSuggestion()
+}
+
+func (e *editor) SetPromptColor(color string) {
+	e.promptColor = color
+	if !e.shellMode {
+		e.textarea.Prompt = e.normalPrompt()
+	}
+}
+
 // InsertText inserts text at the current cursor position
 func (e *editor) InsertText(text string) {
+	e.captureInputUndoSnapshot()
 	e.textarea.InsertString(text)
 	e.userTyped = true
+	e.lastKeyWasKill = false
 	e.refreshSuggestion()
+}
+
+func (e *editor) HasKillBuffer() bool {
+	return e.killBuffer != ""
+}
+
+func (e *editor) ShowKillBufferHint() bool {
+	return e.killBufferHintVisible && e.killBuffer != ""
+}
+
+func (e *editor) YankKillBuffer() tea.Cmd {
+	if e.killBuffer == "" {
+		return nil
+	}
+	e.captureInputUndoSnapshot()
+	e.textarea.InsertString(e.killBuffer)
+	e.userTyped = true
+	e.lastKeyWasKill = false
+	e.refreshSuggestion()
+	return tea.Batch(textarea.Blink, e.updateCompletionQuery())
 }
 
 // AttachFile adds a file as an attachment and inserts @filepath into the editor
 func (e *editor) AttachFile(filePath string) error {
 	placeholder := "@" + filePath
+	e.captureInputUndoSnapshot()
 	if err := e.addFileAttachment(placeholder); err != nil {
 		return fmt.Errorf("failed to attach %s: %w", filePath, err)
 	}
@@ -1462,13 +1940,13 @@ func (e *editor) collectAttachments(content string) []messages.Attachment {
 				continue
 			}
 			result = append(result, messages.Attachment{
-				Name:    strings.TrimPrefix(att.placeholder, "@"),
+				Name:    att.placeholder,
 				Content: string(data),
 			})
 		} else {
 			// File-reference attachment: keep the path for later processing.
 			result = append(result, messages.Attachment{
-				Name:     filepath.Base(att.path),
+				Name:     fileAttachmentDisplayName(att.placeholder, att.path),
 				FilePath: att.path,
 			})
 		}
@@ -1476,6 +1954,27 @@ func (e *editor) collectAttachments(content string) []messages.Attachment {
 	e.attachments = nil
 
 	return result
+}
+
+func fileAttachmentDisplayName(placeholder, absPath string) string {
+	ref := strings.TrimSpace(strings.TrimPrefix(placeholder, "@"))
+	if ref != "" && !filepath.IsAbs(ref) {
+		return filepath.ToSlash(filepath.Clean(ref))
+	}
+
+	if cwd, err := os.Getwd(); err == nil && cwd != "" && absPath != "" {
+		if rel, relErr := filepath.Rel(cwd, absPath); relErr == nil && rel != "." {
+			rel = filepath.Clean(rel)
+			if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return filepath.ToSlash(rel)
+			}
+		}
+	}
+
+	if ref != "" {
+		return filepath.ToSlash(filepath.Clean(ref))
+	}
+	return filepath.Base(absPath)
 }
 
 // Cleanup removes any temporary paste files that haven't been sent yet.
@@ -1486,6 +1985,7 @@ func (e *editor) Cleanup() {
 		}
 	}
 	e.attachments = nil
+	e.clearPasteExpandState()
 }
 
 // SetRecording sets the recording mode which shows animated dots as the cursor.
@@ -1521,11 +2021,59 @@ func (e *editor) IsHistorySearchActive() bool {
 	return e.historySearch.active
 }
 
+func (e *editor) HistorySearchFooterText() string {
+	if !e.historySearch.active {
+		return ""
+	}
+	if e.historySearch.query == "" {
+		return "search prompts:"
+	}
+	if e.historySearch.failing {
+		return "no matching prompt: " + e.historySearch.query
+	}
+	return "search prompts: " + e.historySearch.query
+}
+
+func (e *editor) HistorySearchStartedInShellMode() bool {
+	return e.historySearch.active && e.historySearch.origShellMode
+}
+
+func (e *editor) ShellEffortFooterSuppressed() bool {
+	return e.shellEffortFooterSuppressed
+}
+
+func (e *editor) HistoryNavigationHintVisible() bool {
+	return e.historyNavigationHintVisible
+}
+
+func (e *editor) HistoryNavigationLabel() string {
+	if e.hist == nil || e.historyNavigationIndex < 0 || e.historyNavigationIndex >= len(e.hist.Messages) {
+		return ""
+	}
+	return fmt.Sprintf("History %d/%d", e.historyNavigationIndex+1, len(e.hist.Messages))
+}
+
+// ShellMode returns true when the composer is collecting a shell command.
+func (e *editor) ShellMode() bool {
+	return e.shellMode
+}
+
+// PasteExpandHintVisible reports whether the last pasted-text placeholder can
+// be expanded by pasting the same content again.
+func (e *editor) PasteExpandHintVisible() bool {
+	return e.lastPasteContent != "" &&
+		e.lastPastePlaceholder != "" &&
+		strings.Contains(e.textarea.Value(), e.lastPastePlaceholder)
+}
+
 // SendContent triggers sending the current editor content
 func (e *editor) SendContent() tea.Cmd {
 	value := e.textarea.Value()
 	if value == "" {
 		return nil
+	}
+	if e.shellMode {
+		return e.submitShellCommand(value)
 	}
 	return e.resetAndSendDefault(value)
 }
@@ -1537,10 +2085,18 @@ func (e *editor) SendContentQueued() tea.Cmd {
 	if value == "" {
 		return nil
 	}
+	if e.shellMode {
+		return e.submitShellCommand(value)
+	}
 	return e.resetAndSendQueued(value)
 }
 
 func (e *editor) handlePaste(content string) bool {
+	content = normalizePasteLineEndings(content)
+	if e.expandRepeatedPaste(content) {
+		return true
+	}
+
 	// First, try to parse as file paths (drag-and-drop)
 	filePaths := ParsePastedFiles(content)
 	if len(filePaths) > 0 {
@@ -1574,7 +2130,16 @@ func (e *editor) handlePaste(content string) bool {
 		return false
 	}
 
-	att, err := createPasteAttachment(content)
+	placeholder := ""
+	label := ""
+	showBanner := true
+	if lines > maxInlinePasteLines {
+		placeholder = e.nextPastedTextPlaceholder(lines)
+		label = placeholder
+		showBanner = false
+	}
+
+	att, err := createPasteAttachment(content, placeholder, label, showBanner)
 	if err != nil {
 		slog.Warn("failed to buffer paste", "error", err)
 		// Still return true to prevent the large paste from falling through
@@ -1584,8 +2149,67 @@ func (e *editor) handlePaste(content string) bool {
 
 	e.textarea.InsertString(att.placeholder)
 	e.attachments = append(e.attachments, att)
+	if !att.showBanner {
+		e.lastPasteContent = content
+		e.lastPastePlaceholder = att.placeholder
+	}
 
 	return true
+}
+
+func normalizePasteLineEndings(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	return strings.ReplaceAll(content, "\r", "\n")
+}
+
+func (e *editor) expandRepeatedPaste(content string) bool {
+	if e.lastPasteContent == "" || content != e.lastPasteContent {
+		return false
+	}
+
+	placeholder := e.lastPastePlaceholder
+	if placeholder == "" {
+		return false
+	}
+
+	value := e.textarea.Value()
+	if !strings.Contains(value, placeholder) {
+		e.clearPasteExpandState()
+		return false
+	}
+
+	for i, att := range e.attachments {
+		if att.placeholder != placeholder {
+			continue
+		}
+		if att.isTemp {
+			_ = os.Remove(att.path)
+		}
+		e.attachments = slices.Delete(e.attachments, i, i+1)
+		break
+	}
+
+	e.textarea.SetValue(strings.Replace(value, placeholder, content, 1))
+	e.textarea.MoveToEnd()
+	e.clearPasteExpandState()
+	return true
+}
+
+func (e *editor) nextPastedTextPlaceholder(lines int) string {
+	e.pasteCounter++
+	return fmt.Sprintf("[Pasted text #%d +%d %s]", e.pasteCounter, lines, pluralizeLine(lines))
+}
+
+func pluralizeLine(lines int) string {
+	if lines == 1 {
+		return "line"
+	}
+	return "lines"
+}
+
+func (e *editor) clearPasteExpandState() {
+	e.lastPasteContent = ""
+	e.lastPastePlaceholder = ""
 }
 
 // removeLastNAttachments removes the last n non-temp attachments and their
@@ -1618,6 +2242,12 @@ func (e *editor) updateAttachmentBanner() {
 	var items []bannerItem
 
 	for _, att := range e.attachments {
+		if !att.isTemp {
+			continue
+		}
+		if !att.showBanner {
+			continue
+		}
 		if strings.Contains(value, att.placeholder) {
 			items = append(items, bannerItem{
 				label:       att.label,
@@ -1630,7 +2260,7 @@ func (e *editor) updateAttachmentBanner() {
 	e.updateTextareaHeight()
 }
 
-func createPasteAttachment(content string) (attachment, error) {
+func createPasteAttachment(content, placeholder, label string, showBanner bool) (attachment, error) {
 	pasteDir := filepath.Join(paths.GetDataDir(), "pastes")
 	if err := os.MkdirAll(pasteDir, 0o700); err != nil {
 		return attachment{}, fmt.Errorf("create paste dir: %w", err)
@@ -1646,18 +2276,28 @@ func createPasteAttachment(content string) (attachment, error) {
 		return attachment{}, fmt.Errorf("write paste file: %w", err)
 	}
 
-	displayName, err := randomPasteDisplayName()
-	if err != nil {
-		_ = os.Remove(file.Name())
-		return attachment{}, err
+	if placeholder == "" {
+		displayName, err := randomPasteDisplayName()
+		if err != nil {
+			_ = os.Remove(file.Name())
+			return attachment{}, err
+		}
+		placeholder = "@" + displayName
+		if label == "" {
+			label = fmt.Sprintf("%s (%s)", displayName, units.HumanSize(float64(len(content))))
+		}
+	}
+	if label == "" {
+		label = fmt.Sprintf("%s (%s)", placeholder, units.HumanSize(float64(len(content))))
 	}
 
 	return attachment{
 		path:        file.Name(),
-		placeholder: "@" + displayName,
-		label:       fmt.Sprintf("%s (%s)", displayName, units.HumanSize(float64(len(content)))),
+		placeholder: placeholder,
+		label:       label,
 		sizeBytes:   len(content),
 		isTemp:      true,
+		showBanner:  showBanner,
 	}, nil
 }
 
@@ -1670,7 +2310,11 @@ func randomPasteDisplayName() (string, error) {
 }
 
 func (e *editor) historyAvailable() bool {
-	return e.hist != nil
+	return e.hist != nil && len(e.hist.Messages) > 0
+}
+
+func (e *editor) shouldNavigatePromptHistory() bool {
+	return e.historyAvailable() && !strings.Contains(e.textarea.Value(), "\n")
 }
 
 func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
@@ -1681,6 +2325,7 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 		active:                   true,
 		origTextValue:            e.textarea.Value(),
 		origTextPlaceholderValue: e.textarea.Placeholder,
+		origShellMode:            e.shellMode,
 		matchIndex:               -1,
 	}
 
@@ -1714,22 +2359,32 @@ func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.
 	case msg.String() == "enter":
 		value := e.textarea.Value()
 		matchIdx := e.historySearch.matchIndex
+		shellMode := e.shellMode
 		cmd := e.exitHistorySearch()
 		if value != "" {
+			e.setShellMode(shellMode)
 			e.textarea.SetValue(value)
 			e.textarea.MoveToEnd()
 			if matchIdx >= 0 {
 				e.hist.SetCurrent(matchIdx)
 			}
 			e.userTyped = false
+			e.refreshSuggestion()
+			var sendCmd tea.Cmd
+			if shellMode {
+				sendCmd = e.submitShellCommand(value)
+			} else {
+				sendCmd = e.resetAndSendDefault(value)
+			}
+			return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}), sendCmd)
 		}
 		e.refreshSuggestion()
 		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
 
 	case msg.String() == "esc" || msg.String() == "ctrl+g":
-		cmd := e.exitHistorySearch()
+		cmd := e.exitHistorySearchKeepingPreview()
 		e.refreshSuggestion()
-		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
+		return e, tea.Batch(cmd, e.updateCompletionQuery())
 	}
 
 	var cmd tea.Cmd
@@ -1758,8 +2413,7 @@ func (e *editor) cycleMatch(findFn func(string, int) (string, int, bool), wrapFr
 		e.historySearch.match = m
 		e.historySearch.matchIndex = idx
 		e.historySearch.failing = false
-		e.textarea.SetValue(m)
-		e.textarea.MoveToEnd()
+		e.applyHistorySearchMatch(m)
 	}
 }
 
@@ -1768,6 +2422,7 @@ func (e *editor) historySearchComputeMatch() {
 		e.historySearch.match = ""
 		e.historySearch.matchIndex = -1
 		e.historySearch.failing = false
+		e.setShellMode(e.historySearch.origShellMode)
 		e.textarea.SetValue("")
 		e.textarea.Placeholder = ""
 		return
@@ -1778,20 +2433,73 @@ func (e *editor) historySearchComputeMatch() {
 		e.historySearch.match = m
 		e.historySearch.matchIndex = idx
 		e.historySearch.failing = false
-		e.textarea.SetValue(m)
-		e.textarea.MoveToEnd()
+		e.applyHistorySearchMatch(m)
 	} else {
 		e.historySearch.failing = true
-		e.historySearch.match = ""
-		e.historySearch.matchIndex = -1
-		e.textarea.SetValue("")
-		e.textarea.Placeholder = "No matching entry in history"
 	}
 }
 
 func (e *editor) exitHistorySearch() tea.Cmd {
+	e.setShellMode(e.historySearch.origShellMode)
 	e.textarea.SetValue(e.historySearch.origTextValue)
 	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
 	e.historySearch = historySearchState{matchIndex: -1}
 	return e.textarea.Focus()
+}
+
+func (e *editor) exitHistorySearchKeepingPreview() tea.Cmd {
+	if e.textarea.Value() == "" {
+		e.setShellMode(e.historySearch.origShellMode)
+		e.textarea.SetValue(e.historySearch.origTextValue)
+	} else {
+		e.shellEffortFooterSuppressed = e.shellMode && !e.historySearch.origShellMode
+	}
+	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
+	e.historySearch = historySearchState{matchIndex: -1}
+	return e.textarea.Focus()
+}
+
+func (e *editor) applyHistorySearchMatch(match string) {
+	if command, ok := shellHistoryCommand(match); ok {
+		e.setShellMode(true)
+		e.textarea.SetValue(command)
+	} else {
+		e.setShellMode(false)
+		e.textarea.SetValue(match)
+	}
+	e.textarea.MoveToEnd()
+}
+
+func (e *editor) applyHistoryNavigationMatch(match string) {
+	e.historyNavigationIndex = e.historyNavigationIndexFor(match)
+	if command, ok := shellHistoryCommand(match); ok {
+		e.setShellMode(true)
+		e.textarea.SetValue(strings.TrimLeft(command, " \t"))
+	} else {
+		e.setShellMode(false)
+		e.textarea.SetValue(match)
+	}
+	e.textarea.MoveToEnd()
+	e.shellEffortFooterSuppressed = e.shellMode
+	e.historyNavigationHintVisible = false
+}
+
+func (e *editor) historyNavigationIndexFor(match string) int {
+	if match == "" || e.hist == nil {
+		return -1
+	}
+	for i, item := range e.hist.Messages {
+		if item == match {
+			return i
+		}
+	}
+	return -1
+}
+
+func shellHistoryCommand(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "!") {
+		return "", false
+	}
+	return strings.TrimLeft(strings.TrimPrefix(trimmed, "!"), " \t"), true
 }

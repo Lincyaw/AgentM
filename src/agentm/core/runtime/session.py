@@ -7,7 +7,7 @@ from loguru import logger
 import os
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from agentm.core.abi import (
     AgentEndEvent,
@@ -64,6 +64,7 @@ _DEFAULT_EVENT_LOOP_LAG_WARNING_SECONDS = 5.0
 _EVENT_LOOP_LAG_RATE_LIMIT_SECONDS = 60.0
 _EVENT_LOOP_LAG_INTERVAL_ENV = "AGENTM_EVENT_LOOP_LAG_INTERVAL_SECONDS"
 _EVENT_LOOP_LAG_WARNING_ENV = "AGENTM_EVENT_LOOP_LAG_WARNING_SECONDS"
+ThinkingLevel = Literal["off", "low", "medium", "high"]
 
 
 def _env_float(name: str, default: float) -> float:
@@ -300,6 +301,7 @@ class AgentSession:
         # supplies overrides; cleaned up on ``shutdown``. ``None`` for
         # ordinary sessions — no filesystem cost.
         self._eval_sandbox: Path | None = eval_sandbox
+        self._thinking_level: ThinkingLevel = "off"
 
         # --- step-5 driver state ------------------------------------------
         # The persistent driver task — always-on owner of ``_loop.run``. It
@@ -403,6 +405,11 @@ class AgentSession:
         if name in self._services:
             raise KeyError(f"service {name!r} is already registered")
         self._services[name] = obj
+
+    def set_thinking_level(self, thinking: str) -> None:
+        if thinking not in {"off", "low", "medium", "high"}:
+            raise ValueError(f"unsupported thinking level: {thinking!r}")
+        self._thinking_level = cast(ThinkingLevel, thinking)
 
     def install_atom(self, name: str, config: dict[str, Any] | None = None) -> None:
         """Mount a builtin atom into this already-created session (sync only)."""
@@ -858,6 +865,7 @@ class AgentSession:
                 tools=self._tools,
                 system=system_prompt,
                 signal=self._signal,
+                thinking=self._thinking_level,
             )
         finally:
             self._in_run = False

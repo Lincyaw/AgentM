@@ -21,7 +21,8 @@ from typing import Any, Literal
 
 from loguru import logger
 
-from agentm.core.abi import GATEWAY_SCHEDULER_SERVICE
+from agentm.core.abi import GATEWAY_SCHEDULER_SERVICE, ToolContinue, ToolResult, ToolTerminate
+from agentm.core.abi.tool_executor import execute_tool_call
 from agentm.gateway.approval import ApprovalManager
 from agentm.gateway.chat_session_map import ChatSessionMap
 from agentm.gateway.child_registry import ChildSessionRegistry
@@ -265,6 +266,15 @@ def _push_user_input(inbox: Any, body: InboundBody, content: str) -> None:
     )
 
 
+def _apply_thinking_level(session: Any, body: InboundBody) -> None:
+    thinking = body.thinking
+    if thinking is None:
+        return
+    setter = getattr(session, "set_thinking_level", None)
+    if callable(setter):
+        setter(thinking)
+
+
 async def _load_session_history(
     cwd: str, session_id: str
 ) -> dict[str, Any] | None:
@@ -305,6 +315,8 @@ class _GatewayRequestTracker:
             RouterAction.RUN_COMMAND,
             RouterAction.INTERACTION_RESPONSE,
             RouterAction.INTERRUPT,
+            RouterAction.SWITCH_MODEL,
+            RouterAction.SET_CONFIG,
             RouterAction.PROMPT_SESSION,
         }
 
@@ -870,7 +882,11 @@ class GatewayRuntime:
         # (invoked as /skill:<name>). They are discovered at startup and static,
         # so the welcome frame can advertise them for the terminal's /skills view.
         skills = [
-            {"name": h.name, "summary": h.summary}
+            {
+                "name": h.name,
+                "summary": h.summary,
+                "source_dir": getattr(h, "source_dir", ""),
+            }
             for h in all_handlers
             if h.namespace == "skill"
         ]
@@ -1035,6 +1051,30 @@ class GatewayRuntime:
         if decision.action is RouterAction.INTERRUPT:
             self._interrupt_session(session_key)
             return
+        if decision.action is RouterAction.CANCEL_BACKGROUND:
+            task = asyncio.create_task(
+                self._cancel_background_task(session_key, body),
+                name=f"gw-cancel-background-{session_key}",
+            )
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
+            return
+        if decision.action is RouterAction.SWITCH_MODEL:
+            task = asyncio.create_task(
+                self._switch_model_control(session_key, body),
+                name=f"gw-switch-model-{session_key}",
+            )
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
+            return
+        if decision.action is RouterAction.SET_CONFIG:
+            task = asyncio.create_task(
+                self._set_config_control(session_key, env.scenario, body),
+                name=f"gw-set-config-{session_key}",
+            )
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
+            return
         if decision.action is RouterAction.STEER:
             self._steer_session(session_key, body)
             return
@@ -1067,14 +1107,23 @@ class GatewayRuntime:
 
     def _interrupt_session(self, session_key: str) -> None:
         sess = self._sessions.get(session_key)
-        if sess is not None:
-            sess.interrupt()
-            snapshot = self._state.snapshot_for(session_key)
-            if snapshot.phase != "interrupting":
-                snapshot.phase = "interrupting"
-            snapshot.active_turn_id = None
-            if not snapshot.pending_interactions:
-                self._state.schedule_snapshot(session_key)
+        if sess is None:
+            return
+        status_fn = getattr(sess, "status", None)
+        if callable(status_fn):
+            try:
+                status = status_fn()
+            except Exception:  # noqa: BLE001
+                status = {}
+            if isinstance(status, dict) and status.get("phase") != "running":
+                return
+        sess.interrupt()
+        snapshot = self._state.snapshot_for(session_key)
+        if snapshot.phase != "interrupting":
+            snapshot.phase = "interrupting"
+        snapshot.active_turn_id = None
+        if not snapshot.pending_interactions:
+            self._state.schedule_snapshot(session_key)
 
     def _steer_session(self, session_key: str, body: InboundBody) -> None:
         """Inject a user message mid-turn without waiting for turn end."""
@@ -1084,7 +1133,197 @@ class GatewayRuntime:
         content = body.content or ""
         if not content.strip():
             return
+        _apply_thinking_level(sess, body)
         sess.send_user_message(content)
+
+    async def _cancel_background_task(
+        self, session_key: str, body: InboundBody
+    ) -> None:
+        """Cancel a background_exec task without creating a conversational turn."""
+        task_id = (body.task_id or "").strip()
+        if not task_id:
+            await self._send_error(
+                session_key, body, ValueError("cancel_background requires task_id")
+            )
+            return
+        sess = self._sessions.get(session_key)
+        if sess is None:
+            await self._send_error(
+                session_key, body, RuntimeError("no live session for background task")
+            )
+            return
+        cancel_tool = next(
+            (tool for tool in sess.tools if tool.name == "cancel_background"),
+            None,
+        )
+        if cancel_tool is None:
+            await self._send_error(
+                session_key,
+                body,
+                RuntimeError("cancel_background tool is unavailable"),
+            )
+            return
+        try:
+            result = await execute_tool_call(
+                cancel_tool,
+                {"task_id": task_id},
+                signal=None,
+            )
+        except Exception as exc:
+            logger.exception("cancel_background failed for {}", task_id)
+            await self._send_error(session_key, body, exc)
+            return
+        if isinstance(result, ToolContinue | ToolTerminate):
+            tool_result = result.result
+        elif isinstance(result, ToolResult):
+            tool_result = result
+        else:
+            tool_result = None
+        if tool_result is not None and tool_result.is_error:
+            await self._send_error(
+                session_key,
+                body,
+                RuntimeError(f"cancel_background rejected task {task_id}"),
+            )
+            return
+        await self._state.emit_snapshot(session_key)
+
+    async def _switch_model_control(
+        self, session_key: str, body: InboundBody
+    ) -> None:
+        """Switch models without rendering a slash-command turn."""
+        name = (body.content or "").strip()
+        if not name:
+            await self._send_error(
+                session_key, body, ValueError("switch_model requires content")
+            )
+            return
+        ok, message = await self._overrides.switch_model(
+            session_key,
+            name,
+            sessions=self._sessions,
+            state=self._state,
+        )
+        if not ok:
+            await self._send_error(
+                session_key,
+                body,
+                RuntimeError(f"could not switch model to '{name}': {message}"),
+            )
+            return
+
+        try:
+            from agentm.core.lib.user_config import load_user_config
+
+            models = list(load_user_config().models.keys())
+        except Exception:
+            logger.exception("switch_model: failed to read model profiles")
+            models = []
+        await self._emit_outbound(
+            {
+                "channel": body.channel,
+                "chat_id": body.chat_id,
+                "content": "",
+                "thread_id": body.thread_id,
+                "metadata": {
+                    "kind": "session_ready",
+                    "model": message,
+                    "models": models,
+                },
+                "_session_key": session_key,
+            }
+        )
+
+    async def _set_config_control(
+        self, session_key: str, scenario: str | None, body: InboundBody
+    ) -> None:
+        """Apply a non-conversational session config change."""
+
+        raw = body.raw or {}
+        key = str(raw.get("key") or "").strip()
+        if key == "permission_rule":
+            await self._set_permission_rule_control(session_key, body, raw)
+            return
+        if key != "auto_compact":
+            await self._send_error(
+                session_key, body, ValueError(f"unsupported config key {key!r}")
+            )
+            return
+        enabled = raw.get("enabled")
+        if not isinstance(enabled, bool):
+            await self._send_error(
+                session_key, body, ValueError("auto_compact requires boolean enabled")
+            )
+            return
+
+        sess = await self._get_or_create_session_for_input(session_key, scenario, body)
+        control = sess.get_service("llm_compaction.control")
+        setter = getattr(control, "set_enabled", None)
+        if control is None or not callable(setter):
+            await self._send_error(
+                session_key,
+                body,
+                RuntimeError("auto_compact is not available in this session"),
+            )
+            return
+
+        actual = bool(setter(enabled))
+        await self._emit_outbound(
+            {
+                "channel": body.channel,
+                "chat_id": body.chat_id,
+                "content": "",
+                "thread_id": body.thread_id,
+                "metadata": {
+                    "kind": "config_update",
+                    "key": key,
+                    "enabled": actual,
+                },
+                "_session_key": session_key,
+            }
+        )
+
+    async def _set_permission_rule_control(
+        self,
+        session_key: str,
+        body: InboundBody,
+        raw: dict[str, Any],
+    ) -> None:
+        """Apply a terminal /permissions rule to the live approval policy."""
+
+        kind = str(raw.get("kind") or "").strip().lower()
+        pattern = str(raw.get("pattern") or "").strip()
+        if kind not in {"allow", "ask", "deny"}:
+            await self._send_error(
+                session_key, body, ValueError("permission_rule kind must be allow, ask, or deny")
+            )
+            return
+        if not pattern:
+            await self._send_error(
+                session_key, body, ValueError("permission_rule requires pattern")
+            )
+            return
+        if not self._approval.add_session_rule(session_key, kind, pattern):
+            await self._send_error(
+                session_key, body, RuntimeError("failed to apply permission rule")
+            )
+            return
+
+        await self._emit_outbound(
+            {
+                "channel": body.channel,
+                "chat_id": body.chat_id,
+                "content": "",
+                "thread_id": body.thread_id,
+                "metadata": {
+                    "kind": "config_update",
+                    "key": "permission_rule",
+                    "rule_kind": kind,
+                    "pattern": pattern,
+                },
+                "_session_key": session_key,
+            }
+        )
 
     def _interrupt_child(self, child_id: str) -> None:
         child = self._child_registry.get(child_id)
@@ -1109,6 +1348,7 @@ class GatewayRuntime:
         content = body.content or ""
         if not content.strip():
             return
+        _apply_thinking_level(child, body)
         _push_user_input(child.inbox, body, content)
 
     def _resolve_interaction(self, session_key: str, body: InboundBody) -> None:
@@ -1210,6 +1450,7 @@ class GatewayRuntime:
         self._state.increment_turn_count(session_key)
         if body.content == "":
             return
+        _apply_thinking_level(sess, body)
         _push_user_input(sess.inbox, body, body.content)
         await self._state.emit_snapshot(session_key)
 

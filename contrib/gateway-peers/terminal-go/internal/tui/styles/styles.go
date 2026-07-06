@@ -434,8 +434,8 @@ var (
 
 // Resize Handle Style
 var (
-	ResizeHandleStyle = BaseStyle.
-				Foreground(BorderSecondary)
+	ResizeHandleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244"))
 
 	ResizeHandleHoverStyle = BaseStyle.
 				Foreground(Info).
@@ -477,19 +477,16 @@ var (
 				Padding(0, 1)
 
 	CompletionNormalStyle = BaseStyle.
-				Foreground(TextPrimary).
-				Bold(true)
+				Foreground(lipgloss.Color("246"))
 
 	CompletionSelectedStyle = CompletionNormalStyle.
-				Foreground(White).
-				Background(MobyBlue)
+				Foreground(lipgloss.Color("153"))
 
 	CompletionDescStyle = BaseStyle.
-				Foreground(TextSecondary)
+				Foreground(lipgloss.Color("246"))
 
 	CompletionSelectedDescStyle = CompletionDescStyle.
-					Foreground(White).
-					Background(MobyBlue)
+					Foreground(lipgloss.Color("153"))
 
 	CompletionNoResultsStyle = BaseStyle.
 					Foreground(TextMuted).

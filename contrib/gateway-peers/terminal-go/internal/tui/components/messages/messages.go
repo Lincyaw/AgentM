@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"slices"
 	"sort"
 	"strconv"
@@ -58,10 +59,13 @@ type Model interface {
 	layout.Positionable
 
 	AddUserMessage(content string) tea.Cmd
+	RemoveLastUserMessage(content string) tea.Cmd
 	AddLoadingMessage(description string) tea.Cmd
 	ReplaceLoadingWithUser(content string, sessionPos int) tea.Cmd
+	RemoveLoadingMessage()
 	AddErrorMessage(content string) tea.Cmd
 	AddAssistantMessage() tea.Cmd
+	AddAssistantTextMessage(agentName, content string) tea.Cmd
 	AddCancelledMessage() tea.Cmd
 	AddWelcomeMessage(content string) tea.Cmd
 	AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status types.ToolStatus) tea.Cmd
@@ -71,11 +75,20 @@ type Model interface {
 	AppendReasoning(agentName, content string) tea.Cmd
 	AddShellOutputMessage(content string) tea.Cmd
 	AddSystemMessage(title, content string) tea.Cmd
+	AddNoticeMessage(content string) tea.Cmd
+	RemoveLastSystemMessage() tea.Cmd
 	LoadFromSession(sess *session.Session) tea.Cmd
+	IsEmpty() bool
+	NthLatestAssistantMessage(index int) string
+	AssistantMessageCount() int
+	ExportTranscript() string
 
 	RemoveSpinner()
 	ScrollToBottom() tea.Cmd
+	ForceScrollToBottom() tea.Cmd
 	AdjustBottomSlack(delta int)
+	RenderedHeight() int
+	ViewportHeight() int
 
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
@@ -164,18 +177,19 @@ type model struct {
 
 // New creates a new message list component
 func New(sessionState *service.SessionState) Model {
-	return newModel(120, 24, sessionState)
+	return newModel(120, 24, sessionState, false)
 }
 
 // NewScrollableView creates a simple scrollable view for displaying messages in dialogs
 // This is a lightweight version that doesn't require app or session state management
 func NewScrollableView(width, height int, sessionState *service.SessionState) Model {
-	return newModel(width, height, sessionState)
+	return newModel(width, height, sessionState, true)
 }
 
-func newModel(width, height int, sessionState *service.SessionState) *model {
+func newModel(width, height int, sessionState *service.SessionState, showScrollbar bool) *model {
 	sv := scrollview.New(
 		scrollview.WithReserveScrollbarSpace(true),
+		scrollview.WithShowScrollbar(showScrollbar),
 	)
 	sv.SetSize(width, height)
 	return &model{
@@ -253,7 +267,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, nil
 
 	case SetTranscriptDetailMsg:
-		m.sessionState.SetHideToolResults(!msg.Verbose)
+		m.sessionState.SetHideToolResults(!msg.Detailed)
 		m.sessionState.SetExpandThinking(msg.Detailed)
 		for _, view := range m.views {
 			if block, ok := view.(*reasoningblock.Model); ok {
@@ -943,6 +957,104 @@ func (m *model) findLastAssistantMessage() int {
 	return -1
 }
 
+func (m *model) NthLatestAssistantMessage(index int) string {
+	if index < 1 {
+		index = 1
+	}
+	seen := 0
+	for i := range slices.Backward(m.messages) {
+		msg := m.messages[i]
+		if msg.Type != types.MessageTypeAssistant {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		seen++
+		if seen == index {
+			return content
+		}
+	}
+	return ""
+}
+
+func (m *model) AssistantMessageCount() int {
+	count := 0
+	for _, msg := range m.messages {
+		if msg.Type == types.MessageTypeAssistant && strings.TrimSpace(msg.Content) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *model) ExportTranscript() string {
+	if len(m.messages) == 0 {
+		return ""
+	}
+
+	previousFocused := m.focused
+	previousHovered := m.hoveredMessageIndex
+	previousSelected := m.selectedMessageIndex
+	m.focused = false
+	m.hoveredMessageIndex = -1
+	m.selectedMessageIndex = -1
+	defer func() {
+		m.focused = previousFocused
+		m.hoveredMessageIndex = previousHovered
+		m.selectedMessageIndex = previousSelected
+	}()
+
+	var chunks []string
+	for i, msg := range m.messages {
+		if !isExportableTranscriptMessage(msg) || i >= len(m.views) {
+			continue
+		}
+		item := m.renderItem(i, m.views[i])
+		text := plainRenderedItemText(item)
+		if text != "" {
+			chunks = append(chunks, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(chunks, "\n\n"))
+}
+
+func isExportableTranscriptMessage(msg *types.Message) bool {
+	if msg == nil {
+		return false
+	}
+	switch msg.Type {
+	case types.MessageTypeUser:
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			return false
+		}
+		return !strings.HasPrefix(content, "/") || msg.SessionPosition != nil
+	case types.MessageTypeAssistant,
+		types.MessageTypeAssistantReasoningBlock,
+		types.MessageTypeShellOutput,
+		types.MessageTypeError,
+		types.MessageTypeCancelled,
+		types.MessageTypeToolCall,
+		types.MessageTypeToolResult:
+		return true
+	default:
+		return false
+	}
+}
+
+func plainRenderedItemText(item renderedItem) string {
+	if len(item.lines) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(item.lines))
+	for _, line := range item.lines {
+		lines = append(lines, strings.TrimRight(ansi.Strip(line), " \t"))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 func (m *model) findPreviousSelectableMessage(fromIndex int) int {
 	for i := fromIndex - 1; i >= 0; i-- {
 		if m.isSelectableMessage(i) {
@@ -1157,6 +1269,16 @@ func (m *model) needsSeparator(index int) bool {
 	}
 	currentIsToolCall := m.messages[index].Type == types.MessageTypeToolCall
 	nextIsToolCall := m.messages[index+1].Type == types.MessageTypeToolCall
+	if isBangUserMessage(m.messages[index]) &&
+		((nextIsToolCall && m.messages[index+1].DirectShell) || m.messages[index+1].Type == types.MessageTypeCancelled) {
+		return false
+	}
+	if m.messages[index+1].Type == types.MessageTypeNotice {
+		return false
+	}
+	if standaloneAssistantNotice(m.messages[index]) && standaloneAssistantNotice(m.messages[index+1]) {
+		return false
+	}
 
 	// Always add a separator before transfer_task, even between consecutive tool calls
 	if nextIsToolCall && m.messages[index+1].ToolCall.Function.Name == toolschema.ToolNameTransferTask {
@@ -1164,6 +1286,18 @@ func (m *model) needsSeparator(index int) bool {
 	}
 
 	return !currentIsToolCall || !nextIsToolCall
+}
+
+func standaloneAssistantNotice(msg *types.Message) bool {
+	return msg != nil &&
+		msg.Type == types.MessageTypeAssistant &&
+		strings.HasPrefix(strings.TrimSpace(msg.Content), "Unknown command: ")
+}
+
+func isBangUserMessage(msg *types.Message) bool {
+	return msg != nil &&
+		msg.Type == types.MessageTypeUser &&
+		strings.HasPrefix(strings.TrimRight(msg.Content, "\n\r\t "), "! ")
 }
 
 func (m *model) ensureAllItemsRendered() {
@@ -1290,6 +1424,10 @@ func (m *model) invalidateAllItems() {
 	m.renderDirtyFrom = -1
 }
 
+func (m *model) markAppendedViewDirty() {
+	m.markRenderDirtyFrom(max(0, len(m.views)-2))
+}
+
 // finalizePreviousMessageView releases per-message render state on the most
 // recent message.Model view (if any) before a new top-level entry is
 // appended. The renderCache and IncrementalRenderer are pure caches — dropping
@@ -1310,8 +1448,44 @@ func (m *model) AddUserMessage(content string) tea.Cmd {
 	return m.addMessage(types.User(content))
 }
 
+func (m *model) RemoveLastUserMessage(content string) tea.Cmd {
+	want := strings.TrimSpace(content)
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		if msg.Type != types.MessageTypeUser || strings.TrimSpace(msg.Content) != want {
+			continue
+		}
+		if i < len(m.views) {
+			animation.StopView(m.views[i])
+			m.views = slices.Delete(m.views, i, i+1)
+		}
+		m.messages = slices.Delete(m.messages, i, i+1)
+		m.invalidateAllItems()
+		return nil
+	}
+	return nil
+}
+
+func (m *model) IsEmpty() bool {
+	return len(m.messages) == 0
+}
+
 func (m *model) AddLoadingMessage(description string) tea.Cmd {
 	return m.addMessage(types.Loading(description))
+}
+
+func (m *model) RemoveLoadingMessage() {
+	for i := range slices.Backward(m.messages) {
+		if m.messages[i].Type != types.MessageTypeLoading {
+			continue
+		}
+		m.messages = slices.Delete(m.messages, i, i+1)
+		if i < len(m.views) {
+			m.views = slices.Delete(m.views, i, i+1)
+		}
+		m.invalidateAllItems()
+		break
+	}
 }
 
 func (m *model) ReplaceLoadingWithUser(content string, sessionPos int) tea.Cmd {
@@ -1347,8 +1521,37 @@ func (m *model) AddSystemMessage(title, content string) tea.Cmd {
 	return m.addMessage(types.System(title, content))
 }
 
+func (m *model) AddNoticeMessage(content string) tea.Cmd {
+	m.removeSpinner()
+	return m.addMessage(types.Notice(content))
+}
+
+func (m *model) RemoveLastSystemMessage() tea.Cmd {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].Type != types.MessageTypeSystem {
+			continue
+		}
+		if i < len(m.views) {
+			animation.StopView(m.views[i])
+			m.views = slices.Delete(m.views, i, i+1)
+		}
+		m.messages = slices.Delete(m.messages, i, i+1)
+		m.invalidateAllItems()
+		return nil
+	}
+	return nil
+}
+
 func (m *model) AddAssistantMessage() tea.Cmd {
 	return m.addMessage(types.Spinner())
+}
+
+func (m *model) AddAssistantTextMessage(agentName, content string) tea.Cmd {
+	m.removeSpinner()
+	if strings.TrimSpace(agentName) == "" {
+		agentName = "assistant"
+	}
+	return m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
 }
 
 func (m *model) AddCancelledMessage() tea.Cmd {
@@ -1357,7 +1560,7 @@ func (m *model) AddCancelledMessage() tea.Cmd {
 	m.messages = append(m.messages, msg)
 	view := m.createMessageView(msg)
 	m.views = append(m.views, view)
-	m.markRenderDirtyFrom(len(m.views) - 1)
+	m.markAppendedViewDirty()
 	return view.Init()
 }
 
@@ -1369,7 +1572,7 @@ func (m *model) AddWelcomeMessage(content string) tea.Cmd {
 	m.messages = append(m.messages, msg)
 	view := m.createMessageView(msg)
 	m.views = append(m.views, view)
-	m.markRenderDirtyFrom(len(m.views) - 1)
+	m.markAppendedViewDirty()
 	return view.Init()
 }
 
@@ -1382,7 +1585,7 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	view := m.createMessageView(msg)
 	m.sessionState.SetPreviousMessage(msg)
 	m.views = append(m.views, view)
-	m.markRenderDirtyFrom(len(m.views) - 1)
+	m.markAppendedViewDirty()
 
 	var cmds []tea.Cmd
 	if initCmd := view.Init(); initCmd != nil {
@@ -1434,6 +1637,7 @@ func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
 	// addStandaloneToolCall adds a tool call as a standalone message (not in a reasoning block)
 	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]string) {
 		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
+		toolMsg.DirectShell = m.isDirectShellToolCall(tc)
 		// Apply tool result if available
 		if result, ok := toolResults[tc.ID]; ok {
 			toolMsg.Content = strings.ReplaceAll(result, "\t", "    ")
@@ -1603,10 +1807,11 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 	// Otherwise create a standalone tool call message
 	m.finalizePreviousMessageView()
 	msg := types.ToolCallMessage(agentName, toolCall, toolDef, status)
+	msg.DirectShell = m.isDirectShellToolCall(toolCall)
 	m.messages = append(m.messages, msg)
 	view := m.createToolCallView(msg)
 	m.views = append(m.views, view)
-	m.markRenderDirtyFrom(len(m.views) - 1)
+	m.markAppendedViewDirty()
 
 	return view.Init()
 }
@@ -1674,6 +1879,37 @@ func (m *model) AddToolResult(msg *runtime.ToolCallResponseEvent, status types.T
 		}
 	}
 	return nil
+}
+
+func (m *model) isDirectShellToolCall(toolCall tools.ToolCall) bool {
+	if toolCall.Function.Name != toolschema.ToolNameShell && toolCall.Function.Name != toolschema.ToolNameBash {
+		return false
+	}
+
+	var args struct {
+		Cmd string `json:"cmd"`
+	}
+	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+		return false
+	}
+	command := strings.TrimSpace(args.Cmd)
+	if command == "" {
+		return false
+	}
+
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		switch msg.Type {
+		case types.MessageTypeUser:
+			userCommand, ok := strings.CutPrefix(strings.TrimSpace(msg.Content), "!")
+			return ok && strings.TrimSpace(userCommand) == command
+		case types.MessageTypeLoading, types.MessageTypeSpinner:
+			continue
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
@@ -1747,7 +1983,7 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	m.messages = append(m.messages, msg)
 	m.views = append(m.views, block)
 	m.sessionState.SetPreviousMessage(msg)
-	m.markRenderDirtyFrom(len(m.views) - 1)
+	m.markAppendedViewDirty()
 
 	var cmds []tea.Cmd
 	if initCmd := block.Init(); initCmd != nil {
@@ -1791,11 +2027,35 @@ func (m *model) ScrollToBottom() tea.Cmd {
 	}
 }
 
+func (m *model) ForceScrollToBottom() tea.Cmd {
+	return func() tea.Msg {
+		m.scrollToBottom()
+		return nil
+	}
+}
+
 func (m *model) AdjustBottomSlack(delta int) {
 	if delta == 0 {
 		return
 	}
-	m.bottomSlack = max(0, min(m.bottomSlack+delta, m.maxBottomSlack()))
+	m.ensureAllItemsRendered()
+	limit := m.maxBottomSlack()
+	if delta > 0 {
+		limit = max(limit, min(m.height, m.bottomSlack+delta))
+	}
+	m.bottomSlack = max(0, min(m.bottomSlack+delta, limit))
+	if !m.userHasScrolled {
+		m.scrollToBottom()
+	}
+}
+
+func (m *model) RenderedHeight() int {
+	m.ensureAllItemsRendered()
+	return m.totalHeight
+}
+
+func (m *model) ViewportHeight() int {
+	return m.height
 }
 
 // contentWidth returns the width available for content.

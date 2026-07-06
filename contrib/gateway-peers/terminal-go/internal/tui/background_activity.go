@@ -34,6 +34,7 @@ type backgroundActivity struct {
 	label     string
 	status    string
 	note      string
+	startedAt time.Time
 	updatedAt time.Time
 	finished  bool
 }
@@ -65,9 +66,7 @@ func normalizeBackgroundActivityStatus(status string) string {
 func retainFinishedBackgroundActivity(status string) bool {
 	switch status {
 	case backgroundActivityStatusError,
-		backgroundActivityStatusFailed,
-		backgroundActivityStatusCanceled,
-		backgroundActivityStatusCancelled:
+		backgroundActivityStatusFailed:
 		return true
 	default:
 		return false
@@ -98,6 +97,50 @@ func (m *appModel) backgroundActivityCountText() string {
 		parts = append(parts, backgroundStatusCountLabel(otherCount, "activity", "activities"))
 	}
 	return strings.Join(parts, " · ")
+}
+
+func (m *appModel) backgroundShellCount() int {
+	count := 0
+	for _, activity := range m.backgroundActivities {
+		if activity.finished {
+			continue
+		}
+		if activity.source == "background" && strings.HasPrefix(activity.label, "bash:") {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *appModel) backgroundShellText() string {
+	count := m.backgroundShellCount()
+	switch count {
+	case 0:
+		return ""
+	case 1:
+		return "1 shell"
+	default:
+		return fmt.Sprintf("%d shells", count)
+	}
+}
+
+func isBackgroundShellActivity(activity backgroundActivity) bool {
+	return !activity.finished && activity.source == "background" && strings.HasPrefix(activity.label, "bash:")
+}
+
+func (m *appModel) selectedBackgroundShellActivity() (backgroundActivity, bool) {
+	var selected backgroundActivity
+	for _, activity := range m.sortedBackgroundActivities() {
+		if !isBackgroundShellActivity(activity) {
+			continue
+		}
+		selected = activity
+	}
+	return selected, selected.id != ""
+}
+
+func backgroundShellTaskID(activity backgroundActivity) string {
+	return strings.TrimPrefix(activity.id, "background:")
 }
 
 func backgroundStatusCountLabel(count int, singular, plural string) string {
@@ -142,6 +185,10 @@ func (m *appModel) handleBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 		return m, nil
 	}
 	activityChanged := m.updateBackgroundActivity(ev)
+	if m.backgroundShellCount() == 0 {
+		m.backgroundActivityPrompt = false
+		m.backgroundActivityDetail = false
+	}
 	m.statusBar.SetActivity(m.backgroundActivityText())
 	if !activityChanged || m.bottomSurfaceHeight(m.width) == m.bottomSurfaceLayoutHeight {
 		return m, nil
@@ -163,6 +210,12 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 		delete(m.backgroundActivities, key)
 		return existed
 	}
+	now := time.Now()
+	previous, existed := m.backgroundActivities[key]
+	startedAt := now
+	if existed && !previous.startedAt.IsZero() {
+		startedAt = previous.startedAt
+	}
 	next := backgroundActivity{
 		sessionID: activity.sessionID,
 		source:    activity.source,
@@ -170,10 +223,10 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 		label:     activity.label,
 		status:    activity.status,
 		note:      activity.note,
-		updatedAt: time.Now(),
+		startedAt: startedAt,
+		updatedAt: now,
 		finished:  ev.Terminal,
 	}
-	_, existed := m.backgroundActivities[key]
 	m.backgroundActivities[key] = next
 	m.pruneBackgroundActivities()
 	// Existing activity rows keep the same bottom-surface height; repaint is enough.
@@ -260,6 +313,39 @@ func (m *appModel) renderBackgroundActivityRow(row backgroundActivity, width int
 		return styles.SecondaryStyle.Render(line)
 	}
 	return styles.MutedStyle.Render(line)
+}
+
+func (m *appModel) renderBackgroundShellDetails(width int) string {
+	activity, ok := m.selectedBackgroundShellActivity()
+	if !ok {
+		return ""
+	}
+	innerWidth := max(20, width-appPaddingHorizontal)
+	command := strings.TrimSpace(strings.TrimPrefix(activity.label, "bash:"))
+	if command == "" {
+		command = "bash"
+	}
+	runtimeText := formatWorkflowAge(activity.startedAt)
+	if runtimeText == "" {
+		runtimeText = "0s"
+	}
+	status := cmpNonEmpty(activity.status, backgroundActivityStatusRunning)
+	bodyLines := []string{
+		"Shell details",
+		"",
+		fmt.Sprintf("Status:   %s", status),
+		fmt.Sprintf("Runtime:  %s", runtimeText),
+		"Command:  " + command,
+		"",
+		"Output:",
+		"No output available",
+		"",
+	}
+	lines := make([]string, 0, len(bodyLines))
+	for _, line := range bodyLines {
+		lines = append(lines, styles.SecondaryStyle.Render(ansi.Truncate(line, innerWidth, "…")))
+	}
+	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(strings.Join(lines, "\n"))
 }
 
 func renderHiddenBackgroundActivitiesRow(count, width int) string {

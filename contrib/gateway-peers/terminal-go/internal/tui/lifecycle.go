@@ -77,6 +77,12 @@ func (m *appModel) openExternalEditor() (tea.Model, tea.Cmd) {
 	if editorCmd == "" {
 		if goruntime.GOOS == "windows" {
 			editorCmd = "notepad"
+		} else if goruntime.GOOS == "darwin" {
+			if _, err := exec.LookPath("code"); err == nil {
+				editorCmd = "code --wait"
+			} else {
+				editorCmd = "vi"
+			}
 		} else {
 			editorCmd = "vi"
 		}

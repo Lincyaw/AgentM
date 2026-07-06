@@ -6,8 +6,10 @@ Modern clients may set an explicit ``body["action"]``:
 
 * ``submit`` — user content to be submitted as a new turn.
 * ``interrupt`` — preempt the in-flight prompt.
+* ``cancel_background`` — cancel a detached background task.
 * ``run_command`` — invoke command dispatch.
 * ``interaction_response`` — resolve a pending human interaction.
+* ``switch_model`` — switch the active model profile out of band.
 
 For backwards compatibility, clients without explicit action still work via
 legacy fields:
@@ -37,7 +39,10 @@ class RouterAction(Enum):
     STEER = "steer"
     INTERACTION_RESPONSE = "interaction_response"
     INTERRUPT = "interrupt"
+    CANCEL_BACKGROUND = "cancel_background"
     RESOLVE_APPROVAL = "resolve_approval"
+    SWITCH_MODEL = "switch_model"
+    SET_CONFIG = "set_config"
     RUN_COMMAND = "run_command"
     # Legacy prompt_session keeps the current behavior for compatibility with
     # non-action inbounds that still carry content/commands.
@@ -81,8 +86,14 @@ def dispatch(env: Envelope) -> RouterDecision:
             return RouterDecision(RouterAction.STEER, body)
         if body.action == "interrupt":
             return RouterDecision(RouterAction.INTERRUPT, body)
+        if body.action == "cancel_background":
+            return RouterDecision(RouterAction.CANCEL_BACKGROUND, body)
         if body.action == "resolve_approval":
             return RouterDecision(RouterAction.RESOLVE_APPROVAL, body)
+        if body.action == "switch_model":
+            return RouterDecision(RouterAction.SWITCH_MODEL, body)
+        if body.action == "set_config":
+            return RouterDecision(RouterAction.SET_CONFIG, body)
         raise ProtocolError(f"unsupported explicit action {body.action!r}")
 
     if body.control == "interrupt":

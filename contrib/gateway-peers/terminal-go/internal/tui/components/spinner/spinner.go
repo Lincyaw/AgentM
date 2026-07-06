@@ -25,6 +25,10 @@ type Spinner interface {
 	Stop()
 	// RawFrame returns the current spinner character without any styling applied.
 	RawFrame() string
+	// FrameIndex returns the current animation frame index.
+	FrameIndex() int
+	// CurrentMessage returns the stable status text chosen for this spinner.
+	CurrentMessage() string
 }
 type spinner struct {
 	animSub             *animation.Subscription // manages animation tick subscription
@@ -40,33 +44,19 @@ type spinner struct {
 
 // Default messages for the spinner
 var defaultMessages = []string{
-	"Working",
-	"Reticulating splines",
+	"Accomplishing",
+	"Cascading",
+	"Channeling",
 	"Computing",
-	"Thinking",
-	"Processing",
-	"Analyzing",
-	"Calibrating",
-	"Initializing",
-	"Generating",
-	"Evaluating",
-	"Synthesizing",
-	"Optimizing",
-	"Consulting the oracle",
-	"Summoning electrons",
-	"Warming up the flux capacitor",
-	"Reversing the polarity",
-	"Spinning up the hamster wheels",
-	"Herding cats",
-	"Untangling yarn",
-	"Aligning the cosmos",
-	"Brewing digital coffee",
-	"Wrangling bits and bytes",
-	"Charging the crystals",
-	"Consulting the rubber duck",
-	"Feeding the gremlins",
-	"Polishing the pixels",
-	"Calibrating the thrusters",
+	"Determining",
+	"Envisioning",
+	"Gusting",
+	"Infusing",
+	"Manifesting",
+	"Nucleating",
+	"Tempering",
+	"Tinkering",
+	"Whisking",
 }
 
 func New(mode Mode, dotsStyle lipgloss.Style) Spinner {
@@ -141,6 +131,14 @@ func (s *spinner) Stop() {
 // RawFrame returns the current spinner character without any styling applied.
 func (s *spinner) RawFrame() string {
 	return spinnerFrames[s.frame%len(spinnerFrames)]
+}
+
+func (s *spinner) FrameIndex() int {
+	return s.frame
+}
+
+func (s *spinner) CurrentMessage() string {
+	return s.currentMessage
 }
 
 // spinnerFrames holds the animation frames for the current terminal.

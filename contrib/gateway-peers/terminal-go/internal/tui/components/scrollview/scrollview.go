@@ -58,6 +58,9 @@ func WithReserveScrollbarSpace(v bool) Option {
 	return func(m *Model) { m.reserveScrollbarSpace = v }
 }
 
+// WithShowScrollbar controls whether overflow renders a scrollbar column.
+func WithShowScrollbar(v bool) Option { return func(m *Model) { m.showScrollbar = v } }
+
 // WithWheelStep sets lines scrolled per wheel tick (default 2).
 func WithWheelStep(n int) Option { return func(m *Model) { m.wheelStep = n } }
 
@@ -74,6 +77,7 @@ type Model struct {
 
 	gapWidth              int
 	reserveScrollbarSpace bool
+	showScrollbar         bool
 	wheelStep             int
 	keyMap                *ScrollKeyMap
 
@@ -88,10 +92,11 @@ type Model struct {
 // New creates a new scrollview with the given options.
 func New(opts ...Option) *Model {
 	m := &Model{
-		sb:        scrollbar.New(),
-		gapWidth:  1,
-		wheelStep: 2,
-		keyMap:    DefaultScrollKeyMap(),
+		sb:            scrollbar.New(),
+		gapWidth:      1,
+		showScrollbar: true,
+		wheelStep:     2,
+		keyMap:        DefaultScrollKeyMap(),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -122,10 +127,13 @@ func (m *Model) SetContent(lines []string, totalHeight int) {
 }
 
 // NeedsScrollbar returns true if content is taller than the viewport.
-func (m *Model) NeedsScrollbar() bool { return m.totalHeight > m.height }
+func (m *Model) NeedsScrollbar() bool { return m.showScrollbar && m.totalHeight > m.height }
 
 // ContentWidth returns the width available for content text.
 func (m *Model) ContentWidth() int {
+	if !m.showScrollbar {
+		return max(1, m.width)
+	}
 	if m.reserveScrollbarSpace || m.NeedsScrollbar() {
 		return max(1, m.width-m.gapWidth-scrollbar.Width)
 	}
@@ -133,13 +141,23 @@ func (m *Model) ContentWidth() int {
 }
 
 // ReservedCols returns columns reserved for gap + scrollbar.
-func (m *Model) ReservedCols() int { return m.gapWidth + scrollbar.Width }
+func (m *Model) ReservedCols() int {
+	if !m.showScrollbar {
+		return 0
+	}
+	return m.gapWidth + scrollbar.Width
+}
 
 // VisibleHeight returns the viewport height in lines.
 func (m *Model) VisibleHeight() int { return m.height }
 
 // ScrollbarX returns the absolute screen X of the scrollbar column.
-func (m *Model) ScrollbarX() int { return m.xPos + m.width - scrollbar.Width }
+func (m *Model) ScrollbarX() int {
+	if !m.showScrollbar {
+		return -1
+	}
+	return m.xPos + m.width - scrollbar.Width
+}
 
 // ScrollOffset returns the current scroll offset.
 func (m *Model) ScrollOffset() int { return m.scrollOffset }
@@ -235,6 +253,9 @@ func (m *Model) Update(msg tea.Msg) (handled bool, cmd tea.Cmd) {
 
 // UpdateMouse delegates mouse events to the scrollbar. Low-level alternative to [Update].
 func (m *Model) UpdateMouse(msg tea.Msg) (handled bool, cmd tea.Cmd) {
+	if !m.showScrollbar {
+		return false, nil
+	}
 	prev := m.scrollOffset
 	sb, c := m.sb.Update(msg)
 	m.sb = sb
@@ -243,7 +264,7 @@ func (m *Model) UpdateMouse(msg tea.Msg) (handled bool, cmd tea.Cmd) {
 }
 
 // IsDragging returns whether the scrollbar thumb is being dragged.
-func (m *Model) IsDragging() bool { return m.sb.IsDragging() }
+func (m *Model) IsDragging() bool { return m.showScrollbar && m.sb.IsDragging() }
 
 // View renders the scrollable region with automatic content slicing.
 func (m *Model) View() string {
@@ -308,7 +329,7 @@ func (m *Model) compose(lines []string) string {
 	if m.NeedsScrollbar() {
 		return lipgloss.JoinHorizontal(lipgloss.Top, contentView, m.buildColumn(m.gapWidth), m.sb.View())
 	}
-	if m.reserveScrollbarSpace {
+	if m.showScrollbar && m.reserveScrollbarSpace {
 		return lipgloss.JoinHorizontal(lipgloss.Top, contentView, m.buildColumnN(m.gapWidth+scrollbar.Width, len(lines)))
 	}
 	return contentView

@@ -62,12 +62,12 @@ func (d Decision) Resume(pattern, reason string) runtime.ResumeRequest {
 
 // BuildPermissionPattern creates the permission pattern granted by the
 // "always allow" decision. For shell commands it extracts the first word of
-// the command and creates a pattern like "shell:cmd=ls*" matching all
+// the command and creates a pattern like "bash:cmd=ls*" matching all
 // invocations of that command; for other tools it returns the tool name.
 func BuildPermissionPattern(toolCall tools.ToolCall) string {
 	toolName := toolCall.Function.Name
 
-	if toolName == "shell" {
+	if toolName == "bash" || toolName == "shell" {
 		var args struct {
 			Cmd string `json:"cmd"`
 		}

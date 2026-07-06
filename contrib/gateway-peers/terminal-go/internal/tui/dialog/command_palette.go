@@ -127,6 +127,9 @@ func (d *commandPaletteDialog) filterCommands() {
 	d.filtered = d.filtered[:0]
 	for _, cat := range d.categories {
 		for _, cmd := range cat.Commands {
+			if cmd.Hidden {
+				continue
+			}
 			if query == "" || commandQueryScore(cmd, query) < commandQueryNoMatch {
 				d.filtered = append(d.filtered, cmd)
 			}

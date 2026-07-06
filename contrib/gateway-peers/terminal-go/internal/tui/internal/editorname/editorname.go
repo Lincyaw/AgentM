@@ -16,13 +16,13 @@ import (
 )
 
 // editorPrefixes maps a binary-name prefix (e.g. "code") to a friendly display
-// name (e.g. "VSCode"). Order matters: longer / more specific prefixes must
+// name (e.g. "VS Code"). Order matters: longer / more specific prefixes must
 // appear before shorter ones (e.g. "vim" before "vi").
 var editorPrefixes = []struct {
 	prefix string
 	name   string
 }{
-	{"code", "VSCode"},
+	{"code", "VS Code"},
 	{"cursor", "Cursor"},
 	{"nvim", "Neovim"},
 	{"vim", "Vim"},
@@ -53,6 +53,9 @@ func FromEnv(visual, editorEnv string) string {
 	if editorCmd == "" {
 		if goruntime.GOOS == "windows" {
 			return "Notepad"
+		}
+		if goruntime.GOOS == "darwin" {
+			return "VS Code"
 		}
 		return "Vi"
 	}

@@ -300,6 +300,27 @@ func SystemNote(content, sessionID, title string) Event {
 	}
 }
 
+// NoticeEvent carries a compact control-command notice that should render like
+// Claude's indented command result row instead of a full system panel.
+type NoticeEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Content   string `json:"content"`
+}
+
+func (e *NoticeEvent) GetSessionID() string { return e.SessionID }
+
+func Notice(content, sessionID string) Event {
+	return &NoticeEvent{
+		Type:         "notice",
+		SessionID:    sessionID,
+		Content:      content,
+		AgentContext: newAgentContext(""),
+	}
+}
+
 // RequestStatusEvent is emitted when the gateway accepts or de-duplicates a
 // mutating inbound request before the agent stream itself has necessarily
 // started. It gives remote clients a visible "gateway heard me" signal.
@@ -528,6 +549,27 @@ func SessionCompaction(sessionID, status, agentName string) Event {
 }
 
 func (e *SessionCompactionEvent) GetSessionID() string { return e.SessionID }
+
+type ConfigUpdateEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id,omitempty"`
+	Key       string `json:"key"`
+	Enabled   bool   `json:"enabled"`
+}
+
+func ConfigUpdate(sessionID, key string, enabled bool, agentName string) Event {
+	return &ConfigUpdateEvent{
+		Type:         "config_update",
+		SessionID:    sessionID,
+		Key:          key,
+		Enabled:      enabled,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+func (e *ConfigUpdateEvent) GetSessionID() string { return e.SessionID }
 
 type StreamStoppedEvent struct {
 	AgentContext

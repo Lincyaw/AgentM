@@ -204,7 +204,7 @@ Gone from v1: `bye` (close-on-socket is fine), `delivery_batch` / `ack_batch` (p
     {"label": "Deny",    "value": "appr-deadbeef:deny",    "style": "danger"}
   ],
   "metadata": {
-    "kind": "assistant_text" | "command_result" | "approval_request" | "approval_resolved" | "diagnostic_warning" | "diagnostic_error"
+    "kind": "assistant_text" | "command_result" | "approval_request" | "approval_resolved" | "diagnostic_warning" | "diagnostic_error" | "turn_start" | "llm_request_start" | "stream_text" | "usage" | "agent_end" | "..."
   }
 }
 ```
@@ -220,7 +220,7 @@ Outbound to a chat client flows through **one ordered channel per peer**: a sing
 **Ordering and reliability are orthogonal**, carried on the *same* queue:
 
 - A **durable** frame (`assistant_text` / `approval_*` / `diagnostic_*`, see `wire/types.py:DURABLE_OUTBOUND_KINDS`) is first written to the per-peer SQLite outbox (the replay floor) and enqueued carrying its row id; the sender acks the row only after a successful write. On socket failure the row is left in the outbox (nacked for immediate re-lease) and replayed — in FIFO order, ahead of new live frames — when the peer reconnects (`WireServer._prefill_from_outbox`). This preserves **at-least-once**, idempotent on envelope `id`. A row's `attempts` advances once per reconnect-lease; a row that exceeds the attempt cap is dead-lettered at prefill rather than replayed forever. (No live retry loop exists — the sender exits on failure and waits for reconnect — so there is no backoff schedule to tune.)
-- An **ephemeral** frame (`stream_text` / `tool_call` / `agent_end` …) carries no row id, is never persisted, and is **best-effort**: under backpressure the queue sheds its *oldest ephemeral* item (durable items are never dropped — they are already on disk), bounding memory without ever losing a durable record or reordering survivors.
+- An **ephemeral** frame (`llm_request_start` / `stream_text` / `tool_call` / `usage` / `agent_end` …) carries no row id, is never persisted, and is **best-effort**: under backpressure the queue sheds its *oldest ephemeral* item (durable items are never dropped — they are already on disk), bounding memory without ever losing a durable record or reordering survivors.
 
 > **Why one channel.** v1/earlier-v2 split delivery into two paths — durable via the outbox/async worker, ephemeral written straight to the socket. They reordered relative to each other (the async-outbox round-trip lags the direct write), so a later-produced `agent_end` reliably overtook an earlier durable `assistant_text`. Unifying onto one FIFO fixes ordering at the source; the outbox is demoted to a persistence side-channel for reconnect replay, not a delivery path.
 

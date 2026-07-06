@@ -301,12 +301,17 @@ class _BgTool:
         forwarder: asyncio.Task[None] | None = None
         if signal is not None:
             forwarder = asyncio.create_task(_forward_abort(signal, abort))
+        inner_args, foreground_timeout = self._manager.prepare_foreground_call(
+            self.name, args
+        )
         task: asyncio.Task[ToolResult | ToolOutcome] = asyncio.create_task(
-            execute_tool_call(self._wrapped, args, signal=abort),
+            execute_tool_call(self._wrapped, inner_args, signal=abort),
             name=f"agentm-bg-inner-{self.name}",
         )
         try:
-            foreground_done, reason = await self._wait_foreground(task)
+            foreground_done, reason = await self._wait_foreground(
+                task, timeout=foreground_timeout
+            )
         except asyncio.CancelledError:
             if forwarder is not None:
                 forwarder.cancel()
@@ -332,15 +337,18 @@ class _BgTool:
         )
 
     async def _wait_foreground(
-        self, task: asyncio.Task[ToolResult | ToolOutcome]
+        self,
+        task: asyncio.Task[ToolResult | ToolOutcome],
+        *,
+        timeout: float,
     ) -> tuple[bool, str]:
         """Wait until the tool finishes, times out, or core inbox gets input."""
 
-        if self._manager.timeout <= 0:
+        if timeout <= 0:
             done, _pending = await asyncio.wait({task}, timeout=0)
-            return task in done, f"moved to background after {self._manager.timeout:g}s"
+            return task in done, f"moved to background after {timeout:g}s"
 
-        timeout_task = asyncio.create_task(asyncio.sleep(self._manager.timeout))
+        timeout_task = asyncio.create_task(asyncio.sleep(timeout))
         inbox_task = asyncio.create_task(self._manager.wait_inbox_nonempty())
         try:
             waiters: set[asyncio.Task[Any]] = {task, timeout_task, inbox_task}
@@ -353,7 +361,7 @@ class _BgTool:
                 if timeout_task in done:
                     return (
                         False,
-                        f"moved to background after {self._manager.timeout:g}s",
+                        f"moved to background after {timeout:g}s",
                     )
                 if inbox_task in done:
                     if inbox_task.result():
@@ -449,6 +457,40 @@ class _BgManager:
             if isinstance(tool, _BgTool):
                 continue
             tools[index] = _BgTool(tool, self)
+
+    def prepare_foreground_call(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> tuple[dict[str, Any], float]:
+        """Return inner args plus the foreground handoff timeout.
+
+        Shell-oriented models often pass a tiny ``timeout`` when they want a
+        long-running command to leave the foreground quickly. If that value is
+        handed straight to ``tool_bash`` the shell is killed before this atom can
+        detach it. Treat short shell timeouts as the foreground handoff window
+        while extending the inner shell timeout to this atom's background cap.
+        """
+
+        foreground_timeout = self.timeout
+        if tool_name not in {"bash", "shell"}:
+            return args, foreground_timeout
+
+        raw_timeout = args.get("timeout")
+        if raw_timeout is None:
+            return args, foreground_timeout
+        try:
+            requested_timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return args, foreground_timeout
+        if requested_timeout <= 0:
+            return args, foreground_timeout
+
+        foreground_timeout = min(requested_timeout, self.timeout)
+        if requested_timeout >= self.timeout:
+            return args, foreground_timeout
+
+        inner_args = dict(args)
+        inner_args["timeout"] = self.timeout
+        return inner_args, foreground_timeout
 
     # --- backgrounding -----------------------------------------------------
 

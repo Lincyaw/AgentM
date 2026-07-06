@@ -38,11 +38,8 @@ type (
 	// CompactSessionMsg generates a summary and compacts session history.
 	CompactSessionMsg struct{ AdditionalPrompt string }
 
-	// CopySessionToClipboardMsg copies the entire conversation to clipboard.
-	CopySessionToClipboardMsg struct{}
-
-	// CopyLastResponseToClipboardMsg copies the last assistant response to clipboard.
-	CopyLastResponseToClipboardMsg struct{}
+	// CopySessionToClipboardMsg copies Claude's latest assistant response to clipboard.
+	CopySessionToClipboardMsg struct{ Argument string }
 
 	// UndoSnapshotMsg restores files from the latest snapshot.
 	UndoSnapshotMsg struct{}
@@ -58,6 +55,12 @@ type (
 
 	// ExportSessionMsg exports the session to the specified file.
 	ExportSessionMsg struct{ Filename string }
+
+	// ShowExportDialogMsg opens the Claude-style export method picker.
+	ShowExportDialogMsg struct{}
+
+	// BackgroundSessionMsg backgrounds the current conversation when possible.
+	BackgroundSessionMsg struct{}
 
 	// OpenSessionBrowserMsg opens the session browser dialog.
 	OpenSessionBrowserMsg struct{}

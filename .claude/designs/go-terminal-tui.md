@@ -321,6 +321,7 @@ router (router.py), expressed as a switch:
 | Kind | Mutation |
 |---|---|
 | `turn_start` | New AssistantTurn block, phase→thinking |
+| `llm_request_start` | Remember turn→model for later usage/cost grouping |
 | `stream_text` | Append to active turn text buffer, mark dirty |
 | `stream_thinking` | Append to active turn thinking buffer, mark dirty |
 | `tool_call` | New ToolBlock in active turn |
@@ -426,8 +427,10 @@ to 128k.
 
 ### 6.13 Cost estimation
 
-Token counts × per-model pricing (a small hardcoded table: input $/1M,
-output $/1M). Updated on each `usage` frame. Displayed as `$this_turn / $session`.
+Token counts come from provider-reported `usage` frames. The terminal groups
+them by the model reported in the preceding `llm_request_start` frame; cost is
+displayed only when the gateway provides an estimate, so unpriced providers
+degrade to token-only summaries with `$0.0000` rather than guessed pricing.
 
 ## 7. Package structure
 

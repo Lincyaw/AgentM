@@ -11,7 +11,8 @@
 // Only the symbols the TUI references are exposed:
 //
 //	App, New, WithReadOnly,
-//	(*App).Run, CompactSession, ResolveInput, RunBangCommand, RunSkillFork,
+//	(*App).Run, CompactSession, Interrupt, ResolveInput, RunBangCommand, RunSkillFork,
+//	SetAutoCompact,
 //	UpdateSessionTitle, CurrentAgentSkills,
 //	CurrentAgentCommands, IsReadOnly, ShouldExitAfterFirstResponse,
 //	SkillCommandFork, Session,
@@ -20,8 +21,12 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -58,16 +63,30 @@ type Controller interface {
 	CompactSession(ctx context.Context, cancel context.CancelFunc, additionalPrompt string)
 	// Resume delivers a tool-confirmation decision to a waiting tool call.
 	Resume(req runtime.ResumeRequest)
+	// Interrupt asks the backend to stop the active turn.
+	Interrupt()
+	// CancelBackground asks the backend to stop a detached background task.
+	CancelBackground(taskID string)
 	// UpdateSessionTitle sets and persists the session title.
 	UpdateSessionTitle(ctx context.Context, title string) error
 	// RunBangCommand runs a shell command and surfaces its output.
-	RunBangCommand(ctx context.Context, command string)
+	RunBangCommand(ctx context.Context, cancel context.CancelFunc, command string)
 	// NewSession starts a fresh session on the backend.
 	NewSession()
+	// ClearSession starts a fresh backend session without echoing /new.
+	ClearSession()
 	// FirstMessage returns the queued first message, if any, to send on launch.
 	FirstMessage() (content string, ok bool)
 	// SwitchModel asks the backend to switch the active model profile by name.
 	SwitchModel(name string)
+	// SetAutoCompact toggles backend automatic context compaction for this session.
+	SetAutoCompact(enabled bool)
+	// SetPermissionRule applies a session-scoped permission rule on the backend.
+	SetPermissionRule(kind, pattern string)
+	// SetThinkingMode toggles extended thinking for subsequent submitted turns.
+	SetThinkingMode(enabled bool)
+	// SetThinkingLevel sets the backend thinking level for subsequent turns.
+	SetThinkingLevel(level string)
 }
 
 // UndoSnapshotResult reports the outcome of an undo/reset operation.
@@ -195,6 +214,49 @@ func (a *App) CompactSession(ctx context.Context, cancel context.CancelFunc, add
 	}
 }
 
+// HasController reports whether this App is backed by a live gateway/runtime
+// controller. Gateway-owned commands should let the backend decide whether the
+// requested action is possible because the local cagent session is only a UI
+// mirror.
+func (a *App) HasController() bool {
+	return a != nil && a.controller != nil
+}
+
+// SetAutoCompact toggles automatic context compaction on the backend session.
+func (a *App) SetAutoCompact(enabled bool) {
+	if a.controller != nil {
+		a.controller.SetAutoCompact(enabled)
+	}
+}
+
+// SetThinkingMode toggles extended thinking for subsequent submitted turns.
+func (a *App) SetThinkingMode(enabled bool) {
+	if a.controller != nil {
+		a.controller.SetThinkingMode(enabled)
+	}
+}
+
+// SetThinkingLevel sets the thinking level for subsequent submitted turns.
+func (a *App) SetThinkingLevel(level string) {
+	if a.controller != nil {
+		a.controller.SetThinkingLevel(level)
+	}
+}
+
+// Interrupt asks the backend to stop the active turn.
+func (a *App) Interrupt() {
+	if a.controller != nil {
+		a.controller.Interrupt()
+	}
+}
+
+// CancelBackground asks the backend to stop a detached background task.
+func (a *App) CancelBackground(taskID string) {
+	if a.controller != nil {
+		a.controller.CancelBackground(taskID)
+	}
+}
+
 // ResolveInput resolves user input (skill commands first, then agent commands)
 // into the content ready to send to the agent. Stub: returns the input unchanged.
 func (a *App) ResolveInput(ctx context.Context, input string) string {
@@ -204,9 +266,9 @@ func (a *App) ResolveInput(ctx context.Context, input string) string {
 
 // RunBangCommand runs a shell command and surfaces its output as a runtime
 // event. Delegates to the wire-backed controller.
-func (a *App) RunBangCommand(ctx context.Context, command string) {
+func (a *App) RunBangCommand(ctx context.Context, cancel context.CancelFunc, command string) {
 	if a.controller != nil {
-		a.controller.RunBangCommand(ctx, command)
+		a.controller.RunBangCommand(ctx, cancel, command)
 	}
 }
 
@@ -237,8 +299,8 @@ func (a *App) CurrentAgentSkills() []skills.Skill {
 }
 
 // SetSkills records the skill catalog projected from the welcome handshake.
-// Each entry carries a name and a one-line summary (the wire protocol does not
-// carry skill bodies, so only the listing fields are populated).
+// Entries carry listing metadata such as name, summary, and source directory;
+// the wire protocol does not carry skill bodies.
 func (a *App) SetSkills(skillList []skills.Skill) {
 	a.agentInfoMu.Lock()
 	defer a.agentInfoMu.Unlock()
@@ -257,6 +319,15 @@ func (a *App) SetAgentInfo(toolNames, commandNames, modelNames []string, activeM
 	a.commandNames = slices.Clone(commandNames)
 	a.modelNames = slices.Clone(modelNames)
 	a.activeModel = activeModel
+}
+
+// CurrentModel returns the active model profile last advertised by session_ready
+// or model-switch acknowledgement events.
+func (a *App) CurrentModel(ctx context.Context) string {
+	_ = ctx
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	return a.activeModel
 }
 
 // CurrentAgentCommands returns the commands for the active agent, sourced from
@@ -412,6 +483,12 @@ func (a *App) NewSession() {
 	}
 }
 
+func (a *App) ClearSession() {
+	if a.controller != nil {
+		a.controller.ClearSession()
+	}
+}
+
 // SwitchAgent switches the active agent. Stub: returns nil until the adapter
 // takes over.
 func (a *App) SwitchAgent(agentName string) error {
@@ -466,16 +543,180 @@ func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
 		choices = append(choices, runtime.ModelChoice{
 			Name:      name,
 			Ref:       name,
-			IsCurrent: name == a.activeModel,
+			IsCurrent: modelNameMatchesActive(name, a.activeModel),
 		})
 	}
 	return choices
 }
 
-// PermissionsInfo returns the team-level permission patterns. Stub: returns
-// nil until the adapter takes over.
+func modelNameMatchesActive(name, active string) bool {
+	name = normalizeModelName(name)
+	active = normalizeModelName(active)
+	if name == "" || active == "" {
+		return false
+	}
+	if name == active {
+		return true
+	}
+	switch active {
+	case "opus", "opus1m", "opus48", "opus481m", "opus481mcontext", "claudeopus48", "claudeopus481m":
+		return name == "opus" || name == "opus1m" || name == "claudeopus48" || name == "claudeopus481m"
+	case "sonnet", "sonnet5", "claudesonnet5":
+		return name == "sonnet" || name == "claudesonnet5"
+	case "sonnet1m", "sonnet51m", "sonnet51mcontext", "claudesonnet51m":
+		return name == "sonnet1m" || name == "sonnet51m" || name == "claudesonnet51m"
+	case "haiku", "haiku45", "claudehaiku45":
+		return name == "haiku" || name == "claudehaiku45"
+	default:
+		return false
+	}
+}
+
+func normalizeModelName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(
+		" ", "",
+		"-", "",
+		"_", "",
+		".", "",
+		"(", "",
+		")", "",
+	)
+	value = replacer.Replace(value)
+	value = strings.TrimPrefix(value, "default")
+	return value
+}
+
+// PermissionsInfo returns the current session's permission patterns.
 func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
-	return nil
+	if a.session == nil || a.session.Permissions == nil {
+		return nil
+	}
+	return &runtime.PermissionsInfo{
+		Allow: slices.Clone(a.session.Permissions.Allow),
+		Ask:   slices.Clone(a.session.Permissions.Ask),
+		Deny:  slices.Clone(a.session.Permissions.Deny),
+	}
+}
+
+// AddPermissionRule records a permission rule on the current session.
+func (a *App) AddPermissionRule(kind, pattern string) {
+	if a.session == nil || pattern == "" {
+		return
+	}
+	normalizedKind := normalizePermissionRuleKind(kind)
+	if a.session.Permissions == nil {
+		a.session.Permissions = &session.PermissionsConfig{}
+	}
+	switch normalizedKind {
+	case "ask":
+		a.session.Permissions.Ask = appendUniqueString(a.session.Permissions.Ask, pattern)
+	case "deny":
+		a.session.Permissions.Deny = appendUniqueString(a.session.Permissions.Deny, pattern)
+	default:
+		a.session.Permissions.Allow = appendUniqueString(a.session.Permissions.Allow, pattern)
+	}
+	if a.controller != nil {
+		a.controller.SetPermissionRule(normalizedKind, pattern)
+	}
+}
+
+// SyncPermissionRules applies the session's loaded permission rules to the
+// live backend approval policy.
+func (a *App) SyncPermissionRules() {
+	if a == nil || a.controller == nil || a.session == nil || a.session.Permissions == nil {
+		return
+	}
+	for _, pattern := range a.session.Permissions.Allow {
+		a.controller.SetPermissionRule("allow", pattern)
+	}
+	for _, pattern := range a.session.Permissions.Ask {
+		a.controller.SetPermissionRule("ask", pattern)
+	}
+	for _, pattern := range a.session.Permissions.Deny {
+		a.controller.SetPermissionRule("deny", pattern)
+	}
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if slices.Contains(values, value) {
+		return values
+	}
+	return append(values, value)
+}
+
+func normalizePermissionRuleKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "ask":
+		return "ask"
+	case "deny":
+		return "deny"
+	default:
+		return "allow"
+	}
+}
+
+// LoadPermissionSettings reads Claude Code-compatible permission settings from
+// user, project, and project-local settings files. Missing or malformed files
+// are ignored so a bad Claude settings file cannot prevent AG startup.
+func LoadPermissionSettings(workingDir string) *session.PermissionsConfig {
+	if strings.TrimSpace(workingDir) == "" {
+		workingDir, _ = os.Getwd()
+	}
+	var files []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		files = append(files, filepath.Join(home, ".claude", "settings.json"))
+	}
+	if workingDir != "" {
+		files = append(files,
+			filepath.Join(workingDir, ".claude", "settings.json"),
+			filepath.Join(workingDir, ".claude", "settings.local.json"),
+		)
+	}
+
+	perms := &session.PermissionsConfig{}
+	for _, path := range files {
+		mergePermissionSettingsFile(perms, path)
+	}
+	if len(perms.Allow) == 0 && len(perms.Ask) == 0 && len(perms.Deny) == 0 {
+		return nil
+	}
+	return perms
+}
+
+type permissionSettingsFile struct {
+	Permissions permissionSettingsBlock `json:"permissions"`
+}
+
+type permissionSettingsBlock struct {
+	Allow []string `json:"allow"`
+	Ask   []string `json:"ask"`
+	Deny  []string `json:"deny"`
+}
+
+func mergePermissionSettingsFile(dst *session.PermissionsConfig, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return
+	}
+	var file permissionSettingsFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return
+	}
+	dst.Allow = appendUniqueStrings(dst.Allow, file.Permissions.Allow)
+	dst.Ask = appendUniqueStrings(dst.Ask, file.Permissions.Ask)
+	dst.Deny = appendUniqueStrings(dst.Deny, file.Permissions.Deny)
+}
+
+func appendUniqueStrings(dst, src []string) []string {
+	for _, value := range src {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		dst = appendUniqueString(dst, value)
+	}
+	return dst
 }
 
 // CurrentAgentTools returns the tools available to the active agent, sourced
@@ -509,9 +750,15 @@ func (a *App) LookupCommand(ctx context.Context, userInput string) (types.Comman
 	return types.Command{}, "", false
 }
 
-// TrackCurrentAgentModel records the active agent's current model. Stub: no-op.
+// TrackCurrentAgentModel records the active agent's current model.
 func (a *App) TrackCurrentAgentModel(model string) {
-	_ = model
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	a.activeModel = model
 }
 
 // PlainTextTranscript renders the session as plain text. Stub: returns the
