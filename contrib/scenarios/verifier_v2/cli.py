@@ -22,6 +22,44 @@ from contrib.scenarios.verifier.prepare import prepare_case
 REPO = Path(__file__).parents[3]
 WORKFLOW_SCRIPT = Path(__file__).parent / "workflow.py"
 
+_ENTRY_KEYWORDS = {"frontend", "ui", "dashboard", "gateway", "proxy", "loadgenerator"}
+
+
+def _detect_entry_services(data_dir: Path, graph: dict[str, list[list[str]]]) -> list[str]:
+    """Detect entry services from trace data + keyword fallback.
+
+    Primary signal: services with root spans (parent_span_id = '').
+    Secondary: keyword matching on service names in the call graph.
+    """
+    root_services: set[str] = set()
+    normal_parquet = data_dir / "normal_traces.parquet"
+    if normal_parquet.exists():
+        try:
+            import duckdb
+
+            conn = duckdb.connect(":memory:")
+            path_str = normal_parquet.as_posix().replace("'", "''")
+            rows = conn.execute(
+                f"SELECT DISTINCT service_name FROM read_parquet('{path_str}') "
+                "WHERE parent_span_id = ''"
+            ).fetchall()
+            root_services = {r[0] for r in rows}
+            conn.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    all_services = set(graph.keys())
+    for neighbors in graph.values():
+        for info in neighbors:
+            if info:
+                all_services.add(str(info[0]))
+    keyword_services = {
+        s for s in all_services if any(kw in s.lower() for kw in _ENTRY_KEYWORDS)
+    }
+
+    combined = root_services | keyword_services
+    return sorted(combined & all_services) if combined else []
+
 _WORKFLOW_EXTENSIONS = [
     ("agentm.extensions.builtin.operations", {"backend": "local"}),
     ("agentm.extensions.builtin.retry_policy", {}),
@@ -125,8 +163,8 @@ def run(
     # Adapt args for v2 schema
     workflow_args["max_parallel"] = max_parallel
     workflow_args["max_retries"] = max_retries
-    workflow_args["entry_services"] = list(
-        workflow_args.get("entry_services", [])
+    workflow_args["entry_services"] = _detect_entry_services(
+        case_dir, workflow_args.get("graph", {}),
     )
 
     result = asyncio.run(_run_workflow(workflow_args, out_dir))
@@ -191,6 +229,9 @@ def batch(
                 max_parallel_tasks=max_parallel,
             )
             workflow_args["max_parallel"] = max_parallel
+            workflow_args["entry_services"] = _detect_entry_services(
+                case_dir, workflow_args.get("graph", {}),
+            )
 
             result = asyncio.run(_run_workflow(workflow_args, out_dir))
             (out_dir / "result.json").write_text(

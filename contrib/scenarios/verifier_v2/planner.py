@@ -53,7 +53,7 @@ def expand_frontier(
 
     tasks: list[VerificationTask] = []
     for from_node in expand_from:
-        if from_node in case.infra_set or from_node in case.entry_services:
+        if from_node in case.infra_set:
             continue
 
         for neighbor, rel_type in _neighbors(case.graph, from_node):
