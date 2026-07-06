@@ -416,7 +416,7 @@ requirements:
     code:
       - path: src/agentm/core/abi/operations.py
       - path: src/agentm/core/abi/resource.py
-      - path: src/agentm/extensions/builtin/_operations/local.py
+      - path: src/agentm/extensions/builtin/writer/local.py
       - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/extensions/builtin/file_tools.py
       - path: src/agentm/core/lib/read_state.py
@@ -1443,7 +1443,7 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: src/agentm/extensions/builtin/_operations/local.py
+      - path: src/agentm/extensions/builtin/bash/local.py
       - path: src/agentm/extensions/builtin/background_exec.py
     docs:
       - path: .claude/designs/session-inbox.md
@@ -1491,7 +1491,7 @@ requirements:
       - path: pyproject.toml
       - path: uv.lock
       - path: src/agentm/extensions/builtin/operations.py
-      - path: src/agentm/extensions/builtin/_operations/agent_env.py
+      - path: src/agentm/extensions/builtin/_agent_env.py
       - path: contrib/scenarios/sandbox/manifest.yaml
       - path: contrib/evals/bench.py
       - path: contrib/evals/benchmarks/base.py
