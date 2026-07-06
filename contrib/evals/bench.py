@@ -670,7 +670,7 @@ def mirror(
         typer.echo("No images to mirror (adapter has no source images).", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Mirror: {len(mirrorable)} images | {bench} → {registry}/{prefix}-*:{tag}")
+    typer.echo(f"Mirror: {len(mirrorable)} images | {bench} → {registry}/")
 
     def _mirror_one(t: TaskSpec, src: str) -> tuple[str, bool, str]:
         dst = adapter.get_image(t, registry, prefix, tag)
