@@ -50,6 +50,8 @@ def _detect_entry_services(data_dir: Path, graph: dict[str, list[list[str]]]) ->
             ).fetchall()
             for svc, root_cnt, total_cnt in rows:
                 ratio = root_cnt / total_cnt if total_cnt else 0
+                if total_cnt < 50:
+                    continue
                 if root_cnt >= 100 or ratio > 0.2:
                     root_services.add(svc)
             conn.close()
