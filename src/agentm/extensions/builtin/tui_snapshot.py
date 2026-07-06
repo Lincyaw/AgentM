@@ -111,7 +111,10 @@ class _TuiSnapshotRuntime:
                     "the TUI the user sees. The dump is written when the user "
                     "runs /dump in the client. Use this to diagnose rendering, "
                     "layout, or interaction bugs you cannot infer from the "
-                    "conversation alone."
+                    "conversation alone. The result starts with a one-line "
+                    "freshness header (dump path + age in seconds, plus a "
+                    "stale warning past ~2 min) — it is not part of the "
+                    "screen content."
                 ),
                 parameters=_TuiSnapshotArgs,
                 fn=self.execute,

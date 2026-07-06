@@ -137,9 +137,22 @@ _TRACE_QUERY_EXT: Final[tuple[str, dict[str, Any]]] = (
 
 
 class _CheckerVerdictArgs(BaseModel):
-    met: bool
-    reason: str
-    unexplained: list[str] = []
+    met: bool = Field(
+        description=(
+            "True only if the condition is fully satisfied with trajectory "
+            "evidence."
+        ),
+    )
+    reason: str = Field(
+        description="Concrete justification citing the trajectory.",
+    )
+    unexplained: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Condition sub-requirements you could not confirm from the "
+            "trajectory."
+        ),
+    )
 
 
 async def _checker_submit_verdict(args: dict[str, Any]) -> ToolTerminate:

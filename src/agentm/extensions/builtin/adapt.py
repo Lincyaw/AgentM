@@ -1155,8 +1155,12 @@ class _AdaptRuntime:
                     "Install and activate a new runtime atom from inline source. Use "
                     "this when the full source is already in the tool arguments. "
                     "On ok=true, any tools registered by the atom are available in "
-                    "the current session. Prefer adapt_install_file when you wrote "
-                    "the source as a workspace file."
+                    "the current session, and the source is persisted per the scope "
+                    "parameter (default: <cwd>/.agentm/atoms, auto-loaded in future "
+                    "sessions). Scenario-scope installs can partially succeed (atom "
+                    "live but manifest pin failed -> ok=false with a `partial` "
+                    "field). Prefer adapt_install_file when you wrote the source as "
+                    "a workspace file."
                 ),
                 parameters=_InstallParams,
                 fn=self._install,
@@ -1168,8 +1172,12 @@ class _AdaptRuntime:
                 description=(
                     "Install and activate a new runtime atom from a workspace source "
                     "file. Use this after writing or editing atom source with file/bash "
-                    "tools. On ok=true, the runtime has validated and loaded it, and "
-                    "any new tools it registers are available in the current session."
+                    "tools. On ok=true, the runtime has validated and loaded it, any "
+                    "new tools it registers are available in the current session, and "
+                    "the atom is persisted per the scope parameter (default: "
+                    "<cwd>/.agentm/atoms, auto-loaded in future sessions). "
+                    "Scenario-scope installs can partially succeed (atom live but "
+                    "manifest pin failed -> ok=false with a `partial` field)."
                 ),
                 parameters=_InstallFileParams,
                 fn=self._install_file,
@@ -1206,8 +1214,10 @@ class _AdaptRuntime:
                 name="adapt_unload",
                 description=(
                     "Remove a loaded runtime atom from the current session when it is "
-                    "misleading, noisy, or no longer useful. The source file is kept "
-                    "unless a scenario manifest pin is explicitly removed."
+                    "misleading, noisy, or no longer useful. The source file is never "
+                    "deleted by this tool — delete it separately for permanent "
+                    "removal. unpin_manifest only removes the atom's `local:` entry "
+                    "from the scenario manifest (no effect for user-scope atoms)."
                 ),
                 parameters=_UnloadParams,
                 fn=self._unload,

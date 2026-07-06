@@ -274,19 +274,21 @@ def _check_path_allowed(
 
 class _ReadArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    path: str = Field(description="Absolute path to the file to read.")
+    path: str = Field(
+        description="Path to the file to read (absolute, or relative to the session cwd)."
+    )
     offset: int | None = Field(
         default=None,
         description=(
-            "1-based line number to start reading from. "
-            "Only provide if the file is too large to read at once."
+            "1-based line number to start reading from. Providing offset "
+            "and/or limit lifts the size gate on large files."
         ),
     )
     limit: int | None = Field(
         default=None,
         description=(
-            "Number of lines to read. "
-            "Only provide if the file is too large to read at once."
+            "Number of lines to read. Providing offset and/or limit lifts "
+            "the size gate on large files."
         ),
     )
 
@@ -312,7 +314,13 @@ class _EditArgs(BaseModel):
         default=None,
         description="1-based end line for line-range replacement (inclusive).",
     )
-    replace_all: bool = Field(default=False)
+    replace_all: bool = Field(
+        default=False,
+        description=(
+            "Replace every occurrence of old_string. Without this, "
+            "old_string must match exactly once or the edit is rejected."
+        ),
+    )
     rationale: str = Field(default="agent edit via file_tools")
 
 
@@ -501,7 +509,13 @@ class _FileToolsRuntime:
                     "Read a UTF-8 text file from disk. "
                     "By default reads the entire file. "
                     f"Files larger than {self._max_size_bytes} bytes require "
-                    "offset and limit parameters."
+                    "offset and/or limit parameters. "
+                    "Output starts with a header line giving the total or "
+                    "shown line range, followed by 1-based line-numbered "
+                    "content (`N\\tcontent`) — the same numbers the edit "
+                    "tool's start_line/end_line refer to. "
+                    "Known binary formats (images, archives, pdf, ...) are "
+                    "rejected; inspect those via bash instead."
                 ),
                 parameters=_ReadArgs,
                 fn=self._read_execute,
@@ -687,9 +701,17 @@ class _FileToolsRuntime:
                 name="edit",
                 description=(
                     "Edit a UTF-8 text file. Two modes:\n"
-                    "1. String replacement: provide old_string + new_string.\n"
-                    "2. Line-range replacement: provide start_line + end_line + new_string "
-                    "(1-based, inclusive). You MUST read the file first to see line numbers."
+                    "1. String replacement: provide old_string + new_string. "
+                    "old_string must match exactly once unless replace_all "
+                    "is set.\n"
+                    "2. Line-range replacement: provide start_line + end_line "
+                    "+ new_string (1-based, inclusive).\n"
+                    "You MUST read the file first (both modes); an edit whose "
+                    "prior read is stale or partial is rejected. An edit that "
+                    "deletes many more lines than the match explains is also "
+                    "rejected — use line-range mode for large intentional "
+                    "deletions. Returns a line-numbered diff snippet of the "
+                    "changed region."
                 ),
                 parameters=_EditArgs,
                 fn=self._edit_execute,

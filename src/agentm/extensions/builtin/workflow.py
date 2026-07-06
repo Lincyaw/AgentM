@@ -130,8 +130,10 @@ class _WorkflowRuntime:
                     "per-child detail is noise. Names: agent, parallel, pipeline, "
                     "budget, args, json, log, phase. The script runs in a curated "
                     "namespace (data builtins only; no import / open / time / "
-                    "random). agent() results are journaled by hash(prompt, args) "
-                    "so re-running a workflow resumes from cache. "
+                    "random). agent() results are journaled by a hash of the "
+                    "prompt plus the agent's options (schema/scenario/model/"
+                    "...; retry/timeout and the top-level args payload are "
+                    "excluded), so re-running a workflow resumes from cache. "
                     "agent(prompt, schema={...}) returns a parsed dict conforming "
                     "to the JSON Schema."
                 ),

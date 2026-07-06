@@ -300,7 +300,10 @@ class _TaskTrackingRuntime:
                 description=(
                     "Create a structured task to track progress on a multi-step "
                     "piece of work. Use for complex work that benefits from "
-                    "decomposition and progress tracking."
+                    "decomposition and progress tracking. Returns the created "
+                    "task including its assigned id — use that id with "
+                    "task_update/task_get. Tasks are in-memory and "
+                    "session-scoped; they do not persist across sessions."
                 ),
                 parameters=pydantic_to_tool_schema(_CreateParams),
                 fn=self.create,
@@ -312,7 +315,9 @@ class _TaskTrackingRuntime:
                 description=(
                     "Update a task's status, subject, description, or "
                     "dependencies. Set status to 'in_progress' when starting "
-                    "work, 'completed' when done, 'deleted' to remove."
+                    "work, 'completed' when done, 'deleted' to remove. "
+                    "Completing or deleting a task automatically removes it "
+                    "from other tasks' blocked_by lists, unblocking them."
                 ),
                 parameters=pydantic_to_tool_schema(_UpdateParams),
                 fn=self.update,

@@ -225,8 +225,8 @@ class _TraceQueryRuntime:
                 description=(
                     "List turn-level summaries of the parent session's trajectory. "
                     "Shows which tools were called each turn with token counts. "
-                    "Use this first to get an overview, then drill into specific "
-                    "turns with read_turn."
+                    "Use this first to get an overview, then page through the "
+                    "messages with read_turn."
                 ),
                 parameters=_ListTurnsArgs,
                 fn=self.list_turns,
@@ -262,10 +262,12 @@ class _TraceQueryRuntime:
             FunctionTool(
                 name="read_turn",
                 description=(
-                    "Read messages from the parent session's trajectory. "
-                    "Filter by role (user/assistant/tool_result/system) and "
-                    "paginate with offset/limit. Use this to inspect what the "
-                    "agent actually did and what results it received."
+                    "Page through the parent session's messages. There is NO "
+                    "turn selector — offset/limit paginate the flat message "
+                    "sequence across the whole trajectory, optionally "
+                    "filtered by role (user/assistant/tool_result/system). "
+                    "Use this to inspect what the agent actually did and "
+                    "what results it received."
                 ),
                 parameters=_ReadTurnArgs,
                 fn=self.read_turn,
@@ -323,9 +325,10 @@ class _TraceQueryRuntime:
                 name="get_tool_calls",
                 description=(
                     "Query tool calls from the parent session. "
-                    "Optionally filter by tool name. Shows arguments and result "
-                    "previews. Use this to verify what commands the agent "
-                    "actually ran and what output they produced."
+                    "Optionally filter by exact tool name. Shows arguments "
+                    "and result previews (first text block, capped at ~500 "
+                    "chars — not full output). Use this to verify what "
+                    "commands the agent actually ran and what they produced."
                 ),
                 parameters=_GetToolCallsArgs,
                 fn=self.get_tool_calls,

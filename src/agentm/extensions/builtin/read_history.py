@@ -82,9 +82,12 @@ class _ReadHistoryRuntime:
             FunctionTool(
                 name="read_history",
                 description=(
-                    "Return the verbatim messages of a past turn (or turn range) "
-                    "by 1-based index — use it to recover detail behind a [Turn N] "
-                    "reference in a compaction summary. Args: start (required), "
+                    "Return the messages of a past turn (or turn range) by "
+                    "1-based index, rendered as a role-tagged transcript — "
+                    "use it to recover detail behind a [Turn N] reference in "
+                    "a compaction summary. Long tool results and the overall "
+                    "response are token-capped; on a truncation marker, "
+                    "request a narrower turn range. Args: start (required), "
                     "end (optional, inclusive)."
                 ),
                 parameters=_ReadHistoryArgs,

@@ -930,7 +930,9 @@ class _CreateMonitorParams(BaseModel):
     watch: str | None = Field(
         default=None,
         description=(
-            "Bus channel name to subscribe to (e.g. 'tool_call', 'agent_end')."
+            "Bus channel name to subscribe to (e.g. 'tool_call', "
+            "'tool_result'). Kernel control/lifecycle channels (agent_start, "
+            "agent_end, context, turn_*, ...) are rejected."
         ),
     )
     condition: str | None = Field(
@@ -950,7 +952,10 @@ class _CreateMonitorParams(BaseModel):
     )
     poll_interval: float | None = Field(
         default=None,
-        description="Seconds between condition monitor fires.",
+        description=(
+            "Seconds between condition monitor fires. Values below the "
+            "configured minimum (default 5s) are clamped up to it."
+        ),
     )
     recurring: bool = Field(
         default=True,
@@ -1019,7 +1024,13 @@ class _MonitorRuntime:
         self._api.register_tool(
             FunctionTool(
                 name="list_monitors",
-                description="List every live monitor (id, kind, watch, status).",
+                description=(
+                    "List every live monitor with its id, kind, status and "
+                    "mode-specific fields (watch channel, condition + "
+                    "poll_interval, or cron schedule details). Durable "
+                    "gateway cron schedules are listed alongside in-memory "
+                    "monitors."
+                ),
                 parameters=pydantic_to_tool_schema(_ListMonitorsParams),
                 fn=self._manager.list_monitors,
             )
@@ -1028,8 +1039,10 @@ class _MonitorRuntime:
             FunctionTool(
                 name="cancel_monitor",
                 description=(
-                    "Cancel one monitor by id. Cancels the wakeup task or "
-                    "unsubscribes the channel handler — never touches any shared "
+                    "Cancel one monitor by id. Cancels the wakeup task, "
+                    "condition poller, or channel subscription; for a "
+                    "persistent cron monitor (schedule:<id>) this DELETES the "
+                    "durable gateway schedule. Never touches any shared "
                     "session signal. Idempotent."
                 ),
                 parameters=pydantic_to_tool_schema(_CancelMonitorParams),

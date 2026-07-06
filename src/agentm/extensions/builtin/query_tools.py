@@ -340,8 +340,11 @@ class _QueryToolsRuntime:
                 description=(
                     "Filter local observability JSONL traces from "
                     "$AGENTM_HOME/observability (or AGENTM_OBSERVABILITY_DIR) "
-                    "by task_class and optional fingerprint. Returns summaries "
-                    "only — fetch full bodies via the `read` tool."
+                    "by task_class and optional fingerprint. Returns up to n "
+                    "(default 50) summaries, newest first, each including "
+                    "the trace's file path — read that path with the file "
+                    "read tool for the full body. A missing directory "
+                    "yields an empty list, not an error."
                 ),
                 parameters=_TracesArgs,
                 fn=self._traces_execute,
@@ -353,7 +356,10 @@ class _QueryToolsRuntime:
                 description=(
                     "Return the Pareto frontier of evolved candidates for a "
                     "scenario. Each frontier entry lists the tasks the "
-                    "candidate uniquely wins on plus a score summary."
+                    "candidate uniquely wins on (strict argmax — ties count "
+                    "for nobody) plus a score summary; the result also "
+                    "includes the dominated candidate ids. Requires "
+                    "target_scenario unless a default was configured."
                 ),
                 parameters=_CandidatesArgs,
                 fn=self._candidates_execute,
@@ -363,9 +369,11 @@ class _QueryToolsRuntime:
             FunctionTool(
                 name="query_module_feedback",
                 description=(
-                    "Return the recent per-module feedback distribution from "
-                    "eval-run summaries. Surfaces grader fingering so the tuner "
-                    "can round-robin its mutation target."
+                    "Return a map of module name -> recent free-text grader "
+                    "feedback strings, aggregated from the last n eval-run "
+                    "summaries (n counts runs scanned, default 20). Use it "
+                    "to see which modules graders blame most, e.g. to pick "
+                    "the next mutation target."
                 ),
                 parameters=_FeedbackArgs,
                 fn=self._feedback_execute,

@@ -97,8 +97,9 @@ class _SaveArgs(BaseModel):
     )
     description: str = Field(
         description=(
-            "One-line relevance hint shown in MEMORY.md index. Used for "
-            "future memory_search ranking."
+            "One-line relevance hint shown in the MEMORY.md index and "
+            "matched by memory_search (substring). Must be a single line — "
+            "newlines are rejected."
         ),
     )
     content: str = Field(description="Memory body. Markdown is fine.")
@@ -108,7 +109,8 @@ class _ReadArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(
         description=(
-            "Memory name (without the type_ prefix or .md extension). "
+            "Bare memory name — the part after 'type/' in the index, "
+            "without the type_ prefix or .md extension. "
             "Increments the access counter on success."
         ),
     )
@@ -264,7 +266,8 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             name="memory_save",
             description=(
                 "Persist a typed memory (feedback/project/user/reference) "
-                "into .agentm/memory/. Updates MEMORY.md index."
+                "into .agentm/memory/. Updates MEMORY.md index. Saving with "
+                "an existing type+name silently overwrites that memory."
             ),
             parameters=_SaveArgs,
             fn=_save,
@@ -275,7 +278,8 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         FunctionTool(
             name="memory_read",
             description=(
-                "Read a memory's body by name. Increments access counter so "
+                "Read a memory by name — returns the full file (YAML "
+                "frontmatter + body). Increments the access counter so "
                 "evolution can later identify hot/cold memories."
             ),
             parameters=_ReadArgs,

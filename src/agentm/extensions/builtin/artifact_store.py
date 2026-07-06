@@ -360,9 +360,22 @@ class ArtifactStore:
 
 
 class _ArtifactReadRange(BaseModel):
-    mode: str = Field(description="Range mode: 'bytes' or 'lines'.")
-    start: int = Field(ge=0, description="Start offset (byte or line).")
-    end: int = Field(ge=0, description="End offset (byte or line).")
+    """Provide exactly ONE of the four fields."""
+
+    lines: list[int] | None = Field(
+        default=None,
+        description="[start, end] line range, 1-based inclusive.",
+    )
+    bytes: list[int] | None = Field(
+        default=None,
+        description="[start, end] byte range, 0-based, end exclusive.",
+    )
+    head: int | None = Field(
+        default=None, ge=1, description="First N lines."
+    )
+    tail: int | None = Field(
+        default=None, ge=1, description="Last N lines."
+    )
 
 
 class _ArtifactWriteParams(BaseModel):
@@ -427,10 +440,12 @@ class _ArtifactStoreRuntime:
             FunctionTool(
                 name="artifact_write",
                 description=(
-                    "Create a new immutable artifact and return its id. "
-                    "Append-only — cannot overwrite existing artifacts; each call "
-                    "mints a new id. Artifacts are shared across parent and child "
-                    "sessions in this session tree."
+                    "Create a new immutable artifact and return "
+                    "{artifact_id, path}. kind and title are required and "
+                    "non-empty. Append-only — cannot overwrite existing "
+                    "artifacts; each call mints a new id. Artifacts are "
+                    "shared across parent and child sessions in this "
+                    "session tree."
                 ),
                 parameters=pydantic_to_tool_schema(_ArtifactWriteParams),
                 fn=self.write,
@@ -440,7 +455,10 @@ class _ArtifactStoreRuntime:
             FunctionTool(
                 name="artifact_read",
                 description=(
-                    "Read one artifact by id, optionally with a byte/line range."
+                    "Read one artifact by id. Without a range the body is "
+                    "truncated to an inline cap (default 8 KB) with a marker; "
+                    "pass a range with exactly one of lines/bytes/head/tail "
+                    "to read a specific slice."
                 ),
                 parameters=pydantic_to_tool_schema(_ArtifactReadParams),
                 fn=self.read,
@@ -449,7 +467,12 @@ class _ArtifactStoreRuntime:
         self._api.register_tool(
             FunctionTool(
                 name="artifact_list",
-                description="List artifact metadata with simple filters.",
+                description=(
+                    "List artifact metadata, newest first (default limit 50). "
+                    "Filters: kind, tags (AND/subset), created_by_task, since "
+                    "(unix ts or ISO-8601). Rows include id, kind, title, "
+                    "path, created_by, tags, size_bytes."
+                ),
                 parameters=pydantic_to_tool_schema(_ArtifactListParams),
                 fn=self.list_artifacts,
             )
@@ -457,7 +480,11 @@ class _ArtifactStoreRuntime:
         self._api.register_tool(
             FunctionTool(
                 name="artifact_grep",
-                description="Regex-search text artifacts and return snippets.",
+                description=(
+                    "Search text artifacts line-by-line with a Python regex; "
+                    "returns up to max_hits hits (default 20), each with a "
+                    "few context lines: {id, kind, title, line_no, snippet}."
+                ),
                 parameters=pydantic_to_tool_schema(_ArtifactGrepParams),
                 fn=self.grep,
             )
@@ -547,7 +574,11 @@ def _read_default(raw: bytes, cap: int) -> str:
 def _read_range(raw: bytes, range_arg: Any) -> str:
     if not isinstance(range_arg, dict):
         raise ValueError("range must be an object")
-    keys = [key for key in ("lines", "bytes", "head", "tail") if key in range_arg]
+    keys = [
+        key
+        for key in ("lines", "bytes", "head", "tail")
+        if range_arg.get(key) is not None
+    ]
     if len(keys) != 1:
         raise ValueError(
             "range must contain exactly one of lines, bytes, head, or tail"

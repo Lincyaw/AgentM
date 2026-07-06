@@ -138,9 +138,14 @@ class _AtomManagementRuntime:
                 name="install_atom",
                 description=(
                     "Install a new agent-authored atom. Source must be a "
-                    "single §11-compliant Python module with a top-level "
-                    "MANIFEST and install() function. The atom is registered "
-                    "in the live session and on disk so it survives restarts."
+                    "single self-contained Python module with a top-level "
+                    "MANIFEST and install() function (contract details in "
+                    "the source parameter). The source is validated first: "
+                    "non-compliant source is rejected with an error and "
+                    "nothing is installed. On success the atom is registered "
+                    "in the live session and persisted on disk (it survives "
+                    "restarts), and the result reports the install path and "
+                    "content hash."
                 ),
                 parameters=_InstallArgs,
                 fn=self.install_atom,

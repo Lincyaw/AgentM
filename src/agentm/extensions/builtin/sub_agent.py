@@ -72,8 +72,8 @@ class SubAgentConfig(PydanticBaseModel):
 MANIFEST = ExtensionManifest(
     name="sub_agent",
     description=(
-        "Spawn nested AgentSession workers without core support. C18: keep this "
-        "atom as one file until it reaches 1500 LOC; no split in issue #87."
+        "Spawn nested AgentSession workers: dispatch_agent / "
+        "inject_instruction / abort_task over background child sessions."
     ),
     registers=(
         "tool:dispatch_agent",
@@ -968,15 +968,21 @@ class _SubAgentRuntime:
             FunctionTool(
                 name="dispatch_agent",
                 description=(
-                    "Spawn a child AgentSession and return its task id immediately "
-                    "— the child runs in the background. Its result arrives later "
-                    "in your inbox as a notification; you will be notified "
-                    "automatically when it finishes, so you do not need to "
-                    "repeatedly check its status. Pass subagent_type "
-                    "for a named persona (system prompt + tool allowlist applied "
-                    "to the child). Use inject_instruction to guide it mid-run, "
-                    "abort_task to stop it. Fails if max_workers children are "
-                    "already running."
+                    "Spawn a child AgentSession — returns {task_id, "
+                    'child_session_id, status: "running", purpose} '
+                    "immediately and the child runs in the background. Its "
+                    "result arrives later in your inbox as a "
+                    "<subagent_result> block containing the child's final "
+                    "summary and any artifacts it produced; you are notified "
+                    "automatically, so do not poll. subagent_type is "
+                    "optional: omit it to spawn a child inheriting the "
+                    "current scenario's atoms, or pass a known persona name "
+                    "(system prompt + tool allowlist; unknown names error). "
+                    "extensions optionally adds [module_path, config] atom "
+                    "pairs on top of the inherited set. Use "
+                    "inject_instruction to guide the child mid-run, "
+                    "abort_task to stop it. Fails if max_workers children "
+                    "are already running."
                 ),
                 parameters=pydantic_to_tool_schema(_DispatchAgentParams),
                 fn=manager.dispatch,

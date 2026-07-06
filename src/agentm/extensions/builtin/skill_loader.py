@@ -416,7 +416,11 @@ class _SkillLoaderRuntime:
                 name="load_skill",
                 description=(
                     "Load the full content of a skill by name. "
-                    "Use this to read detailed instructions from <available_skills>."
+                    "Use this to read detailed instructions from "
+                    "<available_skills>. You may also pass the basename of a "
+                    "sibling .md file bundled next to a skill to load its "
+                    "referenced material. An unknown name returns the list "
+                    "of available skills."
                 ),
                 parameters=pydantic_to_tool_schema(_LoadSkillParams),
                 fn=self.load_skill,
