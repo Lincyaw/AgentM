@@ -116,24 +116,14 @@ def load_messages_from_trace_file(path: str | Path) -> list[dict[str, JsonValue]
     return clean_trace_messages(tr.load_messages())
 
 
-def load_messages_from_session(session_id: str) -> list[dict[str, JsonValue]]:
-    """Load and clean messages by session ID from ClickHouse."""
-    from agentm.core.observability.clickhouse import get_url, session_entries
+def _batch_load_sessions(
+    session_ids: list[str],
+) -> dict[str, list[dict[str, JsonValue]]]:
+    """Bulk-load and clean messages for many sessions via ClickHouse groupArray.
 
-    url = get_url()
-    if url:
-        entries = session_entries(url, session_id)
-        if entries:
-            return clean_trace_messages(entries)
-
-    logger.debug(f"ClickHouse unavailable for session {session_id}")
-    return []
-
-
-def load_messages_batch(session_ids: list[str]) -> dict[str, list[dict[str, JsonValue]]]:
-    """Bulk-load messages for many sessions in one ClickHouse query.
-
-    Returns {session_id: cleaned_messages} for sessions that had data.
+    Returns ``{session_id: cleaned_messages}`` for sessions that had data.
+    Uses a single ``groupArray`` SQL query per 200-session batch — O(sessions)
+    rows returned, not O(messages).
     """
     from agentm.core.observability.clickhouse import _parse_body, _query, get_url
 
@@ -144,31 +134,39 @@ def load_messages_batch(session_ids: list[str]) -> dict[str, list[dict[str, Json
         logger.warning("ClickHouse unavailable, cannot batch-load sessions")
         return {}
 
-    BATCH = 200
+    _BATCH = 200
     result: dict[str, list[dict[str, JsonValue]]] = {}
-    for i in range(0, len(session_ids), BATCH):
-        batch = session_ids[i : i + BATCH]
-        placeholders = ", ".join(f"'{sid}'" for sid in batch)
+    for i in range(0, len(session_ids), _BATCH):
+        batch = session_ids[i : i + _BATCH]
+        in_clause = ",".join(
+            f"'{s.replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
+            for s in batch
+        )
         rows = _query(
             url,
-            "SELECT LogAttributes['agentm.session.id'] AS sid, Body "
+            "SELECT "
+            "  LogAttributes['agentm.session.id'] AS sid, "
+            "  groupArray(Body ORDER BY Timestamp ASC) AS bodies "
             "FROM otel_logs "
             "WHERE EventName = 'agentm.message.appended' "
-            f"  AND LogAttributes['agentm.session.id'] IN ({placeholders}) "
-            "ORDER BY LogAttributes['agentm.session.id'], Timestamp",
+            f"  AND LogAttributes['agentm.session.id'] IN ({in_clause}) "
+            "GROUP BY sid",
             timeout=120,
         )
-        by_sid: dict[str, list[dict[str, JsonValue]]] = {}
+        loaded = 0
         for row in rows:
             sid = row.get("sid", "")
-            body = _parse_body(row.get("Body"))
-            if isinstance(body, dict) and sid:
-                by_sid.setdefault(sid, []).append(body)
-        for sid, entries in by_sid.items():
+            bodies = row.get("bodies", [])
+            entries: list[dict[str, JsonValue]] = []
+            for b in (bodies if isinstance(bodies, list) else []):
+                parsed = _parse_body(b)
+                if isinstance(parsed, dict):
+                    entries.append(parsed)
             msgs = clean_trace_messages(entries)
             if msgs:
                 result[sid] = msgs
-        logger.info(f"batch {i // BATCH + 1}: loaded {len(by_sid)}/{len(batch)} sessions")
+                loaded += 1
+        logger.info(f"batch {i // _BATCH + 1}: loaded {loaded}/{len(batch)} sessions")
 
     return result
 
@@ -1031,9 +1029,13 @@ async def _collect_async(
     if paths:
         sources.extend(loader(paths))
     if session_ids:
-        # Lazy: just record the session IDs; messages loaded in _process_one
+        loaded = _batch_load_sessions(session_ids)
         for sid in session_ids:
-            sources.append({"label": sid, "messages": []})
+            msgs = loaded.get(sid, [])
+            if msgs:
+                sources.append({"label": sid, "messages": msgs})
+            else:
+                logger.debug(f"{sid}: no messages in ClickHouse, skipped")
 
     if not sources:
         logger.error("no trajectories found")
@@ -1077,10 +1079,7 @@ async def _collect_async(
             label = src["label"]
             msgs = src["messages"]
             if not msgs:
-                msgs = load_messages_from_session(label)
-                if not msgs:
-                    logger.debug(f"{label}: no messages in ClickHouse, skipped")
-                    return []
+                return []
             if len(msgs) < min_messages:
                 logger.debug(f"{label}: {len(msgs)} msgs < {min_messages}, skipped")
                 return []
@@ -1118,7 +1117,7 @@ async def _collect_async(
             return chunks
 
     tasks = [_process_one(src) for src in sources]
-    results = await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
 
     _write_hf_dataset_info(output_dir, split, example_count)
     logger.info(f"done: {example_count} examples from {len(sources)} sources -> {data_file}")

@@ -1470,6 +1470,109 @@ def index_cmd(
 
 
 # ---------------------------------------------------------------------------
+# export-dataset
+# ---------------------------------------------------------------------------
+
+
+@app.command("export-dataset")
+def export_dataset_cmd(
+    output: Annotated[
+        Path,
+        typer.Argument(help="Output file path (.parquet or .jsonl)."),
+    ],
+    cwd: CwdOpt = None,
+    scenario: Annotated[
+        list[str] | None,
+        typer.Option("--scenario", help="Filter by scenario (repeatable)."),
+    ] = None,
+    purpose: Annotated[
+        list[str] | None,
+        typer.Option("--purpose", help="Filter by purpose (repeatable)."),
+    ] = None,
+    session: Annotated[
+        list[str] | None,
+        typer.Option("--session", help="Export specific session IDs (repeatable)."),
+    ] = None,
+    roots_only: Annotated[
+        bool,
+        typer.Option("--roots-only", help="Only root sessions (no children)."),
+    ] = False,
+    include_system_prompt: Annotated[
+        bool,
+        typer.Option("--system-prompt", help="Include the system prompt."),
+    ] = False,
+    include_thinking: Annotated[
+        bool,
+        typer.Option("--thinking", help="Include assistant thinking blocks."),
+    ] = False,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", "-n", help="Max sessions to export."),
+    ] = None,
+    compression: Annotated[
+        str,
+        typer.Option("--compression", help="Parquet compression (zstd, snappy, gzip, none)."),
+    ] = "zstd",
+) -> None:
+    """Export traces to a HuggingFace-compatible Parquet or JSONL dataset.
+
+    Each row is one session with an OpenAI-compatible ``messages`` array,
+    session metadata, and token-usage stats. Parquet is written via DuckDB;
+    JSONL is a plain newline-delimited JSON fallback.
+
+    Examples:
+
+        agentm trace export-dataset traces.parquet
+
+        agentm trace export-dataset --scenario chatbot --roots-only out.parquet
+
+        agentm trace export-dataset --session abc123 --session def456 out.jsonl
+    """
+    from agentm.dataset_export import DatasetExporter
+
+    autoload_dotenv(_trace_cwd(cwd))
+
+    scenarios = set(scenario) if scenario else None
+    purposes = set(purpose) if purpose else None
+    session_ids = list(session) if session else None
+
+    ch_url = _trace_clickhouse_url(cwd)
+    if ch_url is not None:
+        exporter = DatasetExporter.from_clickhouse(ch_url)
+        _info("Using ClickHouse backend")
+    else:
+        exporter = DatasetExporter.from_local()
+        _info("Using local JSONL backend")
+
+    suffix = output.suffix.lower()
+    if suffix == ".jsonl":
+        count = exporter.export_jsonl(
+            output,
+            session_ids=session_ids,
+            scenarios=scenarios,
+            purposes=purposes,
+            roots_only=roots_only,
+            include_system_prompt=include_system_prompt,
+            include_thinking=include_thinking,
+            limit=limit,
+        )
+    else:
+        count = exporter.export_parquet(
+            output,
+            session_ids=session_ids,
+            scenarios=scenarios,
+            purposes=purposes,
+            roots_only=roots_only,
+            include_system_prompt=include_system_prompt,
+            include_thinking=include_thinking,
+            compression=compression,
+            limit=limit,
+        )
+
+    _info(f"Exported {count} conversation(s) to {output}")
+
+
+# ---------------------------------------------------------------------------
 # Entry point — lazily dispatched by ``agentm.cli.main`` for ``agentm trace``.
 # ---------------------------------------------------------------------------
 

@@ -1,25 +1,20 @@
 """Builtin ``otlp_export`` atom: ship spans + logs to a remote OTLP endpoint.
 
-AgentM's canonical wire format is OTLP/JSON ndjson written to
-``$AGENTM_HOME/observability/<session_id>.jsonl`` by default (see
-``observability.py`` +
-``core.runtime.otel_export.FileSpanExporter``/``FileLogExporter``). That file
-path is enough for self-contained replay, evolution, and llmharness
-distillation. For *live* observability against a remote collector
-(Jaeger / Tempo / Phoenix / Grafana Cloud / Honeycomb) you mount this
-atom on top, which attaches process-level OTLP exporters to the same
-``TracerProvider`` + ``LoggerProvider`` the file exporters already feed.
+Floor atom — loaded by default in every session. On install it probes the
+configured (or default ``http://localhost:4317``) collector endpoint; when
+reachable it attaches process-level OTLP exporters so every session's spans
+and logs are forwarded to the remote collector. When the collector is
+unreachable the atom silently skips and the core telemetry layer falls back
+to per-session file export (``$AGENTM_HOME/observability/<session_id>.jsonl``).
 
-Mount via ``agentm --extension agentm.extensions.builtin.otlp_export``.
-The first session to install this atom in a process attaches the
-exporters; subsequent sessions reuse the same processors — no per-session
-duplication.
+The first session to install this atom in a process attaches the exporters;
+subsequent sessions reuse the same processors — no per-session duplication.
 
 Config keys (all optional; env vars take precedence per OTel convention):
 
 | key          | env var                          | default                    |
 |--------------|----------------------------------|----------------------------|
-| ``endpoint`` | ``OTEL_EXPORTER_OTLP_ENDPOINT``  | **required**               |
+| ``endpoint`` | ``OTEL_EXPORTER_OTLP_ENDPOINT``  | ``http://localhost:4317``  |
 | ``protocol`` | ``OTEL_EXPORTER_OTLP_PROTOCOL``  | ``grpc``                   |
 | ``headers``  | ``OTEL_EXPORTER_OTLP_HEADERS``   | none                       |
 | ``insecure`` | ``OTEL_EXPORTER_OTLP_INSECURE``  | ``true`` (grpc only)       |
@@ -39,7 +34,8 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from loguru import logger
-from agentm.core.abi import ExtensionAPI, ExtensionLoadError
+from agentm.core.abi import ExtensionAPI
+from agentm.core.observability.otel_export import _probe_endpoint, _DEFAULT_OTLP_ENDPOINT
 from agentm.extensions import ExtensionManifest
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -64,12 +60,13 @@ MANIFEST = ExtensionManifest(
     name="otlp_export",
     description=(
         "Attach process-level OTLP span + log exporters so every session's "
-        "spans and logs are forwarded to a remote collector in addition to "
-        "the on-disk ndjson file. Idempotent across sessions in one process."
+        "spans and logs are forwarded to a remote collector. Probes the "
+        "collector on install; when unreachable the core telemetry layer "
+        "falls back to on-disk ndjson file export."
     ),
-    registers=(),  # Attaches to process-global OTel providers; no surface.
+    registers=(),
     config_schema=OtlpExportConfig,
-    requires=("observability",),
+    requires=(),
     api_version=1,
     tier=1,
 )
@@ -122,19 +119,10 @@ class _OtlpExportRuntime:
         self._config = config
 
     def attach(self) -> None:
-        # Reach the process-level SDK TracerProvider + LoggerProvider through
-        # the per-session telemetry handle. The substrate does not register
-        # these as OTel globals (so ``opentelemetry.trace.get_tracer_provider``
-        # returns ``ProxyTracerProvider``); the handle holds direct references
-        # we can attach our network processors to.
-        #
-        # Since core.observability.otel_export.setup_process_telemetry() now
-        # attaches OTLP exporters early when OTEL_EXPORTER_OTLP_ENDPOINT is
-        # set, this extension is only needed when the env var was NOT set at
-        # provider-construction time but the user explicitly mounts the
-        # extension with a config override.
         telemetry = self._api.get_session_telemetry()
         resolved = self._resolve_config()
+        if resolved is None:
+            return
         span_exporter, log_exporter = self._build_exporters(resolved)
         span_processor = BatchSpanProcessor(span_exporter)
         log_processor = BatchLogRecordProcessor(log_exporter)
@@ -142,32 +130,29 @@ class _OtlpExportRuntime:
         telemetry.logger_provider.add_log_record_processor(log_processor)
         self._register_shutdown(span_processor, log_processor)
 
-    def _resolve_config(self) -> _ResolvedOtlpConfig:
-        endpoint = self._config.endpoint or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        if not endpoint:
-            raise ExtensionLoadError(
-                __name__,
-                RuntimeError(
-                    "No OTLP endpoint configured. Set OTEL_EXPORTER_OTLP_ENDPOINT "
-                    "or pass endpoint in the extension config.\n\n"
-                    "  Quick start:\n"
-                    "    docker compose -f tools/otel/docker-compose.yaml up -d\n"
-                    "    export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317"
-                ),
+    def _resolve_config(self) -> _ResolvedOtlpConfig | None:
+        endpoint = (
+            self._config.endpoint
+            or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+            or _DEFAULT_OTLP_ENDPOINT
+        )
+        if not _probe_endpoint(endpoint):
+            logger.debug(
+                "otlp_export atom: collector at {} unreachable, skipping",
+                endpoint,
             )
+            return None
         protocol = (
             self._config.protocol
             or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
             or _DEFAULT_PROTOCOL
         )
         if protocol not in _SUPPORTED_PROTOCOLS:
-            raise ExtensionLoadError(
-                __name__,
-                ValueError(
-                    f"otlp_export: unsupported protocol {protocol!r}; "
-                    "expected 'grpc' or 'http/protobuf'"
-                ),
+            logger.warning(
+                "otlp_export: unsupported protocol {!r}, expected 'grpc' or 'http/protobuf'",
+                protocol,
             )
+            return None
         return _ResolvedOtlpConfig(
             endpoint=endpoint,
             protocol=protocol,

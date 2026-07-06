@@ -75,6 +75,7 @@ __all__ = [
     "attach_loguru_otel_sink",
     "iter_log_records",
     "iter_spans",
+    "otlp_is_active",
     "otlp_unwrap",
     "resolve_observability_dir",
     "setup_process_telemetry",
@@ -265,24 +266,52 @@ _global_lock = threading.Lock()
 _global_tracer_provider: TracerProvider | None = None
 _global_logger_provider: LoggerProvider | None = None
 _global_atexit_registered = False
+_otlp_attached = False
+
+_DEFAULT_OTLP_ENDPOINT = "http://localhost:4317"
+
+
+def otlp_is_active() -> bool:
+    """Whether OTLP network exporters were successfully attached."""
+    return _otlp_attached
+
+
+def _probe_endpoint(endpoint: str, timeout: float = 2.0) -> bool:
+    """Quick TCP connect to check if an OTLP collector is reachable."""
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(endpoint)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 4317
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
 
 
 def _maybe_attach_otlp_exporters(
     tp: TracerProvider, lp: LoggerProvider
 ) -> None:
-    """Attach OTLP network exporters using ``OTEL_EXPORTER_OTLP_ENDPOINT``.
+    """Attach OTLP network exporters to the process-level providers.
 
-    Called once during process-level provider construction — before any
-    session emits its first event — so that every record (including
-    ``session.start``) reaches the remote collector. The
-    ``otlp_export`` builtin extension becomes a no-op when the exporters
-    are already attached here.
-
-    Skips silently when the env var is unset — local file export is
-    controlled separately via ``AGENTM_OBSERVABILITY_DIR``.
+    Tries ``OTEL_EXPORTER_OTLP_ENDPOINT`` if set, otherwise falls back to
+    the default collector endpoint (``http://localhost:4317``). A quick TCP
+    probe runs first — when the collector is unreachable the function skips
+    silently and :func:`setup_session_telemetry` will enable per-session
+    file export as a fallback.
     """
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-    if not endpoint:
+    global _otlp_attached
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or _DEFAULT_OTLP_ENDPOINT
+
+    if not _probe_endpoint(endpoint):
+        logger.debug(
+            "otel_export: collector at {} unreachable, will fall back to file export",
+            endpoint,
+        )
+        _otlp_attached = False
         return
 
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
@@ -339,12 +368,15 @@ def _maybe_attach_otlp_exporters(
         # Exporter construction failed (bad endpoint, missing optional deps) —
         # run without network export rather than crashing telemetry setup.
         logger.warning("otel_export: OTLP exporter setup failed, network export disabled: {}", exc)
+        _otlp_attached = False
         return
 
     span_proc = BatchSpanProcessor(span_exp)
     log_proc = BatchLogRecordProcessor(log_exp)
     tp.add_span_processor(span_proc)
     lp.add_log_record_processor(log_proc)
+    _otlp_attached = True
+    logger.debug("otel_export: OTLP exporters attached to {}", endpoint)
 
 
 def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
@@ -791,9 +823,10 @@ def setup_session_telemetry(
 
     tracer_provider, logger_provider = setup_process_telemetry()
 
-    # File export: only when caller passes an explicit path (SessionManager
-    # persistence) or the user opted in via AGENTM_OBSERVABILITY_DIR.
-    write_files = file_path is not None or file_export_requested()
+    # File export: explicit path (SessionManager persistence), user opt-in
+    # via AGENTM_OBSERVABILITY_DIR, or automatic fallback when no OTLP
+    # collector is attached (so traces are never silently lost).
+    write_files = file_path is not None or file_export_requested() or not _otlp_attached
     resolved_path: Path | None = None
     span_exporter: FileSpanExporter | None = None
     log_exporter: FileLogExporter | None = None

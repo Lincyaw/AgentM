@@ -593,6 +593,27 @@ def _try_json(raw: Any) -> Any:
         return raw
 
 
+def _query_binary(
+    url: str,
+    sql: str,
+    *,
+    database: str = "otel",
+    timeout: int = 60,
+) -> bytes:
+    """Execute SQL and return the raw response body as bytes.
+
+    Use with ``FORMAT Parquet`` or any other binary output format — the
+    caller writes the bytes directly to a file without parsing.
+    """
+    qp: dict[str, str] = {"database": database}
+    full_url = f"{url}/?{urllib.parse.urlencode(qp)}"
+    req = urllib.request.Request(
+        full_url, data=sql.encode("utf-8"), method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
 __all__ = [
     "get_url",
     "resolve_session",
