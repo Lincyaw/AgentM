@@ -152,6 +152,13 @@ _KERNEL_CONTROL_CHANNELS: frozenset[str] = frozenset(
         "extension_unload",
         "api_register",
         "api_send_user_message",
+        # Presenter/activity signal that THIS atom (and background_exec /
+        # sub_agent) emit as a side effect of firing. A monitor watching it
+        # re-emits it from its own handler, which ``emit_sync`` dispatches back
+        # into that same handler — a self-feedback recursion at create time and
+        # on every background heartbeat thereafter. Same producer-is-consumer
+        # shape the rest of this denylist guards against.
+        "background_activity",
     }
 )
 

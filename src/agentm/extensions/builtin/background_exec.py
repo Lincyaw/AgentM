@@ -92,6 +92,15 @@ _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
 _MAX_WAIT_BACKGROUND_SECONDS = 30.0
 _MAX_ACTIVITY_LABEL_CHARS = 96
+_INBOX_GRACE_SECONDS = 0.5
+
+# Which inbox sources justify soft-preempting a running foreground tool. Must
+# exclude this atom's OWN ``source="background"`` ticker/completion posts: if
+# those counted, each detach would post a completion that keeps the inbox
+# non-empty and forces the next tool to detach too — a self-sustaining loop.
+# Design intent is user input only (session-inbox.md: "soft-preempt on pending
+# user input").
+_PREEMPT_SOURCES = frozenset({"user"})
 
 
 class BackgroundExecConfig(BaseModel):
@@ -366,7 +375,7 @@ class _BgTool:
                     if inbox_task.result():
                         return (
                             False,
-                            "moved to background because new input is pending",
+                            "moved to background because new user input is pending",
                         )
                     await asyncio.sleep(0.05)
                     waiters.remove(inbox_task)
@@ -570,7 +579,7 @@ class _BgManager:
 
     async def wait_inbox_nonempty(self) -> bool:
         try:
-            return await self._api.wait_inbox_nonempty()
+            return await self._api.wait_inbox_nonempty(sources=_PREEMPT_SOURCES)
         except ExtensionStaleError:
             return False
 

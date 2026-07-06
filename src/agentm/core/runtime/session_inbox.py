@@ -114,10 +114,21 @@ class SessionInbox:
         self._nonempty.clear()
         return items
 
-    def is_empty(self) -> bool:
-        """Non-blocking emptiness check (used by the keep-alive floor)."""
+    def is_empty(self, sources: frozenset[str] | None = None) -> bool:
+        """Non-blocking emptiness check (used by the keep-alive floor).
 
-        return not self._items
+        With ``sources=None`` (default) this reports whether the inbox holds
+        *any* item — the keep-alive floor's "inbox non-empty ⇒ keep running"
+        semantics. With a ``sources`` set it reports whether any pending item
+        comes from one of those producer classes, so a caller can ask a
+        narrower question ("is there pending USER input?") without draining or
+        being fooled by unrelated items (e.g. a producer's own
+        ``source="background"`` ticker/completion echoes).
+        """
+
+        if sources is None:
+            return not self._items
+        return not any(item.source in sources for item in self._items)
 
     async def wait_nonempty(self) -> None:
         """Block until the inbox holds at least one item (or :meth:`kick`).

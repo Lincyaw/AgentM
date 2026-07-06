@@ -1375,7 +1375,12 @@ requirements:
       hang, while ``timeout=None`` keeps the unbounded #179 semantics (#201).
       ``ExtensionAPI.wait_inbox_nonempty`` exposes a non-draining wakeup so
       producer atoms can react to pending input without bypassing the runtime
-      context-drain handler.
+      context-drain handler. It accepts an optional ``sources`` filter so a
+      caller can wait for a specific producer class (e.g. ``{"user"}``) and is
+      not tripped by unrelated items — notably a producer's OWN
+      ``source="background"`` ticker/completion echoes, which would otherwise
+      let ``background_exec`` soft-preempt on its own posts and strand every
+      subsequent tool call in the background.
     priority: P0
     status: implemented
     confidence: confirmed
@@ -1596,7 +1601,9 @@ requirements:
       under a stable dedup_key. ``create_monitor`` refuses kernel-control
       channels at the call site (denylist of channels like ``context`` /
       ``decide_turn_action`` that would create an unbreakable inbox/loop
-      spin) and clamps a condition ``poll_interval`` up to a configured floor
+      spin — including ``background_activity``, which this atom itself emits
+      from a channel handler, so watching it would self-recurse through
+      ``emit_sync`` on every fire) and clamps a condition ``poll_interval`` up to a configured floor
       so the agent cannot wedge a tight re-poll spin. Non-cron state is
       per-session and in-memory; cron state is durable gateway state and can be
       deleted through ``cancel_monitor(schedule:<job_id>)``.

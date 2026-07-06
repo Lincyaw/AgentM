@@ -73,9 +73,11 @@ class FakeExtensionAPI:
         finally:
             self.inbox.note_work_finished()
 
-    async def wait_inbox_nonempty(self) -> bool:
+    async def wait_inbox_nonempty(
+        self, sources: frozenset[str] | None = None
+    ) -> bool:
         await self.inbox.wait_nonempty()
-        return not self.inbox.is_empty()
+        return not self.inbox.is_empty(sources)
 
     def register_tool(self, tool: Any) -> None:
         self.tools.append(tool)
