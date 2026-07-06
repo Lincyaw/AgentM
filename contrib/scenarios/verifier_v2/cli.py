@@ -40,10 +40,18 @@ def _detect_entry_services(data_dir: Path, graph: dict[str, list[list[str]]]) ->
             conn = duckdb.connect(":memory:")
             path_str = normal_parquet.as_posix().replace("'", "''")
             rows = conn.execute(
-                f"SELECT DISTINCT service_name FROM read_parquet('{path_str}') "
-                "WHERE parent_span_id = ''"
+                "SELECT service_name, "
+                "       count(*) AS root_spans, "
+                "       (SELECT count(*) FROM read_parquet('" + path_str + "') t2 "
+                "        WHERE t2.service_name = t1.service_name) AS total_spans "
+                "FROM read_parquet('" + path_str + "') t1 "
+                "WHERE parent_span_id = '' "
+                "GROUP BY service_name"
             ).fetchall()
-            root_services = {r[0] for r in rows}
+            for svc, root_cnt, total_cnt in rows:
+                ratio = root_cnt / total_cnt if total_cnt else 0
+                if root_cnt >= 100 or ratio > 0.2:
+                    root_services.add(svc)
             conn.close()
         except Exception:  # noqa: BLE001, S110
             pass
