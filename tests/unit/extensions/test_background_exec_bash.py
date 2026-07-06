@@ -17,7 +17,7 @@ from agentm.core.abi import (
     ToolResult,
 )
 from agentm.extensions.builtin import background_exec
-from agentm.extensions.builtin._operations.local import LocalBashOperations
+from agentm.extensions.builtin.bash.local import LocalBashOperations
 from tests.unit.extensions._fake_api import FakeExtensionAPI
 
 

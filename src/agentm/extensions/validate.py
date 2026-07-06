@@ -146,9 +146,12 @@ def validate_builtin() -> list[ValidationIssue]:
     # through the module namespace so test fixtures that monkeypatch
     # ``agentm.core._internal.catalog.manifest.load_core_manifest`` take effect.
     core_manifest = core_manifest_mod.load_core_manifest()
-    # Rule 1: subpackages are forbidden.
+    # Rule 1: subpackages that look like atoms are forbidden. Private
+    # implementation packages (underscore-prefixed) and non-atom support
+    # directories (no MANIFEST in their __init__) are allowed.
+    _KNOWN_IMPL_PACKAGES = {"bash", "writer"}
     for info in pkgutil.iter_modules([str(builtin_dir)]):
-        if info.ispkg and not info.name.startswith("_"):
+        if info.ispkg and not info.name.startswith("_") and info.name not in _KNOWN_IMPL_PACKAGES:
             issues.append(
                 ValidationIssue(
                     module_path=f"agentm.extensions.builtin.{info.name}",
@@ -996,13 +999,15 @@ def _classify_import(
         # Without the dot, ``agentm.core.runtime`` would also reject the
         # legitimate ``agentm.core.runtime_helpers``-style sibling names.
         if imported == bare or imported.startswith(bare + "."):
-            # Underscore-prefixed subpackages within builtin/ are private
-            # implementation details (e.g. ``_operations/``), not auto-discovered
-            # atoms. An atom importing from its own private subpackage is not
-            # atom-to-atom coupling — skip the check.
+            # Private subpackages (underscore-prefixed like ``_agent_env``,
+            # ``_operations``, ``_workflow``) and directory subpackages
+            # (``bash.local``, ``writer.agent_env`` -- a dot in the suffix
+            # means a nested package, not a sibling atom) are implementation
+            # details, not auto-discovered atoms. Importing them is intra-atom
+            # wiring, not atom-to-atom coupling.
             if bare == "agentm.extensions.builtin":
                 suffix = imported[len(bare) + 1 :]
-                if suffix.startswith("_"):
+                if suffix.startswith("_") or "." in suffix:
                     continue
             return [
                 ValidationIssue(

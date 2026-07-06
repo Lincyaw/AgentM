@@ -6,10 +6,8 @@ Backend selected by ``config["backend"]``:
   and most scenarios.
 - ``"agent_env"`` — ARL sandbox-backed, for Kubernetes-isolated execution.
 
-Replaces the former ``operations_local`` and ``operations_agent_env`` atoms
-with a single entry point and a dispatcher. The implementations live in
-``_operations/local.py`` and ``_operations/agent_env.py`` (the ``_`` prefix
-prevents auto-discovery as separate atoms).
+Implementations live in ``bash/`` (BashOperations), ``writer/`` (ResourceWriter),
+and ``_agent_env.py`` (shared ARL helpers + agent-env install entry point).
 """
 
 from __future__ import annotations
@@ -77,12 +75,12 @@ class _OperationsRuntime:
 
     def _install_local(self) -> None:
         # Sub-installers expect a plain dict; forward the full model dump.
-        from agentm.extensions.builtin._operations.local import install_local
+        from agentm.extensions.builtin.bash.local import install_local
 
         install_local(self._api, self._config.model_dump())
 
     async def _install_agent_env(self) -> None:
-        from agentm.extensions.builtin._operations.agent_env import (
+        from agentm.extensions.builtin._agent_env import (
             AgentEnvConfig,
             install_agent_env,
         )
