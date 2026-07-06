@@ -137,9 +137,6 @@ def _arl_class(arl_module: Any, *names: str) -> Any:
 async def _get_execute_operation(
     session: "ArlSandboxSession",
     operation_id: str,
-    *,
-    gateway_url: str,
-    api_key: str | None,
 ) -> Any:
     getter = getattr(session, "get_execute_operation", None)
     if getter is not None:
@@ -153,7 +150,7 @@ async def _get_execute_operation(
 
     import arl  # type: ignore[import-not-found]
 
-    client = _gateway_client_class(arl)(base_url=gateway_url, api_key=api_key)
+    client = _gateway_client_class(arl)()
     try:
         return await _call_maybe_async(
             client.get_execute_operation, session_id, operation_id
@@ -167,9 +164,6 @@ async def _recover_execute_operation(
     steps: list[dict[str, Any]],
     operation_id: str,
     started_at: float,
-    *,
-    gateway_url: str,
-    api_key: str | None,
 ) -> Any:
     budget = _step_timeout_budget(steps)
     deadline = started_at + budget if budget is not None else None
@@ -178,8 +172,6 @@ async def _recover_execute_operation(
         operation = await _get_execute_operation(
             session,
             operation_id,
-            gateway_url=gateway_url,
-            api_key=api_key,
         )
         if operation.result is not None:
             return operation.result
@@ -212,8 +204,6 @@ async def _async_execute(
     steps: list[dict[str, Any]],
     *,
     on_output: Callable[[str, str], None] | None = None,
-    gateway_url: str = "",
-    api_key: str | None = None,
 ) -> Any:
     from arl import GatewayOperationTimeout  # type: ignore[import-not-found]
 
@@ -226,8 +216,6 @@ async def _async_execute(
             steps,
             exc.operation_id,
             started_at,
-            gateway_url=gateway_url,
-            api_key=api_key,
         )
 
 
@@ -238,8 +226,6 @@ async def _async_execute(
 async def _replay_fork_environment(
     api: ExtensionAPI,
     session: "ArlSandboxSession",
-    gateway_url: str,
-    api_key: str | None,
 ) -> None:
     """Replay the source session's full sandbox history into this fork's sandbox.
 
@@ -262,7 +248,7 @@ async def _replay_fork_environment(
 
         import arl  # type: ignore[import-not-found]
 
-        client = _gateway_client_class(arl)(base_url=gateway_url, api_key=api_key)
+        client = _gateway_client_class(arl)()
         try:
             arl_sessions = await _call_maybe_async(
                 client.list_experiment_sessions, experiment_id
@@ -348,8 +334,6 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         session = await _call_maybe_async(
             sandbox_cls.attach,
             config.attach_session,
-            gateway_url=config.gateway_url or "",
-            api_key=config.api_key,
             timeout=config.create_timeout or 600.0,
         )
         owned = False
@@ -366,15 +350,12 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         session = managed_cls(
             image=config.image,
             experiment_id=config.experiment_id or api.session_id,
-            gateway_url=config.gateway_url or "",
             workspace_dir=work_dir,
-            api_key=config.api_key,
             timeout=config.create_timeout or 600.0,
             resources=_build_resources(config),
             profile=config.profile or "default",
             config_env=config.config_env,
             idle_timeout_seconds=config.idle_timeout_seconds,
-            max_lifetime_seconds=config.max_lifetime_seconds,
             private_containers=pcs,
         )
     else:
@@ -396,21 +377,16 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         session,
         default_work_dir=work_dir,
         default_timeout=config.timeout,
-        gateway_url=config.gateway_url or "",
-        api_key=config.api_key,
     )
     writer = AgentEnvResourceWriter(
         session, work_dir=work_dir,
-        gateway_url=config.gateway_url or "", api_key=config.api_key,
         session_id=session_id,
     )
     api.register_operations(bash=bash_ops)
     api.register_resource_writer(writer)
 
     if owned:
-        await _replay_fork_environment(
-            api, session, config.gateway_url or "", config.api_key
-        )
+        await _replay_fork_environment(api, session)
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
         if not owned:
@@ -418,9 +394,7 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         if delete_on_shutdown:
             from arl import GatewayClient  # type: ignore[import-not-found]
 
-            client = GatewayClient(
-                base_url=config.gateway_url or "", api_key=config.api_key
-            )
+            client = GatewayClient()
             try:
                 client.delete_session(session_id)
             except Exception as exc:  # noqa: BLE001
