@@ -501,20 +501,22 @@ requirements:
   - id: REQ-203-thinking-only-retry
     title: Thinking-only model turns retry before clean termination
     description: >
-      The chatbot and local scenarios must include a thinking_retry atom that
-      observes ``decide_turn_action`` and converts a voluntary
-      ``Stop(ModelEndTurn)`` into ``Step()`` only when the assistant message
-      contains ThinkingBlock content with no text or tool calls. The atom must
-      keep a per-session consecutive retry counter so thinking-only leaks from
-      provider reasoning do not silently end useful sessions and also cannot
-      loop forever.
+      Every session must include a thinking_retry atom (floor-mounted by the
+      session factory alongside retry_policy) that observes
+      ``decide_turn_action`` and converts a voluntary ``Stop(ModelEndTurn)``
+      into ``Step()`` only when the assistant message contains ThinkingBlock
+      content with no text or tool calls. The atom must keep a per-session
+      consecutive retry counter so thinking-only leaks from provider
+      reasoning do not silently end useful sessions and also cannot loop
+      forever.
     priority: P1
     status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/thinking_retry.py
-      - path: src/agentm/scenarios/chatbot/manifest.yaml
-      - path: src/agentm/scenarios/local/manifest.yaml
+      - path: src/agentm/core/runtime/session_factory.py
+      - path: src/agentm/extensions/loader.py
+      - path: contrib/scenarios/chatbot/manifest.yaml
     tests: []
     docs:
       - path: .claude/designs/agent-loop.md
@@ -1428,15 +1430,20 @@ requirements:
       The ``background_exec`` atom wraps every registered tool in an auto-bg
       shim: fast calls return unchanged; overruns and pending core-inbox input
       move the running tool to a detached task and return a ticket plus
-      inbox-driven progress reports (ticker + completion milestone). Companion
-      tools ``check_background`` / ``wait_background`` / ``cancel_background``
-      poll the registry and are never themselves auto-backgrounded; a
-      timed-out ``wait_background`` returns running status rather than creating
-      a second detached wait task. ``cancel_background`` must propagate through
-      the per-task abort signal to local bash process groups so nested commands
-      such as shell-managed ``sleep`` processes are killed. A session_shutdown
-      handler drains running tasks under a configurable grace. The shim keeps
-      its session-state wrapper on the event loop but executes the wrapped tool
+      inbox-driven progress reports (ticker + completion milestone). The
+      wrapped tool's description and (for shell) ``timeout`` param schema are
+      rewritten so the model knows a detached call is still running, not
+      terminated. Companion tools ``check_background`` / ``cancel_background``
+      poll the registry and are never themselves auto-backgrounded; a running
+      shell task exposes a live output tail (``latest_output``) via the
+      ``bash_output_tails`` service owned by ``tool_bash``, and the inbox
+      completion note carries only a bounded tail preview (full output via
+      ``check_background``, which passes through tool_result_cap).
+      ``cancel_background`` must propagate through the per-task abort signal
+      to local bash process groups so nested commands such as shell-managed
+      ``sleep`` processes are killed. A session_shutdown handler drains
+      running tasks under a configurable grace. The shim keeps its
+      session-state wrapper on the event loop but executes the wrapped tool
       through the core tool executor, preserving the wrapped tool's own
       ``execution_domain`` metadata.
     priority: P0
@@ -1444,6 +1451,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/bash/local.py
+      - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/builtin/background_exec.py
     docs:
       - path: .claude/designs/session-inbox.md
