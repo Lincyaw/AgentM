@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from agentm.core.abi import ExecResult
-from agentm.extensions.builtin._agent_env import _async_execute
+from agentm.extensions.builtin._agent_env import _async_execute, _sandbox_abs
 
 if TYPE_CHECKING:
     from arl import SandboxSession as ArlSandboxSession
@@ -100,7 +100,13 @@ class AgentEnvBashOperations:
         )
         exec_id = f"agentm-{uuid.uuid4().hex}"
         if log_path is not None:
-            log_abs = log_path if log_path.startswith("/") else f"{work_dir}/{log_path}"
+            # Resolve against the SANDBOX work dir, not the session cwd: the
+            # cwd param can be a host-side path (the agent's logical cwd),
+            # and the ResourceWriter reading this log back resolves relative
+            # paths against the sandbox work dir — both sides must agree or
+            # the advertised log_path 404s (found the hard way: tee wrote a
+            # host-shaped path inside the sandbox).
+            log_abs = _sandbox_abs(self._default_work_dir, log_path)
             cmd = _wrap_cmd_with_source_log(cmd, log_abs)
         quoted_cmd = shlex.quote(cmd)
         runner = f"exec bash -lc {quoted_cmd}"
