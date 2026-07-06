@@ -26,15 +26,18 @@ extensions:
       backend: local
 
   # === resilience: exponential-backoff retry policy the provider layer wraps.
+  # Floor atom — auto-mounted anyway; listed for catalog completeness.
   - module: agentm.extensions.builtin.retry_policy
 
   # === tool-result hygiene ==================================================
+  # Floor atom — auto-mounted anyway; listed here to pin explicit config.
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 50000
       preview_tokens: 50000
       error_floor_tokens: 256
   # Default English text for kernel-emitted ToolErrorEvent.
+  # Floor atom — auto-mounted anyway; listed for catalog completeness.
   - module: agentm.extensions.builtin.tool_error_messages
 
   # === file I/O + shell tool floor =========================================
@@ -116,6 +119,7 @@ extensions:
       pricing:
         openai: [0.55, 2.2]
   # Retry the turn when the assistant message is thinking-only (no text/tools).
+  # Floor atom — auto-mounted anyway; listed for catalog completeness.
   - module: agentm.extensions.builtin.thinking_retry
 
   # === self-modification ====================================================

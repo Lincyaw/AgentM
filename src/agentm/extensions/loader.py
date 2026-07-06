@@ -662,7 +662,8 @@ def _parse_extensions(
 # "not loaded". Names match the role fulfillers' ``MANIFEST.name``.
 _FLOOR_ATOM_NAMES: frozenset[str] = frozenset(
     {"prompt_templates", "compaction_prompts", "slash_commands", "system_prompt",
-     "retry_policy", "otlp_export"}
+     "retry_policy", "otlp_export", "tool_result_cap", "tool_error_messages",
+     "thinking_retry"}
 )
 
 def sort_extensions_by_requires(

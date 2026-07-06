@@ -253,7 +253,7 @@ extensions:
 
 Rules:
 - `operations` atom listed **first** — other atoms depend on it
-- Floor atoms (`compaction_prompts`, `slash_commands`) auto-mount
+- Floor atoms auto-mount (`prompt_templates`, `compaction_prompts`, `slash_commands`, `retry_policy`, `otlp_export`, `tool_result_cap`, `tool_error_messages`, `thinking_retry`)
 - Scenario-specific logic in `contrib/scenarios/<name>/`, **never** in
   `src/agentm/core/`
 - Local atoms referenced with `local:` resolve from the scenario directory
