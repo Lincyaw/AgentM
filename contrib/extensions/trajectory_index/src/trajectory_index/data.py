@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -125,7 +124,7 @@ def _batch_load_sessions(
     Uses a single ``groupArray`` SQL query per 200-session batch — O(sessions)
     rows returned, not O(messages).
     """
-    from agentm.core.observability.clickhouse import _parse_body, _query, get_url
+    from agentm.core.observability.clickhouse import bulk_session_entries, get_url
 
     if not session_ids:
         return {}
@@ -138,30 +137,8 @@ def _batch_load_sessions(
     result: dict[str, list[dict[str, JsonValue]]] = {}
     for i in range(0, len(session_ids), _BATCH):
         batch = session_ids[i : i + _BATCH]
-        in_clause = ",".join(
-            f"'{s.replace(chr(92), chr(92)*2).replace(chr(39), chr(92)+chr(39))}'"
-            for s in batch
-        )
-        rows = _query(
-            url,
-            "SELECT "
-            "  LogAttributes['agentm.session.id'] AS sid, "
-            "  groupArray(Body ORDER BY Timestamp ASC) AS bodies "
-            "FROM otel_logs "
-            "WHERE EventName = 'agentm.message.appended' "
-            f"  AND LogAttributes['agentm.session.id'] IN ({in_clause}) "
-            "GROUP BY sid",
-            timeout=120,
-        )
         loaded = 0
-        for row in rows:
-            sid = row.get("sid", "")
-            bodies = row.get("bodies", [])
-            entries: list[dict[str, JsonValue]] = []
-            for b in (bodies if isinstance(bodies, list) else []):
-                parsed = _parse_body(b)
-                if isinstance(parsed, dict):
-                    entries.append(parsed)
+        for sid, entries in bulk_session_entries(url, batch).items():
             msgs = clean_trace_messages(entries)
             if msgs:
                 result[sid] = msgs
@@ -252,7 +229,6 @@ def _inject_response_format(config: dict[str, JsonValue]) -> None:
 
 
 _stream_debug: bool = False
-_vocabulary: str = "default"
 
 
 def _install_stream_tap(session: Any) -> None:
@@ -308,9 +284,9 @@ def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[
     )
 
 
-def _validate_vocabulary(result: ExtractionResult) -> str | None:
+def _validate_vocabulary(result: ExtractionResult, vocabulary: str = "default") -> str | None:
     """Check extraction result symbol kinds against the selected vocabulary yaml."""
-    symbol_values, _reference_values, _relation_values = _load_vocabulary_values(_vocabulary)
+    symbol_values, _reference_values, _relation_values = _load_vocabulary_values(vocabulary)
 
     errors: list[str] = []
     for sym in result.symbols:
@@ -446,7 +422,10 @@ def _build_references(
     return refs, []
 
 
-def _try_parse_response(messages: list[Any]) -> tuple[ExtractionResult | None, str | None]:
+def _try_parse_response(
+    messages: list[Any],
+    vocabulary: str = "default",
+) -> tuple[ExtractionResult | None, str | None]:
     """Try to parse an ExtractionResult from assistant messages.
 
     Returns (result, error_text). If parsing succeeds error_text is None;
@@ -467,7 +446,7 @@ def _try_parse_response(messages: list[Any]) -> tuple[ExtractionResult | None, s
                 except Exception as exc:
                     logger.debug("data: caught exception: {}", exc)
                     return None, f"JSON keys={list(obj.keys())}; validation error: {exc}"
-                vocab_error = _validate_vocabulary(result)
+                vocab_error = _validate_vocabulary(result, vocabulary)
                 if vocab_error:
                     return None, vocab_error
                 return result, None
@@ -480,6 +459,7 @@ async def extract(
     provider: ProviderSpec,
     registry: list[dict[str, Any]] | None = None,
     message_id_start: int = 0,
+    vocabulary: str = "default",
 ) -> ExtractionResult | None:
     """Run the extraction agent with a teacher model and return the result.
 
@@ -499,6 +479,9 @@ async def extract(
         purpose="teacher_extraction",
         loop_config=LoopConfig(max_turns=1),
         log_trace_command=False,
+        atom_config_overrides={
+            "trajectory_extractor_context": {"vocabulary": vocabulary},
+        },
     )
     if registry:
         prompt_data: dict[str, Any] = {"known_symbols": registry, "messages": reindexed}
@@ -515,7 +498,7 @@ async def extract(
         with contextlib.suppress(Exception):
             await session.shutdown()
 
-    result, error = _try_parse_response(messages)
+    result, error = _try_parse_response(messages, vocabulary)
     if result:
         return result
 
@@ -538,7 +521,7 @@ async def extract(
             with contextlib.suppress(Exception):
                 await retry_session.shutdown()
 
-        result, error = _try_parse_response(retry_messages)
+        result, error = _try_parse_response(retry_messages, vocabulary)
         if result:
             return result
         if not error:
@@ -610,6 +593,7 @@ async def extract_incremental(
     chunk_size: tuple[int, int] = DEFAULT_CHUNK_SIZE,
     on_chunk: OnChunkCallback | None = None,
     run_id: str = "",
+    vocabulary: str = "default",
 ) -> list[ExtractedChunk]:
     """Extract symbols incrementally in chunks with registry accumulation.
 
@@ -631,6 +615,7 @@ async def extract_incremental(
                 provider,
                 registry=chunk_registry,
                 message_id_start=chunk.start,
+                vocabulary=vocabulary,
             )
         except Exception:
             logger.exception(
@@ -673,16 +658,16 @@ async def extract_incremental(
 # ---------------------------------------------------------------------------
 
 
-def load_inference_prompt() -> str:
+def load_inference_prompt(vocabulary: str = "default") -> str:
     """Load the full extraction prompt with vocabulary and JSON schema."""
     from .agents.entity_extractor.context import _build_vocabulary_section
     from .agents.entity_extractor.schema import ExtractionResult as Schema
 
     prompts_dir = Path(__file__).parent / "agents" / "entity_extractor" / "prompts"
     base = (prompts_dir / "default.md").read_text(encoding="utf-8")
-    vocabulary = _build_vocabulary_section()
+    vocab_section = _build_vocabulary_section(vocabulary)
     schema = json.dumps(Schema.model_json_schema(), indent=2, ensure_ascii=False)
-    return f"{base}\n\n{vocabulary}\n\n## JSON Schema\n\nYour output must conform to this schema:\n\n```json\n{schema}\n```"
+    return f"{base}\n\n{vocab_section}\n\n## JSON Schema\n\nYour output must conform to this schema:\n\n```json\n{schema}\n```"
 
 
 def build_sft_example(
@@ -841,9 +826,7 @@ def collect(
       - positional paths: local JSONL files or directories
       - --session: session IDs loaded from ClickHouse
     """
-    global _stream_debug, _vocabulary
-    _vocabulary = vocabulary
-    os.environ["TRAJ_INDEX_VOCABULARY"] = vocabulary
+    global _stream_debug
     if debug:
         _stream_debug = True
         import sys
@@ -857,6 +840,7 @@ def collect(
     asyncio.run(_collect_async(
         paths or [], all_sessions, model, output_dir, index_output,
         split, _parse_chunk_size(chunk_size), concurrency, fmt, min_messages,
+        vocabulary,
     ))
 
 
@@ -1019,6 +1003,7 @@ async def _collect_async(
     concurrency: int,
     fmt: str = "agentm",
     min_messages: int = 10,
+    vocabulary: str = "default",
 ) -> None:
     loader = LOADERS.get(fmt)
     if not loader:
@@ -1090,6 +1075,7 @@ async def _collect_async(
                     chunk_size,
                     on_chunk=_on_chunk,
                     run_id=label,
+                    vocabulary=vocabulary,
                 )
             except Exception:
                 logger.exception(f"{label}: extraction failed")

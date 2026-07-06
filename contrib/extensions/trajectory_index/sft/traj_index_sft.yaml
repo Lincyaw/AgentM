@@ -1,3 +1,7 @@
+# Template config for trajectory-index SFT on AReaL. Dataset paths are
+# relative to the launch cwd — override them on the CLI
+# (train_dataset.path=... valid_dataset.path=...) or run from the directory
+# that holds datasets/. Generate both splits with prepare_sft.py.
 experiment_name: traj-index-sft
 trial_name: trial0
 
@@ -51,14 +55,14 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 4
-  path: /home/ddq/AoyangSpace/AgentM/datasets/trajectory_index_sft/train
+  path: datasets/trajectory_index_sft/train
   type: sft
 
 valid_dataset:
   batch_size: 8
   pin_memory: true
   num_workers: 4
-  path: /home/ddq/AoyangSpace/AgentM/datasets/trajectory_index_sft/train
+  path: datasets/trajectory_index_sft/valid
   type: sft
 
 saver:

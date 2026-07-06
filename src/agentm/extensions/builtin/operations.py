@@ -35,7 +35,6 @@ class OperationsConfig(BaseModel):
     work_dir: str | None = None
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
-    max_lifetime_seconds: int | None = None
     create_timeout: float | None = None
     cpu_request: str | None = None
     cpu_limit: str | None = None
@@ -77,7 +76,7 @@ class _OperationsRuntime:
 
     def _install_local(self) -> None:
         # Sub-installers expect a plain dict; forward the full model dump.
-        from agentm.extensions.builtin._operations.local import install_local
+        from agentm.extensions.builtin._operations.bash.local import install_local
 
         install_local(self._api, self._config.model_dump())
 

@@ -1,6 +1,6 @@
 """``AgentSessionConfig`` — atom-facing session construction contract.
 
-Lives in the ABI layer so atoms (e.g. ``tool_eval_run``, llmharness adapter)
+Lives in the ABI layer so atoms (e.g. ``sub_agent``, llmharness adapter)
 can build child-session configs without importing anything in
 ``agentm.core.runtime``. Runtime-typed fields (:class:`SessionManager`,
 :class:`ResourceLoader`) are referenced via TYPE_CHECKING imports — atoms
@@ -192,7 +192,7 @@ class AgentSessionConfig:
     task_class: str | None = None
     """Task class label populated on ``session.fingerprint.task_meta`` by the
     observability atom. Production scenarios declare this as a top-level
-    ``task_class`` field in ``manifest.yaml``; ``tool_eval_run`` sets it on
+    ``task_class`` field in ``manifest.yaml``; eval harnesses set it on
     each child session."""
 
     eval_run_id: str | None = None
@@ -209,9 +209,9 @@ class AgentSessionConfig:
     completes, the session walks this map and applies each via the existing
     reload path WITHOUT writing to the working tree — overrides are written
     to a per-session sandbox temp dir, the atom's module file is redirected
-    there, and the reload happens against that file. Used by
-    ``tool_eval_run`` to evaluate proposed atom versions without mutating
-    the source-of-truth tree. Cleaned up on ``AgentSession.shutdown``."""
+    there, and the reload happens against that file. Lets eval harnesses
+    evaluate proposed atom versions without mutating the source-of-truth
+    tree. Cleaned up on ``AgentSession.shutdown``."""
 
     def with_bus(self, bus: EventBus) -> "AgentSessionConfig":
         return replace(self, bus=bus)

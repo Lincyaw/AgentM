@@ -1438,13 +1438,11 @@ requirements:
       through the core tool executor, preserving the wrapped tool's own
       ``execution_domain`` metadata.
     priority: P0
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/_operations/local.py
       - path: src/agentm/extensions/builtin/background_exec.py
-    tests:
-      - path: tests/unit/extensions/test_background_exec_bash.py
     docs:
       - path: .claude/designs/session-inbox.md
     depends_on:

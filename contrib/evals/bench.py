@@ -43,7 +43,11 @@ app = typer.Typer(
     add_completion=False,
 )
 
-DEFAULT_IMAGE_REGISTRY = "pair-diag-cn-guangzhou.cr.volces.com/pair"
+# Env-first so a general checkout is not tied to one private registry; the
+# fallback keeps the historical default for existing runs.
+DEFAULT_IMAGE_REGISTRY = os.environ.get(
+    "AGENTM_EVAL_IMAGE_REGISTRY", "pair-diag-cn-guangzhou.cr.volces.com/pair"
+)
 DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "terminal_bench:arl"
 
 _INFRA_RETRY_LOG_MARKERS = (

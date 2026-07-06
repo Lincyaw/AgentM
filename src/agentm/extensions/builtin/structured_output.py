@@ -117,6 +117,26 @@ class _StructuredOutputRuntime:
     async def submit_result(self, args: dict[str, Any]) -> ToolTerminate:
         result = args.get("result")
         validation_error = self._validator.validate_error(result, self._schema)
+        if validation_error is not None and isinstance(result, str):
+            # Recovery for double-encoded submissions: models sometimes pass
+            # the result as a JSON string instead of an object. Unwrap only
+            # when the raw string fails validation and the decoded value
+            # passes — a legitimately-string result is never reinterpreted.
+            # This is the single unwrap point; downstream consumers
+            # (e.g. workflow _auto_parse) must not second-guess it.
+            try:
+                decoded = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                decoded = None
+            if (
+                isinstance(decoded, (dict, list))
+                and self._validator.validate_error(decoded, self._schema) is None
+            ):
+                logger.debug(
+                    "submit_result: unwrapped double-encoded JSON string result"
+                )
+                result = decoded
+                validation_error = None
         if validation_error is not None:
             return _terminate_result(
                 {

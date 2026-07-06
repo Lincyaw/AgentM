@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Final
@@ -19,6 +18,7 @@ _PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
 
 class ExtractorContextConfig(BaseModel):
     prompt_name: str = "default"
+    vocabulary: str = "default"
 
 
 MANIFEST = ExtensionManifest(
@@ -29,15 +29,13 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def _resolve_vocabulary_file() -> str:
-    """Resolve vocabulary filename from TRAJ_INDEX_VOCABULARY env var."""
-    name = os.environ.get("TRAJ_INDEX_VOCABULARY", "default")
+def _vocabulary_filename(name: str = "default") -> str:
     return "vocabulary.yaml" if name == "default" else f"vocabulary.{name}.yaml"
 
 
-def _build_vocabulary_section() -> str:
+def _build_vocabulary_section(vocabulary: str = "default") -> str:
     """Build the vocabulary section from the selected vocabulary yaml."""
-    vocab_text = files("trajectory_index").joinpath(_resolve_vocabulary_file()).read_text(encoding="utf-8")
+    vocab_text = files("trajectory_index").joinpath(_vocabulary_filename(vocabulary)).read_text(encoding="utf-8")
     vocab: dict[str, Any] = yaml.safe_load(vocab_text)
 
     sections: list[tuple[str, str, bool]] = [
@@ -62,7 +60,7 @@ def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
         raise ValueError(f"prompt not found: {prompt_path}")
     base_prompt = prompt_path.read_text(encoding="utf-8")
 
-    vocabulary = _build_vocabulary_section()
+    vocabulary = _build_vocabulary_section(config.vocabulary)
     schema = json.dumps(
         ExtractionResult.model_json_schema(),
         indent=2,

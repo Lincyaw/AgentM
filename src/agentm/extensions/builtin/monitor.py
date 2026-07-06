@@ -998,12 +998,12 @@ class _MonitorRuntime:
             FunctionTool(
                 name="create_monitor",
                 description=(
-                    "Subscribe to a bus channel; each fire posts a "
-                    "source='monitor' item to the session inbox under a stable "
-                    "dedup_key (latest fire replaces the prior undrained one). "
-                    "Alternatively pass condition + optional poll_interval for a "
-                    "recurring condition-poll monitor, or cron + note for a "
-                    "persistent gateway-backed monitor."
+                    "Create a monitor that delivers events to your inbox. "
+                    "Exactly one mode — watch (bus channel subscription), "
+                    "condition + poll_interval (recurring poll), or cron + note "
+                    "(persistent gateway-backed schedule). Each fire replaces "
+                    "the prior undrained notification so you always see the "
+                    "latest state, not a backlog."
                 ),
                 parameters=pydantic_to_tool_schema(_CreateMonitorParams),
                 fn=self._manager.create_monitor,

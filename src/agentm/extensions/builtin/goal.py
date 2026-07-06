@@ -54,6 +54,8 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
+GOAL_CONDITION_SERVICE: Final = "goal.condition"
+
 _CLEAR_ALIASES: Final[frozenset[str]] = frozenset(
     {
         "clear",
@@ -73,8 +75,17 @@ _CHECKER_PROMPT_TEMPLATE: Final[str] = (
     "- `list_turns` — overview of all turns (tools called, token counts)\n"
     "- `read_turn` — read actual messages (filter by role, paginate)\n"
     "- `get_tool_calls` — query specific tool calls with args and results\n\n"
-    "Investigate the trajectory to determine whether the condition is met. "
-    "Focus on the agent's actual output and deliverables, not procedural steps.\n\n"
+    "Investigate the trajectory to determine whether the condition is met.\n\n"
+    "You are checking the final result, not the process. But the result must "
+    "be backed by evidence in the trajectory:\n"
+    "- If the condition requires tests to pass, the agent must have actually "
+    "executed those tests AND the output must show they passed. Use "
+    "`get_tool_calls` to find the execution and check the output.\n"
+    "- A timeout, crash, or inconclusive test run is NOT a pass — do not "
+    "infer that code 'would pass' based on reading the source. Only actual "
+    "passing output counts.\n"
+    "- If the condition requires specific output or artifacts, verify they "
+    "exist in the trajectory.\n\n"
     "When done, call `submit_verdict` with your structured verdict. "
     "Do NOT output your verdict as text — you MUST call the tool."
 )
@@ -184,6 +195,7 @@ class GoalConfig(BaseModel):
     auto_init_scenario: str | None = None
     auto_init_max_turns: int = 10
     auto_init_retries: int = 3
+    max_rejects: int = 5
 
 
 class _ConditionPayload(BaseModel):
@@ -197,8 +209,10 @@ class _GoalState:
     condition: str
     started_at: float = field(default_factory=time.monotonic)
     turns_evaluated: int = 0
+    consecutive_rejects: int = 0
     last_reason: str = ""
     achieved: bool = False
+    released: bool = False
 
 
 MANIFEST = ExtensionManifest(
@@ -398,11 +412,13 @@ class _GoalRuntime:
         self._auto_init_scenario = config.auto_init_scenario or api.scenario
         self._auto_init_max_turns = config.auto_init_max_turns
         self._auto_init_retries = max(config.auto_init_retries, 0)
+        self._max_rejects = max(config.max_rejects, 1)
         self._auto_init_started = False
         self._state: _GoalState | None = None
 
         if config.condition:
             self._state = _GoalState(condition=config.condition)
+            api.set_service(GOAL_CONDITION_SERVICE, config.condition)
             logger.info("goal: static condition — {}", config.condition)
 
     def install(self) -> None:
@@ -448,6 +464,12 @@ class _GoalRuntime:
             return "No active goal."
 
         elapsed = time.monotonic() - state.started_at
+        if state.released:
+            return (
+                f"Goal released after {state.consecutive_rejects} consecutive "
+                f"rejects ({state.turns_evaluated} turn(s), {elapsed:.0f}s, "
+                f"not achieved): {state.condition}"
+            )
         if state.achieved:
             return (
                 f"Goal achieved in {state.turns_evaluated} turn(s) "
@@ -522,6 +544,7 @@ class _GoalRuntime:
                     if self._state is not None:
                         return
                     self._state = _GoalState(condition=condition)
+                    self._api.set_service(GOAL_CONDITION_SERVICE, condition)
                     logger.info(
                         "goal: auto-initialized after {} attempt(s) — {}",
                         attempt + 1,
@@ -556,7 +579,7 @@ class _GoalRuntime:
 
     async def _on_decide(self, event: DecideTurnActionEvent) -> Any:
         state = self._state
-        if state is None or state.achieved:
+        if state is None or state.achieved or state.released:
             return None
 
         default = event.observation.default_action
@@ -580,14 +603,27 @@ class _GoalRuntime:
 
         if is_met:
             state.achieved = True
+            state.consecutive_rejects = 0
             logger.info("goal: condition met — {}", reason)
             return None
 
-        logger.info("goal: not met — {}", reason)
+        state.consecutive_rejects += 1
+        if state.consecutive_rejects >= self._max_rejects:
+            state.released = True
+            logger.warning(
+                "goal: releasing after {} consecutive rejects — {}",
+                state.consecutive_rejects, reason,
+            )
+            return None
+
+        logger.info(
+            "goal: not met ({}/{} rejects) — {}",
+            state.consecutive_rejects, self._max_rejects, reason,
+        )
         return Inject(
             messages=[
                 text_message(
-                    f"[Goal not met] {reason}\n\n"
+                    f"[Goal not met ({state.consecutive_rejects}/{self._max_rejects})] {reason}\n\n"
                     f"Continue working toward: {state.condition}"
                 ),
             ]

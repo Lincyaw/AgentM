@@ -1,10 +1,10 @@
 name: format_fix
 description: |
-  Toy task class for end-to-end self-modification loop validation. The
-  agent receives a malformed-but-fixable JSON string and must reply with
-  the canonical Python-dict-equivalent JSON. The atom under evolution is
-  ``tool_normalize_json`` — its v1 implementation (naive str.replace) is
-  deliberately weak; the tuner must evolve it to pass tasks 02–05.
+  Toy task class with a deterministic eval suite. The agent receives a
+  malformed-but-fixable JSON string and must reply with the canonical
+  Python-dict-equivalent JSON. The ``tool_normalize_json`` atom does the
+  actual work; the agent copies its output verbatim so the eval score
+  measures the atom, not the model.
 
 task_class: format_fix
 

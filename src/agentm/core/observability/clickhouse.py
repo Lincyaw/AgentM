@@ -13,6 +13,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from typing import Any, Iterator
 
 from loguru import logger
@@ -42,10 +43,25 @@ def get_url() -> str | None:
     return None
 
 
-def _query(
+def _encode_param(value: str | list[str]) -> str:
+    """Encode a bind-parameter value for the CH HTTP interface.
+
+    Lists become an ``Array(String)`` literal for ``{name:Array(String)}``
+    placeholders. Binding happens server-side — the SQL text never contains
+    caller data, so this encoding is a wire format, not SQL escaping.
+    """
+    if isinstance(value, list):
+        quoted = (
+            "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'" for v in value
+        )
+        return "[" + ",".join(quoted) + "]"
+    return value
+
+
+def query(
     url: str,
     sql: str,
-    params: dict[str, str] | None = None,
+    params: Mapping[str, str | list[str]] | None = None,
     *,
     database: str = "otel",
     timeout: int = 30,
@@ -54,7 +70,7 @@ def _query(
     qp: dict[str, str] = {"database": database}
     if params:
         for k, v in params.items():
-            qp[f"param_{k}"] = v
+            qp[f"param_{k}"] = _encode_param(v)
     full_url = f"{url}/?{urllib.parse.urlencode(qp)}"
     body = f"{sql}\nFORMAT JSONEachRow"
     req = urllib.request.Request(
@@ -124,7 +140,7 @@ def index(
         f"FROM otel_logs WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp"
     )
-    for r in _query(url, sql, params):
+    for r in query(url, sql, params):
         purpose = r["purpose"] or None
         scenario = r["scenario"] or None
         if purposes and purpose not in purposes:
@@ -148,7 +164,7 @@ def index(
 
 def session_header(url: str, sid: str) -> dict[str, Any] | None:
     """Fetch the latest ``agentm.session.header`` body for *sid*."""
-    rows = _query(
+    rows = query(
         url,
         "SELECT Body FROM otel_logs "
         "WHERE EventName = 'agentm.session.header' "
@@ -158,14 +174,14 @@ def session_header(url: str, sid: str) -> dict[str, Any] | None:
     )
     if not rows:
         return None
-    body = _parse_body(rows[0].get("Body"))
+    body = parse_body(rows[0].get("Body"))
     return body if isinstance(body, dict) else None
 
 
 def session_entries(url: str, sid: str) -> list[dict[str, Any]]:
     """Fetch all ``agentm.message.appended`` bodies for *sid*, ordered."""
     result: list[dict[str, Any]] = []
-    for r in _query(
+    for r in query(
         url,
         "SELECT Body FROM otel_logs "
         "WHERE EventName = 'agentm.message.appended' "
@@ -173,7 +189,7 @@ def session_entries(url: str, sid: str) -> list[dict[str, Any]]:
         "ORDER BY Timestamp",
         params={"sid": sid},
     ):
-        body = _parse_body(r.get("Body"))
+        body = parse_body(r.get("Body"))
         if isinstance(body, dict):
             result.append(body)
     return result
@@ -186,7 +202,7 @@ def most_recent_session_id(url: str, cwd: str | None = None) -> str | None:
     if cwd:
         where.append("LogAttributes['agentm.session.cwd'] = {cwd:String}")
         params["cwd"] = cwd
-    rows = _query(
+    rows = query(
         url,
         "SELECT LogAttributes['agentm.session.id'] AS sid "
         "FROM otel_logs "
@@ -220,7 +236,7 @@ def recent_sessions(
     if cwd:
         where.append("LogAttributes['agentm.session.cwd'] = {cwd:String}")
         params["cwd"] = cwd
-    rows = _query(
+    rows = query(
         url,
         "SELECT "
         "  LogAttributes['agentm.session.id']       AS session_id, "
@@ -247,7 +263,7 @@ def recent_sessions(
 
 def first_user_message(url: str, sid: str) -> str:
     """Best-effort first user message from a session (for title display)."""
-    rows = _query(
+    rows = query(
         url,
         "SELECT Body FROM otel_logs "
         "WHERE EventName = 'agentm.message.appended' "
@@ -256,7 +272,7 @@ def first_user_message(url: str, sid: str) -> str:
         params={"sid": sid},
     )
     for r in rows:
-        body = _parse_body(r.get("Body"))
+        body = parse_body(r.get("Body"))
         if not isinstance(body, dict):
             continue
         raw_payload = body.get("payload")
@@ -277,7 +293,7 @@ def first_user_message(url: str, sid: str) -> str:
 
 def message_stats(url: str, sid: str) -> dict[str, int]:
     """Return lightweight transcript stats for a session."""
-    rows = _query(
+    rows = query(
         url,
         "SELECT count() AS messages, sum(length(toString(Body))) AS bytes "
         "FROM otel_logs "
@@ -310,7 +326,7 @@ def messages(
     """Conversation trajectory — same dict shape as ``TraceReader.load_messages``."""
     if include_system_prompt:
         if (not types or "message" in types) and (not roles or "system" in roles):
-            sys_rows = _query(
+            sys_rows = query(
                 url,
                 "SELECT Body FROM otel_logs "
                 "WHERE EventName = 'agentm.llm.system_prompt' "
@@ -319,7 +335,7 @@ def messages(
                 params={"sid": sid},
             )
             if sys_rows:
-                body = _parse_body(sys_rows[0].get("Body"))
+                body = parse_body(sys_rows[0].get("Body"))
                 text = body.get("text", "") if isinstance(body, dict) else ""
                 yield {
                     "type": "message",
@@ -332,7 +348,7 @@ def messages(
                     },
                 }
 
-    for r in _query(
+    for r in query(
         url,
         "SELECT Body FROM otel_logs "
         "WHERE EventName = 'agentm.message.appended' "
@@ -340,7 +356,7 @@ def messages(
         "ORDER BY Timestamp",
         params={"sid": sid},
     ):
-        body = _parse_body(r.get("Body"))
+        body = parse_body(r.get("Body"))
         if not isinstance(body, dict):
             continue
         if types and body.get("type") not in types:
@@ -358,7 +374,7 @@ def messages(
 
 def turns(url: str, sid: str) -> Iterator[dict[str, Any]]:
     """Per-turn summaries — bodies of ``agentm.turn.summary`` log records."""
-    for r in _query(
+    for r in query(
         url,
         "SELECT Body FROM otel_logs "
         "WHERE EventName = 'agentm.turn.summary' "
@@ -366,7 +382,7 @@ def turns(url: str, sid: str) -> Iterator[dict[str, Any]]:
         "ORDER BY Timestamp",
         params={"sid": sid},
     ):
-        body = _parse_body(r.get("Body"))
+        body = parse_body(r.get("Body"))
         if isinstance(body, dict):
             yield body
 
@@ -401,7 +417,7 @@ def usage(url: str, sid: str) -> dict[str, Any] | None:
 
 def chats(url: str, sid: str) -> Iterator[dict[str, Any]]:
     """LLM calls — one row per ``chat <model>`` span."""
-    for r in _query(
+    for r in query(
         url,
         "SELECT SpanName, SpanId, SpanAttributes, Duration, "
         "  toUnixTimestamp64Nano(Timestamp) AS start_ns "
@@ -432,7 +448,7 @@ def chats(url: str, sid: str) -> Iterator[dict[str, Any]]:
 
 def tools(url: str, sid: str) -> Iterator[dict[str, Any]]:
     """Tool calls — from ``execute_tool`` spans + span attributes."""
-    for r in _query(
+    for r in query(
         url,
         "SELECT SpanName, SpanId, SpanAttributes, Duration, "
         "  toUnixTimestamp64Nano(Timestamp) AS start_ns "
@@ -476,7 +492,7 @@ def info(url: str, sid: str) -> dict[str, Any]:
         ("agentm.session.header", "header"),
         ("agentm.session.fingerprint", "fingerprint"),
     ):
-        rows = _query(
+        rows = query(
             url,
             "SELECT Body FROM otel_logs "
             "WHERE EventName = {ev:String} "
@@ -485,7 +501,7 @@ def info(url: str, sid: str) -> dict[str, Any]:
             params={"ev": event_name, "sid": sid},
         )
         if rows:
-            body = _parse_body(rows[0].get("Body"))
+            body = parse_body(rows[0].get("Body"))
             if isinstance(body, dict):
                 payload[key] = body
     return payload
@@ -498,14 +514,14 @@ def info(url: str, sid: str) -> dict[str, Any]:
 
 def stats(url: str, sid: str) -> dict[str, Any]:
     """Event-name histogram for a session."""
-    log_rows = _query(
+    log_rows = query(
         url,
         "SELECT EventName, count() AS cnt FROM otel_logs "
         "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
         "GROUP BY EventName ORDER BY cnt DESC",
         params={"sid": sid},
     )
-    span_rows = _query(
+    span_rows = query(
         url,
         "SELECT SpanName, count() AS cnt FROM otel_traces "
         "WHERE SpanAttributes['agentm.session.id'] = {sid:String} "
@@ -550,8 +566,8 @@ def logs(
         f"FROM otel_logs WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp"
     )
-    for r in _query(url, sql, params):
-        body = _parse_body(r.get("Body"))
+    for r in query(url, sql, params):
+        body = parse_body(r.get("Body"))
         yield {
             "event_name": r["EventName"],
             "body": body,
@@ -584,7 +600,7 @@ def spans(
         f"FROM otel_traces WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp"
     )
-    for r in _query(url, sql, params):
+    for r in query(url, sql, params):
         start_ns = _int(r.get("start_ns"))
         duration = _int(r.get("Duration"))
         yield {
@@ -603,7 +619,7 @@ def spans(
 # ---------------------------------------------------------------------------
 
 
-def _parse_body(raw: Any) -> Any:
+def parse_body(raw: Any) -> Any:
     """Parse a Body column value — JSON string → dict, passthrough otherwise."""
     if isinstance(raw, str):
         try:
@@ -623,9 +639,10 @@ def _try_json(raw: Any) -> Any:
         return raw
 
 
-def _query_binary(
+def query_binary(
     url: str,
     sql: str,
+    params: Mapping[str, str | list[str]] | None = None,
     *,
     database: str = "otel",
     timeout: int = 60,
@@ -636,12 +653,144 @@ def _query_binary(
     caller writes the bytes directly to a file without parsing.
     """
     qp: dict[str, str] = {"database": database}
+    if params:
+        for k, v in params.items():
+            qp[f"param_{k}"] = _encode_param(v)
     full_url = f"{url}/?{urllib.parse.urlencode(qp)}"
     req = urllib.request.Request(
         full_url, data=sql.encode("utf-8"), method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+# ---------------------------------------------------------------------------
+# Bulk (multi-session) helpers
+# ---------------------------------------------------------------------------
+#
+# The two aggregation fragments below are the single home of the
+# messages-per-session and turn-usage-per-session schema knowledge; the bulk
+# helpers and the raw Parquet export all compose from them.
+
+_BULK_MESSAGES_SQL = (
+    "SELECT "
+    "  LogAttributes['agentm.session.id'] AS session_id, "
+    "  groupArray(Body ORDER BY Timestamp ASC) AS bodies "
+    "FROM otel_logs "
+    "WHERE EventName = 'agentm.message.appended' "
+    "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
+    "GROUP BY session_id"
+)
+
+_BULK_TURN_USAGE_SQL = (
+    "SELECT "
+    "  LogAttributes['agentm.session.id'] AS session_id, "
+    "  count(*) AS turns, "
+    "  sum(JSONExtractInt(Body, 'input_tokens')) AS input_tokens, "
+    "  sum(JSONExtractInt(Body, 'output_tokens')) AS output_tokens "
+    "FROM otel_logs "
+    "WHERE EventName = 'agentm.turn.summary' "
+    "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
+    "GROUP BY session_id"
+)
+
+
+def bulk_session_entries(
+    url: str, session_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """``agentm.message.appended`` bodies for many sessions in one query."""
+    if not session_ids:
+        return {}
+    result: dict[str, list[dict[str, Any]]] = {}
+    for row in query(url, _BULK_MESSAGES_SQL, {"sids": session_ids}, timeout=120):
+        bodies = row.get("bodies", [])
+        entries = [
+            parsed
+            for b in (bodies if isinstance(bodies, list) else [])
+            if isinstance(parsed := parse_body(b), dict)
+        ]
+        result[row.get("session_id", "")] = entries
+    return result
+
+
+def bulk_turn_usage(
+    url: str, session_ids: list[str],
+) -> dict[str, dict[str, int]]:
+    """Turn counts + token sums for many sessions in one query."""
+    if not session_ids:
+        return {}
+    result: dict[str, dict[str, int]] = {}
+    for row in query(url, _BULK_TURN_USAGE_SQL, {"sids": session_ids}, timeout=60):
+        result[row.get("session_id", "")] = {
+            "turns": _int(row.get("turns")),
+            "input_tokens": _int(row.get("input_tokens")),
+            "output_tokens": _int(row.get("output_tokens")),
+        }
+    return result
+
+
+def bulk_system_prompts(url: str, session_ids: list[str]) -> dict[str, str]:
+    """First ``agentm.llm.system_prompt`` text for many sessions."""
+    if not session_ids:
+        return {}
+    result: dict[str, str] = {}
+    for row in query(
+        url,
+        "SELECT "
+        "  LogAttributes['agentm.session.id'] AS session_id, "
+        "  any(Body) AS body "
+        "FROM otel_logs "
+        "WHERE EventName = 'agentm.llm.system_prompt' "
+        "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
+        "GROUP BY session_id",
+        {"sids": session_ids},
+        timeout=60,
+    ):
+        body = parse_body(row.get("body"))
+        text = body.get("text", "") if isinstance(body, dict) else ""
+        if text:
+            result[row.get("session_id", "")] = text
+    return result
+
+
+def bulk_models(url: str, session_ids: list[str]) -> dict[str, str]:
+    """Model name (from ``chat <model>`` spans) for many sessions."""
+    if not session_ids:
+        return {}
+    result: dict[str, str] = {}
+    for row in query(
+        url,
+        "SELECT "
+        "  SpanAttributes['agentm.session.id'] AS session_id, "
+        "  any(SpanName) AS model_span "
+        "FROM otel_traces "
+        "WHERE startsWith(SpanName, 'chat ') "
+        "  AND SpanAttributes['agentm.session.id'] IN {sids:Array(String)} "
+        "GROUP BY session_id",
+        {"sids": session_ids},
+        timeout=60,
+    ):
+        name = row.get("model_span", "")
+        if name.startswith("chat "):
+            result[row["session_id"]] = name.removeprefix("chat ").strip()
+    return result
+
+
+def raw_parquet_export(url: str, session_ids: list[str]) -> bytes:
+    """Messages + turn usage joined per session, as Parquet bytes."""
+    sql = (
+        "SELECT "
+        "  m.session_id, "
+        "  m.bodies AS messages, "
+        "  u.turns, "
+        "  u.input_tokens, "
+        "  u.output_tokens "
+        f"FROM ({_BULK_MESSAGES_SQL}) m "
+        f"LEFT JOIN ({_BULK_TURN_USAGE_SQL}) u "
+        "ON m.session_id = u.session_id "
+        "FORMAT Parquet"
+    )
+    return query_binary(url, sql, {"sids": session_ids}, timeout=120)
 
 
 __all__ = [
@@ -657,4 +806,12 @@ __all__ = [
     "stats",
     "logs",
     "spans",
+    "query",
+    "query_binary",
+    "parse_body",
+    "bulk_session_entries",
+    "bulk_turn_usage",
+    "bulk_system_prompts",
+    "bulk_models",
+    "raw_parquet_export",
 ]

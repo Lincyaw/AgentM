@@ -968,11 +968,15 @@ class _SubAgentRuntime:
             FunctionTool(
                 name="dispatch_agent",
                 description=(
-                    "Spawn a child AgentSession and return its task id immediately. "
-                    "Pass ``subagent_type`` to launch a named persona (resolved by "
-                    "peer extensions via the ``resolve_subagent`` event); the "
-                    "persona's system prompt and tool allowlist are applied to the "
-                    "child."
+                    "Spawn a child AgentSession and return its task id immediately "
+                    "— the child runs in the background. Its result arrives later "
+                    "in your inbox as a notification; you will be notified "
+                    "automatically when it finishes, so you do not need to "
+                    "repeatedly check its status. Pass subagent_type "
+                    "for a named persona (system prompt + tool allowlist applied "
+                    "to the child). Use inject_instruction to guide it mid-run, "
+                    "abort_task to stop it. Fails if max_workers children are "
+                    "already running."
                 ),
                 parameters=pydantic_to_tool_schema(_DispatchAgentParams),
                 fn=manager.dispatch,
@@ -981,7 +985,11 @@ class _SubAgentRuntime:
         self._api.register_tool(
             FunctionTool(
                 name="inject_instruction",
-                description="Queue an instruction for the child's next prompt turn.",
+                description=(
+                    "Queue a follow-up instruction for a running child (by its "
+                    "dispatch_agent task_id); batched into the child's next prompt "
+                    "turn. Errors if the task is unknown or already terminal."
+                ),
                 parameters=pydantic_to_tool_schema(_InjectInstructionParams),
                 fn=manager.inject_instruction,
             )
@@ -989,7 +997,11 @@ class _SubAgentRuntime:
         self._api.register_tool(
             FunctionTool(
                 name="abort_task",
-                description="Abort a running child session.",
+                description=(
+                    "Cooperatively abort a running child by its dispatch_agent "
+                    "task_id. The child stops once it observes the signal. "
+                    "Errors if unknown or already terminal."
+                ),
                 parameters=pydantic_to_tool_schema(_AbortTaskParams),
                 fn=manager.abort,
             )

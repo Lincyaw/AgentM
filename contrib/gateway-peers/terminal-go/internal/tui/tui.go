@@ -940,9 +940,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 	chromeHeight := m.tabBarHeight() + m.statusBarHeight() + bottomSurfaceHeight + composerBottomBorderHeight + resizeHandleHeight
 
 	// Calculate editor height
-	minLines := minEditorLines
-	maxLines := max(minLines, (height-6)/2)
-	m.editorLines = max(minLines, min(max(m.editorLines, m.desiredEditorLines()), maxLines))
+	m.editorLines = max(minEditorLines, min(max(m.editorLines, m.desiredEditorLines()), m.maxEditorLines()))
 
 	targetEditorHeight := m.editorLines - 1
 	if m.localPanelOpen || m.transcriptDetailed {
@@ -973,6 +971,28 @@ func (m *appModel) resizeAll() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// resizeAllIfBottomSurfaceChanged re-renders the bottom surface once and
+// triggers a full reflow only when its height diverged from the height used
+// at the last layout pass (m.bottomSurfaceLayoutHeight, written only by
+// resizeAll). Mutation sites that may have changed the bottom surface call
+// this instead of hand-rolling the measure-and-compare. The short-circuit
+// cannot live inside resizeAll itself: resizeAll must always perform a full
+// reflow for callers whose layout inputs are invisible from here (tab
+// switches swap m.chatPage/m.editor, sidebar collapse changes chat-internal
+// layout), so an early return there would leave those callers stale.
+func (m *appModel) resizeAllIfBottomSurfaceChanged() tea.Cmd {
+	if m.bottomSurfaceHeight(m.width) == m.bottomSurfaceLayoutHeight {
+		return nil
+	}
+	return m.resizeAll()
+}
+
+// maxEditorLines caps the composer at roughly half the window height so the
+// transcript and fixed chrome rows stay visible.
+func (m *appModel) maxEditorLines() int {
+	return max(minEditorLines, (m.height-6)/2)
+}
+
 func (m *appModel) desiredEditorLines() int {
 	if m.editor == nil {
 		return minEditorLines
@@ -981,9 +1001,7 @@ func (m *appModel) desiredEditorLines() int {
 	if bannerHeight := m.editor.BannerHeight(); bannerHeight > 0 {
 		visualLines += bannerHeight
 	}
-	minLines := minEditorLines
-	maxLines := max(minLines, (m.height-6)/2)
-	return max(minLines, min(visualLines+1, maxLines))
+	return max(minEditorLines, min(visualLines+1, m.maxEditorLines()))
 }
 
 func editorVisualLineCount(value string, width int) int {

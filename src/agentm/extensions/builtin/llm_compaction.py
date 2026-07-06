@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -81,8 +82,9 @@ class LlmCompactionConfig(BaseModel):
     custom_instructions: str | None = None
 
 
-COMPACTION_CONTROL_SERVICE = "llm_compaction.control"
+COMPACTION_CONTROL_SERVICE: Final = "llm_compaction.control"
 
+COMPACTION_REQUEST_SERVICE: Final = "compaction.request"
 
 MANIFEST = ExtensionManifest(
     name="llm_compaction",
@@ -586,6 +588,13 @@ class _LlmCompactionRuntime:
                 handler=self.compact_command,
             ),
         )
+        self._api.set_service(COMPACTION_REQUEST_SERVICE, self._request_compaction)
+
+    async def _request_compaction(self, reason: str = "requested") -> bool:
+        """Programmatic compaction entry point for peer atoms."""
+        session_messages = self._api.session.get_messages()
+        rebuilt = await self._run_compaction(reason, session_messages)
+        return rebuilt is not None
 
     def set_auto_compaction_enabled(self, enabled: bool) -> bool:
         self._settings = replace(self._settings, enabled=enabled)

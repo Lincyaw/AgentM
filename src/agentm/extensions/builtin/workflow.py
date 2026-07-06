@@ -124,15 +124,16 @@ class _WorkflowRuntime:
                 description=(
                     "Run an async Python orchestration script (inline or from a "
                     "file via script_path) that fans out deterministic child agent "
-                    "sessions. Use for parallel verify / judge / sweep harnesses "
-                    "where you author the control flow as code rather than "
-                    "turn-by-turn. Names: agent, parallel, pipeline, budget, args, "
-                    "json, log, phase. The script runs in a curated "
+                    "sessions. ONLY the script's final return value enters your "
+                    "context — all intermediate child outputs are dropped, so use "
+                    "this for high-fan-out verify/judge/sweep harnesses where "
+                    "per-child detail is noise. Names: agent, parallel, pipeline, "
+                    "budget, args, json, log, phase. The script runs in a curated "
                     "namespace (data builtins only; no import / open / time / "
-                    "random). agent() results are "
-                    "journaled by hash(prompt, args) so re-running a workflow "
-                    "resumes from cache. agent(prompt, schema={...}) returns a "
-                    "parsed dict conforming to the JSON Schema."
+                    "random). agent() results are journaled by hash(prompt, args) "
+                    "so re-running a workflow resumes from cache. "
+                    "agent(prompt, schema={...}) returns a parsed dict conforming "
+                    "to the JSON Schema."
                 ),
                 parameters=_WorkflowArgs,
                 fn=self.run_workflow,

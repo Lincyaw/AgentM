@@ -71,11 +71,23 @@ def build_auditor_system_prompt(
     base_prompt: str | None = None,
     methodology: list[str] | None = None,
     context_index: dict[str, Any] | None = None,
+    goal_condition: str | None = None,
 ) -> str:
     """Assemble the auditor system prompt for one firing."""
     framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal_index")
 
     sections: list[str] = [framing.rstrip(), ""]
+
+    if goal_condition:
+        sections.append("## GOAL CONDITION")
+        sections.append(
+            "The main agent must satisfy this condition to complete the task. "
+            "Use it to judge whether the agent is on track, and whether its "
+            "claims of completion are backed by actual evidence (e.g., test "
+            "execution output, not just code that compiles)."
+        )
+        sections.append(goal_condition.strip())
+        sections.append("")
 
     if methodology:
         sections.append("## METHODOLOGY (loaded by main agent)")
@@ -174,6 +186,7 @@ class AuditorContextConfig(BaseModel):
     mode: Literal["index", "trajectory"] = "index"
     context_index: dict[str, Any] | None = None
     methodology: list[str] = []  # kept for backward compat
+    goal_condition: str | None = None
 
 MANIFEST = ExtensionManifest(
     name="auditor_context",
@@ -208,6 +221,7 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
             base_prompt=base_prompt,
             methodology=meth,
             context_index=context_index,
+            goal_condition=config.goal_condition,
         )
 
     def _before_start(event: BeforeAgentStartEvent) -> None:

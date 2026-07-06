@@ -128,14 +128,9 @@ WIRE_OUTBOUND_SERVICE: Final = "wire_outbound"
 APPROVAL_MANAGER_SERVICE: Final = "approval_manager"
 """``ApprovalManager`` published by the gateway session manager."""
 
-CHANGESPEC_VALIDATORS_SERVICE: Final = "changespec_validators"
-"""Registry of changespec validator callables."""
-
-
 __all__ = [
     "APPROVAL_MANAGER_SERVICE",
     "ARTIFACT_STORE_SERVICE",
-    "CHANGESPEC_VALIDATORS_SERVICE",
     "COMMAND_PARSER",
     "COMPACTION_PROMPTS",
     "COST_QUERY_SERVICE",

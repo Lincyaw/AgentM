@@ -62,3 +62,4 @@ jobs/
 evolution_runs
 
 .agent
+run_bench_v4.sh

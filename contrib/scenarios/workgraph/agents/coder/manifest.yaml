@@ -15,6 +15,7 @@ extensions:
     config:
       timeout: 120
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.otlp_export
   - local: workgraph_context
   - module: agentm.extensions.builtin.system_prompt
     config:
@@ -40,9 +41,11 @@ extensions:
           abstraction, edge cases covered by tests instead of TODOs.
         - Security: never commit secrets, tokens, or credentials; never log
           PII or unmasked documents; no injection-prone string building.
-        - Contract conformance: cross-context shapes must match
-          docs/08-contracts/ exactly (field names, Money minorUnits, RFC3339
-          UTC, envelope fields, camelCase JSON, SCREAMING_SNAKE enums).
+        - Contract conformance: cross-context shapes must match the
+          repository's own contract documentation exactly.
+        If the context includes review_standards, treat every rule in it as a
+        mandatory review criterion with the same weight as the standards
+        above.
 
         A local commit is not a delivery. `Status: success` requires a pushed
         remote branch. If `gh` is available, create or update a PR and include
@@ -66,31 +69,13 @@ extensions:
         Final response format:
 
         In workflow calls the `submit_result` tool is available; call it
-        exactly once with fields matching this contract: `status`,
-        `agent_env_session`, `branch`, `commit`, `remote`, `pr`, and `report`.
-        Put the human-readable markdown sections below in `report`; the
-        workflow will prepend the canonical status fields before writing
-        `result.md`.
-        IMPORTANT: the `result` argument must be a JSON OBJECT, not a
-        JSON-encoded string. Pass the fields directly; do not wrap the
-        object in quotes or serialize it yourself.
-
-        Status: success | failed | conflict
-        AgentEnvSession: <agent_env.session_id or none>
-        Branch: <branch or none>
-        Commit: <commit or none>
-        Remote: <remote branch name/url or none>
-        PR: <url or none>
-
-        ## Changed Files
-        - ...
-
-        ## Validation
-        - `<command>`: passed/failed/not-run
-
-        ## Notes
-        Concise explanation of what happened. If rebase or push conflicts,
-        use `Status: conflict` and include the conflicted files.
+        exactly once, passing `result` as a JSON object (never a JSON-encoded
+        string) with fields matching this contract: `status`
+        (success | failed | conflict), `agent_env_session`, `branch`,
+        `commit`, `remote`, `pr`, and `report`. Put the human-readable
+        markdown in `report`: changed files, per-command validation outcomes,
+        and concise notes. If rebase or push conflicts, use
+        `status: conflict` and include the conflicted files.
   - module: agentm.extensions.builtin.turn_reminder
     config:
       warn_within: 5

@@ -354,7 +354,7 @@ class ExtensionAPI(Protocol):
 
         Must be called at most once before freeze; a second call raises
         ``KeyError``. Atoms that want to redirect ``write`` /
-        ``edit`` / ``tool_propose_change`` writes to a non-default
+        ``edit`` writes to a non-default
         target (e.g. a sandbox-backed filesystem) call this at install
         time. If no atom calls it, ``get_resource_writer()`` returns the
         default :class:`~agentm.core.runtime.resource_writer.GitBackedResourceWriter`

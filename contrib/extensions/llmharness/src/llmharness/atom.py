@@ -54,8 +54,16 @@ class LLMHarnessConfig(BaseModel):
     finalize_tool: str | None = None
     enable_methodology: bool = False
     methodology_model: str | None = None
+    # Task-spec detection for methodology generation: a non-error tool result
+    # is treated as spec material when its head contains one of these markers
+    # (or opens with a markdown heading) and it is at least ``spec_min_chars``
+    # long. Scenario manifests override the markers for other task layouts.
+    spec_markers: tuple[str, ...] = ("instruction", "lab:", "task:")
+    spec_min_chars: int = 200
+    spec_max_chars: int = 5000
     enable_index: bool = False
     index_model: str | None = None
+    index_vocabulary: str = "coding"
 
 
 REMINDER_OPEN: Final = "<system-reminder>\n"
@@ -315,6 +323,10 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     finalize_tool = cfg.finalize_tool
 
     auditor_provider = _resolve_provider(cfg.auditor_model, cfg.auditor_provider)
+    if auditor_provider:
+        logger.info("llmharness: auditor_model={!r} resolved to {}", cfg.auditor_model, auditor_provider[0])
+    else:
+        logger.info("llmharness: auditor_model={!r}, auditor inherits parent provider", cfg.auditor_model)
     methodology_provider = _resolve_provider(cfg.methodology_model, None) if cfg.methodology_model else auditor_provider
 
     # State
@@ -329,11 +341,15 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     # Methodology generation (spec-driven, runs once)
     # ------------------------------------------------------------------
 
+    def _looks_like_spec(text: str) -> bool:
+        head = text.lower()[:100]
+        return any(marker in head for marker in cfg.spec_markers) or "# " in text[:20]
+
     async def _generate_methodology(messages: list[AgentMessage]) -> list[str]:
         """Extract task spec from messages and generate auditor methodology.
 
         Looks for the task spec in this order:
-        1. Tool results containing INSTRUCTION.md content (most complete)
+        1. Tool results matching ``cfg.spec_markers`` (most complete)
         2. First user message (fallback — may be just a pointer)
         """
         spec_parts: list[str] = []
@@ -353,13 +369,12 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                     ):
                         for sub in result_block.content:
                             text = getattr(sub, "text", None)
-                            if isinstance(text, str) and len(text) > 200 and (
-                                "instruction" in text.lower()[:100]
-                                or "lab:" in text.lower()[:100]
-                                or "task:" in text.lower()[:100]
-                                or "# " in text[:20]
+                            if (
+                                isinstance(text, str)
+                                and len(text) > cfg.spec_min_chars
+                                and _looks_like_spec(text)
                             ):
-                                spec_parts.append(text[:5000])
+                                spec_parts.append(text[: cfg.spec_max_chars])
         task_spec = "\n\n".join(spec_parts) if spec_parts else user_prompt
         if not task_spec:
             logger.warning("llmharness: no task spec found for methodology generation")
@@ -387,6 +402,68 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         return []
 
     # ------------------------------------------------------------------
+    # Async index extraction
+    # ------------------------------------------------------------------
+
+    _latest_index: dict[str, Any] | None = None
+    _idx_provider: Any = None
+
+    if cfg.enable_index:
+        try:
+            from trajectory_index.data import resolve_provider as _resolve_idx_provider
+        except ImportError:
+            logger.exception(
+                "llmharness: enable_index=true but trajectory-index is not "
+                "installed — index extraction disabled"
+            )
+        else:
+            if cfg.index_model:
+                try:
+                    _idx_provider = _resolve_idx_provider(cfg.index_model)
+                except Exception:
+                    logger.exception(
+                        "llmharness: index_model {!r} not resolvable", cfg.index_model
+                    )
+
+    async def _update_index(traj: list[dict[str, Any]]) -> None:
+        nonlocal _latest_index
+        try:
+            from trajectory_index.atom import run_extraction
+
+            from llmharness.context_index import build_context_index
+
+            extraction = await run_extraction(
+                api, traj, _idx_provider, vocabulary=cfg.index_vocabulary
+            )
+            if extraction is not None:
+                symbols = [s.model_dump() for s in extraction.symbols]
+                ci = build_context_index(
+                    trajectory=traj,
+                    symbols=symbols,
+                )
+                _latest_index = ci.to_dict()
+                logger.info(
+                    "llmharness: index updated — {} entities, {} observations",
+                    len(ci.entities), len(ci.observations),
+                )
+        except Exception:
+            logger.exception("llmharness: async index extraction failed")
+
+    # ------------------------------------------------------------------
+    # Stuck-loop compaction
+    # ------------------------------------------------------------------
+
+    async def _request_compaction_if_stuck(n: int) -> None:
+        request_compact = api.get_service("compaction.request")
+        if not callable(request_compact):
+            return
+        try:
+            await request_compact("stuck_loop")
+            logger.info("llmharness: compaction triggered after {} consecutive reminders", n)
+        except Exception:
+            logger.warning("llmharness: compaction request failed after {} consecutive reminders", n)
+
+    # ------------------------------------------------------------------
     # Core pipeline step
     # ------------------------------------------------------------------
 
@@ -405,38 +482,16 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         if auditor_due and cfg.enable_methodology and not cached_methodology:
             cached_methodology = await _generate_methodology(messages)
 
-        # --- Index extraction (optional, before auditor) ---
-        context_index: dict[str, Any] | None = None
-        if auditor_due and cfg.enable_index:
-            try:
-                from trajectory_index.atom import _run_extraction
-                from trajectory_index.data import resolve_provider as _resolve_idx_provider
-                from llmharness.context_index import build_context_index
+        # --- Serialize trajectory once for index + auditor ---
+        traj_snapshot: list[dict[str, Any]] | None = None
+        if auditor_due:
+            traj_snapshot = _serialize_trajectory(messages)
 
-                idx_provider = None
-                if cfg.index_model:
-                    try:
-                        idx_provider = _resolve_idx_provider(cfg.index_model)
-                    except Exception:
-                        logger.warning("llmharness: index_model {!r} not found, skipping index", cfg.index_model)
+        # --- Index extraction (when auditor is due) ---
+        if auditor_due and cfg.enable_index and traj_snapshot is not None:
+            await _update_index(traj_snapshot)
 
-                traj = _serialize_trajectory(messages)
-                extraction = await _run_extraction(api, traj, idx_provider)
-                if extraction is not None:
-                    symbols = [s.model_dump() for s in extraction.symbols]
-                    references = [r.model_dump() for r in extraction.references]
-                    ci = build_context_index(
-                        trajectory=traj,
-                        symbols=symbols,
-                        references=references,
-                    )
-                    context_index = ci.to_dict()
-                    logger.info(
-                        "llmharness: index built — {} entities, {} observations",
-                        len(ci.entities), len(ci.observations),
-                    )
-            except Exception:
-                logger.warning("llmharness: index extraction failed, auditor will run without index")
+        context_index = _latest_index
 
         # --- Auditor ---
         if auditor_due:
@@ -448,7 +503,11 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                 auditor_config["methodology"] = cached_methodology
             if context_index is not None:
                 auditor_config["context_index"] = context_index
-                auditor_config["trajectory_snapshot"] = _serialize_trajectory(messages)
+                auditor_config["trajectory_snapshot"] = traj_snapshot
+
+            goal_condition = api.get_service("goal.condition")
+            if isinstance(goal_condition, str) and goal_condition:
+                auditor_config["goal_condition"] = goal_condition
 
             child_msgs = await _run_child(
                 api,
@@ -464,12 +523,14 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                     default=str,
                 ),
                 purpose="cognitive_audit_auditor",
-                extra_extensions=[
-                    ("agentm.extensions.builtin.trace_query", {}),
-                ],
+                extra_extensions=[],
                 atom_config_overrides={
                     "auditor_context": auditor_config,
                     "auditor_tools": {},
+                    "auditor_index_tools": {
+                        "trajectory": auditor_config.get("trajectory_snapshot", []),
+                        "context_index": auditor_config.get("context_index"),
+                    },
                 },
                 provider=auditor_provider,
             )
@@ -481,8 +542,25 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         verdict = Verdict.from_dict(verdict_raw)
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
                         api.session.append_entry(_et.VERDICT, verdict.to_dict())
+                        n = cumulative.consecutive_reminders
+                        escalate = n >= 3 and n % 3 == 0
                         if verdict.surface_reminder and verdict.reminder_text:
-                            pending_reminders.append(Reminder(text=verdict.reminder_text))
+                            text = verdict.reminder_text
+                            if escalate:
+                                text = (
+                                    f"[REPEATED REMINDER #{n}] {text}\n\n"
+                                    "You have been reminded about this issue multiple times. "
+                                    "Your current approach is not working. Stop repeating "
+                                    "the same actions and try a fundamentally different strategy."
+                                )
+                                logger.warning(
+                                    "llmharness: {} consecutive reminders — escalating",
+                                    n,
+                                )
+                            pending_reminders.append(Reminder(text=text))
+
+                        if escalate:
+                            await _request_compaction_if_stuck(n)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -509,11 +587,11 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
     if enable_reminders:
 
-        def _on_before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+        def _on_before_start(event: BeforeAgentStartEvent) -> None:
             current = str(event.system or "")
-            updated = f"{current}\n\n{_SYSTEM_PROMPT_BLOCK}" if current else _SYSTEM_PROMPT_BLOCK
-            event.system = updated
-            return {"system": updated}
+            event.system = (
+                f"{current}\n\n{_SYSTEM_PROMPT_BLOCK}" if current else _SYSTEM_PROMPT_BLOCK
+            )
 
         api.on(BeforeAgentStartEvent.CHANNEL, _on_before_start)
 

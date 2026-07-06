@@ -12,7 +12,6 @@ extensions:
       experiment_id: ${AGENTM_AGENT_ENV_EXPERIMENT_ID}
       delete_on_shutdown: ${AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN}
       idle_timeout_seconds: 7200
-      max_lifetime_seconds: 14400
       private_containers:
         - name: eval
           image: ${AGENTM_AGENT_ENV_EVAL_IMAGE}
@@ -52,13 +51,14 @@ extensions:
       total_max_tokens: 50000
   - module: llmharness.atom
     config:
-      mode: sync
+      mode: async
       audit_interval_turns: 5
       auditor_prompt: minimal_coding
+      auditor_model: litellm-dsv4flash
       enable_reminders: true
       enable_methodology: false
       enable_index: true
-      index_model: litellm-dsv4flash
+      index_model: local-indexer
   - module: agentm.extensions.builtin.background_exec
     config:
       timeout: 120

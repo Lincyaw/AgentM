@@ -92,7 +92,7 @@ class _TracesArgs(BaseModel):
     include_eval_runs: bool = Field(
         default=True,
         description=(
-            "If False, exclude traces produced by tool_eval_run "
+            "If False, exclude traces produced by eval runs "
             "(those carry a non-null eval_run_id)."
         ),
     )

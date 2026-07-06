@@ -26,6 +26,15 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.11",
 ]
+# ``enable_index: true`` spawns trajectory-index extraction children; the
+# import is guarded at runtime, but the dependency is declared here so the
+# coupling is visible instead of relying on incidental co-installation.
+index = [
+  "trajectory-index",
+]
+
+[tool.uv.sources]
+trajectory-index = { workspace = true }
 
 [project.scripts]
 llmharness-distill = "llmharness.distill.cli:main"

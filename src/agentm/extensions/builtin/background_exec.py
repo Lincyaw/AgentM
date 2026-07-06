@@ -16,7 +16,7 @@ What it does (opt-in; a scenario lists it):
     immediate ticket ``ToolResult`` so the turn's "every tool_call gets a
     result" protocol is satisfied. The real result arrives later as a
     ``source="background"`` inbox item.
-- Companion tools ``check_background`` / ``wait_background`` / ``cancel_background``
+- Companion tools ``check_background`` / ``cancel_background``
   expose direct controls for backgrounded tool calls. ``cancel_background`` is
   the first caller of :meth:`BackgroundTaskRegistry.cancel`.
 - A per-task **ticker** posts to the inbox on milestones (completion / error /
@@ -84,7 +84,7 @@ _ACTIVITY_TERMINAL_STATUSES: frozenset[_Status] = frozenset(
 # The companion tools never auto-background themselves — they are pure registry
 # pokes that return promptly, and backgrounding a poll would be nonsensical.
 _COMPANION_TOOLS = frozenset(
-    {"check_background", "wait_background", "cancel_background"}
+    {"check_background", "cancel_background"}
 )
 
 _DEFAULT_TIMEOUT = 60.0
@@ -110,7 +110,6 @@ MANIFEST = ExtensionManifest(
     ),
     registers=(
         "tool:check_background",
-        "tool:wait_background",
         "tool:cancel_background",
         "event:agent_start",
         "event:background_activity",
@@ -605,9 +604,6 @@ class _BgManager:
                 state.error = str(exc) or exc.__class__.__name__
                 self._finalize(state)
                 return
-            # Normalize a bare ToolResult to ToolContinue so downstream
-            # rendering has one shape (the kernel does the same for foreground
-            # returns).
             state.outcome = (
                 outcome
                 if isinstance(outcome, ToolOutcome)
@@ -617,12 +613,6 @@ class _BgManager:
                 state.status = _CANCELLED
                 self._finalize(state)
                 return
-            # #177: a backgrounded tool that ultimately returns ToolTerminate
-            # carries a terminate intent. ``_post_completion`` posts the
-            # completion with ``terminal=True`` so the runtime drain seam routes
-            # it through loop termination (Stop(ToolTerminated)) once the message
-            # has been delivered, instead of swallowing the intent as an ordinary
-            # completion.
             state.status = _COMPLETED
             self._finalize(state)
         finally:
@@ -923,7 +913,11 @@ class _BackgroundExecRuntime:
             FunctionTool(
                 name="check_background",
                 description=(
-                    "List background tasks (state + elapsed) without waiting."
+                    "List background tasks (state + elapsed) without waiting. "
+                    "Long-running tool calls are automatically moved to the "
+                    "background — this does NOT mean they failed or timed out. "
+                    "You will be notified automatically when a background task "
+                    "completes, so you do not need to poll this tool repeatedly."
                 ),
                 parameters=pydantic_to_tool_schema(_CheckBackgroundParams),
                 fn=self._manager.check_background,
@@ -931,19 +925,14 @@ class _BackgroundExecRuntime:
         )
         self._api.register_tool(
             FunctionTool(
-                name="wait_background",
-                description=(
-                    "Wait briefly for one background task to reach a terminal state; "
-                    "returns the current running status if timeout_s elapses."
-                ),
-                parameters=pydantic_to_tool_schema(_WaitBackgroundParams),
-                fn=self._manager.wait_background,
-            )
-        )
-        self._api.register_tool(
-            FunctionTool(
                 name="cancel_background",
-                description="Request cancellation of a running background task.",
+                description=(
+                    "Request cancellation of a running background task. "
+                    "Only cancel if you are certain the task is stuck — "
+                    "a task that was moved to background is still running "
+                    "and may complete successfully. You will be notified "
+                    "automatically when it finishes."
+                ),
                 parameters=pydantic_to_tool_schema(_CancelBackgroundParams),
                 fn=self._manager.cancel_background,
             )

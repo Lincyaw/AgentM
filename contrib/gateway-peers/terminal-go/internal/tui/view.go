@@ -60,9 +60,7 @@ func (m *appModel) editorTop() int {
 func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	editorPadding := styles.EditorStyle.GetVerticalFrameSize()
 	targetLines := m.height - y - 1 - editorPadding - m.tabBarHeight() - m.bottomSurfaceLayoutHeight
-	minLines := minEditorLines
-	maxLines := max(minLines, (m.height-6)/2)
-	newLines := max(minLines, min(targetLines, maxLines))
+	newLines := max(minEditorLines, min(targetLines, m.maxEditorLines()))
 	if newLines != m.editorLines {
 		m.editorLines = newLines
 		return m.resizeAll()

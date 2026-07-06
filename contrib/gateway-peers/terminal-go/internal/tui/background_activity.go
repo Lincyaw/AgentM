@@ -190,10 +190,10 @@ func (m *appModel) handleBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 		m.backgroundActivityDetail = false
 	}
 	m.statusBar.SetActivity(m.backgroundActivityText())
-	if !activityChanged || m.bottomSurfaceHeight(m.width) == m.bottomSurfaceLayoutHeight {
+	if !activityChanged {
 		return m, nil
 	}
-	return m, m.resizeAll()
+	return m, m.resizeAllIfBottomSurfaceChanged()
 }
 
 func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent) bool {

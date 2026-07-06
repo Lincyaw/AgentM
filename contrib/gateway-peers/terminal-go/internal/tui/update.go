@@ -57,12 +57,10 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.TabsUpdatedMsg:
 		tabChromeChanged := m.syncTabChrome(msg.Tabs, msg.ActiveIdx)
 		m.syncWorkflowTaskPickerState()
-		bottomSurfaceHeightChanged := m.bottomSurfaceHeight(m.width) != m.bottomSurfaceLayoutHeight
-		if tabChromeChanged || bottomSurfaceHeightChanged {
-			cmd := m.resizeAll()
-			return m, cmd
+		if tabChromeChanged {
+			return m, m.resizeAll()
 		}
-		return m, nil
+		return m, m.resizeAllIfBottomSurfaceChanged()
 
 	case messages.SpawnSessionMsg:
 		return m.handleSpawnSession(msg.WorkingDir, msg.Background)
@@ -143,24 +141,16 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.editor.Value() != msg.value {
 			return m, nil
 		}
-		prevBottomSurfaceHeight := m.bottomSurfaceHeight(m.width)
 		cmd := m.updateCompletionsCmd(completion.QueryMsg{Query: msg.query})
-		if m.bottomSurfaceHeight(m.width) != prevBottomSurfaceHeight {
-			return m, tea.Batch(cmd, m.resizeAll())
-		}
-		return m, cmd
+		return m, tea.Batch(cmd, m.resizeAllIfBottomSurfaceChanged())
 
 	case completion.OpenMsg, completion.CloseMsg:
 		cmd := m.updateCompletionsCmd(msg)
 		return m, tea.Batch(cmd, m.resizeAll())
 
 	case completion.QueryMsg, completion.AppendItemsMsg, completion.ReplaceItemsMsg, completion.SetLoadingMsg:
-		prevBottomSurfaceHeight := m.bottomSurfaceHeight(m.width)
 		cmd := m.updateCompletionsCmd(msg)
-		if m.bottomSurfaceHeight(m.width) != prevBottomSurfaceHeight {
-			return m, tea.Batch(cmd, m.resizeAll())
-		}
-		return m, cmd
+		return m, tea.Batch(cmd, m.resizeAllIfBottomSurfaceChanged())
 
 	case completion.OpenedMsg:
 		return m, m.resizeAll()
@@ -388,7 +378,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Forward send messages to the active content view
 		m.streamCancelFooterHidden = false
 		if m.history != nil && !msg.BypassQueue {
-			_ = m.history.Add(msg.Content)
+			if err := m.history.Add(msg.Content); err != nil {
+				slog.Warn("Failed to add prompt to history", "error", err)
+			}
 		}
 		return m.forwardChat(msg)
 

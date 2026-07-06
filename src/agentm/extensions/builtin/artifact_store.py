@@ -426,7 +426,12 @@ class _ArtifactStoreRuntime:
         self._api.register_tool(
             FunctionTool(
                 name="artifact_write",
-                description="Append a new shared artifact to the session-tree store.",
+                description=(
+                    "Create a new immutable artifact and return its id. "
+                    "Append-only — cannot overwrite existing artifacts; each call "
+                    "mints a new id. Artifacts are shared across parent and child "
+                    "sessions in this session tree."
+                ),
                 parameters=pydantic_to_tool_schema(_ArtifactWriteParams),
                 fn=self.write,
             )

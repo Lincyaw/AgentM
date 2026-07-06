@@ -530,3 +530,53 @@ Backward-compatible (no-op on marker-less legacy logs). Tests: unit
 pre-existing package-wide `load_extension` signature pattern, not introduced
 here). **Core substrate change → on branch `fix/gateway-shutdown-workspace-
 traversal`, handed off for review, NOT self-merged.**
+
+## 2026-07-06 — week-in-review baggage cleanup (6-area parallel review → fixes)
+
+Ran 6 parallel review agents over the last week's changes, then fixed all
+confirmed findings. Notable autonomous decisions (L2–L4):
+
+- **Finished the evolution-atom deletion** (85c2b7e2 left dangling state):
+  removed `format_fix/tuner` scenario (referenced 3 deleted atoms → load
+  error), orphaned `changespec_validators` extension, the unused
+  `CHANGESPEC_VALIDATORS_SERVICE` constant, and stale docstring refs.
+  [flagged] Design docs (`per-task-evolution-loop.md`, `.claude/index.yaml`
+  entry) still describe the deleted implementation — direction call
+  (delete docs vs. planned resurrection) escalated to user, not decided.
+- **ClickHouse consolidation**: promoted `query`/`query_binary`/`parse_body`
+  to public, added `Array(String)` param binding + bulk helpers
+  (`bulk_session_entries`/`bulk_turn_usage`/`bulk_system_prompts`/
+  `bulk_models`/`raw_parquet_export`); dataset_export.py and
+  trajectory_index/data.py now carry zero hand-rolled SQL escaping.
+  Synthetic system-prompt entries unified to `role: system` (was
+  `role: user` + `[system]` prefix in dataset_export — shape change for
+  future exports).
+- **Double-encode shim**: single unwrap point in `submit_result`, now
+  recovery-gated (only when raw string fails schema and decoded passes);
+  removed the second decode in workflow `_auto_parse`, which could
+  reinterpret legitimate JSON-looking string results.
+- **llmharness ↔ trajectory_index**: public `run_extraction` entry with
+  explicit `vocabulary` param, `index_vocabulary` config (was hardcoded
+  "coding"), optional `index` extra declaring the workspace dep, py.typed
+  marker for trajectory_index.
+- **WorkGraph structured-only worker contract**: deleted ~150 lines of dead
+  free-text fallback scraping (`ctx.agent(schema=…)` raises on validation
+  failure, so the fallback branch only ever saw error blobs); VerifierReport
+  gained structured `findings[{severity,location,finding}]`, blocker ⇒
+  failed derived in one place (legacy `[blocker]` text scan kept as guard).
+  Domain contract (train-ticket rules) moved out of coder/verifier prompts
+  into injected `review_standards` context (state-dir file / config / args);
+  the old prompt text preserved at `examples/review_standards.example.md`.
+  4 byte-identical `workgraph_context.py` atoms → relative symlinks to one
+  canonical file. Devbox mode resolved once via `ExecMode`.
+- **terminal-go**: integrated dev-worker fixes (bottom-surface reflow guard
+  `resizeAllIfBottomSurfaceChanged`, `maxEditorLines()`, history.Add error
+  logging) by patch, deliberately EXCLUDING concurrent-session commit
+  82c6ade4 (lincyaw, "Align terminal UI with Claude Code flows") found on
+  the worker branch. The queued-input dual-source finding left unfixed on
+  purpose: 82c6ade4 already rewrites that area; fixing it on main would
+  collide with in-flight work. Worker branch
+  `worktree-agent-aa1886b79cb746bfc` kept (holds that commit).
+- Known-red at time of writing: `project-index.yaml` REQ-176 flags
+  `tests/unit/extensions/test_background_exec_bash.py` deleted by the
+  concurrent session's uncommitted work — theirs to resolve.

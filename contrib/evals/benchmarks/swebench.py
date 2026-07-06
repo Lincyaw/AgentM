@@ -56,10 +56,9 @@ class SWEBenchAdapter:
         return f"swebench/sweb.eval.x86_64.{instance_id}:latest"
 
     def get_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
-        # Keep upstream repo name + tag, only swap the registry/namespace.
-        # e.g. jefzda/sweap-images:foo → {registry}/sweap-images:foo
-        _, _, rest = task.image.partition("/")
-        return f"{registry}/{rest}" if rest else task.image
+        if registry:
+            return f"{registry}/{task.image}"
+        return task.image
 
     def get_source_image(self, task: TaskSpec) -> str | None:
         return task.image or None

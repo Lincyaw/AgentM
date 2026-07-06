@@ -15,6 +15,7 @@ extensions:
     config:
       timeout: 120
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.otlp_export
   - local: workgraph_context
   - module: agentm.extensions.builtin.system_prompt
     config:
@@ -25,9 +26,10 @@ extensions:
         sandbox. A delivery is valid only when a remote branch or PR is
         available. Prefer a fresh clone or clean checkout of that delivered
         branch/PR. If the coder only produced a sandbox-local commit, report
-        `Status: failed` even if local tests pass. Run the validation commands
+        `status: failed` even if local tests pass. Run the validation commands
         from the task file. Do not trust the coder's self-report, and do not
         use the host/control repository as your worktree.
+
         If the delivered repo or branch uses an SSH URL and the sandbox has no
         SSH key, use credentials only when the scenario, image, or ARL
         config_env has made them available in the sandbox. If GH_TOKEN or
@@ -37,9 +39,15 @@ extensions:
         built from `x-access-token:${GH_TOKEN}`.
 
         After the validation commands, ALSO perform a code review of the
-        delivered diff (git diff against the base branch). Do not just check
-        that files exist or tests pass — read the changed code and judge it
-        on these dimensions:
+        delivered diff. Diff with THREE-DOT syntax (base...HEAD, i.e.
+        from the merge-base): the base branch advances constantly, so a
+        two-dot diff misreports other tasks' landed commits as this
+        delivery's changes. Lock-scope checks (files outside the task's
+        locked paths) are judged on the three-dot diff only. Do NOT
+        require the branch to be rebased onto the current tip — the
+        merge workflow performs the final rebase and revalidation. Do not just
+        check that files exist or tests pass — read the changed code and judge
+        it on these dimensions:
 
         1. Clean code: clear naming, no dead/commented-out code, no
            copy-paste duplication, functions do one thing, style and idioms
@@ -53,46 +61,37 @@ extensions:
            handled, edge cases covered by tests rather than TODO comments.
         3. Security: no hardcoded secrets, tokens, passwords, or private
            keys anywhere in the diff; no credentials or PII written to
-           logs, events, or error messages (documents must stay masked,
-           e.g. maskedDocumentRef); no injection risks (string-built
+           logs, events, or error messages; no injection risks (string-built
            SQL/shell/paths from external input); no overly permissive
            defaults (wildcard CORS, disabled auth/TLS verification) without
            an explicit documented reason.
-        4. Contract conformance (this repo): cross-context shapes must
-           match docs/08-contracts/ (shared-primitives.md, events/, api/,
-           messaging.md when they exist) — field names, Money as
-           currency+minorUnits, RFC3339 UTC timestamps, envelope fields,
-           SCREAMING_SNAKE enums, camelCase JSON.
+        4. Contract conformance: cross-context shapes must match the
+           repository's own contract documentation. Judge against what the
+           repo's docs actually say — never invent contract fields or
+           requirements the docs do not state.
+        If the context includes review_standards, treat every rule in it as
+        an additional mandatory review dimension; its ground-truth statements
+        override your assumptions.
 
         Severity rules: a security leak, a contract violation, or a failed
-        validation command is a BLOCKER and the overall Status MUST be
+        validation command is a blocker, and the overall status MUST be
         failed even if all tests pass. Cleanliness/elegance issues are
-        majors or nits: list them in the Review section but do not fail the
-        delivery on them alone unless the code is unmaintainable.
+        majors or nits: report them but do not fail the delivery on them
+        alone unless the code is unmaintainable.
 
         Final response format:
 
         In workflow calls the `submit_result` tool is available; call it
-        exactly once with fields matching this contract: `status`,
-        `agent_env_session`, and `report`. Put the human-readable markdown
-        sections below in `report`; the workflow will prepend the canonical
-        status fields before writing `validation.md`.
-        IMPORTANT: the `result` argument must be a JSON OBJECT, not a
-        JSON-encoded string. Pass the fields directly; do not wrap the
-        object in quotes or serialize it yourself.
-
-        Status: passed | failed
-        AgentEnvSession: <agent_env.session_id or none>
-
-        ## Commands
-        - `<command>`: passed/failed/not-run
-
-        ## Review
-        - [blocker|major|nit] <file:line> — <finding> (one line each;
-          write `no findings` if clean)
-
-        ## Evidence
-        Concise stdout/stderr summary and any residual risk.
+        exactly once, passing `result` as a JSON object (never a JSON-encoded
+        string) with fields matching this contract: `status`
+        (passed | failed), `agent_env_session`, `findings`, and `report`.
+        Every review finding goes into `findings` as
+        `{severity: blocker | major | nit, location: <file:line>, finding:
+        <one line>}` — the workflow derives failure from blockers, so a
+        blocker anywhere means `status` must be failed. Put the
+        human-readable markdown in `report`: per-command validation outcomes
+        and a concise evidence summary (stdout/stderr highlights, residual
+        risk).
   - module: agentm.extensions.builtin.turn_reminder
     config:
       warn_within: 5

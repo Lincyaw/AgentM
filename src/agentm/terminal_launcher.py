@@ -30,6 +30,9 @@ class TerminalLaunchError(RuntimeError):
     """Raised when the local gateway or terminal peer cannot be launched."""
 
 
+DEFAULT_TERMINAL_BIN = "ag"
+
+
 @dataclass(slots=True)
 class TerminalLaunchConfig:
     """Resolved configuration for ``agentm terminal``."""
@@ -38,7 +41,7 @@ class TerminalLaunchConfig:
     connect: str | None = None
     scenario: str | None = None
     state_dir: Path | None = None
-    terminal_bin: str = "ag"
+    terminal_bin: str = DEFAULT_TERMINAL_BIN
     terminal_bin_fallbacks: tuple[str, ...] = ("agentm-terminal",)
     terminal_log: Path | None = None
     session_id: str | None = None
@@ -306,7 +309,9 @@ def _find_terminal_executable(config: TerminalLaunchConfig) -> str:
     try:
         return _find_executable(config.terminal_bin)
     except TerminalLaunchError as primary_error:
-        if config.terminal_bin != "ag":
+        # Legacy-binary fallbacks apply only when the caller did not override
+        # the default binary name.
+        if config.terminal_bin != DEFAULT_TERMINAL_BIN:
             raise
         for fallback in config.terminal_bin_fallbacks:
             try:

@@ -152,8 +152,10 @@ def default_daemon_runtime_dir(*, create: bool = False) -> Path:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             path.chmod(0o700)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning(
+                "gateway daemon: could not chmod 0700 runtime dir {}: {}", path, exc
+            )
     return path
 
 
@@ -430,8 +432,10 @@ def _read_nonempty_token(path: Path) -> str:
 def _chmod_private(path: Path) -> None:
     try:
         path.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as exc:
+        # A failed chmod leaves a secret file readable by other local users —
+        # keep going (the daemon still works) but never silently.
+        logger.warning("gateway daemon: could not chmod 0600 {}: {}", path, exc)
 
 
 def _read_daemon_metadata() -> dict[str, Any]:
@@ -451,10 +455,7 @@ def _write_daemon_metadata(data: dict[str, Any]) -> None:
     path = default_daemon_metadata_file(create_runtime_dir=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
-    try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
+    _chmod_private(tmp)
     tmp.replace(path)
 
 

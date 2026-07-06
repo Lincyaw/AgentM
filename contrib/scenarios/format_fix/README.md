@@ -1,14 +1,15 @@
 # format_fix
 
-**What this is**: a toy task class used as the worked example for the
-per-task evolution loop. The production agent receives a malformed-but-
-fixable JSON-ish string and must reply with the canonical JSON. The atom
-under evolution is `tool_normalize_json` — its v1 implementation is
-deliberately weak so the tuner has something real to evolve.
+**What this is**: a toy task class with a deterministic eval suite. The
+production agent receives a malformed-but-fixable JSON-ish string and
+must reply with the canonical JSON. The `tool_normalize_json` atom does
+the actual work — the agent copies its output verbatim, so eval score
+measures the atom, not the model.
 
-**Why it exists**: validates the [per-task evolution loop](../../../.claude/designs/per-task-evolution-loop.md)
-end-to-end without coupling the validation to a heavyweight scenario.
-Three properties make it the right lab:
+**Why it exists**: a minimal lab for evidence-driven atom iteration
+(see [per-task evolution loop](../../../.claude/designs/per-task-evolution-loop.md)
+for the original design; its tuner meta-scenario and evolution atoms
+have since been removed). Three properties make it the right lab:
 
 1. **Deterministic grader.** `eval/grader.py` does `json.loads(actual) == expected`.
    No LLM in the eval signal — when a result is 0/1, that's the atom's
@@ -20,23 +21,15 @@ Three properties make it the right lab:
    capable LLM bypassing the broken atom. If the atom is wrong, the
    answer is wrong.
 
-If you just want to see the loop work, run the tuner here. If you want
-to wire the loop onto your own scenario, copy this directory and read
-[`tuner/README.md`](tuner/README.md).
-
 ## Layout
 
 ```
 format_fix/
 ├── manifest.yaml          # production scenario; declares task_class: format_fix
-├── tool_normalize_json.py # the atom under evolution (post-tuning: v2)
-├── eval/
-│   ├── tasks/*.yaml       # 8 representative tasks, 2 marked holdout
-│   └── grader.py          # deterministic deep-equal grader
-└── tuner/
-    ├── manifest.yaml      # meta-scenario: stacks the 3 evolution atoms
-    ├── prompt.md          # tuner system prompt (quality signal lives here)
-    └── README.md          # how to clone this onto your own scenario
+├── tool_normalize_json.py # the atom under test (post-tuning: v2)
+└── eval/
+    ├── tasks/*.yaml       # 8 representative tasks, 2 marked holdout
+    └── grader.py          # deterministic deep-equal grader
 ```
 
 ## Run the production scenario
@@ -51,19 +44,6 @@ agentm --scenario format_fix \
 The agent calls `normalize_json`, copies its text result verbatim, and
 that becomes the final answer. Observability traces land under
 `$AGENTM_HOME/observability/` by default.
-
-## Run the tuner (one iteration)
-
-```bash
-agentm --scenario format_fix/tuner \
-       --cwd /tmp/ff_sandbox \
-       "Run one tuning iteration. Eval baseline, propose an improved
-        tool_normalize_json (stdlib only), eval proposed, propose_change."
-```
-
-Decisions land in `<cwd>/.agentm/decisions/format_fix/activations.jsonl`
-(append-only audit log). Activations write through to
-`tool_normalize_json.py` and commit via git.
 
 ## What the eval set covers
 

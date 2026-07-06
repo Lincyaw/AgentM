@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from agentm.extensions.builtin._operations import agent_env
+from agentm.extensions.builtin._operations import agent_env as agent_env_mod
 from agentm.extensions.builtin._operations.agent_env import (
     AgentEnvConfig,
     install_agent_env,
@@ -144,7 +144,7 @@ async def test_async_execute_recovers_pending_operation_result(
             return self._responses.pop(0)
 
     session = FakeAsyncSession()
-    result = await agent_env._async_execute(
+    result = await agent_env_mod.async_execute(
         session,  # type: ignore[arg-type]
         [{"cmd": "sleep 10", "timeout": 1}],
     )

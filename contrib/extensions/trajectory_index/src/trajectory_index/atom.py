@@ -57,6 +57,10 @@ class TrajectoryIndexConfig(BaseModel):
         default="qwen",
         description="config.toml model profile name for the extraction agent",
     )
+    vocabulary: str = Field(
+        default="default",
+        description="Vocabulary name for symbol kind validation (default, coding, research)",
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -193,20 +197,31 @@ _MAX_RETRIES: Final = 3
 _RETRY_DELAY: Final = 5.0
 
 
-def _try_parse_response(messages: list[AgentMessage]) -> tuple[ExtractionResult | None, str | None]:
+def _try_parse_response(
+    messages: list[AgentMessage],
+    vocabulary: str = "default",
+) -> tuple[ExtractionResult | None, str | None]:
     """Try to parse an ExtractionResult from assistant messages."""
     from .data import _try_parse_response as _parse
 
-    return _parse(messages)
+    return _parse(messages, vocabulary)
 
 
-async def _run_extraction(
+async def run_extraction(
     api: ExtensionAPI,
     messages: list[dict[str, JsonValue]],
     provider: ProviderSpec | None,
     registry: list[dict[str, Any]] | None = None,
     message_id_start: int = 0,
+    vocabulary: str = "default",
 ) -> ExtractionResult | None:
+    """Public extraction entry point: index a trajectory via a child session.
+
+    Consumed by this atom's own turn-end handler and by external harnesses
+    (e.g. llmharness) that want a one-shot extraction over a serialized
+    trajectory. Vocabulary selection is explicit — no module globals or
+    environment variables.
+    """
     from .data import _reindex_messages
 
     reindexed = _reindex_messages(messages, start=message_id_start)
@@ -231,6 +246,9 @@ async def _run_extraction(
             "kind": "trajectory_index_extraction",
             "parent_session_id": api.session_id,
         },
+        atom_config_overrides={
+            "trajectory_extractor_context": {"vocabulary": vocabulary},
+        },
     )
 
     for attempt in range(_MAX_RETRIES):
@@ -238,12 +256,11 @@ async def _run_extraction(
             child = await api.spawn_child_session(config)
             try:
                 child_msgs: list[AgentMessage] = await child.prompt(prompt)
-                result, error = _try_parse_response(child_msgs)
+                result, error = _try_parse_response(child_msgs, vocabulary)
                 if result:
                     return result
                 if error:
                     logger.warning(f"extraction parse failed: {error}")
-                    # Retry with error feedback in a new child
                     retry_child = await api.spawn_child_session(config)
                     try:
                         retry_prompt = (
@@ -252,7 +269,7 @@ async def _run_extraction(
                             "Fix the errors and output valid JSON only."
                         )
                         retry_msgs = await retry_child.prompt(retry_prompt)
-                        result, _ = _try_parse_response(retry_msgs)
+                        result, _ = _try_parse_response(retry_msgs, vocabulary)
                         if result:
                             return result
                     finally:
@@ -354,12 +371,13 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
 
         registry = index.registry_snapshot() if watermark > 0 else None
         provider = _resolve_provider_safe(cfg.model)
-        result = await _run_extraction(
+        result = await run_extraction(
             api,
             new_msgs,
             provider,
             registry=registry,
             message_id_start=watermark,
+            vocabulary=cfg.vocabulary,
         )
         if result is None:
             return ToolResult(

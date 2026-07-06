@@ -15,6 +15,7 @@ extensions:
     config:
       timeout: 120
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.otlp_export
   - local: workgraph_context
   - module: agentm.extensions.builtin.system_prompt
     config:

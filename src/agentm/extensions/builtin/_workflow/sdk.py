@@ -998,6 +998,11 @@ class WorkflowContext:
         return self._run.args_payload
 
     @property
+    def cwd(self) -> str:
+        """Effective working directory for this workflow run."""
+        return self._run.cwd_override or self._run.api.cwd
+
+    @property
     def budget(self) -> _Budget:
         """Read-only token-spend view."""
         return _Budget(self._run.budget_svc)
@@ -1253,16 +1258,9 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
         parsed = json.loads(text)
         if isinstance(parsed, (dict, list)):
             return parsed
-        if isinstance(parsed, str):
-            # Tolerate double-encoded results: models sometimes pass a JSON
-            # *string* instead of an object to submit_result. One extra
-            # decode recovers the intended structure.
-            try:
-                inner = json.loads(parsed)
-                if isinstance(inner, (dict, list)):
-                    return inner
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # A decoded *string* payload is a legitimate string result:
+        # double-encoded submissions are already unwrapped at the boundary
+        # (structured_output.submit_result), so no second decode here.
     except (json.JSONDecodeError, TypeError) as exc:
         # Free-text agent output that isn't JSON — return it verbatim.
         logger.debug("workflow: agent output not JSON, returning as text: {}", exc)

@@ -1511,7 +1511,10 @@ def export_dataset_cmd(
     ] = None,
     compression: Annotated[
         str,
-        typer.Option("--compression", help="Parquet compression (zstd, snappy, gzip, none)."),
+        typer.Option(
+            "--compression",
+            help="Parquet compression (zstd, snappy, gzip, uncompressed, brotli, lz4).",
+        ),
     ] = "zstd",
 ) -> None:
     """Export traces to a HuggingFace-compatible Parquet or JSONL dataset.
@@ -1545,6 +1548,13 @@ def export_dataset_cmd(
         _info("Using local JSONL backend")
 
     suffix = output.suffix.lower()
+    if suffix not in {".jsonl", ".parquet"}:
+        _fail(
+            2,
+            "bad-output-suffix",
+            f"unsupported output suffix {suffix!r}",
+            fix="use a .parquet or .jsonl output path",
+        )
     if suffix == ".jsonl":
         count = exporter.export_jsonl(
             output,

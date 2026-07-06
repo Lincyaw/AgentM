@@ -194,34 +194,26 @@ update a PR when `gh` is available. A sandbox-local commit is not a delivery:
 be `none`; the merge agent creates the PR later when needed.
 
 When a worker is called by the workflow, it receives a structured
-`submit_result` schema. The workflow treats that structured result as the
-source of truth for status and delivery fields, returns those fields to the
-main agent in the workflow tool result, and still writes canonical Markdown
-reports for compatibility with the filesystem bus. If a worker runs without
-structured output, the same Markdown header remains the fallback contract. The
-coder report must begin with one of:
+`submit_result` schema (`CoderReport` / `VerifierReport` / `MergeReport`).
+That structured result is the only worker contract: the workflow reads
+status and delivery fields from it, returns them to the main agent in the
+workflow tool result, and renders canonical Markdown reports onto the
+filesystem bus for later stages to read. A worker that returns anything
+other than the structured report is recorded as failed with the raw payload
+as evidence.
 
-```text
-Status: success
-Status: failed
-Status: conflict
-AgentEnvSession: <agent_env.session_id or none>
-Branch: <branch or none>
-Commit: <commit or none>
-Remote: <remote branch name/url or none>
-PR: <url or none>
-```
+The workflow coerces a coder `success` with empty `remote` and `pr` to
+failed before verification. The verifier receives the task and the coder's
+result, performs a fresh clone or checkout of the remote branch or PR, runs
+the validation commands, and submits review findings as structured
+`{severity, location, finding}` entries — any `blocker` finding fails the
+delivery regardless of the reported status.
 
-The workflow coerces a coder `Status: success` with empty `Remote:` and `PR:`
-to failed before verification. The verifier receives the task and the coder's
-result, performs a fresh clone or checkout of the remote branch or PR, runs the
-validation commands, and reports:
-
-```text
-Status: passed
-Status: failed
-AgentEnvSession: <agent_env.session_id or none>
-```
+Project-specific review rules (contract documentation, recurring rejected
+patterns) are injected as `review_standards` context rather than baked into
+the agent prompts: put them in `<state_dir>/review_standards.md`, point
+`review_standards_file` at a file, or pass `args.review_standards` inline.
+See `examples/review_standards.example.md`.
 
 The workflow moves verifier-passed task files to `verified/`; failed or
 conflicted tasks move to `failed/` or `conflicts/`. It writes `result.md`,

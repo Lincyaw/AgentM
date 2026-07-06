@@ -31,12 +31,17 @@ class CumulativeAuditState:
     )
     last_continuation_notes: list[str] = field(default_factory=list)
     firing_id_counter: int = 0
+    consecutive_reminders: int = 0
 
     def absorb_auditor_verdict(self, verdict: dict[str, Any]) -> None:
         self.recent_verdicts.append(verdict)
         raw_notes = verdict.get("continuation_notes")
         if isinstance(raw_notes, list):
             self.last_continuation_notes = [n for n in raw_notes if isinstance(n, str)]
+        if verdict.get("surface_reminder"):
+            self.consecutive_reminders += 1
+        else:
+            self.consecutive_reminders = 0
 
     @classmethod
     def fresh(cls) -> CumulativeAuditState:

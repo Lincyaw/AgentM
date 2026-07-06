@@ -83,6 +83,16 @@ def _entry_to_chat_messages(
     role = payload.get("role")
     content_blocks = payload.get("content") or []
 
+    if role == "system":
+        text = "\n".join(
+            block.get("text", "")
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+        if not text:
+            return []
+        return [{"role": "system", "content": text}]
+
     if role == "user":
         text = "\n".join(
             block.get("text", "")
@@ -189,12 +199,21 @@ class _Backend(Protocol):
 # ---------------------------------------------------------------------------
 
 
-def _escape_ch(s: str) -> str:
-    return s.replace("\\", "\\\\").replace("'", "\\'")
+def _system_prompt_entry(text: str) -> dict[str, Any]:
+    """Synthetic SessionEntry carrying the system prompt.
 
-
-def _in_clause(session_ids: list[str]) -> str:
-    return "(" + ",".join(f"'{_escape_ch(sid)}'" for sid in session_ids) + ")"
+    Shaped like ``clickhouse.messages()``'s system row so both backends and
+    the trace CLI agree on one representation.
+    """
+    return {
+        "type": "message", "id": "system-prompt",
+        "parent_id": None, "timestamp": 0,
+        "payload": {
+            "role": "system",
+            "content": [{"type": "text", "text": text}],
+            "timestamp": 0,
+        },
+    }
 
 
 class _ClickHouseBackend:
@@ -215,14 +234,6 @@ class _ClickHouseBackend:
             roots_only=roots_only,
         ))[:limit]
 
-    def _query(self, sql: str, *, timeout: int = 60) -> list[dict[str, Any]]:
-        from agentm.core.observability.clickhouse import _query
-        return _query(self._url, sql, timeout=timeout)
-
-    def _query_binary(self, sql: str, *, timeout: int = 120) -> bytes:
-        from agentm.core.observability.clickhouse import _query_binary
-        return _query_binary(self._url, sql, timeout=timeout)
-
     def load_conversations(
         self,
         session_ids: list[str],
@@ -232,87 +243,20 @@ class _ClickHouseBackend:
     ) -> list[Conversation]:
         if not session_ids:
             return []
-        from agentm.core.observability.clickhouse import _parse_body
+        from agentm.core.observability import clickhouse as ch
 
-        in_cl = _in_clause(session_ids)
-
-        msg_rows = self._query(
-            "SELECT "
-            "  LogAttributes['agentm.session.id'] AS session_id, "
-            "  groupArray(Body ORDER BY Timestamp ASC) AS bodies "
-            "FROM otel_logs "
-            "WHERE EventName = 'agentm.message.appended' "
-            f" AND LogAttributes['agentm.session.id'] IN {in_cl} "
-            "GROUP BY session_id",
-        )
-        messages_by_sid: dict[str, list[dict[str, Any]]] = {}
-        for row in msg_rows:
-            sid = row.get("session_id", "")
-            bodies = row.get("bodies", [])
-            entries: list[dict[str, Any]] = []
-            for b in (bodies if isinstance(bodies, list) else []):
-                parsed = _parse_body(b)
-                if isinstance(parsed, dict):
-                    entries.append(parsed)
-            messages_by_sid[sid] = entries
+        messages_by_sid = ch.bulk_session_entries(self._url, session_ids)
 
         if include_system_prompt:
-            for row in self._query(
-                "SELECT "
-                "  LogAttributes['agentm.session.id'] AS session_id, "
-                "  any(Body) AS body "
-                "FROM otel_logs "
-                "WHERE EventName = 'agentm.llm.system_prompt' "
-                f" AND LogAttributes['agentm.session.id'] IN {in_cl} "
-                "GROUP BY session_id",
-            ):
-                sid = row.get("session_id", "")
-                body = _parse_body(row.get("body"))
-                text = body.get("text", "") if isinstance(body, dict) else ""
-                if text and sid in messages_by_sid:
-                    messages_by_sid[sid].insert(0, {
-                        "type": "message", "id": "system-prompt",
-                        "parent_id": None, "timestamp": 0,
-                        "payload": {
-                            "role": "user",
-                            "content": [{"type": "text", "text": f"[system]\n{text}"}],
-                            "timestamp": 0,
-                        },
-                    })
+            for sid, text in ch.bulk_system_prompts(self._url, session_ids).items():
+                if sid in messages_by_sid:
+                    messages_by_sid[sid].insert(0, _system_prompt_entry(text))
 
-        usage_rows = self._query(
-            "SELECT "
-            "  LogAttributes['agentm.session.id'] AS session_id, "
-            "  count(*) AS turns, "
-            "  sum(JSONExtractInt(Body, 'input_tokens')) AS input_tokens, "
-            "  sum(JSONExtractInt(Body, 'output_tokens')) AS output_tokens "
-            "FROM otel_logs "
-            "WHERE EventName = 'agentm.turn.summary' "
-            f" AND LogAttributes['agentm.session.id'] IN {in_cl} "
-            "GROUP BY session_id",
-        )
-        usage_by_sid: dict[str, dict[str, int]] = {}
-        for row in usage_rows:
-            usage_by_sid[row.get("session_id", "")] = {
-                "turns": int(row.get("turns", 0)),
-                "input_tokens": int(row.get("input_tokens", 0)),
-                "output_tokens": int(row.get("output_tokens", 0)),
-            }
+        usage_by_sid = ch.bulk_turn_usage(self._url, session_ids)
 
         model_by_sid: dict[str, str] = {}
         try:
-            for row in self._query(
-                "SELECT "
-                "  SpanAttributes['agentm.session.id'] AS session_id, "
-                "  any(SpanName) AS model_span "
-                "FROM otel_traces "
-                "WHERE startsWith(SpanName, 'chat ') "
-                f" AND SpanAttributes['agentm.session.id'] IN {in_cl} "
-                "GROUP BY session_id",
-            ):
-                name = row.get("model_span", "")
-                if name.startswith("chat "):
-                    model_by_sid[row["session_id"]] = name.removeprefix("chat ").strip()
+            model_by_sid = ch.bulk_models(self._url, session_ids)
         except Exception as exc:
             logger.debug("dataset_export: model query failed: {}", exc)
 
@@ -346,55 +290,16 @@ class _ClickHouseBackend:
         roots_only: bool = False,
     ) -> int:
         """ClickHouse → Parquet in one HTTP round-trip, no Python transform."""
-        where = ["EventName = 'agentm.session.start'"]
-        if roots_only:
-            where.append("LogAttributes['agentm.session.parent_id'] = ''")
+        from agentm.core.observability import clickhouse as ch
 
-        session_sql = (
-            "SELECT LogAttributes['agentm.session.id'] AS session_id, "
-            "  LogAttributes['agentm.session.scenario'] AS scenario, "
-            "  LogAttributes['agentm.session.purpose'] AS purpose "
-            f"FROM otel_logs WHERE {' AND '.join(where)}"
-        )
-        sessions = self._query(session_sql)
-        if scenarios:
-            sessions = [s for s in sessions if s.get("scenario") in scenarios]
-        if purposes:
-            sessions = [s for s in sessions if s.get("purpose") in purposes]
-        if not sessions:
-            return 0
+        sessions = list(ch.index(
+            self._url, purposes=purposes, scenarios=scenarios,
+            roots_only=roots_only,
+        ))
         sids = [s["session_id"] for s in sessions if s.get("session_id")]
-        in_cl = _in_clause(sids)
-
-        sql = (
-            "SELECT "
-            "  m.session_id, "
-            "  m.messages, "
-            "  u.turns, "
-            "  u.input_tokens, "
-            "  u.output_tokens "
-            "FROM ("
-            "  SELECT "
-            "    LogAttributes['agentm.session.id'] AS session_id, "
-            "    groupArray(Body ORDER BY Timestamp ASC) AS messages "
-            "  FROM otel_logs "
-            "  WHERE EventName = 'agentm.message.appended' "
-            f"   AND LogAttributes['agentm.session.id'] IN {in_cl} "
-            "  GROUP BY session_id"
-            ") m LEFT JOIN ("
-            "  SELECT "
-            "    LogAttributes['agentm.session.id'] AS session_id, "
-            "    count(*) AS turns, "
-            "    sum(JSONExtractInt(Body, 'input_tokens')) AS input_tokens, "
-            "    sum(JSONExtractInt(Body, 'output_tokens')) AS output_tokens "
-            "  FROM otel_logs "
-            "  WHERE EventName = 'agentm.turn.summary' "
-            f"   AND LogAttributes['agentm.session.id'] IN {in_cl} "
-            "  GROUP BY session_id"
-            ") u ON m.session_id = u.session_id "
-            "FORMAT Parquet"
-        )
-        data = self._query_binary(sql)
+        if not sids:
+            return 0
+        data = ch.raw_parquet_export(self._url, sids)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(data)
         return len(sids)
@@ -489,15 +394,7 @@ class _LocalBackend:
                     body = rec.body if isinstance(rec.body, dict) else {}
                     text = body.get("text", "")
                     if text:
-                        entries.insert(0, {
-                            "type": "message", "id": "system-prompt",
-                            "parent_id": None, "timestamp": 0,
-                            "payload": {
-                                "role": "user",
-                                "content": [{"type": "text", "text": f"[system]\n{text}"}],
-                                "timestamp": 0,
-                            },
-                        })
+                        entries.insert(0, _system_prompt_entry(text))
                     break
 
             chat_msgs = _entries_to_conversation(entries, include_thinking=include_thinking)
@@ -562,6 +459,10 @@ CREATE TABLE conversations (
 )"""
 
 _INSERT_SQL = "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+_PARQUET_COMPRESSIONS = frozenset(
+    {"uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4", "lz4_raw"}
+)
 
 
 def _conv_to_row(conv: Conversation) -> tuple[Any, ...]:
@@ -669,6 +570,11 @@ class DatasetExporter:
         """Export to Parquet with OpenAI-format messages. Returns row count."""
         import duckdb
 
+        if compression.lower() not in _PARQUET_COMPRESSIONS:
+            raise ValueError(
+                f"unsupported parquet compression {compression!r}; "
+                f"expected one of {sorted(_PARQUET_COMPRESSIONS)}"
+            )
         output = Path(output)
         output.parent.mkdir(parents=True, exist_ok=True)
         conn = duckdb.connect(":memory:")
@@ -692,9 +598,12 @@ class DatasetExporter:
             conn.close()
             return 0
 
+        # DuckDB COPY does not support a bound parameter for the target path;
+        # single-quote doubling is the documented literal escape.
+        escaped_output = str(output).replace("'", "''")
         conn.execute(
-            f"COPY conversations TO '{output}' "
-            f"(FORMAT PARQUET, COMPRESSION '{compression}')"
+            f"COPY conversations TO '{escaped_output}' "
+            f"(FORMAT PARQUET, COMPRESSION '{compression.lower()}')"
         )
         conn.close()
         return count

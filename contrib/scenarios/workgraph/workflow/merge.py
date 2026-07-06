@@ -3,14 +3,15 @@
 This module-mode workflow implements one merge scheduling pass over the
 WorkGraph filesystem task bus. It claims verified tasks, serializes merges for
 the same repo/base through a filesystem lock, and delegates all git/GitHub
-operations to a short-lived merger agent running in ARL agent_env.
+operations to a short-lived merger agent running in ARL agent_env. The merger
+reports exclusively through a structured ``submit_result`` payload
+(:class:`MergeReport`); anything else is recorded as failed with the raw
+payload as evidence.
 """
 
 from __future__ import annotations
 
 import hashlib
-import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -19,43 +20,32 @@ from agentm.extensions.builtin.workflow import WorkflowContext
 from pydantic import BaseModel, Field
 
 from .common import (
-    _agent_env_session_from_report,
-    _agent_env_target_configured,
+    TaskFile,
     _as_float,
     _as_str,
+    _atom_config,
     _config_int,
     _config_str,
-    _csv_field,
     _deps_satisfied,
     _done_ids,
     _ensure_dirs,
-    _field,
     _is_noneish,
     _load_config,
+    _move_task,
     _operations_config_from_config,
+    _read_task,
+    _release_locks,
     _report_field,
     _report_optional_value,
+    _resolve_exec_mode,
+    _result_dir,
     _safe_lock_name,
-    _shared_attach_session_configured,
     _state_root,
     _structured_report_text,
-    _task_id,
-    _validation_commands,
+    _try_acquire_lock_file,
 )
 
 DEFAULT_MERGER_SCENARIO = "workgraph/agents/merger"
-
-
-@dataclass(slots=True)
-class TaskFile:
-    task_id: str
-    path: Path
-    text: str
-    depends: list[str]
-    locks: list[str]
-    repo: str
-    base: str
-    validation: list[str]
 
 
 @dataclass(slots=True)
@@ -90,20 +80,6 @@ class MergeReport(BaseModel):
     )
 
 
-def _read_task(path: Path, default_repo: str, default_base: str) -> TaskFile:
-    text = path.read_text(encoding="utf-8")
-    return TaskFile(
-        task_id=_task_id(path, text),
-        path=path,
-        text=text,
-        depends=_csv_field(text, "Depends"),
-        locks=_csv_field(text, "Locks"),
-        repo=_field(text, "Repo") or default_repo,
-        base=_field(text, "Base") or default_base,
-        validation=_validation_commands(text),
-    )
-
-
 def _merge_lock_name(task: TaskFile) -> str:
     digest = hashlib.sha256(f"{task.repo}\n{task.base}".encode()).hexdigest()[:16]
     base = _safe_lock_name(task.base)[:60] or "base"
@@ -112,17 +88,9 @@ def _merge_lock_name(task: TaskFile) -> str:
 
 def _acquire_merge_lock(root: Path, task: TaskFile) -> list[Path] | None:
     path = root / "locks" / _merge_lock_name(task)
-    try:
-        with path.open("x", encoding="utf-8") as handle:
-            handle.write(f"{task.task_id}\n{task.path.name}\n")
-    except FileExistsError:
+    if not _try_acquire_lock_file(path, task.task_id, task.path.name):
         return None
     return [path]
-
-
-def _release_locks(paths: list[Path]) -> None:
-    for path in paths:
-        path.unlink(missing_ok=True)
 
 
 def _claim_tasks(
@@ -167,87 +135,40 @@ def _claim_tasks(
     return claimed
 
 
-def _normalize_report(text: object) -> str:
-    """Lowercase and strip markdown decorations so 'Status: x', '**Status:** x',
-    '`Status`: x', and '- **Status**: x' all parse the same way."""
-    return re.sub(r"[*_`]", "", str(text or "")).lower()
+def _merge_report_text(report: MergeReport) -> str:
+    return _structured_report_text(
+        [
+            ("Status", report.status),
+            ("AgentEnvSession", report.agent_env_session),
+            ("PR", report.pr),
+            ("Branch", report.branch),
+            ("MergedCommit", report.merged_commit),
+        ],
+        report.report,
+    )
 
 
-def _merge_status(text: object) -> str:
-    normalized = _normalize_report(text)
-    for status in ("merged", "failed", "conflict", "needs_human", "pending"):
-        if re.search(rf"status\s*:\s*{status}", normalized):
-            return status
-    if re.search(r"status\s*:\s*auto[_-]merge", normalized):
-        return "auto_merge"
-    return "unknown"
-
-
-def _normalize_merge_status(status: str) -> str:
-    if status in {
-        "merged",
-        "auto_merge",
-        "pending",
-        "failed",
-        "conflict",
-        "needs_human",
-    }:
-        return status
-    return "failed"
-
-
-def _merge_report_text(result: object) -> str:
-    if isinstance(result, MergeReport):
-        return _structured_report_text(
-            [
-                ("Status", result.status),
-                ("AgentEnvSession", result.agent_env_session),
-                ("PR", result.pr),
-                ("Branch", result.branch),
-                ("MergedCommit", result.merged_commit),
-            ],
-            result.report,
-        )
-    return str(result)
-
-
-def _agent_env_session_from_result(result: object, text: str) -> str:
-    if isinstance(result, MergeReport):
-        value = result.agent_env_session
-    else:
-        value = _agent_env_session_from_report(text)
+def _session_from(report: MergeReport) -> str:
+    value = report.agent_env_session
     return "" if _is_noneish(value) else value.strip()
 
 
-def _merge_summary(
-    result: object,
-    text: str,
-    status: str,
-) -> dict[str, object]:
-    if isinstance(result, MergeReport):
-        pr = result.pr
-        branch = result.branch
-        merged_commit = result.merged_commit
-        agent_env_session = result.agent_env_session
-    else:
-        pr = _report_field(text, "PR")
-        branch = _report_field(text, "Branch")
-        merged_commit = _report_field(text, "MergedCommit")
-        agent_env_session = _agent_env_session_from_report(text)
+def _merge_summary(report: MergeReport | None, status: str) -> dict[str, object]:
+    if report is None:
+        return {
+            "status": status,
+            "pr": None,
+            "branch": None,
+            "merged_commit": None,
+            "agent_env_session": None,
+        }
     return {
         "status": status,
-        "pr": _report_optional_value(pr),
-        "branch": _report_optional_value(branch),
-        "merged_commit": _report_optional_value(merged_commit),
-        "agent_env_session": _report_optional_value(agent_env_session),
+        "pr": _report_optional_value(report.pr),
+        "branch": _report_optional_value(report.branch),
+        "merged_commit": _report_optional_value(report.merged_commit),
+        "agent_env_session": _report_optional_value(report.agent_env_session),
     }
-
-
-def _result_dir(root: Path, task: TaskFile) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", task.task_id).strip("-")
-    path = root / "results" / (safe or task.path.stem)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _read_result_file(root: Path, task: TaskFile, name: str) -> str:
@@ -285,11 +206,7 @@ def _move_finished(root: Path, claim: ClaimedMergeTask, status: str) -> Path:
         target_dir = root / "conflicts"
     else:
         target_dir = root / "failed"
-    target = target_dir / claim.merging_path.name
-    if target.exists():
-        target.unlink()
-    shutil.move(str(claim.merging_path), str(target))
-    return target
+    return _move_task(claim.merging_path, target_dir)
 
 
 def _context_for_task(
@@ -318,36 +235,21 @@ def _context_for_task(
         "branch": "" if _is_noneish(branch) else branch,
         "pr": "" if _is_noneish(pr) else pr,
         "remote": "" if _is_noneish(remote) else remote,
+        # Run-specific facts only — the merge procedure itself lives in the
+        # merger agent's system prompt (single source of truth).
         "execution": (
-            "Run inside the ARL agent_env sandbox. Do not use the host/control "
-            "repository as the worktree. Perform GitHub and git operations for "
-            "exactly one verified delivery branch or PR. If no PR exists yet, "
-            "create it from the delivery branch before merge operations. "
-            "Fetch the latest remote base, rebase the delivery branch onto "
-            "origin/<base>, immediately push only the worker delivery branch "
-            "with --force-with-lease after a successful rebase, verify the "
-            "remote delivery branch was updated, run validation, and merge "
-            "through gh with rebase semantics. After a successful merge, fetch "
-            "origin/<base> immediately and report MergedCommit as the remote "
-            "base HEAD that contains the delivery. If source_queue is "
-            "merge_pending, first check whether the PR is already merged; if "
-            "it is still waiting on checks or branch protection, report "
-            "Status: auto_merge again. Never print credentials."
+            "Run inside the ARL agent_env sandbox. Do not use the "
+            "host/control repository as the worktree. Handle exactly one "
+            "verified delivery branch or PR — the one in this context. If "
+            "source_queue is merge_pending, first check whether the PR is "
+            "already merged; if it is still waiting on checks or branch "
+            "protection, report Status: auto_merge again. Never print "
+            "credentials."
         ),
     }
     if extra:
         context.update(extra)
     return context
-
-
-def _atom_config(
-    operations: dict[str, object],
-    context: dict[str, object],
-) -> dict[str, dict[str, Any]]:
-    config: dict[str, dict[str, Any]] = {"workgraph_context": dict(context)}
-    if operations:
-        config["operations"] = dict(operations)
-    return config
 
 
 async def _run_one(
@@ -375,17 +277,17 @@ async def _run_one(
             retry=1,
             trace_label=f"{task.task_id}:merger",
         )
-        merger_text = _merge_report_text(merger_result)
-        merge_status_raw: str = (
-            merger_result.status
-            if isinstance(merger_result, MergeReport)
-            else _merge_status(merger_text)
-        )
-        merge_status = _normalize_merge_status(merge_status_raw)
-        agent_env_session = _agent_env_session_from_result(
-            merger_result,
-            merger_text,
-        )
+        merge_report = merger_result if isinstance(merger_result, MergeReport) else None
+        if merge_report is not None:
+            merger_text = _merge_report_text(merge_report)
+            merge_status = merge_report.status
+            agent_env_session = _session_from(merge_report)
+        else:
+            merger_text = (
+                "Status: failed\n\nMerger returned no structured report; raw "
+                f"result: {merger_result!r}"
+            )
+            merge_status = "failed"
 
         _write_merge_result(root, task, merger_text, agent_env_session)
         target = _move_finished(root, claim, merge_status)
@@ -397,7 +299,7 @@ async def _run_one(
             "source_queue": claim.source_queue,
             "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
-            "merge": _merge_summary(merger_result, merger_text, merge_status),
+            "merge": _merge_summary(merge_report, merge_status),
         }
     except Exception as exc:
         ctx.log(f"{task.task_id}: merge workflow failed: {type(exc).__name__}: {exc}")
@@ -433,23 +335,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         config_root,
         backend_error="WorkGraph merge agents require operations backend 'agent_env'",
     )
-    devbox_session = str(operations.pop("devbox_session", "") or "").strip()
-    if devbox_session:
-        # Devbox mode: merge agents attach to the shared long-lived sandbox.
-        operations["attach_session"] = devbox_session
-    elif _shared_attach_session_configured(operations):
-        raise RuntimeError(
-            "WorkGraph merge does not accept a shared agent_env attach_session "
-            "for automatic task claiming. Use agent_env.devbox_session for the "
-            "shared-devbox mode, or args.agent_env.image / "
-            "AGENTM_AGENT_ENV_IMAGE so each claimed merge gets its own ARL "
-            "sandbox."
-        )
-    if not devbox_session and not _agent_env_target_configured(operations):
-        raise RuntimeError(
-            "WorkGraph merge agents require an ARL agent_env target. "
-            "Pass args.agent_env.image or set AGENTM_AGENT_ENV_IMAGE."
-        )
+    _resolve_exec_mode(operations, workflow="merge")
 
     ctx.phase("claim")
     claimed = _claim_tasks(root, max_parallel, default_repo, default_base)

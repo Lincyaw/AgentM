@@ -324,8 +324,8 @@ class _TraceQueryRuntime:
                 description=(
                     "Query tool calls from the parent session. "
                     "Optionally filter by tool name. Shows arguments and result "
-                    "previews. Use this to check specific tool outputs like "
-                    "submit_final_report."
+                    "previews. Use this to verify what commands the agent "
+                    "actually ran and what output they produced."
                 ),
                 parameters=_GetToolCallsArgs,
                 fn=self.get_tool_calls,
