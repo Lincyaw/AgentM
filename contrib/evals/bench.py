@@ -358,7 +358,13 @@ def _run_and_eval_one(
                 logger.debug("orphan cleanup {}: {}", agent_exp_id, e)
             log.unlink(missing_ok=True)
 
-        eval_image = adapter.get_eval_image(task, config.registry, config.prefix, config.tag)
+        # Adapters without a private evaluator (e.g. Harbor's in-place eval)
+        # get an empty image so the manifest's private container is dropped.
+        eval_getter = getattr(adapter, "get_eval_image", None)
+        eval_image = (
+            str(eval_getter(task, config.registry, config.prefix, config.tag))
+            if callable(eval_getter) else ""
+        )
         env = {
             **os.environ,
             "AGENTM_AGENT_ENV_IMAGE": image,
