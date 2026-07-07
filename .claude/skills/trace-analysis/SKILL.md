@@ -37,9 +37,44 @@ file interleaved with spans. Query them with `agentm trace logs`.
 | `chats` | per-LLM-call with duration |
 | `spans` | generic span query (custom `--name` / `--where` / `--since`) |
 | `logs` | generic log query (harness operational logs) |
-| `stats` | histogram of event/span names (orientation) |
+| `stats` | full session profile (see below) — the first stop for trajectory analysis |
 
 All accept `--session <id>` / `--file <path>` / `--latest` and `--format ndjson`.
+
+## Session profile: `stats`
+
+`stats` is no longer just a name histogram — it returns one JSON document
+profiling the whole session:
+
+| Field | Contents | Use for |
+|---|---|---|
+| `logs` / `spans` | event/span name histograms | orientation, sanity checks |
+| `tools.<name>` | calls, errors, result-size (avg/max/total chars), duration (avg/p95/max ms) | which tool dominates latency or output volume |
+| `turns` | total turns/tool_calls/errors, input/output/cache_read tokens, avg/max/min input | token economics, context growth |
+| `session` | start/end/duration, `stop_reasons` histogram | did the agent stop naturally (`stop`) or run out of budget |
+| `context_snapshots` | peak-context turn with per-source char attribution (`tool_result_by_name`, assistant, user, system) | *what fills the context window* — e.g. `read` results dominating 60% of peak context |
+
+```bash
+agentm trace stats --session <sid> | jq '{turns: .turns, stop: .session.stop_reasons}'
+agentm trace stats --session <sid> | jq '.context_snapshots[0].tool_result_by_name'
+```
+
+## Data-quality checks (do these before trusting aggregates)
+
+ClickHouse rows can be duplicated by double-export bugs (real case 2026-07-07:
+core auto-attach + `otlp_export` floor atom both exported every span → all
+counts exactly 2×). Verify before quoting numbers:
+
+```bash
+# rows vs unique turns — if rows == 2 × unique, aggregates are inflated 2×
+agentm trace turns --session <sid> --format ndjson \
+  | jq -s '{rows: length, unique: (map(.turn_index)|unique|length)}'
+```
+
+Cross-check one independent source (e.g. bench.py's `tools=N` console line,
+or the local JSONL file) when a number drives a decision. Historical sessions
+ingested while a duplication bug was live stay duplicated — dedup by
+`span_id` / `turn_index` at query time.
 
 ## Composition patterns
 
@@ -78,7 +113,7 @@ agentm trace index --format ndjson \
 ## Analysis order
 
 1. **Find the session** — `--latest`, workflow artifact `child_sessions[].session_id`, or `index`
-2. **Cost?** `usage --session <sid>`
+2. **Profile first** — `stats --session <sid>` (tools, tokens, stop_reasons, peak context), then run the data-quality check above
 3. **What happened per turn?** `turns --session <sid>`
 4. **Specific tool calls?** `tools --session <sid> --tool <name>`
 5. **Harness logs?** `logs --session <sid>` — look for warnings/errors
