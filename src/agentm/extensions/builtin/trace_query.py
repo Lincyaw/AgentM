@@ -267,7 +267,9 @@ class _TraceQueryRuntime:
                     "sequence across the whole trajectory, optionally "
                     "filtered by role (user/assistant/tool_result/system). "
                     "Use this to inspect what the agent actually did and "
-                    "what results it received."
+                    "what results it received. Blocks are clipped previews "
+                    "with explicit truncation markers by default; pass "
+                    "full=true (with a narrow window) for complete content."
                 ),
                 parameters=_ReadTurnArgs,
                 fn=self.read_turn,
@@ -278,10 +280,29 @@ class _TraceQueryRuntime:
         parsed = _ReadTurnArgs.model_validate(args)
         roles = {parsed.role} if parsed.role else None
         records = self._backend.messages(roles=roles)
-        return _text(self._render_messages(records, parsed.offset, parsed.limit))
+        return _text(
+            self._render_messages(
+                records, parsed.offset, parsed.limit, full=parsed.full,
+            )
+        )
+
+    @staticmethod
+    def _clip(text: str, limit: int, full: bool) -> str:
+        if full or len(text) <= limit:
+            return text
+        return (
+            text[:limit]
+            + f"\n[truncated {len(text) - limit} chars — re-read this message "
+            "with full=true and a narrow offset/limit window]"
+        )
 
     def _render_messages(
-        self, records: list[dict[str, Any]], offset: int, limit: int
+        self,
+        records: list[dict[str, Any]],
+        offset: int,
+        limit: int,
+        *,
+        full: bool = False,
     ) -> str:
         total = len(records)
         sliced = records[offset : offset + limit]
@@ -301,7 +322,7 @@ class _TraceQueryRuntime:
                     if btype == "tool_call":
                         name = b.get("name", "")
                         a = json.dumps(b.get("arguments", {}), ensure_ascii=False)
-                        blocks.append(f"[tool_call: {name}({a})]")
+                        blocks.append(f"[tool_call: {name}({self._clip(a, 500, full)})]")
                     elif btype == "tool_result":
                         sub = b.get("content", [])
                         txt = ""
@@ -310,9 +331,9 @@ class _TraceQueryRuntime:
                                 if isinstance(s, dict):
                                     txt += s.get("text", "")
                         err = " ERROR" if b.get("is_error") else ""
-                        blocks.append(f"[tool_result{err}] {txt}")
+                        blocks.append(f"[tool_result{err}] {self._clip(txt, 1000, full)}")
                     elif b.get("text"):
-                        blocks.append(b["text"])
+                        blocks.append(self._clip(b["text"], 1500, full))
             body = "\n".join(blocks) if blocks else "(empty)"
             parts.append(f"[{role}]\n{body}\n")
         return "\n".join(parts)
@@ -381,6 +402,16 @@ class _ReadTurnArgs(BaseModel):
     )
     limit: int = Field(default=20, description="Max messages to return")
     offset: int = Field(default=0, description="Skip this many messages")
+    full: bool = Field(
+        default=False,
+        description=(
+            "false (default): each content block is a preview clipped to a "
+            "few hundred chars, with an explicit '[truncated N chars ...]' "
+            "marker where content was cut. true: return blocks unclipped — "
+            "combine with a narrow offset/limit window (e.g. limit=1) to "
+            "read one message in full without flooding your context."
+        ),
+    )
 
 
 class _GetToolCallsArgs(BaseModel):
