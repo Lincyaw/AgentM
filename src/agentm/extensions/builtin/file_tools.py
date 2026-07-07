@@ -95,6 +95,24 @@ def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 
 
+def _is_not_found_error(exc: Exception) -> bool:
+    """Whether a read failure means "the file does not exist".
+
+    Local backends raise ``FileNotFoundError``; remote backends surface the
+    condition only in the error text (the ARL executor currently wraps ENOENT
+    as a gRPC Internal error), so match the message as a fallback. Anything
+    unrecognized must be treated as *unknown*, never as absence.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return True
+    msg = str(exc).lower()
+    return (
+        "no such file" in msg
+        or "file not found" in msg
+        or "does not exist" in msg
+    )
+
+
 _PATH_ALIASES: Final[tuple[str, ...]] = ("file_path",)
 
 
@@ -645,9 +663,18 @@ class _FileToolsRuntime:
             await writer.read(path)
             file_exists = True
         except Exception as exc:
-            # Read failed → treat as not-yet-existing (covers not-found and
-            # unreadable paths alike); the write below will surface hard errors.
-            logger.debug("file_tools: existence probe read({!r}) failed: {}", path, exc)
+            if not _is_not_found_error(exc):
+                # Unknown probe failure (gateway hiccup, transport error):
+                # do NOT assume the file is absent — that would silently
+                # disable the read-before-overwrite guard and allow a blind
+                # overwrite of an existing file. Fail the write instead.
+                return _error(
+                    f"Could not verify whether {path!r} already exists — the "
+                    f"backend read failed with: {exc}. Retry the write; if "
+                    "the error persists, read the file (or the enclosing "
+                    "directory) first."
+                )
+            logger.debug("file_tools: {!r} does not exist yet: {}", path, exc)
 
         if file_exists and self._require_read:
             rs = get_read_state(read_state_path)
