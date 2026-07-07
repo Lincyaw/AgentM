@@ -138,7 +138,18 @@ Rules that hold regardless of the question:
 |---|---|---|
 | **Wall time** | LLM latency (`chat` spans) vs tool wall (`execute_tool` spans) vs residual gap (harness overhead) | `chats` / `tools` durations vs session duration |
 | **Tokens** | context composition by source: tool_result by tool, assistant, user/injections | `stats` → `context_snapshots.tool_result_by_name` |
-| **Turns** | phase structure + loop detection: repeated similar tool args, edit→revert churn, same error recurring | `tools --format ndjson \| jq '.args'`, `turns` |
+| **Turns** | phase structure + loop detection: repeated similar tool args, edit→revert churn, same error recurring | see loop-detection one-liner below |
+
+Loop detection — group tool calls by args, sort by repeat count:
+
+```bash
+agentm trace tools --session <sid> --format ndjson \
+  | jq -s 'group_by([.tool, .args]) | map({tool: .[0].tool, args: .[0].args, n: length}) | sort_by(-.n) | .[:5]'
+```
+
+A high repeat count on identical args is the strongest single signal; check
+whether the repeats are back-to-back (same result re-fetched — the result
+itself is deficient) or spread out (context lost the information).
 
 ### Cause-class signatures
 
