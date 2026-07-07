@@ -1113,7 +1113,8 @@ class GatewayRuntime:
         if callable(status_fn):
             try:
                 status = status_fn()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("interrupt: session status probe failed: {}", exc)
                 status = {}
             if isinstance(status, dict) and status.get("phase") != "running":
                 return
