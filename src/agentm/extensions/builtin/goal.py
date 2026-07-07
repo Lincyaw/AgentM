@@ -24,6 +24,7 @@ imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -235,6 +236,17 @@ _STRUCTURED_OUTPUT_EXT: Final[tuple[str, dict[str, Any]]] = (
     "agentm.extensions.builtin.structured_output",
     {"result_schema": _ConditionSchema.model_json_schema()},
 )
+# Budget-runway warnings so the child submits before max_turns hard-stops
+# it. Without this the deriver/checker can burn the whole budget exploring,
+# produce nothing, and a fresh-session retry repeats the same failure.
+_DERIVER_TURN_REMINDER_EXT: Final[tuple[str, dict[str, Any]]] = (
+    "agentm.extensions.builtin.turn_reminder",
+    {"warn_within": 6, "finalize_tool": "submit_result"},
+)
+_CHECKER_TURN_REMINDER_EXT: Final[tuple[str, dict[str, Any]]] = (
+    "agentm.extensions.builtin.turn_reminder",
+    {"warn_within": 4, "finalize_tool": "submit_verdict"},
+)
 _AGENT_ENV_SESSION_SERVICE: Final[str] = "agent_env.session_id"
 _OPERATIONS_ATOM: Final[str] = "".join(("oper", "ations"))
 
@@ -374,7 +386,7 @@ async def _evaluate_checker(
         max_turns,
         prompt,
         "goal_checker",
-        extra_extensions=[_TRACE_QUERY_EXT],
+        extra_extensions=[_TRACE_QUERY_EXT, _CHECKER_TURN_REMINDER_EXT],
         extra_tools=[_CHECKER_VERDICT_TOOL],
     )
     if messages is None:
@@ -415,6 +427,16 @@ def _parse_structured_payload(
         for block in msg.content:
             if isinstance(block, ToolCallBlock) and block.name == "submit_result":
                 result = block.arguments.get("result", block.arguments)
+                if isinstance(result, str):
+                    # Mirror the structured_output atom's runtime handling:
+                    # models sometimes double-encode the result as a JSON
+                    # string. The tool accepted it, so this parser must too.
+                    try:
+                        decoded = json.loads(result)
+                    except json.JSONDecodeError:
+                        decoded = None
+                    if isinstance(decoded, dict):
+                        result = decoded
                 if not isinstance(result, dict):
                     last_error = ValueError(
                         f"submit_result arguments did not contain a result object: {result!r}"
@@ -620,7 +642,7 @@ class _GoalRuntime:
                 self._auto_init_max_turns,
                 prompt,
                 "goal_derivation",
-                extra_extensions=[_STRUCTURED_OUTPUT_EXT],
+                extra_extensions=[_STRUCTURED_OUTPUT_EXT, _DERIVER_TURN_REMINDER_EXT],
                 atom_config_overrides=_agent_env_attach_overrides(self._api),
             )
             if messages is None:
