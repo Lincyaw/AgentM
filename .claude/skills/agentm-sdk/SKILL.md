@@ -253,7 +253,7 @@ extensions:
 
 Rules:
 - `operations` atom listed **first** — other atoms depend on it
-- Floor atoms auto-mount (`prompt_templates`, `compaction_prompts`, `slash_commands`, `retry_policy`, `otlp_export`, `tool_result_cap`, `tool_error_messages`, `thinking_retry`)
+- Floor atoms auto-mount (`prompt_templates`, `compaction_prompts`, `slash_commands`, `retry_policy`, `tool_result_cap`, `tool_error_messages`, `thinking_retry`); trace export is not an atom — the core telemetry layer picks OTLP vs local-file per environment
 - Scenario-specific logic in `contrib/scenarios/<name>/`, **never** in
   `src/agentm/core/`
 - Local atoms referenced with `local:` resolve from the scenario directory

@@ -106,8 +106,9 @@ and what tools/events it registers.
     `tool_error_messages.py`, `permission.py`, `dedup.py`.
   - LLM: `llm_openai.py`, `llm_anthropic.py`, `llm_compaction.py`,
     `thinking_retry.py`, `retry_policy.py`.
-  - Observability: `observability.py`, `otlp_export.py`, `cost_budget.py`,
-    `loop_budget.py`.
+  - Observability: `observability.py`, `cost_budget.py`,
+    `loop_budget.py`. (Trace export is core, not an atom: the telemetry
+    layer picks OTLP vs local-file per environment.)
   - UI: `wire_driver.py` (gateway wire protocol), `tui_snapshot.py`,
     `slash_commands.py`.
 

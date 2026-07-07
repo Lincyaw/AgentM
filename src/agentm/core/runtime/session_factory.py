@@ -721,7 +721,6 @@ async def _resolve_extensions(
     # Mirror any change in ``extensions.loader._FLOOR_ATOM_NAMES``.
     resilience_floor_modules = (
         "agentm.extensions.builtin.retry_policy",
-        "agentm.extensions.builtin.otlp_export",
         "agentm.extensions.builtin.tool_result_cap",
         "agentm.extensions.builtin.tool_error_messages",
         "agentm.extensions.builtin.thinking_retry",

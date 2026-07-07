@@ -41,7 +41,7 @@ import threading
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import IO, Any, Sequence
+from typing import IO, Any, Protocol, Sequence
 
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
@@ -71,7 +71,10 @@ __all__ = [
     "BlockingBatchSpanProcessor",
     "FileLogExporter",
     "FileSpanExporter",
+    "LocalFileSink",
+    "OtlpSink",
     "SessionTelemetry",
+    "TraceSink",
     "attach_loguru_otel_sink",
     "iter_log_records",
     "iter_spans",
@@ -266,14 +269,14 @@ _global_lock = threading.Lock()
 _global_tracer_provider: TracerProvider | None = None
 _global_logger_provider: LoggerProvider | None = None
 _global_atexit_registered = False
-_otlp_attached = False
+_process_otlp_sink: "OtlpSink | None" = None
 
 _DEFAULT_OTLP_ENDPOINT = "http://localhost:4317"
 
 
 def otlp_is_active() -> bool:
-    """Whether OTLP network exporters were successfully attached."""
-    return _otlp_attached
+    """Whether the process-level OTLP sink is attached."""
+    return _process_otlp_sink is not None
 
 
 def _probe_endpoint(endpoint: str, timeout: float = 2.0) -> bool:
@@ -292,91 +295,189 @@ def _probe_endpoint(endpoint: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def _maybe_attach_otlp_exporters(
-    tp: TracerProvider, lp: LoggerProvider
-) -> None:
-    """Attach OTLP network exporters to the process-level providers.
+# --- Trace sinks --------------------------------------------------------------
+#
+# Exactly one sink handles routine export for any given record: the
+# process-level :class:`OtlpSink` when a collector is reachable (spans/logs
+# reach ClickHouse via the collector), otherwise a per-session
+# :class:`LocalFileSink`. Selection happens in :func:`setup_process_telemetry`
+# / :func:`setup_session_telemetry` and nowhere else — a single attach site is
+# what rules out double export by construction. Explicit ``file_path``
+# (SessionManager persistence) and the ``AGENTM_OBSERVABILITY_DIR`` opt-in
+# additionally force a file sink regardless of collector reachability.
 
-    Tries ``OTEL_EXPORTER_OTLP_ENDPOINT`` if set, otherwise falls back to
-    the default collector endpoint (``http://localhost:4317``). A quick TCP
-    probe runs first — when the collector is unreachable the function skips
-    silently and :func:`setup_session_telemetry` will enable per-session
-    file export as a fallback.
+
+class TraceSink(Protocol):
+    """Destination for the process's spans and log records."""
+
+    def attach(self, tp: TracerProvider, lp: LoggerProvider) -> bool: ...
+
+    def shutdown(self) -> None: ...
+
+
+class OtlpSink:
+    """Process-level network sink: OTLP exporters → collector.
+
+    Configuration comes from the standard OTel env vars
+    (``OTEL_EXPORTER_OTLP_ENDPOINT`` / ``_PROTOCOL`` / ``_HEADERS`` /
+    ``_INSECURE`` / ``_TIMEOUT``). Attached at most once per process; the
+    providers' atexit shutdown drains its processors.
     """
-    global _otlp_attached
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or _DEFAULT_OTLP_ENDPOINT
 
-    if not _probe_endpoint(endpoint):
-        logger.debug(
-            "otel_export: collector at {} unreachable, will fall back to file export",
-            endpoint,
+    def __init__(self, endpoint: str) -> None:
+        self._endpoint = endpoint
+
+    def attach(self, tp: TracerProvider, lp: LoggerProvider) -> bool:
+        protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+        headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+        headers: dict[str, str] | None = None
+        if headers_raw:
+            headers = {}
+            for chunk in headers_raw.split(","):
+                chunk = chunk.strip()
+                if "=" in chunk:
+                    k, _, v = chunk.partition("=")
+                    if k.strip():
+                        headers[k.strip()] = v.strip()
+            headers = headers or None
+
+        insecure_env = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE")
+        insecure = insecure_env is None or insecure_env.lower() == "true"
+        timeout = int(float(os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT", "10")))
+
+        try:
+            span_exp: Any
+            log_exp: Any
+            if protocol == "http/protobuf":
+                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                    OTLPSpanExporter as HttpSpanExp,
+                )
+                from opentelemetry.exporter.otlp.proto.http._log_exporter import (
+                    OTLPLogExporter as HttpLogExp,
+                )
+
+                span_exp = HttpSpanExp(
+                    endpoint=self._endpoint, headers=headers, timeout=timeout,
+                )
+                log_exp = HttpLogExp(
+                    endpoint=self._endpoint, headers=headers, timeout=timeout,
+                )
+            else:
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                    OTLPSpanExporter as GrpcSpanExp,
+                )
+                from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
+                    OTLPLogExporter as GrpcLogExp,
+                )
+
+                span_exp = GrpcSpanExp(
+                    endpoint=self._endpoint, insecure=insecure,
+                    headers=headers, timeout=timeout,
+                )
+                log_exp = GrpcLogExp(
+                    endpoint=self._endpoint, insecure=insecure,
+                    headers=headers, timeout=timeout,
+                )
+        except Exception as exc:
+            # Exporter construction failed (bad endpoint, missing optional
+            # deps) — run without network export rather than crashing
+            # telemetry setup; the caller falls back to file export.
+            logger.warning(
+                "otel_export: OTLP exporter setup failed, network export disabled: {}", exc,
+            )
+            return False
+
+        tp.add_span_processor(BatchSpanProcessor(span_exp))
+        lp.add_log_record_processor(BatchLogRecordProcessor(log_exp))
+        logger.debug("otel_export: OTLP sink attached to {}", self._endpoint)
+        return True
+
+    def shutdown(self) -> None:
+        # The process-level providers own the attached processors and drain
+        # them in shutdown_process_telemetry(); nothing session-scoped to do.
+        return None
+
+
+class LocalFileSink:
+    """Per-session file sink: OTLP-shaped ndjson lines on local disk.
+
+    Wraps a :class:`FileSpanExporter` / :class:`FileLogExporter` pair behind
+    session-filtered blocking batch processors. :meth:`shutdown` drains the
+    processors, detaches them from the shared providers (other sessions in
+    the process keep emitting), and closes the file handles. Idempotent.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        path: Path,
+        *,
+        max_queue_size: int,
+        schedule_delay_millis: int,
+        export_timeout_millis: int,
+        max_export_batch_size: int,
+    ) -> None:
+        self._session_id = session_id
+        self.path = path
+        self._max_queue_size = max_queue_size
+        self._schedule_delay_millis = schedule_delay_millis
+        self._export_timeout_millis = export_timeout_millis
+        self._max_export_batch_size = max_export_batch_size
+        self._tp: TracerProvider | None = None
+        self._lp: LoggerProvider | None = None
+        self._span_processor: BlockingBatchSpanProcessor | None = None
+        self._log_processor: BlockingBatchLogRecordProcessor | None = None
+        self._span_exporter: FileSpanExporter | None = None
+        self._log_exporter: FileLogExporter | None = None
+        self._shutdown = False
+
+    def attach(self, tp: TracerProvider, lp: LoggerProvider) -> bool:
+        self._tp = tp
+        self._lp = lp
+        self._span_exporter = FileSpanExporter(self.path)
+        self._log_exporter = FileLogExporter(self.path)
+        self._span_processor = BlockingBatchSpanProcessor(
+            self._span_exporter,
+            max_queue_size=self._max_queue_size,
+            schedule_delay_millis=self._schedule_delay_millis,
+            export_timeout_millis=self._export_timeout_millis,
+            max_export_batch_size=self._max_export_batch_size,
+            session_id_filter=self._session_id,
         )
-        _otlp_attached = False
-        return
+        tp.add_span_processor(self._span_processor)
+        self._log_processor = BlockingBatchLogRecordProcessor(
+            self._log_exporter,
+            max_queue_size=self._max_queue_size,
+            schedule_delay_millis=self._schedule_delay_millis,
+            export_timeout_millis=self._export_timeout_millis,
+            max_export_batch_size=self._max_export_batch_size,
+            session_id_filter=self._session_id,
+        )
+        lp.add_log_record_processor(self._log_processor)
+        return True
 
-    protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
-    headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
-    headers: dict[str, str] | None = None
-    if headers_raw:
-        headers = {}
-        for chunk in headers_raw.split(","):
-            chunk = chunk.strip()
-            if "=" in chunk:
-                k, _, v = chunk.partition("=")
-                if k.strip():
-                    headers[k.strip()] = v.strip()
-        headers = headers or None
-
-    insecure_env = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE")
-    insecure = insecure_env is None or insecure_env.lower() == "true"
-    timeout = int(float(os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT", "10")))
-
-    try:
-        span_exp: Any
-        log_exp: Any
-        if protocol == "http/protobuf":
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                OTLPSpanExporter as HttpSpanExp,
-            )
-            from opentelemetry.exporter.otlp.proto.http._log_exporter import (
-                OTLPLogExporter as HttpLogExp,
-            )
-
-            span_exp = HttpSpanExp(
-                endpoint=endpoint, headers=headers, timeout=timeout,
-            )
-            log_exp = HttpLogExp(
-                endpoint=endpoint, headers=headers, timeout=timeout,
-            )
-        else:
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                OTLPSpanExporter as GrpcSpanExp,
-            )
-            from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
-                OTLPLogExporter as GrpcLogExp,
-            )
-
-            span_exp = GrpcSpanExp(
-                endpoint=endpoint, insecure=insecure,
-                headers=headers, timeout=timeout,
-            )
-            log_exp = GrpcLogExp(
-                endpoint=endpoint, insecure=insecure,
-                headers=headers, timeout=timeout,
-            )
-    except Exception as exc:
-        # Exporter construction failed (bad endpoint, missing optional deps) —
-        # run without network export rather than crashing telemetry setup.
-        logger.warning("otel_export: OTLP exporter setup failed, network export disabled: {}", exc)
-        _otlp_attached = False
-        return
-
-    span_proc = BatchSpanProcessor(span_exp)
-    log_proc = BatchLogRecordProcessor(log_exp)
-    tp.add_span_processor(span_proc)
-    lp.add_log_record_processor(log_proc)
-    _otlp_attached = True
-    logger.debug("otel_export: OTLP exporters attached to {}", endpoint)
+    def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
+        if self._span_processor is not None:
+            try:
+                self._span_processor.shutdown()
+            except Exception as exc:  # pragma: no cover
+                logger.debug("otel_export: span processor shutdown failed: {}", exc)
+            if self._tp is not None:
+                _remove_span_processor(self._tp, self._span_processor)
+        if self._log_processor is not None:
+            try:
+                self._log_processor.shutdown()
+            except Exception as exc:  # pragma: no cover
+                logger.debug("otel_export: log processor shutdown failed: {}", exc)
+            if self._lp is not None:
+                _remove_log_processor(self._lp, self._log_processor)
+        if self._span_exporter is not None:
+            self._span_exporter.shutdown()
+        if self._log_exporter is not None:
+            self._log_exporter.shutdown()
 
 
 def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
@@ -388,14 +489,17 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
     ``agentm.scenario.name``) is emitted as **per-span / per-log
     attributes** by the observability atom, not as resource attributes.
 
-    When ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set, process-level OTLP
-    network exporters are attached immediately — before any session emits
-    its first event — so that every record reaches the remote collector.
+    Sink selection happens here, once per process: when the collector at
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` (default ``http://localhost:4317``) is
+    reachable, an :class:`OtlpSink` is attached — before any session emits
+    its first event — and every record ships to the collector. When it is
+    not, :func:`setup_session_telemetry` attaches a per-session
+    :class:`LocalFileSink` instead.
 
     Returns ``(tracer_provider, logger_provider)``.
     """
     global _global_tracer_provider, _global_logger_provider
-    global _global_atexit_registered
+    global _global_atexit_registered, _process_otlp_sink
     with _global_lock:
         if (
             _global_tracer_provider is not None
@@ -410,9 +514,16 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
         )
         _global_tracer_provider = TracerProvider(resource=resource)
         _global_logger_provider = LoggerProvider(resource=resource)
-        _maybe_attach_otlp_exporters(
-            _global_tracer_provider, _global_logger_provider,
-        )
+        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or _DEFAULT_OTLP_ENDPOINT
+        if _probe_endpoint(endpoint):
+            sink = OtlpSink(endpoint)
+            if sink.attach(_global_tracer_provider, _global_logger_provider):
+                _process_otlp_sink = sink
+        else:
+            logger.debug(
+                "otel_export: collector at {} unreachable, sessions fall back to file export",
+                endpoint,
+            )
         if not _global_atexit_registered:
             atexit.register(shutdown_process_telemetry)
             _global_atexit_registered = True
@@ -502,12 +613,13 @@ def shutdown_process_telemetry() -> None:
     Registered as an ``atexit`` hook on first :func:`setup_process_telemetry`
     call. Safe to invoke explicitly from tests that want a clean slate.
     """
-    global _global_tracer_provider, _global_logger_provider
+    global _global_tracer_provider, _global_logger_provider, _process_otlp_sink
     with _global_lock:
         tp = _global_tracer_provider
         lp = _global_logger_provider
         _global_tracer_provider = None
         _global_logger_provider = None
+        _process_otlp_sink = None
     if tp is not None:
         try:
             tp.shutdown()
@@ -580,23 +692,23 @@ def _remove_log_processor(
 class SessionTelemetry:
     """Handle bundling per-session telemetry plumbing.
 
-    Each session has its own :class:`BlockingBatchSpanProcessor` +
-    :class:`BlockingBatchLogRecordProcessor` attached to the **shared**
-    process-level providers. ``tracer`` and ``logger`` are scoped instrument
-    objects (scope name ``agentm.session.<id>``) acquired from the global
-    providers; spans/logs emitted through them flow through every attached
-    processor, but our per-session processor is the only one that forwards
-    to this session's file exporter, so files stay cleanly partitioned.
+    ``tracer`` and ``logger`` are scoped instrument objects (scope name
+    ``agentm.session.<id>``) acquired from the shared process-level
+    providers. When this session exports to disk, ``file_sink`` holds the
+    per-session :class:`LocalFileSink` whose session-filtered processors
+    keep files cleanly partitioned between concurrent sessions; when the
+    process-level :class:`OtlpSink` handles export, ``file_sink`` is
+    ``None`` and records flow only through the shared OTLP processors.
 
     ``agentm.session.id`` is **not** on the OTel resource. Atoms emitting
     spans / log records stamp it as an attribute on every record (see
     :mod:`agentm.extensions.builtin.observability`).
 
-    :meth:`shutdown` flushes this session's processors, removes them from
-    the global providers, and closes the file exporters. Idempotent — safe
-    to call from explicit teardown + the ``SessionShutdownEvent`` handler.
-    The global providers themselves outlive every session and are torn
-    down once at process exit by an ``atexit`` hook.
+    :meth:`shutdown` drains and detaches the file sink (when present).
+    Idempotent — safe to call from explicit teardown + the
+    ``SessionShutdownEvent`` handler. The global providers themselves
+    outlive every session and are torn down once at process exit by an
+    ``atexit`` hook.
 
     **Observability fields** (``obs_*`` and the tracker dicts) are populated
     by the observability atom during :func:`install` and consumed by the
@@ -613,10 +725,7 @@ class SessionTelemetry:
     logger: Logger
     tracer_provider: TracerProvider
     logger_provider: LoggerProvider
-    span_processor: BlockingBatchSpanProcessor | None
-    log_processor: BlockingBatchLogRecordProcessor | None
-    span_exporter: FileSpanExporter | None
-    log_exporter: FileLogExporter | None
+    file_sink: LocalFileSink | None
     # --- Observability-atom-populated context ------------------------------
     # The observability atom stamps these in its install() so each
     # per-event translator has session-scoped metadata without re-reaching
@@ -760,26 +869,10 @@ class SessionTelemetry:
         if self._shutdown:
             return
         self._shutdown = True
-        if self.span_processor is None:
-            return
-        # Drain + remove the per-session processors so other sessions still
+        # Drain + detach the per-session file sink so other sessions still
         # running in the same process keep emitting. Provider lives on.
-        try:
-            self.span_processor.shutdown()
-        except Exception as exc:  # pragma: no cover
-            logger.debug("otel_export: span processor shutdown failed: {}", exc)
-        try:
-            if self.log_processor is not None:
-                self.log_processor.shutdown()
-        except Exception as exc:  # pragma: no cover
-            logger.debug("otel_export: log processor shutdown failed: {}", exc)
-        _remove_span_processor(self.tracer_provider, self.span_processor)
-        if self.log_processor is not None:
-            _remove_log_processor(self.logger_provider, self.log_processor)
-        if self.span_exporter is not None:
-            self.span_exporter.shutdown()
-        if self.log_exporter is not None:
-            self.log_exporter.shutdown()
+        if self.file_sink is not None:
+            self.file_sink.shutdown()
 
 
 def setup_session_telemetry(
@@ -825,13 +918,10 @@ def setup_session_telemetry(
 
     # File export: explicit path (SessionManager persistence), user opt-in
     # via AGENTM_OBSERVABILITY_DIR, or automatic fallback when no OTLP
-    # collector is attached (so traces are never silently lost).
-    write_files = file_path is not None or file_export_requested() or not _otlp_attached
+    # sink is attached (so traces are never silently lost).
+    write_files = file_path is not None or file_export_requested() or not otlp_is_active()
     resolved_path: Path | None = None
-    span_exporter: FileSpanExporter | None = None
-    log_exporter: FileLogExporter | None = None
-    span_processor: BlockingBatchSpanProcessor | None = None
-    log_processor: BlockingBatchLogRecordProcessor | None = None
+    file_sink: LocalFileSink | None = None
 
     if write_files:
         if file_path is not None:
@@ -839,34 +929,20 @@ def setup_session_telemetry(
         else:
             resolved_path = resolve_observability_dir(cwd) / f"{session_id}.jsonl"
 
-        span_exporter = FileSpanExporter(resolved_path)
-        log_exporter = FileLogExporter(resolved_path)
-
         effective_batch_size = (
             max_export_batch_size
             if max_export_batch_size is not None
             else min(512, max_queue_size)
         )
-
-        span_processor = BlockingBatchSpanProcessor(
-            span_exporter,
+        file_sink = LocalFileSink(
+            session_id,
+            resolved_path,
             max_queue_size=max_queue_size,
             schedule_delay_millis=schedule_delay_millis,
             export_timeout_millis=export_timeout_millis,
             max_export_batch_size=effective_batch_size,
-            session_id_filter=session_id,
         )
-        tracer_provider.add_span_processor(span_processor)
-
-        log_processor = BlockingBatchLogRecordProcessor(
-            log_exporter,
-            max_queue_size=max_queue_size,
-            schedule_delay_millis=schedule_delay_millis,
-            export_timeout_millis=export_timeout_millis,
-            max_export_batch_size=effective_batch_size,
-            session_id_filter=session_id,
-        )
-        logger_provider.add_log_record_processor(log_processor)
+        file_sink.attach(tracer_provider, logger_provider)
 
     # Per-session instrument scope: gives consumers a join point in addition
     # to the ``agentm.session.id`` attribute stamped by atoms.
@@ -881,8 +957,5 @@ def setup_session_telemetry(
         logger=logger,
         tracer_provider=tracer_provider,
         logger_provider=logger_provider,
-        span_processor=span_processor,
-        log_processor=log_processor,
-        span_exporter=span_exporter,
-        log_exporter=log_exporter,
+        file_sink=file_sink,
     )

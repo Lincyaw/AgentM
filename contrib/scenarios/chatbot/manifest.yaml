@@ -187,11 +187,9 @@ extensions:
   # turn; conflicts with open-ended chat. Needs a `result_schema` to be useful.
   #   - module: agentm.extensions.builtin.structured_output
   #
-  # OTLP export — now a floor atom (auto-mounted). Probes the default
-  # collector endpoint (http://localhost:4317); falls back to file export
-  # when unreachable. Override the endpoint via config if needed:
-  #   - module: agentm.extensions.builtin.otlp_export
-  #     config: { endpoint: "http://my-collector:4317" }
+  # Trace export needs no atom: the core telemetry layer probes
+  # OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4317) and ships
+  # via OTLP when reachable, else writes per-session ndjson files.
   #
   # Gateway wire translation — the single-process gateway wires this itself;
   # not a scenario-level atom.
