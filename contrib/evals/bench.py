@@ -266,6 +266,11 @@ _TRANSIENT_CREATE_MARKERS = (
     "Gateway error (429)",
     "Gateway error (500)",
     "Gateway error (503)",
+    "Server disconnected",
+    "Connection reset",
+    "Connection refused",
+    "ReadTimeout",
+    "timed out",
 )
 _MAX_CREATE_ATTEMPTS = 20  # x30s sleep + ~30s gateway wait ≈ 20 min ceiling
 
