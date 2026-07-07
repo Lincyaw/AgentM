@@ -52,17 +52,41 @@ def _text_result(text: str) -> ToolResult:
 
 def _build_get_turn_tool(state: _IndexState) -> FunctionTool:
     class Args(BaseModel):
-        turn_index: int = Field(description="0-based turn index to read")
+        turn_index: int = Field(
+            description="0-based turn index to read (see list_turns for the range)",
+        )
+        full: bool = Field(
+            default=False,
+            description=(
+                "false (default): each content block is a preview clipped to a "
+                "few hundred chars, with an explicit '[truncated N chars ...]' "
+                "marker where content was cut. true: return the turn's blocks "
+                "in full, no clipping. Re-reading the same turn without "
+                "full=true always returns the same clipped preview — when a "
+                "preview is marked truncated, retry with full=true instead."
+            ),
+        )
+
+    def _clip(text: str, limit: int, full: bool) -> str:
+        if full or len(text) <= limit:
+            return text
+        return (
+            text[:limit]
+            + f"\n[truncated {len(text) - limit} chars — call get_turn again "
+            "with full=true for the complete content]"
+        )
 
     async def handler(args: dict[str, Any]) -> ToolResult:
         parsed = Args.model_validate(args)
         idx = parsed.turn_index
+        full = parsed.full
         if idx < 0 or idx >= len(state.trajectory):
             return _text_result(f"Turn {idx} out of range (0-{len(state.trajectory)-1})")
         turn = state.trajectory[idx]
         role = turn.get("role", "?")
         content = turn.get("content", [])
-        # Compact: show role + content blocks
+        # Compact by default: role + clipped content blocks; full=true lifts
+        # every clip so the auditor can always reach complete evidence.
         blocks: list[str] = []
         if isinstance(content, list):
             for b in content:
@@ -72,19 +96,19 @@ def _build_get_turn_tool(state: _IndexState) -> FunctionTool:
                     name = b.get("name", "")
                     if btype == "tool_call" and name:
                         args_str = json.dumps(b.get("arguments", {}), ensure_ascii=False)
-                        blocks.append(f"[tool_call: {name}] {args_str[:500]}")
+                        blocks.append(f"[tool_call: {name}] {_clip(args_str, 500, full)}")
                     elif btype == "tool_result":
                         sub = b.get("content", [])
                         sub_text = ""
                         if isinstance(sub, list):
                             for s in sub:
                                 if isinstance(s, dict):
-                                    sub_text += s.get("text", "")[:800]
-                        blocks.append(f"[tool_result] {sub_text[:1000]}")
+                                    sub_text += s.get("text", "")
+                        blocks.append(f"[tool_result] {_clip(sub_text, 1000, full)}")
                     elif text:
-                        blocks.append(text[:1500])
+                        blocks.append(_clip(text, 1500, full))
         else:
-            blocks.append(str(content)[:1500])
+            blocks.append(_clip(str(content), 1500, full))
         return _text_result(f"Turn {idx} ({role}):\n" + "\n".join(blocks))
 
     return FunctionTool(
@@ -92,7 +116,9 @@ def _build_get_turn_tool(state: _IndexState) -> FunctionTool:
         description=(
             "Read the content of a specific trajectory turn. "
             "Use this to verify what the agent actually did at a given turn "
-            "before making claims about the agent's behavior."
+            "before making claims about the agent's behavior. "
+            "By default blocks are clipped previews with explicit truncation "
+            "markers; pass full=true to read a turn's complete content."
         ),
         parameters=Args,
         fn=handler,

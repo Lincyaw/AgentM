@@ -390,7 +390,10 @@ requirements:
       cumulative audit state, and inject system-reminder guidance without
       owning the main session driver. Optional methodology generation extracts
       task-spec text from user and tool-result messages while staying type
-      clean under the llmharness workspace checks.
+      clean under the llmharness workspace checks. Auditor index-query tools
+      that clip content previews must mark every truncation explicitly and
+      offer a full-content mode (get_turn full=true), so the auditor never
+      loops re-reading the same clipped payload.
     priority: P2
     status: implemented
     confidence: inferred
@@ -398,6 +401,7 @@ requirements:
       - path: contrib/extensions/llmharness/pyproject.toml
       - path: contrib/extensions/llmharness/src/llmharness/atom.py
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/tools.py
+      - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/index_tools.py
     tests: []
     docs: []
     depends_on:
