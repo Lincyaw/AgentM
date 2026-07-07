@@ -50,14 +50,6 @@ DEFAULT_IMAGE_REGISTRY = os.environ.get(
 )
 DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "terminal_bench:arl"
 
-_INFRA_RETRY_LOG_MARKERS = (
-    b"404 Client Error",
-    b"session not found",
-    b"Source session",
-    b"ImagePullBackOff",
-    b"Failed to pull image",
-    b"failed to pull image",
-)
 
 
 def _filter_supported_kwargs(
@@ -264,8 +256,11 @@ def _private_eval_container(
 # Core run+eval logic
 # ---------------------------------------------------------------------------
 
-_active_procs: set[subprocess.Popen] = set()  # type: ignore[type-arg]
-_active_procs_lock = __import__("threading").Lock()
+# In-flight agent sessions run in worker threads, each with its own event
+# loop. Ctrl-C interrupts them cooperatively: AgentSession.prompt() takes an
+# asyncio.Event and returns early when it fires.
+_active_agent_interrupts: set[tuple[Any, Any]] = set()  # (loop, event)
+_active_agent_lock = __import__("threading").Lock()
 _active_eval_sessions: set[Any] = set()
 _active_eval_lock = __import__("threading").Lock()
 
@@ -282,6 +277,8 @@ class _RunEvalConfig:
     scenario: str
     run_id: str
     prompt_prefix: str
+    bench: str = ""
+    provider_spec: tuple[str, dict[str, Any]] | None = None
     source_images: bool = False
 
 
@@ -293,37 +290,118 @@ class _RunEvalJob:
     experiment_attempt_idx: int | None
 
 
-def _terminate_process_group(
-    proc: subprocess.Popen,  # type: ignore[type-arg]
-    *,
-    grace_seconds: float = 10.0,
-    log_file: Any | None = None,
-) -> None:
-    if proc.poll() is not None:
-        return
+def _resolve_provider_spec(model: str) -> tuple[str, dict[str, Any]]:
+    """Resolve ``--model`` (profile name or model id) to an SDK provider spec.
+
+    Mirrors the CLI's resolution: config.toml profile > registry default,
+    with the AGENTM_REASONING_EFFORT convenience knob applied on top.
+    """
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import (
+        apply_reasoning_effort,
+        resolve_provider_model,
+    )
+
+    provider, model_id, profile = resolve_provider_model(model_flag=model)
+    build_config = profile.to_build_config() if profile else {"model": model_id}
+    apply_reasoning_effort(build_config, None)
+    return DEFAULT_PROVIDER_REGISTRY.build(provider, dict(build_config))
+
+
+def _run_agent_session(
+    job: _RunEvalJob,
+    config: _RunEvalConfig,
+    image: str,
+    agent_exp_id: str,
+    prompt: str,
+) -> dict[str, Any]:
+    """Run one agent via the embedded SDK in this worker thread's event loop.
+
+    Returns ``{session_id, timed_out, tools}`` or ``{error}``.
+    """
+    import asyncio
+
+    async def _run() -> dict[str, Any]:
+        from agentm.core.abi.session_config import AgentSessionConfig
+        from agentm.core.runtime.session import AgentSession
+
+        adapter = config.adapter
+        task = job.task
+
+        # Operations backend config goes straight into the atom — no env-var
+        # interpolation, so concurrent sessions with different images can
+        # share the process.
+        operations_config: dict[str, Any] = {
+            "image": image,
+            "experiment_id": agent_exp_id,
+            "delete_on_shutdown": False,
+        }
+        eval_getter = getattr(adapter, "get_eval_image", None)
+        if callable(eval_getter):
+            operations_config["private_containers"] = [{
+                "name": "eval",
+                "image": str(eval_getter(
+                    task, config.registry, config.prefix, config.tag,
+                )),
+                "mountWorkspace": True,
+                "workspaceMountPath": "/app",
+                "workspaceAccess": "readWrite",
+            }]
+        else:
+            # No private evaluator (e.g. Harbor's in-place eval) — drop the
+            # manifest's placeholder entry.
+            operations_config["private_containers"] = []
+
+        assert config.provider_spec is not None
+        provider_name, provider_config = config.provider_spec
+        session = await AgentSession.create(AgentSessionConfig(
+            cwd=os.getcwd(),
+            scenario=config.scenario,
+            provider=(provider_name, dict(provider_config)),
+            atom_config_overrides={"operations": operations_config},
+            task_class=config.bench,
+            eval_run_id=config.run_id,
+            eval_task_id=task.name,
+            experiment={"harness": "bench", "attempt": job.attempt_slot},
+        ))
+
+        interrupt = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        with _active_agent_lock:
+            _active_agent_interrupts.add((loop, interrupt))
+        timed_out = False
+        messages: list[Any] = []
+        try:
+            coro = session.prompt(prompt, signal=interrupt)
+            if config.agent_timeout > 0:
+                try:
+                    messages = await asyncio.wait_for(
+                        coro, timeout=config.agent_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+            else:
+                messages = await coro
+        finally:
+            with _active_agent_lock:
+                _active_agent_interrupts.discard((loop, interrupt))
+            await session.shutdown()
+
+        tool_calls = sum(
+            len(m.content) for m in messages
+            if getattr(m, "role", "") == "tool_result"
+        )
+        return {
+            "session_id": session.session_id,
+            "timed_out": timed_out,
+            "tools": str(tool_calls),
+        }
 
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError:
-        proc.terminate()
-
-    try:
-        proc.wait(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        if log_file is not None:
-            log_file.write("[bench] agent did not terminate; killing process group\n")
-            log_file.flush()
-
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except OSError:
-        proc.kill()
-    proc.wait()
+        return asyncio.run(_run())
+    except Exception as e:  # noqa: BLE001 — reported as a task failure row.
+        logger.debug("agent session for {} failed: {}", job.task.name, e)
+        return {"error": str(e)}
 
 
 def _run_and_eval_one(
@@ -336,7 +414,7 @@ def _run_and_eval_one(
     task = job.task
     adapter = config.adapter
     name = task.name
-    log = job.out / f"{name}.log"
+    state_file = job.out / f"{name}.session.json"
     score_file = job.out / f"{name}.score.json"
     agent_exp_id = _experiment_ids(
         config.prefix,
@@ -351,20 +429,24 @@ def _run_and_eval_one(
         source_images=config.source_images,
     )
 
+    if score_file.is_file():
+        cached_scores = json.loads(score_file.read_text())
+        return {
+            "task": name, "status": "done",
+            "tools": cached_scores.get("tools", "?"), **cached_scores,
+        }
+
     # --- Agent phase ---
+    # The state file marks "agent finished, eval pending": a re-run resumes
+    # straight into eval against the still-alive sandbox.
     session_id = None
     agent_timed_out = False
-    if log.is_file():
-        raw = log.read_bytes()
-        agent_timed_out = b"[bench] agent timeout" in raw
-        if not any(marker in raw for marker in _INFRA_RETRY_LOG_MARKERS):
-            # Only match the completion summary line (session_id=xxx at EOF),
-            # NOT the startup log line (session id: xxx). The startup line
-            # appears immediately; matching it on a re-invocation would skip
-            # the agent phase while the subprocess is still running.
-            m = re.search(rb"^session_id=(\S+)", raw, re.MULTILINE)
-            if m:
-                session_id = m.group(1).decode()
+    tools_count = "?"
+    if state_file.is_file():
+        state = json.loads(state_file.read_text())
+        session_id = state.get("session_id")
+        agent_timed_out = bool(state.get("agent_timed_out", False))
+        tools_count = str(state.get("tools", "?"))
 
     if session_id is None:
         prompt = task.prompt
@@ -373,84 +455,28 @@ def _run_and_eval_one(
         if config.prompt_prefix:
             prompt = f"{config.prompt_prefix}\n\n{prompt}"
 
-        # If a log exists without completion marker, the previous agent may
-        # still be running (orphaned by a pkill). Clean up its sandbox before
-        # starting a fresh attempt.
-        if log.is_file():
-            try:
-                client = arl.GatewayClient()
-                client.delete_experiment(agent_exp_id)
-                client.close()
-            except Exception as e:  # noqa: BLE001
-                logger.debug("orphan cleanup {}: {}", agent_exp_id, e)
-            log.unlink(missing_ok=True)
+        # A previous crashed run may have left the experiment behind;
+        # deleting a nonexistent one is a harmless 404.
+        try:
+            client = arl.GatewayClient()
+            client.delete_experiment(agent_exp_id)
+            client.close()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("orphan cleanup {}: {}", agent_exp_id, e)
 
-        # Adapters without a private evaluator (e.g. Harbor's in-place eval)
-        # get an empty image so the manifest's private container is dropped.
-        eval_getter = getattr(adapter, "get_eval_image", None)
-        eval_image = (
-            str(eval_getter(task, config.registry, config.prefix, config.tag))
-            if callable(eval_getter) else ""
-        )
-        env = {
-            **os.environ,
-            "AGENTM_AGENT_ENV_IMAGE": image,
-            "AGENTM_AGENT_ENV_EVAL_IMAGE": eval_image,
-            "AGENTM_AGENT_ENV_EXPERIMENT_ID": agent_exp_id,
-            "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN": "false",
-        }
-        cmd = [
-            "uv", "run", "agentm",
-            "--scenario", config.scenario,
-            "--model", config.model,
-            "-p", prompt,
-        ]
-        with open(log, "w") as f:
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            with _active_procs_lock:
-                _active_procs.add(proc)
-            try:
-                try:
-                    proc.wait(
-                        timeout=config.agent_timeout
-                        if config.agent_timeout > 0
-                        else None
-                    )
-                except subprocess.TimeoutExpired:
-                    agent_timed_out = True
-                    f.write(
-                        "\n[bench] agent timeout after "
-                        f"{config.agent_timeout}s; terminating\n"
-                    )
-                    f.flush()
-                    _terminate_process_group(proc, log_file=f)
-            finally:
-                with _active_procs_lock:
-                    _active_procs.discard(proc)
-
-        raw = log.read_bytes()
-        m = re.search(rb"^session_id=(\S+)", raw, re.MULTILINE)
-        if not m:
-            m = re.search(rb"session id:\s*(\S+)", raw)
-        if m:
-            session_id = m.group(1).decode()
-
-    if session_id is None:
-        return {"task": name, "status": "agent_failed"}
-
-    tools_m = re.search(rb"tool_calls=(\d+)", log.read_bytes())
-    tools_count = tools_m.group(1).decode() if tools_m else "?"
+        agent = _run_agent_session(job, config, image, agent_exp_id, prompt)
+        if "error" in agent:
+            return {"task": name, "status": "agent_failed", "error": agent["error"]}
+        session_id = agent["session_id"]
+        agent_timed_out = agent["timed_out"]
+        tools_count = agent["tools"]
+        state_file.write_text(json.dumps({
+            "session_id": session_id,
+            "agent_timed_out": agent_timed_out,
+            "tools": tools_count,
+        }, ensure_ascii=False))
 
     # --- Eval phase (in-place: reuse the agent's sandbox) ---
-    if score_file.is_file():
-        cached_scores = json.loads(score_file.read_text())
-        return {"task": name, "status": "done", "tools": tools_count, **cached_scores}
 
     # Find the agent's ARL sandbox session via experiment_id.
     client = arl.GatewayClient()
@@ -508,8 +534,10 @@ def _run_and_eval_one(
         scores["agent_timed_out"] = True
 
     score_file.write_text(json.dumps(
-        {"task": name, "session_id": session_id, **scores}, ensure_ascii=False,
+        {"task": name, "session_id": session_id, "tools": tools_count, **scores},
+        ensure_ascii=False,
     ))
+    state_file.unlink(missing_ok=True)
 
     return {
         "task": name, "status": "done", "tools": tools_count,
@@ -867,7 +895,12 @@ def batch(
     """
     from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
+    from agentm.env import autoload_dotenv
     from benchmarks.swebench import write_predictions
+
+    # In-process SDK sessions need the repo .env (OTLP endpoint, ClickHouse
+    # URL, provider keys) that the CLI subprocess used to autoload itself.
+    autoload_dotenv(Path.cwd())
 
     resolved_source = _resolve_source(repo, source, bench)
     adapter = get_adapter(bench)
@@ -885,10 +918,15 @@ def batch(
     interrupted = False
 
     def _kill_children() -> None:
-        with _active_procs_lock:
-            procs = list(_active_procs)
-        for p in procs:
-            _terminate_process_group(p, grace_seconds=5.0)
+        # Cooperative: fire each in-flight session's interrupt event on its
+        # own event loop; AgentSession.prompt() returns early.
+        with _active_agent_lock:
+            entries = list(_active_agent_interrupts)
+        for loop, interrupt in entries:
+            try:
+                loop.call_soon_threadsafe(interrupt.set)
+            except RuntimeError as e:
+                logger.debug("interrupt signal to closed loop: {}", e)
 
     def _cleanup_experiments(
         pfx: str, mdl: str, rid: str,
@@ -954,15 +992,10 @@ def batch(
             score_path = out / f"{t.name}.score.json"
             if score_path.is_file():
                 scores = json.loads(score_path.read_text())
-                log_path = out / f"{t.name}.log"
-                tools_count = "?"
-                if log_path.is_file():
-                    tools_m = re.search(rb"tool_calls=(\d+)", log_path.read_bytes())
-                    tools_count = tools_m.group(1).decode() if tools_m else "?"
                 all_attempt_results[attempt_idx][t.name] = {
                     "task": t.name,
                     "status": "done",
-                    "tools": tools_count,
+                    "tools": scores.get("tools", "?"),
                     **scores,
                 }
                 continue
@@ -997,6 +1030,8 @@ def batch(
         scenario=scenario,
         run_id=resolved_run_id,
         prompt_prefix=prompt_prefix,
+        bench=bench,
+        provider_spec=_resolve_provider_spec(model),
         source_images=source_images,
     )
 

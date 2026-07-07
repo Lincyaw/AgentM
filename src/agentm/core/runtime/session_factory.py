@@ -595,6 +595,9 @@ async def create_agent_session(
             root_session_id=root_session_id,
             task_id=config.task_id,
             persona=config.persona,
+            task_class=config.task_class,
+            eval_run_id=config.eval_run_id,
+            eval_task_id=config.eval_task_id,
         ),
     )
 
