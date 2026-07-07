@@ -142,7 +142,11 @@ Rules that hold regardless of the question:
 
 ### Cause-class signatures
 
-Anchor classes (conclusions stay free-text; these guide where to look):
+Causes are open-ended — conclusions are free-text and the real cause may be
+none of the below (bad ground truth, harness misconfiguration, data-quality
+artifacts, provider-side behavior, …). The classes here are the three most
+common *anchors* to check first, each with observable signatures; when none
+fits, say so and describe the cause in its own terms:
 
 - **Framework/tooling**: retries of the *same args after the same error*
   (the error message taught the model nothing — tool_error_messages'
