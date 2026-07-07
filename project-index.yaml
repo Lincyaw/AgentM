@@ -1901,3 +1901,30 @@ requirements:
     docs: []
     depends_on:
       - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-205-trace-data-quality
+    title: Trace store reads deduplicated data and doctor validates invariants
+    description: >
+      Observability analysis must stand on trustworthy data. Every ClickHouse
+      trace reader must deduplicate rows (historical sessions ingested during
+      the double-export era exist as byte-identical duplicates), and a
+      ``agentm trace doctor`` command must validate per-session data-quality
+      invariants against the raw tables: no span/log record duplication,
+      session lifecycle counts (header present, exactly one start, at most one
+      end), contiguous turn_index sequence, turn span/summary pairing, and
+      execute_tool span parentage. Doctor exits non-zero on error-severity
+      violations. The benchmark batch runner must record each task's agentm
+      session id in its score artifact and run doctor over the run's sessions
+      after scoring, surfacing violations without failing the run.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/observability/clickhouse.py
+      - path: src/agentm/cli_trace.py
+      - path: contrib/evals/bench.py
+    tests: []
+    docs:
+      - path: .claude/skills/trace-analysis/SKILL.md
+    depends_on:
+      - REQ-192-native-log-defaults

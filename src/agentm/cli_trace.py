@@ -1176,6 +1176,66 @@ def stats_cmd(
             sink.close()
 
 
+@app.command("doctor")
+def doctor_cmd(
+    session: SessionOpt = None,
+    latest: LatestOpt = False,
+    cwd: CwdOpt = None,
+    fmt: FormatOpt = None,
+    out: OutputOpt = None,
+) -> None:
+    """Check data-quality invariants for a session (ClickHouse backend).
+
+    Audits the raw tables: record duplication, session lifecycle counts,
+    turn_index contiguity, turn span/summary pairing, tool-span parentage.
+    Exits 1 when any error-severity violation is found — run it before
+    trusting aggregates from an unfamiliar or freshly ingested session.
+
+    Examples:
+
+      agentm trace doctor --latest
+      agentm trace doctor --session <sid> --format ndjson
+    """
+    sink, close = _open_output(out)
+    try:
+        chosen_fmt = _resolve_format(fmt, sink)
+
+        ch = _ch_session(None, session, latest, cwd)
+        if not ch:
+            typer.echo(
+                "Error: doctor requires the ClickHouse backend "
+                "(set AGENTM_CLICKHOUSE_URL / OTEL_EXPORTER_OTLP_ENDPOINT "
+                "and pass --session/--latest).",
+                err=True,
+            )
+            raise typer.Exit(2)
+        url, sid = ch
+        violations = _ch().doctor(url, sid)
+
+        if chosen_fmt == "text":
+            if not violations:
+                sink.write(f"session {sid}: all invariants hold\n")
+            else:
+                sink.write(f"session {sid}: {len(violations)} violation(s)\n")
+                for v in violations:
+                    sink.write(
+                        f"  [{v['severity'].upper():>7}] {v['check']}: "
+                        f"expected {v['expected']}, got {v['actual']} — {v['detail']}\n"
+                    )
+        else:  # json / ndjson
+            payload = {"session_id": sid, "violations": violations}
+            if chosen_fmt == "json":
+                json.dump(payload, sink, ensure_ascii=False, indent=2)
+            else:
+                sink.write(json.dumps(payload, ensure_ascii=False))
+            sink.write("\n")
+    finally:
+        if close:
+            sink.close()
+    if any(v["severity"] == "error" for v in violations):
+        raise typer.Exit(1)
+
+
 def _print_session_stats(sink: Any, session: dict[str, Any] | None) -> None:
     if not session:
         return

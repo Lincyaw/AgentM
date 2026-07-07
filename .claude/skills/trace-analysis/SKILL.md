@@ -38,6 +38,7 @@ file interleaved with spans. Query them with `agentm trace logs`.
 | `spans` | generic span query (custom `--name` / `--where` / `--since`) |
 | `logs` | generic log query (harness operational logs) |
 | `stats` | full session profile (see below) — the first stop for trajectory analysis |
+| `doctor` | data-quality invariants for one session (duplication, lifecycle, turn contiguity, span parentage); exit 1 on violations |
 
 All accept `--session <id>` / `--file <path>` / `--latest` and `--format ndjson`.
 
@@ -61,20 +62,16 @@ agentm trace stats --session <sid> | jq '.context_snapshots[0].tool_result_by_na
 
 ## Data-quality checks (do these before trusting aggregates)
 
-ClickHouse rows can be duplicated by double-export bugs (real case 2026-07-07:
-core auto-attach + `otlp_export` floor atom both exported every span → all
-counts exactly 2×). Verify before quoting numbers:
+Run `agentm trace doctor --session <sid>` before quoting numbers from an
+unfamiliar session — it audits the raw tables for record duplication,
+lifecycle counts, turn_index contiguity, and span parentage, exiting 1 on
+violations. `bench.py batch` runs it automatically over each run's sessions.
 
-```bash
-# rows vs unique turns — if rows == 2 × unique, aggregates are inflated 2×
-agentm trace turns --session <sid> --format ndjson \
-  | jq -s '{rows: length, unique: (map(.turn_index)|unique|length)}'
-```
-
-Cross-check one independent source (e.g. bench.py's `tools=N` console line,
-or the local JSONL file) when a number drives a decision. Historical sessions
-ingested while a duplication bug was live stay duplicated — dedup by
-`span_id` / `turn_index` at query time.
+Readers (`stats`, `turns`, `usage`, …) deduplicate at query time, so
+historical sessions from the double-export era (pre-89f20ea7, 2026-07-07)
+read clean even though doctor still reports their raw duplication. When a
+number drives a decision, cross-check one independent source (e.g. bench.py's
+`tools=N` console line, or the score.json `session_id` join).
 
 ## Composition patterns
 

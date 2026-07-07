@@ -507,9 +507,14 @@ def _run_and_eval_one(
     if agent_timed_out:
         scores["agent_timed_out"] = True
 
-    score_file.write_text(json.dumps({"task": name, **scores}, ensure_ascii=False))
+    score_file.write_text(json.dumps(
+        {"task": name, "session_id": session_id, **scores}, ensure_ascii=False,
+    ))
 
-    return {"task": name, "status": "done", "tools": tools_count, **scores}
+    return {
+        "task": name, "status": "done", "tools": tools_count,
+        "session_id": session_id, **scores,
+    }
 
 
 def _print_summary_table(results: dict[str, dict], adapter: Any) -> None:
@@ -1042,6 +1047,44 @@ def batch(
 
     if attempts > 1:
         _print_pass_at_k(all_attempt_results, tasks, base_out, adapter)
+
+    _doctor_sessions(all_attempt_results)
+
+
+def _doctor_sessions(all_attempt_results: list[dict[str, dict[str, Any]]]) -> None:
+    """Data-quality gate: run trace doctor on every session of this run.
+
+    Violations don't fail the run — they flag that this run's trace data
+    can't be trusted for analysis until the emission bug is fixed.
+    """
+    from agentm.core.observability import clickhouse as ch
+
+    url = ch.get_url()
+    if url is None:
+        return
+    sids = sorted({
+        str(r["session_id"])
+        for results in all_attempt_results
+        for r in results.values()
+        if r.get("session_id")
+    })
+    if not sids:
+        return
+    bad = 0
+    for sid in sids:
+        try:
+            violations = [v for v in ch.doctor(url, sid) if v["severity"] == "error"]
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"  [WARN] doctor {sid}: {e}", err=True)
+            continue
+        if violations:
+            bad += 1
+            for v in violations:
+                typer.echo(
+                    f"  [DOCTOR] {sid} {v['check']}: "
+                    f"expected {v['expected']}, got {v['actual']}"
+                )
+    typer.echo(f"Trace doctor: {len(sids) - bad}/{len(sids)} sessions clean")
 
 
 if __name__ == "__main__":

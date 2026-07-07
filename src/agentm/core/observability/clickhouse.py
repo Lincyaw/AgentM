@@ -4,6 +4,14 @@ SQL templates against the OTel Collector's ``otel_logs`` / ``otel_traces``
 tables.  Uses ``urllib.request`` — zero extra dependencies.  Activated when
 ``AGENTM_CLICKHOUSE_URL`` is set or ClickHouse is reachable on
 ``http://localhost:8123``.
+
+Every reader queries ``(SELECT DISTINCT * FROM <table>)`` instead of the raw
+table: rows ingested before the single-sink fix (89f20ea7) exist twice as
+byte-identical duplicates (core auto-attach + otlp_export floor atom both
+exported every record), and DISTINCT makes historical sessions read clean.
+ClickHouse pushes the outer WHERE into the subquery, so scans stay
+session-scoped.  ``doctor`` is the one deliberate exception — it audits the
+raw tables precisely to catch new duplication bugs that DISTINCT would hide.
 """
 
 from __future__ import annotations
@@ -137,7 +145,7 @@ def index(
         "  LogAttributes['agentm.session.parent_id']  AS parent_session_id, "
         "  LogAttributes['agentm.session.purpose']    AS purpose, "
         "  LogAttributes['agentm.session.scenario']   AS scenario "
-        f"FROM otel_logs WHERE {' AND '.join(where)} "
+        f"FROM (SELECT DISTINCT * FROM otel_logs) WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp"
     )
     for r in query(url, sql, params):
@@ -166,7 +174,7 @@ def session_header(url: str, sid: str) -> dict[str, Any] | None:
     """Fetch the latest ``agentm.session.header`` body for *sid*."""
     rows = query(
         url,
-        "SELECT Body FROM otel_logs "
+        "SELECT Body FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE EventName = 'agentm.session.header' "
         "  AND LogAttributes['agentm.session.id'] = {sid:String} "
         "ORDER BY Timestamp DESC LIMIT 1",
@@ -183,7 +191,7 @@ def session_entries(url: str, sid: str) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for r in query(
         url,
-        "SELECT Body FROM otel_logs "
+        "SELECT Body FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE EventName = 'agentm.message.appended' "
         "  AND LogAttributes['agentm.session.id'] = {sid:String} "
         "ORDER BY Timestamp",
@@ -205,7 +213,7 @@ def most_recent_session_id(url: str, cwd: str | None = None) -> str | None:
     rows = query(
         url,
         "SELECT LogAttributes['agentm.session.id'] AS sid "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp DESC LIMIT 1",
         params=params,
@@ -242,7 +250,7 @@ def recent_sessions(
         "  LogAttributes['agentm.session.id']       AS session_id, "
         "  LogAttributes['agentm.session.scenario']  AS scenario, "
         "  Timestamp                                  AS ts "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp DESC "
         "LIMIT {lim:UInt32}",
@@ -265,7 +273,7 @@ def first_user_message(url: str, sid: str) -> str:
     """Best-effort first user message from a session (for title display)."""
     rows = query(
         url,
-        "SELECT Body FROM otel_logs "
+        "SELECT Body FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE EventName = 'agentm.message.appended' "
         "  AND LogAttributes['agentm.session.id'] = {sid:String} "
         "ORDER BY Timestamp LIMIT 5",
@@ -296,7 +304,7 @@ def message_stats(url: str, sid: str) -> dict[str, int]:
     rows = query(
         url,
         "SELECT count() AS messages, sum(length(toString(Body))) AS bytes "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE EventName = 'agentm.message.appended' "
         "  AND LogAttributes['agentm.session.id'] = {sid:String}",
         params={"sid": sid},
@@ -328,7 +336,7 @@ def messages(
         if (not types or "message" in types) and (not roles or "system" in roles):
             sys_rows = query(
                 url,
-                "SELECT Body FROM otel_logs "
+                "SELECT Body FROM (SELECT DISTINCT * FROM otel_logs) "
                 "WHERE EventName = 'agentm.llm.system_prompt' "
                 "  AND LogAttributes['agentm.session.id'] = {sid:String} "
                 "ORDER BY Timestamp LIMIT 1",
@@ -350,7 +358,7 @@ def messages(
 
     for r in query(
         url,
-        "SELECT Body FROM otel_logs "
+        "SELECT Body FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE EventName = 'agentm.message.appended' "
         "  AND LogAttributes['agentm.session.id'] = {sid:String} "
         "ORDER BY Timestamp",
@@ -376,7 +384,7 @@ def turns(url: str, sid: str) -> Iterator[dict[str, Any]]:
     """Per-turn summaries — bodies of ``agentm.turn.summary`` log records."""
     for r in query(
         url,
-        "SELECT Body FROM otel_logs "
+        "SELECT Body FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE EventName = 'agentm.turn.summary' "
         "  AND LogAttributes['agentm.session.id'] = {sid:String} "
         "ORDER BY Timestamp",
@@ -421,7 +429,7 @@ def chats(url: str, sid: str) -> Iterator[dict[str, Any]]:
         url,
         "SELECT SpanName, SpanId, SpanAttributes, Duration, "
         "  toUnixTimestamp64Nano(Timestamp) AS start_ns "
-        "FROM otel_traces "
+        "FROM (SELECT DISTINCT * FROM otel_traces) "
         "WHERE startsWith(SpanName, 'chat ') "
         "  AND SpanAttributes['agentm.session.id'] = {sid:String} "
         "ORDER BY Timestamp",
@@ -452,7 +460,7 @@ def tools(url: str, sid: str) -> Iterator[dict[str, Any]]:
         url,
         "SELECT SpanName, SpanId, SpanAttributes, Duration, "
         "  toUnixTimestamp64Nano(Timestamp) AS start_ns "
-        "FROM otel_traces "
+        "FROM (SELECT DISTINCT * FROM otel_traces) "
         "WHERE startsWith(SpanName, 'execute_tool ') "
         "  AND SpanAttributes['agentm.session.id'] = {sid:String} "
         "ORDER BY Timestamp",
@@ -494,7 +502,7 @@ def info(url: str, sid: str) -> dict[str, Any]:
     ):
         rows = query(
             url,
-            "SELECT Body FROM otel_logs "
+            "SELECT Body FROM (SELECT DISTINCT * FROM otel_logs) "
             "WHERE EventName = {ev:String} "
             "  AND LogAttributes['agentm.session.id'] = {sid:String} "
             "ORDER BY Timestamp DESC LIMIT 1",
@@ -516,14 +524,14 @@ def stats(url: str, sid: str) -> dict[str, Any]:
     """Event-name histogram + tool/turn statistics for a session."""
     log_rows = query(
         url,
-        "SELECT EventName, count() AS cnt FROM otel_logs "
+        "SELECT EventName, count() AS cnt FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
         "GROUP BY EventName ORDER BY cnt DESC",
         params={"sid": sid},
     )
     span_rows = query(
         url,
-        "SELECT SpanName, count() AS cnt FROM otel_traces "
+        "SELECT SpanName, count() AS cnt FROM (SELECT DISTINCT * FROM otel_traces) "
         "WHERE SpanAttributes['agentm.session.id'] = {sid:String} "
         "GROUP BY SpanName ORDER BY cnt DESC",
         params={"sid": sid},
@@ -563,7 +571,7 @@ def _tool_stats(url: str, sid: str) -> dict[str, Any]:
         "  avg(Duration) / 1e6 AS avg_duration_ms, "
         "  quantile(0.95)(Duration) / 1e6 AS p95_duration_ms, "
         "  max(Duration) / 1e6 AS max_duration_ms "
-        "FROM otel_traces "
+        "FROM (SELECT DISTINCT * FROM otel_traces) "
         "WHERE SpanAttributes['agentm.session.id'] = {sid:String} "
         "  AND SpanAttributes['gen_ai.operation.name'] = 'execute_tool' "
         "GROUP BY tool ORDER BY calls DESC",
@@ -599,7 +607,7 @@ def _turn_stats(url: str, sid: str) -> dict[str, Any]:
         "  avg(JSONExtractInt(Body, 'input_tokens')) AS avg_input_tokens, "
         "  max(JSONExtractInt(Body, 'input_tokens')) AS max_input_tokens, "
         "  min(JSONExtractInt(Body, 'input_tokens')) AS min_input_tokens "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
         "  AND EventName = 'agentm.turn.summary'",
         params={"sid": sid},
@@ -633,7 +641,7 @@ def _context_snapshots(url: str, sid: str) -> list[dict[str, Any]]:
         "  JSONExtractInt(Body, 'turn_index') AS turn_idx, "
         "  JSONExtractInt(Body, 'input_tokens') AS input_tokens, "
         "  JSONExtractRaw(Body, 'context_breakdown') AS breakdown_raw "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
         "  AND EventName = 'agentm.turn.summary' "
         "  AND JSONHas(Body, 'context_breakdown') = 1 "
@@ -666,7 +674,7 @@ def _session_stats(url: str, sid: str) -> dict[str, Any]:
         "  min(Timestamp) AS start_time, "
         "  max(Timestamp) AS end_time, "
         "  dateDiff('second', min(Timestamp), max(Timestamp)) AS duration_s "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE LogAttributes['agentm.session.id'] = {sid:String}",
         params={"sid": sid},
     )
@@ -675,7 +683,7 @@ def _session_stats(url: str, sid: str) -> dict[str, Any]:
         "SELECT "
         "  LogAttributes['agentm.session.purpose'] AS purpose, "
         "  count() AS cnt "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE LogAttributes['agentm.root.session.id'] = {sid:String} "
         "  AND EventName = 'agentm.session.start' "
         "  AND LogAttributes['agentm.session.id'] != {sid:String} "
@@ -687,7 +695,7 @@ def _session_stats(url: str, sid: str) -> dict[str, Any]:
         "SELECT "
         "  JSONExtractString(Body, 'stop_reason') AS stop_reason, "
         "  count() AS cnt "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
         "  AND EventName = 'agentm.turn.summary' "
         "GROUP BY stop_reason ORDER BY cnt DESC",
@@ -734,7 +742,7 @@ def logs(
     sql = (
         "SELECT EventName, Body, LogAttributes, "
         "  toUnixTimestamp64Nano(Timestamp) AS time_ns, TraceId, SpanId "
-        f"FROM otel_logs WHERE {' AND '.join(where)} "
+        f"FROM (SELECT DISTINCT * FROM otel_logs) WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp"
     )
     for r in query(url, sql, params):
@@ -768,7 +776,7 @@ def spans(
     sql = (
         "SELECT SpanName, SpanId, ParentSpanId, SpanAttributes, Duration, "
         "  toUnixTimestamp64Nano(Timestamp) AS start_ns, TraceId "
-        f"FROM otel_traces WHERE {' AND '.join(where)} "
+        f"FROM (SELECT DISTINCT * FROM otel_traces) WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp"
     )
     for r in query(url, sql, params):
@@ -847,7 +855,7 @@ _BULK_MESSAGES_SQL = (
     "SELECT "
     "  LogAttributes['agentm.session.id'] AS session_id, "
     "  groupArray(Body ORDER BY Timestamp ASC) AS bodies "
-    "FROM otel_logs "
+    "FROM (SELECT DISTINCT * FROM otel_logs) "
     "WHERE EventName = 'agentm.message.appended' "
     "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
     "GROUP BY session_id"
@@ -859,7 +867,7 @@ _BULK_TURN_USAGE_SQL = (
     "  count(*) AS turns, "
     "  sum(JSONExtractInt(Body, 'input_tokens')) AS input_tokens, "
     "  sum(JSONExtractInt(Body, 'output_tokens')) AS output_tokens "
-    "FROM otel_logs "
+    "FROM (SELECT DISTINCT * FROM otel_logs) "
     "WHERE EventName = 'agentm.turn.summary' "
     "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
     "GROUP BY session_id"
@@ -910,7 +918,7 @@ def bulk_system_prompts(url: str, session_ids: list[str]) -> dict[str, str]:
         "SELECT "
         "  LogAttributes['agentm.session.id'] AS session_id, "
         "  any(Body) AS body "
-        "FROM otel_logs "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
         "WHERE EventName = 'agentm.llm.system_prompt' "
         "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
         "GROUP BY session_id",
@@ -934,7 +942,7 @@ def bulk_models(url: str, session_ids: list[str]) -> dict[str, str]:
         "SELECT "
         "  SpanAttributes['agentm.session.id'] AS session_id, "
         "  any(SpanName) AS model_span "
-        "FROM otel_traces "
+        "FROM (SELECT DISTINCT * FROM otel_traces) "
         "WHERE startsWith(SpanName, 'chat ') "
         "  AND SpanAttributes['agentm.session.id'] IN {sids:Array(String)} "
         "GROUP BY session_id",
@@ -964,6 +972,176 @@ def raw_parquet_export(url: str, session_ids: list[str]) -> bytes:
     return query_binary(url, sql, {"sids": session_ids}, timeout=120)
 
 
+# ---------------------------------------------------------------------------
+# doctor — data-quality invariants
+# ---------------------------------------------------------------------------
+
+
+def doctor(url: str, sid: str) -> list[dict[str, Any]]:
+    """Run data-quality invariants for one session; return violations.
+
+    Duplication checks deliberately hit the **raw** tables (the readers'
+    DISTINCT wrapper would hide exactly the bug class they exist to catch);
+    logical checks run on deduplicated rows so a known-duplicated historical
+    session reports only its duplication, not phantom double lifecycles.
+
+    Each violation: ``{check, severity, expected, actual, detail}`` with
+    severity ``error`` or ``warning``.
+    """
+    violations: list[dict[str, Any]] = []
+
+    def _add(check: str, severity: str, expected: Any, actual: Any, detail: str) -> None:
+        violations.append({
+            "check": check, "severity": severity,
+            "expected": expected, "actual": actual, "detail": detail,
+        })
+
+    # 1. Span duplication (raw table).
+    r = query(
+        url,
+        "SELECT count() AS rows, uniqExact(SpanId) AS uniq FROM otel_traces "
+        "WHERE SpanAttributes['agentm.session.id'] = {sid:String}",
+        params={"sid": sid},
+    )[0]
+    if _int(r["rows"]) != _int(r["uniq"]):
+        _add(
+            "span_duplication", "error", _int(r["uniq"]), _int(r["rows"]),
+            "same SpanId stored multiple times — double export at emission "
+            "or collector retry; sessions ingested before 89f20ea7 are "
+            "expected to show exactly 2x",
+        )
+    span_total = _int(r["uniq"])
+
+    # 2. Log duplication (raw table). (Timestamp, EventName, Body) is unique
+    # per logical record at ns precision.
+    r = query(
+        url,
+        "SELECT count() AS rows, "
+        "  uniqExact((Timestamp, EventName, Body)) AS uniq "
+        "FROM otel_logs "
+        "WHERE LogAttributes['agentm.session.id'] = {sid:String}",
+        params={"sid": sid},
+    )[0]
+    if _int(r["rows"]) != _int(r["uniq"]):
+        _add(
+            "log_duplication", "error", _int(r["uniq"]), _int(r["rows"]),
+            "identical log records stored multiple times — see span_duplication",
+        )
+
+    if span_total == 0 and _int(r["uniq"]) == 0:
+        _add(
+            "session_exists", "error", ">0 records", 0,
+            "no spans or logs found for this session id",
+        )
+        return violations
+
+    # 3. Session lifecycle (deduplicated): exactly one header and start;
+    # a missing end means abnormal teardown (warning, not error).
+    rows = query(
+        url,
+        "SELECT EventName, count() AS cnt "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
+        "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
+        "  AND EventName IN "
+        "    ('agentm.session.header', 'agentm.session.start', 'agentm.session.end') "
+        "GROUP BY EventName",
+        params={"sid": sid},
+    )
+    lifecycle = {row["EventName"]: _int(row["cnt"]) for row in rows}
+    # Headers are re-emitted on update (stub at creation, resolved config
+    # later); readers take the latest, so the invariant is presence only.
+    if lifecycle.get("agentm.session.header", 0) == 0:
+        _add(
+            "session_lifecycle", "error", ">=1", 0,
+            "agentm.session.header missing",
+        )
+    if lifecycle.get("agentm.session.start", 0) != 1:
+        _add(
+            "session_lifecycle", "error", 1,
+            lifecycle.get("agentm.session.start", 0),
+            "agentm.session.start must occur exactly once",
+        )
+    if lifecycle.get("agentm.session.end", 0) == 0:
+        _add(
+            "session_lifecycle", "warning", 1, 0,
+            "agentm.session.end missing — session crashed or was killed",
+        )
+    elif lifecycle.get("agentm.session.end", 0) > 1:
+        _add(
+            "session_lifecycle", "error", 1, lifecycle["agentm.session.end"],
+            "agentm.session.end emitted more than once",
+        )
+
+    # 4. Turn contiguity (deduplicated): turn_index values 0..N-1, no holes,
+    # no repeats.
+    r = query(
+        url,
+        "SELECT count() AS cnt, "
+        "  uniqExact(JSONExtractInt(Body, 'turn_index')) AS uniq, "
+        "  min(JSONExtractInt(Body, 'turn_index')) AS mn, "
+        "  max(JSONExtractInt(Body, 'turn_index')) AS mx "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
+        "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
+        "  AND EventName = 'agentm.turn.summary'",
+        params={"sid": sid},
+    )[0]
+    turn_count = _int(r["cnt"])
+    if turn_count > 0:
+        if _int(r["uniq"]) != turn_count:
+            _add(
+                "turn_contiguity", "error", turn_count, _int(r["uniq"]),
+                "duplicate turn_index in turn summaries",
+            )
+        elif _int(r["mn"]) != 0 or _int(r["mx"]) != turn_count - 1:
+            _add(
+                "turn_contiguity", "error",
+                f"0..{turn_count - 1}", f"{_int(r['mn'])}..{_int(r['mx'])}",
+                "turn_index sequence has holes or wrong origin",
+            )
+
+    # 5. Turn span/summary pairing (deduplicated): every turn emits both an
+    # agentm.turn span and a turn.summary log.
+    r = query(
+        url,
+        "SELECT count() AS cnt FROM (SELECT DISTINCT * FROM otel_traces) "
+        "WHERE SpanAttributes['agentm.session.id'] = {sid:String} "
+        "  AND SpanName = 'agentm.turn'",
+        params={"sid": sid},
+    )[0]
+    turn_spans = _int(r["cnt"])
+    if turn_spans != turn_count:
+        _add(
+            "turn_span_pairing",
+            # A missing final pair happens on abnormal teardown; large gaps
+            # mean instrumentation loss.
+            "warning" if abs(turn_spans - turn_count) <= 1 else "error",
+            turn_count, turn_spans,
+            "agentm.turn span count != turn.summary log count",
+        )
+
+    # 6. Tool span parentage (deduplicated): every execute_tool span hangs
+    # off an agentm.turn span of the same session.
+    r = query(
+        url,
+        "SELECT count() AS orphans "
+        "FROM (SELECT DISTINCT * FROM otel_traces) "
+        "WHERE SpanAttributes['agentm.session.id'] = {sid:String} "
+        "  AND SpanName LIKE 'execute_tool%' "
+        "  AND ParentSpanId NOT IN ( "
+        "    SELECT SpanId FROM (SELECT DISTINCT * FROM otel_traces) "
+        "    WHERE SpanAttributes['agentm.session.id'] = {sid:String} "
+        "      AND SpanName = 'agentm.turn')",
+        params={"sid": sid},
+    )[0]
+    if _int(r["orphans"]) > 0:
+        _add(
+            "tool_span_parentage", "error", 0, _int(r["orphans"]),
+            "execute_tool spans not parented to an agentm.turn span",
+        )
+
+    return violations
+
+
 __all__ = [
     "get_url",
     "resolve_session",
@@ -975,6 +1153,7 @@ __all__ = [
     "tools",
     "info",
     "stats",
+    "doctor",
     "logs",
     "spans",
     "query",
