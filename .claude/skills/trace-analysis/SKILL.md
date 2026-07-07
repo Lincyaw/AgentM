@@ -39,6 +39,7 @@ file interleaved with spans. Query them with `agentm trace logs`.
 | `logs` | generic log query (harness operational logs) |
 | `stats` | full session profile (see below) — the first stop for trajectory analysis |
 | `doctor` | data-quality invariants for one session (duplication, lifecycle, turn contiguity, span parentage); exit 1 on violations |
+| `scan` | cohort-baseline outlier list (turns/tokens/duration/peak-context/error-rate vs (scenario, task_class) p50/p95) — generates attribution entry points |
 
 All accept `--session <id>` / `--file <path>` / `--latest` and `--format ndjson`.
 

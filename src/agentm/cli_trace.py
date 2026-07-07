@@ -1236,6 +1236,71 @@ def doctor_cmd(
         raise typer.Exit(1)
 
 
+@app.command("scan")
+def scan_cmd(
+    window: Annotated[int, typer.Option("--window-hours")] = 48,
+    min_cohort: Annotated[int, typer.Option("--min-cohort")] = 5,
+    limit: Annotated[int, typer.Option("--limit")] = 50,
+    cwd: CwdOpt = None,
+    fmt: FormatOpt = None,
+    out: OutputOpt = None,
+) -> None:
+    """Flag outlier sessions against their (scenario, task_class) cohort.
+
+    Sessions whose turns / tokens / wall time / peak context / tool-error
+    rate exceed the cohort p95 (and 1.5x median) are attribution entry
+    points: something in the framework, the model, or the task itself made
+    them expensive. Requires the ClickHouse backend.
+
+    Examples:
+
+      agentm trace scan --window-hours 24
+      agentm trace scan --format ndjson | jq '.findings[]'
+    """
+    sink, close = _open_output(out)
+    try:
+        chosen_fmt = _resolve_format(fmt, sink)
+        url = _trace_clickhouse_url(cwd)
+        if url is None:
+            typer.echo(
+                "Error: scan requires the ClickHouse backend "
+                "(set AGENTM_CLICKHOUSE_URL / OTEL_EXPORTER_OTLP_ENDPOINT).",
+                err=True,
+            )
+            raise typer.Exit(2)
+        report = _ch().scan(
+            url, window_hours=window, min_cohort=min_cohort, limit=limit,
+        )
+
+        if chosen_fmt == "text":
+            sink.write(
+                f"window: {report['window_hours']}h | "
+                f"sessions: {report['sessions']} | "
+                f"findings: {len(report['findings'])}\n"
+            )
+            sink.write("cohorts:\n")
+            for cohort_name, n in report["cohorts"].items():
+                sink.write(f"  {n:>6}  {cohort_name}\n")
+            if report["findings"]:
+                sink.write("findings (value vs cohort p50/p95):\n")
+                for f in report["findings"]:
+                    sink.write(
+                        f"  {f['session_id']}  {f['metric']}={f['value']} "
+                        f"(p50={f['p50']}, p95={f['p95']}, "
+                        f"x{f['ratio_to_p50']}, n={f['cohort_size']}) "
+                        f"{f['scenario']}/{f['task_class'] or '-'}\n"
+                    )
+        elif chosen_fmt == "json":
+            json.dump(report, sink, ensure_ascii=False, indent=2)
+            sink.write("\n")
+        else:
+            sink.write(json.dumps(report, ensure_ascii=False))
+            sink.write("\n")
+    finally:
+        if close:
+            sink.close()
+
+
 def _print_session_stats(sink: Any, session: dict[str, Any] | None) -> None:
     if not session:
         return

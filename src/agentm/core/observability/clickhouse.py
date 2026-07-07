@@ -1142,6 +1142,125 @@ def doctor(url: str, sid: str) -> list[dict[str, Any]]:
     return violations
 
 
+# ---------------------------------------------------------------------------
+# scan — cohort-baseline outlier detection
+# ---------------------------------------------------------------------------
+
+_SCAN_METRICS = ("turns", "input_tokens", "duration_s", "peak_input", "tool_error_rate")
+
+
+def scan(
+    url: str,
+    *,
+    window_hours: int = 48,
+    min_cohort: int = 5,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Flag sessions that are outliers against their cohort baseline.
+
+    A cohort is ``(scenario, task_class)``. For every session in the window,
+    per-session features (turns, tokens, wall time, peak context, tool-error
+    rate) are compared against the cohort's p50/p95; a session is flagged on
+    a metric when it exceeds p95 AND 1.5x the median, in cohorts of at least
+    ``min_cohort`` sessions. Anomalies are entry points for attribution —
+    the scan says *where to look*, never *why*.
+    """
+    feature_rows = query(
+        url,
+        "SELECT "
+        "  LogAttributes['agentm.session.id'] AS sid, "
+        "  count() AS turns, "
+        "  sum(JSONExtractInt(Body, 'input_tokens')) AS input_tokens, "
+        "  max(JSONExtractInt(Body, 'input_tokens')) AS peak_input, "
+        "  sum(JSONExtractInt(Body, 'tool_call_count')) AS tool_calls, "
+        "  sum(JSONExtractInt(Body, 'tool_error_count')) AS tool_errors, "
+        "  (max(toUnixTimestamp64Nano(Timestamp)) "
+        "   - min(toUnixTimestamp64Nano(Timestamp))) / 1e9 AS duration_s "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
+        "WHERE EventName = 'agentm.turn.summary' "
+        "  AND Timestamp > now() - INTERVAL {h:UInt32} HOUR "
+        "GROUP BY sid",
+        params={"h": str(window_hours)},
+        timeout=120,
+    )
+    identity_rows = query(
+        url,
+        "SELECT "
+        "  LogAttributes['agentm.session.id'] AS sid, "
+        "  anyLast(LogAttributes['agentm.session.scenario']) AS scenario, "
+        "  anyLast(LogAttributes['agentm.task.class']) AS task_class, "
+        "  anyLast(LogAttributes['agentm.task.eval_run_id']) AS eval_run_id "
+        "FROM (SELECT DISTINCT * FROM otel_logs) "
+        "WHERE EventName = 'agentm.session.fingerprint' "
+        "  AND Timestamp > now() - INTERVAL {h:UInt32} HOUR "
+        "GROUP BY sid",
+        params={"h": str(window_hours)},
+        timeout=120,
+    )
+    identity = {r["sid"]: r for r in identity_rows}
+
+    cohorts: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for r in feature_rows:
+        ident = identity.get(r["sid"], {})
+        tool_calls = _int(r.get("tool_calls"))
+        session = {
+            "session_id": r["sid"],
+            "scenario": ident.get("scenario", ""),
+            "task_class": ident.get("task_class", ""),
+            "eval_run_id": ident.get("eval_run_id", ""),
+            "turns": _int(r.get("turns")),
+            "input_tokens": _int(r.get("input_tokens")),
+            "peak_input": _int(r.get("peak_input")),
+            "duration_s": float(r.get("duration_s") or 0.0),
+            "tool_error_rate": (
+                _int(r.get("tool_errors")) / tool_calls if tool_calls else 0.0
+            ),
+        }
+        key = (session["scenario"], session["task_class"])
+        cohorts.setdefault(key, []).append(session)
+
+    def _quantile(sorted_values: list[float], q: float) -> float:
+        if not sorted_values:
+            return 0.0
+        idx = min(int(q * len(sorted_values)), len(sorted_values) - 1)
+        return sorted_values[idx]
+
+    findings: list[dict[str, Any]] = []
+    for (scenario, task_class), sessions in cohorts.items():
+        if len(sessions) < min_cohort:
+            continue
+        for metric in _SCAN_METRICS:
+            values = sorted(float(s[metric]) for s in sessions)
+            p50 = _quantile(values, 0.50)
+            p95 = _quantile(values, 0.95)
+            for s in sessions:
+                value = float(s[metric])
+                if value > p95 and value > 1.5 * p50 and value > 0:
+                    findings.append({
+                        "session_id": s["session_id"],
+                        "scenario": scenario,
+                        "task_class": task_class,
+                        "eval_run_id": s["eval_run_id"],
+                        "metric": metric,
+                        "value": round(value, 2),
+                        "p50": round(p50, 2),
+                        "p95": round(p95, 2),
+                        "ratio_to_p50": round(value / p50, 2) if p50 else 0.0,
+                        "cohort_size": len(sessions),
+                    })
+
+    findings.sort(key=lambda f: -f["ratio_to_p50"])
+    return {
+        "window_hours": window_hours,
+        "sessions": len(feature_rows),
+        "cohorts": {
+            f"{sc or '<none>'}/{tc or '<none>'}": len(ss)
+            for (sc, tc), ss in sorted(cohorts.items(), key=lambda kv: -len(kv[1]))
+        },
+        "findings": findings[:limit],
+    }
+
+
 __all__ = [
     "get_url",
     "resolve_session",
@@ -1154,6 +1273,7 @@ __all__ = [
     "info",
     "stats",
     "doctor",
+    "scan",
     "logs",
     "spans",
     "query",

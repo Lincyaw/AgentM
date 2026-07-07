@@ -1928,3 +1928,27 @@ requirements:
       - path: .claude/skills/trace-analysis/SKILL.md
     depends_on:
       - REQ-192-native-log-defaults
+
+  - id: REQ-206-trace-anomaly-scan
+    title: Cohort-baseline outlier scan surfaces attribution entry points
+    description: >
+      Analysis does not always start from an outcome; any significant
+      deviation is an entry point. ``agentm trace scan`` must compare every
+      recent session's features (turns, input tokens, wall time, peak
+      context, tool-error rate) against its cohort baseline — cohort =
+      (scenario, task_class) built from session.fingerprint attributes — and
+      flag sessions exceeding the cohort p95 and 1.5x median, in cohorts of a
+      minimum size. Output ranks findings by deviation ratio so a human can
+      pick attribution targets; the scan locates anomalies but never claims
+      causes.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/observability/clickhouse.py
+      - path: src/agentm/cli_trace.py
+    tests: []
+    docs:
+      - path: .claude/skills/trace-analysis/SKILL.md
+    depends_on:
+      - REQ-205-trace-data-quality
