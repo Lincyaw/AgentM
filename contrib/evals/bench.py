@@ -257,6 +257,18 @@ def _private_eval_container(
 # Core run+eval logic
 # ---------------------------------------------------------------------------
 
+# Session-create failures that mean "sandbox pool still warming up" (cold
+# image pull takes minutes; the gateway queues an allocation for only ~30s).
+_TRANSIENT_CREATE_MARKERS = (
+    "pool at maximum capacity",
+    "queued for",
+    "context deadline exceeded",
+    "Gateway error (429)",
+    "Gateway error (500)",
+    "Gateway error (503)",
+)
+_MAX_CREATE_ATTEMPTS = 20  # x30s sleep + ~30s gateway wait ≈ 20 min ceiling
+
 # In-flight agent sessions run in worker threads, each with its own event
 # loop. Ctrl-C interrupts them cooperatively: AgentSession.prompt() takes an
 # asyncio.Event and returns early when it fires.
@@ -355,7 +367,7 @@ def _run_agent_session(
 
         assert config.provider_spec is not None
         provider_name, provider_config = config.provider_spec
-        session = await AgentSession.create(AgentSessionConfig(
+        session_config = AgentSessionConfig(
             cwd=os.getcwd(),
             scenario=config.scenario,
             provider=(provider_name, dict(provider_config)),
@@ -364,7 +376,29 @@ def _run_agent_session(
             eval_run_id=config.run_id,
             eval_task_id=task.name,
             experiment={"harness": "bench", "attempt": job.attempt_slot},
-        ))
+        )
+        # Cold warm-pools pull multi-GB images for minutes while the gateway
+        # only queues an allocation for ~30s before returning 429/deadline.
+        # Retry transient create failures until the pool warms up; anything
+        # non-transient propagates immediately.
+        create_attempts = 0
+        while True:
+            try:
+                session = await AgentSession.create(session_config)
+                break
+            except Exception as e:  # noqa: BLE001
+                msg = str(e)
+                transient = any(
+                    marker in msg for marker in _TRANSIENT_CREATE_MARKERS
+                )
+                create_attempts += 1
+                if not transient or create_attempts >= _MAX_CREATE_ATTEMPTS:
+                    raise
+                logger.info(
+                    "agent env for {} not ready (attempt {}/{}), retrying in 30s: {}",
+                    task.name, create_attempts, _MAX_CREATE_ATTEMPTS, msg[:160],
+                )
+                await asyncio.sleep(30)
 
         interrupt = asyncio.Event()
         loop = asyncio.get_running_loop()
