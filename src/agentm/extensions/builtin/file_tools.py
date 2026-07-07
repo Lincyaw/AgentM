@@ -95,24 +95,6 @@ def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 
 
-def _is_not_found_error(exc: Exception) -> bool:
-    """Whether a read failure means "the file does not exist".
-
-    Local backends raise ``FileNotFoundError``; remote backends surface the
-    condition only in the error text (the ARL executor currently wraps ENOENT
-    as a gRPC Internal error), so match the message as a fallback. Anything
-    unrecognized must be treated as *unknown*, never as absence.
-    """
-    if isinstance(exc, FileNotFoundError):
-        return True
-    msg = str(exc).lower()
-    return (
-        "no such file" in msg
-        or "file not found" in msg
-        or "does not exist" in msg
-    )
-
-
 _PATH_ALIASES: Final[tuple[str, ...]] = ("file_path",)
 
 
@@ -394,24 +376,31 @@ def _snippet_around(content: str, start_line: int, end_line: int) -> str:
 
 
 async def _update_read_state_after_edit(
-    normalized_path: str,
+    path: str,
+    state_key: str,
     writer: Any,
 ) -> None:
-    """Refresh read_state for *normalized_path* after a successful edit."""
-    old = get_read_state(normalized_path)
+    """Refresh read_state after a successful edit.
+
+    ``path`` is the path the agent used (the writer backend resolves it
+    against its own working directory, e.g. the sandbox workspace);
+    ``state_key`` is the host-side bookkeeping key. Reading back with the
+    state key would send a host path to a remote backend — wrong file space.
+    """
+    old = get_read_state(state_key)
     total_lines = old.total_lines if old else 0
     is_partial = old.is_partial if old else False
     chash = old.content_hash if old else ""
     try:
-        raw = await writer.read(normalized_path)
+        raw = await writer.read(path)
         chash = content_hash_for(raw)
         total_lines = raw.decode("utf-8", errors="replace").count("\n") + 1
     except (OSError, FileNotFoundError) as exc:
         logger.warning(
-            "file_tools: post-edit read({}) failed: {}", normalized_path, exc
+            "file_tools: post-edit read({}) failed: {}", path, exc
         )
     record_read(
-        normalized_path,
+        state_key,
         total_lines=total_lines,
         is_partial=is_partial,
         content_hash=chash,
@@ -658,23 +647,21 @@ class _FileToolsRuntime:
 
         read_state_path = _read_state_path(path, self._api.cwd)
         writer = self._get_writer()
-        file_exists = False
         try:
-            await writer.read(path)
-            file_exists = True
+            file_exists = await writer.exists(path)
         except Exception as exc:
-            if not _is_not_found_error(exc):
-                # Unknown probe failure (gateway hiccup, transport error):
-                # do NOT assume the file is absent — that would silently
-                # disable the read-before-overwrite guard and allow a blind
-                # overwrite of an existing file. Fail the write instead.
-                return _error(
-                    f"Could not verify whether {path!r} already exists — the "
-                    f"backend read failed with: {exc}. Retry the write; if "
-                    "the error persists, read the file (or the enclosing "
-                    "directory) first."
-                )
-            logger.debug("file_tools: {!r} does not exist yet: {}", path, exc)
+            # Unknown probe failure (gateway hiccup, transport error): do
+            # NOT assume the file is absent — that would silently disable
+            # the read-before-overwrite guard and allow a blind overwrite
+            # of an existing file. Fail the write instead, in plain words
+            # the agent can act on.
+            logger.warning("file_tools: exists({!r}) probe failed: {}", path, exc)
+            return _error(
+                f"Could not check whether {path!r} already exists "
+                f"(temporary file-system error: {exc}). Nothing was "
+                "written. Retry the write; if it keeps failing, read the "
+                "file first to confirm its state."
+            )
 
         if file_exists and self._require_read:
             rs = get_read_state(read_state_path)
@@ -900,7 +887,9 @@ class _FileToolsRuntime:
                 )
 
             if not result.is_error:
-                await _update_read_state_after_edit(read_state_path, self._get_writer())
+                await _update_read_state_after_edit(
+                    path, read_state_path, self._get_writer()
+                )
 
             return result
         except Exception as exc:

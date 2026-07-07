@@ -32,6 +32,17 @@ if TYPE_CHECKING:
     from arl import SandboxSession as ArlSandboxSession
 
 
+def _is_enoent(message: str) -> bool:
+    """Whether an error message from the sandbox means "file does not exist".
+
+    This module owns the commands it runs (``base64``, ``ls``) and the
+    gateway file API, so matching their ENOENT phrasing here is the one
+    legitimate place; callers dispatch on ``FileNotFoundError`` only.
+    """
+    lowered = message.lower()
+    return "no such file or directory" in lowered or "code = notfound" in lowered
+
+
 # Versioning-token script. Emits ``<mtime_ns>-<sha16>`` for files up to
 # ``_MTIME_TOKEN_SIZE_CAP`` bytes, ``<mtime_ns>-size<size>`` for larger
 # files. The mtime component uses GNU stat's ``%.Y`` format (fractional
@@ -151,13 +162,22 @@ class AgentEnvResourceWriter:
             try:
                 return await _call_maybe_async(self._session.download_file, rel_path)
             except Exception as exc:
-                raise FileNotFoundError(str(exc)) from exc
+                # Classify at the boundary that owns the transport: only a
+                # genuine missing-file error becomes FileNotFoundError;
+                # gateway/transport failures propagate as themselves so
+                # callers never mistake an outage for file absence.
+                if _is_enoent(str(exc)):
+                    raise FileNotFoundError(str(exc)) from exc
+                raise
         abs_path = self._resolve(path)
         stdout, stderr, code = await self._run(
             ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
         )
         if code != 0:
-            raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
+            message = stderr.decode("utf-8", "replace") or path
+            if _is_enoent(message):
+                raise FileNotFoundError(message)
+            raise RuntimeError(f"read {path!r} failed: {message}")
         encoded = stdout.strip()
         if not encoded:
             return b""
@@ -173,7 +193,10 @@ class AgentEnvResourceWriter:
         abs_path = self._resolve(path)
         stdout, stderr, code = await self._run(["ls", "-1A", "--", abs_path])
         if code != 0:
-            raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
+            message = stderr.decode("utf-8", "replace") or path
+            if _is_enoent(message):
+                raise FileNotFoundError(message)
+            raise RuntimeError(f"list {path!r} failed: {message}")
         text = stdout.decode("utf-8", "replace").strip("\n")
         return sorted(line for line in text.split("\n") if line)
 
