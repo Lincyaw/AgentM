@@ -398,7 +398,7 @@ class _BgTool:
                         "waiting, continue with other work — review your "
                         "code, check for issues, or read related files. "
                         "Use for long-running commands (compilation, test "
-                        "suites, QEMU)."
+                        "suites, large builds)."
                     ),
                 },
             },

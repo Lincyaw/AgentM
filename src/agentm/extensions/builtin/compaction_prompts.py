@@ -97,8 +97,8 @@ the goal statement and verification method verbatim — the successor \
 agent needs these to know what to work toward and how to verify it.
 
 ## Task Specification
-If the agent read a task spec file (e.g., INSTRUCTION.md, README, \
-project spec) early in the session, reproduce the key requirements \
+If the agent read a task specification file early in the session \
+(README, project spec, or similar), reproduce the key requirements \
 verbatim or near-verbatim here. The successor agent will not re-read \
 the file — this section is its only reference to what the task asks \
 for. Include: what to implement, what files to modify, how to test, \

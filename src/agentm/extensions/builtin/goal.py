@@ -76,27 +76,23 @@ _CHECKER_PROMPT_TEMPLATE: Final[str] = (
     "- `read_turn` — read actual messages (filter by role, paginate)\n"
     "- `get_tool_calls` — query specific tool calls with args and results\n\n"
     "Investigate the trajectory to determine whether the condition is met.\n\n"
-    "You are checking the final result, not the process. But the result must "
-    "be backed by evidence in the trajectory:\n"
-    "- If the condition requires tests to pass, the agent must have actually "
-    "executed those tests AND the output must show they passed. Use "
-    "`get_tool_calls` to find the execution and check the output.\n"
-    "- A timeout, crash, or inconclusive test run is NOT a pass — do not "
-    "infer that code 'would pass' based on reading the source. Only actual "
-    "passing output counts.\n"
-    "- If the condition requires specific output or artifacts, verify they "
-    "exist in the trajectory.\n\n"
-    "Judge pragmatically:\n"
-    "- Focus on the primary acceptance criteria (tests pass, correct output). "
-    "Ancillary modifications that help achieve the goal (e.g., fixing a "
-    "dependency to unblock tests) are acceptable unless the spec explicitly "
-    "forbids them.\n"
-    "- If all required tests pass and the implementation is correct, do not "
-    "reject solely because the agent touched files beyond the minimum set. "
-    "Only reject for scope violations that are explicitly stated in the "
-    "original specification.\n"
-    "- Distinguish between 'the spec says not to do X' (reject) and 'the "
-    "spec does not mention X' (allow).\n\n"
+    "Verify that claimed results are backed by actual tool output — not "
+    "agent prose, not inference from source code. A test that timed out, "
+    "crashed, or was never executed is not a pass.\n\n"
+    "Require positive evidence, not absence of failure: a zero exit code or "
+    "a completed command does not by itself show that a required check ran. "
+    "The output must contain the check's own success signal. If the "
+    "condition names several checks, confirm each one appears in the "
+    "output — a run that silently skips one is not a pass for it.\n\n"
+    "Check coverage, not just outcomes: when the condition names specific "
+    "behaviors (checklist items, invariants), the agent's verification must "
+    "actually exercise each of them. Passing checks that never touch a "
+    "named behavior do not satisfy it. When rejecting on this ground, name "
+    "the specific behaviors whose verification is missing — that tells the "
+    "agent exactly what to add.\n\n"
+    "Judge pragmatically: focus on whether the acceptance criteria are met. "
+    "Do not invent restrictions the specification does not state — "
+    "'the spec forbids X' is a reject; 'the spec is silent on X' is not.\n\n"
     "When done, call `submit_verdict` with your structured verdict. "
     "Do NOT output your verdict as text — you MUST call the tool."
 )
@@ -104,17 +100,26 @@ _CHECKER_PROMPT_TEMPLATE: Final[str] = (
 _AUTO_INIT_PROMPT: Final[str] = (
     "You are a goal-condition formulator. Your job is to derive a compound "
     "completion condition — not to execute the task itself.\n\n"
-    "Derive the condition for the ORIGINAL user request only. Do not make "
-    "`submit_result`, structured output, or this meta-task itself part of the "
-    "completion goal unless the original user request explicitly requires it.\n\n"
-    "Treat the system prompt as background policy/context, not as the task. "
-    "Do not derive the goal from runtime-context instructions such as "
-    "working-directory guidance unless the original user request is itself "
-    "about that runtime context.\n\n"
-    "You may use tools to do lightweight exploration — list files, read "
-    "schemas, run simple queries to understand what data or constraints "
-    "exist. But keep it shallow: just enough to discover the implicit "
-    "requirements, not to solve the problem.\n\n"
+    "Derive the condition for the ORIGINAL user request only. The system "
+    "prompt is background context, not the task. Do not include meta-tasks "
+    "(submit_result, structured output) or runtime-context instructions "
+    "(working-directory guidance) unless the original request requires them.\n\n"
+    "You may use tools for lightweight exploration (list files, read specs, "
+    "check what exists) — just enough to discover implicit requirements, "
+    "not to solve the problem.\n\n"
+    "Ground every part of the condition in this environment: confirm that "
+    "the files, commands, and procedures it references exist here. Use "
+    "cheap existence checks (list directories, glob for names) — do NOT "
+    "read source files end-to-end; grounding is about availability, not "
+    "implementation detail. A condition that demands something this "
+    "environment cannot provide is worse than useless — it sends the agent "
+    "chasing the impossible. When the spec's stated procedure conflicts "
+    "with what actually exists, derive the condition from what can be "
+    "verified here and note the substitution.\n\n"
+    "You have a budget of {max_turns} turns. Spend at most half of them "
+    "exploring and reserve the final turn for `submit_result` — a "
+    "submitted condition with approximate grounding beats a perfect one "
+    "that never gets submitted.\n\n"
     "## Parent system prompt (background only)\n{system}\n\n"
     "## Original user request\n{user_text}\n\n"
     "Your output has four parts:\n\n"
@@ -122,8 +127,8 @@ _AUTO_INIT_PROMPT: Final[str] = (
     "The final acceptance criterion (tests pass, output matches spec, etc.).\n\n"
     "### 2. Verification method\n"
     "How the goal should be verified. Two steps:\n"
-    "a) Read the source material (e.g., INSTRUCTION.md) and quote the "
-    "specific passages that describe testing or validation procedures.\n"
+    "a) Read the source material (task spec, README, or similar) and quote "
+    "the specific passages that describe testing or validation procedures.\n"
     "b) **Check what actually exists in the environment**: list the test "
     "directories, check whether the test files or scripts mentioned in the "
     "spec are present. If they are missing, the verification method must "
@@ -142,8 +147,8 @@ _AUTO_INIT_PROMPT: Final[str] = (
     "callbacks or interrupt handlers?\n"
     "- **API surface**: are there test files or specs that define the exact "
     "function signatures, names, or return types required?\n"
-    "- **Build system**: are there Makefiles, CMakeLists, or configs that "
-    "must be updated for new source files or targets?\n"
+    "- **Build system**: does the build configuration need updating for new "
+    "source files or targets?\n"
     "- **Edge cases**: what happens at boundaries (empty input, max size, "
     "zero refcount, null pointer)?\n\n"
     "IMPORTANT: every invariant must be traceable to an explicit statement "
@@ -239,9 +244,10 @@ class GoalConfig(BaseModel):
     checker_scenario: str = "local"
     checker_max_turns: int = 10
     checker_prompt: str | None = None
+    checker_retries: int = 1
     auto_init: bool = False
     auto_init_scenario: str | None = None
-    auto_init_max_turns: int = 10
+    auto_init_max_turns: int = 16
     auto_init_retries: int = 3
     max_rejects: int = 5
 
@@ -350,7 +356,14 @@ async def _evaluate_checker(
     max_turns: int,
     condition: str,
     checker_prompt_override: str | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool | None, str]:
+    """Run one checker session.
+
+    Returns ``(met, reason)``; ``met is None`` means the checker itself
+    failed to produce a verdict (spawn failure or no ``submit_verdict``
+    call) — an infrastructure failure, not a judgment on the goal.
+    """
+
     if checker_prompt_override:
         prompt = checker_prompt_override.format(condition=condition)
     else:
@@ -365,7 +378,7 @@ async def _evaluate_checker(
         extra_tools=[_CHECKER_VERDICT_TOOL],
     )
     if messages is None:
-        return False, "checker produced no response"
+        return None, "checker produced no response"
     return _parse_verdict_from_tool_call(messages)
 
 
@@ -376,7 +389,7 @@ async def _evaluate_checker(
 
 def _parse_verdict_from_tool_call(
     messages: list[AgentMessage],
-) -> tuple[bool, str]:
+) -> tuple[bool | None, str]:
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
             continue
@@ -389,7 +402,7 @@ def _parse_verdict_from_tool_call(
                 if not met and unexplained:
                     reason = f"{reason} (unexplained: {', '.join(unexplained)})"
                 return met, reason
-    return False, "checker did not call submit_verdict"
+    return None, "checker did not call submit_verdict"
 
 
 def _parse_structured_payload(
@@ -464,6 +477,7 @@ class _GoalRuntime:
         self._checker_scenario = config.checker_scenario
         self._checker_max_turns = config.checker_max_turns
         self._checker_prompt_override = config.checker_prompt
+        self._checker_retries = max(config.checker_retries, 0)
         self._auto_init_enabled = config.auto_init
         self._auto_init_scenario = config.auto_init_scenario or api.scenario
         self._auto_init_max_turns = config.auto_init_max_turns
@@ -479,7 +493,12 @@ class _GoalRuntime:
 
     def install(self) -> None:
         self._register_goal_command()
-        self._register_auto_init()
+        if self._auto_init_enabled and self._auto_init_scenario is None:
+            logger.warning(
+                "goal: auto_init requires a scenario but none is set — disabled"
+            )
+            self._auto_init_enabled = False
+        self._api.on(BeforeSendToLlmEvent.CHANNEL, self._on_before_send)
         self._api.on(DecideTurnActionEvent.CHANNEL, self._on_decide)
 
     def _register_goal_command(self) -> None:
@@ -540,34 +559,48 @@ class _GoalRuntime:
             msg += f"\nLast evaluation: {state.last_reason}"
         return msg + f"\nChecker: scenario={self._checker_scenario}"
 
-    def _register_auto_init(self) -> None:
-        if not self._auto_init_enabled:
-            return
-        if self._auto_init_scenario is None:
-            logger.warning(
-                "goal: auto_init requires a scenario but none is set — skipping"
-            )
-            return
-        if self._api.parent_session_id is not None:
-            return
-        self._api.on(BeforeSendToLlmEvent.CHANNEL, self._on_before_send)
-
     async def _on_before_send(self, event: BeforeSendToLlmEvent) -> None:
-        if self._state is not None:
-            return
-        if self._auto_init_started:
-            return
-        user_text = _collect_user_text(event.messages)
-        if not user_text:
-            logger.warning(
-                "goal: auto_init skipped; no user message available "
-                "before first LLM request"
-            )
+        if (
+            self._auto_init_enabled
+            and not self._auto_init_started
+            and self._state is None
+            and self._api.parent_session_id is None
+        ):
+            user_text = _collect_user_text(event.messages)
             self._auto_init_started = True
-            return
+            if not user_text:
+                logger.warning(
+                    "goal: auto_init skipped; no user message available "
+                    "before first LLM request"
+                )
+            else:
+                await self._derive_goal(event.system or "", user_text)
+        self._append_goal_criteria(event)
 
-        self._auto_init_started = True
-        await self._derive_goal(event.system or "", user_text)
+    def _append_goal_criteria(self, event: BeforeSendToLlmEvent) -> None:
+        """Expose the acceptance criteria to the main agent.
+
+        Appended to the system prompt on every request while a goal is
+        active: the block is identical each turn, so it forms a stable
+        prefix (KV-cache friendly) and — unlike a conversation message —
+        survives compaction. The agent sees the bar it will be checked
+        against from turn one and can build verification that covers it,
+        instead of discovering the criteria through rejections.
+        """
+
+        state = self._state
+        if state is None or state.achieved or state.released:
+            return
+        event.system = (
+            (event.system or "")
+            + "\n\n## Completion criteria\n"
+            "An independent checker will verify your work against the "
+            "condition below before the session can end. Design your "
+            "verification early: build checks that exercise each "
+            "checklist item, run them, and only declare completion once "
+            "they pass.\n\n"
+            + state.condition
+        )
 
     async def _derive_goal(self, system: str, user_text: str) -> None:
         if self._auto_init_scenario is None:
@@ -576,6 +609,7 @@ class _GoalRuntime:
         base_prompt = _AUTO_INIT_PROMPT.format(
             system=system,
             user_text=user_text,
+            max_turns=self._auto_init_max_turns,
         )
         prompt = base_prompt
         last_error: Exception | None = None
@@ -652,15 +686,36 @@ class _GoalRuntime:
         if not isinstance(cause, (ModelEndTurn, ToolTerminated)):
             return None
 
-        is_met, reason = await _evaluate_checker(
-            self._api,
-            self._checker_scenario,
-            self._checker_max_turns,
-            state.condition,
-            self._checker_prompt_override,
-        )
+        is_met: bool | None = None
+        reason = ""
+        for attempt in range(self._checker_retries + 1):
+            is_met, reason = await _evaluate_checker(
+                self._api,
+                self._checker_scenario,
+                self._checker_max_turns,
+                state.condition,
+                self._checker_prompt_override,
+            )
+            if is_met is not None:
+                break
+            logger.warning(
+                "goal: checker infra failure (attempt {}/{}) — {}",
+                attempt + 1, self._checker_retries + 1, reason,
+            )
         state.turns_evaluated += 1
         state.last_reason = reason
+
+        if is_met is None:
+            # The checker itself failed, not the agent's work. Burning a
+            # reject slot here would let harness flakiness drive the release
+            # counter, and injecting a fabricated rejection would mislead
+            # the agent — allow the stop without a verdict instead.
+            logger.warning(
+                "goal: checker unavailable after {} attempt(s); "
+                "allowing stop without verdict — {}",
+                self._checker_retries + 1, reason,
+            )
+            return None
 
         if is_met:
             state.achieved = True
