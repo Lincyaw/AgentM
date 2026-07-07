@@ -466,10 +466,12 @@ async def create_agent_session(
         session_config_payload["experiment"] = config.experiment
     session_manager.set_session_config(session_config_payload)
 
+    install_errors: dict[str, Exception] = {}
     for module_path, ext_cfg in to_load:
         try:
             await install(module_path, ext_cfg)
         except Exception as exc:  # noqa: BLE001
+            install_errors[module_path] = exc
             logger.error(f"extension install failed: {module_path}: {exc}")
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
@@ -499,6 +501,19 @@ async def create_agent_session(
         )
 
     if scope.operations.bundle is None:
+        # When the operations atom itself failed to install (e.g. sandbox
+        # allocation error), surface that root cause instead of the generic
+        # missing-registration symptom — callers dispatch on it (bench
+        # retries transient gateway errors).
+        ops_error = next(
+            (
+                exc for module_path, exc in install_errors.items()
+                if "operations" in module_path
+            ),
+            None,
+        )
+        if ops_error is not None:
+            raise ExtensionLoadError("<operations>", ops_error) from ops_error
         raise ExtensionLoadError(
             "<operations>",
             RuntimeError(
