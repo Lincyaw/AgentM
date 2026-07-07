@@ -42,6 +42,7 @@ import importlib.util
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -763,7 +764,17 @@ def _validate_module(source: str, index: int, module: str) -> None:
     # If the module has already been imported elsewhere, keep the stronger
     # ``install()`` assertion.
     loaded = sys.modules.get(module)
-    if loaded is not None and not callable(getattr(loaded, "install", None)):
+    if loaded is None:
+        return
+    # Python inserts a module into ``sys.modules`` BEFORE executing its body,
+    # so a concurrent first import on another thread (embedded-SDK sessions
+    # created in parallel) exposes a partially-initialized module here whose
+    # ``install`` is legitimately not visible yet. ``find_spec`` above already
+    # proved importability — skip the stronger assertion mid-import.
+    spec_obj = getattr(loaded, "__spec__", None)
+    if spec_obj is not None and getattr(spec_obj, "_initializing", False):
+        return
+    if not callable(getattr(loaded, "install", None)):
         raise ScenarioLoadError(
             source,
             ValueError(
@@ -829,6 +840,13 @@ def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
     if project_root is not None:
         _prepend_sys_path(project_root)
 
+# Serializes scenario-local atom registration: ``_register_local`` puts the
+# module into ``sys.modules`` before executing it, so without the lock a
+# concurrent caller (parallel embedded-SDK sessions) would take the idempotent
+# early-return and receive a partially-executed module.
+_REGISTER_LOCAL_LOCK = threading.Lock()
+
+
 def _register_local(
     *,
     source: str,
@@ -840,6 +858,24 @@ def _register_local(
     """Resolve ``<scenario_dir>/<stem>.py`` and register it under a
     synthetic module name. Returns the synthetic name."""
 
+    with _REGISTER_LOCAL_LOCK:
+        return _register_local_locked(
+            source=source,
+            index=index,
+            scenario_dir=scenario_dir,
+            scenario_name=scenario_name,
+            stem=stem,
+        )
+
+
+def _register_local_locked(
+    *,
+    source: str,
+    index: int,
+    scenario_dir: Path,
+    scenario_name: str,
+    stem: str,
+) -> str:
     synthetic = f"agentm._scenarios.{scenario_name}.{stem}"
     if synthetic in sys.modules:
         # Idempotent: a previous load already registered this atom.
