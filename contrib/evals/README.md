@@ -17,13 +17,15 @@ Multi-format benchmark runner for evaluating AgentM on terminal agent tasks.
 # List tasks
 uv run python contrib/evals/bench.py list --bench tb1 --repo ~/longcli-bench/tasks_long_cli
 
-# Mirror upstream images to our registry (Harbor/SWE-bench)
+# Mirror upstream images into docker.io/opspai — only needed when we retag
+# or overlay them (tb2). Plain docker.io images need no mirroring: run with
+# --source-images and the pull-through mirror registry instead.
 uv run python contrib/evals/bench.py mirror --bench harbor --repo ~/harbor-datasets/terminal-bench \
     --registry opspai --prefix tb2 --tag v1 -j 8
 
-# Run batch evaluation
+# Run batch evaluation (ARL gateway + key come from ~/.config/arl/config.yaml)
 uv run python contrib/evals/bench.py batch --bench tb1 --repo ~/longcli-bench/tasks_long_cli \
-    --model litellm --gateway http://<arl-gateway> --api-key <key> -j 20
+    --model litellm -j 20
 
 # pass@k (multiple independent attempts)
 uv run python contrib/evals/bench.py batch --bench tb1 --repo ~/longcli-bench/tasks_long_cli \
@@ -87,11 +89,11 @@ for task in $(ls ../harbor-datasets/terminal-bench/); do
   docker push opspai/tb2-${task}:v1
 done
 
-# 5. Run evaluation (use Volcengine registry prefix for ARL cluster)
+# 5. Run evaluation (Volcengine docker.io mirror prefix for ARL cluster)
 uv run python contrib/evals/bench.py batch --bench harbor \
     --repo ../harbor-datasets/terminal-bench \
-    --registry pair-cn-shanghai.cr.volces.com/opspai --prefix tb2 --tag v1 \
-    --model litellm --gateway http://<arl-gateway> --api-key <key> \
+    --registry pair-cn-guangzhou.cr.volces.com/opspai --prefix tb2 --tag v1 \
+    --model litellm \
     -j 5 --eval-timeout 900 --results /tmp/tb2-results
 ```
 
@@ -99,9 +101,9 @@ uv run python contrib/evals/bench.py batch --bench harbor \
 - Keep concurrency <= 5 for first run; Volcengine registry has pull QPS limits
   on cold images. After images are cached on nodes, concurrency can go higher.
 - Re-running with existing logs skips completed tasks automatically.
-- The `--registry` must be the full Volcengine prefix
-  (`pair-cn-shanghai.cr.volces.com/opspai`), not bare `opspai`, because the
-  K8s cluster cannot reach docker.io directly.
+- The `--registry` must be the full mirror prefix
+  (`pair-cn-guangzhou.cr.volces.com/opspai`), not bare `opspai`, because the
+  K8s cluster cannot reach docker.io directly (see the registry section below).
 
 ## Results: Doubao (doubao-seed-2-0-pro) on Terminal Bench 1.0
 
@@ -185,46 +187,51 @@ Passed tasks: `cobol-modernization`, `code-from-image`, `constraints-scheduling`
    These get reward=0.0 as fallback. True pass rate may be slightly higher
    with a healthier cluster.
 
+## Registry: docker.io pull-through mirror
+
+The ARL cluster cannot reach docker.io directly, but
+`pair-cn-guangzhou.cr.volces.com` is a Docker Hub pull-through mirror:
+**any docker.io image is pullable by swapping the prefix only** — path and
+tag stay verbatim (`jefzda/sweap-images:tag` →
+`pair-cn-guangzhou.cr.volces.com/jefzda/sweap-images:tag`).
+
+- **Upstream images** (SWE-bench Pro, SWE-bench, …): no mirror/retag step —
+  run with `--registry pair-cn-guangzhou.cr.volces.com --source-images`.
+  Never invent a namespace on the mirror (`…/pair/sweap-images` does not
+  exist on Docker Hub and yields eternal ImagePullBackOff).
+- **Our own images** (tb1 builds, tb2 overlays): `docker push
+  docker.io/opspai/<name>:<tag>` once, then pull as
+  `pair-cn-guangzhou.cr.volces.com/opspai/<name>:<tag>`.
+- The `bench.py mirror` + `pair-diag-cn-guangzhou.cr.volces.com/pair`
+  private-registry route still works for already-mirrored artifacts, but new
+  runs should prefer the mirror.
+
+Cold pools pull multi-GB images through the mirror for a couple of minutes;
+if the first run fails with `get sandbox warm pool … context deadline
+exceeded`, wait for the pool to go ready (`arl pool list`) and re-run.
+
 ## Running SWE-bench Pro from Harbor
 
 Harbor publishes Scale AI's SWE-bench Pro as `scale-ai/swe-bench-pro`.
-Export the dataset or a selected task with the Harbor CLI, then use the generic
-Harbor adapter:
+Export the dataset with the Harbor CLI, then use the generic Harbor adapter.
+Source images live on Docker Hub (`jefzda/sweap-images`), so `--source-images`
+with the mirror registry needs no image preparation at all. The ARL gateway
+address and API key come from `~/.config/arl/config.yaml` automatically.
 
 ```bash
 # Full dataset export (731 tasks; usually do this once)
 uv run harbor download scale-ai/swe-bench-pro@latest \
-    -o runs/harbor-datasets --export
+    -o ~/AoyangSpace/harbor-datasets --export
 
-# Or export one known task for smoke tests
-uv run harbor task download scale-ai/<task-name>@<sha256-ref> \
-    -o runs/swebenchpro-harbor-sample --export
-
-# Mirror task images into the Guangzhou registry used by ARL.
-# The adapter reads source images from either task.toml environment.docker_image
-# or environment/Dockerfile's FROM line.
-uv run python contrib/evals/bench.py mirror --bench harbor \
-    --repo runs/harbor-datasets/swe-bench-pro \
-    --registry pair-diag-cn-guangzhou.cr.volces.com/pair \
-    --prefix swebenchpro --tag v0 -j 8
-
-# Baseline
+# Baseline (add -t <task-name> to smoke-test a single task)
 uv run python contrib/evals/bench.py batch --bench harbor \
-    --repo runs/harbor-datasets/swe-bench-pro \
-    --registry pair-diag-cn-guangzhou.cr.volces.com/pair \
-    --prefix swebenchpro --tag v0 \
-    --model azure-gpt --gateway http://<arl-gateway> --api-key <key> \
+    --repo ~/AoyangSpace/harbor-datasets/swe-bench-pro \
+    --registry pair-cn-guangzhou.cr.volces.com --source-images \
+    --prefix swebenchpro \
+    --model litellm-dsv4flash \
     --scenario terminal_bench:arl \
     --agent-timeout 7200 --eval-timeout 3000 \
-    --results runs/swebenchpro-baseline
+    --results runs/swebenchpro-baseline -j 5
 
-# Adapt agent
-uv run python contrib/evals/bench.py batch --bench harbor \
-    --repo runs/harbor-datasets/swe-bench-pro \
-    --registry pair-diag-cn-guangzhou.cr.volces.com/pair \
-    --prefix swebenchpro --tag v0 \
-    --model azure-gpt --gateway http://<arl-gateway> --api-key <key> \
-    --scenario terminal_bench:arl_adapt \
-    --agent-timeout 7200 --eval-timeout 3000 \
-    --results runs/swebenchpro-adapt
+# Adapt agent: same command with --scenario terminal_bench:arl_adapt
 ```

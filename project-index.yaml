@@ -1545,8 +1545,10 @@ requirements:
       The generic Harbor benchmark adapter must support package-exported
       SWE-bench Pro tasks from ``scale-ai/swe-bench-pro``. Tasks may declare
       their upstream runtime image only in ``environment/Dockerfile`` rather
-      than ``task.toml``; the adapter must discover that source image so the
-      mirror command can retag it into the ARL-accessible registry. The adapter
+      than ``task.toml``; the adapter must discover that source image so it can
+      run either through the mirror command (retag into a private registry) or
+      directly via ``--source-images``, which keeps the upstream docker.io path
+      verbatim behind a pull-through mirror prefix. The adapter
       must also read nested Harbor metadata fields such as difficulty and
       category so swebench-pro subsets can be inspected before running
       baseline/adapt experiments. The AgentM Harbor agent adapter must keep
@@ -1558,6 +1560,7 @@ requirements:
     confidence: confirmed
     code:
       - path: contrib/scenarios/terminal_bench/manifest.arl_task.yaml
+      - path: contrib/evals/bench.py
       - path: contrib/evals/benchmarks/harbor.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/agent.py
     tests: []

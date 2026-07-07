@@ -161,6 +161,29 @@ def _generate_skaffold(tasks: list[TaskSpec], registry: str, prefix: str, tag: s
     }
 
 
+def _task_image(
+    adapter: Any,
+    task: TaskSpec,
+    registry: str,
+    prefix: str,
+    tag: str,
+    *,
+    source_images: bool = False,
+) -> str:
+    """Resolve the runtime image for a task.
+
+    With ``source_images``, keep the upstream image path verbatim and only
+    prepend the registry — for pull-through docker.io mirrors, where no
+    retag/mirror step is needed.
+    """
+    if source_images:
+        src = adapter.get_source_image(task) or ""
+        if not src:
+            raise ValueError(f"task {task.name} declares no source image")
+        return f"{registry}/{src}" if registry else src
+    return adapter.get_image(task, registry, prefix, tag)
+
+
 def _get_eval_image(adapter: Any, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
     getter = getattr(adapter, "get_eval_image", None)
     if callable(getter):
@@ -259,6 +282,7 @@ class _RunEvalConfig:
     scenario: str
     run_id: str
     prompt_prefix: str
+    source_images: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,7 +346,10 @@ def _run_and_eval_one(
         job.experiment_attempt_idx,
     )[0]
 
-    image = adapter.get_image(task, config.registry, config.prefix, config.tag)
+    image = _task_image(
+        adapter, task, config.registry, config.prefix, config.tag,
+        source_images=config.source_images,
+    )
 
     # --- Agent phase ---
     session_id = None
@@ -721,6 +748,7 @@ def list_tasks(
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
     json_out: Annotated[bool, typer.Option("--json")] = False,
+    source_images: Annotated[bool, typer.Option("--source-images")] = False,
 ) -> None:
     """List discovered tasks and their image names."""
     resolved_source = _resolve_source(repo, source, bench)
@@ -732,7 +760,9 @@ def list_tasks(
         for t in tasks:
             d = {
                 "name": t.name,
-                "image": adapter.get_image(t, registry, prefix, tag),
+                "image": _task_image(
+                    adapter, t, registry, prefix, tag, source_images=source_images,
+                ),
                 "difficulty": t.difficulty,
                 "category": t.category,
             }
@@ -747,13 +777,13 @@ def list_tasks(
     if bench.startswith("swebench"):
         typer.echo(f"{'Instance ID':<55} {'Repo':<30} {'Image'}")
         for t in tasks:
-            typer.echo(f"{t.name:<55} {t.repo:<30} "
-                       f"{adapter.get_image(t, registry, prefix, tag)}")
+            img = _task_image(adapter, t, registry, prefix, tag, source_images=source_images)
+            typer.echo(f"{t.name:<55} {t.repo:<30} {img}")
     else:
         typer.echo(f"{'Task':<30} {'Diff':<8} {'Image'}")
         for t in tasks:
-            typer.echo(f"{t.name:<30} {t.difficulty:<8} "
-                       f"{adapter.get_image(t, registry, prefix, tag)}")
+            img = _task_image(adapter, t, registry, prefix, tag, source_images=source_images)
+            typer.echo(f"{t.name:<30} {t.difficulty:<8} {img}")
     typer.echo(f"\n{len(tasks)} tasks")
 
 
@@ -769,6 +799,7 @@ def run(
     registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
+    source_images: Annotated[bool, typer.Option("--source-images")] = False,
 ) -> None:
     """Run a single task via ARL sandbox."""
     adapter = get_adapter(bench)
@@ -781,7 +812,7 @@ def run(
         raise typer.Exit(1)
     task_spec = matching[0]
 
-    image = adapter.get_image(task_spec, registry, prefix, tag)
+    image = _task_image(adapter, task_spec, registry, prefix, tag, source_images=source_images)
     prompt = instruction or task_spec.prompt
     if not prompt:
         typer.echo("Error: no prompt found. Provide -p or ensure task has instruction.", err=True)
@@ -817,6 +848,7 @@ def batch(
     scenario: Annotated[str, typer.Option("--scenario")] = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
     run_id: Annotated[str | None, typer.Option("--run-id")] = None,
     prompt_prefix: Annotated[str, typer.Option("--prompt-prefix")] = "",
+    source_images: Annotated[bool, typer.Option("--source-images")] = False,
 ) -> None:
     """Run all tasks in parallel, then evaluate. Results include scores.
 
@@ -960,6 +992,7 @@ def batch(
         scenario=scenario,
         run_id=resolved_run_id,
         prompt_prefix=prompt_prefix,
+        source_images=source_images,
     )
 
     # Collect results per attempt
