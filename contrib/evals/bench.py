@@ -19,6 +19,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -405,6 +406,34 @@ def _run_agent_session(
 
 
 def _run_and_eval_one(
+    job: _RunEvalJob,
+    config: _RunEvalConfig,
+) -> dict[str, Any]:
+    """Run agent + evaluate one task with a per-task log file.
+
+    Each job runs on its own worker thread, and the embedded session's
+    asyncio work all executes on that thread's event loop — so a
+    thread-filtered loguru sink captures exactly this job's log lines
+    (agent + eval phases) into ``<results>/<task>.log`` without needing
+    per-session log routing.
+    """
+
+    log_file = job.out / f"{job.task.name}.log"
+    thread_id = threading.get_ident()
+    sink_id = logger.add(
+        str(log_file),
+        filter=lambda record: record["thread"].id == thread_id,
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+    )
+    try:
+        return _run_and_eval_one_inner(job, config)
+    finally:
+        logger.remove(sink_id)
+
+
+def _run_and_eval_one_inner(
     job: _RunEvalJob,
     config: _RunEvalConfig,
 ) -> dict[str, Any]:
