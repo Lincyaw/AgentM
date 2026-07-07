@@ -90,7 +90,19 @@ searched via `agentm trace messages --session <session_id>` or \
 
 ## Goal
 What is the user trying to accomplish? Include acceptance criteria if \
-stated. Can be multiple items if the session covers different tasks.
+stated. Can be multiple items if the session covers different tasks. \
+If the conversation contains a structured goal condition (from a \
+"[Goal not met ...]" message or a goal-checker injection), preserve \
+the goal statement and verification method verbatim — the successor \
+agent needs these to know what to work toward and how to verify it.
+
+## Task Specification
+If the agent read a task spec file (e.g., INSTRUCTION.md, README, \
+project spec) early in the session, reproduce the key requirements \
+verbatim or near-verbatim here. The successor agent will not re-read \
+the file — this section is its only reference to what the task asks \
+for. Include: what to implement, what files to modify, how to test, \
+what output is expected, and any constraints stated in the spec.
 
 ## Constraints & Preferences
 - Any constraints, preferences, or requirements the user stated
@@ -137,6 +149,9 @@ command lines.
 - Failed approaches and why they failed — so the successor does not repeat \
 them
 - Successful fixes and what they addressed
+- Test execution results: which tests passed, which failed, with exact \
+output (exit codes, pass/fail markers). The successor needs this to know \
+what still needs fixing vs. what is already working.
 
 ## Next Steps
 1. Ordered list of what should happen next

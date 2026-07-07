@@ -505,6 +505,8 @@ class AgentLoop:
         self._bus = bus
         self._config = config if config is not None else LoopConfig()
         self._next_turn_id = 0
+        self.cumulative_turns = 0
+        self.cumulative_tool_calls = 0
 
     def set_stream_fn(self, fn: StreamFn) -> None:
         """Replace the active provider for subsequent turns.
@@ -556,6 +558,7 @@ class AgentLoop:
         try:
             for turn_index in turn_iter:
                 last_turn_index = turn_index
+                self.cumulative_turns += 1
                 turn_id = self._next_turn_id
                 self._next_turn_id += 1
                 # Rebuild dispatch index per turn so atoms registered mid-prompt
@@ -753,6 +756,7 @@ class AgentLoop:
                         )
                     paired_outcomes = raw_outcomes
                     tool_calls_used += len(paired_outcomes)
+                    self.cumulative_tool_calls += len(paired_outcomes)
                 if dropped_tool_calls:
                     total = len(dropped_tool_calls) + len(tool_calls)
                     limit = cap or len(tool_calls)

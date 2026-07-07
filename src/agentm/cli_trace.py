@@ -1158,6 +1158,13 @@ def stats_cmd(
             sink.write(f"spans ({summary['span_total']}):\n")
             for k, v in summary["spans"].items():
                 sink.write(f"  {v:>5}  {k}\n")
+            _print_session_stats(sink, summary.get("session"))
+            _print_tool_stats(sink, summary.get("tools"))
+            _print_turn_stats(sink, summary.get("turns"))
+            _print_context_snapshots(sink, summary.get("context_snapshots"))
+            _print_context_composition(
+                sink, summary.get("tools"), summary.get("turns")
+            )
         elif chosen_fmt == "json":
             json.dump(summary, sink, ensure_ascii=False, indent=2)
             sink.write("\n")
@@ -1167,6 +1174,148 @@ def stats_cmd(
     finally:
         if close:
             sink.close()
+
+
+def _print_session_stats(sink: Any, session: dict[str, Any] | None) -> None:
+    if not session:
+        return
+    sink.write("session:\n")
+    if "duration_s" in session:
+        mins = session["duration_s"] // 60
+        secs = session["duration_s"] % 60
+        sink.write(f"  duration:            {mins}m{secs}s\n")
+        sink.write(f"  start:               {session.get('start_time', '')}\n")
+        sink.write(f"  end:                 {session.get('end_time', '')}\n")
+    children = session.get("child_sessions")
+    if children:
+        total = sum(children.values())
+        sink.write(f"  child_sessions:      {total}\n")
+        for purpose, cnt in children.items():
+            sink.write(f"    {cnt:>4}  {purpose}\n")
+    stops = session.get("stop_reasons")
+    if stops:
+        sink.write("  stop_reasons:\n")
+        for reason, cnt in stops.items():
+            sink.write(f"    {cnt:>4}  {reason}\n")
+
+
+def _print_tool_stats(sink: Any, tools: dict[str, Any] | None) -> None:
+    if not tools:
+        return
+    sink.write("tools:\n")
+    sink.write(
+        f"  {'name':<22} {'calls':>5} {'err':>4} {'avg_ch':>7} "
+        f"{'max_ch':>8} {'total_ch':>10} {'avg_ms':>7} {'p95_ms':>7} {'max_ms':>7}\n"
+    )
+    sink.write(f"  {'-' * 83}\n")
+    for name, s in tools.items():
+        sink.write(
+            f"  {name:<22} {s['calls']:>5} {s.get('errors',0):>4} "
+            f"{s['avg_result_chars']:>7} {s['max_result_chars']:>8} "
+            f"{s['total_result_chars']:>10} {s['avg_duration_ms']:>7} "
+            f"{s['p95_duration_ms']:>7} {s['max_duration_ms']:>7}\n"
+        )
+
+
+def _print_turn_stats(sink: Any, turns: dict[str, Any] | None) -> None:
+    if not turns:
+        return
+    sink.write("turns:\n")
+    sink.write(f"  total_turns:         {turns.get('total_turns', 0)}\n")
+    sink.write(f"  total_tool_calls:    {turns.get('total_tool_calls', 0)}\n")
+    sink.write(f"  total_tool_errors:   {turns.get('total_tool_errors', 0)}\n")
+    sink.write(f"  total_input_tokens:  {turns.get('total_input_tokens', 0)}\n")
+    sink.write(f"  total_output_tokens: {turns.get('total_output_tokens', 0)}\n")
+    sink.write(f"  total_cache_read:    {turns.get('total_cache_read', 0)}\n")
+    sink.write(
+        f"  context_tokens:      "
+        f"min={turns.get('min_input_tokens', 0)} "
+        f"avg={turns.get('avg_input_tokens', 0)} "
+        f"max={turns.get('max_input_tokens', 0)}\n"
+    )
+
+
+def _print_context_snapshots(
+    sink: Any, snapshots: list[dict[str, Any]] | None
+) -> None:
+    if not snapshots:
+        return
+    for snap in snapshots:
+        total = snap.get("total_chars", 0)
+        if total <= 0:
+            continue
+        label = snap.get("label", "snapshot")
+        turn = snap.get("turn_index", "?")
+        in_tok = snap.get("input_tokens", "?")
+        sink.write(f"context_snapshot [{label}] turn={turn} input_tokens={in_tok}:\n")
+
+        for category in ("system", "user", "assistant", "tool_result"):
+            chars = snap.get(category, 0)
+            pct = chars * 100 / total if total else 0
+            tokens = chars // 4
+            sink.write(f"  {category:<20} {tokens:>8} tokens  {pct:>5.1f}%\n")
+
+        by_name = snap.get("tool_result_by_name")
+        if by_name:
+            sink.write("  tool_result breakdown:\n")
+            for name, chars in by_name.items():
+                pct = chars * 100 / total if total else 0
+                tokens = chars // 4
+                if pct >= 0.5:
+                    sink.write(f"    {name:<18} {tokens:>8} tokens  {pct:>5.1f}%\n")
+
+
+def _print_context_composition(
+    sink: Any,
+    tools: dict[str, Any] | None,
+    turns: dict[str, Any] | None,
+) -> None:
+    if not tools or not turns:
+        return
+    total_input = turns.get("total_input_tokens", 0)
+    total_output = turns.get("total_output_tokens", 0)
+    if total_input <= 0:
+        return
+
+    sink.write("context_composition (estimated):\n")
+
+    tool_items: list[tuple[str, int]] = []
+    total_tool_chars = 0
+    for name, s in tools.items():
+        chars = s.get("total_result_chars", 0)
+        total_tool_chars += chars
+        tool_items.append((name, chars))
+
+    total_tool_tokens = total_tool_chars // 4
+    assistant_tokens = total_output
+    other_tokens = max(0, total_input - total_tool_tokens - assistant_tokens)
+
+    sink.write(
+        f"  {'category':<30} {'~tokens':>10} {'%':>6}\n"
+    )
+    sink.write(f"  {'-' * 50}\n")
+
+    for name, chars in sorted(tool_items, key=lambda x: -x[1]):
+        tokens = chars // 4
+        pct = tokens * 100 / total_input if total_input else 0
+        if pct >= 0.5:
+            sink.write(f"  tool:{name:<24} {tokens:>10} {pct:>5.1f}%\n")
+
+    sink.write(
+        f"  {'tool_results (total)':<30} {total_tool_tokens:>10} "
+        f"{total_tool_tokens * 100 / total_input:>5.1f}%\n"
+    )
+    sink.write(
+        f"  {'assistant_output':<30} {assistant_tokens:>10} "
+        f"{assistant_tokens * 100 / total_input:>5.1f}%\n"
+    )
+    sink.write(
+        f"  {'system+user+overhead':<30} {other_tokens:>10} "
+        f"{other_tokens * 100 / total_input:>5.1f}%\n"
+    )
+    sink.write(
+        f"  {'total_input':<30} {total_input:>10}\n"
+    )
 
 
 # ---------- index (directory-granular session topology) ---------------------

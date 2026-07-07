@@ -94,8 +94,6 @@ async def test_install_attach_passes_timeout_and_registers_operations(
 
     assert captured == {
         "session_id": "sandbox-session",
-        "gateway_url": "http://gateway.invalid",
-        "api_key": None,
         "timeout": 123.0,
     }
     assert api.services["agent_env.session_id"] == "sandbox-session"

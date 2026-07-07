@@ -73,14 +73,10 @@ class AgentEnvBashOperations:
         *,
         default_work_dir: str,
         default_timeout: float | None,
-        gateway_url: str,
-        api_key: str | None,
     ) -> None:
         self._session = session
         self._default_work_dir = default_work_dir
         self._default_timeout = default_timeout
-        self._gateway_url = gateway_url
-        self._api_key = api_key
 
     async def exec(
         self,
@@ -154,8 +150,6 @@ class AgentEnvBashOperations:
                 self._session,
                 [step],
                 on_output=_stream_output if on_data is not None else None,
-                gateway_url=self._gateway_url,
-                api_key=self._api_key,
             )
         )
         signal_task: asyncio.Task[bool] | None = None
@@ -258,8 +252,6 @@ printf 'cancelled %s pids:%s\\n' "$marker" "$targets"
             await _async_execute(
                 self._session,
                 [step],
-                gateway_url=self._gateway_url,
-                api_key=self._api_key,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

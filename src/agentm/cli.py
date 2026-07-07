@@ -260,12 +260,16 @@ def _print_final(
     cost_service: Any | None = None,
     provider: str | None = None,
     output: TextIO = sys.stdout,
+    cumulative_turns: int | None = None,
+    cumulative_tool_calls: int | None = None,
 ) -> None:
     # Body text was already streamed live via ``_attach_streaming_presenter``;
     # only emit the summary line so we don't double-print the trajectory.
     report = final_summary(final_messages)
+    msg_count = report.message_count
+    tool_count = cumulative_tool_calls if cumulative_tool_calls is not None else report.tool_calls
     print("=" * 60, file=output)
-    print(f"messages={report.message_count} tool_calls={report.tool_calls}", file=output)
+    print(f"messages={msg_count} tool_calls={tool_count}", file=output)
     usage = report.usage
     if usage.assistant_turns:
         estimate = getattr(cost_service, "estimate", None)
@@ -850,7 +854,15 @@ async def run(
         cost_service = session.get_service("cost_query")
         provider_name = session.model.provider if session.model is not None else None
         if not config.quiet:
-            _print_final(final, cost_service=cost_service, provider=provider_name, output=output)
+            loop = getattr(session, "_loop", None)
+            _print_final(
+                final,
+                cost_service=cost_service,
+                provider=provider_name,
+                output=output,
+                cumulative_turns=getattr(loop, "cumulative_turns", None),
+                cumulative_tool_calls=getattr(loop, "cumulative_tool_calls", None),
+            )
     finally:
         await session.shutdown()
 

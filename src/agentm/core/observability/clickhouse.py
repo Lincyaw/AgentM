@@ -513,7 +513,7 @@ def info(url: str, sid: str) -> dict[str, Any]:
 
 
 def stats(url: str, sid: str) -> dict[str, Any]:
-    """Event-name histogram for a session."""
+    """Event-name histogram + tool/turn statistics for a session."""
     log_rows = query(
         url,
         "SELECT EventName, count() AS cnt FROM otel_logs "
@@ -530,13 +530,184 @@ def stats(url: str, sid: str) -> dict[str, Any]:
     )
     logs_sorted = {r["EventName"]: _int(r["cnt"]) for r in log_rows}
     spans_sorted = {r["SpanName"]: _int(r["cnt"]) for r in span_rows}
+
+    tool_stats = _tool_stats(url, sid)
+    turn_stats = _turn_stats(url, sid)
+    session_stats = _session_stats(url, sid)
+    context_snapshots = _context_snapshots(url, sid)
+
     return {
         "file": f"clickhouse (session {sid})",
         "logs": logs_sorted,
         "spans": spans_sorted,
         "log_total": sum(logs_sorted.values()),
         "span_total": sum(spans_sorted.values()),
+        "tools": tool_stats,
+        "turns": turn_stats,
+        "session": session_stats,
+        "context_snapshots": context_snapshots,
     }
+
+
+def _tool_stats(url: str, sid: str) -> dict[str, Any]:
+    """Per-tool call count, result size, and duration stats."""
+    rows = query(
+        url,
+        "SELECT "
+        "  SpanAttributes['gen_ai.tool.name'] AS tool, "
+        "  count() AS calls, "
+        "  countIf(SpanAttributes['agentm.tool.is_error'] = 'true') AS errors, "
+        "  avg(length(SpanAttributes['gen_ai.tool.call.result'])) AS avg_result_chars, "
+        "  max(length(SpanAttributes['gen_ai.tool.call.result'])) AS max_result_chars, "
+        "  sum(length(SpanAttributes['gen_ai.tool.call.result'])) AS total_result_chars, "
+        "  avg(Duration) / 1e6 AS avg_duration_ms, "
+        "  quantile(0.95)(Duration) / 1e6 AS p95_duration_ms, "
+        "  max(Duration) / 1e6 AS max_duration_ms "
+        "FROM otel_traces "
+        "WHERE SpanAttributes['agentm.session.id'] = {sid:String} "
+        "  AND SpanAttributes['gen_ai.operation.name'] = 'execute_tool' "
+        "GROUP BY tool ORDER BY calls DESC",
+        params={"sid": sid},
+    )
+    tools: dict[str, Any] = {}
+    for r in rows:
+        name = r["tool"]
+        tools[name] = {
+            "calls": _int(r["calls"]),
+            "errors": _int(r.get("errors", 0)),
+            "avg_result_chars": int(float(r.get("avg_result_chars", 0))),
+            "max_result_chars": _int(r.get("max_result_chars", 0)),
+            "total_result_chars": _int(r.get("total_result_chars", 0)),
+            "avg_duration_ms": int(float(r.get("avg_duration_ms", 0))),
+            "p95_duration_ms": int(float(r.get("p95_duration_ms", 0))),
+            "max_duration_ms": int(float(r.get("max_duration_ms", 0))),
+        }
+    return tools
+
+
+def _turn_stats(url: str, sid: str) -> dict[str, Any]:
+    """Aggregate turn-level statistics from turn summary logs."""
+    rows = query(
+        url,
+        "SELECT "
+        "  count() AS total_turns, "
+        "  sum(JSONExtractInt(Body, 'tool_call_count')) AS total_tool_calls, "
+        "  sum(JSONExtractInt(Body, 'tool_error_count')) AS total_tool_errors, "
+        "  sum(JSONExtractInt(Body, 'input_tokens')) AS total_input_tokens, "
+        "  sum(JSONExtractInt(Body, 'output_tokens')) AS total_output_tokens, "
+        "  sum(JSONExtractInt(Body, 'cache_read')) AS total_cache_read, "
+        "  avg(JSONExtractInt(Body, 'input_tokens')) AS avg_input_tokens, "
+        "  max(JSONExtractInt(Body, 'input_tokens')) AS max_input_tokens, "
+        "  min(JSONExtractInt(Body, 'input_tokens')) AS min_input_tokens "
+        "FROM otel_logs "
+        "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
+        "  AND EventName = 'agentm.turn.summary'",
+        params={"sid": sid},
+    )
+    if not rows:
+        return {}
+    r = rows[0]
+    return {
+        "total_turns": _int(r.get("total_turns", 0)),
+        "total_tool_calls": _int(r.get("total_tool_calls", 0)),
+        "total_tool_errors": _int(r.get("total_tool_errors", 0)),
+        "total_input_tokens": _int(r.get("total_input_tokens", 0)),
+        "total_output_tokens": _int(r.get("total_output_tokens", 0)),
+        "total_cache_read": _int(r.get("total_cache_read", 0)),
+        "avg_input_tokens": int(float(r.get("avg_input_tokens", 0))),
+        "max_input_tokens": _int(r.get("max_input_tokens", 0)),
+        "min_input_tokens": _int(r.get("min_input_tokens", 0)),
+    }
+
+
+def _context_snapshots(url: str, sid: str) -> list[dict[str, Any]]:
+    """Extract context_breakdown from peak-context turns.
+
+    Only available for sessions recorded with the breakdown instrumentation.
+    Returns snapshots for the turn with highest input_tokens and
+    the last turn.
+    """
+    rows = query(
+        url,
+        "SELECT "
+        "  JSONExtractInt(Body, 'turn_index') AS turn_idx, "
+        "  JSONExtractInt(Body, 'input_tokens') AS input_tokens, "
+        "  JSONExtractRaw(Body, 'context_breakdown') AS breakdown_raw "
+        "FROM otel_logs "
+        "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
+        "  AND EventName = 'agentm.turn.summary' "
+        "  AND JSONHas(Body, 'context_breakdown') = 1 "
+        "ORDER BY input_tokens DESC "
+        "LIMIT 1",
+        params={"sid": sid},
+    )
+    snapshots: list[dict[str, Any]] = []
+    for r in rows:
+        import json as _json
+
+        try:
+            breakdown = _json.loads(r.get("breakdown_raw", "{}"))
+        except (ValueError, TypeError):
+            continue
+        snapshots.append({
+            "turn_index": _int(r.get("turn_idx", 0)),
+            "input_tokens": _int(r.get("input_tokens", 0)),
+            "label": "peak",
+            **breakdown,
+        })
+    return snapshots
+
+
+def _session_stats(url: str, sid: str) -> dict[str, Any]:
+    """Session-level metadata: duration, child sessions, stop reasons."""
+    duration_rows = query(
+        url,
+        "SELECT "
+        "  min(Timestamp) AS start_time, "
+        "  max(Timestamp) AS end_time, "
+        "  dateDiff('second', min(Timestamp), max(Timestamp)) AS duration_s "
+        "FROM otel_logs "
+        "WHERE LogAttributes['agentm.session.id'] = {sid:String}",
+        params={"sid": sid},
+    )
+    child_rows = query(
+        url,
+        "SELECT "
+        "  LogAttributes['agentm.session.purpose'] AS purpose, "
+        "  count() AS cnt "
+        "FROM otel_logs "
+        "WHERE LogAttributes['agentm.root.session.id'] = {sid:String} "
+        "  AND EventName = 'agentm.session.start' "
+        "  AND LogAttributes['agentm.session.id'] != {sid:String} "
+        "GROUP BY purpose ORDER BY cnt DESC",
+        params={"sid": sid},
+    )
+    stop_rows = query(
+        url,
+        "SELECT "
+        "  JSONExtractString(Body, 'stop_reason') AS stop_reason, "
+        "  count() AS cnt "
+        "FROM otel_logs "
+        "WHERE LogAttributes['agentm.session.id'] = {sid:String} "
+        "  AND EventName = 'agentm.turn.summary' "
+        "GROUP BY stop_reason ORDER BY cnt DESC",
+        params={"sid": sid},
+    )
+    result: dict[str, Any] = {}
+    if duration_rows:
+        r = duration_rows[0]
+        result["start_time"] = str(r.get("start_time", ""))
+        result["end_time"] = str(r.get("end_time", ""))
+        result["duration_s"] = _int(r.get("duration_s", 0))
+    if child_rows:
+        result["child_sessions"] = {
+            r["purpose"]: _int(r["cnt"]) for r in child_rows
+        }
+    if stop_rows:
+        result["stop_reasons"] = {
+            r["stop_reason"]: _int(r["cnt"]) for r in stop_rows
+        }
+    return result
 
 
 # ---------------------------------------------------------------------------

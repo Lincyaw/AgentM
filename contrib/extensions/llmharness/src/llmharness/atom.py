@@ -46,7 +46,7 @@ class LLMHarnessConfig(BaseModel):
     audit_interval_turns: int = 3
     prompt_override_auditor: str | None = None
     auditor_prompt: str = "minimal_index"
-    shutdown_timeout_s: float = 600.0
+    shutdown_timeout_s: float = 30.0
     auditor_provider: ProviderConfig | None = None
     auditor_model: str | None = None
     enable_auditor: bool = True
@@ -453,9 +453,18 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     # Stuck-loop compaction
     # ------------------------------------------------------------------
 
+    _MIN_TURNS_FOR_COMPACTION = 50
+
     async def _request_compaction_if_stuck(n: int) -> None:
         request_compact = api.get_service("compaction.request")
         if not callable(request_compact):
+            return
+        msg_count = len(api.session.get_messages())
+        if msg_count < _MIN_TURNS_FOR_COMPACTION:
+            logger.debug(
+                "llmharness: skipping compaction — only {} messages (min {})",
+                msg_count, _MIN_TURNS_FOR_COMPACTION,
+            )
             return
         try:
             await request_compact("stuck_loop")
@@ -543,7 +552,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
                         api.session.append_entry(_et.VERDICT, verdict.to_dict())
                         n = cumulative.consecutive_reminders
-                        escalate = n >= 3 and n % 3 == 0
+                        escalate = n >= 8 and n % 8 == 0
                         if verdict.surface_reminder and verdict.reminder_text:
                             text = verdict.reminder_text
                             if escalate:

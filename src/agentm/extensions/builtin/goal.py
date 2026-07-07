@@ -86,6 +86,17 @@ _CHECKER_PROMPT_TEMPLATE: Final[str] = (
     "passing output counts.\n"
     "- If the condition requires specific output or artifacts, verify they "
     "exist in the trajectory.\n\n"
+    "Judge pragmatically:\n"
+    "- Focus on the primary acceptance criteria (tests pass, correct output). "
+    "Ancillary modifications that help achieve the goal (e.g., fixing a "
+    "dependency to unblock tests) are acceptable unless the spec explicitly "
+    "forbids them.\n"
+    "- If all required tests pass and the implementation is correct, do not "
+    "reject solely because the agent touched files beyond the minimum set. "
+    "Only reject for scope violations that are explicitly stated in the "
+    "original specification.\n"
+    "- Distinguish between 'the spec says not to do X' (reject) and 'the "
+    "spec does not mention X' (allow).\n\n"
     "When done, call `submit_verdict` with your structured verdict. "
     "Do NOT output your verdict as text — you MUST call the tool."
 )
@@ -106,10 +117,22 @@ _AUTO_INIT_PROMPT: Final[str] = (
     "requirements, not to solve the problem.\n\n"
     "## Parent system prompt (background only)\n{system}\n\n"
     "## Original user request\n{user_text}\n\n"
-    "Your output has three parts:\n\n"
+    "Your output has four parts:\n\n"
     "### 1. Completion goal\n"
     "The final acceptance criterion (tests pass, output matches spec, etc.).\n\n"
-    "### 2. Implementation invariants\n"
+    "### 2. Verification method\n"
+    "How the goal should be verified. Two steps:\n"
+    "a) Read the source material (e.g., INSTRUCTION.md) and quote the "
+    "specific passages that describe testing or validation procedures.\n"
+    "b) **Check what actually exists in the environment**: list the test "
+    "directories, check whether the test files or scripts mentioned in the "
+    "spec are present. If they are missing, the verification method must "
+    "acknowledge this and describe what the agent CAN do instead (e.g., "
+    "write its own tests, verify via build + code review, run available "
+    "build targets). Never require the agent to run tests or scripts that "
+    "do not exist in the workspace — and never encourage the agent to "
+    "download them from external sources.\n\n"
+    "### 3. Implementation invariants\n"
     "Specific correctness constraints that the implementation must satisfy. "
     "These are the tricky edge cases where a developer is most likely to "
     "make mistakes. Derive them from the task structure:\n"
@@ -123,7 +146,12 @@ _AUTO_INIT_PROMPT: Final[str] = (
     "must be updated for new source files or targets?\n"
     "- **Edge cases**: what happens at boundaries (empty input, max size, "
     "zero refcount, null pointer)?\n\n"
-    "### 3. Verification checklist\n"
+    "IMPORTANT: every invariant must be traceable to an explicit statement "
+    "in the source material. Do NOT invent restrictions that are not stated "
+    "— e.g. do not add 'only modify these files' unless the spec explicitly "
+    "says so. If the spec lists files to implement, that is guidance, not a "
+    "prohibition on touching other files.\n\n"
+    "### 4. Verification checklist\n"
     "Concrete checks the reviewer should perform on the code, each phrased "
     "as a yes/no question. Focus on the invariants above.\n\n"
     "When ready, call the `submit_result` tool with your structured output. "
@@ -183,6 +211,13 @@ _CHECKER_VERDICT_TOOL: Final = FunctionTool(
 
 class _ConditionSchema(BaseModel):
     goal: str = Field(description="The final acceptance criterion.")
+    verification_method: str = Field(
+        description=(
+            "How to verify the goal is met. Quote specific passages from the "
+            "task specification that describe testing or validation procedures, "
+            "including commands to run, companion processes, and expected outputs."
+        ),
+    )
     invariants: list[str] = Field(
         description="Correctness constraints the implementation must satisfy. Focus on tricky edge cases: init paths, concurrency, API surface, build system."
     )
@@ -213,6 +248,7 @@ class GoalConfig(BaseModel):
 
 class _ConditionPayload(BaseModel):
     goal: str
+    verification_method: str = ""
     invariants: list[str] = []
     checklist: list[str] = []
 
@@ -220,6 +256,8 @@ class _ConditionPayload(BaseModel):
 @dataclass(slots=True)
 class _GoalState:
     condition: str
+    goal_summary: str = ""
+    verification_method: str = ""
     started_at: float = field(default_factory=time.monotonic)
     turns_evaluated: int = 0
     consecutive_rejects: int = 0
@@ -354,9 +392,9 @@ def _parse_verdict_from_tool_call(
     return False, "checker did not call submit_verdict"
 
 
-def _parse_structured_condition(
+def _parse_structured_payload(
     messages: list[AgentMessage],
-) -> str:
+) -> _ConditionPayload:
     last_error: Exception | None = None
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
@@ -370,23 +408,28 @@ def _parse_structured_condition(
                     )
                     continue
                 try:
-                    payload = _ConditionPayload.model_validate(result)
+                    return _ConditionPayload.model_validate(result)
                 except ValidationError as exc:
                     last_error = exc
                     continue
-                parts = [f"## Goal\n{payload.goal}"]
-                if payload.invariants:
-                    inv_lines = "\n".join(
-                        f"{i + 1}. {v}" for i, v in enumerate(payload.invariants)
-                    )
-                    parts.append(f"## Invariants\n{inv_lines}")
-                if payload.checklist:
-                    chk_lines = "\n".join(f"- {c}" for c in payload.checklist)
-                    parts.append(f"## Checklist\n{chk_lines}")
-                return "\n\n".join(parts)
     if last_error is not None:
         raise last_error
     raise ValueError("no submit_result tool call found")
+
+
+def _format_condition(payload: _ConditionPayload) -> str:
+    parts = [f"## Goal\n{payload.goal}"]
+    if payload.verification_method:
+        parts.append(f"## Verification method\n{payload.verification_method}")
+    if payload.invariants:
+        inv_lines = "\n".join(
+            f"{i + 1}. {v}" for i, v in enumerate(payload.invariants)
+        )
+        parts.append(f"## Invariants\n{inv_lines}")
+    if payload.checklist:
+        chk_lines = "\n".join(f"- {c}" for c in payload.checklist)
+        parts.append(f"## Checklist\n{chk_lines}")
+    return "\n\n".join(parts)
 
 
 def _structured_retry_prompt(original: str, exc: Exception, attempt: int) -> str:
@@ -550,13 +593,18 @@ class _GoalRuntime:
                 last_error = RuntimeError("goal derivation child produced no response")
             else:
                 try:
-                    condition = _parse_structured_condition(messages)
+                    payload = _parse_structured_payload(messages)
                 except (TypeError, ValueError, ValidationError) as exc:
                     last_error = exc
                 else:
                     if self._state is not None:
                         return
-                    self._state = _GoalState(condition=condition)
+                    condition = _format_condition(payload)
+                    self._state = _GoalState(
+                        condition=condition,
+                        goal_summary=payload.goal,
+                        verification_method=payload.verification_method,
+                    )
                     self._api.set_service(GOAL_CONDITION_SERVICE, condition)
                     logger.info(
                         "goal: auto-initialized after {} attempt(s) — {}",
@@ -633,14 +681,17 @@ class _GoalRuntime:
             "goal: not met ({}/{} rejects) — {}",
             state.consecutive_rejects, self._max_rejects, reason,
         )
-        return Inject(
-            messages=[
-                text_message(
-                    f"[Goal not met ({state.consecutive_rejects}/{self._max_rejects})] {reason}\n\n"
-                    f"Continue working toward: {state.condition}"
-                ),
-            ]
-        )
+        if state.verification_method:
+            inject_text = (
+                f"[Goal not met ({state.consecutive_rejects}/{self._max_rejects})] {reason}\n\n"
+                f"Verification method (from task specification): {state.verification_method}"
+            )
+        else:
+            inject_text = (
+                f"[Goal not met ({state.consecutive_rejects}/{self._max_rejects})] {reason}\n\n"
+                f"Continue working toward: {state.goal_summary or state.condition}"
+            )
+        return Inject(messages=[text_message(inject_text)])
 
 
 def install(api: ExtensionAPI, config: GoalConfig) -> None:

@@ -21,6 +21,21 @@ def _bool_safe_int(raw: Any) -> int | None:
     return None
 
 
+def _reminder_type_key(verdict: dict[str, Any]) -> str:
+    """Extract a coarse key from a verdict to group same-type reminders.
+
+    Uses the first continuation note (trimmed to 120 chars) as a fingerprint.
+    Different issues produce different notes; the same recurring issue
+    produces similar notes.
+    """
+    notes = verdict.get("continuation_notes")
+    if isinstance(notes, list) and notes:
+        first = str(notes[0])[:120].strip().lower()
+        return first
+    text = str(verdict.get("reminder_text", ""))[:120].strip().lower()
+    return text
+
+
 @dataclass(slots=True)
 class CumulativeAuditState:
     """Auditor side-channel state across firings."""
@@ -32,6 +47,7 @@ class CumulativeAuditState:
     last_continuation_notes: list[str] = field(default_factory=list)
     firing_id_counter: int = 0
     consecutive_reminders: int = 0
+    _last_reminder_key: str = ""
 
     def absorb_auditor_verdict(self, verdict: dict[str, Any]) -> None:
         self.recent_verdicts.append(verdict)
@@ -39,9 +55,15 @@ class CumulativeAuditState:
         if isinstance(raw_notes, list):
             self.last_continuation_notes = [n for n in raw_notes if isinstance(n, str)]
         if verdict.get("surface_reminder"):
-            self.consecutive_reminders += 1
+            reminder_key = _reminder_type_key(verdict)
+            if reminder_key == self._last_reminder_key:
+                self.consecutive_reminders += 1
+            else:
+                self.consecutive_reminders = 1
+                self._last_reminder_key = reminder_key
         else:
             self.consecutive_reminders = 0
+            self._last_reminder_key = ""
 
     @classmethod
     def fresh(cls) -> CumulativeAuditState:

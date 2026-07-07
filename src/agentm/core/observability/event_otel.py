@@ -44,7 +44,13 @@ from agentm.core.abi.events import (
     TurnEndEvent,
     TurnStartEvent,
 )
-from agentm.core.abi.messages import ToolCallBlock
+from agentm.core.abi.messages import (
+    AgentMessage,
+    TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
+    ToolResultMessage,
+)
 from agentm.core.observability.otel_dispatch import register_otel
 
 # Span-kind keys for ``SessionTelemetry.span_tracker``.
@@ -302,6 +308,75 @@ def _turn_start_to_otel(
     telemetry.current_turn_span = span
 
 
+def _message_chars(msg: AgentMessage) -> int:
+    total = 0
+    for block in msg.content:
+        if isinstance(block, TextContent):
+            total += len(block.text)
+        elif isinstance(block, ToolCallBlock):
+            total += len(block.name) + len(str(block.arguments))
+        elif isinstance(block, ToolResultBlock):
+            for sub in block.content:
+                if isinstance(sub, TextContent):
+                    total += len(sub.text)
+    return total
+
+
+def _context_breakdown(
+    messages: tuple[AgentMessage, ...],
+) -> dict[str, Any] | None:
+    if not messages:
+        return None
+    call_id_to_name: dict[str, str] = {}
+    system_chars = 0
+    user_chars = 0
+    assistant_chars = 0
+    tool_result_by_name: dict[str, int] = {}
+    tool_result_total = 0
+
+    for msg in messages:
+        chars = _message_chars(msg)
+        role = getattr(msg, "role", "")
+        if role == "system":
+            system_chars += chars
+        elif role == "user":
+            user_chars += chars
+        elif role == "assistant":
+            assistant_chars += chars
+            for block in msg.content:
+                if isinstance(block, ToolCallBlock):
+                    call_id_to_name[block.id] = block.name
+        elif isinstance(msg, ToolResultMessage):
+            for block in msg.content:
+                if isinstance(block, ToolResultBlock):
+                    block_chars = sum(
+                        len(sub.text)
+                        for sub in block.content
+                        if isinstance(sub, TextContent)
+                    )
+                    name = call_id_to_name.get(block.tool_call_id, "unknown")
+                    tool_result_by_name[name] = (
+                        tool_result_by_name.get(name, 0) + block_chars
+                    )
+                    tool_result_total += block_chars
+
+    total = system_chars + user_chars + assistant_chars + tool_result_total
+    if total == 0:
+        return None
+
+    sorted_tools = dict(
+        sorted(tool_result_by_name.items(), key=lambda kv: -kv[1])
+    )
+    return {
+        "total_chars": total,
+        "system": system_chars,
+        "user": user_chars,
+        "assistant": assistant_chars,
+        "tool_result": tool_result_total,
+        "tool_result_by_name": sorted_tools,
+    }
+
+
 def _turn_end_to_otel(
     self: "TurnEndEvent", telemetry: Any
 ) -> None:
@@ -370,6 +445,9 @@ def _turn_end_to_otel(
             turn_span.set_attribute(
                 "gen_ai.usage.cache_write_tokens", usage.cache_write
             )
+    context_breakdown = _context_breakdown(self.messages)
+    if context_breakdown:
+        body["context_breakdown"] = context_breakdown
     telemetry.emit_log("agentm.turn.summary", body=body, attributes=attrs)
     telemetry.turn_state["previous_tool_errors"] = 0
 

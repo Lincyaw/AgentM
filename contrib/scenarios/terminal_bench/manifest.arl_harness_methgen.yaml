@@ -32,15 +32,11 @@ extensions:
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
-        You are working on a Terminal Bench task in a remote ARL sandbox.
-        Your file and shell tools execute inside that sandbox, not in the
-        host AgentM repository. The sandbox working directory is /app. Treat
-        relative paths such as INSTRUCTION.md and task project directories as
-        relative to /app.
-        Terminal Bench validation commands can be slow. For xv6/qemu tests,
-        use generous timeouts, typically 1200 seconds or more, and do not wrap
-        validation commands in shorter shell-level timeout limits unless the
-        task explicitly requires it.
+        Your working directory is /app. Treat relative paths such as
+        INSTRUCTION.md and task project directories as relative to /app.
+        Validation commands can be slow — use generous timeouts (1200s+)
+        and do not wrap them in shorter shell-level timeout limits unless
+        the task explicitly requires it.
   - module: agentm.extensions.builtin.llm_compaction
     config:
       tool_result_max_tokens: 8000

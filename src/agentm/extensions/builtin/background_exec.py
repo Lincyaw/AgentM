@@ -260,6 +260,16 @@ def _completion_note(state: _BgTask) -> str:
     return f"Background task {state.task_id} ({state.label}): {state.status}."
 
 
+_CHECK_BG_TAIL_LINES: int = 10
+
+
+def _last_n_lines(text: str, n: int) -> str:
+    lines = text.splitlines(keepends=True)
+    if len(lines) <= n:
+        return text
+    return "".join(lines[-n:])
+
+
 def _task_payload(state: _BgTask, *, tails: Any | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": state.task_id,
@@ -273,7 +283,8 @@ def _task_payload(state: _BgTask, *, tails: Any | None = None) -> dict[str, Any]
     if state.log_path is not None:
         payload["log_path"] = state.log_path
     if state.status == _COMPLETED and state.outcome is not None:
-        payload["result"] = _result_text(_outcome_result(state.outcome))
+        full = _result_text(_outcome_result(state.outcome))
+        payload["result"] = _last_n_lines(full, _CHECK_BG_TAIL_LINES)
     elif (
         state.status == _RUNNING
         and tails is not None
@@ -281,7 +292,7 @@ def _task_payload(state: _BgTask, *, tails: Any | None = None) -> dict[str, Any]
     ):
         tail = tails.tail(state.output_key)
         if tail:
-            payload["latest_output"] = tail
+            payload["latest_output"] = _last_n_lines(tail, _CHECK_BG_TAIL_LINES)
     return payload
 
 
@@ -370,10 +381,28 @@ class _BgTool:
         patched_prop["description"] = (
             "Seconds before this command is moved to the background — NOT a "
             "kill deadline: the command keeps running there (kill deadline "
-            f"{timeout:g}s) and its result arrives via the inbox. Values of "
+            f"{timeout:g}s) and its result arrives as a new message. Values of "
             f"{timeout:g}s or more act as a real kill deadline instead."
         )
-        return {**parameters, "properties": {**props, "timeout": patched_prop}}
+        return {
+            **parameters,
+            "properties": {
+                **props,
+                "timeout": patched_prop,
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run this command in the background immediately. "
+                        "The result will be delivered automatically as a "
+                        "new message when the command finishes. While "
+                        "waiting, continue with other work — review your "
+                        "code, check for issues, or read related files. "
+                        "Use for long-running commands (compilation, test "
+                        "suites, QEMU)."
+                    ),
+                },
+            },
+        }
 
     async def execute(
         self,
@@ -381,6 +410,12 @@ class _BgTool:
         *,
         signal: asyncio.Event | None = None,
     ) -> ToolResult | ToolOutcome:
+        run_in_background = bool(args.get("background"))
+        clean_args = (
+            {k: v for k, v in args.items() if k != "background"}
+            if "background" in args
+            else args
+        )
         # Always run the inner tool against a fresh PER-TASK abort event, never
         # the shared kernel ``signal``. ``cancel_background`` only ever sets this
         # per-task event, so cancelling one background task cannot abort the live
@@ -393,8 +428,10 @@ class _BgTool:
         if signal is not None:
             forwarder = asyncio.create_task(_forward_abort(signal, abort))
         inner_args, foreground_timeout = self._manager.prepare_foreground_call(
-            self.name, args
+            self.name, clean_args
         )
+        if run_in_background:
+            foreground_timeout = 0
         # Bind a live-output tail key around task creation so the bash tool
         # (if this wraps it) streams a bounded tail into a readable buffer
         # AND tees its full output into a source-side log file (written
@@ -462,8 +499,11 @@ class _BgTool:
         if timeout <= 0:
             done, _pending = await asyncio.wait({task}, timeout=0)
             return task in done, (
-                f"moved to background after {timeout:g}s — still running, "
-                "NOT terminated; the result will arrive via the inbox"
+                "Running in background — still running, NOT terminated. "
+                "The result will be delivered to you automatically as a new "
+                "message when it finishes. While waiting, continue with "
+                "other work — review your code, check for potential issues, "
+                "or read related files. Do not cancel or poll"
             )
 
         timeout_task = asyncio.create_task(asyncio.sleep(timeout))
@@ -480,16 +520,20 @@ class _BgTool:
                     return (
                         False,
                         f"moved to background after {timeout:g}s — still "
-                        "running, NOT terminated; the result will arrive "
-                        "via the inbox",
+                        "running, NOT terminated. The result will be "
+                        "delivered to you automatically as a new message "
+                        "when it finishes. While waiting, continue with "
+                        "other work — review your code, check for potential "
+                        "issues, or read related files. Do not cancel or poll",
                     )
                 if inbox_task in done:
                     if inbox_task.result():
                         return (
                             False,
                             "moved to background because new user input is "
-                            "pending — still running, NOT terminated; the "
-                            "result will arrive via the inbox",
+                            "pending — still running, NOT terminated. The "
+                            "result will be delivered automatically as a "
+                            "new message when it finishes",
                         )
                     await asyncio.sleep(0.05)
                     waiters.remove(inbox_task)
@@ -1069,8 +1113,7 @@ class _BackgroundExecRuntime:
                     "output is inlined in `result` (oversized results are "
                     "spilled to a file whose path replaces the overflow). "
                     "Seeing a finished task here consumes its pending "
-                    "completion notification — it will not also arrive in "
-                    "the inbox."
+                    "completion notification."
                 ),
                 parameters=pydantic_to_tool_schema(_CheckBackgroundParams),
                 fn=self._manager.check_background,
@@ -1083,11 +1126,12 @@ class _BackgroundExecRuntime:
                     "Request cancellation of a running background task. "
                     "Only cancel if you are certain the task is stuck — "
                     "a task that was moved to background is still running "
-                    "and may complete successfully. Cancellation is "
-                    'cooperative: this returns {task_id, status: "cancelling"} '
-                    "immediately, and the actual stop is confirmed later via "
-                    "the inbox. Unknown or already-finished task ids return "
-                    "an error."
+                    "and may complete successfully. Do NOT cancel a task "
+                    "just because it was moved to background; wait for it "
+                    "to finish. Cancellation is cooperative: this returns "
+                    '{task_id, status: "cancelling"} immediately, and the '
+                    "actual stop is confirmed later as a new message. "
+                    "Unknown or already-finished task ids return an error."
                 ),
                 parameters=pydantic_to_tool_schema(_CancelBackgroundParams),
                 fn=self._manager.cancel_background,

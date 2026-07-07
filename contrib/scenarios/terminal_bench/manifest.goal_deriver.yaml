@@ -21,7 +21,6 @@ extensions:
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
-        You are deriving runtime-oversight conditions for a Terminal Bench task.
-        Your file and shell tools run in the remote benchmark sandbox. The
-        sandbox working directory is /app; task files such as INSTRUCTION.md
+        You are deriving runtime-oversight conditions for a coding task.
+        Your working directory is /app; task files such as INSTRUCTION.md
         and the project directory are relative to /app.

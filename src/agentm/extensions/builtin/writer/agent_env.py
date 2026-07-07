@@ -73,14 +73,10 @@ class AgentEnvResourceWriter:
         session: "ArlSandboxSession",
         *,
         work_dir: str,
-        gateway_url: str,
-        api_key: str | None,
         session_id: str,
     ) -> None:
         self._session = session
         self._work_dir = _normalize_work_dir(work_dir)
-        self._gateway_url = gateway_url
-        self._api_key = api_key
         self._session_id = session_id
 
     # --- path classification ---------------------------------------------
@@ -108,8 +104,6 @@ class AgentEnvResourceWriter:
         response = await _async_execute(
             self._session,
             [step],
-            gateway_url=self._gateway_url,
-            api_key=self._api_key,
         )
         if not response.results:
             return b"", b"no result", 1
@@ -292,10 +286,7 @@ class AgentEnvResourceWriter:
     def current_version_for_path(self, path: str) -> str | None:
         from arl import GatewayClient  # type: ignore[import-not-found]
 
-        client = GatewayClient(
-            base_url=self._gateway_url,
-            api_key=self._api_key,
-        )
+        client = GatewayClient()
         try:
             response = client.execute(
                 self._session_id,
