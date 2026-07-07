@@ -555,7 +555,14 @@ def _run_and_eval_one_inner(
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": f"list sessions: {e}"}
     if not agent_arl_sessions:
         client.close()
-        return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": "no ARL session for agent"}
+        # The sandbox is gone (scaled down, deleted, or died). Drop the
+        # agent-done marker so a re-run redoes the agent instead of
+        # retrying this unreachable eval forever.
+        state_file.unlink(missing_ok=True)
+        return {
+            "task": name, "status": "eval_create_failed", "tools": tools_count,
+            "error": "agent sandbox no longer exists; re-run to redo this task",
+        }
     arl_session_id = agent_arl_sessions[0].id
 
     session = arl.SandboxSession.attach(arl_session_id)
@@ -1039,8 +1046,11 @@ def batch(
     def _on_sigint(_sig: int, _frame: object) -> None:
         nonlocal interrupted
         if interrupted:
+            # SystemExit would still wait for in-flight worker threads
+            # blocked on network calls; a second Ctrl-C means the user
+            # wants out NOW.
             typer.echo("\nForce quit.")
-            raise SystemExit(1)
+            os._exit(130)
         interrupted = True
         typer.echo("\nCtrl-C — terminating child processes & eval sandboxes...")
         _kill_children()
