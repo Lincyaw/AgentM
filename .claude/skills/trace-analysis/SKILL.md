@@ -110,9 +110,51 @@ agentm trace index --format ndjson \
 
 ## Analysis order
 
-1. **Find the session** — `--latest`, workflow artifact `child_sessions[].session_id`, or `index`
-2. **Profile first** — `stats --session <sid>` (tools, tokens, stop_reasons, peak context), then run the data-quality check above
+1. **Find the session** — `--latest`, workflow artifact `child_sessions[].session_id`, `index`, or a `scan` finding
+2. **Profile first** — `stats --session <sid>` (tools, tokens, stop_reasons, peak context), then `doctor --session <sid>`
 3. **What happened per turn?** `turns --session <sid>`
 4. **Specific tool calls?** `tools --session <sid> --tool <name>`
 5. **Harness logs?** `logs --session <sid>` — look for warnings/errors
 6. **Raw trajectory?** `messages --session <sid>` — only when the above don't suffice
+
+## Attribution playbook
+
+The purpose of trace analysis is to attribute an observed effect (a failed
+task, an outlier session, a suspicious number) to an intervenable cause.
+Rules that hold regardless of the question:
+
+- **Aggregates are indexes, not conclusions.** A number only tells you
+  *that* something differs; the *why* lives at turn level. Never state a
+  cause without citing turn/span evidence.
+- **Decompose before narrating.** Pick the anomalous dimension and split it
+  mechanically first; only then read the trajectory.
+- **Judge against a cohort.** A lone trajectory is uninterpretable; compare
+  to sibling sessions (same task_class/scenario — `scan` output gives the
+  cohort context for free).
+
+### The three decomposition knives
+
+| Dimension | Split into | Command |
+|---|---|---|
+| **Wall time** | LLM latency (`chat` spans) vs tool wall (`execute_tool` spans) vs residual gap (harness overhead) | `chats` / `tools` durations vs session duration |
+| **Tokens** | context composition by source: tool_result by tool, assistant, user/injections | `stats` → `context_snapshots.tool_result_by_name` |
+| **Turns** | phase structure + loop detection: repeated similar tool args, edit→revert churn, same error recurring | `tools --format ndjson \| jq '.args'`, `turns` |
+
+### Cause-class signatures
+
+Anchor classes (conclusions stay free-text; these guide where to look):
+
+- **Framework/tooling**: retries of the *same args after the same error*
+  (the error message taught the model nothing — tool_error_messages'
+  job); truncated results followed by re-reads (result-cap tuning); large
+  residual gap in the time split; harness ERROR/diagnostic logs;
+  compaction thrash.
+- **Model**: retries that *change approach but gain no information*;
+  ignoring an explicit error message; edit→revert oscillation; high output
+  tokens with low action density.
+- **Task inherently expensive**: wall time concentrated *inside* tool
+  spans (builds, test suites); monotonic progress across turns — each
+  turn advances, there is just a lot to do.
+
+Loops are the strongest discriminator: same-args-same-error → framework;
+new-approach-no-progress → model; steady progress → task.
