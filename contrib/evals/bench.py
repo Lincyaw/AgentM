@@ -102,8 +102,18 @@ def _experiment_ids(
     task: str,
     attempt_idx: int | None,
 ) -> tuple[str, str]:
+    """Collision-free experiment ids within the 63-char k8s name budget.
+
+    The task-name hash sits BEFORE the human-readable tail: long task names
+    truncate, and two tasks sharing a truncated prefix must never share an
+    experiment id — each task's pre-run orphan cleanup deletes its
+    experiment, which would kill the other task's live sandbox mid-run.
+    """
+    import hashlib
+
     attempt = f"a{attempt_idx}" if attempt_idx is not None else "a0"
-    suffix = f"{run_id}-{model}-{attempt}-{task}"
+    task_tag = hashlib.sha256(task.encode("utf-8")).hexdigest()[:10]
+    suffix = f"{run_id}-{attempt}-{task_tag}-{model}-{task}"
     return (
         _safe_experiment_id(f"{prefix}-{suffix}"),
         _safe_experiment_id(f"eval-{suffix}"),
