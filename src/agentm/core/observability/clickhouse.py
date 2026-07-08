@@ -852,24 +852,24 @@ def query_binary(
 # helpers and the raw Parquet export all compose from them.
 
 _BULK_MESSAGES_SQL = (
-    "SELECT "
-    "  LogAttributes['agentm.session.id'] AS session_id, "
-    "  groupArray(Body ORDER BY Timestamp ASC) AS bodies "
-    "FROM (SELECT DISTINCT * FROM otel_logs) "
-    "WHERE EventName = 'agentm.message.appended' "
-    "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
-    "GROUP BY session_id"
+    "SELECT session_id, groupArray(Body) AS bodies FROM ("
+    "  SELECT _session_id AS session_id, Body, Timestamp "
+    "  FROM otel_logs "
+    "  WHERE EventName = 'agentm.message.appended' "
+    "    AND _session_id IN {sids:Array(String)} "
+    "  ORDER BY Timestamp ASC"
+    ") GROUP BY session_id"
 )
 
 _BULK_TURN_USAGE_SQL = (
     "SELECT "
-    "  LogAttributes['agentm.session.id'] AS session_id, "
+    "  _session_id AS session_id, "
     "  count(*) AS turns, "
     "  sum(JSONExtractInt(Body, 'input_tokens')) AS input_tokens, "
     "  sum(JSONExtractInt(Body, 'output_tokens')) AS output_tokens "
-    "FROM (SELECT DISTINCT * FROM otel_logs) "
+    "FROM otel_logs "
     "WHERE EventName = 'agentm.turn.summary' "
-    "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
+    "  AND _session_id IN {sids:Array(String)} "
     "GROUP BY session_id"
 )
 
@@ -916,11 +916,11 @@ def bulk_system_prompts(url: str, session_ids: list[str]) -> dict[str, str]:
     for row in query(
         url,
         "SELECT "
-        "  LogAttributes['agentm.session.id'] AS session_id, "
+        "  _session_id AS session_id, "
         "  any(Body) AS body "
-        "FROM (SELECT DISTINCT * FROM otel_logs) "
+        "FROM otel_logs "
         "WHERE EventName = 'agentm.llm.system_prompt' "
-        "  AND LogAttributes['agentm.session.id'] IN {sids:Array(String)} "
+        "  AND _session_id IN {sids:Array(String)} "
         "GROUP BY session_id",
         {"sids": session_ids},
         timeout=60,
@@ -940,11 +940,11 @@ def bulk_models(url: str, session_ids: list[str]) -> dict[str, str]:
     for row in query(
         url,
         "SELECT "
-        "  SpanAttributes['agentm.session.id'] AS session_id, "
+        "  _session_id AS session_id, "
         "  any(SpanName) AS model_span "
-        "FROM (SELECT DISTINCT * FROM otel_traces) "
+        "FROM otel_traces "
         "WHERE startsWith(SpanName, 'chat ') "
-        "  AND SpanAttributes['agentm.session.id'] IN {sids:Array(String)} "
+        "  AND _session_id IN {sids:Array(String)} "
         "GROUP BY session_id",
         {"sids": session_ids},
         timeout=60,

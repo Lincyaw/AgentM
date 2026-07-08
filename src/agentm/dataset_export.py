@@ -220,6 +220,59 @@ class _ClickHouseBackend:
     def __init__(self, url: str) -> None:
         self._url = url
 
+    def resolve_workflow_children(self, session_ids: list[str]) -> list[str]:
+        """Expand root/workflow session IDs to their child agent sessions.
+
+        Looks up each session's ``root_id`` via ``session.start``, then finds
+        all child sessions with ``purpose=workflow`` under those roots.
+        Sessions that are already leaf sessions (with messages) are discovered
+        naturally — ``load_conversations`` skips sessions with no messages.
+        """
+        if not session_ids:
+            return []
+        from agentm.core.observability.clickhouse import query
+
+        input_set = set(session_ids)
+
+        root_ids: set[str] = set()
+        for row in query(
+            self._url,
+            "SELECT DISTINCT "
+            "  LogAttributes['agentm.session.root_id'] AS root_id "
+            "FROM otel_logs "
+            "WHERE EventName = 'agentm.session.start' "
+            "  AND _session_id IN {sids:Array(String)} ",
+            {"sids": session_ids},
+            timeout=60,
+        ):
+            if row.get("root_id"):
+                root_ids.add(row["root_id"])
+
+        if not root_ids:
+            return session_ids
+
+        child_sids: list[str] = []
+        for row in query(
+            self._url,
+            "SELECT DISTINCT "
+            "  _session_id AS sid "
+            "FROM otel_logs "
+            "WHERE EventName = 'agentm.session.start' "
+            "  AND LogAttributes['agentm.session.root_id'] IN {rids:Array(String)} "
+            "  AND LogAttributes['agentm.session.purpose'] = 'workflow' ",
+            {"rids": list(root_ids)},
+            timeout=120,
+        ):
+            sid = row.get("sid")
+            if sid and sid not in input_set:
+                child_sids.append(sid)
+
+        logger.info(
+            "expand_children: {} root(s) → {} child session(s)",
+            len(root_ids), len(child_sids),
+        )
+        return child_sids if child_sids else session_ids
+
     def list_sessions(
         self,
         *,
@@ -443,7 +496,7 @@ class _LocalBackend:
 # ---------------------------------------------------------------------------
 
 
-_BATCH_SIZE = 200
+_BATCH_SIZE = 500
 
 _CREATE_TABLE_SQL = """\
 CREATE TABLE conversations (
@@ -527,6 +580,7 @@ class DatasetExporter:
         roots_only: bool = False,
         include_system_prompt: bool = False,
         include_thinking: bool = False,
+        expand_children: bool = False,
         limit: int | None = None,
     ) -> Iterator[Conversation]:
         """Yield conversations. Loads in batches of 200 for bounded memory."""
@@ -536,6 +590,9 @@ class DatasetExporter:
                 roots_only=roots_only, limit=limit,
             )
             session_ids = [r["session_id"] for r in rows if r.get("session_id")]
+
+        if expand_children and isinstance(self._backend, _ClickHouseBackend):
+            session_ids = self._backend.resolve_workflow_children(session_ids)
 
         emitted = 0
         for i in range(0, len(session_ids), _BATCH_SIZE):
@@ -564,6 +621,7 @@ class DatasetExporter:
         roots_only: bool = False,
         include_system_prompt: bool = False,
         include_thinking: bool = False,
+        expand_children: bool = False,
         compression: str = "zstd",
         limit: int | None = None,
     ) -> int:
@@ -585,7 +643,8 @@ class DatasetExporter:
         for conv in self.iter_conversations(
             session_ids=session_ids, scenarios=scenarios, purposes=purposes,
             roots_only=roots_only, include_system_prompt=include_system_prompt,
-            include_thinking=include_thinking, limit=limit,
+            include_thinking=include_thinking, expand_children=expand_children,
+            limit=limit,
         ):
             batch.append(_conv_to_row(conv))
             count += 1
@@ -639,6 +698,7 @@ class DatasetExporter:
         roots_only: bool = False,
         include_system_prompt: bool = False,
         include_thinking: bool = False,
+        expand_children: bool = False,
         limit: int | None = None,
     ) -> int:
         """Export to JSONL. Streaming — no full materialisation."""
@@ -649,7 +709,8 @@ class DatasetExporter:
             for conv in self.iter_conversations(
                 session_ids=session_ids, scenarios=scenarios, purposes=purposes,
                 roots_only=roots_only, include_system_prompt=include_system_prompt,
-                include_thinking=include_thinking, limit=limit,
+                include_thinking=include_thinking, expand_children=expand_children,
+                limit=limit,
             ):
                 fh.write(json.dumps({
                     "session_id": conv.session_id,

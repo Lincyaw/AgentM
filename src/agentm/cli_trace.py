@@ -1790,12 +1790,23 @@ def export_dataset_cmd(
             help="Parquet compression (zstd, snappy, gzip, uncompressed, brotli, lz4).",
         ),
     ] = "zstd",
+    expand_children: Annotated[
+        bool,
+        typer.Option(
+            "--expand-children",
+            help="For workflow sessions, auto-expand to child agent sessions.",
+        ),
+    ] = False,
 ) -> None:
     """Export traces to a HuggingFace-compatible Parquet or JSONL dataset.
 
     Each row is one session with an OpenAI-compatible ``messages`` array,
     session metadata, and token-usage stats. Parquet is written via DuckDB;
     JSONL is a plain newline-delimited JSON fallback.
+
+    For workflow orchestrator sessions (which have no direct messages),
+    use ``--expand-children`` to automatically discover and export the
+    child agent sessions instead.
 
     Examples:
 
@@ -1804,6 +1815,8 @@ def export_dataset_cmd(
         agentm trace export-dataset --scenario chatbot --roots-only out.parquet
 
         agentm trace export-dataset --session abc123 --session def456 out.jsonl
+
+        agentm trace export-dataset --session <workflow-root> --expand-children out.parquet
     """
     from agentm.dataset_export import DatasetExporter
 
@@ -1838,6 +1851,7 @@ def export_dataset_cmd(
             roots_only=roots_only,
             include_system_prompt=include_system_prompt,
             include_thinking=include_thinking,
+            expand_children=expand_children,
             limit=limit,
         )
     else:
@@ -1849,6 +1863,7 @@ def export_dataset_cmd(
             roots_only=roots_only,
             include_system_prompt=include_system_prompt,
             include_thinking=include_thinking,
+            expand_children=expand_children,
             compression=compression,
             limit=limit,
         )
