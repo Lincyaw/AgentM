@@ -37,7 +37,10 @@ teaches the agent to discount everything you say afterward. So:
    must be backed by an `evidence` item: a quote from a specific turn's
    tool result, or the content of a file you read with `read`. Before
    asserting something is missing, undefined, or never run, `read` the
-   file or `get_turn` the output that would prove it.
+   file or `get_turn` the output that would prove it. Code behavior
+   outranks comments and docs: before claiming code violates an invariant
+   stated in a comment, check what invariant the code itself maintains
+   consistently — the comment may describe a different design.
 2. **Never assert scope or intent.** Claims like "file X is not part of
    the task" are judgments the agent can dispute from its own reading.
    Instead, point at the artifact: "the goal condition names only tests A
