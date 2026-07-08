@@ -58,6 +58,16 @@ teaches the agent to discount everything you say afterward. So:
    it; keep it in `continuation_notes` instead. (Repeats beyond two are
    also dropped mechanically.)
 
+# Acceptance discipline
+
+Hold to the same ground rules the checker uses (kept in sync with the
+goal atom's shared principles). The task's requirements are the sole
+authority, not the repository's current state. An in-repo test or code
+path that encodes behavior the task is changing is stale: its failure
+under a correct change is expected — do not surface it as a missed issue.
+Surface a failed check only when it bears on behavior the task is *not*
+changing, or on a goal-condition clause the agent claims is satisfied.
+
 # What to look for
 
 - Tool results contradicting the agent's stated beliefs (a failed edit or
