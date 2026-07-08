@@ -5,6 +5,7 @@ Atoms import from ``agentm.core.lib`` only; direct sub-module imports
 validator.
 """
 
+from agentm.core.lib.duckdb_utils import cap_duckdb_threads
 from agentm.core.lib.artifact_files import (
     ArtifactCreator,
     ArtifactMetadata,
@@ -57,6 +58,7 @@ from agentm.core.lib.user_config import agentm_home_dir, resolve_model_profile
 __all__ = [
     "ArtifactCreator", "ArtifactMetadata",
     "BackgroundTask", "BackgroundTaskRegistry",
+    "cap_duckdb_threads",
     "DEFAULT_SHUTDOWN_GRACE_SECONDS",
     "FileReadState",
     "Ref",
