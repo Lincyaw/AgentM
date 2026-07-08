@@ -1,0 +1,60 @@
+name: terminal_bench:arl_auditor
+description: |
+  Ablation arm: baseline arl + llmharness auditor + trajectory indexer.
+  NO goal atom, NO adapt. Isolates the auditor/indexer contribution to
+  outcome stability (pass@k / floor) against the bare baseline.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      image: ${AGENTM_AGENT_ENV_IMAGE}
+      experiment_id: ${AGENTM_AGENT_ENV_EXPERIMENT_ID}
+      delete_on_shutdown: ${AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN}
+      idle_timeout_seconds: 7200
+      private_containers:
+        - name: eval
+          image: ${AGENTM_AGENT_ENV_EVAL_IMAGE}
+          mountWorkspace: true
+          workspaceMountPath: /app
+          workspaceAccess: readWrite
+      work_dir: /app
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
+  - module: agentm.extensions.builtin.file_tools
+    config:
+      verify_readback: true
+  - module: agentm.extensions.builtin.tool_bash
+    config:
+      default_timeout: 1200
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        Your working directory is /app. Treat relative paths such as
+        INSTRUCTION.md and task project directories as relative to /app.
+        Validation commands can be slow — use generous timeouts (1200s+)
+        and do not wrap them in shorter shell-level timeout limits unless
+        the task explicitly requires it.
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120
+  - module: llmharness.atom
+    config:
+      mode: async
+      audit_interval_turns: 10
+      auditor_prompt: minimal_coding
+      auditor_model: litellm-dsv4flash
+      enable_reminders: true
+      enable_methodology: false
+      enable_index: true
+      index_model: local-indexer
