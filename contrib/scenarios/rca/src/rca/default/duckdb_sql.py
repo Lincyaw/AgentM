@@ -72,7 +72,7 @@ from agentm.core.abi import (
     TextContent,
     ToolResult,
 )
-from agentm.core.lib import count_text_tokens, truncate_text_tokens
+from agentm.core.lib import cap_duckdb_threads, count_text_tokens, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
 class DuckdbSqlConfig(BaseModel):
@@ -297,28 +297,6 @@ def _install_helper_macros(conn: duckdb.DuckDBPyConnection) -> None:
         except duckdb.Error as exc:  # pragma: no cover - macro already present / engine drift
             logger.debug("duckdb_sql: macro install failed: {}", exc)
 
-def _cap_duckdb_threads(conn: duckdb.DuckDBPyConnection) -> None:
-    """Bound this connection's DuckDB worker pool.
-
-    Each ``duckdb.connect()`` defaults its task scheduler to the host core
-    count. When many of these tools run as concurrent agent subprocesses
-    (e.g. an eval fan-out spawning hundreds of ``agentm`` processes), every
-    connection grabbing all cores oversubscribes the box badly — the data
-    here is tiny (per-case parquet), so a low cap costs no real query speed.
-    Opt-in via ``AGENTM_DUCKDB_THREADS``; unset preserves DuckDB's default.
-    """
-    raw = os.environ.get("AGENTM_DUCKDB_THREADS")
-    if not raw:
-        return
-    try:
-        n = max(1, int(raw))
-    except ValueError:
-        return
-    try:
-        conn.execute(f"SET threads={n}")
-    except duckdb.Error as exc:  # pragma: no cover - engine drift
-        logger.debug("duckdb_sql: SET threads={} failed: {}", n, exc)
-
 class _DuckDBState:
     def __init__(
         self,
@@ -340,7 +318,7 @@ class _DuckDBState:
         if self.conn is not None:
             return self.conn
         conn = duckdb.connect(":memory:")
-        _cap_duckdb_threads(conn)
+        cap_duckdb_threads(conn)
         _install_helper_macros(conn)
         files = sorted(
             f.name

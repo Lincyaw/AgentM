@@ -5,9 +5,10 @@ checks coverage, and produces a CompiledDossier for the judge.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
+
+from agentm.core.lib import cap_duckdb_threads
 
 from .schema import (
     CompiledDossier,
@@ -72,12 +73,7 @@ def _connect(data_dir: str) -> Any:
         return None
 
     conn = duckdb.connect(":memory:")
-    cap = os.environ.get("AGENTM_DUCKDB_THREADS")
-    if cap:
-        try:
-            conn.execute(f"SET threads={max(1, int(cap))}")
-        except (ValueError, Exception):  # noqa: S110
-            pass
+    cap_duckdb_threads(conn)
 
     # Register common macros
     for name, quantile in [("p50", "0.5"), ("p90", "0.9"), ("p95", "0.95"), ("p99", "0.99")]:

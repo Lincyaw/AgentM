@@ -26,7 +26,6 @@ the investigator prompt's SQL guidance.
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -34,6 +33,7 @@ from typing import Any
 from loguru import logger
 
 from agentm.core.abi import TraceReader
+from agentm.core.lib import cap_duckdb_threads
 from agentm.core.lib.observability_dir import resolve_observability_dir
 
 # The grader runs in the same process as tool_eval_run; resolve from cwd so
@@ -516,7 +516,7 @@ def _evaluate_fpg_sql_evidence(
     executable = 0
     try:
         conn = duckdb.connect(":memory:")
-        _cap_sql_eval_threads(conn)
+        cap_duckdb_threads(conn)
         _install_sql_eval_macros(conn)
         _register_case_parquets(conn, case_dir)
     except Exception as exc:  # noqa: BLE001 - setup failure is grader feedback
@@ -631,17 +631,6 @@ def _wrap_evidence_sql(sql: str, head: str) -> str:
 def _install_sql_eval_macros(conn: Any) -> None:
     for stmt in _SQL_HELPER_MACROS:
         conn.execute(stmt)
-
-
-def _cap_sql_eval_threads(conn: Any) -> None:
-    raw = os.environ.get("AGENTM_DUCKDB_THREADS")
-    if not raw:
-        return
-    try:
-        threads = max(1, int(raw))
-    except ValueError:
-        return
-    conn.execute(f"SET threads={threads}")
 
 
 def _register_case_parquets(conn: Any, case_dir: Path) -> None:
