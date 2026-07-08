@@ -24,6 +24,8 @@ extensions:
       max_tokens: 4000
       preview_tokens: 4000
   - module: agentm.extensions.builtin.file_tools
+    config:
+      verify_readback: true
   - module: agentm.extensions.builtin.tool_bash
     config:
       default_timeout: 1200

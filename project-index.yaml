@@ -422,7 +422,10 @@ requirements:
       Builtin file tool atoms must use the documented hybrid IO seam: read
       consumes FileOperations through ExtensionAPI operations, while write/edit
       consume ResourceWriter exclusively so scenario overrides and managed
-      resource protections intercept all file mutations consistently.
+      resource protections intercept all file mutations consistently. An
+      opt-in verify_readback config reads every successful write/edit back
+      and fails loudly on mismatch, guarding remote-sandbox backends against
+      silent write loss (enabled in terminal_bench arl scenarios).
     priority: P0
     status: tested
     confidence: confirmed

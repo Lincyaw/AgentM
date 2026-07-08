@@ -57,6 +57,11 @@ class FileToolsConfig(BaseModel):
     max_size_bytes: int = 262_144
     require_read: bool = True
     default_limit: int = 250
+    # Read the file back after every successful write/edit and fail loudly
+    # if the content on disk differs from what was written. Guards against
+    # silent write loss in remote-sandbox writer backends (observed once in
+    # the wild, unreproduced under stress); costs one read per mutation.
+    verify_readback: bool = False
 
     @field_validator("tools")
     @classmethod
@@ -494,6 +499,7 @@ class _FileToolsRuntime:
         self._deny_globs = _coerce_globs(config.deny_globs, api.cwd)
         self._max_size_bytes = config.max_size_bytes
         self._require_read = config.require_read
+        self._verify_readback = config.verify_readback
 
     def install(self) -> None:
         if "read" in self._enabled_tools:
@@ -507,6 +513,37 @@ class _FileToolsRuntime:
         if not self._writer_cache:
             self._writer_cache.append(self._api.get_resource_writer())
         return self._writer_cache[0]
+
+    async def _verify_persisted(self, path: str, expected: bytes) -> str | None:
+        """Confirm a just-written file actually holds ``expected``.
+
+        Returns an agent-facing error message on mismatch, ``None`` when
+        verified. A transient readback failure must not turn a good write
+        into an error, so it only logs.
+        """
+        if not self._verify_readback:
+            return None
+        try:
+            current = await self._get_writer().read(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "file_tools: readback of {!r} failed, verification skipped: {}",
+                path, exc,
+            )
+            return None
+        if current == expected:
+            return None
+        logger.error(
+            "file_tools: silent write loss at {!r} — wrote {} bytes, "
+            "file holds {} bytes",
+            path, len(expected), len(current),
+        )
+        return (
+            f"The write to {path!r} reported success, but reading the file "
+            "back shows different content — the change did NOT persist on "
+            "disk. Write the full intended content again, then read the "
+            "file to confirm it before building on it."
+        )
 
     def _register_read(self) -> None:
         self._api.register_tool(
@@ -693,6 +730,9 @@ class _FileToolsRuntime:
             result = await writer.write(path, content_bytes, rationale=rationale)
             if result.error is not None:
                 return _error(result.error)
+            loss = await self._verify_persisted(path, content_bytes)
+            if loss is not None:
+                return _error(loss)
 
             total_lines = content.count("\n") + (1 if content else 0)
             record_read(
@@ -766,6 +806,9 @@ class _FileToolsRuntime:
         )
         if result.error is not None:
             return _error(result.error)
+        loss = await self._verify_persisted(path, updated.encode("utf-8"))
+        if loss is not None:
+            return _error(loss)
         before_lines = original[: original.index(actual)].count("\n")
         new_lines_count = new_string.count("\n") + 1
         snippet = _snippet_around(
@@ -807,6 +850,9 @@ class _FileToolsRuntime:
         )
         if result.error is not None:
             return _error(result.error)
+        loss = await self._verify_persisted(path, updated.encode("utf-8"))
+        if loss is not None:
+            return _error(loss)
         new_line_count = new_string.count("\n") + 1
         snippet = _snippet_around(updated, start, start + new_line_count - 1)
         return _ok(f"Replaced lines {start}-{end} in {path!r}:\n{snippet}")
