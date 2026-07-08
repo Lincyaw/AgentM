@@ -26,7 +26,7 @@ from agentm.core.abi import (
     UserMessage,
     text_message,
 )
-from agentm.extensions import ExtensionManifest
+from agentm.extensions import ChannelEffects, ExtensionManifest
 from loguru import logger
 from pydantic import BaseModel
 
@@ -101,6 +101,9 @@ MANIFEST = ExtensionManifest(
     requires=("observability", "operations"),
     api_version=1,
     tier=1,
+    # _on_before_start appends the reminder-protocol block to event.system
+    # (registered only when reminders are enabled; declared unconditionally).
+    effects={"before_agent_start": ChannelEffects(appends=("system",))},
 )
 
 

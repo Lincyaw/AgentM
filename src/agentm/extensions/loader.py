@@ -746,7 +746,53 @@ def sort_extensions_by_requires(
             continue
         visit(module_name)
 
+    _check_effects_ordering(
+        sorted_entries,
+        name_by_module=name_by_module,
+        manifests=manifests,
+        source=source,
+    )
     return sorted_entries
+
+
+def _check_effects_ordering(
+    sorted_entries: list[tuple[str, dict[str, Any]]],
+    *,
+    name_by_module: dict[str, str],
+    manifests: dict[str, ExtensionManifest],
+    source: str,
+) -> None:
+    """Fail fast on declared handler-effect ordering violations.
+
+    Runs :func:`agentm.extensions.validate.validate_effects_ordering` over
+    the final load order. The session factory funnels every resolved
+    extension list (scenario + extras + floor atoms, post atom-config
+    resolution) through :func:`sort_extensions_by_requires`, so the check
+    fires on every session build. Errors abort the load; warnings (two
+    non-commutative mutators of the same resource) are logged.
+    """
+
+    ordered: list[tuple[str, ExtensionManifest]] = []
+    for module_path, _config in sorted_entries:
+        name = name_by_module.get(module_path)
+        if name is None:
+            continue
+        manifest = manifests[name]
+        if manifest.effects:
+            ordered.append((module_path, manifest))
+    if len(ordered) < 2:
+        return
+
+    from agentm.extensions.validate import validate_effects_ordering
+
+    errors: list[str] = []
+    for issue in validate_effects_ordering(ordered):
+        if issue.severity == "warning":
+            logger.warning("scenario loader: {}", issue.message)
+        else:
+            errors.append(issue.message)
+    if errors:
+        raise ScenarioLoadError(source, ValueError("; ".join(errors)))
 
 def _validate_module(source: str, index: int, module: str) -> None:
     spec = importlib.util.find_spec(module)

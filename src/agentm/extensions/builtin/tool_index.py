@@ -13,7 +13,7 @@ from xml.sax.saxutils import escape
 from pydantic import BaseModel
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
-from agentm.extensions import ExtensionManifest
+from agentm.extensions import ChannelEffects, ExtensionManifest
 
 
 class ToolIndexConfig(BaseModel):
@@ -26,6 +26,9 @@ MANIFEST = ExtensionManifest(
     registers=("event:before_agent_start",),
     config_schema=ToolIndexConfig,
     requires=(),
+    effects={
+        "before_agent_start": ChannelEffects(reads=("tools",), appends=("system",)),
+    },
 )
 
 

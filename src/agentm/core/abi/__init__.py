@@ -90,6 +90,7 @@ from .events import (
 from .loop import AgentLoop, LoopConfig
 
 # -- manifest ----------------------------------------------------------------
+from .manifest import ChannelEffects as ChannelEffects
 from .manifest import ExtensionManifest as ExtensionManifest
 
 # -- presenter ---------------------------------------------------------------
@@ -346,6 +347,7 @@ __all__ = [
     "AgentLoop",
     "LoopConfig",
     # manifest
+    "ChannelEffects",
     "ExtensionManifest",
     # presenter
     "PHASE_GLYPHS",

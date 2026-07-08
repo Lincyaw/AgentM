@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI, SYSTEM_PROMPT_PROVIDER
 from agentm.core.lib import expand_path, expand_path_from_cwd
-from agentm.extensions import ExtensionManifest
+from agentm.extensions import ChannelEffects, ExtensionManifest
 
 
 class SystemPromptConfig(BaseModel):
@@ -28,6 +28,10 @@ MANIFEST = ExtensionManifest(
     config_schema=SystemPromptConfig,
     requires=(),
     provides_role=(SYSTEM_PROMPT_PROVIDER,),
+    # Prepends its text to event.system while preserving existing content —
+    # a prepend commutes with tail-appenders, so this is an append, not a
+    # mutation.
+    effects={"before_agent_start": ChannelEffects(appends=("system",))},
 )
 
 _CONTEXT_FILENAMES = ("AGENTS.md", "CLAUDE.md")

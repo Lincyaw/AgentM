@@ -53,7 +53,7 @@ from agentm.core.abi import (
     UserMessage,
     text_message,
 )
-from agentm.extensions import ExtensionManifest
+from agentm.extensions import ChannelEffects, ExtensionManifest
 
 GOAL_CONDITION_SERVICE: Final = "goal.condition"
 
@@ -312,6 +312,9 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=GoalConfig,
     requires=(),
+    # _append_goal_criteria adds the completion-criteria block to the tail
+    # of event.system on every LLM request.
+    effects={"before_send_to_llm": ChannelEffects(appends=("system",))},
 )
 
 

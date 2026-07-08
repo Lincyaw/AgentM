@@ -11,7 +11,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from agentm.core.abi import AgentStartEvent, BeforeAgentStartEvent, ExtensionAPI
-from agentm.extensions import ExtensionManifest
+from agentm.extensions import ChannelEffects, ExtensionManifest
 
 
 class ToolFilterConfig(BaseModel):
@@ -28,6 +28,10 @@ MANIFEST = ExtensionManifest(
     config_schema=ToolFilterConfig,
     requires=(),  # Defers filtering to start events so tool atoms may load in any order.
     tier=2,
+    effects={
+        "before_agent_start": ChannelEffects(mutates=("tools",)),
+        "agent_start": ChannelEffects(mutates=("tools",)),
+    },
 )
 
 

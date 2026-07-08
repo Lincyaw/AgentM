@@ -29,6 +29,7 @@ from __future__ import annotations
 # here for backward compatibility: the ~100 atom files that do
 # ``from agentm.extensions import ExtensionManifest`` keep working unchanged,
 # and ``isinstance(MANIFEST, ExtensionManifest)`` stays a single class object.
+from agentm.core.abi import ChannelEffects as ChannelEffects
 from agentm.core.abi import ExtensionManifest as ExtensionManifest
 
 # --- Tag parsing helper (used by validator + future tooling) ----------------
@@ -56,6 +57,7 @@ def parse_register_tag(tag: str) -> tuple[str, str]:
 
 
 __all__ = [
+    "ChannelEffects",
     "ExtensionManifest",
     "VALID_REGISTER_KINDS",
     "parse_register_tag",

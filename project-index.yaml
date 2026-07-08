@@ -1965,3 +1965,36 @@ requirements:
       - path: .claude/skills/trace-analysis/SKILL.md
     depends_on:
       - REQ-205-trace-data-quality
+
+  - id: REQ-207-declared-handler-effects
+    title: Declared handler effects with load-time ordering validation
+    description: >
+      Atoms may declare per-channel handler effects in
+      ``MANIFEST.effects`` (channel name -> mutates/reads/appends resource
+      tuples, e.g. tool_filter mutates "tools" while tool_index reads it on
+      before_agent_start). The scenario loader validates the resolved,
+      ordered extension list on every session build: a declared reader of a
+      resource loading before a declared mutator of it on the same channel
+      is a load-time error naming both atoms, the channel, the resource,
+      and the fix; two non-append mutators of the same resource on the same
+      channel warn (order unspecified); appends are commutative and
+      unconstrained. Declarations are opt-in — undeclared atoms carry no
+      constraints.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/manifest.py
+      - path: src/agentm/extensions/validate.py
+      - path: src/agentm/extensions/loader.py
+      - path: src/agentm/extensions/builtin/tool_filter.py
+      - path: src/agentm/extensions/builtin/tool_index.py
+      - path: src/agentm/extensions/builtin/system_prompt.py
+      - path: src/agentm/extensions/builtin/goal.py
+      - path: contrib/extensions/llmharness/src/llmharness/atom.py
+    tests:
+      - path: tests/unit/extensions/test_effects_ordering.py
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
+    depends_on:
+      - REQ-086-atom-rework-infra

@@ -702,6 +702,18 @@ Discovery is **memoized per process** so production loads pay the directory walk
    f-string dynamic imports under `agentm.*`, and `isinstance` downcasts to
    concrete runtime service classes. Atoms must consume runtime capabilities
    through ExtensionAPI and Protocol methods.
+11. Declared handler effects are order-checked (opt-in). `MANIFEST.effects`
+   maps an event channel name to `ChannelEffects(mutates=…, reads=…,
+   appends=…)` — tuples of objective resource ids such as `"tools"` or
+   `"system"`. Per channel and resource, the scenario loader
+   (`validate_effects_ordering`, run over the resolved, ordered extension
+   list at every session build — not part of `validate_builtin`) requires
+   every declared reader to load after every declared mutator (load-time
+   error naming both atoms plus the fix), warns when two non-append mutators
+   share a resource (order unspecified), and leaves commutative appenders
+   and undeclared atoms unconstrained. This turns silent handler-ordering
+   bugs (e.g. `tool_index` listing pre-filter tools when loaded before
+   `tool_filter`) into fail-fast load errors.
 
 Test integration: `tests/unit/extensions/test_extension_contract.py` calls `validate_builtin()` and fails the suite on any issue. **This is the gate every new extension PR must pass mechanically — an agent self-editing an extension knows it broke the contract before any human reads the diff.**
 

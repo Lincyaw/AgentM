@@ -24,6 +24,11 @@ Checks (numbered to match design §11.4):
     mutable globals, dynamic ``agentm.*`` imports, concrete runtime-service
     downcasts, undeclared peer-name string references, and undeclared direct
     mutation of ExtensionAPI-owned registries.
+12. Declared handler effects (``MANIFEST.effects``) order-check: on each
+    channel, a declared reader of a resource must load after every declared
+    mutator of it (:func:`validate_effects_ordering` — run by the scenario
+    loader over the resolved, ordered extension list, not by
+    :func:`validate_builtin`).
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from __future__ import annotations
 import ast
 import inspect
 import pkgutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
@@ -1051,6 +1057,92 @@ def _classify_import(
     return []
 
 
+def validate_effects_ordering(
+    ordered_manifests: Sequence[tuple[str, ExtensionManifest]],
+) -> list[ValidationIssue]:
+    """Check declared handler effects across a resolved, ordered extension list.
+
+    *ordered_manifests* is ``(module_path, manifest)`` pairs in final load
+    order (post ``sort_extensions_by_requires``). Per channel, per resource
+    (§11.4.12, opt-in):
+
+    - every extension that ``reads`` resource X on channel C must come
+      after every extension that ``mutates`` X on C → error, with the fix
+      spelled out (move the reader after the mutator in the manifest);
+    - two extensions that both ``mutates`` X on C, neither declaring X in
+      ``appends`` on C → warning (non-commutative mutation order is
+      unspecified);
+    - ``appends`` are commutative: appenders are unconstrained among
+      themselves and do not count as mutators.
+
+    Extensions without an ``effects`` declaration are unconstrained.
+    """
+
+    issues: list[ValidationIssue] = []
+    # (channel, resource) -> ordered [(position, name, module_path)].
+    mutators: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    readers: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    # Names that also declare the resource in ``appends`` on the channel —
+    # exempts mutator pairs from the unspecified-order warning.
+    appenders: dict[tuple[str, str], set[str]] = {}
+
+    for position, (module_path, manifest) in enumerate(ordered_manifests):
+        for channel, fx in manifest.effects.items():
+            entry = (position, manifest.name, module_path)
+            for resource in fx.mutates:
+                mutators.setdefault((channel, resource), []).append(entry)
+            for resource in fx.reads:
+                readers.setdefault((channel, resource), []).append(entry)
+            for resource in fx.appends:
+                appenders.setdefault((channel, resource), set()).add(manifest.name)
+
+    for key, reader_entries in readers.items():
+        channel, resource = key
+        for reader_pos, reader_name, reader_module in reader_entries:
+            for mutator_pos, mutator_name, _mutator_module in mutators.get(key, []):
+                if mutator_name == reader_name or mutator_pos < reader_pos:
+                    continue
+                issues.append(
+                    ValidationIssue(
+                        module_path=reader_module,
+                        rule="11.4.12-effects-read-after-mutate",
+                        message=(
+                            f"extension {reader_name!r} reads {resource!r} on "
+                            f"channel {channel!r} but {mutator_name!r} mutates "
+                            f"{resource!r} on the same channel later in the "
+                            f"load order; move {reader_name!r} after "
+                            f"{mutator_name!r} in the manifest"
+                        ),
+                    )
+                )
+
+    for key, mutator_entries in mutators.items():
+        channel, resource = key
+        exempt = appenders.get(key, set())
+        contenders = [e for e in mutator_entries if e[1] not in exempt]
+        for index, (_pos_a, name_a, module_a) in enumerate(contenders):
+            for _pos_b, name_b, _module_b in contenders[index + 1 :]:
+                if name_a == name_b:
+                    continue
+                issues.append(
+                    ValidationIssue(
+                        module_path=module_a,
+                        rule="11.4.12-effects-mutate-mutate",
+                        message=(
+                            f"extensions {name_a!r} and {name_b!r} both mutate "
+                            f"{resource!r} on channel {channel!r}; their "
+                            "relative order is load-bearing but unspecified — "
+                            "declare the resource in 'appends' if the "
+                            "mutations commute, or add a 'requires' edge to "
+                            "fix the order"
+                        ),
+                        severity="warning",
+                    )
+                )
+
+    return issues
+
+
 def validate_extension_contract(
     *,
     module_path: str,
@@ -1212,6 +1304,7 @@ __all__ = [
     "ValidationIssue",
     "validate_atom_file",
     "validate_atom_package",
+    "validate_effects_ordering",
     "validate_extension_contract",
     "validate_builtin",
 ]
