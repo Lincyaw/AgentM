@@ -388,8 +388,12 @@ requirements:
       The llmharness contrib atom installs turn-end and loop-decision hooks
       that periodically run an auditor over the live trajectory, maintain
       cumulative audit state, and inject system-reminder guidance without
-      owning the main session driver. The auditor is advisory-only (the goal
-      checker holds the acceptance gate): every surfaced reminder must carry
+      owning the main session driver. The auditor is advisory-only and its
+      surfacing criterion is acceptance risk, not fault attribution: red
+      signals that would fail the task's acceptance run (never-built
+      deliverables, failing goal-relevant tests) are surfaceable on the
+      failing output alone, regardless of whether the cause is pre-existing
+      or environmental. Every surfaced reminder must carry
       a non-empty evidence list (schema-enforced), the auditor child attaches
       to the main agent's sandbox with read-only workspace access (tool_filter
       allow-list keeps out leaked scenario tools such as adapt-created
