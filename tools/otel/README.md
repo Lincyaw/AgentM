@@ -15,6 +15,18 @@ open http://localhost:16686       # Jaeger UI, service = "agentm"
 
 Stop with `docker compose -f tools/otel/docker-compose.yaml down`.
 
+After the first traces arrive, run the index init script once to add
+materialized columns and bloom filter indexes for fast session-level queries:
+
+```bash
+clickhouse-client --host localhost --query "$(cat tools/otel/init-db.sql)"
+# or via HTTP:
+curl http://localhost:8123/ --data-binary @tools/otel/init-db.sql
+```
+
+Without these indexes, `agentm trace export-dataset` and other
+session-filtered queries do full table scans on every call.
+
 ## What you get
 
 Span tree per session (GenAI semconv aligned):
