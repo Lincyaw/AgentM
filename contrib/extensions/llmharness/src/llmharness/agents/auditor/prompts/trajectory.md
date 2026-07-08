@@ -98,6 +98,8 @@ Call `submit_verdict` exactly once. Do not emit JSON in trailing text.
     the blind spot.
   Keep it to 2-4 sentences. Don't mention turn indices, trajectory dump,
   or auditor internals.
+- `evidence`: one item per verified fact — source (turn or file) + what it
+  shows. Required (non-empty) when `surface_reminder=true`.
 - `continuation_notes`: short notes for your next firing -- what scope is
   open, what you're watching. Always at least one. These are auditor-internal
   (the main agent never sees them) so turn indices are fine here. Track which

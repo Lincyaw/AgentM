@@ -25,6 +25,17 @@ class _VerdictModel(BaseModel):
     reminder_text: str = Field(
         description="Advisory for the main agent. Non-empty when surface_reminder=true.",
     )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Verifiable support for the reminder, one item per fact. Each item "
+            "names its source and quotes what it shows, e.g. "
+            "'turn 42 bash result: 3 tests FAILED (copyout)' or "
+            "'read kernel/memlayout.h: USYSCALL already defined at line 61'. "
+            "Required (non-empty) when surface_reminder=true; every claim in "
+            "reminder_text must be covered by an item here."
+        ),
+    )
     continuation_notes: list[str] = Field(
         description="Notes for your next firing. Auditor-internal.",
     )
@@ -41,6 +52,12 @@ class _VerdictModel(BaseModel):
     def _check_reminder(self) -> Self:
         if self.surface_reminder and not self.reminder_text.strip():
             raise ValueError("reminder_text must be non-empty when surface_reminder=true")
+        if self.surface_reminder and not any(e.strip() for e in self.evidence):
+            raise ValueError(
+                "evidence must contain at least one non-empty item when "
+                "surface_reminder=true — cite the turn or file that supports "
+                "the reminder, or submit a silent verdict instead"
+            )
         return self
 
 class SubmitVerdictArgs(BaseModel):

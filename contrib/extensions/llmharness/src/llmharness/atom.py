@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import json
 import time
 from typing import Any, Final, Literal
@@ -69,17 +70,26 @@ class LLMHarnessConfig(BaseModel):
 REMINDER_OPEN: Final = "<system-reminder>\n"
 REMINDER_CLOSE: Final = "\n</system-reminder>"
 
+# A reminder that is this similar to an already-delivered one counts as a
+# repeat; after _MAX_SIMILAR_DELIVERIES repeats the issue goes silent (the
+# goal checker enforces at acceptance — repeating unheeded warnings only
+# devalues the channel).
+_SIMILAR_REMINDER_THRESHOLD: Final = 0.6
+_MAX_SIMILAR_DELIVERIES: Final = 2
+
 _SYSTEM_PROMPT_BLOCK: Final = (
-    "## Automated review\n\n"
-    "During your investigation you may receive `<system-reminder>` messages.\n"
-    "These are from an independent reviewer monitoring your reasoning trajectory.\n\n"
-    "When you receive one:\n"
-    "- Treat it as a serious signal, not noise.\n"
-    "- If it identifies a lead you haven't investigated, prioritize it.\n"
-    "- If it flags a contradiction, re-examine the raw data rather than "
-    "reasoning from memory.\n"
-    "- Change your investigation direction based on the feedback — do not "
-    "simply acknowledge and continue."
+    "## Background monitor\n\n"
+    "A read-only monitor periodically reviews your trajectory and may inject\n"
+    "`<system-reminder>` observations. Treat them like environment feedback —\n"
+    "a signal to verify, not an instruction to obey.\n\n"
+    "- Each observation cites its evidence (a tool output you produced, or a\n"
+    "  file the monitor read). Check that evidence against your own view of\n"
+    "  the workspace before acting.\n"
+    "- If it holds up, address it. If your direct observation contradicts it,\n"
+    "  note the contradiction briefly and move on — the monitor sees only\n"
+    "  your trajectory and may lag behind your latest changes.\n"
+    "- The monitor does not decide anything; acceptance of your work is\n"
+    "  judged separately."
 )
 
 MANIFEST = ExtensionManifest(
@@ -332,10 +342,36 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     # State
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
     pending_reminders: list[Reminder] = []
+    delivered_reminder_texts: list[str] = []
     turn_count = 0
     cached_methodology: list[str] = []
 
     aud_scenario = auditor_scenario()
+
+    def _sandbox_attach_overrides() -> dict[str, Any]:
+        """Attach the auditor child to the main agent's sandbox (if any).
+
+        Without this the auditor's read tools see the host filesystem, not
+        the workspace the agent is editing — its workspace claims would be
+        unverifiable exactly where verification matters.
+        """
+        sid = api.get_service("agent_env.session_id")
+        if not isinstance(sid, str) or not sid:
+            return {}
+        ov: dict[str, Any] = {"backend": "agent_env", "attach_session": sid}
+        work_dir = api.get_service("agent_env.work_dir")
+        if isinstance(work_dir, str) and work_dir:
+            ov["work_dir"] = work_dir
+        return {"operations": ov}
+
+    def _similar_delivery_count(text: str) -> int:
+        norm = " ".join(text.lower().split())
+        return sum(
+            1
+            for prev in delivered_reminder_texts
+            if difflib.SequenceMatcher(None, norm, prev).ratio()
+            >= _SIMILAR_REMINDER_THRESHOLD
+        )
 
     # ------------------------------------------------------------------
     # Methodology generation (spec-driven, runs once)
@@ -540,6 +576,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         "trajectory": auditor_config.get("trajectory_snapshot", []),
                         "context_index": auditor_config.get("context_index"),
                     },
+                    **_sandbox_attach_overrides(),
                 },
                 provider=auditor_provider,
             )
@@ -551,24 +588,27 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         verdict = Verdict.from_dict(verdict_raw)
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
                         api.session.append_entry(_et.VERDICT, verdict.to_dict())
-                        n = cumulative.consecutive_reminders
-                        escalate = n >= 8 and n % 8 == 0
                         if verdict.surface_reminder and verdict.reminder_text:
                             text = verdict.reminder_text
-                            if escalate:
-                                text = (
-                                    f"[REPEATED REMINDER #{n}] {text}\n\n"
-                                    "You have been reminded about this issue multiple times. "
-                                    "Your current approach is not working. Stop repeating "
-                                    "the same actions and try a fundamentally different strategy."
+                            if verdict.evidence:
+                                evidence_lines = "\n".join(
+                                    f"- {e}" for e in verdict.evidence if e.strip()
                                 )
-                                logger.warning(
-                                    "llmharness: {} consecutive reminders — escalating",
-                                    n,
+                                text = f"{text}\n\nEvidence:\n{evidence_lines}"
+                            if _similar_delivery_count(text) >= _MAX_SIMILAR_DELIVERIES:
+                                logger.info(
+                                    "llmharness: suppressing repeat reminder "
+                                    "(delivered {} similar already)",
+                                    _MAX_SIMILAR_DELIVERIES,
                                 )
-                            pending_reminders.append(Reminder(text=text))
+                                api.session.append_entry(
+                                    _et.REMINDER_SUPPRESSED, {"text": text}
+                                )
+                            else:
+                                pending_reminders.append(Reminder(text=text))
 
-                        if escalate:
+                        n = cumulative.consecutive_reminders
+                        if n >= 8 and n % 8 == 0:
                             await _request_compaction_if_stuck(n)
 
     # ------------------------------------------------------------------
@@ -588,6 +628,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         while pending_reminders:
             r = pending_reminders.pop(0)
             injected.append(_build_reminder_msg(r.text))
+            delivered_reminder_texts.append(" ".join(r.text.lower().split()))
             try:
                 api.session.append_entry(_et.REMINDER_DELIVERED, {"text": r.text})
             except Exception:

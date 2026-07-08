@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 _AGENT_ENV_SESSION_SERVICE = "agent_env.session_id"
 _AGENT_ENV_EXPERIMENT_SERVICE = "agent_env.experiment_id"
+_AGENT_ENV_WORK_DIR_SERVICE = "agent_env.work_dir"
 _OPERATION_POLL_INTERVAL_SECONDS = 2.0
 _OPERATION_TIMEOUT_GRACE_SECONDS = 30.0
 _OPERATION_STATUS_DONE = "done"
@@ -372,6 +373,7 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         api.set_service(_AGENT_ENV_SESSION_SERVICE, session_id)
     if owned and hasattr(session, "experiment_id"):
         api.set_service(_AGENT_ENV_EXPERIMENT_SERVICE, session.experiment_id)
+    api.set_service(_AGENT_ENV_WORK_DIR_SERVICE, work_dir)
 
     bash_ops = AgentEnvBashOperations(
         session,

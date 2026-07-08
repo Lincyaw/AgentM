@@ -93,5 +93,6 @@ Call `submit_verdict` exactly once as your final action.
 
 - `surface_reminder`: true only when a concrete, visible reasoning gap could change the RCA graph.
 - `reminder_text`: the short reminder to inject into the forked RCA agent.
+- `evidence`: one item per verified fact — source (turn index or file) + what it shows. Required (non-empty) when `surface_reminder=true`.
 - `continuation_notes`: short notes for the next auditor firing.
 - `matched_event_ids`: turn indices that materially support the reminder.

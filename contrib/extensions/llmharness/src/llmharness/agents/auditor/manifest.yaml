@@ -6,6 +6,36 @@ description: >
 extensions:
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.operations
+  # Read-only workspace access so the auditor can verify a claim against
+  # the actual repo before surfacing it. The allow-list (not a deny-list)
+  # also keeps out dynamically named tools leaked from the parent scenario
+  # (e.g. adapt-created rt_bash/direct_bash), which would let the auditor
+  # mutate the agent's sandbox.
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 20000
+      preview_tokens: 20000
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_filter
+    config:
+      allow:
+        - read
+        - list_turns
+        - get_turn
+        - list_entities
+        - search_entities
+        - get_entity_timeline
+        - list_attention_hints
+        - submit_verdict
+  # Hard turn cap + runway warning so a long verification pass still ends
+  # in a submit_verdict instead of an exhausted context and no verdict.
+  - module: agentm.extensions.builtin.loop_budget
+    config:
+      max_turns: 30
+  - module: agentm.extensions.builtin.turn_reminder
+    config:
+      finalize_tool: submit_verdict
+      warn_within: 5
   - module: llmharness.agents.auditor.context
   - module: llmharness.agents.auditor.tools
   - module: llmharness.agents.auditor.index_tools

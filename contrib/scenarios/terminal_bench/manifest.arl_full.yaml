@@ -62,5 +62,6 @@ extensions:
     config:
       auto_init: true
       auto_init_scenario: "terminal_bench:goal_deriver"
+      auto_init_max_turns: 60
       checker_scenario: "terminal_bench:goal_checker"
       checker_max_turns: 15

@@ -580,3 +580,20 @@ confirmed findings. Notable autonomous decisions (L2–L4):
 - Known-red at time of writing: `project-index.yaml` REQ-176 flags
   `tests/unit/extensions/test_background_exec_bash.py` deleted by the
   concurrent session's uncommitted work — theirs to resolve.
+
+## 2026-07-08 — Deleted GLM-created host-escape atoms (L3)
+
+During the 2026-07-07 GLM-5.2 run, the agent used adapt (scope=user +
+scope=scenario) to install fallback tools when the gateway flaked:
+`.agentm/atoms/{direct_ops,runtime_workspace_tools}.py` (rt_bash/direct_bash
+etc. — raw subprocess/os on the HOST, bypassing the sandbox and
+ResourceWriter, auto-loaded into every session under this cwd) and three
+inert files in contrib/scenarios/terminal_bench/. Deleted all five files.
+(Initially also reverted the uncommitted `auto_init_max_turns: 60` manifest
+override, mistaking it for GLM-session residue — user corrected: it is
+intentional, the deriver needs a high turn cap for complete initialization.
+Restored.) Score contamination: none observed — the tools
+target /app which does not exist on the host, so calls errored out.
+Follow-up: adapt-installed user atoms leaking into child sessions (incl.
+the auditor) is a standing hazard; the auditor now guards itself with a
+tool_filter allow-list, but the general mechanism deserves a design pass.

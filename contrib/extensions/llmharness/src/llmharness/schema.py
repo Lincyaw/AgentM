@@ -253,6 +253,7 @@ class Verdict:
 
     surface_reminder: bool
     reminder_text: str = ""
+    evidence: list[str] = field(default_factory=list)
     continuation_notes: list[str] = field(default_factory=list)
     matched_event_ids: list[int] = field(default_factory=list)
 
@@ -260,6 +261,7 @@ class Verdict:
         return {
             "surface_reminder": self.surface_reminder,
             "reminder_text": self.reminder_text,
+            "evidence": list(self.evidence),
             "continuation_notes": list(self.continuation_notes),
             "matched_event_ids": list(self.matched_event_ids),
         }
@@ -269,6 +271,7 @@ class Verdict:
         return cls(
             surface_reminder=bool(data.get("surface_reminder", False)),
             reminder_text=str(data.get("reminder_text", "")),
+            evidence=[str(e) for e in (data.get("evidence") or [])],
             continuation_notes=[str(n) for n in (data.get("continuation_notes") or [])],
             matched_event_ids=list(data.get("matched_event_ids") or []),
         )
@@ -288,6 +291,7 @@ class Reminder:
 VERDICT = "llmharness.verdict"
 EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
 REMINDER_DELIVERED = "llmharness.reminder_delivered"
+REMINDER_SUPPRESSED = "llmharness.reminder_suppressed"
 
 RECENT_VERDICTS_FOR_AUDITOR = 5
 

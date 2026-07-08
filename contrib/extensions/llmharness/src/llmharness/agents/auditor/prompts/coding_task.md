@@ -59,5 +59,6 @@ Call `submit_verdict` exactly once as your final action.
 
 - `surface_reminder`: true when you found a specific, concrete issue
 - `reminder_text`: written to the main agent — be precise
+- `evidence`: one item per verified fact — source (turn index or file) + what it shows. Required (non-empty) when `surface_reminder=true`.
 - `continuation_notes`: short notes for your next firing
 - `matched_event_ids`: empty list
