@@ -597,3 +597,40 @@ target /app which does not exist on the host, so calls errored out.
 Follow-up: adapt-installed user atoms leaking into child sessions (incl.
 the auditor) is a standing hazard; the auditor now guards itself with a
 tool_filter allow-list, but the general mechanism deserves a design pass.
+
+## 2026-07-08 — Authority rule must cover stale-test *runs*, not just source (L2, pending)
+
+Attribution of a v2 (uncapped-deriver) lost rescue on ansible task
+`0fd88717` (password lookup). base=0.0, old arl_full=1.0, v2=0.0 — a task
+only supervision ever passes, which v2's supervision failed to land.
+Root cause is a `_parse_content` 2→3-tuple contract conflict:
+
+1. Task requires `_parse_content` to include `ident` (return 3 values).
+2. The in-repo (pre-change) `test_password.py::TestParseContent` still
+   calls it expecting 2 values; the task also says tests are already
+   handled (don't modify them).
+3. The agent first changed the contract to 3-tuple (correct per task),
+   which made the stale in-repo test raise `too many values to unpack`.
+4. The goal checker rejected on "unit tests fail / no successful rerun".
+5. To green the stale test, the agent REVERTED `_parse_content` to
+   2-tuple and hid ident in a new `_parse_content_with_ident()` — "29
+   passed" on the stale file.
+6. Gold checks out the NEW test (expects 3-tuple) → 4 TestParseContent
+   fail → 26/30. Old run's agent kept the 3-tuple contract and passed.
+
+Gap: the committed authority rule (checker + deriver) covers a stale test
+as *source* ("an in-repo artifact that contradicts the task is stale"),
+but NOT a stale test as a *failing/green run*. The checker's accurate-
+looking "your tests fail" rejection drove the agent to satisfy the stale
+test the wrong way — same disease (stale-as-oracle), runtime form.
+
+Fix direction (evaluate AFTER the v2 run completes, alongside its A/B
+numbers — do not change prompts mid-run):
+- Extend the authority principle to runtime evidence: when the task is
+  changing a behavior a test guards, that test passing/failing in-repo is
+  not valid acceptance evidence; the agent must not contort the
+  implementation to green a stale test. Requirements are the authority.
+- Candidate surfaces: checker prompt (don't reject solely on a failing
+  in-repo test the task is changing) and the agent/deriver framing (a
+  green run of a stale test is not "done"). Keep it principle-level, no
+  case specifics — same anti-overfit discipline as the committed change.
