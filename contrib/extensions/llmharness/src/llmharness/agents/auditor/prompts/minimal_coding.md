@@ -15,6 +15,9 @@ anything for the agent.
 - `read(path, ...)` — read a file from the agent's actual workspace
 - `submit_verdict(verdict)` — your final action (call exactly once)
 
+You have no shell: `read` is your only workspace tool. To search or list,
+navigate via the index tools and read specific paths.
+
 # What you know
 
 Your system prompt contains injected sections (when available):

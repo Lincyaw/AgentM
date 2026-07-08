@@ -1,14 +1,16 @@
 """Policy-gate atom for the §7 ``extensions.builtin.tool_filter`` row.
 
-Filters the final tool catalog on ``agent_start`` after tool atoms have
-registered.
+Filters the final tool catalog on ``before_agent_start`` (with an
+``agent_start`` safety net), after tool atoms have registered. Filtering
+early lets prompt-building atoms registered after this one (e.g.
+``tool_index``) observe the final catalog.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 
-from agentm.core.abi import AgentStartEvent, ExtensionAPI
+from agentm.core.abi import AgentStartEvent, BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 
@@ -22,9 +24,9 @@ class ToolFilterConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="tool_filter",
     description="Remove tools from the registered catalog by allow/deny rules.",
-    registers=("event:agent_start",),
+    registers=("event:before_agent_start", "event:agent_start"),
     config_schema=ToolFilterConfig,
-    requires=(),  # Defers filtering to agent_start so tool atoms may load in any order.
+    requires=(),  # Defers filtering to start events so tool atoms may load in any order.
     tier=2,
 )
 
@@ -40,9 +42,14 @@ class _ToolFilterRuntime:
         return bool(self._allow or self._deny)
 
     def install(self) -> None:
+        # Filter on before_agent_start so prompt-building atoms registered
+        # after this one (e.g. tool_index) see the final catalog; keep the
+        # agent_start hook as a safety net for sessions that skip the
+        # before event. Filtering is idempotent.
+        self._api.on(BeforeAgentStartEvent.CHANNEL, self.on_agent_start)
         self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
 
-    def on_agent_start(self, _: AgentStartEvent) -> None:
+    def on_agent_start(self, _: AgentStartEvent | BeforeAgentStartEvent) -> None:
         if self._filtered:
             return
         tools = self._api.tools

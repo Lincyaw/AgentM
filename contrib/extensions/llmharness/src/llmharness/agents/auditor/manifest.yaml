@@ -27,6 +27,11 @@ extensions:
         - get_entity_timeline
         - list_attention_hints
         - submit_verdict
+  # After tool_filter (registration order = handler order on
+  # before_agent_start): injects the FILTERED catalog into the system
+  # prompt so the model sees exactly which tools exist — no hallucinated
+  # bash/grep calls.
+  - module: agentm.extensions.builtin.tool_index
   # Hard turn cap + runway warning so a long verification pass still ends
   # in a submit_verdict instead of an exhausted context and no verdict.
   - module: agentm.extensions.builtin.loop_budget
