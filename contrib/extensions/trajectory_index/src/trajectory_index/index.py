@@ -11,12 +11,31 @@ import json
 import re
 from collections import defaultdict, deque
 from collections.abc import Mapping, MutableMapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
 from hashlib import sha1
 from pathlib import Path
+from typing import Literal
 
 type MetadataValue = str | int | float | bool | None
 type NameKey = tuple[str, str]
+
+# --- Grounding / def-use analysis (see SCHEMA-readwrite.md) -----------------
+# The taint bit on a def-use edge. A value is *grounded* if it came from a tool
+# (trusted source), *ungrounded* if the model conjured it. Whether the model was
+# bold about it (put an ungrounded name into a tool call) vs merely musing (named
+# it in reasoning text) is recoverable from the reference's ``kind`` — it is not a
+# separate grade.
+#   grounded  — the reaching def was tool-backed; the use is safe.
+#   premature — the reaching def was ungrounded, but the entity IS grounded at a
+#               later step (the model ran ahead of its evidence, but it held up).
+#   ungrounded — the entity was never grounded anywhere; the use relied on a name
+#               no tool ever produced (fabricated-name candidate).
+type Risk = Literal["grounded", "premature", "ungrounded"]
+
+# Runtime value set for Risk — the single source the load path validates against
+# (kept in lockstep with the Literal alias).
+_RISK_VALUES: frozenset[str] = frozenset({"grounded", "premature", "ungrounded"})
 
 # ---------------------------------------------------------------------------
 # Role enum (structural, not vocabulary-driven)
@@ -85,6 +104,31 @@ class Reference:
     role: str
     kind: str = "unknown"
     confidence: float = 1.0
+    grounded: bool = False               # is this occurrence's value tool-backed?
+    grounds_ref_id: str | None = None    # if grounded by copying a prior def, which
+    structured: bool = False
+    metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class Dependency:
+    """One def-use edge: a use step relied on a value an earlier def produced.
+
+    ``risk`` is the grounding verdict on the use — whether the reaching def was
+    tool-backed, ran ahead of grounding, or was never grounded. See
+    SCHEMA-readwrite.md for the build rule.
+    """
+
+    id: str
+    symbol_id: str
+    run_id: str
+    def_step_id: str
+    def_ref_id: str
+    use_step_id: str
+    use_ref_id: str
+    risk: Risk
+    grounded_by_step_id: str | None = None   # if ungrounded at use, a later step that grounds it
+    confidence: float = 1.0
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
@@ -113,6 +157,7 @@ class IndexStats:
     symbol_count: int = 0
     reference_count: int = 0
     relation_count: int = 0
+    dependency_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +200,24 @@ class SymbolContext:
     snippets: tuple[ContextSnippet, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class AliasCandidate:
+    """A deterministically-blocked pair of structured symbols that MIGHT be the
+    same entity. The merge decision is a name-resolution model judgment (Pass 2),
+    not a rule — this only proposes the pair with enough context for it (SCHEMA §7)."""
+
+    symbol_a_id: str
+    symbol_b_id: str
+    name_a: str
+    name_b: str
+    kind_a: str
+    kind_b: str
+    signal: str          # why blocked: "substring" | "similar"
+    score: float         # normalized name similarity in [0, 1]
+    context_a: tuple[str, ...] = ()   # sample reference snippets for the model
+    context_b: tuple[str, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
@@ -176,6 +239,62 @@ def stable_id(prefix: str, *parts: object, length: int = 16) -> str:
     return f"{prefix}_{digest}"
 
 
+# --- Def-use / grounding helpers (Pass 3: dataflow, deterministic) ---------
+
+# Reference kinds that produce/introduce a resource value (a "write"). The
+# extractor only emits tool_output (data.py); define/write/observe are inert for
+# freshly-built indexes and only matter for loaded/external ones. This is the
+# file's single producing-kind vocabulary — DEFINITION_PREFERRED_KINDS aliases it.
+_PRODUCING_KINDS: frozenset[str] = frozenset({"tool_output", "define", "write", "observe"})
+
+_MISSING_STEP_INDEX = 10**12  # sort sentinel for a reference whose step is absent
+_MIN_BLOCK_SUBSTR = 3         # alias blocking: shortest name a substring match may involve
+_SNIPPET_CHARS = 120          # per-reference context snippet cap for the merge adjudicator
+
+# looks_structured signals (hoisted; a name is structured if any matches)
+_PATH_SEP = re.compile(r"[\\/]")             # path separator
+_DOTTED = re.compile(r"\.[A-Za-z0-9]{1,8}\b")  # dotted: extension / module.attr
+_DIGIT = re.compile(r"\d")                   # id / version / sha / line no.
+_CAMEL_HUMP = re.compile(r"[a-z][A-Z]")      # camelCase
+_NON_WORD = re.compile(r"\W", re.UNICODE)
+
+
+def looks_structured(name: str) -> bool:
+    """Heuristic v1 gate: is this a verbatim-matchable structured identifier?
+
+    Structured ids (file paths, keys, ids, shas, function names) match by string
+    equality across steps, so a small model / regex resolves them reliably.
+    Natural-language concepts ("the customer") need coreference and are excluded
+    from the def-use layer for now (see SCHEMA-readwrite.md §2). Tunable.
+    """
+    n = name.strip()
+    if not n:
+        return False
+    # a phrase with spaces is natural language unless it carries a path separator
+    if " " in n and not _PATH_SEP.search(n):
+        return False
+    if len(_NON_WORD.sub("", n)) < 2:
+        return False
+    # a URL is caught by _PATH_SEP (it contains "//"), so no separate url clause
+    return bool(
+        _PATH_SEP.search(n)
+        or _DOTTED.search(n)
+        or _DIGIT.search(n)
+        or "_" in n
+        or _CAMEL_HUMP.search(n)
+    )
+
+
+def grounded_from_kind(kind: str) -> bool:
+    """Base per-reference grounding from block-derived kind (no look-back).
+
+    A tool-produced value is grounded; anything the model wrote (``tool_input``,
+    ``mention``) starts ungrounded. A ``tool_input`` may still be upgraded to
+    grounded during dependency build if it copies a prior grounded value.
+    """
+    return kind in _PRODUCING_KINDS
+
+
 # ---------------------------------------------------------------------------
 # In-memory index
 # ---------------------------------------------------------------------------
@@ -184,9 +303,7 @@ def stable_id(prefix: str, *parts: object, length: int = 16) -> str:
 class TrajectoryIndex:
     """In-memory symbol-reference-relation index over trajectory steps."""
 
-    DEFINITION_PREFERRED_KINDS: frozenset[str] = frozenset({
-        "define", "write", "observe", "tool_output",
-    })
+    DEFINITION_PREFERRED_KINDS: frozenset[str] = _PRODUCING_KINDS
 
     def __init__(self) -> None:
         self.steps: dict[tuple[str, str], Step] = {}
@@ -200,6 +317,10 @@ class TrajectoryIndex:
 
         self.relations: dict[str, Relation] = {}
         self._relation_ids_by_symbol: dict[str, list[str]] = defaultdict(list)
+
+        # Def-use / grounding layer (Pass 3). Built by build_dependencies().
+        self.dependencies: dict[str, Dependency] = {}
+        self._dep_ids_by_symbol: dict[str, list[str]] = defaultdict(list)
 
         self.indexed_message_count: int = 0
 
@@ -285,6 +406,8 @@ class TrajectoryIndex:
             role=step.role,
             kind=kind,
             confidence=confidence,
+            grounded=grounded_from_kind(kind),
+            structured=looks_structured(symbol.canonical_name),
         )
         self.references[ref_id] = ref
         self._ref_ids_by_symbol[symbol.id].append(ref_id)
@@ -329,6 +452,242 @@ class TrajectoryIndex:
         self._relation_ids_by_symbol[to_symbol.id].append(relation_id)
         return relation
 
+    # ---- alias resolution: deterministic candidates + merge mechanism (SCHEMA §7)
+    #      the merge DECISION is a name-resolution model judgment (Pass 2), injected via apply_alias_merges
+
+    def _rebuild_symbol_name_index(self) -> None:
+        self._symbol_ids_by_norm = defaultdict(set)
+        for sid, sym in self.symbols.items():
+            ns = str(sym.metadata.get("namespace", ""))
+            for name in sym.all_names:
+                self._index_symbol_name(sid, name, ns)
+
+    def _rebuild_relation_index(self) -> None:
+        self._relation_ids_by_symbol = defaultdict(list)
+        for rid, rel in self.relations.items():
+            self._relation_ids_by_symbol[rel.from_symbol_id].append(rid)
+            self._relation_ids_by_symbol[rel.to_symbol_id].append(rid)
+
+    def _choose_canonical(self, symbol_ids: list[str]) -> str:
+        """Representative of a merge group: most-referenced, tie broken by stable id.
+        Which id represents the merged entity is cosmetic; the choice is deterministic."""
+        return sorted(
+            symbol_ids, key=lambda sid: (-len(self._ref_ids_by_symbol.get(sid, [])), sid),
+        )[0]
+
+    def _ref_snippets(self, symbol_id: str, limit: int = 3) -> tuple[str, ...]:
+        """A few reference texts for a symbol — context for the merge adjudicator."""
+        out: list[str] = []
+        for rid in self._ref_ids_by_symbol.get(symbol_id, [])[:limit]:
+            text = self.references[rid].text.strip()
+            if text:
+                out.append(text[:_SNIPPET_CHARS])
+        return tuple(out)
+
+    def alias_candidates(self, min_ratio: float = 0.82) -> list[AliasCandidate]:
+        """Deterministically block structured-symbol pairs that MIGHT be one entity.
+
+        Cheap lexical signals only — a proper substring relation, or normalized-name
+        similarity ≥ ``min_ratio``. This proposes pairs; whether to merge is a
+        name-resolution model judgment (Pass 2) fed by :meth:`apply_alias_merges` (SCHEMA §7). No
+        scenario-specific rules, no model here.
+        """
+        # Normalized name + context snippets computed once per symbol (reused across
+        # every pair the symbol appears in), not per emitted candidate.
+        items = [
+            (sid, sym, normalize_name(sym.canonical_name), self._ref_snippets(sid))
+            for sid, sym in self.symbols.items()
+            if looks_structured(sym.canonical_name)
+        ]
+        out: list[AliasCandidate] = []
+        for i in range(len(items)):
+            aid, asym, anorm, asnip = items[i]
+            for j in range(i + 1, len(items)):
+                bid, bsym, bnorm, bsnip = items[j]
+                if anorm == bnorm:
+                    continue  # exact-normalized dups already share a symbol via upsert
+                substring = (
+                    (anorm in bnorm or bnorm in anorm)
+                    and min(len(anorm), len(bnorm)) >= _MIN_BLOCK_SUBSTR
+                )
+                ratio = SequenceMatcher(None, anorm, bnorm).ratio()
+                if not substring and ratio < min_ratio:
+                    continue
+                out.append(AliasCandidate(
+                    symbol_a_id=aid, symbol_b_id=bid,
+                    name_a=asym.canonical_name, name_b=bsym.canonical_name,
+                    kind_a=asym.kind, kind_b=bsym.kind,
+                    signal="substring" if substring else "similar",
+                    score=round(ratio, 3),
+                    context_a=asnip, context_b=bsnip,
+                ))
+        return sorted(out, key=lambda c: (-c.score, c.symbol_a_id, c.symbol_b_id))
+
+    def apply_alias_merges(self, groups: list[list[str]]) -> None:
+        """Fold each decided group of symbol ids into one canonical symbol.
+
+        The mechanism (deterministic, idempotent); *which* symbols form a group is
+        decided upstream — a name-resolution judgment over :meth:`alias_candidates`, not
+        a rule here. References and relations are re-pointed; folded names become
+        aliases.
+        """
+        merged = False
+        for sids in groups:
+            live = [s for s in dict.fromkeys(sids) if s in self.symbols]
+            if len(live) < 2:
+                continue
+            canonical_id = self._choose_canonical(live)
+            canon = self.symbols[canonical_id]
+            for other_id in live:
+                if other_id == canonical_id:
+                    continue
+                other = self.symbols[other_id]
+                canon.aliases.update(other.all_names)
+                canon.aliases.discard(canon.canonical_name)
+                for rid in self._ref_ids_by_symbol.get(other_id, []):
+                    self.references[rid] = replace(self.references[rid], symbol_id=canonical_id)
+                    self._ref_ids_by_symbol[canonical_id].append(rid)
+                self._ref_ids_by_symbol.pop(other_id, None)
+                # only relations touching other_id need re-pointing (a folded symbol
+                # is never a canonical target, so this index entry is complete).
+                for rel_id in dict.fromkeys(self._relation_ids_by_symbol.get(other_id, [])):
+                    rel = self.relations.get(rel_id)
+                    if rel is None:
+                        continue
+                    nf = canonical_id if rel.from_symbol_id == other_id else rel.from_symbol_id
+                    nt = canonical_id if rel.to_symbol_id == other_id else rel.to_symbol_id
+                    if nf == nt:  # self-loop after the merge — drop
+                        self.relations.pop(rel_id, None)
+                    else:
+                        self.relations[rel_id] = replace(rel, from_symbol_id=nf, to_symbol_id=nt)
+                self.symbols.pop(other_id, None)
+                merged = True
+
+        if merged:
+            self._rebuild_symbol_name_index()
+            self._rebuild_relation_index()
+            # dependencies are derived from symbols; a merge invalidates them.
+            self.dependencies = {}
+            self._dep_ids_by_symbol = defaultdict(list)
+
+    # ---- def-use / grounding layer (Pass 3: dataflow, deterministic) ----
+
+    def _ref_step_index(self, ref: Reference) -> int:
+        step = self.steps.get((ref.run_id, ref.step_id))
+        return step.index if step else _MISSING_STEP_INDEX
+
+    def build_dependencies(self) -> None:
+        """Build the def-use layer over structured entities (Pass 3: dataflow).
+
+        Idempotent: clears and rebuilds every edge. Deterministic (no model),
+        global traversal. See SCHEMA-readwrite.md for the def/use classification,
+        reaching-def selection with forward grounding propagation, and the
+        grounded/premature/ungrounded risk derivation.
+
+        Name resolution (Pass 2) is a separate, upstream step: run apply_alias_merges()
+        with the model-decided groups from alias_candidates() *before* this, if
+        desired. This method does no merging on its own.
+        """
+        self.dependencies = {}
+        self._dep_ids_by_symbol = defaultdict(list)
+
+        for symbol_id in self.symbols:
+            refs = self.get_references(symbol_id)  # sorted (run_id, step index, start)
+            if not refs or not any(r.structured for r in refs):
+                continue  # only structured entities drive the def-use layer
+            by_run: dict[str, list[Reference]] = defaultdict(list)
+            for r in refs:
+                by_run[r.run_id].append(r)
+            for run_id, run_refs in by_run.items():
+                self._build_run_dependencies(symbol_id, run_id, run_refs)
+
+    def _build_run_dependencies(
+        self, symbol_id: str, run_id: str, refs: list[Reference],
+    ) -> None:
+        """Chain one symbol's references within a single run into def-use edges.
+
+        The reaching def for a use is the most-recent def at a *strictly earlier*
+        step (SCHEMA §5: ``def_step < use_step``). Defs in the use's own step do not
+        count — a same-step def/use is not cross-step reliance, so it produces no
+        edge. Defs are therefore committed only when we cross a step boundary;
+        within a step they buffer in ``pending``.
+        """
+        # (step_index, step_id) of every grounded def, for the look-ahead that tells
+        # "used before grounded, but grounded later" (premature) from "never grounded".
+        grounded_defs: list[tuple[int, str]] = sorted(
+            (self._ref_step_index(r), r.step_id) for r in refs if r.grounded
+        )
+
+        reaching: Reference | None = None          # committed from a strictly earlier step
+        grounded_reaching: Reference | None = None
+        pending: Reference | None = None           # latest def in the current step
+        pending_grounded: Reference | None = None
+        cur_step: int | None = None
+
+        for i, ref in enumerate(refs):
+            use_idx = self._ref_step_index(ref)
+            if use_idx != cur_step:
+                # crossed a step boundary: the prior step's defs become reaching
+                if pending is not None:
+                    reaching = pending
+                if pending_grounded is not None:
+                    grounded_reaching = pending_grounded
+                pending = pending_grounded = None
+                cur_step = use_idx
+
+            # A tool_input that copies a prior grounded def is itself grounded.
+            if (
+                ref.kind == "tool_input"
+                and not ref.grounded
+                and grounded_reaching is not None
+            ):
+                ref = replace(ref, grounded=True, grounds_ref_id=grounded_reaching.id)
+                self.references[ref.id] = ref
+
+            is_def = ref.kind in _PRODUCING_KINDS or i == 0
+            if is_def:
+                pending = ref
+                if ref.grounded:
+                    pending_grounded = ref
+                continue
+
+            # use → link to the most-recent def at a strictly earlier step
+            if reaching is None:
+                continue
+            grounded_by: str | None = None
+            if reaching.grounded:
+                risk: Risk = "grounded"
+                grounded_by = reaching.step_id
+            else:
+                grounded_by = next(
+                    (sid for idx, sid in grounded_defs if idx > use_idx), None,
+                )
+                risk = "premature" if grounded_by else "ungrounded"
+
+            dep_id = stable_id("dep", run_id, reaching.step_id, ref.step_id, symbol_id)
+            dep = Dependency(
+                id=dep_id,
+                symbol_id=symbol_id,
+                run_id=run_id,
+                def_step_id=reaching.step_id,
+                def_ref_id=reaching.id,
+                use_step_id=ref.step_id,
+                use_ref_id=ref.id,
+                risk=risk,
+                grounded_by_step_id=grounded_by,
+                confidence=min(reaching.confidence, ref.confidence),
+            )
+            self.dependencies[dep.id] = dep
+            self._dep_ids_by_symbol[symbol_id].append(dep.id)
+
+    def get_dependencies(self, symbol_id: str = "") -> list[Dependency]:
+        """All dependency edges, or those for one symbol, in run/step order."""
+        if symbol_id:
+            deps = [self.dependencies[d] for d in self._dep_ids_by_symbol.get(symbol_id, [])]
+        else:
+            deps = list(self.dependencies.values())
+        return sorted(deps, key=lambda d: (d.run_id, d.use_step_id, d.symbol_id))
+
     def registry_snapshot(self) -> list[dict[str, str | list[str]]]:
         """Compact symbol registry for incremental extraction prompts."""
         out: list[dict[str, str | list[str]]] = []
@@ -362,6 +721,7 @@ class TrajectoryIndex:
             symbol_count=len(self.symbols),
             reference_count=len(self.references),
             relation_count=len(self.relations),
+            dependency_count=len(self.dependencies),
         )
 
     # ---- integrity ----
@@ -377,6 +737,13 @@ class TrajectoryIndex:
                 errors.append(f"relation {rel.id} from_symbol {rel.from_symbol_id} not found")
             if rel.to_symbol_id not in self.symbols:
                 errors.append(f"relation {rel.id} to_symbol {rel.to_symbol_id} not found")
+        for dep in self.dependencies.values():
+            if dep.symbol_id not in self.symbols:
+                errors.append(f"dependency {dep.id} symbol {dep.symbol_id} not found")
+            if dep.def_ref_id not in self.references:
+                errors.append(f"dependency {dep.id} def_ref {dep.def_ref_id} not found")
+            if dep.use_ref_id not in self.references:
+                errors.append(f"dependency {dep.id} use_ref {dep.use_ref_id} not found")
         return errors
 
     # ---- persistence ----
@@ -427,6 +794,9 @@ class TrajectoryIndex:
                 "role": r.role,
                 "kind": r.kind,
                 "confidence": r.confidence,
+                "grounded": r.grounded,
+                "grounds_ref_id": r.grounds_ref_id,
+                "structured": r.structured,
                 "metadata": dict(r.metadata) if r.metadata else {},
             }
             for r in self.references.values()
@@ -445,18 +815,36 @@ class TrajectoryIndex:
             }
             for r in self.relations.values()
         ]
+        dependencies = [
+            {
+                "id": d.id,
+                "symbol_id": d.symbol_id,
+                "run_id": d.run_id,
+                "def_step_id": d.def_step_id,
+                "def_ref_id": d.def_ref_id,
+                "use_step_id": d.use_step_id,
+                "use_ref_id": d.use_ref_id,
+                "risk": d.risk,
+                "grounded_by_step_id": d.grounded_by_step_id,
+                "confidence": d.confidence,
+                "metadata": dict(d.metadata) if d.metadata else {},
+            }
+            for d in self.dependencies.values()
+        ]
         data = {
             "stats": {
                 "steps": len(self.steps),
                 "symbols": len(self.symbols),
                 "references": len(self.references),
                 "relations": len(self.relations),
+                "dependencies": len(self.dependencies),
                 "indexed_message_count": self.indexed_message_count,
             },
             "steps": steps,
             "symbols": symbols,
             "references": refs,
             "relations": relations,
+            "dependencies": dependencies,
         }
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -534,6 +922,11 @@ class TrajectoryIndex:
             ref_id = str(r.get("id") or stable_id("ref", run_id, step_id, start, end, sym.id))
             if ref_id in index.references:
                 continue
+            ref_kind = str(r.get("kind", r.get("mention_type", "unknown")))
+            raw_grounded = r.get("grounded")
+            grounded = bool(raw_grounded) if isinstance(raw_grounded, bool) else grounded_from_kind(ref_kind)
+            structured = bool(r.get("structured", looks_structured(sym.canonical_name)))
+            grounds_ref_id = r.get("grounds_ref_id") if isinstance(r.get("grounds_ref_id"), str) else None
             ref = Reference(
                 id=ref_id,
                 symbol_id=sym.id,
@@ -542,8 +935,11 @@ class TrajectoryIndex:
                 location=Location(run_id, step_id, start, end),
                 text=text,
                 role=str(r.get("role", ref_step.role)),
-                kind=str(r.get("kind", r.get("mention_type", "unknown"))),
+                kind=ref_kind,
                 confidence=float(r.get("confidence", 1.0)),
+                grounded=grounded,
+                grounds_ref_id=grounds_ref_id,
+                structured=structured,
                 metadata=r.get("metadata", {}) if isinstance(r.get("metadata"), dict) else {},
             )
             index.references[ref.id] = ref
@@ -583,6 +979,40 @@ class TrajectoryIndex:
             index.relations[relation.id] = relation
             index._relation_ids_by_symbol[from_s.id].append(relation.id)
             index._relation_ids_by_symbol[to_s.id].append(relation.id)
+
+        for d in data.get("dependencies", []):
+            sym_id = str(d.get("symbol_id", ""))
+            if sym_id not in index.symbols:
+                _log.warning(f"load: dependency {d.get('id')} -> missing symbol {sym_id}, skipped")
+                continue
+            raw_risk = d.get("risk")
+            risk: Risk = raw_risk if raw_risk in _RISK_VALUES else "grounded"
+            run_id = str(d.get("run_id", ""))
+            def_step_id = str(d.get("def_step_id", ""))
+            use_step_id = str(d.get("use_step_id", ""))
+            dep_id = str(
+                d.get("id") or stable_id("dep", run_id, def_step_id, use_step_id, sym_id)
+            )
+            if dep_id in index.dependencies:
+                continue
+            dep = Dependency(
+                id=dep_id,
+                symbol_id=sym_id,
+                run_id=run_id,
+                def_step_id=def_step_id,
+                def_ref_id=str(d.get("def_ref_id", "")),
+                use_step_id=use_step_id,
+                use_ref_id=str(d.get("use_ref_id", "")),
+                risk=risk,
+                grounded_by_step_id=(
+                    d.get("grounded_by_step_id")
+                    if isinstance(d.get("grounded_by_step_id"), str) else None
+                ),
+                confidence=float(d.get("confidence", 1.0)),
+                metadata=d.get("metadata", {}) if isinstance(d.get("metadata"), dict) else {},
+            )
+            index.dependencies[dep.id] = dep
+            index._dep_ids_by_symbol[sym_id].append(dep.id)
 
         return index
 
@@ -785,6 +1215,4 @@ class TrajectoryIndex:
         )[0]
 
     def _ref_sort_key(self, ref: Reference) -> tuple[str, int, int]:
-        step = self.steps.get((ref.run_id, ref.step_id))
-        step_index = step.index if step else 10**12
-        return (ref.run_id, step_index, ref.location.start)
+        return (ref.run_id, self._ref_step_index(ref), ref.location.start)

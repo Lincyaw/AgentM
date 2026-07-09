@@ -61,6 +61,17 @@ class TrajectoryIndexConfig(BaseModel):
         default="default",
         description="Vocabulary name for symbol kind validation (default, coding, research)",
     )
+    resolve_aliases: bool = Field(
+        default=True,
+        description="Run Pass 2 name resolution (merge same-entity surface forms) "
+        "before the def-use layer. Best-effort: a model failure degrades to the "
+        "deterministic Pass 1+3 without merging.",
+    )
+    resolve_model: str = Field(
+        default="",
+        description="Model profile for the Pass 2 same-entity judgment. Empty "
+        "reuses the extraction model.",
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -380,7 +391,29 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
 
         _populate_index(index, result, new_steps, prompt_msgs)
         index.indexed_message_count = len(clean_msgs)
+
+        # Pass 2 (name resolution): merge same-entity surface forms before the
+        # dataflow. Best-effort — a model failure returns no groups and we fall
+        # through to the deterministic layer unmerged.
+        merged = 0
+        if cfg.resolve_aliases:
+            from .adjudicate import resolve_aliases
+
+            groups = await resolve_aliases(
+                index, model=cfg.resolve_model or cfg.model, apply=False,
+            )
+            if groups:
+                index.apply_alias_merges(groups)
+                merged = sum(len(g) for g in groups) - len(groups)
+
+        # Pass 3 (dataflow): def-use + grounding over the full run (deterministic).
+        index.build_dependencies()
         stats = index.stats(run_id)
+        ungrounded = sum(1 for d in index.get_dependencies() if d.risk == "ungrounded")
+        merged_note = f", merged {merged} aliases" if merged else ""
+        flag_note = (
+            f", {ungrounded} fabricated-name candidate(s)" if ungrounded else ""
+        )
         return ToolResult(
             content=[
                 TextContent(
@@ -390,7 +423,9 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                         f"(total {stats.step_count} steps) -> "
                         f"{stats.symbol_count} symbols, "
                         f"{stats.reference_count} references, "
-                        f"{stats.relation_count} relations."
+                        f"{stats.relation_count} relations, "
+                        f"{stats.dependency_count} dependencies"
+                        f"{merged_note}{flag_note}."
                     ),
                 )
             ]
@@ -400,8 +435,10 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         name="index_trajectory",
         description=(
             "Build or update the semantic index over the current session's "
-            "trajectory. Incrementally extracts symbols, references, and "
-            "relations from new messages since the last indexing."
+            "trajectory. Incrementally extracts symbols, references, and relations "
+            "from new messages (Pass 1), resolves same-entity aliases (Pass 2), and "
+            "builds the def-use / grounding layer that flags fabricated names — "
+            "structured identifiers the model used but no tool ever produced (Pass 3)."
         ),
         parameters={"type": "object", "properties": {}, "required": []},
         fn=_handle,

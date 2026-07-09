@@ -960,6 +960,7 @@ def _build_index_from_chunks(all_chunks: list[ChunkResults]) -> Any:
     for chunk_list in all_chunks:
         for extracted in chunk_list:
             _build_index_from_chunks_into(index, extracted)
+    index.build_dependencies()
     return index
 
 
@@ -1080,10 +1081,16 @@ async def _collect_async(
     logger.info(f"done: {example_count} examples from {len(sources)} sources -> {data_file}")
 
     if live_index:
+        # Pass 3 (dataflow): the def-use / grounding layer needs the full run, so
+        # it runs once after all chunks (the incremental dumps omit it).
+        live_index.build_dependencies()
+        if index_output:
+            live_index.dump(index_output)
         stats = live_index.stats()
         logger.info(
             f"index: {stats.symbol_count} symbols, {stats.reference_count} references, "
-            f"{stats.relation_count} relations -> {index_output}"
+            f"{stats.relation_count} relations, {stats.dependency_count} dependencies "
+            f"-> {index_output}"
         )
 
 

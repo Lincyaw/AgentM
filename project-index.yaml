@@ -414,7 +414,7 @@ requirements:
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/tools.py
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/index_tools.py
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/manifest.yaml
-      - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/prompts/minimal_coding.md
+      - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/prompts/swe.md
     tests: []
     docs: []
     depends_on:
@@ -1302,6 +1302,48 @@ requirements:
       - path: contrib/extensions/trajectory_index/README.md
     depends_on:
       - REQ-200-agentm-home-resolution
+
+  - id: REQ-208-trajectory-index-readwrite-layer
+    title: Trajectory grounding analysis (def-use layer + name resolution)
+    description: >
+      Over the extracted symbol/reference graph, trajectory_index runs a
+      def-use / grounding analysis that catches when the model used a structured
+      identifier no tool ever produced (a fabricated name). It is structured as a
+      three-pass, compiler-style pipeline with a hard invariant that the model
+      only ever does local work and all global traversal is code. Pass 1 (PARSE):
+      an LLM extracts entities per chunk; code tags each occurrence's kind from
+      message structure (tool_output=def/grounded, tool_input & mention=use) and
+      marks structured identifiers. Pass 2 (RESOLVE, name resolution): code blocks
+      candidate same-entity pairs by cheap lexical signal (alias_candidates —
+      substring or normalized-name similarity), an ~8B model judges each pair
+      locally (resolve_aliases), and code union-finds the yes-pairs into groups
+      and folds them into one canonical symbol (apply_alias_merges: re-points
+      references/relations, invalidates the def-use layer) — no scenario-specific
+      merge rules. Pass 3 (DATAFLOW, deterministic global): each use links to its
+      reaching def at a strictly-earlier step (build_dependencies), grounding
+      propagates forward (a tool_input copying a grounded def becomes grounded),
+      and each edge gets a risk of grounded / premature (used before grounding,
+      held up) / ungrounded (never grounded anywhere = fabricated-name candidate).
+      Every reference carries a single grounded bool (the taint bit; bold-vs-idle
+      is recoverable from kind, not a separate grade). Only structured identifiers
+      drive the layer; natural-language concepts are excluded pending coreference.
+      The layer is idempotently rebuilt, persisted through dump/load, and
+      integrity-checked by validate(). Fabricated-value detection (wrong value on
+      a real name) is a deferred extension of Pass 3, not built. See
+      SCHEMA-readwrite.md.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/index.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/adjudicate.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/data.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/atom.py
+    tests: []
+    docs:
+      - path: contrib/extensions/trajectory_index/SCHEMA-readwrite.md
+    depends_on:
+      - REQ-204-trajectory-index-trace-discovery
 
   - id: REQ-119-core-kernel-residuals
     title: Core kernel removes hard-coded layout literals and dead Tool surface
