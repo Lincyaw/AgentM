@@ -1,7 +1,7 @@
 name: terminal_bench:arl_harness
 description: |
   Terminal-bench with llmharness runtime oversight.
-  - coding_task auditor fires every 5 turns (sync mode)
+  - swe auditor fires every 5 turns (sync mode)
   - reminders injected before next turn
 
 extensions:
@@ -47,7 +47,7 @@ extensions:
     config:
       mode: sync
       audit_interval_turns: 5
-      auditor_prompt: coding_task
+      auditor_prompt: swe
       enable_reminders: true
   - module: agentm.extensions.builtin.background_exec
     config:

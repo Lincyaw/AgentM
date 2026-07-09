@@ -40,7 +40,7 @@ async def evaluate_instance(
     model: str | None = None,
     cwd: str,
     audit_interval: int = 5,
-    auditor_prompt: str = "minimal_index",
+    auditor_prompt: str = "index",
     extractor_interval: int = 5,  # deprecated no-op
 ) -> EvalResult:
     """Run the llmharness auditor pipeline on one TELBench instance and score."""

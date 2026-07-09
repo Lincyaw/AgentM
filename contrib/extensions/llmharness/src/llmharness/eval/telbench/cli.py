@@ -74,7 +74,7 @@ def telbench(
     model: Annotated[str | None, typer.Option("--model", help="config.toml profile name")] = None,
     auditor_prompt: Annotated[
         str, typer.Option("--auditor-prompt", help="Auditor prompt variant name")
-    ] = "minimal_index",
+    ] = "index",
     concurrency: Annotated[
         int, typer.Option("--concurrency", "-j", help="Max parallel instances")
     ] = 1,

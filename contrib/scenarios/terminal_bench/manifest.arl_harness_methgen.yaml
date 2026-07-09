@@ -1,7 +1,7 @@
 name: terminal_bench:arl_harness_methgen
 description: |
   Terminal-bench with llmharness runtime oversight + spec-driven methodology.
-  - minimal_coding auditor + auto-generated methodology from task spec
+  - swe auditor + auto-generated methodology from task spec
   - methodology generated once at first auditor firing
   - auditor fires every 5 turns (sync mode)
 
@@ -48,7 +48,7 @@ extensions:
     config:
       mode: sync
       audit_interval_turns: 5
-      auditor_prompt: minimal_coding
+      auditor_prompt: swe
       enable_reminders: true
       enable_methodology: true
       methodology_model: litellm-dsv4flash

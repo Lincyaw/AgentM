@@ -21,7 +21,7 @@ _PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
 _BUILTIN_NAMES: Final = frozenset(p.stem for p in _PROMPTS_DIR.glob("*.md"))
 
 
-def load_auditor_prompt(name: str = "minimal_index") -> str:
+def load_auditor_prompt(name: str = "index") -> str:
     """Load auditor prompt by name or absolute path."""
     md = _PROMPTS_DIR / f"{name}.md"
     if md.is_file():
@@ -74,7 +74,7 @@ def build_auditor_system_prompt(
     goal_condition: str | None = None,
 ) -> str:
     """Assemble the auditor system prompt for one firing."""
-    framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal_index")
+    framing = base_prompt if base_prompt is not None else load_auditor_prompt("index")
 
     sections: list[str] = [framing.rstrip(), ""]
 
@@ -181,7 +181,7 @@ class AuditorContextConfig(BaseModel):
     references: list[dict[str, Any]] = []
     check_errors: dict[str, str] = {}
     continuation_notes: list[str] = []
-    prompt_name: str = "minimal_index"
+    prompt_name: str = "index"
     trajectory_snapshot: list[dict[str, Any]] | None = None
     mode: Literal["index", "trajectory"] = "index"
     context_index: dict[str, Any] | None = None

@@ -52,7 +52,7 @@ class AuditorSettings:
     def default(cls) -> AuditorSettings:
         from llmharness.agents.auditor.context import load_auditor_prompt
 
-        return cls(base_prompt=load_auditor_prompt("minimal_index"))
+        return cls(base_prompt=load_auditor_prompt("index"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,7 +377,7 @@ async def offline_audit(
     cwd: str,
     provider: tuple[str, dict[str, Any]],
     audit_interval: int = 5,
-    auditor_prompt: str = "minimal_index",
+    auditor_prompt: str = "index",
     stop_on_first_surface: bool = False,
     min_surface_turn_index: int = 0,
     **kwargs: Any,

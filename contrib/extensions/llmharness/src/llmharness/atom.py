@@ -46,7 +46,7 @@ class LLMHarnessConfig(BaseModel):
     mode: Literal["async", "sync"] = "async"
     audit_interval_turns: int = 3
     prompt_override_auditor: str | None = None
-    auditor_prompt: str = "minimal_index"
+    auditor_prompt: str = "index"
     shutdown_timeout_s: float = 30.0
     auditor_provider: ProviderConfig | None = None
     auditor_model: str | None = None

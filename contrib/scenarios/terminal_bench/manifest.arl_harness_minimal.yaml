@@ -46,7 +46,7 @@ extensions:
     config:
       mode: sync
       audit_interval_turns: 5
-      auditor_prompt: minimal_coding
+      auditor_prompt: swe
       enable_reminders: true
       enable_methodology: false
   - module: agentm.extensions.builtin.background_exec
