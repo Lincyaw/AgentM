@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from .base import TaskSpec, image_name, upload_file_to_sandbox
+from .bench import TaskSpec, image_name, upload_file_to_sandbox
 
 
 def _patch_test_sh(content: bytes) -> bytes:

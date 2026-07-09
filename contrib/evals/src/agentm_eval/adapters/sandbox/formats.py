@@ -1,4 +1,4 @@
-"""Benchmark adapter registry."""
+"""Sandbox benchmark format registry."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from .swebench import SWEBenchAdapter
 from .terminal_bench import TerminalBenchAdapter
 
 if TYPE_CHECKING:
-    from .base import BenchAdapter
+    from .bench import BenchAdapter
 
 ADAPTERS: dict[str, type | object] = {
     "terminal-bench": TerminalBenchAdapter,
-    "tb1": TerminalBenchAdapter,  # legacy alias
+    "tb1": TerminalBenchAdapter,
     "harbor": HarborAdapter,
-    "tb2": HarborAdapter,  # legacy alias
+    "tb2": HarborAdapter,
     "swebench-verified": lambda: SWEBenchAdapter(variant="verified"),
     "swebench-pro": lambda: SWEBenchAdapter(variant="pro"),
 }
@@ -23,8 +23,7 @@ ADAPTERS: dict[str, type | object] = {
 BENCH_CHOICES = list(ADAPTERS.keys())
 
 
-def get_adapter(name: str) -> BenchAdapter:
-    """Instantiate and return the adapter for the given bench name."""
+def get_format_adapter(name: str) -> BenchAdapter:
     entry = ADAPTERS.get(name)
     if entry is None:
         msg = f"Unknown bench format: {name!r}. Choose from: {', '.join(ADAPTERS)}"

@@ -1,3 +1,10 @@
 */**
-!benchmarks/
-!benchmarks/Dockerfile.terminal-bench-eval
+__pycache__/
+!src/
+!src/**
+!rescue_window/
+!rescue_window/**
+!tau2/
+!tau2/**
+!longcli/
+!longcli/**

@@ -19,6 +19,7 @@ resolution-markers = [
 [manifest]
 members = [
     "agentm",
+    "agentm-eval",
     "agentm-feishu",
     "agentm-harbor",
     "agentm-mcp-bridge",
@@ -59,6 +60,7 @@ all-contrib = [
     { name = "llmharness" },
 ]
 eval = [
+    { name = "agentm-eval" },
     { name = "agentm-rescue-window" },
     { name = "duckdb" },
     { name = "fpg" },
@@ -88,6 +90,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentm-eval", marker = "extra == 'eval'", editable = "contrib/evals" },
     { name = "agentm-harbor", marker = "extra == 'harbor'", editable = "contrib/scenarios/harbor" },
     { name = "agentm-mcp-bridge", marker = "extra == 'all-contrib'", editable = "contrib/extensions/mcp_bridge" },
     { name = "agentm-mcp-bridge", marker = "extra == 'mcp'", editable = "contrib/extensions/mcp_bridge" },
@@ -126,6 +129,66 @@ dev = [
     { name = "types-pyyaml", specifier = ">=6.0.12.20250915" },
     { name = "types-tqdm", specifier = ">=4.66.0.20240417" },
 ]
+
+[[package]]
+name = "agentm-eval"
+version = "0.1.0"
+source = { editable = "contrib/evals" }
+dependencies = [
+    { name = "agentm" },
+    { name = "loguru" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+aftraj = [
+    { name = "llmharness" },
+    { name = "pandas" },
+    { name = "trajectory-index" },
+]
+all = [
+    { name = "agentm-rescue-window" },
+    { name = "arl-env" },
+    { name = "llmharness" },
+    { name = "pandas" },
+    { name = "pyyaml" },
+    { name = "toml" },
+    { name = "trajectory-index" },
+]
+rescue-window = [
+    { name = "agentm-rescue-window" },
+]
+sandbox = [
+    { name = "arl-env" },
+    { name = "pyyaml" },
+]
+tau2 = [
+    { name = "toml" },
+]
+telbench = [
+    { name = "llmharness" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agentm", editable = "." },
+    { name = "agentm-eval", extras = ["aftraj"], marker = "extra == 'all'", editable = "contrib/evals" },
+    { name = "agentm-eval", extras = ["rescue-window"], marker = "extra == 'all'", editable = "contrib/evals" },
+    { name = "agentm-eval", extras = ["sandbox"], marker = "extra == 'all'", editable = "contrib/evals" },
+    { name = "agentm-eval", extras = ["tau2"], marker = "extra == 'all'", editable = "contrib/evals" },
+    { name = "agentm-eval", extras = ["telbench"], marker = "extra == 'all'", editable = "contrib/evals" },
+    { name = "agentm-rescue-window", marker = "extra == 'rescue-window'", editable = "contrib/evals/rescue_window" },
+    { name = "arl-env", marker = "extra == 'sandbox'", specifier = ">=0.19.8" },
+    { name = "llmharness", marker = "extra == 'aftraj'", editable = "contrib/extensions/llmharness" },
+    { name = "llmharness", marker = "extra == 'telbench'", editable = "contrib/extensions/llmharness" },
+    { name = "loguru", specifier = ">=0.7" },
+    { name = "pandas", marker = "extra == 'aftraj'", specifier = ">=2.0" },
+    { name = "pyyaml", marker = "extra == 'sandbox'", specifier = ">=6.0" },
+    { name = "toml", marker = "extra == 'tau2'", specifier = ">=0.10" },
+    { name = "trajectory-index", marker = "extra == 'aftraj'", editable = "contrib/extensions/trajectory_index" },
+    { name = "typer", specifier = ">=0.25.1" },
+]
+provides-extras = ["sandbox", "aftraj", "tau2", "telbench", "rescue-window", "all"]
 
 [[package]]
 name = "agentm-feishu"
@@ -206,7 +269,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentm", editable = "." },
+    { name = "agentm" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.25.1" },
 ]

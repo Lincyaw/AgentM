@@ -9,7 +9,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from .base import TaskSpec, eval_image_name, image_name, upload_file_to_sandbox
+from .bench import TaskSpec, eval_image_name, image_name, upload_file_to_sandbox
 
 try:
     import yaml as _yaml

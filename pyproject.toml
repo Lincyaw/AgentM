@@ -42,6 +42,7 @@ agent-env = [
     "arl-env>=0.19.8",
 ]
 eval = [
+    "agentm-eval",
     "agentm-rescue-window",
     "duckdb>=1.5.2",
     # Fault-propagation-graph schema: the verifier natively emits
@@ -84,6 +85,7 @@ build-backend = "uv_build"
 # entries are pure manifests with no pyproject.toml and must NOT be picked
 # up as workspace members.
 members = [
+    "contrib/evals",
     "contrib/evals/rescue_window",
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
@@ -104,6 +106,7 @@ agentm-mcp-bridge = { workspace = true }
 agentm-harbor = { workspace = true }
 rca-scenario = { workspace = true }
 trajectory-index = { workspace = true }
+agentm-eval = { workspace = true }
 agentm = { workspace = true }
 
 [tool.pytest.ini_options]

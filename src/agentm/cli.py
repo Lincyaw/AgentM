@@ -1395,6 +1395,12 @@ app.add_typer(_daemon_app, name="daemon")
 app.add_typer(_gateway_app, name="gateway")
 app.add_typer(_contrib_app, name="contrib")
 app.add_typer(_lint_app, name="lint")
+try:
+    from agentm_eval.cli import app as _eval_app
+
+    app.add_typer(_eval_app, name="eval")
+except ImportError:
+    pass
 
 
 def main() -> None:

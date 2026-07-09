@@ -7,7 +7,7 @@ from pathlib import Path
 
 import typer
 
-from .base import TaskSpec
+from .bench import TaskSpec
 
 try:
     import datasets as _datasets
