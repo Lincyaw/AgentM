@@ -78,9 +78,11 @@ __all__ = [
     "attach_loguru_otel_sink",
     "iter_log_records",
     "iter_spans",
+    "otlp_export_reachable",
     "otlp_is_active",
     "otlp_unwrap",
     "resolve_observability_dir",
+    "resolve_otlp_endpoint",
     "setup_process_telemetry",
     "setup_session_telemetry",
     "shutdown_process_telemetry",
@@ -293,6 +295,26 @@ def _probe_endpoint(endpoint: str, timeout: float = 2.0) -> bool:
         return True
     except (socket.timeout, ConnectionRefusedError, OSError):
         return False
+
+
+def resolve_otlp_endpoint() -> str:
+    """Endpoint the process would export to: env override or the default."""
+    return os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or _DEFAULT_OTLP_ENDPOINT
+
+
+def otlp_export_reachable() -> bool:
+    """Whether the OTLP collector we would export to is reachable *now*.
+
+    Mirrors the endpoint resolution in :func:`setup_process_telemetry` — the
+    configured ``OTEL_EXPORTER_OTLP_ENDPOINT`` or the ``localhost:4317``
+    default, probed via a short TCP connect. Unlike :func:`otlp_is_active`
+    (which reports whether the process sink is *already* attached) this can be
+    called before any session emits, so the session-store selection can decide
+    whether the ClickHouse-backed store is safe: its ``create()`` persists
+    nothing locally and relies entirely on this export path reaching the
+    collector.
+    """
+    return _probe_endpoint(resolve_otlp_endpoint())
 
 
 # --- Trace sinks --------------------------------------------------------------
@@ -514,7 +536,7 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
         )
         _global_tracer_provider = TracerProvider(resource=resource)
         _global_logger_provider = LoggerProvider(resource=resource)
-        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or _DEFAULT_OTLP_ENDPOINT
+        endpoint = resolve_otlp_endpoint()
         if _probe_endpoint(endpoint):
             sink = OtlpSink(endpoint)
             if sink.attach(_global_tracer_provider, _global_logger_provider):

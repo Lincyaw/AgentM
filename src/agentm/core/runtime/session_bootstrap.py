@@ -9,9 +9,9 @@ flavored error wrapping on top.
 Two functions:
 
 * :func:`make_default_session_store` — returns the canonical session
-  store.  When ClickHouse is reachable and OTLP export is configured the
-  store reads session state from the collector (no local JSONL);
-  otherwise falls back to ``JsonlSessionStore``.
+  store.  When ClickHouse is reachable and the OTLP collector we export to
+  is reachable the store reads session state from the collector (no local
+  JSONL); otherwise falls back to ``JsonlSessionStore``.
 * :func:`resolve_session_state` — picks the right :class:`SessionState`
   given a resume id / continue-recent flag, falling back to a fresh
   state when neither is requested. Raises :class:`FileNotFoundError`
@@ -22,7 +22,6 @@ Two functions:
 from __future__ import annotations
 
 import copy
-import os
 from pathlib import Path
 from typing import Any
 
@@ -145,20 +144,28 @@ class ClickHouseSessionStore:
 def make_default_session_store(cwd: str) -> SessionStore:
     """Return the best available session store.
 
-    Prefers ClickHouse only when both the query backend is reachable and
-    network export is configured. Otherwise sessions must persist locally so
-    traces are not silently dropped.
+    Prefers ClickHouse only when both the query backend is reachable *and* the
+    OTLP collector we would export to is reachable — the write path defaults to
+    ``localhost:4317`` and probes it, so an explicit ``OTEL_EXPORTER_OTLP_ENDPOINT``
+    is not required; a running local collector is enough. Otherwise sessions
+    must persist locally so traces are not silently dropped (the ClickHouse
+    store's ``create()`` persists nothing on disk and relies on the export path).
     """
 
     try:
         from agentm.core.observability import clickhouse
+        from agentm.core.observability.otel_export import (
+            otlp_export_reachable,
+            resolve_otlp_endpoint,
+        )
         url = clickhouse.get_url()
         if url is not None:
-            if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+            if otlp_export_reachable():
                 return ClickHouseSessionStore(url)  # type: ignore[return-value]
             logger.debug(
-                "session store: ClickHouse query backend is available but "
-                "OTEL_EXPORTER_OTLP_ENDPOINT is unset; using JSONL store"
+                "session store: ClickHouse query backend is available but the "
+                "OTLP collector at {} is unreachable; using JSONL store",
+                resolve_otlp_endpoint(),
             )
     except Exception as exc:
         # ClickHouse store unavailable/misconfigured — fall back to the local
