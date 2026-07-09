@@ -89,8 +89,14 @@ class VerifierFinding(BaseModel):
 
 
 class VerifierReport(BaseModel):
-    status: Literal["passed", "failed"] = Field(
-        description="Independent verification status."
+    status: Literal["passed", "passed_pending_live_gate", "failed"] = Field(
+        description=(
+            "Independent verification status. Use passed_pending_live_gate "
+            "when every sandbox-runnable check passed with no blockers and "
+            "only validation items this sandbox structurally cannot run "
+            "(live cluster / orchestrator-only gates) remain; the "
+            "orchestrator runs those before merging."
+        )
     )
     agent_env_session: str = Field(
         default="",
@@ -236,13 +242,13 @@ def _effective_verifier_status(report: VerifierReport) -> tuple[str, str | None]
     remains as a guard for models that still write ``[blocker]`` lines into
     the free-text report instead of the findings field.
     """
-    if report.status != "passed":
+    if report.status not in ("passed", "passed_pending_live_gate"):
         return report.status, None
     if any(f.severity == "blocker" for f in report.findings):
         return "failed", "blocker findings present despite passed verdict"
     if _LEGACY_BLOCKER_RE.search(report.report):
         return "failed", "[blocker] lines in report despite passed verdict"
-    return "passed", None
+    return report.status, None
 
 
 def _coder_summary(report: CoderReport | None, status: str) -> dict[str, object]:
@@ -463,7 +469,11 @@ async def _run_one(
                     f"raw result: {verifier_result!r}"
                 )
                 verifier_status = "failed"
-            final_status = "verified" if verifier_status == "passed" else "failed"
+            final_status = (
+                "verified"
+                if verifier_status in ("passed", "passed_pending_live_gate")
+                else "failed"
+            )
 
         _write_result(root, task, coder_text, verifier_text, agent_env_session)
         target = _move_finished(root, claim, final_status)

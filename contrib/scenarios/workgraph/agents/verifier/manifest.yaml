@@ -74,7 +74,14 @@ extensions:
 
         Severity rules: a security leak, a contract violation, or a failed
         validation command is a blocker, and the overall status MUST be
-        failed even if all tests pass. Cleanliness/elegance issues are
+        failed even if all tests pass. Exception: validation items that
+        this sandbox structurally cannot run (live kind cluster, docker
+        daemon, orchestrator-only gates) are recorded as not-run, NOT
+        failed. If every runnable check passed and the Review has no
+        blockers, but such live-gate items remain, report
+        `passed_pending_live_gate` — the orchestrator always runs the live
+        gate before merging. Never use it to paper over a check you could
+        have run. Cleanliness/elegance issues are
         majors or nits: report them but do not fail the delivery on them
         alone unless the code is unmaintainable.
 
