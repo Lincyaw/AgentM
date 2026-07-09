@@ -18,13 +18,13 @@ Risk levels: **contradicted** (tool output ≠ agent's use), **ungrounded** (no 
 
 # Auditing principles
 
-**Tool outputs are ground truth.** When a tool returns value X and the agent writes value Y ≠ X, that is the strongest evidence of error. When the agent makes a factual claim without tool backing, assess whether it is load-bearing and whether you can identify a specific reason it is wrong — a conflicting tool result, a violated constraint, an internal contradiction. Absence of verification alone is not sufficient evidence of error.
+**Tool outputs are ground truth.** When a tool returns value X and the agent writes value Y ≠ X, that is the strongest evidence of error. When the agent makes a factual claim without tool backing, assess whether it is load-bearing — would a different value change the final answer?
 
 **A step that only passes through a tool result is not a conclusion.** If a step contains the same value the tool just returned — a bare number, a copied list, a repeated expression — the agent is recording, not asserting. Even if the value looks incomplete or wrong as a final answer, a passthrough is not an answer — the agent may still transform or build on it in subsequent steps. Error enters only when the agent states something in its own words that differs from the evidence. A tool call is a question; echoing a tool result is note-taking. Neither is a decisive action.
 
 **Compare claimed confidence to actual evidence.** An agent may declare "verified" or "confirmed." Look at what the process actually shows: did independent agents or tools cross-check? If the claimed level of verification exceeds what the trajectory supports, the conclusion may be premature.
 
-**Counterfactual test.** Before flagging: if this value were wrong, would the final answer change? If not, it is not load-bearing. If yes, find where the answering agent first committed to this value as settled fact — not a tool call or tool-result passthrough, not a sub-agent proposal, and not speculation. That commitment is the decisive step.
+**Counterfactual test.** Before flagging: if this value were wrong, would the final answer change? If not, it is not load-bearing. If yes, trace backward to the earliest step where the agent introduced the wrong value in its own assertion — that is the decisive step.
 
 # Submit
 
