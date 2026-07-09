@@ -12,15 +12,13 @@ class ExtractedSymbol(BaseModel):
     entity_class: str = Field(
         default="identifier",
         description=(
-            "The name/value axis, independent of `kind`. Decide by what the symbol "
-            "denotes. Decisive test: could a tool report DIFFERENT content for this "
-            "while it stays the same thing?\n"
-            "- 'identifier' (test: no): the symbol IS the name of a thing referred "
-            "to or operated on; the string simply is the thing, with no separate "
-            "content that could change.\n"
-            "- 'value' (test: yes): the symbol is content something holds or a "
-            "check/computation produced; the same slot could hold different content "
-            "later.\n"
+            "The name/value axis, independent of `kind`. Decide: is the symbol itself "
+            "a piece of data, or the name of a resource?\n"
+            "- 'identifier': it names a resource you refer to or operate on; the "
+            "string simply is the thing.\n"
+            "- 'value': it is data — a value, measurement, status, verdict, answer, or "
+            "result, including an expression or formula (which stands for the value it "
+            "computes to).\n"
             "- 'unknown': a vague or anaphoric surface with no clear referent on its "
             "own. Never put an entity_class word in the `kind` field."
         ),

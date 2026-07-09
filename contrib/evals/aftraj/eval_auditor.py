@@ -41,27 +41,65 @@ def _aftraj_turn_to_serialized(
     turn: dict[str, Any],
     index: int,
 ) -> dict[str, Any]:
+    """Convert one AFTraj turn into a format compatible with trajectory_index.
+
+    Produces content blocks with proper ``type`` discriminators so that
+    ``_build_references`` classifies references as ``tool_input`` /
+    ``tool_output`` / ``mention`` instead of collapsing everything into
+    ``mention``.  The ``id`` field is set so per-turn dedup works.
+    """
     role = turn.get("role", "unknown")
-    parts: list[str] = []
+    blocks: list[dict[str, Any]] = []
+
     thought = turn.get("thought") or ""
     if thought:
-        parts.append(f"[Thought] {thought}")
-    action = turn.get("action") or ""
-    if action:
-        parts.append(f"[Action] {action}")
+        blocks.append({"type": "text", "text": f"[Thought] {thought}"})
+
+    action_raw = turn.get("action") or ""
+    if action_raw:
+        try:
+            calls = json.loads(action_raw) if isinstance(action_raw, str) else action_raw
+            if isinstance(calls, list):
+                for call in calls:
+                    if isinstance(call, dict):
+                        args_raw = call.get("arguments", "")
+                        if isinstance(args_raw, str):
+                            try:
+                                args_raw = json.loads(args_raw)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        blocks.append({
+                            "type": "tool_call",
+                            "name": call.get("name", "unknown"),
+                            "arguments": args_raw,
+                        })
+            else:
+                blocks.append({"type": "text", "text": f"[Action] {action_raw}"})
+        except (json.JSONDecodeError, TypeError):
+            blocks.append({"type": "text", "text": f"[Action] {action_raw}"})
+
     content = turn.get("content") or ""
     if content:
-        parts.append(content)
-    flat_content = "\n".join(parts) if parts else "(empty)"
+        if role == "environment":
+            blocks.append({
+                "type": "tool_result",
+                "content": [{"type": "text", "text": content}],
+            })
+        else:
+            blocks.append({"type": "text", "text": content})
+
+    if not blocks:
+        blocks.append({"type": "text", "text": "(empty)"})
 
     msg_type = "user" if role == "user" else (
         "tool_result" if role == "environment" else "assistant"
     )
     return {
+        "id": str(index),
         "index": index,
         "role": role,
         "type": msg_type,
-        "content": [{"type": "text", "text": flat_content}],
+        "content": blocks,
     }
 
 
@@ -216,6 +254,7 @@ def _load_data(
     *,
     test_split_only: bool,
     limit: int | None,
+    domain: str | None = None,
 ) -> list[dict[str, Any]]:
     safe_df = pd.read_parquet(data_dir / "aftraj_safe.parquet")
     unsafe_df = pd.read_parquet(data_dir / "aftraj_unsafe.parquet")
@@ -231,6 +270,11 @@ def _load_data(
             safe_df = safe_df[safe_df["conv_id"].isin(test_ids)]
             unsafe_df = unsafe_df[unsafe_df["conv_id"].isin(test_ids)]
             logger.info(f"Test split: {len(safe_df)} safe, {len(unsafe_df)} unsafe")
+
+    if domain:
+        safe_df = safe_df[safe_df["domain"] == domain]
+        unsafe_df = unsafe_df[unsafe_df["domain"] == domain]
+        logger.info(f"Domain filter '{domain}': {len(safe_df)} safe, {len(unsafe_df)} unsafe")
 
     safe_rows = [row.to_dict() for _, row in safe_df.iterrows()]
     unsafe_rows = [row.to_dict() for _, row in unsafe_df.iterrows()]
@@ -317,6 +361,86 @@ async def _run_index_extraction(
     return [], []
 
 
+def _format_grounding_summary(index: Any) -> str | None:
+    """Format a built TrajectoryIndex's grounding findings for the auditor prompt.
+
+    Returns None if no non-grounded edges exist.
+    """
+    deps = index.get_dependencies()
+    non_grounded = [d for d in deps if d.risk != "grounded"]
+    if not non_grounded:
+        return None
+
+    lines: list[str] = ["## GROUNDING ANALYSIS (attention hints, not conclusions)"]
+    lines.append("")
+
+    # Entity table
+    lines.append("Entities:")
+    for sym in index.symbols.values():
+        refs = index.get_references(sym.id)
+        if not refs:
+            continue
+        steps = sorted({r.step_id for r in refs}, key=lambda s: int(s))
+        g = any(r.grounded for r in refs)
+        ec = getattr(sym, "entity_class", "?")
+        lines.append(
+            f"- {sym.canonical_name} ({sym.kind}, {ec}) "
+            f"steps=[{','.join(steps)}] grounded={'yes' if g else 'no'}"
+        )
+
+    lines.append("")
+    lines.append("Non-grounded edges:")
+    for d in non_grounded:
+        sym = index.symbols.get(d.symbol_id)
+        name = sym.canonical_name if sym else d.symbol_id
+        detail = f'- [{d.risk}] "{name}" def@step {d.def_step_id} -> use@step {d.use_step_id}'
+        if d.risk == "contradicted":
+            def_val = getattr(d, "def_value", None) or ""
+            use_val = getattr(d, "use_value", None) or ""
+            if def_val or use_val:
+                detail += f' (tool said "{def_val}", agent used "{use_val}")'
+        elif d.risk == "premature" and d.grounded_by_step_id:
+            detail += f" (grounded later at step {d.grounded_by_step_id})"
+        lines.append(detail)
+
+    return "\n".join(lines)
+
+
+async def _build_index_for_trajectory(
+    trajectory: list[dict[str, Any]],
+    *,
+    index_model: str,
+    index_vocabulary: str,
+) -> Any | None:
+    """Run the full grounding pipeline (Pass 1-3.5) on a trajectory."""
+    from trajectory_index.data import _build_index_from_chunks, extract_incremental
+
+    try:
+        chunks = await extract_incremental(
+            trajectory, model=index_model,
+            run_id="", chunk_size=(4, 6), vocabulary=index_vocabulary,
+        )
+        if not chunks:
+            return None
+        idx = _build_index_from_chunks([chunks])
+        try:
+            from trajectory_index.adjudicate import compare_values, resolve_aliases, resolve_references
+
+            groups = await resolve_aliases(idx, model=index_model, apply=False)
+            if groups:
+                idx.apply_alias_merges(groups)
+            await resolve_references(idx, model=index_model, apply=False)
+            idx.build_dependencies()
+            await compare_values(idx, model=index_model, apply=True)
+        except Exception:
+            logger.debug("grounding passes 2-3.5 failed, using Pass 1+3 only", exc_info=True)
+            idx.build_dependencies()
+        return idx
+    except Exception:
+        logger.debug("index build failed", exc_info=True)
+        return None
+
+
 async def _auditor_call(
     trajectory: list[dict[str, Any]],
     *,
@@ -331,40 +455,41 @@ async def _auditor_call(
         build_auditor_system_prompt,
         load_auditor_prompt,
     )
-    from llmharness.context_index import build_context_index
     from llmharness.offline import StandaloneChildRunner
 
-    symbols: list[dict[str, Any]] = []
-    references: list[dict[str, Any]] = []
-    context_index_dict: dict[str, Any] | None = None
+    grounding_summary: str | None = None
 
     if index_model is not None:
-        symbols, references = await _run_index_extraction(
-            trajectory, index_model=index_model, index_vocabulary=index_vocabulary, cwd=cwd,
+        idx = await _build_index_for_trajectory(
+            trajectory, index_model=index_model, index_vocabulary=index_vocabulary,
         )
-        context_index_dict = build_context_index(
-            trajectory=trajectory,
-            symbols=symbols,
-            references=references,
-        ).to_dict()
+        if idx is not None:
+            grounding_summary = _format_grounding_summary(idx)
+            if grounding_summary:
+                logger.debug(f"grounding analysis: {len(grounding_summary)} chars")
+            else:
+                logger.debug("grounding analysis: no issues found")
 
     base_prompt = load_auditor_prompt(prompt_name)
     prompt_text = build_auditor_system_prompt(
         check_errors={},
         continuation_notes=[],
         base_prompt=base_prompt,
-        context_index=context_index_dict,
+        context_index=None,
     )
+
+    if grounding_summary:
+        prompt_text = prompt_text.rstrip() + "\n\n" + grounding_summary
 
     child = StandaloneChildRunner(cwd)
     return await child.run_auditor(
         prompt_text=prompt_text,
         tools_config={},
         model=model,
-        context_index=context_index_dict,
+        context_index=None,
         trajectory=trajectory,
-        symbols=symbols,
-        references=references,
+        symbols=[],
+        references=[],
     )
 
 

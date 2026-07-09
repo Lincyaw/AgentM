@@ -11,9 +11,11 @@ When `known_symbols` is present, do not re-declare them. Only output NEW symbols
 
 Named entities and concrete values the agent actively interacts with: services queried, tools invoked, files read, metrics checked, tables scanned, APIs called, errors encountered, statuses/verdicts returned, answers or results computed.
 
+A symbol's `name` is the **entity itself** — a token, identifier, value, or proper noun — never a sentence or clause that merely contains it. Extract the bare entity, not the phrase wrapping it.
+
 Skip:
 - items that merely appear in a schema listing, column enumeration, or bulk output without being individually discussed or queried;
-- **prose descriptions and observations** — "a floating-point precision issue", "the logic looks off", "concerns about edge cases". These describe a thought, not a thing. Do not extract them as symbols.
+- **prose descriptions and observations** — a described issue, a stated concern, a judgement. These describe a thought, not a thing. Do not extract them as symbols.
 
 ## Aliases
 
@@ -28,14 +30,13 @@ Aliases are critical — they enable downstream reference matching across naming
 `entity_class` is the **name/value axis**, and it is **independent of `kind`**.
 Judge by what the symbol denotes, not by capitalization or where it appears.
 
-Decisive test: *could a tool report DIFFERENT content for this while it stays the
-same thing?*
+Decisive question: *is the symbol itself a piece of data, or the name of a resource?*
 
-- `identifier` (test → no) — the symbol **is the name** of a thing referred to or
-  operated on. The string simply *is* the thing; it has no separate content that
-  could change.
-- `value` (test → yes) — the symbol is **content** something holds or a
-  check/computation produced. The same slot could hold different content later.
+- `identifier` — the symbol **names a resource** you refer to or operate on; the
+  string simply *is* the thing.
+- `value` — the symbol **is data**: a value, measurement, status, verdict, answer,
+  or result — including an expression or formula, which stands for the value it
+  computes to.
 - `unknown` — a vague or anaphoric surface with no clear referent on its own.
 
 `kind` and `entity_class` are orthogonal: `kind` says *what type* the thing is (from
