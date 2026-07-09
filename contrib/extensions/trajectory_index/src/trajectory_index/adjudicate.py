@@ -3,7 +3,7 @@
 The rest of ``trajectory_index`` is deterministic (Pass 1 tagging, Pass 3 dataflow).
 This module is the one place a model earns its keep, and it only ever answers a
 *local* question — it never traverses the graph. Code does the traversal and
-propagation ("the model gives a point, code propagates it"; SCHEMA-readwrite).
+propagation ("the model gives a point, code propagates it"; SCHEMA).
 
 * ``resolve_aliases`` — **Pass 2a, name resolution.** "Are these two surface forms
   the same entity?" Code blocks candidate pairs (``alias_candidates``), the model
@@ -95,7 +95,7 @@ def cluster_merges(
 
     Transitivity is code's job: if the model says A~B and B~C, the group {A,B,C}
     emerges here even though no A~C pair was ever judged. This is the "code does
-    the traversal" half of the divide-and-conquer (SCHEMA §7).
+    the traversal" half of the divide-and-conquer.
     """
     parent: dict[str, str] = {}
 

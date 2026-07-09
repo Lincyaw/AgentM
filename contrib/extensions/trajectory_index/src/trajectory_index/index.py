@@ -20,7 +20,7 @@ from typing import Literal
 type MetadataValue = str | int | float | bool | None
 type NameKey = tuple[str, str]
 
-# --- Grounding / def-use analysis (see SCHEMA-readwrite.md) -----------------
+# --- Grounding / def-use analysis (see SCHEMA.md) -----------------
 # SSA unifies the name world and the value world: every entity is a cell with
 # versioned bindings, a use resolves to a reaching binding, and risk is read off
 # that binding. `entity_class` (LLM, Pass 1) says which world an entity lives in.
@@ -143,7 +143,7 @@ class Dependency:
 
     ``risk`` is the grounding verdict on the use — whether the reaching def was
     tool-backed, ran ahead of grounding, or was never grounded. See
-    SCHEMA-readwrite.md for the build rule.
+    SCHEMA.md for the build rule.
     """
 
     id: str
@@ -234,7 +234,7 @@ class SymbolContext:
 class AliasCandidate:
     """A deterministically-blocked pair of structured symbols that MIGHT be the
     same entity. The merge decision is a name-resolution model judgment (Pass 2),
-    not a rule — this only proposes the pair with enough context for it (SCHEMA §7)."""
+    not a rule — this only proposes the pair with enough context for it."""
 
     symbol_a_id: str
     symbol_b_id: str
@@ -469,7 +469,7 @@ class TrajectoryIndex:
         self._relation_ids_by_symbol[to_symbol.id].append(relation_id)
         return relation
 
-    # ---- alias resolution: deterministic candidates + merge mechanism (SCHEMA §7)
+    # ---- alias resolution: deterministic candidates + merge mechanism
     #      the merge DECISION is a name-resolution model judgment (Pass 2), injected via apply_alias_merges
 
     def _rebuild_symbol_name_index(self) -> None:
@@ -506,7 +506,7 @@ class TrajectoryIndex:
 
         Cheap lexical signals only — a proper substring relation, or normalized-name
         similarity ≥ ``min_ratio``. This proposes pairs; whether to merge is a
-        name-resolution model judgment (Pass 2) fed by :meth:`apply_alias_merges` (SCHEMA §7). No
+        name-resolution model judgment (Pass 2) fed by :meth:`apply_alias_merges`. No
         scenario-specific rules, no model here.
         """
         # Normalized name + context snippets computed once per symbol (reused across
@@ -597,7 +597,7 @@ class TrajectoryIndex:
         """Build the def-use layer over structured entities (Pass 3: dataflow).
 
         Idempotent: clears and rebuilds every edge. Deterministic (no model),
-        global traversal. See SCHEMA-readwrite.md for the def/use classification,
+        global traversal. See SCHEMA.md for the def/use classification,
         reaching-def selection with forward grounding propagation, and the
         grounded/premature/ungrounded risk derivation.
 
@@ -624,7 +624,7 @@ class TrajectoryIndex:
         """Chain one symbol's references within a single run into def-use edges.
 
         The reaching def for a use is the most-recent def at a *strictly earlier*
-        step (SCHEMA §5: ``def_step < use_step``). Defs in the use's own step do not
+        step (most-recent at a strictly earlier step). Defs in the use's own step do not
         count — a same-step def/use is not cross-step reliance, so it produces no
         edge. Defs are therefore committed only when we cross a step boundary;
         within a step they buffer in ``pending``.

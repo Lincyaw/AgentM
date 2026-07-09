@@ -9,9 +9,11 @@ When `known_symbols` is present, do not re-declare them. Only output NEW symbols
 
 ## What counts as a symbol
 
-Named entities the agent actively interacts with: services queried, tools invoked, files read, metrics checked, tables scanned, APIs called, errors encountered.
+Named entities and concrete values the agent actively interacts with: services queried, tools invoked, files read, metrics checked, tables scanned, APIs called, errors encountered, statuses/verdicts returned, answers or results computed.
 
-Skip items that merely appear in a schema listing, column enumeration, or bulk output without being individually discussed or queried.
+Skip:
+- items that merely appear in a schema listing, column enumeration, or bulk output without being individually discussed or queried;
+- **prose descriptions and observations** — "a floating-point precision issue", "the logic looks off", "concerns about edge cases". These describe a thought, not a thing. Do not extract them as symbols.
 
 ## Aliases
 
@@ -23,21 +25,25 @@ Aliases are critical — they enable downstream reference matching across naming
 
 ## Entity class
 
-Every symbol needs an `entity_class` — which world the entity lives in, judged by
-meaning, not spelling:
+`entity_class` is the **name/value axis**, and it is **independent of `kind`**.
+Judge by what the symbol denotes, not by capitalization or where it appears.
 
-- `identifier` — a rigid name that denotes the same thing every time it appears: a
-  file path, table, id, endpoint, function name, error code, or a proper noun (a
-  place, a person). Its value is its own existence. This is the common case.
-- `value` — a slot whose bound value can change across the trajectory: a metric
-  (cpu usage), a status, a price, a computed answer, `user.tier`. The name is
-  stable but what it holds varies.
-- `unknown` — a vague or anaphoric surface whose referent is unclear on its own:
-  "the previous result", "the customer", "it", "this approach".
+Decisive test: *could a tool report DIFFERENT content for this while it stays the
+same thing?*
+
+- `identifier` (test → no) — the symbol **is the name** of a thing referred to or
+  operated on. The string simply *is* the thing; it has no separate content that
+  could change.
+- `value` (test → yes) — the symbol is **content** something holds or a
+  check/computation produced. The same slot could hold different content later.
+- `unknown` — a vague or anaphoric surface with no clear referent on its own.
+
+`kind` and `entity_class` are orthogonal: `kind` says *what type* the thing is (from
+the vocabulary), `entity_class` says *name or value*. **Never** put a `kind` word in
+`entity_class`, or an `entity_class` word (identifier / value / unknown) in `kind`.
 
 ## Rules
 
 - Output valid JSON only. No markdown fences, no explanation.
-- Every symbol needs a `kind` from the vocabulary.
-- Every symbol needs a short `summary` and an `entity_class`.
+- Every symbol needs a `kind` from the vocabulary, a short `summary`, and an `entity_class`.
 - Prefer specific names over generic descriptions.

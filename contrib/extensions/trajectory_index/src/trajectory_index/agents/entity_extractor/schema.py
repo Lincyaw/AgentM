@@ -12,14 +12,17 @@ class ExtractedSymbol(BaseModel):
     entity_class: str = Field(
         default="identifier",
         description=(
-            "Which world this entity lives in — decide from meaning, not spelling:\n"
-            "- 'identifier': a rigid name that denotes the same thing every time it "
-            "appears (file path, table, id, endpoint, function name, error code, a "
-            "proper noun like a place or person). Its value is its own existence.\n"
-            "- 'value': a slot whose bound value can change over the trajectory "
-            "(a metric like cpu usage, a status, a price, an answer, user.tier).\n"
-            "- 'unknown': a vague or anaphoric surface whose referent is unclear on "
-            "its own ('the previous result', 'the customer', 'it', 'this approach')."
+            "The name/value axis, independent of `kind`. Decide by what the symbol "
+            "denotes. Decisive test: could a tool report DIFFERENT content for this "
+            "while it stays the same thing?\n"
+            "- 'identifier' (test: no): the symbol IS the name of a thing referred "
+            "to or operated on; the string simply is the thing, with no separate "
+            "content that could change.\n"
+            "- 'value' (test: yes): the symbol is content something holds or a "
+            "check/computation produced; the same slot could hold different content "
+            "later.\n"
+            "- 'unknown': a vague or anaphoric surface with no clear referent on its "
+            "own. Never put an entity_class word in the `kind` field."
         ),
     )
 

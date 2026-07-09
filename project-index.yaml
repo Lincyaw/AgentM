@@ -1329,7 +1329,7 @@ requirements:
       (compare_values); stale is defined but not yet emitted. Every model pass is
       best-effort (a failure leaves the deterministic layer intact). The layer is
       idempotently rebuilt, persisted through dump/load, and integrity-checked by
-      validate(). See SCHEMA-readwrite.md.
+      validate(). See SCHEMA.md.
     priority: P2
     status: implemented
     confidence: confirmed
@@ -1340,7 +1340,7 @@ requirements:
       - path: contrib/extensions/trajectory_index/src/trajectory_index/atom.py
     tests: []
     docs:
-      - path: contrib/extensions/trajectory_index/SCHEMA-readwrite.md
+      - path: contrib/extensions/trajectory_index/SCHEMA.md
     depends_on:
       - REQ-204-trajectory-index-trace-discovery
 

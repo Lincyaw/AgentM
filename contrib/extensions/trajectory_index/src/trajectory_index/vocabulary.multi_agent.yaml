@@ -1,37 +1,31 @@
+# Symbol kinds for multi-agent trajectories (math / coding / agentic).
+# `kind` is the TYPE axis and is orthogonal to `entity_class` (the name/value axis).
+# The set is deliberately small and non-overlapping — pick the single best fit.
+# No kind name collides with an entity_class value (identifier / value / unknown).
 symbol_kinds:
-  agent: A named agent role in the multi-agent system (e.g. MathSolver, Verifier, CodeWriter, Manager)
-  assistant: An agent or assistant role (alias for agent)
-  role: An agent role (alias for agent)
-  tool: An agent tool or function that can be invoked (e.g. compute, web_search, verify_answer)
-  function: A named function, method, or callable (e.g. factorint, final_answer)
-  computation: A specific calculation, formula, or expression evaluated by a tool
-  expression: A mathematical or logical expression
-  equation: A mathematical equation or formula
-  variable: A named variable, parameter, or intermediate value
-  value: A numeric or computed value
-  fact: A specific data point, numeric result, or factual claim produced during execution
-  claim: An assertion or statement made by an agent
-  constraint: A requirement or condition from the original task
-  condition: A logical condition or predicate
-  entity: A named entity — person, place, concept, or object mentioned in the task
-  code: A function, class, or code snippet written or tested by an agent
-  test: A test case, test suite, or validation check
-  error: An execution error, incorrect result, or tool failure
-  concept: An abstract idea or domain term
-  relation: A relationship between entities or concepts
-  service: A running service, process, or API endpoint
-  metric: A measurable quantity or indicator
-  file: A file, document, or data source
-  query: A search or retrieval query
-  unknown: Cannot be classified into the above
+  agent: A named agent role in the system.
+  tool: A tool or function the agent invokes.
+  code: A function, class, or snippet the agent writes or tests.
+  test: A test case, test suite, or validation check.
+  expression: A math or logical expression or equation being evaluated.
+  result: A produced status, verdict, answer, or computed output.
+  metric: A measurable quantity or indicator.
+  entity: A real-world person, place, work, or object named in the task.
+  file: A file, document, or data source.
+  table: A database table, view, dataset, or result set.
+  api: An API, RPC method, endpoint, or route.
+  error: An execution error, tool failure, or incorrect result.
+  concept: An abstract domain term — use only when nothing more specific fits.
+  unknown: Cannot be classified into the above.
 
+# Reference kinds are assigned by code from message structure (NOT chosen by the
+# model); listed here for reference only.
 reference_kinds:
-  tool_input: Entity targeted in a tool call (named in arguments, search query, expression to compute)
-  tool_output: Entity appeared in a tool result (computation result, search result, test output)
-  mention: Entity referenced in agent reasoning outside of tool calls/results
-  claim: Agent asserts this entity as part of its answer or conclusion
+  tool_input: The entity is named in a tool call — arguments, query, expression to compute.
+  tool_output: The entity appears in a tool result — computation output, search result, test verdict.
+  mention: The entity is referenced in agent reasoning text, outside tool calls/results.
 
 relation_types:
-  produces: Agent A produces result B (observed in tool results)
-  verifies: Agent A verifies or checks claim B
-  contradicts: Result A contradicts claim or result B
+  produces: Agent A produces result B (observed in a tool result).
+  verifies: Agent A verifies or checks claim/result B.
+  contradicts: Result A contradicts claim or result B.
