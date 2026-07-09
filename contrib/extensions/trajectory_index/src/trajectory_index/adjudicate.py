@@ -119,8 +119,12 @@ async def _ask_model(instructions: str, payload: str, model: str | None) -> list
     """One plain-JSON model call; returns the ``verdicts`` list or None."""
     from pathlib import Path
 
-    from agentm.core.abi import AssistantMessage, LoopConfig, TextContent
-    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.abi import (
+        AgentSessionConfig,
+        AssistantMessage,
+        LoopConfig,
+        TextContent,
+    )
     from agentm.core.runtime.session import AgentSession
 
     config = AgentSessionConfig(

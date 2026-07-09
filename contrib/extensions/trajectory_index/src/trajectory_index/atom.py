@@ -14,6 +14,7 @@ from typing import Any, Final
 
 from agentm.core.abi import (
     AgentMessage,
+    AgentSessionConfig,
     ExtensionAPI,
     FunctionTool,
     LoopConfig,
@@ -23,7 +24,6 @@ from agentm.core.abi import (
     ToolResult,
     ToolResultBlock,
 )
-from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 from loguru import logger
 from pydantic import BaseModel, Field

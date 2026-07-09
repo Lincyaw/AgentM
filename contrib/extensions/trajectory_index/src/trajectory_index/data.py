@@ -202,8 +202,7 @@ def _install_stream_tap(session: Any) -> None:
     """Hook into a child session's bus to print streaming deltas in real-time."""
     import sys
 
-    from agentm.core.abi.events import StreamDeltaEvent
-    from agentm.core.abi.stream import TextDelta, ThinkingDelta, ToolCallStart
+    from agentm.core.abi import StreamDeltaEvent, TextDelta, ThinkingDelta, ToolCallStart
 
     prefix = {"thinking": False}
 
@@ -433,8 +432,7 @@ async def extract(
 
     Turn IDs in the result match the absolute message IDs sent in the prompt.
     """
-    from agentm.core.abi import LoopConfig
-    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.abi import AgentSessionConfig, LoopConfig
     from agentm.core.runtime.session import AgentSession
 
     reindexed = _reindex_messages(steps, start=message_id_start)
