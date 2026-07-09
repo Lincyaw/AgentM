@@ -34,10 +34,14 @@ class _IndexState:
         for turn in self.context_index.get("turns", []):
             if isinstance(turn, dict) and isinstance(turn.get("turn_index"), int):
                 self._context_turns_by_index[turn["turn_index"]] = turn
-        self._sym_by_id: dict[str, dict[str, Any]] = {s["id"]: s for s in symbols}
+        self._sym_by_id: dict[str, dict[str, Any]] = {}
         self._sym_by_name: dict[str, dict[str, Any]] = {}
         for s in symbols:
-            self._sym_by_name[s["name"].lower()] = s
+            sym_id = s.get("id") or s.get("name", "")
+            self._sym_by_id[sym_id] = s
+            name = s.get("name", "")
+            if name:
+                self._sym_by_name[name.lower()] = s
             for alias in s.get("aliases", []):
                 if isinstance(alias, str):
                     self._sym_by_name[alias.lower()] = s
@@ -142,9 +146,9 @@ def _build_search_entities_tool(state: _IndexState) -> FunctionTool:
             if parsed.kind and kind != parsed.kind:
                 continue
             if q in name.lower() or any(q in a for a in all_names) or q in kind:
-                ref_count = len(state._refs_by_sym.get(s["id"], []))
+                ref_count = len(state._refs_by_sym.get(s.get("id") or s.get("name", ""), []))
                 ref_kinds = Counter(
-                    r.get("kind", "?") for r in state._refs_by_sym.get(s["id"], [])
+                    r.get("kind", "?") for r in state._refs_by_sym.get(s.get("id") or s.get("name", ""), [])
                 )
                 results.append({
                     "name": name,
@@ -244,7 +248,7 @@ def _build_list_entities_tool(state: _IndexState) -> FunctionTool:
             for s in state.symbols:
                 if parsed.kind and s.get("kind") != parsed.kind:
                     continue
-                refs = state._refs_by_sym.get(s["id"], [])
+                refs = state._refs_by_sym.get(s.get("id") or s.get("name", ""), [])
                 ref_kinds = Counter(r.get("kind", "?") for r in refs)
                 entities.append({
                     "name": s["name"],
