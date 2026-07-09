@@ -370,7 +370,14 @@ def _format_grounding_summary(index: Any) -> str | None:
     if not non_grounded:
         return None
 
-    lines: list[str] = ["## GROUNDING ANALYSIS (attention hints, not conclusions)"]
+    lines: list[str] = ["## GROUNDING ANALYSIS"]
+    lines.append("")
+    lines.append(
+        "Attention hints from automated tracing. Each edge shows where a value "
+        "**originated** and where it was **relied on**. If the origin is wrong, "
+        "the origin step is the decisive error — not the downstream step that "
+        "relied on it."
+    )
     lines.append("")
 
     # Entity table
@@ -388,18 +395,21 @@ def _format_grounding_summary(index: Any) -> str | None:
         )
 
     lines.append("")
-    lines.append("Non-grounded edges:")
+    lines.append("Weak edges (investigate the origin step first):")
     for d in non_grounded:
         sym = index.symbols.get(d.symbol_id)
         name = sym.canonical_name if sym else d.symbol_id
-        detail = f'- [{d.risk}] "{name}" def@step {d.def_step_id} -> use@step {d.use_step_id}'
+        detail = (
+            f'- [{d.risk}] "{name}" originated@step {d.def_step_id}, '
+            f"relied on@step {d.use_step_id}"
+        )
         if d.risk == "contradicted":
             def_val = getattr(d, "def_value", None) or ""
             use_val = getattr(d, "use_value", None) or ""
             if def_val or use_val:
                 detail += f' (tool said "{def_val}", agent used "{use_val}")'
         elif d.risk == "premature" and d.grounded_by_step_id:
-            detail += f" (grounded later at step {d.grounded_by_step_id})"
+            detail += f" (verified later at step {d.grounded_by_step_id})"
         lines.append(detail)
 
     return "\n".join(lines)
@@ -450,12 +460,15 @@ async def _auditor_call(
     index_vocabulary: str,
     cwd: str,
     prompt_name: str,
+    pre_built_index: Any | None = None,
 ) -> dict[str, Any]:
     """Run the auditor once on a serialized trajectory prefix.
 
+    When ``pre_built_index`` is provided the grounding summary is derived from
+    that index directly (no extraction). Otherwise the full pipeline runs.
+
     Returns the auditor result dict with extra keys:
     - ``grounding_summary``: the injected grounding analysis text (or None)
-    - ``auditor_session_id``: session ID for the auditor child (from trace log)
     """
     from llmharness.agents.auditor.context import (
         build_auditor_system_prompt,
@@ -465,16 +478,19 @@ async def _auditor_call(
 
     grounding_summary: str | None = None
 
-    if index_model is not None:
+    if pre_built_index is not None:
+        grounding_summary = _format_grounding_summary(pre_built_index)
+    elif index_model is not None:
         idx = await _build_index_for_trajectory(
             trajectory, index_model=index_model, index_vocabulary=index_vocabulary,
         )
         if idx is not None:
             grounding_summary = _format_grounding_summary(idx)
-            if grounding_summary:
-                logger.debug(f"grounding analysis: {len(grounding_summary)} chars")
-            else:
-                logger.debug("grounding analysis: no issues found")
+
+    if grounding_summary:
+        logger.debug(f"grounding analysis: {len(grounding_summary)} chars")
+    elif index_model is not None or pre_built_index is not None:
+        logger.debug("grounding analysis: no issues found")
 
     base_prompt = load_auditor_prompt(prompt_name)
     prompt_text = build_auditor_system_prompt(
@@ -551,6 +567,41 @@ async def _eval_safe(
     }
 
 
+async def _incremental_index_step(
+    idx: Any,
+    new_turn: dict[str, Any],
+    *,
+    index_model: str,
+    index_vocabulary: str,
+) -> None:
+    """Add one turn to an existing TrajectoryIndex incrementally.
+
+    Mirrors the online auditor flow: extract symbols for the new turn using the
+    existing registry as context, append references, then rebuild dependencies.
+    """
+    from trajectory_index.data import (
+        ExtractedChunk,
+        _build_index_from_chunks_into,
+        extract,
+    )
+
+    registry = idx.registry_snapshot()
+    result = await extract(
+        [new_turn],
+        registry=registry,
+        message_id_start=int(new_turn.get("id", 0)),
+        vocabulary=index_vocabulary,
+        model=index_model,
+    )
+    if result is None:
+        return
+
+    prompt_input: dict[str, Any] = {"known_symbols": registry, "messages": [new_turn]}
+    chunk = ExtractedChunk(run_id="", prompt_input=prompt_input, result=result)
+    _build_index_from_chunks_into(idx, chunk)
+    idx.build_dependencies()
+
+
 async def _eval_unsafe_incremental(
     row: dict[str, Any],
     *,
@@ -560,7 +611,12 @@ async def _eval_unsafe_incremental(
     cwd: str,
     prompt_name: str,
 ) -> dict[str, Any]:
-    """Unsafe trajectory: incremental prefix walk, early-stop on first ALARM."""
+    """Unsafe trajectory: incremental prefix walk, early-stop on first ALARM.
+
+    The index is built incrementally — each step appends to the same
+    TrajectoryIndex, mirroring the online auditor flow.
+    """
+    from trajectory_index.data import build_index_from_chunks
     turns_raw = row["turns"]
     if isinstance(turns_raw, str):
         turns_raw = json.loads(turns_raw)
@@ -578,10 +634,25 @@ async def _eval_unsafe_incremental(
     last_error: str | None = None
     last_grounding: str | None = None
 
+    idx = build_index_from_chunks([]) if index_model else None
+
     for k in range(num_turns):
         prefix = aftraj_to_trajectory(turns_raw, up_to=k)
+        new_turn = prefix[-1]
+
+        if idx is not None and index_model is not None:
+            try:
+                await _incremental_index_step(
+                    idx, new_turn,
+                    index_model=index_model, index_vocabulary=index_vocabulary,
+                )
+            except Exception:
+                logger.debug(f"incremental index step {k} failed", exc_info=True)
+
         result = await _auditor_call(
-            prefix, model=model, index_model=index_model, index_vocabulary=index_vocabulary, cwd=cwd, prompt_name=prompt_name,
+            prefix, model=model, index_model=None, index_vocabulary=index_vocabulary,
+            cwd=cwd, prompt_name=prompt_name,
+            pre_built_index=idx,
         )
         n_calls += 1
         last_grounding = result.get("grounding_summary")
