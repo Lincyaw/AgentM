@@ -24,7 +24,7 @@ Risk levels: **contradicted** (tool output ≠ agent's use), **ungrounded** (no 
 
 **Compare claimed confidence to actual evidence.** An agent may declare "verified" or "confirmed." Look at what the process actually shows: did independent agents or tools cross-check? If the claimed level of verification exceeds what the trajectory supports, the conclusion may be premature.
 
-**Counterfactual test.** Before flagging: if this value were wrong, would the final answer change? If not, it is not load-bearing. If yes, trace backward to the earliest step where the agent introduced the wrong value in its own assertion — that is the decisive step.
+**Counterfactual test.** Before flagging: if this value were wrong, would the final answer change? If not, it is not load-bearing. If yes, find where the answering agent first committed to this value as settled fact — not where a sub-agent proposed it, and not where the answering agent merely speculated or planned. That commitment is the decisive step.
 
 # Submit
 
