@@ -12,7 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 sandbox = ["arl-env>=0.19.8", "pyyaml>=6.0"]
 aftraj = ["pandas>=2.0", "llmharness", "trajectory-index"]
-tau2 = ["toml>=0.10"]
+tau2 = []
 telbench = ["llmharness"]
 rescue-window = ["agentm-rescue-window"]
 all = [

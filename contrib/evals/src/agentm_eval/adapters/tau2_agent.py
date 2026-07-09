@@ -29,7 +29,6 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-import toml
 from loguru import logger
 
 
@@ -47,6 +46,8 @@ def load_agentm_profiles() -> dict[str, dict[str, Any]]:
     if not cfg_path.exists():
         logger.warning(f"AgentM config not found at {cfg_path}")
         return {}
+    import toml
+
     cfg = toml.load(cfg_path)
     return cfg.get("models", {})
 

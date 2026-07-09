@@ -33,12 +33,13 @@ def _agentm_config_path() -> Path:
 
 
 def _load_agentm_profiles() -> dict[str, dict[str, Any]]:
-    import toml
+    import tomllib
 
     cfg_path = _agentm_config_path()
     if not cfg_path.exists():
         return {}
-    return toml.load(cfg_path).get("models", {})
+    with open(cfg_path, "rb") as f:
+        return tomllib.load(f).get("models", {})
 
 
 def _resolve_profile(profile_name: str) -> dict[str, Any]:
