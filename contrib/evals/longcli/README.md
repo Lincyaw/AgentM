@@ -17,118 +17,62 @@ stored in host ClickHouse for rescue-window fork/replay.
 ## Image setup (one-time)
 
 Task images are built from the longcli-bench repo and pushed to a
-container registry. ARL pulls them on demand — no manual loading needed.
+container registry. ARL pulls them on demand.
 
 ```bash
 # Prerequisites
 git clone https://github.com/finyorko/longcli-bench.git ../longcli-bench
 
 # List all discovered tasks
-uv run python contrib/evals/bench.py list \
-  --repo ../longcli-bench/tasks_long_cli
+agentm eval sandbox list --repo ../longcli-bench/tasks_long_cli
 
-# Build + push all 20 task images (skaffold, concurrency=4)
-uv run python contrib/evals/bench.py build \
-  --repo ../longcli-bench/tasks_long_cli \
-  --base-dir ../longcli-bench/longcli_dockerImage \
-  --push
+# Build + push all 20 task images
+agentm eval sandbox build --repo ../longcli-bench/tasks_long_cli \
+    --base-dir ../longcli-bench/longcli_dockerImage --push
 
-# Build paired private evaluator images using the Terminal-Bench adapter hook
-uv run python contrib/evals/bench.py build \
-  --repo ../longcli-bench/tasks_long_cli \
-  --eval-only \
-  --push
+# Build paired private evaluator images
+agentm eval sandbox build --repo ../longcli-bench/tasks_long_cli --eval-only --push
 
 # Only build specific tasks
-uv run python contrib/evals/bench.py build \
-  --repo ../longcli-bench/tasks_long_cli \
-  -t cs61_fa24_hog -t 61810_cow \
-  --push
-
-# Custom registry
-uv run python contrib/evals/bench.py build \
-  --repo ../longcli-bench/tasks_long_cli \
-  --registry ghcr.io/myorg \
-  --push
+agentm eval sandbox build --repo ../longcli-bench/tasks_long_cli \
+    -t cs61_fa24_hog -t 61810_cow --push
 ```
 
 Pre-built images are available at `docker.io/opspai/longcli-*:v0`.
 
-The `bench.py` CLI works with any terminal-bench-format benchmark — any
-directory containing task subdirectories with `Dockerfile` + `INSTRUCTION.md`.
-
 ## Run
 
-### Single task (via bench CLI)
+### Batch evaluation (all tasks)
 
 ```bash
-# Auto-reads instruction from task.yaml
-uv run python contrib/evals/bench.py run \
-  --task cs61_fa24_hog \
-  --repo ../longcli-bench/tasks_long_cli \
-  --model glm47 \
-  --gateway http://<arl-gateway>:8080
+agentm eval sandbox batch --bench tb1 \
+    --repo ../longcli-bench/tasks_long_cli \
+    --model litellm -j 20
 
-# Or pass instruction directly
-uv run python contrib/evals/bench.py run \
-  --task cs61_fa24_hog \
-  -p "Implement the CS61A Hog project tasks in folder cs61-hog." \
-  --model glm47
-```
-
-### Single task (via env vars)
-
-```bash
-AGENTM_AGENT_ENV_IMAGE="opspai/longcli-cs61-fa24-hog:v0" \
-AGENTM_AGENT_ENV_GATEWAY_URL="http://<arl-gateway>:8080" \
-AGENTM_AGENT_ENV_EXPERIMENT_ID="longcli-hog" \
-uv run agentm --scenario terminal_bench_arl --model glm47 \
-  -p "Open and follow the detailed project specification at INSTRUCTION.md. \
-Implement the CS61A Hog project tasks accordingly in folder cs61-hog."
-```
-
-### All 20 tasks (batch)
-
-```bash
-bash contrib/evals/longcli/run_batch.sh \
-  --gateway http://<arl-gateway>:8080 \
-  --model glm47
-
-# Run batch evaluation with paired private evaluator images. bench.py only
-# orchestrates this path; the Terminal-Bench adapter defines the test layout.
-uv run python contrib/evals/bench.py batch \
-  --bench tb1 \
-  --repo ../longcli-bench/tasks_long_cli \
-  --gateway http://<arl-gateway>:8080 \
-  --model glm47 \
-  --private-eval
+# pass@k (multiple independent attempts)
+agentm eval sandbox batch --bench tb1 \
+    --repo ../longcli-bench/tasks_long_cli \
+    --model litellm -j 20 --attempts 8
 
 # Only specific tasks
-bash contrib/evals/longcli/run_batch.sh --task cs61_fa24_hog --task 61810_cow
+agentm eval sandbox batch --bench tb1 \
+    --repo ../longcli-bench/tasks_long_cli \
+    -t cs61_fa24_hog -t 61810_cow --model glm47
 ```
 
-Results go to `/tmp/longcli-results/<task>.log`. Auto-skips completed
-tasks (resumable).
+Results go to `~/.agentm/eval_runs/{exp_id}/`. Re-running with existing
+results skips completed tasks automatically (resumable).
 
 ### Evaluate results
 
-Task images contain only the project skeleton and INSTRUCTION.md — no
-tests. By default, after the agent finishes, evaluation works by:
+After the agent finishes, evaluation works by reusing the agent's sandbox:
 
-1. Creating a fresh sandbox with the same task image
-2. Replaying the agent's tool calls (from ClickHouse trajectory)
-3. Uploading the task's test suite via `session.upload_file()` / `download_file()`
-4. Running `run-tests.sh` → parsing F2P/P2P scores
+1. The eval phase runs test scripts in the still-live sandbox
+2. F2P/P2P scores are computed from test output
+3. Results are recorded to `results.jsonl` in the experiment directory
 
-With `--private-eval`, each eval sandbox also starts a private container from
-`{registry}/{prefix}-{task}-eval:{tag}`. For Terminal-Bench-format tasks, the
-adapter builds that image with `/tests/run-tests.sh` and `/tests/*`, mounts the
-shared workspace at `/app`, and runs the same `run-tests.sh` there. The
-agent-facing executor container never receives those test files during the
-agent phase.
-
-See `rescue_window/harness/replay.py` for the replay module and
-`longcli-bench/tasks_long_cli/<task>/tests/` for test suites.
+With private evaluator containers, the eval sandbox also starts a private
+container with the test suite mounted.
 
 ## Task list
 

@@ -14,43 +14,42 @@ git clone https://github.com/sierra-research/tau2-bench.git
 cd tau2-bench
 uv sync
 uv run tau2 check-data
+
+# Set env so the adapter finds tau2-bench
+export TAU2_BENCH_DIR=~/AoyangSpace/tau2-bench
 ```
 
 ## Usage
 
-All commands run from the AgentM repo root, using tau2-bench's venv:
+All commands run from the AgentM repo root via the unified eval CLI:
 
 ```bash
 # List available AgentM model profiles
-cd ~/AoyangSpace/tau2-bench
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py list-profiles
+agentm eval tau2 list-profiles
 
 # List tau2 domains
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py list-domains
+agentm eval tau2 list-domains
 
 # Quick sanity check (mock domain, 1 task)
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py run \
-    --model litellm-dsv4flash --domain mock --num-tasks 1
+agentm eval tau2 run --model litellm-dsv4flash --domain mock --num-tasks 1
 
 # Airline domain (3 tasks)
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py run \
-    --model litellm-dsv4flash --domain airline --num-tasks 3
+agentm eval tau2 run --model litellm-dsv4flash --domain airline --num-tasks 3
 
-# Retail domain (full, all tasks)
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py run \
-    --model litellm-dsv4flash --domain retail
+# Full retail eval
+agentm eval tau2 run --model litellm-dsv4flash --domain retail
 
 # Use different model for user simulator
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py run \
-    --model litellm-dsv4flash --user-model azure-gpt --domain airline
+agentm eval tau2 run --model litellm-dsv4flash --user-model azure-gpt --domain airline
 
-# Raw litellm model (no AgentM profile needed)
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py run \
-    --raw-llm openai/gpt-4.1 --domain airline --num-tasks 5
+# Raw litellm model (no AgentM profile)
+agentm eval tau2 run --raw-llm openai/gpt-4.1 --domain airline --num-tasks 5
 
 # Parallel execution
-uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py run \
-    --model litellm-dsv4flash --domain airline -j 4
+agentm eval tau2 run --model litellm-dsv4flash --domain airline -j 4
+
+# Custom experiment ID
+agentm eval tau2 run --model litellm-dsv4flash --domain airline --exp-id my-airline-run
 ```
 
 ## Domains
@@ -65,17 +64,18 @@ uv run python ~/AoyangSpace/AgentM/contrib/evals/tau2/run_eval.py run \
 ## Scoring
 
 - **reward**: product of DB match × communicate check (0 or 1)
-- **pass^k**: whether the agent solves the same task on every one of k tries
+- **pass_rate**: fraction of tasks with reward >= 1.0
 - **DB match**: predicted database end state matches the target
 
-Results are auto-saved to `tau2-bench/data/simulations/`.
+Results are recorded in the unified experiment output at
+`~/.agentm/eval_runs/{exp_id}/results.jsonl`.
 
 ## Architecture
 
 ```
 AgentM config.toml          tau2-bench
 ────────────────           ──────────
-model profiles  ──→  agentm_agent.py  ──→  HalfDuplexAgent
+model profiles  ──→  tau2_agent.py   ──→  HalfDuplexAgent
 (base_url,             (adapter)          (generate_next_message)
  api_key,                    │
  model)                      ↓
