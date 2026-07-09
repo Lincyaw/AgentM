@@ -1304,33 +1304,32 @@ requirements:
       - REQ-200-agentm-home-resolution
 
   - id: REQ-208-trajectory-index-readwrite-layer
-    title: Trajectory grounding analysis (def-use layer + name resolution)
+    title: Trajectory grounding analysis (SSA def-use, coreference, value fidelity)
     description: >
-      Over the extracted symbol/reference graph, trajectory_index runs a
-      def-use / grounding analysis that catches when the model used a structured
-      identifier no tool ever produced (a fabricated name). It is structured as a
-      three-pass, compiler-style pipeline with a hard invariant that the model
-      only ever does local work and all global traversal is code. Pass 1 (PARSE):
-      an LLM extracts entities per chunk; code tags each occurrence's kind from
-      message structure (tool_output=def/grounded, tool_input & mention=use) and
-      marks structured identifiers. Pass 2 (RESOLVE, name resolution): code blocks
-      candidate same-entity pairs by cheap lexical signal (alias_candidates —
-      substring or normalized-name similarity), an ~8B model judges each pair
-      locally (resolve_aliases), and code union-finds the yes-pairs into groups
-      and folds them into one canonical symbol (apply_alias_merges: re-points
-      references/relations, invalidates the def-use layer) — no scenario-specific
-      merge rules. Pass 3 (DATAFLOW, deterministic global): each use links to its
-      reaching def at a strictly-earlier step (build_dependencies), grounding
-      propagates forward (a tool_input copying a grounded def becomes grounded),
-      and each edge gets a risk of grounded / premature (used before grounding,
-      held up) / ungrounded (never grounded anywhere = fabricated-name candidate).
-      Every reference carries a single grounded bool (the taint bit; bold-vs-idle
-      is recoverable from kind, not a separate grade). Only structured identifiers
-      drive the layer; natural-language concepts are excluded pending coreference.
-      The layer is idempotently rebuilt, persisted through dump/load, and
-      integrity-checked by validate(). Fabricated-value detection (wrong value on
-      a real name) is a deferred extension of Pass 3, not built. See
-      SCHEMA-readwrite.md.
+      Over the extracted symbol/reference graph, trajectory_index runs an
+      SSA-framed def-use / grounding analysis that catches both fabricated names
+      (an identifier no tool produced) and fabricated values (a value a tool
+      contradicts). Unifying model: every entity is a cell with versioned
+      bindings; a use resolves to a reaching binding; risk is read off its
+      grounding. Names are the value-free special case. Hard invariant: the LLM
+      only does local point-judgments, all global traversal is code. Pass 1
+      (PARSE): an LLM extracts entities and classifies entity_class (identifier /
+      value / unknown — replacing the old looks_structured regex gate); code tags
+      def/use + grounded from message structure and assigns SSA versions. Pass 2a
+      (name resolution): code blocks candidate same-entity pairs (alias_candidates),
+      the model judges each (resolve_aliases), code union-finds and merges
+      (apply_alias_merges). Pass 2b (coreference): code detects anaphors and
+      proposes recent in-scope candidates, the model binds each pronoun to its
+      antecedent entity (resolve_references), code adds a resolved reference. Pass 3
+      (DATAFLOW, deterministic global): each use links to its reaching binding at a
+      strictly-earlier step (build_dependencies), grounding propagates forward, and
+      each edge is graded grounded / premature / ungrounded (name axis). Pass 3.5
+      (value fidelity): for value-class edges with a grounded binding, the model
+      compares the used value against the grounded one and flags contradicted
+      (compare_values); stale is defined but not yet emitted. Every model pass is
+      best-effort (a failure leaves the deterministic layer intact). The layer is
+      idempotently rebuilt, persisted through dump/load, and integrity-checked by
+      validate(). See SCHEMA-readwrite.md.
     priority: P2
     status: implemented
     confidence: confirmed

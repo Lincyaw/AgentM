@@ -1,202 +1,191 @@
-# Trajectory grounding analysis — design
+# Trajectory grounding analysis — complete schema
 
-An enhancement to `trajectory_index`: over the extracted symbol/reference graph,
-run a **def-use / grounding analysis** that catches when the model *used something
-no tool ever gave it*.
+Over the extracted symbol graph, run a **def-use / grounding analysis** that catches
+when the agent *relied on something no tool ever gave it*. The unifying frame is
+**SSA (static single assignment)**: every entity is a cell with versioned bindings;
+a use resolves to a reaching binding; risk is read off the binding's grounding.
 
-The existing `Symbol` / `Reference` / `Relation` (co-occurrence graph, for
-retrieval) are unchanged and kept. `Dependency` is a new, orthogonal def-use layer
-over steps. Do not conflate them.
+Two failure worlds, one model:
 
-## What it catches
+- **Fabricated name** — the agent used an identifier (file / table / id / endpoint)
+  no tool produced. The "value" of an identifier is its own existence.
+- **Fabricated value** — the agent acted on a *value* (`cpu=90%`, `tier=premium`)
+  that a tool never returned or later contradicted. The name is real; the value is wrong.
 
-Frame it as a taint analysis: a value is **grounded** if it came from a tool (a
-trusted source), **ungrounded** if the model conjured it. Relying on an ungrounded
-value is the bug.
-
-- **Fabricated name** *(built)* — the model referenced a structured identifier
-  (file / table / column / endpoint / id) that no tool ever produced. Built now.
-- **Fabricated value** *(deferred, see end)* — the model acted on a *value* that
-  differs from what a tool returned (tool said CPU 45%, model diagnosed off 90%).
-  The name is real; the value is wrong. Needs value-tracking + coreference; later.
-
-## The pipeline — three passes, like a compiler
-
-The organizing principle: everything deterministic/local goes to cheap code; only
-the one irreducible *local* semantic judgment goes to a model; **global traversal
-is always code** ("the model gives a point, code propagates it").
-
-| Pass | Compiler analogue | What we do | Who |
-|---|---|---|---|
-| 1 · PARSE | lexing / parsing | extract entities + occurrences; tag each occurrence's `kind` from message structure | LLM (local extract) + code (tag) |
-| 2 · RESOLVE | name resolution / symbol table | decide which surface forms are the same entity, then merge | code (block) → LLM (judge one pair) → code (cluster + merge) |
-| 3 · DATAFLOW | reaching-defs / def-use / taint | link each use to its reaching def, propagate grounding, flag ungrounded uses | code, global |
-
-The LLM only ever does **local** work (extract a chunk in Pass 1, judge one pair in
-Pass 2). Global traversal (Pass 3) is entirely code. That invariant is enforced by
-the pass structure, not by discipline.
+Names are the **value-free special case** of values. One schema covers both.
 
 ---
 
-## Pass 1 — PARSE: extract entities + tag occurrences
+## The PL picture
 
-- **LLM (local):** read each chunk of steps, emit structured entities with their
-  surface forms / aliases and where they occur. This is the one place per step that
-  needs a model — mapping natural language to entities.
-- **Code (deterministic):** for each occurrence assign a `kind` from **message
-  structure**, not a model:
-
-  | message block | `kind` | role |
-  |---|---|---|
-  | tool result | `tool_output` | **def** (produces a value) · grounded |
-  | tool call | `tool_input` | **use** · ungrounded (unless it copies a grounded def — Pass 3) |
-  | assistant text | `mention` | **use** · ungrounded |
-
-  Also mark `structured` via the `looks_structured` gate (below).
-
-### The structured-entity gate
-
-A small model is reliable at **local, verbatim** extraction, not at **cross-step
-coreference**. So only **structured, verbatim-matchable identifiers** drive the
-def-use layer, because matching them is string equality, not semantic coreference.
-
-- `structured = True`: file paths, DB / row keys, order/user/txn ids, URLs,
-  `tool_call_id`, function names, error codes, git SHAs, line numbers.
-- `structured = False`: natural-language concepts ("the customer", "the previous
-  result"). Extracted and stored for retrieval, but they get **no def-use edges**
-  yet — linking them needs coreference (the deferred value work).
-
-This still catches the largest hallucination class (model fabricates an id/path,
-then acts on it) and is the grounded layer that carries signal anyway.
+| PL concept | here |
+|---|---|
+| **const** | an *identifier* entity — bound once, name rigidly denotes (file path, id). Name world. |
+| **variable** | a *value* entity — a slot whose bound value changes over time (`user.tier`). Value world. |
+| **SSA version** | each (re)definition of an entity = a new binding version (`tier₁`, `tier₂`). |
+| **def / use** | a binding (production) / a read of it. |
+| **reaching definition** | the binding a use resolves to (most-recent prior version). |
+| **pointer / deref** | an *anaphor* (`this`, `it`, `the previous result`) — a use that points at an entity indirectly; resolving it = dereferencing. |
+| **taint** | grounded (from a tool, trusted) vs ungrounded (model-conjured). |
 
 ---
 
-## Pass 2 — RESOLVE: name resolution (same-entity)
+## Entities, bindings, references
 
-The analysis is only as correct as its entity resolution: a use links to its def
-only if the two surface forms are unified. The extractor routinely **splits one
-entity into several** — a data file and the table registered from it
-(`normal_traces.parquet` vs `normal_traces`), a service under two names, an endpoint
-and its short form. Left unmerged, a def under one form fails to ground a use under
-another, producing false "fabricated name" flags.
+An **entity** is a cell. Its `entity_class` (LLM-decided, Pass 1):
 
-This is entity resolution, not a rules problem — lexical rules over-merge
-(`normal_traces` ⊂ `abnormal_traces`, but they are opposites; `.../travel` vs
-`.../travels` are different endpoints at 0.98 similarity). On the real RCA run the
-lexical score is *anti-correlated* with mergeability: the top-scoring pairs are
-traps, the true merges (`X.parquet` ↔ `X`) sit at the bottom. So it is the same
-divide-and-conquer as everything else:
+- `identifier` — const/name world. The binding's "value" is existence.
+- `value` — variable/SSA world. Each binding carries an actual value.
+- `unknown` — vague/anaphoric surface that could not be tied to a concrete entity;
+  excluded from def-use until resolved (Pass 2 coreference may promote it).
 
-- **Block (code):** `alias_candidates()` proposes structured-symbol pairs on a cheap
-  lexical signal (proper substring, or normalized-name similarity ≥ threshold), each
-  carrying names, kinds, and sample reference snippets. It only *proposes*.
-- **Judge (model):** `resolve_aliases()` asks an ~8B model, per pair, "are these the
-  same entity?" — bounded and local; the model never traverses the graph.
-- **Merge (code):** `apply_alias_merges(groups)` union-finds the yes-pairs into
-  groups, folds each into one canonical symbol (most-referenced), re-points
-  references and relations, demotes folded names to aliases, and invalidates the
-  derived def-use layer. Idempotent. Runs **before** Pass 3.
+A **binding** is a def of an entity at a step, with an SSA `version` (ordinal among
+that entity's defs in the run), a `value` (for `value` entities), and a `grounded`
+bit. Bindings are not a separate table — they are the def-role references, ordered.
 
-`build_dependencies()` (Pass 3) does **no** merging — a pure Pass 3 run links only
-exactly-normalized entities. Merge is an explicit upstream step.
+A **reference** is one occurrence. Its `form`:
+
+- `direct` — the name appears verbatim (`abnormal_traces`), string-matchable.
+- `anaphor` — a pronoun/description (`this`, `it`, `that table`, `the previous
+  result`). Carries no entity until Pass 2 resolves it to a target entity + version.
+
+Grounding of a reference is derived from message structure (`tool_output` →
+grounded def; `tool_input`/`mention` → ungrounded use) and propagates: a use that
+copies a grounded binding is grounded.
 
 ---
 
-## Pass 3 — DATAFLOW: def-use + grounding (deterministic, global)
+## The four local judgments the LLM makes (divide-and-conquer)
 
-For each structured entity, within each run, in step order:
+Code does all global traversal (versioning, reaching-def, taint, risk). The LLM
+only ever answers a **local** question:
 
-1. **def vs use.** A reference is a **def** if `kind` is a producing kind
-   (`tool_output`, …) or it is the entity's first appearance in the run; otherwise
-   it is a **use**.
-2. **grounding.** A def is **grounded** if its value is tool-backed
-   (`grounded_from_kind`: a producing kind). A `tool_input` that copies a prior
-   grounded def is upgraded to grounded (records `grounds_ref_id`) — this is how
-   grounding **propagates forward**.
-3. **reaching def.** Each use links to the most-recent def at a **strictly earlier
-   step** (`def_step < use_step`; ties by `location.start`). A def in the use's own
-   step does not count — a same-step def/use is not cross-step reliance, so it emits
-   no edge.
-4. **risk** on each edge:
+1. **Name vs value recognition** (Pass 1, per entity) — is this an `identifier` or a
+   `value`, and if `value`, what value does this occurrence assert/observe? Replaces
+   the old `looks_structured` regex — the model knows a rigid name from a slot, and a
+   proper noun (`Big Stone Gap`) from anaphora (`the previous one`).
+2. **Coreference resolution** (Pass 2, per anaphor) — code proposes recent in-scope
+   candidate entities/versions; the model picks which one `this`/`it` binds to. The
+   anaphor is then rewritten to a direct reference of that entity+version.
+3. **Alias resolution** (Pass 2, per candidate pair) — "are these two surface forms
+   the same entity?" (existing `resolve_aliases`). Coreference is its sibling: both
+   are "resolve a reference to an entity."
+4. **Value comparison** (Pass 3.5, per flagged value edge) — "does the tool's
+   grounded value confirm or contradict the value the agent acted on?" Sets
+   `contradicted`.
 
-   | condition | risk | meaning |
-   |---|---|---|
-   | reaching def is grounded | `grounded` | safe |
-   | reaching def ungrounded, but entity IS grounded at a later step | `premature` | ran ahead of evidence, held up (records `grounded_by_step_id`) |
-   | entity never grounded anywhere in the run | `ungrounded` | **fabricated-name candidate** |
+Everything else is deterministic code.
 
-Whether an ungrounded use was *bold* (model put the name into a tool call) or *idle*
-(named it only in reasoning) is recoverable from the use's `kind` (`tool_input` vs
-`mention`) — it is not stored as a separate grade.
+---
 
-### The query this enables
+## Passes
 
 ```
-Dependency where risk == "ungrounded"
-  → a use relied on an identifier no tool ever produced
-  → fabricated-name candidate (with its use site)
+1 PARSE      LLM: extract entities, classify identifier/value, extract asserted values,
+             flag anaphors.  code: def/use + grounded from message structure; SSA versions.
+2 RESOLVE    code blocks candidates → LLM decides → code rewrites:
+               (a) alias:      same-entity surface forms      (resolve_aliases)
+               (b) coreference: anaphor → antecedent+version   (resolve_references)
+             After Pass 2 every reference points at a concrete entity+version.
+3 DATAFLOW   code, global: each use → reaching binding (SSA), grounding propagates,
+             risk graded per edge.
+3.5 COMPARE  LLM, local, on flagged value edges only: confirm vs contradict → risk.
 ```
 
-`premature` is a weaker, secondary signal (impatience, not hallucination). This is
-the signal pure topology (edge shape / run length) cannot produce — it needs the
-grounding bit on the producing def, the one label a generic graph model has no
-channel for.
+Iron rule preserved: the LLM only does local point-judgments; every global
+traversal is code.
+
+---
+
+## Unified risk taxonomy (one axis, name ⊂ value)
+
+Per def-use edge (`reaching binding → use`):
+
+| risk | condition | world |
+|---|---|---|
+| `grounded` | reaching binding grounded and current | both |
+| `premature` | reaching binding ungrounded, but the entity is grounded at a later step and consistent | both |
+| `ungrounded` | entity never grounded anywhere — fabricated (name: fake id; value: made-up number) | both |
+| `contradicted` | used an asserted value; a later grounded binding of the entity has a **different** value (Pass 3.5) | value |
+| `stale` | used an older grounded version while a **newer grounded version** exists | value |
+
+For `identifier` entities only `grounded`/`premature`/`ungrounded` can arise (no
+value to contradict or go stale) — the name world falls out as the degenerate case.
 
 ---
 
 ## Data model
 
 ```python
-type Risk = Literal["grounded", "premature", "ungrounded"]
+type EntityClass = Literal["identifier", "value", "unknown"]
+type RefForm     = Literal["direct", "anaphor"]
+type Risk        = Literal["grounded", "premature", "ungrounded", "contradicted", "stale"]
 
-@dataclass(frozen=True, slots=True)
-class Reference:          # ...existing fields unchanged...
-    grounded: bool = False           # is this occurrence's value tool-backed?
-    grounds_ref_id: str | None = None  # if grounded by copying a prior def, which
-    structured: bool = False
+@dataclass  # Symbol/entity
+class Symbol:
+    ...canonical_name, kind, aliases, summary...
+    entity_class: EntityClass = "identifier"   # LLM (Pass 1)
 
-@dataclass(frozen=True, slots=True)
-class Dependency:         # one def-use edge
-    id: str
-    symbol_id: str
-    run_id: str
-    def_step_id: str
-    def_ref_id: str
-    use_step_id: str
-    use_ref_id: str
+@dataclass(frozen=True)
+class Reference:               # one occurrence (a def or a use)
+    ...id, symbol_id, run_id, step_id, location, text, role, kind...
+    grounded: bool = False              # tool-backed? (taint bit)
+    grounds_ref_id: str | None = None   # if grounded by copying a prior def
+    form: RefForm = "direct"            # direct name vs anaphor (LLM flags anaphor)
+    value: str | None = None            # value asserted/observed here (value entities)
+    resolved_from: str | None = None    # original anaphor text, if Pass 2 rewrote it
+    structured: bool = True             # derived: entity_class != "unknown"
+
+@dataclass(frozen=True)
+class Dependency:              # one def-use edge, version-aware
+    ...id, symbol_id, run_id...
+    def_step_id: str; def_ref_id: str; def_version: int
+    use_step_id: str; use_ref_id: str
     risk: Risk
-    grounded_by_step_id: str | None = None  # if ungrounded at use, a later grounding step
-    confidence: float = 1.0
+    grounded_by_step_id: str | None = None   # later grounding step, if any
+    def_value: str | None = None             # for value edges: the two sides compared
+    use_value: str | None = None
 ```
 
-### Determinism notes
-
-- reaching-def ordering: by step index, ties by `location.start`.
-- `premature` requires the grounding step **after** the use step.
-- `Dependency.confidence` = min(def, use) reference confidence.
-- read-modify-write (a tool that both reads and produces one resource): `kind` tags
-  one role; treat as a def, note as an edge case.
+SSA `version` = ordinal of the def among the entity's defs in the run (code-assigned).
+No separate binding table.
 
 ---
 
-## Deferred — fabricated value (extends Pass 3, not a new pass)
+## Scenarios this schema must cover (and how)
 
-The dangerous RCA error is often not a fake name but a **wrong value on a real
-name**: the tool returned CPU 45%, the model reasoned "90%, that's the root cause".
-Every name is grounded, so the grounded/ungrounded partition says "fine" — it misses
-it entirely.
+| scenario | mechanism |
+|---|---|
+| fabricated file/id name | identifier entity, `ungrounded` |
+| used a name before the tool confirmed it | identifier, `premature` |
+| `this table` / `it` → prior entity | anaphor → coreference (Pass 2) → direct ref |
+| pointer chain (`this` → `it` → …) | transitive resolution; union-find in code |
+| ambiguous `this` (order vs user) | LLM picks by type/salience (Pass 2) |
+| `this result` → a step's output | anaphor whose antecedent is a def-binding, not a named entity |
+| wrong value on a real name (`cpu=90%` vs tool 45%) | value entity, `contradicted` (Pass 3.5) |
+| value changed then used old one (`tier` premium→basic) | SSA versions, `stale` |
+| proper noun (`Big Stone Gap`) repeated verbatim | identifier by LLM; string-matched — no longer dropped by a regex gate |
+| vague concept (`the customer`, `the approach`) | `unknown`; excluded unless coreference ties it down |
 
-This is not a fourth pass. It is Pass 3 with a **richer lattice**: carry the
-*value* along the def-use chain (not just existence), and add one **local** semantic
-compare at the end (LLM: "does the tool's value confirm or contradict the value the
-model acted on?"). It additionally needs (a) value binding in Pass 1 (extract the
-asserted value, not just the entity) and (b) coreference for natural-language
-subjects — which is why it rides on top of the structured layer, later.
+---
 
-## Out of scope (noted, not built)
+## Determinism & staging notes
 
-- **Natural-language-concept reliance** — needs cross-step coreference; the def-use
-  layer is structured-entity-only for now.
-- **Staleness / revalidate-before-act** — a grounded value that later goes stale (a
-  quoted price that changes). A distinct failure mode (grounded-but-stale) from
-  ungrounded reliance; needs resource timestamps/versions. Not modeled here.
+- Pass 1 & 3 are deterministic given the LLM's per-occurrence labels; Pass 2/3.5 are
+  the model seams. `looks_structured` (regex gate) is **removed** — the model owns
+  the name/value/vague judgment.
+- SSA `version` and reaching-def use step index, ties by `location.start`.
+- `contradicted` (value world) is emitted by Pass 3.5 (`compare_values`). `stale` is
+  defined but **not yet emitted**: it needs a use bound to an *older* version while a
+  newer grounded one exists — reaching-def always takes the most-recent, so it only
+  arises once coreference resolves an anaphor to a specific older version. The field
+  and risk value are in place for that refinement.
+- Build order per run: Pass 1 → alias-merge (2a) → coreference (2b) → Pass 3 →
+  Pass 3.5. Each is idempotent; the derived layer is rebuilt wholesale.
+- Every model pass is best-effort: a model failure leaves the deterministic layer
+  intact (name-axis risks still computed).
+
+## Out of scope (still)
+
+- Cross-run / cross-session coreference.
+- Non-textual grounding (an image/plot a tool returned).

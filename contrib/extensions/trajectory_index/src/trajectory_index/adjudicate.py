@@ -5,23 +5,27 @@ This module is the one place a model earns its keep, and it only ever answers a
 *local* question — it never traverses the graph. Code does the traversal and
 propagation ("the model gives a point, code propagates it"; SCHEMA-readwrite).
 
-* ``resolve_aliases`` — **Pass 2, name resolution.** "Are these two surface forms
+* ``resolve_aliases`` — **Pass 2a, name resolution.** "Are these two surface forms
   the same entity?" Code blocks candidate pairs (``alias_candidates``), the model
-  judges each pair here, and code clusters the yes-pairs into merge groups for
-  ``TrajectoryIndex.apply_alias_merges``. Runs **before** ``build_dependencies``.
+  judges each pair, code clusters into merge groups. Runs **before** the dataflow.
+* ``resolve_references`` — **Pass 2b, coreference.** "Which earlier entity does this
+  anaphor (``this`` / ``it`` / ``the previous result``) denote?" Code detects
+  anaphors + proposes recent in-scope candidates, the model picks the referent, code
+  adds a resolved reference so the dataflow links it.
+* ``compare_values`` — **Pass 3.5, value fidelity.** "Does the tool's grounded value
+  confirm or contradict the value the agent acted on?" Fires only on value-class
+  edges; flags ``contradicted``.
 
-The deferred fabricated-value check (does a tool's value confirm or contradict the
-value the model acted on?) would live here too, as a local compare at the tail of
-Pass 3's dataflow — see SCHEMA-readwrite "Deferred". Not built.
-
-The model is swappable (~8B is enough); each call takes a ``model`` name and speaks
-plain JSON.
+Each pass is an *independent local judgment* that fires only where it is needed
+(the divide-and-conquer "B" shape): the model never traverses the graph — code does
+that. The model is swappable (~8B is enough); each call speaks plain JSON.
 """
 from __future__ import annotations
 
 import contextlib
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -29,7 +33,7 @@ from loguru import logger
 from .data import extract_json
 
 if TYPE_CHECKING:
-    from .index import AliasCandidate, TrajectoryIndex
+    from .index import AliasCandidate, Step, TrajectoryIndex
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +222,202 @@ async def resolve_aliases(
         index.apply_alias_merges(groups)
         index.build_dependencies()
     return groups
+
+
+# ---------------------------------------------------------------------------
+# Value comparison (Pass 3.5): did the agent act on a value a tool contradicts?
+# ---------------------------------------------------------------------------
+
+_VALUE_COMPARE_INSTRUCTIONS = """\
+You check whether a value an agent acted on matches what a tool actually produced.
+Each item names a value-bearing entity (a metric, status, price, computed answer),
+the text where a tool GROUNDED its value, and the text where the agent USED a value
+for it. Decide, per item independently:
+  - confirm:    the used value matches the grounded value.
+  - contradict: the used value differs from the grounded value (acted on a wrong value).
+  - unclear:    the texts don't pin down comparable values.
+Judge the value, not the wording. Return ONLY:
+{"verdicts": [{"id": 0, "outcome": "confirm|contradict|unclear", "confidence": 0.9, "reason": "..."}]}
+"""
+
+
+def _step_text(index: TrajectoryIndex, run_id: str, step_id: str, cap: int = 500) -> str:
+    st = index.steps.get((run_id, step_id))
+    return (st.content or "")[:cap] if st else ""
+
+
+def _align_outcomes(n: int, raw: list[Any]) -> list[tuple[str, float, str]]:
+    """Map id-keyed {outcome,confidence,reason} back by position (missing -> unclear)."""
+    by_id: dict[int, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        with contextlib.suppress(TypeError, ValueError, KeyError):
+            by_id[int(item["id"])] = item
+    out: list[tuple[str, float, str]] = []
+    for i in range(n):
+        item = by_id.get(i)
+        if item is None:
+            out.append(("unclear", 0.0, "no verdict"))
+            continue
+        oc = str(item.get("outcome", "unclear"))
+        oc = oc if oc in ("confirm", "contradict", "unclear") else "unclear"
+        out.append((oc, float(item.get("confidence", 0.0)), str(item.get("reason", ""))))
+    return out
+
+
+async def compare_values(
+    index: TrajectoryIndex, model: str | None = None, apply: bool = True,
+) -> list[tuple[str, str]]:
+    """For value-class edges with a grounded binding to compare against, ask the model
+    confirm/contradict and flag ``contradicted``. Local: fires only on value entities.
+
+    Returns (dependency_id, outcome) for every edge judged.
+    """
+    targets: list[tuple[Any, str]] = []
+    for d in index.get_dependencies():
+        sym = index.symbols.get(d.symbol_id)
+        if not sym or sym.entity_class != "value":
+            continue
+        grounded_step = (
+            d.def_step_id if d.risk == "grounded"
+            else d.grounded_by_step_id if d.risk == "premature" else None
+        )
+        if grounded_step:
+            targets.append((d, grounded_step))
+    if not targets:
+        return []
+
+    rows = [
+        {
+            "id": i,
+            "entity": index.symbols[d.symbol_id].canonical_name,
+            "grounded_text": _step_text(index, d.run_id, gs),
+            "used_text": _step_text(index, d.run_id, d.use_step_id),
+        }
+        for i, (d, gs) in enumerate(targets)
+    ]
+    raw = await _ask_model(
+        _VALUE_COMPARE_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
+    )
+    if raw is None:
+        return []
+    outcomes = _align_outcomes(len(targets), raw)
+
+    result: list[tuple[str, str]] = []
+    for (d, _), (outcome, _conf, _why) in zip(targets, outcomes, strict=True):
+        result.append((d.id, outcome))
+        if apply and outcome == "contradict":
+            index.dependencies[d.id] = replace(d, risk="contradicted")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Coreference resolution (Pass 2b): bind an anaphor to its antecedent entity.
+# ---------------------------------------------------------------------------
+
+# Closed-class deictic/anaphoric surfaces a small deterministic proposer can spot.
+_ANAPHOR = re.compile(
+    r"\b(?:this|that|these|those|it|its|the (?:previous|above|prior|last|former|same)"
+    r"\s+\w+|the (?:result|output|value|answer|response))\b",
+    re.IGNORECASE,
+)
+
+_COREF_INSTRUCTIONS = """\
+An agent's text used an anaphor (a pronoun or back-reference like "this", "it",
+"the previous result"). Decide which earlier entity it refers to. You are given the
+anaphor in its sentence and a numbered list of candidate entities recently in scope.
+Pick the single entity the anaphor denotes, or -1 if none fits (it refers to
+something not listed, or to an idea/action rather than a tracked entity).
+Return ONLY: {"verdicts": [{"id": 0, "entity": <candidate-index or -1>, "confidence": 0.9}]}
+"""
+
+
+async def resolve_references(
+    index: TrajectoryIndex, model: str | None = None,
+    window: int = 8, max_candidates: int = 8, apply: bool = True,
+) -> int:
+    """Detect anaphors in agent text, bind each to an antecedent entity (LLM), and add
+    a resolved reference so the def-use layer links it. Returns #anaphors resolved.
+
+    Divide-and-conquer: code detects anaphors + proposes recent in-scope candidates,
+    the model picks the referent (local), code adds the reference and rebuilds Pass 3.
+    """
+    # steps in run/index order, with their entities-in-scope running set
+    steps = sorted(index.steps.values(), key=lambda s: (s.run_id, s.index))
+    # entity last-seen step index per run, for recency-ranked candidates
+    seen: dict[str, list[tuple[int, str]]] = {}  # run_id -> [(step_index, symbol_id)]
+    for r in index.references.values():
+        st = index.steps.get((r.run_id, r.step_id))
+        sym = index.symbols.get(r.symbol_id)
+        if st and sym and sym.entity_class in ("identifier", "value"):
+            seen.setdefault(r.run_id, []).append((st.index, r.symbol_id))
+    for lst in seen.values():
+        lst.sort()
+
+    items: list[tuple[Step, str, list[str]]] = []  # (step, anaphor phrase, candidate sym_ids)
+    for st in steps:
+        if st.role not in ("assistant",) or not st.content:
+            continue
+        m = _ANAPHOR.search(st.content)
+        if not m:
+            continue
+        # candidates: distinct entities seen strictly earlier, most-recent first
+        cands: list[str] = []
+        for idx, sid in reversed(seen.get(st.run_id, [])):
+            if idx < st.index and sid not in cands:
+                cands.append(sid)
+            if len(cands) >= max_candidates:
+                break
+        if not cands:
+            continue
+        items.append((st, m.group(0), cands))
+
+    if not items:
+        return 0
+
+    rows = []
+    for i, (st, phrase, cands) in enumerate(items):
+        sentence = st.content[max(0, st.content.lower().find(phrase.lower()) - 80):][:200]
+        rows.append({
+            "id": i,
+            "anaphor": phrase,
+            "sentence": sentence,
+            "candidates": [
+                {"index": j, "name": index.symbols[sid].canonical_name,
+                 "kind": index.symbols[sid].kind}
+                for j, sid in enumerate(cands)
+            ],
+        })
+    raw = await _ask_model(_COREF_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model)
+    if raw is None:
+        return 0
+
+    by_id: dict[int, dict[str, Any]] = {}
+    for it in raw:
+        if isinstance(it, dict):
+            with contextlib.suppress(TypeError, ValueError, KeyError):
+                by_id[int(it["id"])] = it
+
+    resolved = 0
+    for i, (st, phrase, cands) in enumerate(items):
+        v = by_id.get(i)
+        if not v:
+            continue
+        with contextlib.suppress(TypeError, ValueError):
+            pick = int(v.get("entity", -1))
+        if pick < 0 or pick >= len(cands):
+            continue
+        sym = index.symbols[cands[pick]]
+        pos = st.content.lower().find(phrase.lower())
+        # the added reference records form="anaphor" and text=phrase (the surface it
+        # was resolved from); Pass 3 then links it as a use of `sym`.
+        index.add_reference(
+            symbol=sym, step=st, text=phrase, kind="mention",
+            start=max(0, pos), form="anaphor",
+        )
+        resolved += 1
+
+    if apply and resolved:
+        index.build_dependencies()
+    return resolved

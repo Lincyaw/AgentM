@@ -21,9 +21,23 @@ If an entity appears under multiple surface forms, pick the most canonical as `n
 
 Aliases are critical — they enable downstream reference matching across naming variations.
 
+## Entity class
+
+Every symbol needs an `entity_class` — which world the entity lives in, judged by
+meaning, not spelling:
+
+- `identifier` — a rigid name that denotes the same thing every time it appears: a
+  file path, table, id, endpoint, function name, error code, or a proper noun (a
+  place, a person). Its value is its own existence. This is the common case.
+- `value` — a slot whose bound value can change across the trajectory: a metric
+  (cpu usage), a status, a price, a computed answer, `user.tier`. The name is
+  stable but what it holds varies.
+- `unknown` — a vague or anaphoric surface whose referent is unclear on its own:
+  "the previous result", "the customer", "it", "this approach".
+
 ## Rules
 
 - Output valid JSON only. No markdown fences, no explanation.
 - Every symbol needs a `kind` from the vocabulary.
-- Every symbol needs a short `summary`.
+- Every symbol needs a short `summary` and an `entity_class`.
 - Prefer specific names over generic descriptions.

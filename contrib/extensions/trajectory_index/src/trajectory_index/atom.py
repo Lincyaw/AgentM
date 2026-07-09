@@ -392,28 +392,40 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         _populate_index(index, result, new_steps, prompt_msgs)
         index.indexed_message_count = len(clean_msgs)
 
-        # Pass 2 (name resolution): merge same-entity surface forms before the
-        # dataflow. Best-effort — a model failure returns no groups and we fall
-        # through to the deterministic layer unmerged.
-        merged = 0
+        # Model-judgment passes (best-effort — any model failure leaves the
+        # deterministic layer intact). Each is an independent local judgment.
+        merged = coref = 0
+        model = cfg.resolve_model or cfg.model
         if cfg.resolve_aliases:
-            from .adjudicate import resolve_aliases
+            from .adjudicate import compare_values, resolve_aliases, resolve_references
 
-            groups = await resolve_aliases(
-                index, model=cfg.resolve_model or cfg.model, apply=False,
-            )
+            # Pass 2a — name resolution: merge same-entity surface forms.
+            groups = await resolve_aliases(index, model=model, apply=False)
             if groups:
                 index.apply_alias_merges(groups)
                 merged = sum(len(g) for g in groups) - len(groups)
+            # Pass 2b — coreference: bind anaphors (this / it) to their entities.
+            coref = await resolve_references(index, model=model, apply=False)
 
         # Pass 3 (dataflow): def-use + grounding over the full run (deterministic).
         index.build_dependencies()
+
+        # Pass 3.5 — value fidelity: flag value edges the tool contradicts.
+        if cfg.resolve_aliases:
+            await compare_values(index, model=model, apply=True)
+
         stats = index.stats(run_id)
-        ungrounded = sum(1 for d in index.get_dependencies() if d.risk == "ungrounded")
+        deps = index.get_dependencies()
+        ungrounded = sum(1 for d in deps if d.risk == "ungrounded")
+        contradicted = sum(1 for d in deps if d.risk == "contradicted")
         merged_note = f", merged {merged} aliases" if merged else ""
-        flag_note = (
-            f", {ungrounded} fabricated-name candidate(s)" if ungrounded else ""
-        )
+        coref_note = f", resolved {coref} anaphors" if coref else ""
+        flags = []
+        if ungrounded:
+            flags.append(f"{ungrounded} fabricated-name")
+        if contradicted:
+            flags.append(f"{contradicted} wrong-value")
+        flag_note = f", {' + '.join(flags)} candidate(s)" if flags else ""
         return ToolResult(
             content=[
                 TextContent(
@@ -425,7 +437,7 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                         f"{stats.reference_count} references, "
                         f"{stats.relation_count} relations, "
                         f"{stats.dependency_count} dependencies"
-                        f"{merged_note}{flag_note}."
+                        f"{merged_note}{coref_note}{flag_note}."
                     ),
                 )
             ]

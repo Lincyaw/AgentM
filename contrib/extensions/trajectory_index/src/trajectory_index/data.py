@@ -930,12 +930,14 @@ def _build_index_from_chunks_into(
 
     for ext_sym in result.symbols:
         sym_data = {"name": ext_sym.name, "kind": ext_sym.kind, "aliases": ext_sym.aliases}
+        ec = getattr(ext_sym, "entity_class", "identifier")
         index.upsert_symbol(
             name=ext_sym.name,
             kind=ext_sym.kind.lower(),
             summary=ext_sym.summary,
             aliases=ext_sym.aliases,
             namespace=_symbol_namespace(run_id, sym_data),
+            entity_class=ec if ec in ("identifier", "value", "unknown") else "identifier",
         )
 
     # Programmatic references

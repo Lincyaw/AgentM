@@ -21,21 +21,44 @@ type MetadataValue = str | int | float | bool | None
 type NameKey = tuple[str, str]
 
 # --- Grounding / def-use analysis (see SCHEMA-readwrite.md) -----------------
-# The taint bit on a def-use edge. A value is *grounded* if it came from a tool
-# (trusted source), *ungrounded* if the model conjured it. Whether the model was
-# bold about it (put an ungrounded name into a tool call) vs merely musing (named
-# it in reasoning text) is recoverable from the reference's ``kind`` — it is not a
-# separate grade.
-#   grounded  — the reaching def was tool-backed; the use is safe.
-#   premature — the reaching def was ungrounded, but the entity IS grounded at a
-#               later step (the model ran ahead of its evidence, but it held up).
-#   ungrounded — the entity was never grounded anywhere; the use relied on a name
-#               no tool ever produced (fabricated-name candidate).
-type Risk = Literal["grounded", "premature", "ungrounded"]
+# SSA unifies the name world and the value world: every entity is a cell with
+# versioned bindings, a use resolves to a reaching binding, and risk is read off
+# that binding. `entity_class` (LLM, Pass 1) says which world an entity lives in.
+#   identifier — const/name world: the binding's "value" is its own existence.
+#   value      — variable/SSA world: each binding carries an actual value.
+#   unknown    — vague/anaphoric surface not tied to a concrete entity; excluded
+#                from the def-use layer unless Pass 2 coreference resolves it.
+type EntityClass = Literal["identifier", "value", "unknown"]
 
-# Runtime value set for Risk — the single source the load path validates against
-# (kept in lockstep with the Literal alias).
-_RISK_VALUES: frozenset[str] = frozenset({"grounded", "premature", "ungrounded"})
+# How a reference points at its entity.
+#   direct  — the name appears verbatim (string-matchable).
+#   anaphor — a pronoun/description ("this", "it", "the previous result"); carries
+#             no entity until Pass 2 coreference resolves it (LLM).
+type RefForm = Literal["direct", "anaphor"]
+
+# The taint bit is `Reference.grounded` (tool-backed vs model-conjured). Whether an
+# ungrounded use was bold (name in a tool call) vs idle (named in reasoning) is
+# recoverable from `kind` — not a separate grade.
+#
+# Risk on a def-use edge (reaching binding -> use). One axis, name ⊂ value:
+#   grounded    — reaching binding grounded and current; safe.
+#   premature   — reaching binding ungrounded, but the entity IS grounded later and
+#                 consistent (ran ahead of evidence, held up).
+#   ungrounded  — entity never grounded anywhere; fabricated (name: fake id;
+#                 value: made-up number).
+#   contradicted — used an asserted value a later grounded binding differs from
+#                  (value world; Pass 3.5).
+#   stale       — used an older grounded version while a newer grounded one exists
+#                 (value world).
+type Risk = Literal["grounded", "premature", "ungrounded", "contradicted", "stale"]
+
+# Runtime value sets — the single source the load path validates against (kept in
+# lockstep with the Literal aliases).
+_ENTITY_CLASS_VALUES: frozenset[str] = frozenset({"identifier", "value", "unknown"})
+_REF_FORM_VALUES: frozenset[str] = frozenset({"direct", "anaphor"})
+_RISK_VALUES: frozenset[str] = frozenset(
+    {"grounded", "premature", "ungrounded", "contradicted", "stale"}
+)
 
 # ---------------------------------------------------------------------------
 # Role enum (structural, not vocabulary-driven)
@@ -86,6 +109,7 @@ class Symbol:
     aliases: set[str] = field(default_factory=set)
     summary: str | None = None
     definition_ref_id: str | None = None
+    entity_class: EntityClass = "identifier"  # LLM (Pass 1): name vs value vs vague
     metadata: MutableMapping[str, MetadataValue] = field(default_factory=dict)
 
     @property
@@ -106,7 +130,10 @@ class Reference:
     confidence: float = 1.0
     grounded: bool = False               # is this occurrence's value tool-backed?
     grounds_ref_id: str | None = None    # if grounded by copying a prior def, which
-    structured: bool = False
+    structured: bool = True              # entity drives def-use? (entity_class != "unknown")
+    form: RefForm = "direct"             # direct name vs anaphor (LLM flags anaphor)
+    value: str | None = None             # value asserted/observed here (value entities)
+    resolved_from: str | None = None     # original anaphor text, if Pass 2 rewrote it
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
@@ -124,10 +151,13 @@ class Dependency:
     run_id: str
     def_step_id: str
     def_ref_id: str
+    def_version: int          # SSA version of the reaching binding (0-based, per entity/run)
     use_step_id: str
     use_ref_id: str
     risk: Risk
     grounded_by_step_id: str | None = None   # if ungrounded at use, a later step that grounds it
+    def_value: str | None = None             # value world: the two sides Pass 3.5 compares
+    use_value: str | None = None
     confidence: float = 1.0
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
@@ -251,38 +281,16 @@ _MISSING_STEP_INDEX = 10**12  # sort sentinel for a reference whose step is abse
 _MIN_BLOCK_SUBSTR = 3         # alias blocking: shortest name a substring match may involve
 _SNIPPET_CHARS = 120          # per-reference context snippet cap for the merge adjudicator
 
-# looks_structured signals (hoisted; a name is structured if any matches)
-_PATH_SEP = re.compile(r"[\\/]")             # path separator
-_DOTTED = re.compile(r"\.[A-Za-z0-9]{1,8}\b")  # dotted: extension / module.attr
-_DIGIT = re.compile(r"\d")                   # id / version / sha / line no.
-_CAMEL_HUMP = re.compile(r"[a-z][A-Z]")      # camelCase
-_NON_WORD = re.compile(r"\W", re.UNICODE)
+def drives_defuse(entity_class: str) -> bool:
+    """Does an entity of this class drive the def-use layer?
 
-
-def looks_structured(name: str) -> bool:
-    """Heuristic v1 gate: is this a verbatim-matchable structured identifier?
-
-    Structured ids (file paths, keys, ids, shas, function names) match by string
-    equality across steps, so a small model / regex resolves them reliably.
-    Natural-language concepts ("the customer") need coreference and are excluded
-    from the def-use layer for now (see SCHEMA-readwrite.md §2). Tunable.
+    The name-vs-value-vs-vague judgment is the LLM's (Pass 1, ``entity_class``) —
+    it knows a rigid identifier from an anaphor and a proper noun from a vague
+    concept, which a regex cannot. Only ``unknown`` (vague, unresolved) is excluded;
+    once Pass 2 coreference ties a vague surface to a concrete entity it inherits a
+    real class. Replaces the old ``looks_structured`` regex gate.
     """
-    n = name.strip()
-    if not n:
-        return False
-    # a phrase with spaces is natural language unless it carries a path separator
-    if " " in n and not _PATH_SEP.search(n):
-        return False
-    if len(_NON_WORD.sub("", n)) < 2:
-        return False
-    # a URL is caught by _PATH_SEP (it contains "//"), so no separate url clause
-    return bool(
-        _PATH_SEP.search(n)
-        or _DOTTED.search(n)
-        or _DIGIT.search(n)
-        or "_" in n
-        or _CAMEL_HUMP.search(n)
-    )
+    return entity_class in ("identifier", "value")
 
 
 def grounded_from_kind(kind: str) -> bool:
@@ -343,6 +351,7 @@ class TrajectoryIndex:
         summary: str | None = None,
         aliases: Sequence[str] = (),
         namespace: str = "",
+        entity_class: EntityClass = "identifier",
     ) -> Symbol:
         norm_key = self._name_key(name, namespace)
         existing_ids = self._symbol_ids_by_norm.get(norm_key)
@@ -353,6 +362,9 @@ class TrajectoryIndex:
                 symbol.kind = kind
             if summary and not symbol.summary:
                 symbol.summary = summary
+            # a concrete class wins over a prior "unknown" (a later step pinned it down)
+            if entity_class != "unknown" and symbol.entity_class == "unknown":
+                symbol.entity_class = entity_class
             for alias in aliases:
                 symbol.aliases.add(alias)
                 self._index_symbol_name(symbol_id, alias, namespace)
@@ -369,6 +381,7 @@ class TrajectoryIndex:
             kind=kind,
             summary=summary,
             aliases=set(aliases),
+            entity_class=entity_class,
             metadata=metadata,
         )
         self.symbols[symbol_id] = symbol
@@ -386,6 +399,8 @@ class TrajectoryIndex:
         start: int = 0,
         end: int | None = None,
         confidence: float = 1.0,
+        form: RefForm = "direct",
+        value: str | None = None,
     ) -> Reference:
         if end is None:
             end = start + len(text)
@@ -407,7 +422,9 @@ class TrajectoryIndex:
             kind=kind,
             confidence=confidence,
             grounded=grounded_from_kind(kind),
-            structured=looks_structured(symbol.canonical_name),
+            structured=drives_defuse(symbol.entity_class),
+            form=form,
+            value=value,
         )
         self.references[ref_id] = ref
         self._ref_ids_by_symbol[symbol.id].append(ref_id)
@@ -497,7 +514,7 @@ class TrajectoryIndex:
         items = [
             (sid, sym, normalize_name(sym.canonical_name), self._ref_snippets(sid))
             for sid, sym in self.symbols.items()
-            if looks_structured(sym.canonical_name)
+            if drives_defuse(sym.entity_class)
         ]
         out: list[AliasCandidate] = []
         for i in range(len(items)):
@@ -623,6 +640,7 @@ class TrajectoryIndex:
         pending: Reference | None = None           # latest def in the current step
         pending_grounded: Reference | None = None
         cur_step: int | None = None
+        reaching_version = -1                       # SSA version of `reaching`
 
         for i, ref in enumerate(refs):
             use_idx = self._ref_step_index(ref)
@@ -630,6 +648,7 @@ class TrajectoryIndex:
                 # crossed a step boundary: the prior step's defs become reaching
                 if pending is not None:
                     reaching = pending
+                    reaching_version += 1
                 if pending_grounded is not None:
                     grounded_reaching = pending_grounded
                 pending = pending_grounded = None
@@ -671,10 +690,13 @@ class TrajectoryIndex:
                 run_id=run_id,
                 def_step_id=reaching.step_id,
                 def_ref_id=reaching.id,
+                def_version=max(0, reaching_version),
                 use_step_id=ref.step_id,
                 use_ref_id=ref.id,
                 risk=risk,
                 grounded_by_step_id=grounded_by,
+                def_value=reaching.value,
+                use_value=ref.value,
                 confidence=min(reaching.confidence, ref.confidence),
             )
             self.dependencies[dep.id] = dep
@@ -777,6 +799,7 @@ class TrajectoryIndex:
                 "aliases": sorted(s.aliases) if s.aliases else [],
                 "summary": s.summary,
                 "definition_ref_id": s.definition_ref_id,
+                "entity_class": s.entity_class,
                 "namespace": str(s.metadata.get("namespace", "")),
                 "metadata": dict(s.metadata) if s.metadata else {},
             }
@@ -797,6 +820,9 @@ class TrajectoryIndex:
                 "grounded": r.grounded,
                 "grounds_ref_id": r.grounds_ref_id,
                 "structured": r.structured,
+                "form": r.form,
+                "value": r.value,
+                "resolved_from": r.resolved_from,
                 "metadata": dict(r.metadata) if r.metadata else {},
             }
             for r in self.references.values()
@@ -822,10 +848,13 @@ class TrajectoryIndex:
                 "run_id": d.run_id,
                 "def_step_id": d.def_step_id,
                 "def_ref_id": d.def_ref_id,
+                "def_version": d.def_version,
                 "use_step_id": d.use_step_id,
                 "use_ref_id": d.use_ref_id,
                 "risk": d.risk,
                 "grounded_by_step_id": d.grounded_by_step_id,
+                "def_value": d.def_value,
+                "use_value": d.use_value,
                 "confidence": d.confidence,
                 "metadata": dict(d.metadata) if d.metadata else {},
             }
@@ -885,12 +914,15 @@ class TrajectoryIndex:
                 else stable_id("sym", normalize_name(str(s["name"])))
             )
             symbol_id = str(s.get("id") or default_id)
+            raw_ec = s.get("entity_class")
+            entity_class: EntityClass = raw_ec if raw_ec in _ENTITY_CLASS_VALUES else "identifier"
             symbol = Symbol(
                 id=symbol_id,
                 canonical_name=str(s["name"]).strip(),
                 kind=str(s.get("kind", "unknown")),
                 aliases=aliases,
                 summary=s.get("summary") if isinstance(s.get("summary"), str) else None,
+                entity_class=entity_class,
                 metadata=metadata,
             )
             symbol.definition_ref_id = s.get("definition_ref_id", s.get("definition_mention_id"))
@@ -925,8 +957,10 @@ class TrajectoryIndex:
             ref_kind = str(r.get("kind", r.get("mention_type", "unknown")))
             raw_grounded = r.get("grounded")
             grounded = bool(raw_grounded) if isinstance(raw_grounded, bool) else grounded_from_kind(ref_kind)
-            structured = bool(r.get("structured", looks_structured(sym.canonical_name)))
+            structured = bool(r.get("structured", drives_defuse(sym.entity_class)))
             grounds_ref_id = r.get("grounds_ref_id") if isinstance(r.get("grounds_ref_id"), str) else None
+            raw_form = r.get("form")
+            form: RefForm = raw_form if raw_form in _REF_FORM_VALUES else "direct"
             ref = Reference(
                 id=ref_id,
                 symbol_id=sym.id,
@@ -940,6 +974,9 @@ class TrajectoryIndex:
                 grounded=grounded,
                 grounds_ref_id=grounds_ref_id,
                 structured=structured,
+                form=form,
+                value=r.get("value") if isinstance(r.get("value"), str) else None,
+                resolved_from=r.get("resolved_from") if isinstance(r.get("resolved_from"), str) else None,
                 metadata=r.get("metadata", {}) if isinstance(r.get("metadata"), dict) else {},
             )
             index.references[ref.id] = ref
@@ -1001,6 +1038,7 @@ class TrajectoryIndex:
                 run_id=run_id,
                 def_step_id=def_step_id,
                 def_ref_id=str(d.get("def_ref_id", "")),
+                def_version=int(d.get("def_version", 0)),
                 use_step_id=use_step_id,
                 use_ref_id=str(d.get("use_ref_id", "")),
                 risk=risk,
@@ -1008,6 +1046,8 @@ class TrajectoryIndex:
                     d.get("grounded_by_step_id")
                     if isinstance(d.get("grounded_by_step_id"), str) else None
                 ),
+                def_value=d.get("def_value") if isinstance(d.get("def_value"), str) else None,
+                use_value=d.get("use_value") if isinstance(d.get("use_value"), str) else None,
                 confidence=float(d.get("confidence", 1.0)),
                 metadata=d.get("metadata", {}) if isinstance(d.get("metadata"), dict) else {},
             )
