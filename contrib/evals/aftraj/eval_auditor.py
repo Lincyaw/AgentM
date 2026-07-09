@@ -642,8 +642,9 @@ async def _run_eval(
     test_split_only: bool,
     prompt_name: str,
     concurrency: int,
+    domain: str | None = None,
 ) -> dict[str, Any]:
-    all_rows = _load_data(data_dir, test_split_only=test_split_only, limit=limit)
+    all_rows = _load_data(data_dir, test_split_only=test_split_only, limit=limit, domain=domain)
     n_safe = sum(1 for r in all_rows if "mistake_step" not in r or pd.isna(r.get("mistake_step")))
     n_unsafe = len(all_rows) - n_safe
     logger.info(
@@ -738,6 +739,9 @@ def run(
     cwd: Annotated[
         Path, typer.Option(help="Working directory for auditor sessions")
     ] = _DEFAULT_CWD,
+    domain: Annotated[
+        Optional[str], typer.Option(help="Filter by domain (math, coding, agentic)")
+    ] = None,
 ) -> None:
     """Run the auditor on AFTraj-2K trajectories and compute metrics.
 
@@ -756,6 +760,7 @@ def run(
             index_vocabulary=index_vocabulary,
             cwd=str(cwd),
             limit=limit,
+            domain=domain,
             output_path=output,
             test_split_only=test_split,
             prompt_name=prompt,
