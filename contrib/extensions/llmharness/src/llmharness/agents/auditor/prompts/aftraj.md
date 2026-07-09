@@ -20,7 +20,7 @@ Risk levels: **contradicted** (tool output ≠ agent's use), **ungrounded** (no 
 
 **Tool outputs are ground truth.** When a tool returns value X and the agent writes value Y ≠ X, that is the strongest evidence of error. When the agent makes a factual claim without tool backing, assess whether it is load-bearing — would a different value change the final answer?
 
-**A step that only passes through a tool result is not a conclusion.** If a step contains the same value the tool just returned — a bare number, a copied list, a repeated expression — the agent is recording, not asserting. It has not interpreted or committed to anything. Error enters only when the agent states something in its own words that differs from the evidence. A tool call is a question; echoing a tool result is note-taking. Neither is a decisive action.
+**A step that only passes through a tool result is not a conclusion.** If a step contains the same value the tool just returned — a bare number, a copied list, a repeated expression — the agent is recording, not asserting. Even if the value looks incomplete or wrong as a final answer, a passthrough is not an answer — the agent may still transform or build on it in subsequent steps. Error enters only when the agent states something in its own words that differs from the evidence. A tool call is a question; echoing a tool result is note-taking. Neither is a decisive action.
 
 **Compare claimed confidence to actual evidence.** An agent may declare "verified" or "confirmed." Look at what the process actually shows: did independent agents or tools cross-check? If the claimed level of verification exceeds what the trajectory supports, the conclusion may be premature.
 
