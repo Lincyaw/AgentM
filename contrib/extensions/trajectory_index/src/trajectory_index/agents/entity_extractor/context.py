@@ -34,23 +34,21 @@ def _vocabulary_filename(name: str = "default") -> str:
 
 
 def _build_vocabulary_section(vocabulary: str = "default") -> str:
-    """Build the vocabulary section from the selected vocabulary yaml."""
+    """Build the vocabulary section from the selected vocabulary yaml.
+
+    Only symbol_kinds are injected — the extractor outputs symbols, not
+    references or relations (those are code-generated), so injecting
+    reference_kinds/relation_types would add noise for the extraction model.
+    """
     vocab_text = files("trajectory_index").joinpath(_vocabulary_filename(vocabulary)).read_text(encoding="utf-8")
     vocab: dict[str, Any] = yaml.safe_load(vocab_text)
 
-    sections: list[tuple[str, str, bool]] = [
-        ("symbol_kinds", "Symbol kinds", True),
-        ("reference_kinds", "Reference kinds", True),
-        ("relation_types", "Relation types", False),
-    ]
-    lines: list[str] = []
-    for key, heading, skip_unknown in sections:
-        lines.append(f"## {heading}\n")
-        for name, desc in vocab.get(key, {}).items():
-            if skip_unknown and name == "unknown":
-                continue
-            lines.append(f"- `{name}` — {desc}")
-        lines.append("")
+    lines: list[str] = ["## Symbol kinds\n"]
+    for name, desc in vocab.get("symbol_kinds", {}).items():
+        if name == "unknown":
+            continue
+        lines.append(f"- `{name}` — {desc}")
+    lines.append("")
     return "\n".join(lines).strip()
 
 

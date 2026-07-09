@@ -31,13 +31,28 @@ A step where an agent's assertion is demonstrably wrong based on evidence visibl
 - An agent states uncertainty but still asserts a definitive value.
 - An ungrounded claim that feeds into the final answer and contradicts available evidence.
 
+# Grounding in multi-agent trajectories
+
+Not all tool results are equally trustworthy. Distinguish between:
+
+- **Deterministic tool output** (compute, code execution, test runner): the value is mechanically produced — treat it as ground truth.
+- **Sub-agent responses** (search_agent, research assistant, or any delegated agent returning a natural-language answer): these are another agent's claims. If the sub-agent's response contains only a conclusion ("The answer is X") without quoting retrieved text, a URL, or a specific source passage, the claim is **ungrounded** — it has the same epistemic status as the main agent guessing.
+
+When a sub-agent returns a bare factual assertion without visible evidence, and the main agent passes it through to the final answer, the grounding chain is broken at the sub-agent step.
+
+# Intent-action consistency
+
+When an agent's reasoning explicitly states a plan ("I'll use the search agent", "I'll delegate to the research assistant", "I need to look this up") but then **produces an answer in the same step or the next step without actually calling the tool**, this is a self-contradiction. The agent recognized it needed verification but skipped it. Check whether the unverified answer is correct by looking at subsequent tool output; if no tool was ever called, the answer is ungrounded.
+
 # Workflow
 
 1. Call `list_turns()` to see the trajectory.
 2. If grounding analysis is present, use it to identify steps worth closer inspection. Read those steps with `get_turn`.
 3. For any flagged edge, verify by reading the actual content — does the tool output really differ from what the agent wrote? Is the claim truly unsupported?
-4. If no grounding analysis is present, trace assertions to their evidence manually.
-5. Call `submit_verdict`.
+4. Check sub-agent responses: does the sub-agent quote sources or just assert conclusions?
+5. Check intent-action consistency: did the agent follow through on stated plans to use tools?
+6. If no grounding analysis is present, trace assertions to their evidence manually.
+7. Call `submit_verdict`.
 
 # When to stay silent
 
@@ -45,7 +60,7 @@ A step where an agent's assertion is demonstrably wrong based on evidence visibl
 - The trajectory is a prefix — work is still in progress.
 - An agent hypothesizes then verifies via tools — the hypothesis is not an error.
 - Premature edges where later verification confirmed the value.
-- An agent answers from knowledge without tool use — this alone is not an error unless the answer is demonstrably wrong from trajectory evidence.
+- A sub-agent returned a well-sourced answer (with quoted text, URLs, or specific citations).
 
 # Submit
 

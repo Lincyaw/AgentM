@@ -314,6 +314,7 @@ def _populate_index(
             kind=ext_sym.kind.lower(),
             summary=ext_sym.summary,
             aliases=ext_sym.aliases,
+            entity_class=ext_sym.entity_class,
         )
 
     def _resolve(name: str) -> Symbol | None:
@@ -396,23 +397,29 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         # deterministic layer intact). Each is an independent local judgment.
         merged = coref = 0
         model = cfg.resolve_model or cfg.model
+        sf = api.spawn_child_session  # §11: atom passes its own factory
         if cfg.resolve_aliases:
-            from .adjudicate import compare_values, resolve_aliases, resolve_references
+            from .adjudicate import resolve_aliases, resolve_references
 
-            # Pass 2a — name resolution: merge same-entity surface forms.
-            groups = await resolve_aliases(index, model=model, apply=False)
-            if groups:
-                index.apply_alias_merges(groups)
-                merged = sum(len(g) for g in groups) - len(groups)
-            # Pass 2b — coreference: bind anaphors (this / it) to their entities.
-            coref = await resolve_references(index, model=model, apply=False)
+            try:
+                groups = await resolve_aliases(index, model=model, apply=False, session_factory=sf)
+                if groups:
+                    index.apply_alias_merges(groups)
+                    merged = sum(len(g) for g in groups) - len(groups)
+                coref = await resolve_references(index, model=model, apply=False, session_factory=sf)
+            except Exception:
+                logger.warning("Pass 2 (alias/coref) failed, degrading to Pass 1+3", exc_info=True)
 
         # Pass 3 (dataflow): def-use + grounding over the full run (deterministic).
         index.build_dependencies()
 
-        # Pass 3.5 — value fidelity: flag value edges the tool contradicts.
-        if cfg.resolve_aliases:
-            await compare_values(index, model=model, apply=True)
+        # Pass 3.5 — value fidelity (independent of alias resolution).
+        try:
+            from .adjudicate import compare_values
+
+            await compare_values(index, model=model, apply=True, session_factory=sf)
+        except Exception:
+            logger.warning("Pass 3.5 (value fidelity) failed, skipping", exc_info=True)
 
         stats = index.stats(run_id)
         deps = index.get_dependencies()

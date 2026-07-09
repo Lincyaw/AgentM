@@ -251,16 +251,20 @@ def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[
 
 
 def _validate_vocabulary(result: ExtractionResult, vocabulary: str = "default") -> str | None:
-    """Check extraction result symbol kinds against the selected vocabulary yaml."""
+    """Check extraction result symbol kinds and entity_class against vocabulary."""
+    from .index import _ENTITY_CLASS_VALUES
+
     symbol_values, _reference_values, _relation_values = _load_vocabulary_values(vocabulary)
 
     errors: list[str] = []
     for sym in result.symbols:
         if sym.kind not in symbol_values:
             errors.append(f"symbol '{sym.name}' has invalid kind '{sym.kind}'")
+        if sym.entity_class not in _ENTITY_CLASS_VALUES:
+            errors.append(f"symbol '{sym.name}' has invalid entity_class '{sym.entity_class}'")
     if errors:
         valid_kinds = ", ".join(v for v in symbol_values if v != "unknown")
-        return f"Vocabulary errors: {'; '.join(errors)}. Valid symbol kinds: {valid_kinds}."
+        return f"Vocabulary errors: {'; '.join(errors)}. Valid symbol kinds: {valid_kinds}. Valid entity_class: identifier, value, unknown."
     return None
 
 
@@ -335,12 +339,12 @@ def _build_references(
         if not isinstance(blocks, list):
             continue
 
+        cum_offset = 0
         for block in blocks:
             if not isinstance(block, dict):
                 continue
             btype = block.get("type", "")
 
-            # Determine reference kind and extract searchable text
             if btype == "tool_call":
                 kind = "tool_input"
                 args = block.get("arguments", block.get("input", {}))
@@ -370,7 +374,6 @@ def _build_references(
                     continue
                 seen.add(dedup_key)
 
-                # Extract verbatim snippet around the match
                 snippet_start = max(0, pos)
                 snippet_end = min(len(text), pos + len(search_term))
                 snippet = text[snippet_start:snippet_end]
@@ -382,8 +385,10 @@ def _build_references(
                     turn_id=mid,
                     text=snippet,
                     kind=kind,
-                    start=pos,
+                    start=pos + cum_offset,
                 ))
+
+            cum_offset += len(text) + 1
 
     return refs, []
 
@@ -930,14 +935,13 @@ def _build_index_from_chunks_into(
 
     for ext_sym in result.symbols:
         sym_data = {"name": ext_sym.name, "kind": ext_sym.kind, "aliases": ext_sym.aliases}
-        ec = getattr(ext_sym, "entity_class", "identifier")
         index.upsert_symbol(
             name=ext_sym.name,
             kind=ext_sym.kind.lower(),
             summary=ext_sym.summary,
             aliases=ext_sym.aliases,
             namespace=_symbol_namespace(run_id, sym_data),
-            entity_class=ec if ec in ("identifier", "value", "unknown") else "identifier",
+            entity_class=getattr(ext_sym, "entity_class", "identifier"),
         )
 
     # Programmatic references
@@ -952,7 +956,7 @@ def _build_index_from_chunks_into(
             index.add_reference(symbol=resolved, step=ref_step, text=ref.text, kind=ref.kind, start=ref.start)
 
 
-def _build_index_from_chunks(all_chunks: list[ChunkResults]) -> Any:
+def build_index_from_chunks(all_chunks: list[ChunkResults]) -> Any:
     """Rebuild a TrajectoryIndex from extraction chunk results."""
     from .index import TrajectoryIndex
 
@@ -1006,7 +1010,7 @@ async def _collect_async(
         f"output={output_dir} split={split}"
     )
 
-    live_index = _build_index_from_chunks([]) if index_output else None
+    live_index = build_index_from_chunks([]) if index_output else None
 
     output_dir.mkdir(parents=True, exist_ok=True)
     data_file = output_dir / f"{split}.jsonl"

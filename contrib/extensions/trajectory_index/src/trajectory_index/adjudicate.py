@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,30 @@ from .data import extract_json
 
 if TYPE_CHECKING:
     from .index import AliasCandidate, Step, TrajectoryIndex
+
+# Session factory: ``async (config) -> session`` where session has
+# ``.prompt(text)`` and ``.shutdown()``.  The atom passes
+# ``api.spawn_child_session``; offline callers pass ``AgentSession.create``.
+type SessionFactory = Callable[[Any], Coroutine[Any, Any, Any]]
+
+
+def _index_by_id(raw: list[Any]) -> dict[int, dict[str, Any]]:
+    """Index a list of id-keyed dicts by their ``id`` field (missing → skipped)."""
+    by_id: dict[int, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        with contextlib.suppress(TypeError, ValueError, KeyError):
+            by_id[int(item["id"])] = item
+    return by_id
+
+
+def _safe_float(item: dict[str, Any], key: str, default: float = 0.0) -> float:
+    """Coerce a model-returned field to float, defaulting on garbage."""
+    try:
+        return float(item.get(key, default))
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +144,18 @@ def cluster_merges(
     return [g for g in groups.values() if len(g) > 1]
 
 
-async def _ask_model(instructions: str, payload: str, model: str | None) -> list[Any] | None:
-    """One plain-JSON model call; returns the ``verdicts`` list or None."""
+async def _ask_model(
+    instructions: str,
+    payload: str,
+    model: str | None,
+    session_factory: SessionFactory,
+) -> list[Any] | None:
+    """One plain-JSON model call; returns the ``verdicts`` list or None.
+
+    ``session_factory`` creates a session from an ``AgentSessionConfig``.
+    The atom passes ``api.spawn_child_session``; offline callers pass
+    ``AgentSession.create`` (imported on their side, not here — §11).
+    """
     from pathlib import Path
 
     from agentm.core.abi import (
@@ -129,7 +164,6 @@ async def _ask_model(instructions: str, payload: str, model: str | None) -> list
         LoopConfig,
         TextContent,
     )
-    from agentm.core.runtime.session import AgentSession
 
     config = AgentSessionConfig(
         cwd=str(Path.cwd()),
@@ -139,7 +173,7 @@ async def _ask_model(instructions: str, payload: str, model: str | None) -> list
         loop_config=LoopConfig(max_turns=1),
         log_trace_command=False,
     )
-    session = await AgentSession.create(config)
+    session = await session_factory(config)
     try:
         messages = await session.prompt(f"{instructions}\n\n{payload}")
     finally:
@@ -168,12 +202,7 @@ def _align_verdicts(
     candidates: list[AliasCandidate], raw: list[Any]
 ) -> list[SameEntityVerdict]:
     """Map id-keyed model verdicts back onto the candidate list (missing -> false)."""
-    by_id: dict[int, dict[str, Any]] = {}
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        with contextlib.suppress(TypeError, ValueError, KeyError):
-            by_id[int(item["id"])] = item
+    by_id = _index_by_id(raw)
     out: list[SameEntityVerdict] = []
     for i in range(len(candidates)):
         item = by_id.get(i)
@@ -183,7 +212,7 @@ def _align_verdicts(
         out.append(
             SameEntityVerdict(
                 same=bool(item.get("same", False)),
-                confidence=float(item.get("confidence", 0.0)),
+                confidence=_safe_float(item, "confidence"),
                 reason=str(item.get("reason", "")),
             )
         )
@@ -196,8 +225,12 @@ async def resolve_aliases(
     min_ratio: float = 0.82,
     min_confidence: float = 0.5,
     apply: bool = True,
+    session_factory: SessionFactory | None = None,
 ) -> list[list[str]]:
     """Block -> decide same-entity -> cluster -> (optionally) merge. Returns the groups.
+
+    ``session_factory`` is required when called from the atom (§11). Offline
+    callers may pass ``AgentSession.create`` from their own import.
 
     ``apply=True`` folds the groups into the index via ``apply_alias_merges`` and
     rebuilds the ledger. ``apply=False`` returns the groups without mutating (for
@@ -211,8 +244,13 @@ async def resolve_aliases(
     candidates = index.alias_candidates(min_ratio=min_ratio)
     if not candidates:
         return []
+    if session_factory is None:
+        raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
 
-    raw = await _ask_model(_SAME_ENTITY_INSTRUCTIONS, _format_candidates(candidates), model)
+    raw = await _ask_model(
+        _SAME_ENTITY_INSTRUCTIONS, _format_candidates(candidates), model,
+        session_factory=session_factory,
+    )
     if raw is None:
         return []
     verdicts = _align_verdicts(candidates, raw)
@@ -248,12 +286,7 @@ def _step_text(index: TrajectoryIndex, run_id: str, step_id: str, cap: int = 500
 
 def _align_outcomes(n: int, raw: list[Any]) -> list[tuple[str, float, str]]:
     """Map id-keyed {outcome,confidence,reason} back by position (missing -> unclear)."""
-    by_id: dict[int, dict[str, Any]] = {}
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        with contextlib.suppress(TypeError, ValueError, KeyError):
-            by_id[int(item["id"])] = item
+    by_id = _index_by_id(raw)
     out: list[tuple[str, float, str]] = []
     for i in range(n):
         item = by_id.get(i)
@@ -262,12 +295,13 @@ def _align_outcomes(n: int, raw: list[Any]) -> list[tuple[str, float, str]]:
             continue
         oc = str(item.get("outcome", "unclear"))
         oc = oc if oc in ("confirm", "contradict", "unclear") else "unclear"
-        out.append((oc, float(item.get("confidence", 0.0)), str(item.get("reason", ""))))
+        out.append((oc, _safe_float(item, "confidence"), str(item.get("reason", ""))))
     return out
 
 
 async def compare_values(
     index: TrajectoryIndex, model: str | None = None, apply: bool = True,
+    session_factory: SessionFactory | None = None,
 ) -> list[tuple[str, str]]:
     """For value-class edges with a grounded binding to compare against, ask the model
     confirm/contradict and flag ``contradicted``. Local: fires only on value entities.
@@ -287,6 +321,8 @@ async def compare_values(
             targets.append((d, grounded_step))
     if not targets:
         return []
+    if session_factory is None:
+        raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
 
     rows = [
         {
@@ -299,6 +335,7 @@ async def compare_values(
     ]
     raw = await _ask_model(
         _VALUE_COMPARE_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
+        session_factory=session_factory,
     )
     if raw is None:
         return []
@@ -336,6 +373,7 @@ Return ONLY: {"verdicts": [{"id": 0, "entity": <candidate-index or -1>, "confide
 async def resolve_references(
     index: TrajectoryIndex, model: str | None = None,
     window: int = 8, max_candidates: int = 8, apply: bool = True,
+    session_factory: SessionFactory | None = None,
 ) -> int:
     """Detect anaphors in agent text, bind each to an antecedent entity (LLM), and add
     a resolved reference so the def-use layer links it. Returns #anaphors resolved.
@@ -375,6 +413,8 @@ async def resolve_references(
 
     if not items:
         return 0
+    if session_factory is None:
+        raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
 
     rows = []
     for i, (st, phrase, cands) in enumerate(items):
@@ -389,16 +429,14 @@ async def resolve_references(
                 for j, sid in enumerate(cands)
             ],
         })
-    raw = await _ask_model(_COREF_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model)
+    raw = await _ask_model(
+        _COREF_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
+        session_factory=session_factory,
+    )
     if raw is None:
         return 0
 
-    by_id: dict[int, dict[str, Any]] = {}
-    for it in raw:
-        if isinstance(it, dict):
-            with contextlib.suppress(TypeError, ValueError, KeyError):
-                by_id[int(it["id"])] = it
-
+    by_id = _index_by_id(raw)
     resolved = 0
     for i, (st, phrase, cands) in enumerate(items):
         v = by_id.get(i)
@@ -410,11 +448,9 @@ async def resolve_references(
             continue
         sym = index.symbols[cands[pick]]
         pos = st.content.lower().find(phrase.lower())
-        # the added reference records form="anaphor" and text=phrase (the surface it
-        # was resolved from); Pass 3 then links it as a use of `sym`.
         index.add_reference(
-            symbol=sym, step=st, text=phrase, kind="mention",
-            start=max(0, pos), form="anaphor",
+            symbol=sym, step=st, text=sym.canonical_name, kind="mention",
+            start=max(0, pos), form="anaphor", resolved_from=phrase,
         )
         resolved += 1
 

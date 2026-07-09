@@ -307,11 +307,10 @@ async def _run_index_extraction(
     """Run LLM-based symbol extraction on a trajectory, return (symbols, references)."""
     import contextlib
 
-    from agentm.core.abi import LoopConfig
-    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.abi import AgentSessionConfig, LoopConfig
     from agentm.core.runtime import AgentSession
     from trajectory_index.agents import extractor_scenario
-    from trajectory_index.atom import _try_parse_response
+    from trajectory_index.data import _try_parse_response
 
     prompt = json.dumps(trajectory, ensure_ascii=False, indent=2)
     config = AgentSessionConfig(
@@ -413,7 +412,7 @@ async def _build_index_for_trajectory(
     index_vocabulary: str,
 ) -> Any | None:
     """Run the full grounding pipeline (Pass 1-3.5) on a trajectory."""
-    from trajectory_index.data import _build_index_from_chunks, extract_incremental
+    from trajectory_index.data import build_index_from_chunks, extract_incremental
 
     try:
         chunks = await extract_incremental(
@@ -422,16 +421,18 @@ async def _build_index_for_trajectory(
         )
         if not chunks:
             return None
-        idx = _build_index_from_chunks([chunks])
+        idx = build_index_from_chunks([chunks])
         try:
+            from agentm.core.runtime.session import AgentSession
             from trajectory_index.adjudicate import compare_values, resolve_aliases, resolve_references
 
-            groups = await resolve_aliases(idx, model=index_model, apply=False)
+            sf = AgentSession.create
+            groups = await resolve_aliases(idx, model=index_model, apply=False, session_factory=sf)
             if groups:
                 idx.apply_alias_merges(groups)
-            await resolve_references(idx, model=index_model, apply=False)
+            await resolve_references(idx, model=index_model, apply=False, session_factory=sf)
             idx.build_dependencies()
-            await compare_values(idx, model=index_model, apply=True)
+            await compare_values(idx, model=index_model, apply=True, session_factory=sf)
         except Exception:
             logger.debug("grounding passes 2-3.5 failed, using Pass 1+3 only", exc_info=True)
             idx.build_dependencies()
@@ -450,7 +451,12 @@ async def _auditor_call(
     cwd: str,
     prompt_name: str,
 ) -> dict[str, Any]:
-    """Run the auditor once on a serialized trajectory prefix."""
+    """Run the auditor once on a serialized trajectory prefix.
+
+    Returns the auditor result dict with extra keys:
+    - ``grounding_summary``: the injected grounding analysis text (or None)
+    - ``auditor_session_id``: session ID for the auditor child (from trace log)
+    """
     from llmharness.agents.auditor.context import (
         build_auditor_system_prompt,
         load_auditor_prompt,
@@ -482,7 +488,7 @@ async def _auditor_call(
         prompt_text = prompt_text.rstrip() + "\n\n" + grounding_summary
 
     child = StandaloneChildRunner(cwd)
-    return await child.run_auditor(
+    result = await child.run_auditor(
         prompt_text=prompt_text,
         tools_config={},
         model=model,
@@ -491,6 +497,8 @@ async def _auditor_call(
         symbols=[],
         references=[],
     )
+    result["grounding_summary"] = grounding_summary
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +547,7 @@ async def _eval_safe(
         ),
         "error": result.get("error"),
         "latency_ms": elapsed_ms,
+        "grounding_summary": result.get("grounding_summary"),
     }
 
 
@@ -567,6 +576,7 @@ async def _eval_unsafe_incremental(
     detection_step = -1
     reminder_text = ""
     last_error: str | None = None
+    last_grounding: str | None = None
 
     for k in range(num_turns):
         prefix = aftraj_to_trajectory(turns_raw, up_to=k)
@@ -574,6 +584,7 @@ async def _eval_unsafe_incremental(
             prefix, model=model, index_model=index_model, index_vocabulary=index_vocabulary, cwd=cwd, prompt_name=prompt_name,
         )
         n_calls += 1
+        last_grounding = result.get("grounding_summary")
 
         verdict = result.get("verdict")
         if verdict is not None and verdict.surface_reminder:
@@ -603,6 +614,7 @@ async def _eval_unsafe_incremental(
         "reminder_text": reminder_text,
         "error": last_error,
         "latency_ms": elapsed_ms,
+        "grounding_summary": last_grounding,
     }
 
 

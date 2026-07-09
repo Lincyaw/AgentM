@@ -351,8 +351,10 @@ class TrajectoryIndex:
         summary: str | None = None,
         aliases: Sequence[str] = (),
         namespace: str = "",
-        entity_class: EntityClass = "identifier",
+        entity_class: EntityClass | str = "identifier",
     ) -> Symbol:
+        if entity_class not in _ENTITY_CLASS_VALUES:
+            entity_class = "identifier"  # type: ignore[assignment]
         norm_key = self._name_key(name, namespace)
         existing_ids = self._symbol_ids_by_norm.get(norm_key)
         if existing_ids:
@@ -364,7 +366,7 @@ class TrajectoryIndex:
                 symbol.summary = summary
             # a concrete class wins over a prior "unknown" (a later step pinned it down)
             if entity_class != "unknown" and symbol.entity_class == "unknown":
-                symbol.entity_class = entity_class
+                symbol.entity_class = entity_class  # type: ignore[assignment]
             for alias in aliases:
                 symbol.aliases.add(alias)
                 self._index_symbol_name(symbol_id, alias, namespace)
@@ -381,7 +383,7 @@ class TrajectoryIndex:
             kind=kind,
             summary=summary,
             aliases=set(aliases),
-            entity_class=entity_class,
+            entity_class=entity_class,  # type: ignore[arg-type]
             metadata=metadata,
         )
         self.symbols[symbol_id] = symbol
@@ -401,6 +403,7 @@ class TrajectoryIndex:
         confidence: float = 1.0,
         form: RefForm = "direct",
         value: str | None = None,
+        resolved_from: str | None = None,
     ) -> Reference:
         if end is None:
             end = start + len(text)
@@ -425,6 +428,7 @@ class TrajectoryIndex:
             structured=drives_defuse(symbol.entity_class),
             form=form,
             value=value,
+            resolved_from=resolved_from,
         )
         self.references[ref_id] = ref
         self._ref_ids_by_symbol[symbol.id].append(ref_id)
@@ -608,6 +612,15 @@ class TrajectoryIndex:
         self.dependencies = {}
         self._dep_ids_by_symbol = defaultdict(list)
 
+        # Reset tool_input grounding upgrades from prior builds so the rebuild
+        # is truly idempotent — without this, a re-run sees already-upgraded
+        # refs and may flip risk labels (premature -> grounded).
+        for ref_id, ref in self.references.items():
+            if ref.grounds_ref_id is not None:
+                self.references[ref_id] = replace(
+                    ref, grounded=grounded_from_kind(ref.kind), grounds_ref_id=None,
+                )
+
         for symbol_id in self.symbols:
             refs = self.get_references(symbol_id)  # sorted (run_id, step index, start)
             if not refs or not any(r.structured for r in refs):
@@ -717,6 +730,7 @@ class TrajectoryIndex:
             entry: dict[str, str | list[str]] = {
                 "name": s.canonical_name,
                 "kind": s.kind,
+                "entity_class": s.entity_class,
             }
             if s.summary:
                 entry["summary"] = s.summary
@@ -751,9 +765,14 @@ class TrajectoryIndex:
     def validate(self) -> list[str]:
         """Check referential integrity. Returns a list of error descriptions."""
         errors: list[str] = []
+        for sym in self.symbols.values():
+            if sym.definition_ref_id and sym.definition_ref_id not in self.references:
+                errors.append(f"symbol {sym.id} definition_ref_id {sym.definition_ref_id} not found")
         for ref in self.references.values():
             if ref.symbol_id not in self.symbols:
                 errors.append(f"reference {ref.id} points to missing symbol {ref.symbol_id}")
+            if ref.grounds_ref_id and ref.grounds_ref_id not in self.references:
+                errors.append(f"reference {ref.id} grounds_ref_id {ref.grounds_ref_id} not found")
         for rel in self.relations.values():
             if rel.from_symbol_id not in self.symbols:
                 errors.append(f"relation {rel.id} from_symbol {rel.from_symbol_id} not found")
@@ -766,6 +785,10 @@ class TrajectoryIndex:
                 errors.append(f"dependency {dep.id} def_ref {dep.def_ref_id} not found")
             if dep.use_ref_id not in self.references:
                 errors.append(f"dependency {dep.id} use_ref {dep.use_ref_id} not found")
+            if dep.def_ref_id in self.references and self.references[dep.def_ref_id].symbol_id != dep.symbol_id:
+                errors.append(f"dependency {dep.id} def_ref belongs to {self.references[dep.def_ref_id].symbol_id}, not {dep.symbol_id}")
+            if dep.use_ref_id in self.references and self.references[dep.use_ref_id].symbol_id != dep.symbol_id:
+                errors.append(f"dependency {dep.id} use_ref belongs to {self.references[dep.use_ref_id].symbol_id}, not {dep.symbol_id}")
         return errors
 
     # ---- persistence ----
@@ -889,6 +912,8 @@ class TrajectoryIndex:
         index = cls()
         index.indexed_message_count = data.get("stats", {}).get("indexed_message_count", 0)
 
+        from loguru import logger as _log
+
         for s in data.get("steps", []):
             step = Step(
                 run_id=str(s.get("run_id", "")),
@@ -916,6 +941,8 @@ class TrajectoryIndex:
             symbol_id = str(s.get("id") or default_id)
             raw_ec = s.get("entity_class")
             entity_class: EntityClass = raw_ec if raw_ec in _ENTITY_CLASS_VALUES else "identifier"
+            if raw_ec and raw_ec not in _ENTITY_CLASS_VALUES:
+                _log.warning(f"load: symbol {s.get('name')!r} entity_class {raw_ec!r} invalid, defaulting to 'identifier'")
             symbol = Symbol(
                 id=symbol_id,
                 canonical_name=str(s["name"]).strip(),
@@ -930,8 +957,6 @@ class TrajectoryIndex:
             index._index_symbol_name(symbol.id, symbol.canonical_name, namespace)
             for alias in symbol.aliases:
                 index._index_symbol_name(symbol.id, alias, namespace)
-
-        from loguru import logger as _log
 
         for r in data.get("references", data.get("mentions", [])):
             sym_id = r.get("symbol_id", r.get("entity_id", ""))
@@ -1024,6 +1049,8 @@ class TrajectoryIndex:
                 continue
             raw_risk = d.get("risk")
             risk: Risk = raw_risk if raw_risk in _RISK_VALUES else "grounded"
+            if raw_risk and raw_risk not in _RISK_VALUES:
+                _log.warning(f"load: dependency {d.get('id')} risk {raw_risk!r} invalid, defaulting to 'grounded'")
             run_id = str(d.get("run_id", ""))
             def_step_id = str(d.get("def_step_id", ""))
             use_step_id = str(d.get("use_step_id", ""))

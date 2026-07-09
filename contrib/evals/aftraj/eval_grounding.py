@@ -75,19 +75,21 @@ def aftraj_to_messages(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 async def build_index(msgs: list[dict[str, Any]], *, model: str, vocab: str, full: bool, run_id: str) -> Any:
     """Pass 1 (extract+classify); with ``full`` also run 2a/2b/3/3.5."""
-    from trajectory_index.data import _build_index_from_chunks, extract_incremental
+    from trajectory_index.data import build_index_from_chunks, extract_incremental
 
     chunks = await extract_incremental(msgs, model=model, run_id=run_id, chunk_size=(4, 6), vocabulary=vocab)
-    idx = _build_index_from_chunks([chunks])
+    idx = build_index_from_chunks([chunks])
     if full:
+        from agentm.core.runtime.session import AgentSession
         from trajectory_index.adjudicate import compare_values, resolve_aliases, resolve_references
 
-        groups = await resolve_aliases(idx, model=model, apply=False)
+        sf = AgentSession.create
+        groups = await resolve_aliases(idx, model=model, apply=False, session_factory=sf)
         if groups:
             idx.apply_alias_merges(groups)
-        await resolve_references(idx, model=model, apply=False)
+        await resolve_references(idx, model=model, apply=False, session_factory=sf)
         idx.build_dependencies()
-        await compare_values(idx, model=model, apply=True)
+        await compare_values(idx, model=model, apply=True, session_factory=sf)
     else:
         idx.build_dependencies()
     return idx
