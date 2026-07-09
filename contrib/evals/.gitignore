@@ -1,5 +1,5 @@
 */**
-__pycache__/
+
 !src/
 !src/**
 !rescue_window/
@@ -8,3 +8,9 @@ __pycache__/
 !tau2/**
 !longcli/
 !longcli/**
+
+# re-ignore after un-ignore
+__pycache__/
+*.pyc
+rescue_window/domains/*/results/
+rescue_window/corpus_*.json
