@@ -42,7 +42,7 @@ agent-env = [
     "arl-env>=0.19.8",
 ]
 eval = [
-    "agentm-eval",
+    "agentm-eval[all]",
     "agentm-rescue-window",
     "duckdb>=1.5.2",
     # Fault-propagation-graph schema: the verifier natively emits
