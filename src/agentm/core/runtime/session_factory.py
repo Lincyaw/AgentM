@@ -172,6 +172,25 @@ def _default_model_resolver(model_name: str) -> tuple[str, dict[str, Any]] | Non
         return None
 
 
+def _resolve_model_to_provider(model: str | None) -> tuple[str, dict[str, Any]]:
+    """Resolve ``AgentSessionConfig.model`` to a provider spec tuple.
+
+    Applies the full precedence chain: config.toml profile → env vars →
+    registry default, including ``AGENTM_REASONING_EFFORT`` and
+    ``ProviderRegistry.build()`` env injection (base_url, verify_ssl, …).
+    """
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import (
+        apply_reasoning_effort,
+        resolve_provider_model,
+    )
+
+    provider_id, _model_id, profile = resolve_provider_model(model_flag=model)
+    build_config = profile.to_build_config() if profile else {"model": _model_id}
+    apply_reasoning_effort(build_config, None)
+    return DEFAULT_PROVIDER_REGISTRY.build(provider_id, dict(build_config))
+
+
 def _refresh_active_provider(
     active_provider_ref: Ref[ProviderConfig | None],
     providers: dict[str, ProviderConfig],
@@ -306,6 +325,10 @@ async def create_agent_session(
     from agentm.extensions import discover as discover_mod
 
     config = replace(config, cwd=_normalize_session_cwd(config.cwd))
+
+    if config.provider is None and config.model is not None:
+        config = replace(config, provider=_resolve_model_to_provider(config.model))
+
     bus = config.bus if config.bus is not None else EventBus()
     session_manager: SessionManager = (
         config.session_manager

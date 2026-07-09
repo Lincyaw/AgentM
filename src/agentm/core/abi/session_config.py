@@ -51,6 +51,18 @@ class AgentSessionConfig:
     session boundary, then passes the normalized absolute path to atoms and
     runtime services.
     """
+    model: str | None = None
+    """Model profile name (from ``config.toml``) or raw model identifier.
+
+    When set (and ``provider`` is ``None``), the session factory resolves
+    this to a full provider spec internally — applying the standard
+    precedence chain: ``config.toml`` profile → ``AGENTM_PROVIDER`` env →
+    registry default, plus ``AGENTM_REASONING_EFFORT`` and env-based
+    overrides (``base_url``, ``verify_ssl``, ``default_headers``, …).
+
+    Callers that only need to pick a model should set ``model`` and leave
+    ``provider`` unset. The low-level ``provider`` tuple is still available
+    for advanced use cases that need full control."""
     provider: tuple[str, dict[str, Any]] | None = None
     extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     scenario: str | None = None

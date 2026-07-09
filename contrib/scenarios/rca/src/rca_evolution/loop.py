@@ -40,28 +40,22 @@ class EvolutionResult:
 
 def _resolve_provider(model_profile: str) -> tuple[str, dict[str, Any]]:
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib import resolve_model_profile
+    from agentm.core.lib.user_config import (
+        apply_reasoning_effort,
+        resolve_provider_model,
+    )
 
-    profile = resolve_model_profile(model_profile)
-    if profile is None:
-        raise ValueError(
-            f"no $AGENTM_HOME/config.toml profile (default ~/.agentm/config.toml): "
-            f"{model_profile!r}"
-        )
-    return DEFAULT_PROVIDER_REGISTRY.build(profile.provider, profile.to_build_config())
+    provider_id, _model_id, profile = resolve_provider_model(model_flag=model_profile)
+    build_config = profile.to_build_config() if profile else {"model": _model_id}
+    apply_reasoning_effort(build_config, None)
+    return DEFAULT_PROVIDER_REGISTRY.build(provider_id, dict(build_config))
 
 
-def _eval_observability_dir(env: dict[str, str]) -> Path:
+def _eval_observability_dir() -> Path:
     """Resolve the observability directory used by the eval subprocess."""
-    from agentm.core.lib import expand_path
+    from agentm.core.lib.observability_dir import resolve_observability_dir
 
-    if obs_dir := env.get("AGENTM_OBSERVABILITY_DIR"):
-        return expand_path(obs_dir)
-    if agentm_home := env.get("AGENTM_HOME"):
-        return expand_path(agentm_home) / "observability"
-    if home := env.get("HOME"):
-        return Path(home).expanduser() / ".agentm" / "observability"
-    return Path.home() / ".agentm" / "observability"
+    return resolve_observability_dir()
 
 
 def _effective_env(env_override: dict[str, str] | None = None) -> dict[str, str]:
@@ -207,7 +201,7 @@ async def run_evolution_loop(
     if provider_cfg.get("base_url"):
         eval_env["OPENAI_BASE_URL"] = provider_cfg["base_url"]
     eval_env.update(env_vars or {})
-    eval_obs_dir = _eval_observability_dir(_effective_env(eval_env))
+    eval_obs_dir = _eval_observability_dir()
 
     result = EvolutionResult()
 

@@ -23,7 +23,7 @@ from trajectory_index.agents.entity_extractor.schema import (
     ExtractedSymbol,
     ExtractionResult,
 )
-from trajectory_index.data import JsonValue, ProviderSpec, extract, resolve_provider
+from trajectory_index.data import JsonValue, extract
 
 # ---------------------------------------------------------------------------
 # Case loading
@@ -146,11 +146,11 @@ def grade(case: EvalCase, result: ExtractionResult) -> GradeResult:
 
 async def run_case(
     case: EvalCase,
-    provider: ProviderSpec,
+    model: str,
 ) -> GradeResult:
     t0 = time.monotonic()
     try:
-        result = await extract(case.messages, provider)
+        result = await extract(case.messages, model=model)
         if result is None:
             g = GradeResult(case_id=case.id, error="no parseable JSON in response")
             g.latency_s = time.monotonic() - t0
@@ -204,7 +204,7 @@ def log_report(grades: list[GradeResult]) -> None:
 
 
 async def async_main(model: str, cases_dir: Path, concurrency: int) -> list[GradeResult]:
-    provider = resolve_provider(model)
+    resolved_model = model
     case_files = sorted(cases_dir.glob("*.yaml"))
     if not case_files:
         logger.error(f"No YAML cases found in {cases_dir}")
@@ -218,7 +218,7 @@ async def async_main(model: str, cases_dir: Path, concurrency: int) -> list[Grad
     async def _run_with_sem(case: EvalCase) -> GradeResult:
         async with sem:
             logger.info(f"[{case.id}] starting...")
-            g = await run_case(case, provider)
+            g = await run_case(case, resolved_model)
             if g.error:
                 logger.error(f"[{case.id}] failed: {g.error}")
             else:

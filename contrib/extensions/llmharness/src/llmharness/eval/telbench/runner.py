@@ -36,7 +36,8 @@ async def evaluate_instance(
     instance: TelBenchInstance,
     *,
     mode: Literal["posthoc", "online"],
-    provider: tuple[str, dict[str, Any]] | None,
+    provider: tuple[str, dict[str, Any]] | None = None,
+    model: str | None = None,
     cwd: str,
     audit_interval: int = 5,
     auditor_prompt: str = "minimal_index",
@@ -67,6 +68,7 @@ async def evaluate_instance(
         if auditor_due:
             config = AgentSessionConfig(
                 cwd=cwd,
+                model=model,
                 provider=provider,
                 scenario=aud_scenario,
                 atom_config_overrides={
@@ -141,7 +143,8 @@ async def evaluate_instance(
 async def evaluate_instance_tel(
     instance: TelBenchInstance,
     *,
-    provider: tuple[str, dict[str, Any]] | None,
+    provider: tuple[str, dict[str, Any]] | None = None,
+    model: str | None = None,
     cwd: str,
     prompt_name: str = "default",
 ) -> EvalResult:
@@ -158,7 +161,7 @@ async def evaluate_instance_tel(
     from ...agents.tel.tools import SUBMIT_TOOL_NAME
 
     if prompt_name == "2pass":
-        return await _run_tel_2pass(instance, provider=provider, cwd=cwd)
+        return await _run_tel_2pass(instance, provider=provider, model=model, cwd=cwd)
 
     _OBS = "agentm.extensions.builtin.observability"
     _OPS = "agentm.extensions.builtin.operations"
@@ -190,6 +193,7 @@ async def evaluate_instance_tel(
 
     config = AgentSessionConfig(
         cwd=cwd,
+        model=model,
         provider=provider,
         extensions=extensions,
         purpose=f"tel_eval_{instance.id}",
@@ -300,7 +304,8 @@ _TEL_WORKFLOW_SCRIPT = Path(__file__).parents[2] / "agents" / "tel" / "workflow.
 async def _run_tel_2pass(
     instance: TelBenchInstance,
     *,
-    provider: tuple[str, dict[str, Any]] | None,
+    provider: tuple[str, dict[str, Any]] | None = None,
+    model: str | None = None,
     cwd: str,
 ) -> EvalResult:
     """Two-pass TEL via the workflow module (note → reason → submit)."""
@@ -320,6 +325,7 @@ async def _run_tel_2pass(
 
     config = AgentSessionConfig(
         cwd=cwd,
+        model=model,
         provider=provider,
         extensions=[
             ("agentm.extensions.builtin.observability", {}),
@@ -393,6 +399,7 @@ async def reflect_on_result(
     instance: TelBenchInstance,
     *,
     provider: tuple[str, dict[str, Any]] | None = None,
+    model: str | None = None,
     cwd: str = "/tmp/tel_reflect",
 ) -> str:
     """Resume the reason session with gold labels and a reflection prompt.
@@ -438,18 +445,22 @@ async def reflect_on_result(
 
     config = AgentSessionConfig(
         cwd=cwd,
+        model=model,
         provider=provider,
         session_manager=session_manager,
         session_id=result.reason_session_id,
         extensions=[
             ("agentm.extensions.builtin.observability", {}),
             ("agentm.extensions.builtin.operations", {}),
-            (_TEL_CTX, {
-                "question": instance.question,
-                "spans": instance.spans,
-                "stages": {},
-                "prompt_name": "reflect",
-            }),
+            (
+                _TEL_CTX,
+                {
+                    "question": instance.question,
+                    "spans": instance.spans,
+                    "stages": {},
+                    "prompt_name": "reflect",
+                },
+            ),
             (_TEL_TOOLS, {}),
         ],
         purpose=f"tel_reflect_{result.instance_id}",
@@ -468,10 +479,7 @@ async def reflect_on_result(
 
     for msg in reversed(messages):
         if isinstance(msg, AssistantMessage):
-            parts = [
-                b.text for b in msg.content
-                if isinstance(b, TextContent) and b.text.strip()
-            ]
+            parts = [b.text for b in msg.content if isinstance(b, TextContent) and b.text.strip()]
             if parts:
                 return "\n".join(parts)
 

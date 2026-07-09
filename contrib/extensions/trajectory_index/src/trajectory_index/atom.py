@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from .agents import extractor_scenario
 from .agents.entity_extractor.schema import ExtractionResult
-from .data import JsonValue, ProviderSpec, resolve_provider
+from .data import JsonValue, ProviderSpec
 from .index import (
     Step,
     StepRole,
@@ -76,19 +76,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=TrajectoryIndexConfig,
 )
-
-
-# ---------------------------------------------------------------------------
-# Provider resolution
-# ---------------------------------------------------------------------------
-
-
-def _resolve_provider_safe(model_name: str) -> ProviderSpec | None:
-    try:
-        return resolve_provider(model_name)
-    except RuntimeError:
-        logger.warning(f"could not resolve model profile {model_name!r}")
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -210,10 +197,11 @@ def _try_parse_response(
 async def run_extraction(
     api: ExtensionAPI,
     messages: list[dict[str, JsonValue]],
-    provider: ProviderSpec | None,
+    provider: ProviderSpec | None = None,
     registry: list[dict[str, Any]] | None = None,
     message_id_start: int = 0,
     vocabulary: str = "default",
+    model: str | None = None,
 ) -> ExtractionResult | None:
     """Public extraction entry point: index a trajectory via a child session.
 
@@ -221,6 +209,11 @@ async def run_extraction(
     (e.g. llmharness) that want a one-shot extraction over a serialized
     trajectory. Vocabulary selection is explicit — no module globals or
     environment variables.
+
+    Prefer ``model=`` (a config.toml profile name) over ``provider=``
+    (a raw ``(extension_module, config)`` tuple); the session factory
+    resolves the model internally. ``provider`` is kept for backward
+    compatibility.
     """
     from .data import _reindex_messages
 
@@ -238,6 +231,7 @@ async def run_extraction(
     scenario = extractor_scenario()
     config = AgentSessionConfig(
         cwd=api.cwd,
+        model=model,
         provider=provider,
         scenario=scenario,
         purpose="trajectory_symbol_extractor",
@@ -370,14 +364,13 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
             index.add_step(step)
 
         registry = index.registry_snapshot() if watermark > 0 else None
-        provider = _resolve_provider_safe(cfg.model)
         result = await run_extraction(
             api,
             new_msgs,
-            provider,
             registry=registry,
             message_id_start=watermark,
             vocabulary=cfg.vocabulary,
+            model=cfg.model,
         )
         if result is None:
             return ToolResult(

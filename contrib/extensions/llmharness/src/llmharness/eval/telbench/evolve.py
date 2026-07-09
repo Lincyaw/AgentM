@@ -8,24 +8,19 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
 from loguru import logger
 
 try:
-    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib import resolve_model_profile
     from agentm.env import autoload_dotenv
     _HAS_AGENTM = True
 except ImportError:
-    DEFAULT_PROVIDER_REGISTRY = None  # type: ignore[assignment]
-    resolve_model_profile = None  # type: ignore[assignment]
     autoload_dotenv = None  # type: ignore[assignment]
     _HAS_AGENTM = False
-    logger.debug("telbench.evolve: agentm SDK not available; model profile resolution disabled")
+    logger.debug("telbench.evolve: agentm SDK not available")
 
 _PROMPTS_DIR = Path(__file__).parents[2] / "agents" / "tel" / "prompts"
 
@@ -53,7 +48,7 @@ def _load_reflections(directory: Path) -> list[dict[str, str | float]]:
 
 async def _run_evolve(
     reflections: list[dict[str, str | float]],
-    provider: tuple[str, dict[str, Any]] | None,
+    model: str | None,
     cwd: str,
 ) -> str:
     """Create an AgentM session that edits prompt files directly."""
@@ -85,7 +80,7 @@ async def _run_evolve(
 
     config = AgentSessionConfig(
         cwd=cwd,
-        provider=provider,
+        model=model,
         extensions=[
             ("agentm.extensions.builtin.observability", {}),
             ("agentm.extensions.builtin.operations", {}),
@@ -149,29 +144,11 @@ def evolve(
 
     typer.echo(f"Loaded {len(reflection_data)} reflections")
 
-    resolved_provider: tuple[str, dict[str, Any]] | None = None
-    if model and _HAS_AGENTM:
-        profile = resolve_model_profile(model)
-        if profile is not None:
-            resolved_provider = DEFAULT_PROVIDER_REGISTRY.build(
-                profile.provider, profile.to_build_config(), env=os.environ
-            )
-    if resolved_provider is None and provider:
-        if ":" in provider:
-            mod, payload = provider.split(":", 1)
-            resolved_provider = mod.strip(), json.loads(payload)
-        else:
-            resolved_provider = provider, {}
-    if resolved_provider is None and _HAS_AGENTM:
-        profile = resolve_model_profile(None)
-        if profile is not None:
-            resolved_provider = DEFAULT_PROVIDER_REGISTRY.build(
-                profile.provider, profile.to_build_config(), env=os.environ
-            )
+    resolved_model = model or (os.environ.get("AGENTM_MODEL") if _HAS_AGENTM else None)
 
     typer.echo("Running evolve agent…")
     summary = asyncio.run(
-        _run_evolve(reflection_data, resolved_provider, str(cwd.resolve()))
+        _run_evolve(reflection_data, resolved_model, str(cwd.resolve()))
     )
 
     if summary_file:

@@ -112,31 +112,6 @@ MANIFEST = ExtensionManifest(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_provider(
-    model_name: str | None,
-    legacy: ProviderConfig | None,
-) -> tuple[str, dict[str, Any]] | None:
-    """Resolve a provider config from a config.toml profile name or legacy ProviderConfig."""
-    if model_name is not None:
-        from agentm.ai import DEFAULT_PROVIDER_DESCRIPTORS
-        from agentm.core.lib import resolve_model_profile
-
-        profile = resolve_model_profile(model_name)
-        if profile is None:
-            logger.warning(f"model profile {model_name!r} not found in config.toml")
-            return None
-        ext_module: str | None = None
-        for desc in DEFAULT_PROVIDER_DESCRIPTORS:
-            if desc.id == profile.provider:
-                ext_module = desc.extension_module
-                break
-        if ext_module is None:
-            logger.warning(f"provider {profile.provider!r} (from model {model_name!r}) has no extension module")
-            return None
-        return (ext_module, dict(profile.to_build_config()))
-    if legacy is not None:
-        return (legacy.module, dict(legacy.config))
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +243,12 @@ async def _run_child(
     purpose: str,
     atom_config_overrides: dict[str, dict[str, Any]] | None = None,
     extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
-    provider: tuple[str, dict[str, Any]] | None = None,
+    model: str | None = None,
 ) -> list[AgentMessage] | None:
     """Spawn a child agent session and return its messages, or None on failure."""
     config = AgentSessionConfig(
         cwd=api.cwd,
-        provider=provider,
+        model=model,
         scenario=scenario,
         extra_extensions=extra_extensions or [],
         atom_config_overrides=atom_config_overrides or {},
@@ -335,12 +310,14 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     enable_reminders = cfg.enable_reminders
     finalize_tool = cfg.finalize_tool
 
-    auditor_provider = _resolve_provider(cfg.auditor_model, cfg.auditor_provider)
-    if auditor_provider:
-        logger.info("llmharness: auditor_model={!r} resolved to {}", cfg.auditor_model, auditor_provider[0])
+    auditor_model = cfg.auditor_model
+    if auditor_model:
+        logger.info("llmharness: auditor_model={!r}", auditor_model)
+    elif cfg.auditor_provider:
+        logger.info("llmharness: auditor uses legacy provider config, auditor inherits parent provider")
     else:
-        logger.info("llmharness: auditor_model={!r}, auditor inherits parent provider", cfg.auditor_model)
-    methodology_provider = _resolve_provider(cfg.methodology_model, None) if cfg.methodology_model else auditor_provider
+        logger.info("llmharness: auditor inherits parent provider")
+    methodology_model = cfg.methodology_model or auditor_model
 
     # State
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
@@ -424,7 +401,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             scenario="llmharness:methodology_gen",
             prompt=f"Generate auditor methodology for the following task spec:\n\n{task_spec}",
             purpose="methodology_generation",
-            provider=methodology_provider,
+            model=methodology_model,
         )
         if child_msgs is None:
             logger.warning("llmharness: methodology generation child failed")
@@ -445,24 +422,15 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     # ------------------------------------------------------------------
 
     _latest_index: dict[str, Any] | None = None
-    _idx_provider: Any = None
 
     if cfg.enable_index:
         try:
-            from trajectory_index.data import resolve_provider as _resolve_idx_provider
+            import trajectory_index.atom  # noqa: F401 — verify import
         except ImportError:
             logger.exception(
                 "llmharness: enable_index=true but trajectory-index is not "
                 "installed — index extraction disabled"
             )
-        else:
-            if cfg.index_model:
-                try:
-                    _idx_provider = _resolve_idx_provider(cfg.index_model)
-                except Exception:
-                    logger.exception(
-                        "llmharness: index_model {!r} not resolvable", cfg.index_model
-                    )
 
     async def _update_index(traj: list[dict[str, Any]]) -> None:
         nonlocal _latest_index
@@ -472,7 +440,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             from llmharness.context_index import build_context_index
 
             extraction = await run_extraction(
-                api, traj, _idx_provider, vocabulary=cfg.index_vocabulary
+                api, traj, vocabulary=cfg.index_vocabulary,
+                model=cfg.index_model,
             )
             if extraction is not None:
                 symbols = [s.model_dump() for s in extraction.symbols]
@@ -581,7 +550,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                     },
                     **_sandbox_attach_overrides(),
                 },
-                provider=auditor_provider,
+                model=auditor_model,
             )
             if child_msgs is not None:
                 args = _terminal_tool_args(child_msgs, SUBMIT_VERDICT_TOOL_NAME)

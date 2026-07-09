@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Annotated, Any, Final, TypedDict, cast
+from typing import Annotated, Any, Final, TypedDict
 
 import typer
 from loguru import logger
@@ -193,39 +193,6 @@ def extract_json(text: str) -> dict[str, JsonValue] | None:
     return None
 
 
-def resolve_provider(model_name: str) -> ProviderSpec:
-    """Resolve a config.toml model profile to a provider tuple."""
-    from agentm.ai import DEFAULT_PROVIDER_DESCRIPTORS
-    from agentm.core.lib import resolve_model_profile
-
-    profile = resolve_model_profile(model_name)
-    if profile is None:
-        raise RuntimeError(f"model profile {model_name!r} not found in config.toml")
-    for desc in DEFAULT_PROVIDER_DESCRIPTORS:
-        if desc.id == profile.provider and desc.extension_module:
-            config = cast(dict[str, JsonValue], dict(profile.to_build_config()))
-            if desc.extension_module == "agentm.extensions.builtin.llm_openai":
-                _inject_response_format(config)
-                config.setdefault("max_output_tokens", 32768)
-            return (desc.extension_module, config)
-    raise RuntimeError(f"no extension module for provider {profile.provider!r}")
-
-
-
-def _inject_response_format(config: dict[str, JsonValue]) -> None:
-    """Ask OpenAI-compatible providers to return JSON output.
-
-    Skipped when ``extra_body`` already contains a ``response_format``
-    (caller override) or ``thinking`` (reasoning models that reject
-    response_format).
-    """
-    raw_extra = config.get("extra_body")
-    extra_body: dict[str, JsonValue] = dict(raw_extra) if isinstance(raw_extra, dict) else {}
-    if "response_format" in extra_body or "thinking" in extra_body:
-        config["extra_body"] = extra_body
-        return
-    extra_body["response_format"] = {"type": "json_object"}
-    config["extra_body"] = extra_body
 
 
 _stream_debug: bool = False
@@ -456,10 +423,11 @@ def _try_parse_response(
 
 async def extract(
     steps: list[dict[str, JsonValue]],
-    provider: ProviderSpec,
+    provider: ProviderSpec | None = None,
     registry: list[dict[str, Any]] | None = None,
     message_id_start: int = 0,
     vocabulary: str = "default",
+    model: str | None = None,
 ) -> ExtractionResult | None:
     """Run the extraction agent with a teacher model and return the result.
 
@@ -474,6 +442,7 @@ async def extract(
     scenario = extractor_scenario()
     config = AgentSessionConfig(
         cwd=str(Path.cwd()),
+        model=model,
         provider=provider,
         scenario=scenario,
         purpose="teacher_extraction",
@@ -589,11 +558,12 @@ type OnChunkCallback = Callable[[ExtractedChunk, list[dict[str, JsonValue]]], No
 
 async def extract_incremental(
     messages: list[dict[str, JsonValue]],
-    provider: ProviderSpec,
+    provider: ProviderSpec | None = None,
     chunk_size: tuple[int, int] = DEFAULT_CHUNK_SIZE,
     on_chunk: OnChunkCallback | None = None,
     run_id: str = "",
     vocabulary: str = "default",
+    model: str | None = None,
 ) -> list[ExtractedChunk]:
     """Extract symbols incrementally in chunks with registry accumulation.
 
@@ -616,6 +586,7 @@ async def extract_incremental(
                 registry=chunk_registry,
                 message_id_start=chunk.start,
                 vocabulary=vocabulary,
+                model=model,
             )
         except Exception:
             logger.exception(
@@ -1026,7 +997,7 @@ async def _collect_async(
         logger.error("no trajectories found")
         raise typer.Exit(1)
 
-    provider = resolve_provider(model)
+    resolved_model = model
     sem = asyncio.Semaphore(concurrency)
 
     logger.info(
@@ -1071,8 +1042,8 @@ async def _collect_async(
             try:
                 chunks = await extract_incremental(
                     msgs,
-                    provider,
-                    chunk_size,
+                    chunk_size=chunk_size,
+                    model=resolved_model,
                     on_chunk=_on_chunk,
                     run_id=label,
                     vocabulary=vocabulary,

@@ -306,7 +306,6 @@ class _RunEvalConfig:
     run_id: str
     prompt_prefix: str
     bench: str = ""
-    provider_spec: tuple[str, dict[str, Any]] | None = None
     source_images: bool = False
 
 
@@ -318,22 +317,6 @@ class _RunEvalJob:
     experiment_attempt_idx: int | None
 
 
-def _resolve_provider_spec(model: str) -> tuple[str, dict[str, Any]]:
-    """Resolve ``--model`` (profile name or model id) to an SDK provider spec.
-
-    Mirrors the CLI's resolution: config.toml profile > registry default,
-    with the AGENTM_REASONING_EFFORT convenience knob applied on top.
-    """
-    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import (
-        apply_reasoning_effort,
-        resolve_provider_model,
-    )
-
-    provider, model_id, profile = resolve_provider_model(model_flag=model)
-    build_config = profile.to_build_config() if profile else {"model": model_id}
-    apply_reasoning_effort(build_config, None)
-    return DEFAULT_PROVIDER_REGISTRY.build(provider, dict(build_config))
 
 
 def _run_agent_session(
@@ -380,12 +363,10 @@ def _run_agent_session(
             # manifest's placeholder entry.
             operations_config["private_containers"] = []
 
-        assert config.provider_spec is not None
-        provider_name, provider_config = config.provider_spec
         session_config = AgentSessionConfig(
             cwd=os.getcwd(),
             scenario=config.scenario,
-            provider=(provider_name, dict(provider_config)),
+            model=config.model,
             atom_config_overrides={"operations": operations_config},
             task_class=config.bench,
             eval_run_id=config.run_id,
@@ -1119,7 +1100,6 @@ def batch(
         run_id=resolved_run_id,
         prompt_prefix=prompt_prefix,
         bench=bench,
-        provider_spec=_resolve_provider_spec(model),
         source_images=source_images,
     )
 

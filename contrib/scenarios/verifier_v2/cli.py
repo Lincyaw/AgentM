@@ -81,23 +81,6 @@ _WORKFLOW_EXTENSIONS = [
 app = typer.Typer(pretty_exceptions_enable=False)
 
 
-def _resolve_provider() -> tuple[str, dict[str, Any]]:
-    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib import resolve_model_profile
-
-    model_name = os.environ.get("AGENTM_MODEL")
-    profile = resolve_model_profile(model_name)
-    if profile is not None:
-        build_config = profile.to_build_config()
-        provider_id = os.environ.get("AGENTM_PROVIDER") or profile.provider
-    else:
-        registry = DEFAULT_PROVIDER_REGISTRY
-        provider_id = os.environ.get("AGENTM_PROVIDER") or registry.default_provider().id
-        build_config = {"model": model_name or registry.default_model(provider_id)}
-
-    return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
-
-
 async def _run_workflow(
     workflow_args: dict[str, Any],
     out_dir: Path,
@@ -109,7 +92,7 @@ async def _run_workflow(
 
     config = AgentSessionConfig(
         cwd=str(out_dir),
-        provider=_resolve_provider(),
+        model=os.environ.get("AGENTM_MODEL"),
         extensions=[(m, dict(c)) for m, c in _WORKFLOW_EXTENSIONS],
         auto_commit=False,
     )

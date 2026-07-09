@@ -22,59 +22,15 @@ from .runner import EvalResult, evaluate_instance, evaluate_instance_tel, reflec
 from .scoring import AggregateScores, SpanScores, aggregate_scores
 
 try:
-    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib import resolve_model_profile
     from agentm.env import autoload_dotenv
     _HAS_AGENTM = True
 except ImportError:
-    DEFAULT_PROVIDER_REGISTRY = None  # type: ignore[assignment]
-    resolve_model_profile = None  # type: ignore[assignment]
     autoload_dotenv = None  # type: ignore[assignment]
     _HAS_AGENTM = False
-    logger.debug("telbench.cli: agentm SDK not available; model profile resolution disabled")
+    logger.debug("telbench.cli: agentm SDK not available")
 
 app = typer.Typer(help="TELBench span-level error localization evaluation.")
 
-
-def _resolve_provider(
-    provider_spec: str | None,
-    model_name: str | None = None,
-) -> tuple[str, dict[str, Any]] | None:
-    """Resolve a provider from a ``--model`` profile name, explicit spec, or env."""
-    if model_name and _HAS_AGENTM:
-        profile = resolve_model_profile(model_name)
-        if profile is not None:
-            return DEFAULT_PROVIDER_REGISTRY.build(  # noqa: F823 — guarded by _HAS_AGENTM
-                profile.provider, profile.to_build_config(), env=os.environ
-            )
-
-    if not provider_spec:
-        if _HAS_AGENTM:
-            profile = resolve_model_profile(None)
-            if profile is not None:
-                return DEFAULT_PROVIDER_REGISTRY.build(
-                    profile.provider, profile.to_build_config(), env=os.environ
-                )
-        return None
-
-    if ":" in provider_spec:
-        module, payload = provider_spec.split(":", 1)
-        cfg = json.loads(payload)
-        if not isinstance(cfg, dict):
-            raise typer.BadParameter("--provider config JSON must be an object")
-        return module.strip(), cfg
-
-    try:
-        from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-
-        registry = DEFAULT_PROVIDER_REGISTRY
-        descriptor = registry.resolve(provider_spec)
-        if descriptor.extension_module is None:
-            return provider_spec, {}
-        model = os.environ.get("AGENTM_MODEL") or descriptor.default_model
-        return registry.build(provider_spec, {"model": model}, env=os.environ)
-    except (KeyError, ImportError):
-        return provider_spec, {}
 
 
 def _format_scores(scores: SpanScores) -> str:
@@ -170,7 +126,7 @@ def telbench(
         instances = instances[:limit]
         typer.echo(f"Limited to {len(instances)} instances")
 
-    resolved_provider = _resolve_provider(provider, model_name=model)
+    resolved_model = model or os.environ.get("AGENTM_MODEL")
     resolved_cwd = str(cwd.resolve())
     total = len(instances)
     typer.echo(f"Running {total} instances with concurrency={concurrency}")
@@ -202,7 +158,7 @@ def telbench(
                     if mode == "tel":
                         result = await evaluate_instance_tel(
                             inst,
-                            provider=resolved_provider,
+                            model=resolved_model,
                             cwd=inst_cwd,
                             prompt_name=auditor_prompt
                             if auditor_prompt != "telbench"
@@ -212,7 +168,7 @@ def telbench(
                         result = await evaluate_instance(
                             inst,
                             mode=eval_mode,
-                            provider=resolved_provider,
+                            model=resolved_model,
                             cwd=inst_cwd,
                             extractor_interval=extractor_interval,
                             audit_interval=audit_interval,
@@ -284,7 +240,7 @@ def telbench(
                 try:
                     text = await reflect_on_result(
                         result, inst,
-                        provider=resolved_provider,
+                        model=resolved_model,
                         cwd=resolved_cwd,
                     )
                     fea_tag = "Y" if result.scores.first_error_accurate else "N"

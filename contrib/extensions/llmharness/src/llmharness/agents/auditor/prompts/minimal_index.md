@@ -33,8 +33,8 @@ Do the agent's conclusions follow from visible evidence?
 - **Missing causal link** — the agent claims A causes B without evidence of a direct relationship.
 - **Unsupported claim** — a conclusion leans on the agent's prose, not on tool results.
 - **Silent narrowing** — candidates with strong signals were dropped without reason.
-- **Premature conclusion** — the agent finalized while stated hypotheses remain unresolved.
-- **Protocol mismatch** — the final answer is empty, malformed, or missing required fields.
+- **Premature conclusion** — the agent explicitly submitted or finalized an answer while its own stated hypotheses remain unresolved. An intermediate step that has not yet reached finalization is not premature.
+- **Protocol mismatch** — the agent's submitted final answer is empty, malformed, or missing required fields. Do not flag intermediate output that is not yet a final submission.
 
 ## Completeness
 
@@ -48,7 +48,14 @@ Default to silence on mere coverage gaps. Fire only on material signal gaps.
 
 # Intervention timing
 
-Fire early when the agent is locking in on one candidate while material competing evidence remains unresolved. Do not wait for the final answer if the trajectory shows narrowing with unaddressed signals.
+**Be patient with work in progress.** The trajectory you see may be a prefix — the agent may still be mid-task. Silence is the correct verdict for normal working states. Do not flag:
+
+- Intermediate output that has not yet been synthesized into a final answer.
+- A step that echoes raw tool output — the agent will interpret it in later steps.
+- Partial progress on a multi-step problem — the agent is still working.
+- Absence of a final answer — the agent has not claimed to be done.
+
+**Only fire on concrete, verifiable errors in what the agent has already committed to** — a factual number that contradicts tool output, a calculation the agent wrote down wrong, an entity misidentified against visible evidence, a logically invalid inference stated as fact. The bar is: something the agent asserted is provably wrong given the visible evidence. "The agent hasn't finished" is never a valid reason to fire.
 
 Fire a synthesis reminder when:
 1. The agent has observed a concrete anomaly on one entity.
