@@ -29,33 +29,37 @@ class RescueWindowAdapter:
 
         @cli.command()
         def run(
-            corpus: Annotated[Path, typer.Option(help="Corpus JSON file")],
-            model: Annotated[Optional[str], typer.Option(help="Model profile")] = None,
-            scenario: Annotated[Optional[str], typer.Option(help="Scenario name")] = None,
-            treatments: Annotated[Optional[str], typer.Option(help="Comma-separated treatment names")] = None,
-            seeds: Annotated[int, typer.Option(help="Seeds per treatment")] = 3,
-            concurrency: Annotated[int, typer.Option("-j")] = 4,
+            corpus: Annotated[Path, typer.Option(help="Corpus manifest JSON")],
+            oracle_model: Annotated[Optional[str], typer.Option(help="config.toml profile for ORACLE_GROUNDED")] = None,
+            actor_model: Annotated[Optional[str], typer.Option(help="config.toml profile overriding stored provider")] = None,
+            adapter: Annotated[str, typer.Option(help="Scenario adapter name")] = "rca",
+            preset: Annotated[str, typer.Option(help="Condition preset")] = "oracle-landscape",
+            k: Annotated[int, typer.Option(help="Rollouts per intervention cell")] = 3,
+            concurrency: Annotated[int, typer.Option("-j")] = 1,
+            limit: Annotated[Optional[int], typer.Option(help="Max trajectories")] = None,
             exp_id: Annotated[Optional[str], typer.Option(help="Override experiment ID")] = None,
         ) -> None:
             """Run rescue-window experiments."""
             with experiment_context(
-                "rescue-window", model=model, exp_id=exp_id,
-                corpus=str(corpus), scenario=scenario,
+                "rescue-window", model=oracle_model, exp_id=exp_id,
+                corpus=str(corpus), adapter=adapter, preset=preset, k=k,
             ) as exp:
                 output_file = exp.artifacts_dir / "eval_units.jsonl"
                 cmd = [
                     "rescue-window", "run",
                     "--corpus", str(corpus),
                     "--out", str(output_file),
-                    "--seeds", str(seeds),
+                    "--adapter", adapter,
+                    "--preset", preset,
+                    "--k", str(k),
                     "-j", str(concurrency),
                 ]
-                if model:
-                    cmd.extend(["--model", model])
-                if scenario:
-                    cmd.extend(["--scenario", scenario])
-                if treatments:
-                    cmd.extend(["--treatments", treatments])
+                if oracle_model:
+                    cmd.extend(["--oracle-model", oracle_model])
+                if actor_model:
+                    cmd.extend(["--actor-model", actor_model])
+                if limit is not None:
+                    cmd.extend(["--limit", str(limit)])
 
                 result = subprocess.run(cmd)
                 if result.returncode != 0:
@@ -72,8 +76,8 @@ class RescueWindowAdapter:
                         exp.record_result(TaskResult(
                             task_id=record.get("unit_id", "unknown"),
                             status="pass" if record.get("outcome") == "rescued" else "fail",
-                            score={k: v for k, v in record.items()
-                                   if k in ("outcome", "score", "n_turns")},
+                            score={k_: v for k_, v in record.items()
+                                   if k_ in ("outcome", "score", "n_turns")},
                             session_ids=[record["session_id"]] if record.get("session_id") else [],
                             metadata=record,
                         ).to_dict())
