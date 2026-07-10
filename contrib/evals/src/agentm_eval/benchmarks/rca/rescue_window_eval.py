@@ -6,7 +6,7 @@ this by name (``--adapter rca``) and never imports it statically, keeping the
 measurement machinery scenario-agnostic.
 
 Both halves reuse the scenario's existing fpg evaluation code rather than
-re-deriving anything: scoring goes through ``rca_eval.rescue_window_judge``
+re-deriving anything: scoring goes through ``agentm_eval.benchmarks.rca.rescue_window_judge``
 (fpg ``compare_model_to_ground_truth``), and the ground-truth root cause is read
 from ``fpg.Scenario.graph.root_causes`` — the exact roots the judge scores
 against, so the oracle target can never diverge from the metric.
@@ -48,7 +48,7 @@ class RcaRescueAdapter:
                 detail={},
                 error="no submit_final_report payload in fork messages",
             )
-        from rca_eval.rescue_window_judge import RcabenchJudge
+        from agentm_eval.benchmarks.rca.rescue_window_judge import RcabenchJudge
 
         outcome = await RcabenchJudge().judge(
             agent_output_json=json.dumps(payload, ensure_ascii=False),

@@ -22,13 +22,22 @@ tau2 = [
 ]
 telbench = ["llmharness"]
 rescue-window = ["pyyaml>=6.0"]
+rca = [
+    "rcabench-platform[sdk,llm-eval]>=0.4.44",
+    "fpg>=0.1.0",
+    "duckdb>=1.4.4",
+]
 all = [
     "agentm-eval[sandbox]",
     "agentm-eval[aftraj]",
     "agentm-eval[tau2]",
     "agentm-eval[telbench]",
     "agentm-eval[rescue-window]",
+    "agentm-eval[rca]",
 ]
+
+[project.entry-points."llm_eval.agents"]
+agentm = "agentm_eval.benchmarks.rca.agent:AgentMAgent"
 
 [project.scripts]
 agentm-eval = "agentm_eval.cli:main"
@@ -36,6 +45,9 @@ agentm-eval = "agentm_eval.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv.sources]
+fpg = { git = "https://github.com/Lincyaw/fpg-convention" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentm_eval"]

@@ -86,7 +86,7 @@ class DuckdbSqlConfig(BaseModel):
     keys: list[str] | None = None
     exclude: list[str] = []
     row_limit: int | None = None
-    max_tokens: int = Field(gt=0)
+    max_tokens: int = Field(default=10000, gt=0)
 
     @model_validator(mode="before")
     @classmethod

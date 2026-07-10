@@ -7,7 +7,7 @@ re-runs update existing rows in place rather than duplicating.
 
 Invocation::
 
-    uv run python -m rca_eval.seed_dataset \\
+    uv run python -m agentm_eval.benchmarks.rca.seed_dataset \\
         --jsonl <path-to>/data.jsonl --dataset rca-openrca2-lite
 
 The DB URL is read from ``LLM_EVAL_DB_URL`` (or ``UTU_DB_URL``) — set

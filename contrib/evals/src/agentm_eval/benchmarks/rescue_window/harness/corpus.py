@@ -114,6 +114,99 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
     return [dict(row) for row in reader]
 
 
+def load_corpus_from_eval_db(
+    exp_id: str,
+    *,
+    db_path: str = "eval.db",
+    data_root: Path | None = None,
+    min_score: float | None = None,
+    session_ids: list[str] | None = None,
+) -> list[TrajectoryRef]:
+    """Build a corpus from rcabench-platform eval.db rollout results.
+
+    Resolves trajectory_id (= trace_id), case_id (= source), and data_dir
+    from the evaluation_data table.  Avoids manual manifest authoring after
+    ``rca llm-eval run``.
+    """
+
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        query = (
+            "SELECT trace_id, source, "
+            "  json_extract(meta, '$.path') as data_path, "
+            "  confidence "
+            "FROM evaluation_data "
+            "WHERE exp_id = ? AND stage IN ('rollout', 'judged') "
+            "  AND trace_id IS NOT NULL AND trace_id != '' "
+            "ORDER BY confidence DESC"
+        )
+        rows = conn.execute(query, (exp_id,)).fetchall()
+    finally:
+        conn.close()
+
+    refs: list[TrajectoryRef] = []
+    for trace_id, source, data_path, confidence in rows:
+        if session_ids and trace_id not in session_ids:
+            continue
+        if min_score is not None and (confidence or 0) < min_score:
+            continue
+        case_id = source or ""
+        if data_path:
+            data_dir = data_path
+        elif data_root:
+            data_dir = str(data_root / case_id)
+        else:
+            continue
+        refs.append(
+            TrajectoryRef(
+                trajectory_id=trace_id,
+                case_id=case_id,
+                data_dir=data_dir,
+                repository_id=case_id,
+                metadata={"fpg_score": confidence},
+            )
+        )
+    return refs
+
+
+def load_corpus_from_session_ids(
+    session_ids: list[str],
+    *,
+    data_root: Path,
+    store: SessionStore | None = None,
+) -> list[TrajectoryRef]:
+    """Build a corpus from bare session IDs + a data root.
+
+    Resolves case_id from the session store's fingerprint metadata.
+    Falls back to using the session_id as case_id if metadata is unavailable.
+    """
+
+    refs: list[TrajectoryRef] = []
+    for sid in session_ids:
+        case_id = sid
+        if store is not None:
+            try:
+                source = store.open(sid)
+                header = source.get_header()
+                if header and header.config:
+                    purpose = header.config.get("purpose", "")
+                    if isinstance(purpose, str) and ":" in purpose:
+                        case_id = purpose.rsplit(":", 1)[-1]
+            except Exception:  # noqa: BLE001, S110 — best-effort metadata resolution
+                pass  # noqa: S110
+        refs.append(
+            TrajectoryRef(
+                trajectory_id=sid,
+                case_id=case_id,
+                data_dir=str(data_root / case_id),
+                repository_id=case_id,
+            )
+        )
+    return refs
+
+
 def _row_metadata(raw: dict[str, Any]) -> dict[str, Any]:
     known = {
         "trajectory_id",

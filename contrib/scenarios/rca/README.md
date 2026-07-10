@@ -43,8 +43,8 @@ Detection is by manifest composition, not by scenario name. Add
 
 ## Eval-config environment variables
 
-The YAML configs under `contrib/scenarios/rca/eval/` and
-`contrib/scenarios/rca/eval/baseline/` use shell-style ``${VAR:-default}``
+The YAML configs under `contrib/evals/src/agentm_eval/benchmarks/rca/` and
+`contrib/evals/src/agentm_eval/benchmarks/rca/baseline/` use shell-style ``${VAR:-default}``
 placeholders for paths and model identifiers so the same config is portable
 across machines. The external `rca llm-eval` runner does **not** expand them
 itself — pre-process the file with `envsubst` (or `gettext-base`) before
@@ -54,7 +54,7 @@ piping it in:
 RCA_DATASET_ROOT=/abs/path/to/rca \
 MODEL_NAME=Doubao-Seed-2.0-pro \
 JUDGE_MODEL=Doubao-Seed-2.0-pro \
-envsubst < contrib/scenarios/rca/eval/config.yaml \
+envsubst < contrib/evals/src/agentm_eval/benchmarks/rca/config.yaml \
   | uv run rca llm-eval run - -a agentm -l 1
 ```
 
@@ -119,7 +119,7 @@ export RCA_DATASET_ROOT=$PWD/datasets/ops-lite/cases \
        MODEL_NAME=Doubao-Seed-2.0-pro \
        JUDGE_MODEL=Doubao-Seed-2.0-pro
 
-envsubst < contrib/scenarios/rca/eval/config.ops-lite.yaml \
+envsubst < contrib/evals/src/agentm_eval/benchmarks/rca/config.ops-lite.yaml \
   > /tmp/opslite-eval.yaml
 
 uv run --no-sync rca llm-eval run /tmp/opslite-eval.yaml \
@@ -175,10 +175,10 @@ grep -l "\"trace_id\": \"$trace_id\"" "$obs_dir"/*.jsonl
 ```
 
 A helper that materialises the mapping for an entire eval run lives at
-`contrib/scenarios/rca/eval/scripts/build_trace_map.py`:
+`contrib/evals/src/agentm_eval/benchmarks/rca/scripts/build_trace_map.py`:
 
 ```bash
-uv run python contrib/scenarios/rca/eval/scripts/build_trace_map.py \
+uv run python contrib/evals/src/agentm_eval/benchmarks/rca/scripts/build_trace_map.py \
     --exp-id agentm-rca-opslite-fixed-50-baseline \
     --out eval-data/agentm-rca-opslite-fixed-50-baseline/trace_map.json
 ```
@@ -194,7 +194,7 @@ swap) the agent should be re-measured against the same 50 ops-lite
 cases that produced the 2026-05-11 baseline. The case set lives in:
 
 ```
-contrib/scenarios/rca/eval/fixtures/ops-lite-fixed-50.txt
+contrib/evals/src/agentm_eval/benchmarks/rca/fixtures/ops-lite-fixed-50.txt
 ```
 
 The DB-side contract is a tag, not a list: the helper script
@@ -207,7 +207,7 @@ extend rcabench-platform with a list-of-sources filter.
 ### Re-run
 
 ```bash
-bash contrib/scenarios/rca/eval/scripts/rerun_opslite_fixed_50.sh \
+bash contrib/evals/src/agentm_eval/benchmarks/rca/scripts/rerun_opslite_fixed_50.sh \
     <exp_id_suffix> [<scenario>]
 ```
 
@@ -215,13 +215,13 @@ Examples:
 
 ```bash
 # Baseline reproduction
-bash contrib/scenarios/rca/eval/scripts/rerun_opslite_fixed_50.sh baseline
+bash contrib/evals/src/agentm_eval/benchmarks/rca/scripts/rerun_opslite_fixed_50.sh baseline
 
 # A/B a new system prompt
-bash contrib/scenarios/rca/eval/scripts/rerun_opslite_fixed_50.sh after-prompt-v2
+bash contrib/evals/src/agentm_eval/benchmarks/rca/scripts/rerun_opslite_fixed_50.sh after-prompt-v2
 
 # Compare async vs sync harness on the same 50 cases
-bash contrib/scenarios/rca/eval/scripts/rerun_opslite_fixed_50.sh async-2026-06 rca:harness
+bash contrib/evals/src/agentm_eval/benchmarks/rca/scripts/rerun_opslite_fixed_50.sh async-2026-06 rca:harness
 ```
 
 Each invocation writes a distinct `exp_id`

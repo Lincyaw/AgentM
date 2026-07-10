@@ -17,7 +17,13 @@ from .adapter import (
     extract_tool_args,
     load_adapter,
 )
-from .corpus import TrajectoryRef, load_corpus, load_trajectory_messages
+from .corpus import (
+    TrajectoryRef,
+    load_corpus,
+    load_corpus_from_eval_db,
+    load_corpus_from_session_ids,
+    load_trajectory_messages,
+)
 from .experiment import run_landscape
 from .provider_profiles import build_profile_provider
 from .runner import (
@@ -68,6 +74,8 @@ __all__ = [
     "extract_tool_args",
     "load_adapter",
     "load_corpus",
+    "load_corpus_from_eval_db",
+    "load_corpus_from_session_ids",
     "load_trajectory_messages",
     "run_intervention_rollout",
     "replay_actions",

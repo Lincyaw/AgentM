@@ -205,68 +205,76 @@ def _try_parse_response(
     return _parse(messages, vocabulary)
 
 
-async def run_extraction(
-    api: ExtensionAPI,
-    messages: list[dict[str, JsonValue]],
-    provider: ProviderSpec | None = None,
-    registry: list[dict[str, Any]] | None = None,
-    message_id_start: int = 0,
-    vocabulary: str = "default",
+def build_extraction_config(
+    *,
+    cwd: str,
     model: str | None = None,
-) -> ExtractionResult | None:
-    """Public extraction entry point: index a trajectory via a child session.
-
-    Consumed by this atom's own turn-end handler and by external harnesses
-    (e.g. llmharness) that want a one-shot extraction over a serialized
-    trajectory. Vocabulary selection is explicit — no module globals or
-    environment variables.
-
-    Prefer ``model=`` (a config.toml profile name) over ``provider=``
-    (a raw ``(extension_module, config)`` tuple); the session factory
-    resolves the model internally. ``provider`` is kept for backward
-    compatibility.
-    """
-    from .data import _reindex_messages
-
-    reindexed = _reindex_messages(messages, start=message_id_start)
-
-    if registry:
-        prompt_data: dict[str, Any] = {
-            "known_symbols": registry,
-            "messages": reindexed,
-        }
-        prompt = json.dumps(prompt_data, ensure_ascii=False, indent=2)
-    else:
-        prompt = json.dumps(reindexed, ensure_ascii=False, indent=2)
-
-    scenario = extractor_scenario()
-    config = AgentSessionConfig(
-        cwd=api.cwd,
+    provider: ProviderSpec | None = None,
+    vocabulary: str = "default",
+    parent_session_id: str | None = None,
+) -> AgentSessionConfig:
+    """Build the ``AgentSessionConfig`` for an extractor child session."""
+    return AgentSessionConfig(
+        cwd=cwd,
         model=model,
         provider=provider,
-        scenario=scenario,
+        scenario=extractor_scenario(),
         purpose="trajectory_symbol_extractor",
         loop_config=LoopConfig(max_turns=1),
         lineage={
             "kind": "trajectory_index_extraction",
-            "parent_session_id": api.session_id,
+            "parent_session_id": parent_session_id or "",
         },
         atom_config_overrides={
             "trajectory_extractor_context": {"vocabulary": vocabulary},
         },
     )
 
+
+def build_extraction_prompt(
+    messages: list[dict[str, JsonValue]],
+    *,
+    registry: list[dict[str, Any]] | None = None,
+    message_id_start: int = 0,
+) -> str:
+    """Serialize trajectory messages into the extractor's input prompt."""
+    from .data import _reindex_messages
+
+    reindexed = _reindex_messages(messages, start=message_id_start)
+    if registry:
+        return json.dumps({"known_symbols": registry, "messages": reindexed}, ensure_ascii=False, indent=2)
+    return json.dumps(reindexed, ensure_ascii=False, indent=2)
+
+
+async def run_extraction_session(
+    config: AgentSessionConfig,
+    prompt: str,
+    *,
+    spawn: Any = None,
+    vocabulary: str = "default",
+) -> ExtractionResult | None:
+    """Run the extractor child and parse the result.
+
+    ``spawn`` creates a child session from a config. Defaults to
+    ``AgentSession.create``; callers inside an atom pass
+    ``api.spawn_child_session``.
+    """
+    from agentm.core.runtime import AgentSession
+
+    if spawn is None:
+        spawn = AgentSession.create
+
     for attempt in range(_MAX_RETRIES):
         try:
-            child = await api.spawn_child_session(config)
+            child = await spawn(config)
             try:
                 child_msgs: list[AgentMessage] = await child.prompt(prompt)
                 result, error = _try_parse_response(child_msgs, vocabulary)
                 if result:
                     return result
                 if error:
-                    logger.warning(f"extraction parse failed: {error}")
-                    retry_child = await api.spawn_child_session(config)
+                    logger.warning("extraction parse failed: {}", error)
+                    retry_child = await spawn(config)
                     try:
                         retry_prompt = (
                             f"Your previous output failed validation:\n{error}\n\n"
@@ -286,11 +294,34 @@ async def run_extraction(
                     await child.shutdown()
         except Exception:
             if attempt < _MAX_RETRIES - 1:
-                logger.warning(f"extraction child failed, retry {attempt + 1}/{_MAX_RETRIES - 1}")
+                logger.warning("extraction child failed, retry {}/{}", attempt + 1, _MAX_RETRIES - 1)
                 await asyncio.sleep(_RETRY_DELAY * (2**attempt))
             else:
                 logger.exception("extraction child failed after all retries")
     return None
+
+
+async def run_extraction(
+    api: ExtensionAPI,
+    messages: list[dict[str, JsonValue]],
+    provider: ProviderSpec | None = None,
+    registry: list[dict[str, Any]] | None = None,
+    message_id_start: int = 0,
+    vocabulary: str = "default",
+    model: str | None = None,
+) -> ExtractionResult | None:
+    """Extraction entry point for use inside an atom (has ``ExtensionAPI``)."""
+    config = build_extraction_config(
+        cwd=api.cwd,
+        model=model,
+        provider=provider,
+        vocabulary=vocabulary,
+        parent_session_id=api.session_id,
+    )
+    prompt = build_extraction_prompt(messages, registry=registry, message_id_start=message_id_start)
+    return await run_extraction_session(
+        config, prompt, spawn=api.spawn_child_session, vocabulary=vocabulary,
+    )
 
 
 # ---------------------------------------------------------------------------

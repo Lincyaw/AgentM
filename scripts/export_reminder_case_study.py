@@ -462,24 +462,15 @@ async def _judge_payload(
             }
             return JudgeResult(correct=True, detail=perfect_empty_detail)
         try:
-            repo_root = Path(__file__).parents[1]
-            repo_root_str = str(repo_root)
-            if repo_root_str not in sys.path:
-                sys.path.insert(0, repo_root_str)
+            from fpg import ModelRCAOutput, Scenario, compare_model_to_ground_truth
 
-            from contrib.scenarios.rca.eval import grader
-            from fpg import ModelRCAOutput
-
-            ModelRCAOutput.model_validate(payload)
-            task = {"meta": {"case_dir": data_dir}}
-            verdict = {
-                "fpg_output": payload,
-                "services": [],
-                "fault_kinds": [],
-                "raw": json.dumps(payload, ensure_ascii=False),
-            }
-            comparison = grader._compare_fpg_graph(task, verdict)
-            sql_eval = grader._evaluate_fpg_sql_evidence(task, verdict)
+            model_output = ModelRCAOutput.model_validate(payload)
+            graph_path = Path(data_dir) / "causal_graph_verified.json"
+            if not graph_path.is_file():
+                graph_path = Path(data_dir) / "causal_graph.json"
+            scenario = Scenario.model_validate_json(graph_path.read_text(encoding="utf-8"))
+            comparison = compare_model_to_ground_truth(model_output, scenario).model_dump(mode="json")
+            sql_eval = None
             if comparison is None:
                 return JudgeResult(
                     correct=None,
@@ -506,7 +497,7 @@ async def _judge_payload(
             return JudgeResult(correct=correct, detail=detail)
         except Exception as exc:  # pragma: no cover - diagnostic exporter path
             return JudgeResult(correct=None, detail={}, error=f"fpg judge failed: {exc}")
-    from rca_eval.rescue_window_judge import RcabenchJudge
+    from agentm_eval.benchmarks.rca.rescue_window_judge import RcabenchJudge
 
     outcome = await RcabenchJudge().judge(
         agent_output_json=json.dumps(payload, ensure_ascii=False),

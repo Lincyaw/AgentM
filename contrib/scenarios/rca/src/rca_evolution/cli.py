@@ -3,7 +3,7 @@
 Usage::
 
     uv run python -m rca_evolution.cli run \\
-        --eval-config contrib/scenarios/rca/eval/configs/ops-lite-fixed-50.yaml \\
+        --eval-config contrib/evals/src/agentm_eval/benchmarks/rca/configs/ops-lite-fixed-50.yaml \\
         --model litellm-dsv4flash-nothink \\
         --train-limit 20 --test-limit 10
 

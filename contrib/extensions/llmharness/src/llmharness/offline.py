@@ -272,6 +272,9 @@ async def audit_pipeline_over_trajectory(
     auditor_settings: AuditorSettings,
     audit_interval: int = 5,
     enable_auditor: bool = True,
+    enable_index: bool = False,
+    index_model: str | None = None,
+    index_vocabulary: str = "default",
     stop_on_first_surface: bool = True,
     child: StandaloneChildRunner | None = None,
     seed_cumulative: CumulativeAuditState | None = None,
@@ -280,7 +283,13 @@ async def audit_pipeline_over_trajectory(
     references: list[dict[str, Any]] | None = None,
     trace_id: str | None = None,
 ) -> OfflineRunResult:
-    """Run the cognitive-audit auditor over a captured trajectory."""
+    """Run extractor + auditor over a captured trajectory.
+
+    When ``enable_index`` is True, each auditor firing is preceded by an
+    LLM extraction pass (same as the online llmharness atom). The
+    extractor produces symbols that enrich the context index the auditor
+    navigates.
+    """
 
     resolved_trace_id = trace_id if trace_id is not None else session_id
     cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
@@ -292,8 +301,8 @@ async def audit_pipeline_over_trajectory(
     all_steps: list[dict[str, Any]] = []
     surfaces: list[SurfaceFiring] = []
     reminder: Reminder | None = None
-    resolved_symbols = symbols or []
-    resolved_references = references or []
+    resolved_symbols = list(symbols or [])
+    resolved_references = list(references or [])
 
     from llmharness.agents.auditor.context import build_auditor_system_prompt
     from llmharness.atom import _extract_loaded_skills, _serialize_trajectory
@@ -312,6 +321,17 @@ async def audit_pipeline_over_trajectory(
         auditor_due = enable_auditor and (turn_number % audit_interval) == 0
         if auditor_due:
             trajectory = _serialize_trajectory(prefix)
+
+            if enable_index:
+                resolved_symbols = await _run_extraction_step(
+                    trajectory,
+                    cwd=cwd,
+                    model=index_model,
+                    vocabulary=index_vocabulary,
+                    parent_session_id=session_id,
+                    prior_symbols=resolved_symbols,
+                )
+
             context_index = build_context_index(
                 trajectory=trajectory,
                 symbols=resolved_symbols,
@@ -371,6 +391,40 @@ async def audit_pipeline_over_trajectory(
     )
 
 
+async def _run_extraction_step(
+    trajectory: list[dict[str, Any]],
+    *,
+    cwd: str,
+    model: str | None,
+    vocabulary: str,
+    parent_session_id: str | None,
+    prior_symbols: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run one extractor pass, return the updated symbol list."""
+    try:
+        from trajectory_index.atom import (
+            build_extraction_config,
+            build_extraction_prompt,
+            run_extraction_session,
+        )
+
+        config = build_extraction_config(
+            cwd=cwd,
+            model=model,
+            vocabulary=vocabulary,
+            parent_session_id=parent_session_id,
+        )
+        prompt = build_extraction_prompt(trajectory)
+        extraction = await run_extraction_session(config, prompt, vocabulary=vocabulary)
+        if extraction is not None:
+            return [s.model_dump() for s in extraction.symbols]
+    except ImportError:
+        logger.debug("trajectory-index not installed; skipping extraction")
+    except Exception:
+        logger.exception("offline extraction failed")
+    return prior_symbols
+
+
 async def offline_audit(
     messages: list[Any],
     *,
@@ -378,11 +432,19 @@ async def offline_audit(
     provider: tuple[str, dict[str, Any]],
     audit_interval: int = 5,
     auditor_prompt: str = "index",
+    enable_index: bool = False,
+    index_model: str | None = None,
+    index_vocabulary: str = "default",
     stop_on_first_surface: bool = False,
     min_surface_turn_index: int = 0,
     **kwargs: Any,
 ) -> OfflineRunResult:
-    """Audit a recorded trajectory and return surfaced reminder candidates."""
+    """Audit a recorded trajectory and return surfaced reminder candidates.
+
+    When ``enable_index`` is True, each auditor firing is preceded by an
+    LLM extraction pass that produces symbols for a richer context index.
+    ``index_model`` selects the config.toml profile for the extractor.
+    """
 
     del kwargs
     from llmharness.agents.auditor.context import load_auditor_prompt
@@ -396,8 +458,8 @@ async def offline_audit(
     session_id = f"offline-audit-{id(messages)}"
     child = StandaloneChildRunner(cwd)
     logger.info(
-        f"offline_audit: {len(typed_messages)} messages, "
-        f"interval={audit_interval}, prompt={auditor_prompt}"
+        "offline_audit: {} messages, interval={}, prompt={}, index={}",
+        len(typed_messages), audit_interval, auditor_prompt, enable_index,
     )
     start_turn = 1 if min_surface_turn_index <= 0 else min_surface_turn_index + 2
     result = await audit_pipeline_over_trajectory(
@@ -408,6 +470,9 @@ async def offline_audit(
         auditor_settings=auditor_settings,
         audit_interval=audit_interval,
         enable_auditor=True,
+        enable_index=enable_index,
+        index_model=index_model,
+        index_vocabulary=index_vocabulary,
         stop_on_first_surface=stop_on_first_surface,
         child=child,
         start_turn=start_turn,

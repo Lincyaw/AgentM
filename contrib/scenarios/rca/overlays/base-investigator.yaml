@@ -9,6 +9,7 @@ extensions:
     config:
       exclude:
         - conclusion.parquet
+      max_tokens: 2000
   - module: rca.default.finalize
   - module: agentm.extensions.builtin.observability
   - module: rca.default.fpg_contract

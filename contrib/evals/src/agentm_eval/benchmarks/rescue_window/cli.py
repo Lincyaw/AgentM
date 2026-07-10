@@ -27,6 +27,7 @@ from .harness import (
     default_store,
     load_adapter,
     load_corpus,
+    load_corpus_from_eval_db,
     load_trajectory_messages,
     run_landscape,
 )
@@ -72,6 +73,24 @@ def _make_sampler(
     )
 
 
+def _resolve_corpus(
+    corpus: Path | None,
+    exp_id: str | None,
+    db: str,
+    data_root: Path | None,
+) -> list:
+    """Resolve corpus from either a manifest file or eval.db exp_id."""
+    if corpus is not None:
+        return load_corpus(corpus, data_root=data_root)
+    if exp_id is not None:
+        refs = load_corpus_from_eval_db(exp_id, db_path=db, data_root=data_root)
+        if not refs:
+            raise typer.BadParameter(f"no rollout sessions found for exp_id={exp_id!r} in {db}")
+        typer.echo(f"Loaded {len(refs)} trajectories from eval.db exp_id={exp_id!r}")
+        return refs
+    raise typer.BadParameter("provide --corpus or --exp-id")
+
+
 @app.command()
 def sample(
     corpus: Annotated[Path, typer.Option("--corpus", help="Corpus manifest (YAML/JSON/CSV).")],
@@ -107,8 +126,10 @@ def sample(
 
 @app.command()
 def run(
-    corpus: Annotated[Path, typer.Option("--corpus", help="Corpus manifest.")],
-    out: Annotated[Path, typer.Option("--out", help="EvalUnit store JSONL path.")],
+    corpus: Annotated[Path | None, typer.Option("--corpus", help="Corpus manifest.")] = None,
+    exp_id: Annotated[str | None, typer.Option("--exp-id", help="Load corpus from eval.db by experiment ID.")] = None,
+    db: Annotated[str, typer.Option("--db", help="Path to eval.db.")] = "eval.db",
+    out: Annotated[Path, typer.Option("--out", help="EvalUnit store JSONL path.")] = Path("runs/rescue-window/latest.jsonl"),
     data_root: Annotated[Path | None, typer.Option("--data-root")] = None,
     adapter: Annotated[str, typer.Option("--adapter", help="Scenario adapter name.")] = "rca",
     preset: Annotated[
@@ -139,7 +160,7 @@ def run(
 ) -> None:
     """Run the oracle landscape (E1): fork prefixes, roll out the content ladder."""
 
-    refs = load_corpus(corpus, data_root=data_root)
+    refs = _resolve_corpus(corpus, exp_id, db, data_root)
     if limit is not None:
         refs = refs[:limit]
     scenario = load_adapter(adapter)
