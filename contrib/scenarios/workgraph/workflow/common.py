@@ -208,6 +208,36 @@ def _result_dir(root: Path, task: TaskFile) -> Path:
     return path
 
 
+def _read_result_file(root: Path, task: TaskFile, name: str) -> str:
+    path = _result_dir(root, task) / name
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _next_attempt(root: Path, task: TaskFile) -> int:
+    """Increment and return this task's attempt counter (1-based).
+
+    Persisted in ``results/<task-id>/attempts.txt``. The counter goes into
+    the worker context, so a bus-level retry of an unchanged task file gets
+    a distinct workflow-journal key and actually re-runs instead of being
+    served the previous attempt's cached report (re-running an identical
+    semantic failure with identical context is re-sampling the same
+    failure mode; the attempt number plus previous findings are the
+    'vary something' — reliability-substrate.md §4.1 C3)."""
+    path = _result_dir(root, task) / "attempts.txt"
+    previous = 0
+    if path.is_file():
+        try:
+            previous = int(path.read_text(encoding="utf-8").strip() or "0")
+        except ValueError:
+            logger.warning("workgraph: corrupt attempts counter {}; resetting", path)
+            previous = 0
+    attempt = previous + 1
+    path.write_text(f"{attempt}\n", encoding="utf-8")
+    return attempt
+
+
 def _atom_config(
     operations: dict[str, object],
     context: dict[str, object],

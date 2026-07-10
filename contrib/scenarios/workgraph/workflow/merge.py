@@ -12,6 +12,7 @@ payload as evidence.
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -33,6 +34,7 @@ from .common import (
     _load_config,
     _move_task,
     _operations_config_from_config,
+    _read_result_file,
     _read_task,
     _release_locks,
     _report_field,
@@ -171,13 +173,6 @@ def _merge_summary(report: MergeReport | None, status: str) -> dict[str, object]
     }
 
 
-def _read_result_file(root: Path, task: TaskFile, name: str) -> str:
-    path = _result_dir(root, task) / name
-    if not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
 def _write_merge_result(
     root: Path,
     task: TaskFile,
@@ -222,6 +217,14 @@ def _context_for_task(
     remote = _report_field(coder_result, "Remote")
     context: dict[str, object] = {
         "role": "merger",
+        # Merger calls query and mutate LIVE GitHub state (PR checks,
+        # auto-merge landing, base HEAD), so they must never be served from
+        # the workflow journal cache: an identical-context re-pass (a
+        # merge_pending recheck, or a retry after manual re-ready) would
+        # replay the previous pass's stale report instead of looking at
+        # GitHub. This per-pass stamp makes every merger call a fresh
+        # journal node.
+        "scheduled_at": str(int(time.time())),
         "task_id": task.task_id,
         "task_file": task.path.name,
         "source_queue": claim.source_queue,

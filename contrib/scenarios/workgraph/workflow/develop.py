@@ -36,7 +36,9 @@ from .common import (
     _is_noneish,
     _load_config,
     _move_task,
+    _next_attempt,
     _operations_config_from_config,
+    _read_result_file,
     _read_task,
     _release_locks,
     _report_optional_value,
@@ -130,11 +132,14 @@ async def _run_one_then_release(
     operations: dict[str, object],
     mode: ExecMode,
     review_standards: str,
+    repair_rounds: int,
 ) -> dict[str, object]:
     # Release this task's locks as soon as IT finishes; holding them until
     # the whole claimed batch drains starves retries of failed siblings.
     try:
-        return await _run_one(ctx, root, claim, operations, mode, review_standards)
+        return await _run_one(
+            ctx, root, claim, operations, mode, review_standards, repair_rounds
+        )
     finally:
         _release_locks(claim.lock_paths)
 
@@ -374,6 +379,7 @@ async def _run_one(
     operations: dict[str, object],
     mode: ExecMode,
     review_standards: str,
+    repair_rounds: int,
 ) -> dict[str, object]:
     task = claim.task
     coder_scenario = _as_str(ctx.args.get("coder_scenario"), DEFAULT_CODER_SCENARIO)
@@ -383,35 +389,54 @@ async def _run_one(
     )
     timeout = _as_float(ctx.args.get("agent_timeout_seconds"), 7200.0)
     agent_env_session = ""
+    repairs_used = 0
 
-    try:
-        ctx.log(f"coding {task.task_id}")
-        coder_result = await ctx.agent(
-            f"Implement WorkGraph task {task.task_id}.",
+    # Bus-level retry must vary the worker context: the attempt counter and
+    # the previous attempt's verifier findings make a re-readied task a NEW
+    # workflow-journal node (identical context would be served the previous
+    # attempt's cached report and never actually re-run) and tell the coder
+    # what failed last time instead of restarting blind.
+    attempt = _next_attempt(root, task)
+    coder_extra: dict[str, object] = {"attempt": attempt}
+    if attempt > 1:
+        previous_findings = _read_result_file(root, task, "validation.md")
+        if previous_findings.strip():
+            coder_extra["previous_attempt_findings"] = previous_findings
+
+    async def _call_coder(
+        extra: dict[str, object], prompt: str, label: str
+    ) -> tuple[CoderReport | None, str, str, str | None]:
+        result = await ctx.agent(
+            prompt,
             scenario=coder_scenario,
             atom_config=_atom_config(
                 _operations_for_session(operations, agent_env_session),
-                _context_for_task(task, "coder", mode, review_standards),
+                _context_for_task(task, "coder", mode, review_standards, extra),
             ),
             timeout=timeout,
             schema=CoderReport,
             retry=1,
-            trace_label=f"{task.task_id}:coder",
+            trace_label=label,
         )
-        coder_report = coder_result if isinstance(coder_result, CoderReport) else None
-        if coder_report is not None:
-            coder_text = _coder_report_text(coder_report)
-            coder_status, delivery_error = _coerce_coder_status(coder_report)
-            agent_env_session = _session_from(coder_report)
-        else:
-            coder_text = (
+        report = result if isinstance(result, CoderReport) else None
+        if report is None:
+            text = (
                 "Status: failed\n\nCoder returned no structured report; raw "
-                f"result: {coder_result!r}"
+                f"result: {result!r}"
             )
-            coder_status, delivery_error = (
-                "failed",
-                "Coder returned no structured report.",
-            )
+            return None, text, "failed", "Coder returned no structured report."
+        status, delivery_error = _coerce_coder_status(report)
+        return report, _coder_report_text(report), status, delivery_error
+
+    try:
+        ctx.log(f"coding {task.task_id} (attempt {attempt})")
+        coder_report, coder_text, coder_status, delivery_error = await _call_coder(
+            coder_extra,
+            f"Implement WorkGraph task {task.task_id}.",
+            f"{task.task_id}:coder",
+        )
+        if coder_report is not None:
+            agent_env_session = _session_from(coder_report)
         verifier_status = "failed"
         verifier_report: VerifierReport | None = None
 
@@ -425,54 +450,98 @@ async def _run_one(
             verifier_text = f"Status: failed\n\n{reason}"
             final_status = "failed"
         else:
-            ctx.log(f"verifying {task.task_id}")
-            verifier_result = await ctx.agent(
-                f"Verify WorkGraph task {task.task_id}.",
-                scenario=verifier_scenario,
-                atom_config=_atom_config(
-                    _operations_for_session(operations, agent_env_session),
-                    _context_for_task(
-                        task,
-                        "verifier",
-                        mode,
-                        review_standards,
-                        {
-                            "coder_result": coder_text,
-                            "agent_env_session": agent_env_session,
-                        },
+            # Verify → (bounded) repair loop. A verifier failure with concrete
+            # findings is the most recoverable failure in the pipeline: the
+            # sandbox is warm and the findings say exactly what to fix, so we
+            # hand them back to the coder instead of parking the task in
+            # failed/ and restarting from zero on some later pass.
+            while True:
+                ctx.log(f"verifying {task.task_id}")
+                verifier_extra: dict[str, object] = {
+                    "coder_result": coder_text,
+                    "agent_env_session": agent_env_session,
+                }
+                if repairs_used:
+                    verifier_extra["repair_round"] = repairs_used
+                verifier_result = await ctx.agent(
+                    f"Verify WorkGraph task {task.task_id}.",
+                    scenario=verifier_scenario,
+                    atom_config=_atom_config(
+                        _operations_for_session(operations, agent_env_session),
+                        _context_for_task(
+                            task, "verifier", mode, review_standards, verifier_extra
+                        ),
                     ),
-                ),
-                timeout=timeout,
-                schema=VerifierReport,
-                retry=1,
-                trace_label=f"{task.task_id}:verifier",
-            )
-            if isinstance(verifier_result, VerifierReport):
-                verifier_report = verifier_result
-                verifier_text = _verifier_report_text(verifier_report)
-                agent_env_session = _session_from(verifier_report) or agent_env_session
-                verifier_status, downgrade_reason = _effective_verifier_status(
-                    verifier_report
+                    timeout=timeout,
+                    schema=VerifierReport,
+                    retry=1,
+                    trace_label=f"{task.task_id}:verifier"
+                    + (f"-r{repairs_used}" if repairs_used else ""),
                 )
-                if downgrade_reason is not None:
-                    ctx.log(
-                        f"{task.task_id}: verifier verdict downgraded to failed "
-                        f"({downgrade_reason})"
+                if isinstance(verifier_result, VerifierReport):
+                    verifier_report = verifier_result
+                    verifier_text = _verifier_report_text(verifier_report)
+                    agent_env_session = (
+                        _session_from(verifier_report) or agent_env_session
                     )
+                    verifier_status, downgrade_reason = _effective_verifier_status(
+                        verifier_report
+                    )
+                    if downgrade_reason is not None:
+                        ctx.log(
+                            f"{task.task_id}: verifier verdict downgraded to "
+                            f"failed ({downgrade_reason})"
+                        )
+                        verifier_text = (
+                            "Status: failed (downgraded by workflow: "
+                            f"{downgrade_reason})\n\n{verifier_text}"
+                        )
+                else:
                     verifier_text = (
-                        f"Status: failed (downgraded by workflow: {downgrade_reason})"
-                        f"\n\n{verifier_text}"
+                        "Status: failed\n\nVerifier returned no structured "
+                        f"report; raw result: {verifier_result!r}"
                     )
-            else:
-                verifier_text = (
-                    "Status: failed\n\nVerifier returned no structured report; "
-                    f"raw result: {verifier_result!r}"
+                    verifier_report = None
+                    verifier_status = "failed"
+
+                if verifier_status in ("passed", "passed_pending_live_gate"):
+                    break
+                if repairs_used >= repair_rounds or verifier_report is None:
+                    # No findings to hand back (unstructured verifier reply)
+                    # or repair budget exhausted — park the task; the
+                    # findings written below feed the next bus-level attempt.
+                    break
+
+                repairs_used += 1
+                ctx.log(f"repairing {task.task_id} (round {repairs_used})")
+                repair_report, repair_text, repair_status, _repair_error = (
+                    await _call_coder(
+                        {
+                            **coder_extra,
+                            "repair_round": repairs_used,
+                            "verifier_findings": verifier_text,
+                        },
+                        f"Repair WorkGraph task {task.task_id} after failed "
+                        "verification; address every finding.",
+                        f"{task.task_id}:coder-repair{repairs_used}",
+                    )
                 )
-                verifier_status = "failed"
+                if repair_report is None or repair_status != "success":
+                    # Keep the verifier's failure verdict; record the repair
+                    # attempt's own report as the latest coder output.
+                    coder_text = repair_text
+                    coder_status = repair_status
+                    coder_report = repair_report
+                    break
+                coder_report = repair_report
+                coder_text = repair_text
+                coder_status = repair_status
+                agent_env_session = _session_from(repair_report) or agent_env_session
+
             final_status = (
                 "verified"
                 if verifier_status in ("passed", "passed_pending_live_gate")
-                else "failed"
+                else ("conflict" if coder_status == "conflict" else "failed")
             )
 
         _write_result(root, task, coder_text, verifier_text, agent_env_session)
@@ -483,6 +552,8 @@ async def _run_one(
             "from": str(claim.running_path),
             "to": str(target),
             "coder_status": coder_status,
+            "attempt": attempt,
+            "repairs_used": repairs_used,
             "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
             "coder": _coder_summary(coder_report, coder_status),
@@ -526,6 +597,11 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     )
     mode = _resolve_exec_mode(operations, workflow="develop")
     review_standards = _review_standards(ctx, root, config_root)
+    # In-pipeline repair budget: how many verifier-findings → coder-repair
+    # rounds to run before parking a failed task on the bus.
+    repair_rounds = max(
+        0, _config_int(ctx.args, config_root, ("repair_rounds",), 1)
+    )
 
     ctx.phase("claim")
     claimed = _claim_tasks(root, max_parallel, default_repo, default_base)
@@ -543,7 +619,8 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         raw_results = await ctx.parallel(
             [
                 _run_one_then_release(
-                    ctx, root, claim, operations, mode, review_standards
+                    ctx, root, claim, operations, mode, review_standards,
+                    repair_rounds,
                 )
                 for claim in claimed
             ]

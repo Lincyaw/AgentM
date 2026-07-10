@@ -1900,6 +1900,16 @@ requirements:
       routed to a conflict queue so
       the main orchestrator can decide whether to launch a resolver or ask for
       human intervention.
+      Retries must vary the worker context: every run of a task increments a
+      persisted attempt counter and attempts after the first receive the
+      previous attempt's verifier findings, so a re-readied unchanged task is
+      a new workflow-journal node (never served the prior attempt's cached
+      report) and the coder does not restart blind. A verifier failure with
+      structured findings triggers a bounded in-pipeline repair loop
+      (``repair_rounds``, default 1) reusing the task's sandbox before the
+      task is parked. Merger calls operate on live GitHub state and must
+      never be served from the workflow resume journal; every merger context
+      carries a per-pass ``scheduled_at`` stamp.
     priority: P1
     status: implemented
     confidence: confirmed

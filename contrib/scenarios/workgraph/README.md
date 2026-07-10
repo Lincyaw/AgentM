@@ -215,10 +215,24 @@ the agent prompts: put them in `<state_dir>/review_standards.md`, point
 `review_standards_file` at a file, or pass `args.review_standards` inline.
 See `examples/review_standards.example.md`.
 
+When the verifier fails a delivery with findings, the workflow does not
+immediately park the task: it runs a bounded repair loop — the coder is
+re-invoked in the same sandbox with the verifier findings as context, then
+the verifier re-checks. `repair_rounds` (workflow args or config, default 1)
+bounds the loop; `0` disables it.
+
+Bus-level retries carry memory. Each run of a task increments
+`results/<task-id>/attempts.txt`, and an attempt after the first receives
+the previous attempt's `validation.md` as `previous_attempt_findings`
+context. This both tells the coder what failed last time and gives the
+retry a distinct workflow-journal identity — an identical-context retry
+would be served the previous attempt's cached report by the workflow
+resume journal and never actually re-run.
+
 The workflow moves verifier-passed task files to `verified/`; failed or
 conflicted tasks move to `failed/` or `conflicts/`. It writes `result.md`,
-`validation.md`, `task.md`, and `agent_env_session.txt` under
-`results/<task-id>/`.
+`validation.md`, `task.md`, `attempts.txt`, and `agent_env_session.txt`
+under `results/<task-id>/`.
 
 ## Merge Workflow
 
@@ -248,6 +262,11 @@ agentm workflow run contrib/scenarios/workgraph/workflow/merge.py \
     }
   }'
 ```
+
+Merger calls query and mutate live GitHub state, so the workflow stamps
+every merger context with a per-pass `scheduled_at` marker: merge passes are
+never served from the workflow resume journal (a cached report would tell
+you what GitHub looked like on some earlier pass, not now).
 
 The merge workflow claims `merge_pending/` before `verified/`, then moves the
 task to `merging/` while the merge agent runs. It uses a filesystem lock derived
