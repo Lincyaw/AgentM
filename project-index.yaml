@@ -2099,3 +2099,27 @@ requirements:
       - path: .claude/designs/reliability-substrate.md
     depends_on:
       - REQ-209-workflow-journal-invalidation
+
+  - id: REQ-211-subagent-attempt-fencing
+    title: Sub-agent attempt fencing via explicit supersedes declaration
+    description: >
+      dispatch_agent accepts supersedes=<task_id> declaring that this
+      dispatch replaces an earlier attempt of the same work. The referenced
+      task must exist (unknown ids fail the dispatch loudly), the old
+      attempt is marked only after the replacing dispatch is live, and a
+      superseded attempt that finalizes later has its subagent_result
+      delivered flagged stale with the replacing task named — never as a
+      current result. Whether two dispatches are the same logical work is
+      semantic judgment, so it is declared by the dispatcher, never guessed
+      by the mechanism.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/sub_agent.py
+    tests:
+      - path: tests/unit/extensions/test_subagent_fencing.py
+    docs:
+      - path: .claude/designs/reliability-substrate.md
+    depends_on:
+      - REQ-209-workflow-journal-invalidation

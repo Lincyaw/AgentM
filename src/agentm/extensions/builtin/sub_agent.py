@@ -108,6 +108,11 @@ class _ChildTask(BackgroundTask):
     artifact_refs: list[dict[str, str]] = field(default_factory=list)
     error: str | None = None
     applied_budget: dict[str, int] = field(default_factory=dict)
+    # task_id of the dispatch that replaced this one (attempt fencing): set
+    # when a later dispatch declares ``supersedes=<this task_id>``. A late
+    # result from a superseded task is delivered flagged stale, never as
+    # current (reliability-substrate.md §4.1 C1).
+    superseded_by: str | None = None
 
 class _ChildAborted(RuntimeError):
     pass
@@ -230,12 +235,24 @@ def _summary_text(state: _ChildTask) -> str | None:
     return None
 
 def _format_subagent_result(state: _ChildTask) -> str:
+    stale_attrs = ""
+    if state.superseded_by is not None:
+        stale_attrs = (
+            f' stale="true" superseded_by={_xml_attr(state.superseded_by)}'
+        )
     lines = [
         (
             f"<subagent_result task_id={_xml_attr(state.task_id)} "
-            f"purpose={_xml_attr(state.purpose)}>"
+            f"purpose={_xml_attr(state.purpose)}{stale_attrs}>"
         )
     ]
+    if state.superseded_by is not None:
+        lines.append(
+            "  <note>This task was replaced by a newer dispatch "
+            f"(task {_xml_attr(state.superseded_by)}) before it finished. "
+            "Its result is stale — do not let it override the replacing "
+            "task's result.</note>"
+        )
     summary = _summary_text(state)
     if summary is not None:
         lines.append(f"  <summary>{_xml_attr(summary)}</summary>")
@@ -559,6 +576,26 @@ class _ChildTaskManager:
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
         subagent_type = args.get("subagent_type")
+        # Attempt fencing: an explicit supersedes declaration links this
+        # dispatch to the earlier attempt it replaces. Validated up front so
+        # a typo'd task_id fails the dispatch loudly instead of silently
+        # leaving the old attempt un-fenced.
+        supersedes_raw = args.get("supersedes")
+        superseded_state: _ChildTask | None = None
+        if isinstance(supersedes_raw, str) and supersedes_raw.strip():
+            supersedes_id = supersedes_raw.strip()
+            superseded_state = self._registry.get(supersedes_id)
+            if superseded_state is None:
+                return _tool_result(
+                    {
+                        "error": (
+                            f"unknown supersedes task_id: {supersedes_id}; "
+                            "the dispatch was not performed. Check the "
+                            "task_id of the attempt you meant to replace."
+                        )
+                    },
+                    is_error=True,
+                )
         if "budget" in args:
             logger.debug(
                 "sub_agent: ignoring caller-supplied budget for purpose {!r}; "
@@ -716,14 +753,27 @@ class _ChildTaskManager:
             self._run_child(state=state, initial_prompt=prompt)
         )
         await self._registry.register(state)
-        return _tool_result(
-            {
-                "task_id": task_id,
-                "child_session_id": child.session_id,
-                "status": _RUNNING,
-                "purpose": purpose,
-            }
-        )
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "child_session_id": child.session_id,
+            "status": _RUNNING,
+            "purpose": purpose,
+        }
+        if superseded_state is not None:
+            # Mark only after the replacing dispatch is definitely live, so a
+            # failed spawn never falsely fences the old attempt. If the old
+            # attempt already finalized, its result was delivered as current
+            # before this dispatch existed — fencing protects pending
+            # deliveries only.
+            superseded_state.superseded_by = task_id
+            payload["supersedes"] = superseded_state.task_id
+            if superseded_state.status != _RUNNING:
+                payload["note"] = (
+                    f"superseded task {superseded_state.task_id} had already "
+                    f"finished ({superseded_state.status}); its earlier "
+                    "result was delivered before this dispatch"
+                )
+        return _tool_result(payload)
 
     async def inject_instruction(self, args: dict[str, Any]) -> ToolResult:
         task_id = str(args.get("task_id", ""))
@@ -821,6 +871,14 @@ class _DispatchAgentParams(PydanticBaseModel):
     extensions: list[list[Any]] | None = PydanticField(
         default=None,
         description="Each element is a [module_path, config] pair.",
+    )
+    supersedes: str | None = PydanticField(
+        default=None,
+        description=(
+            "task_id of an earlier dispatch this one replaces (a retry of "
+            "the same work). If the replaced task finishes later, its result "
+            "arrives marked stale instead of looking current."
+        ),
     )
 
 class _InjectInstructionParams(PydanticBaseModel):

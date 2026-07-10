@@ -80,14 +80,20 @@ the self-reference this substrate exists to avoid.
 
 ### 4.1 Control plane
 
-**C1 — Attempt identity and fencing.** Every child dispatch (`sub_agent`
-`dispatch_agent` and workflow `agent()`) is stamped with `task_id`,
-`attempt_id`, and an `idempotency_key` derived from them. Delivery into the
-parent inbox checks attempt currency: a result from a superseded attempt is
-delivered flagged as `stale` (and recorded in trace), never silently merged
-as current. This is single-process fencing — full lease/epoch machinery for
-distributed workers is rejected as scope creep (§7). Fencing matters most
-*during recovery*: without it, retry itself manufactures new contamination.
+**C1 — Attempt fencing (implemented).** Whether two dispatches are "the
+same logical work retried" is semantic judgment, so the mechanism does not
+guess: the dispatcher declares it — `dispatch_agent(..., supersedes=
+<old_task_id>)`. A validated declaration marks the old attempt
+`superseded_by=<new_task_id>` (only after the replacing dispatch is
+definitely live, so a failed spawn never falsely fences); when a superseded
+attempt finalizes later, its `<subagent_result>` is delivered flagged
+`stale="true" superseded_by=...` with an explicit warning — never as
+current. Scope note: the workflow `agent()` path needs no fencing — it
+awaits its child inline (timeout cancels the coroutine), so there is no
+late-delivery channel into a shared inbox; the fencing surface is
+`sub_agent`'s async inbox path only. Full lease/epoch machinery for
+distributed workers remains rejected (§7). Fencing matters most *during
+recovery*: without it, retry itself manufactures new contamination.
 
 **C2 — Typed task outcomes.** Child results carry
 `outcome ∈ {completed, unresolved, rejected, failed, aborted}` plus free-text
@@ -260,7 +266,8 @@ Fail-stop positions. The first three are **user-authorized for tests**
   preserved).
 - [authorized] Backward-edge derivation agrees with the script's real
   dataflow under standard interpolation patterns.
-- A stale attempt's result is never delivered as current (C1 fencing).
+- [authorized] A superseded task's late result is never delivered as
+  current (C1 fencing).
 - The same action idempotency_key never executes twice (C4).
 - Invalidation closure is complete: every session that read a flagged
   artifact has its subsequent writes and journaled results flagged.
@@ -329,12 +336,20 @@ plus the new invalidation/intent records:
 
 Phases (atom-level changes; no core ABI additions expected):
 
-1. **Workflow-channel fault tolerance** *(current slice)*: journal stores
+1. **Workflow-channel fault tolerance** *(shipped)*: journal stores
    prompt; `invalidate` primitive with feedback + carry_previous;
    forced-miss resume with original-key recording; backward-edge derivation
    query. Three authorized fail-stop tests.
-2. **Control-plane hardening**: attempt fencing on inbox delivery; typed
-   outcomes on `<subagent_result>` and workflow `agent()`.
+2. **Control-plane hardening**: attempt fencing via explicit `supersedes`
+   declaration *(shipped)*; typed outcomes on `<subagent_result>` and
+   workflow `agent()` — outcome authority is partitioned: the substrate
+   stamps `failed`/`aborted` (from TerminationCause), the consumer stamps
+   `rejected`, and only `completed` vs `unresolved` is producer-declared
+   (the one distinction with no mechanical source; the slot is
+   asymmetric-safe — a false `unresolved` wastes a retry, a false
+   `completed` is today's status quo, measured by detectors not prevented).
+   `submit_result` gains an `outcome` enum; `outcome=unresolved` may skip
+   payload schema validation so the schema cannot coerce fabrication.
 3. **Artifact channel + side effects**: derived consumption edges exposed
    via `agentm trace`; artifact invalidation + closure; `action_gateway`.
 4. **Index maturation + skills**: near-real-time refined layer;
