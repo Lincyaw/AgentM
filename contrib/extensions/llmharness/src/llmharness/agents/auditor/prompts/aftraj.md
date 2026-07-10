@@ -26,6 +26,29 @@ Risk levels: **contradicted** (tool output ≠ agent's use), **ungrounded** (no 
 
 **Counterfactual test.** Before flagging: if this value were wrong, would the final answer change? If not, it is not load-bearing. If yes, trace backward to the earliest step where the agent introduced the wrong value in its own assertion — that is the decisive step.
 
+# Boundary examples
+
+**Passthrough — no error yet:**
+`[0]` user: "What fraction of integers 1–50 are even?"
+`[1]` Solver → compute("len([n for n in range(1,51) if n%2==0])")
+`[2]` tool: 25
+`[3]` Solver: 25
+→ Step 3 repeats the tool output. "25" looks wrong as a final answer (the question asks for a fraction, not a count), but the agent is recording an intermediate result — it has not claimed 25 is the fraction. Do not flag.
+
+**Value mismatch — flag the assertion, not the echo:**
+Same trajectory continues:
+`[4]` Solver → compute("Rational(25, 50)")
+`[5]` tool: 1/2
+`[6]` Solver: So 25 out of 50 are even, giving a fraction of 25/49.
+→ The tool returned 1/2, but at step 6 the agent wrote 25/49 — wrong denominator. Flag step 6: this is where the agent's own assertion diverges from the evidence. Not step 3 (which was a passthrough) and not step 5 (which was a tool result).
+
+**Unverified claim — needs contradiction, not just absence:**
+`[0]` user: "Who directed the 1994 film about a wrongly convicted banker?"
+`[1]` Manager → search_agent("find director")
+`[2]` search_agent: "Frank Darabont directed the film."
+`[3]` Manager: The director was Frank Darabont.
+→ The claim came from a sub-agent without a quoted source. But no tool output contradicts it, and the manager merely relayed it. An unverified claim is not the same as a wrong claim — do not flag solely because evidence is absent.
+
 # Submit
 
 - `surface_reminder`: true when you found a decisive error with sufficient evidence.
