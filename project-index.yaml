@@ -2065,6 +2065,7 @@ requirements:
     status: tested
     confidence: confirmed
     code:
+      - path: src/agentm/extensions/builtin/_workflow/journal.py
       - path: src/agentm/extensions/builtin/_workflow/sdk.py
       - path: src/agentm/extensions/builtin/workflow.py
     tests:
@@ -2090,6 +2091,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/_workflow/lineage.py
+      - path: src/agentm/extensions/builtin/_workflow/journal_tools.py
       - path: src/agentm/extensions/builtin/workflow.py
     tests:
       - path: tests/unit/extensions/test_workflow_lineage.py

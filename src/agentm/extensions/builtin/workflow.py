@@ -12,14 +12,11 @@ gets the curated SDK names ``agent`` / ``parallel`` / ``pipeline`` / ``budget`` 
 
 from __future__ import annotations
 
-import json
-
 from loguru import logger
 from pydantic import BaseModel, Field
 from typing import Any
 
 from agentm.core.abi import (
-    ARTIFACT_STORE_SERVICE,
     ExtensionAPI,
     FunctionTool,
     MODEL_RESOLVER_SERVICE,
@@ -27,9 +24,10 @@ from agentm.core.abi import (
     ToolResult,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.extensions.builtin._workflow.lineage import (
-    ancestors as _lineage_ancestors,
-    derive_lineage as _derive_lineage,
+from agentm.extensions.builtin._workflow.journal_tools import (
+    JournalTools,
+    WorkflowInvalidateParams,
+    WorkflowLineageParams,
 )
 from agentm.extensions.builtin._workflow.runner import (
     WorkflowRunner,
@@ -45,7 +43,6 @@ from agentm.extensions.builtin._workflow.sdk import (
     AgentMockMode,
     AgentResult,
     BudgetSnapshot,
-    JournalEntry,
     RunSummary,
     WorkflowContext,
     WorkflowPhaseEvent,
@@ -54,8 +51,6 @@ from agentm.extensions.builtin._workflow.sdk import (
     _WORKER_PURPOSE,
     _coerce_agent_mock,
     _default_concurrency,
-    load_journal_entries,
-    write_invalidation,
 )
 
 
@@ -103,150 +98,6 @@ MANIFEST = ExtensionManifest(
 # Name of the service that backs the workflow-local resume journal.
 
 
-class _WorkflowLineageParams(BaseModel):
-    key: str | None = Field(
-        default=None,
-        description=(
-            "Journal key of one node: restrict the output to that node plus "
-            "its upstream ancestors. Omit to get the full graph."
-        ),
-    )
-
-
-class _WorkflowInvalidateParams(BaseModel):
-    key: str = Field(
-        description=(
-            "Journal key of the wrong agent() result (find it with "
-            "workflow_lineage)."
-        )
-    )
-    reason: str = Field(description="Why the result is wrong.")
-    feedback: str | None = Field(
-        default=None,
-        description=(
-            "Guidance injected into the re-run prompt so the new attempt "
-            "does not repeat the failure. Without it the node re-runs with "
-            "an identical prompt and may reproduce the same wrong output."
-        ),
-    )
-    carry_previous: bool = Field(
-        default=False,
-        description=(
-            "Include the invalidated result in the re-run prompt for "
-            "reference (default: fresh solve without anchoring on it)."
-        ),
-    )
-
-
-_SNIPPET_CHARS = 200
-
-
-def _entry_view(entry: JournalEntry) -> dict[str, Any]:
-    return {
-        "key": entry.key,
-        "prompt_head": (entry.prompt or "")[:_SNIPPET_CHARS],
-        "result_head": entry.result[:_SNIPPET_CHARS],
-        "invalidated": entry.invalidated,
-        "recorded_at": entry.timestamp,
-    }
-
-
-def _ok_text(text: str) -> ToolResult:
-    return ToolResult(content=[TextContent(type="text", text=text)])
-
-
-class _JournalTools:
-    """workflow_lineage / workflow_invalidate — the recovery-loop surface
-    over the journal (reliability-substrate.md §4.3)."""
-
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
-
-    def _store(self) -> Any | None:
-        return self._api.get_service(ARTIFACT_STORE_SERVICE)
-
-    async def lineage(self, args: dict[str, Any]) -> ToolResult:
-        store = self._store()
-        if store is None:
-            return _error(
-                "workflow_lineage: no artifact store in this session, so "
-                "there is no workflow journal to inspect"
-            )
-        entries = await load_journal_entries(store)
-        if not entries:
-            return _ok_text(
-                "The workflow journal is empty — no agent() results have "
-                "been recorded in this session tree yet."
-            )
-        graph = _derive_lineage(entries)
-        key_arg = args.get("key")
-        selected = entries
-        if isinstance(key_arg, str) and key_arg.strip():
-            key = key_arg.strip()
-            by_key = {entry.key: entry for entry in entries}
-            if key not in by_key:
-                known = ", ".join(sorted(by_key)[:10])
-                return _error(
-                    f"workflow_lineage: no journal entry with key '{key}'. "
-                    f"Known keys include: {known}"
-                )
-            wanted = {key, *_lineage_ancestors(graph, key)}
-            selected = [entry for entry in entries if entry.key in wanted]
-        selected_keys = {entry.key for entry in selected}
-        payload = {
-            "nodes": [_entry_view(entry) for entry in selected],
-            "edges": [
-                {"src": edge.src, "dst": edge.dst, "kind": edge.kind}
-                for edge in graph.edges
-                if edge.src in selected_keys and edge.dst in selected_keys
-            ],
-            "order_candidates": {
-                node: parents
-                for node, parents in graph.order_candidates.items()
-                if node in selected_keys
-            },
-        }
-        return _ok_text(json.dumps(payload, ensure_ascii=False, indent=2))
-
-    async def invalidate(self, args: dict[str, Any]) -> ToolResult:
-        store = self._store()
-        if store is None:
-            return _error(
-                "workflow_invalidate: no artifact store in this session, so "
-                "there is no workflow journal to invalidate against"
-            )
-        key = str(args.get("key", "")).strip()
-        reason = str(args.get("reason", "")).strip()
-        if not key or not reason:
-            return _error("workflow_invalidate: both key and reason are required")
-        entries = await load_journal_entries(store)
-        if key not in {entry.key for entry in entries}:
-            return _error(
-                f"workflow_invalidate: no journaled result with key '{key}'. "
-                "Run workflow_lineage first to find the node's key."
-            )
-        feedback_arg = args.get("feedback")
-        feedback = (
-            str(feedback_arg).strip()
-            if isinstance(feedback_arg, str) and str(feedback_arg).strip()
-            else None
-        )
-        await write_invalidation(
-            store,
-            key=key,
-            reason=reason,
-            feedback=feedback,
-            carry_previous=bool(args.get("carry_previous", False)),
-        )
-        return _ok_text(
-            f"Invalidated journal entry {key}. On the next run of the same "
-            "workflow script this node re-runs"
-            + (" with your feedback injected" if feedback else "")
-            + ", and every node whose prompt derives from its output re-runs "
-            "automatically; unaffected nodes keep their cached results."
-        )
-
-
 class _WorkflowRuntime:
     def __init__(self, api: ExtensionAPI, config: WorkflowConfig) -> None:
         self._api = api
@@ -277,7 +128,7 @@ class _WorkflowRuntime:
 
     def install(self) -> None:
         self._api.set_service(_WORKFLOW_RUNNER_SERVICE, self._runner)
-        journal_tools = _JournalTools(self._api)
+        journal_tools = JournalTools(self._api)
         self._api.register_tool(
             FunctionTool(
                 name="workflow_lineage",
@@ -286,12 +137,14 @@ class _WorkflowRuntime:
                     "node per journaled agent() call (key, prompt/result "
                     "snippets, invalidated flag), with an edge where one "
                     "node's result appears verbatim in another node's prompt. "
-                    "Nodes whose dataflow was transformed before interpolation "
-                    "fall back to conservative order_candidates. Use this to "
-                    "trace a wrong result back to its upstream nodes before "
-                    "deciding which one to invalidate."
+                    "Edges are the precise subset of the dataflow, not proof "
+                    "there are no other dependencies: a result transformed "
+                    "before interpolation leaves no verbatim edge, and a node "
+                    "with no verbatim parent at all falls back to conservative "
+                    "order_candidates. Use this to trace a wrong result back "
+                    "to its upstream nodes before deciding what to invalidate."
                 ),
-                parameters=_WorkflowLineageParams,
+                parameters=WorkflowLineageParams,
                 fn=journal_tools.lineage,
             )
         )
@@ -306,7 +159,7 @@ class _WorkflowRuntime:
                     "while unaffected nodes keep their cached results. The "
                     "flag is an append-only record; nothing is deleted."
                 ),
-                parameters=_WorkflowInvalidateParams,
+                parameters=WorkflowInvalidateParams,
                 fn=journal_tools.invalidate,
             )
         )

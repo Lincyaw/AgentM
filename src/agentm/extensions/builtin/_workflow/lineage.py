@@ -8,28 +8,30 @@ derives those edges by pure substring matching — the session index's
 deterministic layer; no LLM is involved and no self-report is trusted
 (reliability-substrate.md §4.2).
 
-When a script transforms a result before interpolating it (extracts one JSON
-field, reformats), verbatim matching misses the edge. Nodes with a stored
-prompt but no verbatim parent therefore fall back to conservative
-program-order candidates: every entry recorded earlier. Precision degrades;
-completeness does not. Note the fallback ordering uses record timestamps, so
-after a node has been invalidated and re-recorded its timestamp is its
-*latest* run — conservative candidates for downstream nodes remain a
-superset, which keeps the fallback sound.
+Precision caveat, stated honestly: when a script transforms a result before
+interpolating it (extracts one JSON field, reformats), verbatim matching
+misses that edge. A node with NO verbatim parent falls back to conservative
+program-order candidates (every entry recorded earlier), so fully-transformed
+dataflow degrades to a complete-but-imprecise candidate set — but a node
+with one verbatim parent plus one transformed dependency reports only the
+verbatim edge and gets no fallback. Consumers scoping an invalidation
+closure should treat verbatim edges as the precise subset, not as proof
+there are no other dependencies.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
-from agentm.extensions.builtin._workflow.sdk import JournalEntry
+from agentm.extensions.builtin._workflow.journal import JournalEntry
 
 # Results shorter than this are too generic to treat a substring hit as a
 # real dataflow edge ("ok", "yes", a bare number would match everywhere).
 _MIN_VERBATIM_LEN = 12
-
-EdgeKind = Literal["verbatim"]
+# Cheap pre-match: results can be ~100KB and ``in`` cost scales with needle
+# length, so probe with a bounded prefix first and confirm with the full
+# needle only on prefix hits.
+_FINGERPRINT_CHARS = 256
 
 
 @dataclass(slots=True)
@@ -38,44 +40,40 @@ class LineageEdge:
 
     src: str
     dst: str
-    kind: EdgeKind = "verbatim"
 
 
 @dataclass(slots=True)
 class LineageGraph:
-    entries: list[JournalEntry]
     edges: list[LineageEdge]
     # key → earlier-entry keys, for nodes with a prompt but no verbatim
-    # parent (transformed-dataflow fallback; conservative, ordered oldest
-    # first).
+    # parent (transformed-dataflow fallback; conservative, oldest first).
     order_candidates: dict[str, list[str]]
 
 
 def derive_lineage(entries: list[JournalEntry]) -> LineageGraph:
     """Derive backward edges among journal entries by verbatim matching."""
+    ordered = sorted(entries, key=lambda entry: entry.timestamp)
     edges: list[LineageEdge] = []
-    for src in entries:
+    for src_index, src in enumerate(ordered):
         needle = src.result.strip()
         if len(needle) < _MIN_VERBATIM_LEN:
             continue
-        for dst in entries:
-            if dst.key == src.key or dst.prompt is None:
+        fingerprint = needle[:_FINGERPRINT_CHARS]
+        # A result can only flow into a prompt recorded after it.
+        for dst in ordered[src_index + 1 :]:
+            if dst.prompt is None:
                 continue
-            if needle in dst.prompt:
+            if fingerprint in dst.prompt and needle in dst.prompt:
                 edges.append(LineageEdge(src=src.key, dst=dst.key))
 
     has_parent = {edge.dst for edge in edges}
-    ordered = sorted(entries, key=lambda entry: entry.timestamp)
     order_candidates: dict[str, list[str]] = {}
-    for index, entry in enumerate(ordered):
-        if entry.prompt is None or entry.key in has_parent:
-            continue
-        earlier = [prior.key for prior in ordered[:index]]
-        if earlier:
-            order_candidates[entry.key] = earlier
-    return LineageGraph(
-        entries=entries, edges=edges, order_candidates=order_candidates
-    )
+    prefix: list[str] = []
+    for entry in ordered:
+        if entry.prompt is not None and entry.key not in has_parent and prefix:
+            order_candidates[entry.key] = list(prefix)
+        prefix.append(entry.key)
+    return LineageGraph(edges=edges, order_candidates=order_candidates)
 
 
 def ancestors(graph: LineageGraph, key: str) -> list[str]:

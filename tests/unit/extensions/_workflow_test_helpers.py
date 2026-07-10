@@ -1,16 +1,21 @@
-"""In-memory artifact store fake for workflow journal tests.
+"""Shared helpers for workflow journal tests.
 
-Implements the slice of the ``artifact_store`` service the workflow journal
-consumes (``write_artifact`` / ``list_artifacts`` / ``read``), with the same
-observable contract: sequential ids, ``created_by.timestamp`` floats, and
-newest-first listing.
+``FakeArtifactStore`` implements the slice of the ``artifact_store`` service
+the workflow journal consumes (``write_artifact`` / ``list_artifacts`` /
+``read``), with the same observable contract: sequential ids,
+``created_by.timestamp`` floats, and newest-first listing. ``StubRun`` is a
+``_WorkflowRun`` whose child-session spawn is replaced by a scripted stub.
 """
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
 from typing import Any
 
 from agentm.core.abi import ToolResult
+from agentm.extensions.builtin._workflow.journal import _Journal
+from agentm.extensions.builtin._workflow.sdk import _BudgetService, _WorkflowRun
 
 
 class FakeArtifactStore:
@@ -78,3 +83,34 @@ class FakeArtifactStore:
                     extras={"artifact_id": artifact_id, "body": item["body"]},
                 )
         return ToolResult(content=[], is_error=True)
+
+
+@dataclass(slots=True)
+class StubRun(_WorkflowRun):
+    """``_WorkflowRun`` with the child-session spawn replaced by a stub that
+    pops scripted results and records the prompts it was driven with."""
+
+    spawn_results: list[str] = field(default_factory=list)
+    spawn_prompts: list[str] = field(default_factory=list)
+
+    async def _spawn_and_drive(  # type: ignore[override]
+        self,
+        prompt: str,
+        scenario: str | None,
+        model: str | None,
+        isolation: str | None,
+        tool_allowlist: list[str] | None,
+        **_kwargs: object,
+    ) -> str:
+        self.spawn_prompts.append(prompt)
+        return self.spawn_results.pop(0)
+
+
+def make_run(store: FakeArtifactStore, results: list[str]) -> StubRun:
+    return StubRun(
+        api=None,  # type: ignore[arg-type]  # only reached by the real spawn path
+        journal=_Journal(store=store),
+        budget_svc=_BudgetService(),
+        semaphore=asyncio.Semaphore(2),
+        spawn_results=list(results),
+    )

@@ -28,6 +28,7 @@ from agentm.core.abi import (
     ToolResult,
 )
 from agentm.core.lib import expand_path_from_cwd
+from agentm.extensions.builtin._workflow.journal import _ArtifactStore, _Journal
 from agentm.extensions.builtin._workflow.sdk import (
     AgentMockMode,
     BudgetSnapshot,
@@ -35,10 +36,8 @@ from agentm.extensions.builtin._workflow.sdk import (
     RunSummary,
     WorkflowContext,
     WorkflowResult,
-    _ArtifactStore,
     _Budget,
     _BudgetService,
-    _Journal,
     _SAFE_BUILTINS,
     _WorkflowRun,
     _auto_parse,

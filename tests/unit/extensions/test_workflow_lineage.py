@@ -6,27 +6,19 @@ the script's real dataflow under standard interpolation patterns.
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-
 import pytest
 
-from agentm.extensions.builtin._workflow.lineage import ancestors, derive_lineage
-from agentm.extensions.builtin._workflow.sdk import (
+from agentm.extensions.builtin._workflow.journal import (
     JournalEntry,
-    _BudgetService,
-    _Journal,
-    _WorkflowRun,
     load_journal_entries,
 )
+from agentm.extensions.builtin._workflow.lineage import ancestors, derive_lineage
 
-from ._fake_artifact_store import FakeArtifactStore
+from ._workflow_test_helpers import FakeArtifactStore, make_run
 
 
 def _entry(key: str, result: str, prompt: str | None, ts: float) -> JournalEntry:
-    return JournalEntry(
-        key=key, artifact_id=f"art_{key}", result=result, prompt=prompt, timestamp=ts
-    )
+    return JournalEntry(key=key, result=result, prompt=prompt, timestamp=ts)
 
 
 def test_verbatim_interpolation_yields_the_real_dataflow_edges() -> None:
@@ -54,6 +46,20 @@ def test_short_generic_results_do_not_create_spurious_edges() -> None:
     assert graph.edges == []
 
 
+def test_long_results_match_beyond_the_fingerprint_prefix() -> None:
+    # Result longer than the 256-char fingerprint: the prefix pre-match must
+    # still confirm with the full needle, in both directions.
+    long_result = "x" * 300 + "-tail-marker"
+    entries = [
+        _entry("A", long_result, "start", 1.0),
+        _entry("B", "downstream-result-1", f"use: {long_result}", 2.0),
+        # Same 256-char prefix but different tail → NOT a real dataflow edge.
+        _entry("C", "downstream-result-2", "use: " + "x" * 300 + "-other", 3.0),
+    ]
+    graph = derive_lineage(entries)
+    assert {(e.src, e.dst) for e in graph.edges} == {("A", "B")}
+
+
 def test_ancestors_walks_the_chain_transitively() -> None:
     entries = [
         _entry("A", "level-one-result-aaa", "start", 1.0),
@@ -65,35 +71,13 @@ def test_ancestors_walks_the_chain_transitively() -> None:
     assert ancestors(graph, "A") == []
 
 
-@dataclass(slots=True)
-class _StubRun(_WorkflowRun):
-    spawn_results: list[str] = field(default_factory=list)
-
-    async def _spawn_and_drive(  # type: ignore[override]
-        self,
-        prompt: str,
-        scenario: str | None,
-        model: str | None,
-        isolation: str | None,
-        tool_allowlist: list[str] | None,
-        **_kwargs: object,
-    ) -> str:
-        return self.spawn_results.pop(0)
-
-
 @pytest.mark.asyncio
 async def test_derivation_matches_script_dataflow_end_to_end() -> None:
     """Storage round-trip: run a real agent() flow against the journal, then
     derive lineage from what was stored and compare with the script's actual
     variable wiring."""
     store = FakeArtifactStore()
-    run = _StubRun(
-        api=None,  # type: ignore[arg-type]
-        journal=_Journal(store=store),
-        budget_svc=_BudgetService(),
-        semaphore=asyncio.Semaphore(2),
-        spawn_results=["upstream-result-123456", "downstream-final-answer"],
-    )
+    run = make_run(store, ["upstream-result-123456", "downstream-final-answer"])
     upstream = await run.agent("collect the metrics")
     await run.agent(f"summarize these metrics: {upstream}")
 
