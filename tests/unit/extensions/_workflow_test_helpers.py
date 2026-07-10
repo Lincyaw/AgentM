@@ -2,8 +2,10 @@
 
 ``FakeArtifactStore`` implements the slice of the ``artifact_store`` service
 the workflow journal consumes (``write_artifact`` / ``list_artifacts`` /
-``read``), with the same observable contract: sequential ids,
-``created_by.timestamp`` floats, and newest-first listing. ``StubRun`` is a
+``read``): sequential ids and ``created_by.timestamp`` floats. It
+deliberately lists in INSERTION order (oldest first — the opposite of the
+real store's newest-first) because listing order is not part of the service
+contract and the journal must not depend on it. ``StubRun`` is a
 ``_WorkflowRun`` whose child-session spawn is replaced by a scripted stub.
 """
 
@@ -57,7 +59,6 @@ class FakeArtifactStore:
             if (kind is None or item["kind"] == kind)
             and set(tags).issubset(set(item["tags"]))
         ]
-        matches.sort(key=lambda item: item["created_by"]["timestamp"], reverse=True)
         return ToolResult(
             content=[],
             extras={

@@ -32,7 +32,11 @@ from agentm.core.abi import ToolResult
 
 
 class _ArtifactStore(Protocol):
-    """The ``artifact_store`` service surface the journal consumes."""
+    """The ``artifact_store`` service surface the journal consumes.
+
+    No listing-order guarantee is assumed: the journal picks newest records
+    by ``created_by.timestamp`` itself, so a replacement store may return
+    ``list_artifacts`` results in any order."""
 
     async def list_artifacts(self, args: dict[str, Any]) -> ToolResult: ...
     async def read(self, args: dict[str, Any]) -> ToolResult: ...
@@ -147,16 +151,24 @@ async def _read_full_body(store: _ArtifactStore, artifact_id: str) -> str | None
 async def _newest_for_key(
     store: _ArtifactStore, kind: str, key: str
 ) -> tuple[str, float] | None:
-    """``(artifact_id, timestamp)`` of the newest ``kind`` artifact tagged ``key``."""
+    """``(artifact_id, timestamp)`` of the newest ``kind`` artifact tagged ``key``.
+
+    Picks the max by timestamp itself instead of trusting listing order —
+    the store is a replaceable service and its ordering is not part of the
+    contract. Per-key record counts are small (one original plus a few
+    re-runs), so listing them all is cheap."""
     listed = _listed_artifacts(
-        await store.list_artifacts({"kind": kind, "tags": [key], "limit": 1})
+        await store.list_artifacts({"kind": kind, "tags": [key], "limit": _BULK_LIMIT})
     )
-    if not listed:
-        return None
-    artifact_id = str(listed[0].get("id", ""))
-    if not artifact_id:
-        return None
-    return artifact_id, _artifact_timestamp(listed[0])
+    newest: tuple[str, float] | None = None
+    for item in listed:
+        artifact_id = str(item.get("id", ""))
+        if not artifact_id:
+            continue
+        ts = _artifact_timestamp(item)
+        if newest is None or ts > newest[1]:
+            newest = (artifact_id, ts)
+    return newest
 
 
 async def _write_keyed(
@@ -224,11 +236,15 @@ async def _newest_invalidation_index(
         await store.list_artifacts(
             {"kind": _JOURNAL_INVALIDATION_KIND, "limit": _BULK_LIMIT}
         )
-    ):  # newest first — first occurrence per key wins
+    ):  # max-by-timestamp per key; listing order is not trusted
         key = str(item.get("title", ""))
         artifact_id = str(item.get("id", ""))
-        if key and artifact_id and key not in index:
-            index[key] = (artifact_id, _artifact_timestamp(item))
+        if not key or not artifact_id:
+            continue
+        ts = _artifact_timestamp(item)
+        existing = index.get(key)
+        if existing is None or ts > existing[1]:
+            index[key] = (artifact_id, ts)
     return index
 
 
@@ -237,17 +253,22 @@ async def load_journal_entries(
 ) -> list[JournalEntry]:
     """Newest record per journal key, decoded, with pending-invalidation flags."""
     invalidation_index = await _newest_invalidation_index(store)
-    newest: list[tuple[str, str, float]] = []  # (key, artifact_id, ts)
-    seen: set[str] = set()
+    newest_by_key: dict[str, tuple[str, float]] = {}  # key → (artifact_id, ts)
     for item in _listed_artifacts(
         await store.list_artifacts({"kind": _JOURNAL_KIND, "limit": limit})
-    ):  # newest first
+    ):  # max-by-timestamp per key; listing order is not trusted
         key = str(item.get("title", ""))
         artifact_id = str(item.get("id", ""))
-        if not key or not artifact_id or key in seen:
+        if not key or not artifact_id:
             continue
-        seen.add(key)
-        newest.append((key, artifact_id, _artifact_timestamp(item)))
+        ts = _artifact_timestamp(item)
+        existing = newest_by_key.get(key)
+        if existing is None or ts > existing[1]:
+            newest_by_key[key] = (artifact_id, ts)
+    newest = [
+        (key, artifact_id, ts)
+        for key, (artifact_id, ts) in newest_by_key.items()
+    ]
     bodies = await asyncio.gather(
         *(_read_full_body(store, artifact_id) for _key, artifact_id, _ts in newest)
     )
