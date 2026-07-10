@@ -2046,3 +2046,54 @@ requirements:
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
       - REQ-086-atom-rework-infra
+
+  - id: REQ-209-workflow-journal-invalidation
+    title: Workflow journal invalidation with feedback-injected re-run
+    description: >
+      The workflow resume journal must support invalidating a recorded
+      agent() result: an append-only invalidation record (reason, optional
+      feedback, optional carry_previous) flags a journal key; lookup treats
+      a key as a miss when its newest invalidation is newer than its newest
+      result. The forced re-run injects the feedback (and, when
+      carry_previous is set, the previous attempt's result) into the child
+      prompt while recording the new result under the original key, so the
+      content-addressed key-shift cascade re-runs exactly the affected
+      downstream subgraph on resume and untouched branches keep their
+      cached hits. Journal entries must store the prompt alongside the
+      result so lineage derivation does not require a trace join.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/_workflow/sdk.py
+      - path: src/agentm/extensions/builtin/workflow.py
+    tests:
+      - path: tests/unit/extensions/test_workflow_invalidation.py
+    docs:
+      - path: .claude/designs/reliability-substrate.md
+    depends_on:
+      - REQ-191-workflow-free-text-agent-output
+
+  - id: REQ-210-workflow-lineage-derivation
+    title: Deterministic backward-edge lineage derivation over the workflow journal
+    description: >
+      A deterministic query over stored journal entries derives the
+      dependency graph without LLM involvement: entry X's result body
+      appearing verbatim inside entry Y's prompt yields edge X -> Y; when no
+      verbatim match exists the channel degrades to conservative
+      program-order candidates rather than dropping completeness. The query
+      is exposed to the session (workflow_lineage tool) so a recovery agent
+      can walk from a wrong result to its upstream candidates before
+      choosing what to invalidate.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/_workflow/lineage.py
+      - path: src/agentm/extensions/builtin/workflow.py
+    tests:
+      - path: tests/unit/extensions/test_workflow_lineage.py
+    docs:
+      - path: .claude/designs/reliability-substrate.md
+    depends_on:
+      - REQ-209-workflow-journal-invalidation

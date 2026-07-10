@@ -305,15 +305,213 @@ class _Budget:
         return max(0, total - self.spent())
 
 
+# Journal artifact kinds and the versioned body envelope. Entries store the
+# script-authored prompt alongside the result so lineage derivation (which
+# journal node's result flowed into which node's prompt) needs no trace join.
+_JOURNAL_KIND: Final[str] = "workflow_journal"
+_JOURNAL_INVALIDATION_KIND: Final[str] = "workflow_journal_invalidation"
+_JOURNAL_ENVELOPE_MARKER: Final[str] = "__workflow_journal__"
+_JOURNAL_ENVELOPE_VERSION: Final[int] = 2
+# artifact_read without a range truncates bodies at inline_max_bytes; journal
+# correctness needs the full body, so every journal read passes an explicit
+# byte range covering any realistic size.
+_FULL_BODY_RANGE: Final[dict[str, list[int]]] = {"bytes": [0, 1 << 31]}
+
+
+@dataclass(slots=True)
+class JournalInvalidation:
+    """Pending invalidation flag for one journal key (append-only record)."""
+
+    reason: str
+    feedback: str | None
+    carry_previous: bool
+    timestamp: float
+
+
+@dataclass(slots=True)
+class JournalEntry:
+    """Decoded newest journal record for one key (lineage / tooling view)."""
+
+    key: str
+    artifact_id: str
+    result: str
+    prompt: str | None
+    timestamp: float
+    invalidated: bool = False
+
+
+@dataclass(slots=True)
+class _JournalState:
+    """Resume-relevant state of one key.
+
+    ``cached`` is the newest recorded result (also present when a pending
+    invalidation forces a miss — the re-run may carry it as reference).
+    ``invalidation`` is set only when it is *pending*: newer than the newest
+    result record, i.e. not yet superseded by a re-run."""
+
+    cached: str | None = None
+    invalidation: JournalInvalidation | None = None
+
+
+def _encode_journal_body(prompt: str, result: str) -> str:
+    return json.dumps(
+        {
+            _JOURNAL_ENVELOPE_MARKER: _JOURNAL_ENVELOPE_VERSION,
+            "prompt": prompt,
+            "result": result,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _decode_journal_body(body: str) -> tuple[str | None, str]:
+    """Return ``(prompt, result)``; legacy plain-string bodies → ``(None, body)``."""
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None, body
+    if isinstance(payload, dict) and payload.get(_JOURNAL_ENVELOPE_MARKER) is not None:
+        prompt = payload.get("prompt")
+        return (
+            prompt if isinstance(prompt, str) else None,
+            str(payload.get("result", "")),
+        )
+    return None, body
+
+
+def _listed_artifacts(listing: ToolResult) -> list[dict[str, Any]]:
+    if listing.is_error or not listing.extras:
+        return []
+    artifacts = listing.extras.get("artifacts")
+    return list(artifacts) if isinstance(artifacts, list) else []
+
+
+def _artifact_timestamp(item: dict[str, Any]) -> float:
+    created = item.get("created_by")
+    ts = created.get("timestamp") if isinstance(created, dict) else None
+    return float(ts) if isinstance(ts, (int, float)) else 0.0
+
+
+async def _read_full_body(store: _ArtifactStore, artifact_id: str) -> str | None:
+    read = await store.read({"artifact_id": artifact_id, "range": _FULL_BODY_RANGE})
+    if read.is_error or not read.extras:
+        return None
+    body = read.extras.get("body")
+    return body if isinstance(body, str) else None
+
+
+async def write_invalidation(
+    store: _ArtifactStore,
+    *,
+    key: str,
+    reason: str,
+    feedback: str | None = None,
+    carry_previous: bool = False,
+) -> None:
+    """Append an invalidation flag for ``key`` (never mutates the entry)."""
+    await store.write_artifact(
+        kind=_JOURNAL_INVALIDATION_KIND,
+        title=key,
+        body=json.dumps(
+            {
+                "reason": reason,
+                "feedback": feedback,
+                "carry_previous": carry_previous,
+            },
+            ensure_ascii=False,
+        ),
+        tags=[key],
+    )
+
+
+async def load_journal_entries(
+    store: _ArtifactStore, *, limit: int = 500
+) -> list[JournalEntry]:
+    """Newest record per journal key, decoded, with pending-invalidation flags."""
+    listing = await store.list_artifacts({"kind": _JOURNAL_KIND, "limit": limit})
+    invalidation_ts: dict[str, float] = {}
+    for item in _listed_artifacts(
+        await store.list_artifacts({"kind": _JOURNAL_INVALIDATION_KIND, "limit": limit})
+    ):
+        key = str(item.get("title", ""))
+        ts = _artifact_timestamp(item)
+        if key and ts > invalidation_ts.get(key, float("-inf")):
+            invalidation_ts[key] = ts
+    entries: list[JournalEntry] = []
+    seen: set[str] = set()
+    for item in _listed_artifacts(listing):  # newest first
+        key = str(item.get("title", ""))
+        artifact_id = str(item.get("id", ""))
+        if not key or not artifact_id or key in seen:
+            continue
+        seen.add(key)
+        body = await _read_full_body(store, artifact_id)
+        if body is None:
+            continue
+        prompt, result = _decode_journal_body(body)
+        ts = _artifact_timestamp(item)
+        entries.append(
+            JournalEntry(
+                key=key,
+                artifact_id=artifact_id,
+                result=result,
+                prompt=prompt,
+                timestamp=ts,
+                invalidated=invalidation_ts.get(key, float("-inf")) > ts,
+            )
+        )
+    return entries
+
+
+def _invalidation_rerun_prompt(
+    prompt: str,
+    invalidation: JournalInvalidation,
+    previous_result: str | None,
+) -> str:
+    """Compose the execution prompt for a forced re-run.
+
+    Execution detail only: the journal key stays the hash of the original
+    script-authored prompt, so downstream key-shift propagation and resume
+    addressing are unaffected by this injection."""
+    lines = [
+        prompt,
+        "",
+        "---",
+        "A previous result for this exact task was found to be wrong and has "
+        "been invalidated. Redo the task from the original instructions above.",
+    ]
+    if invalidation.reason.strip():
+        lines.append(f"Why the previous result was wrong: {invalidation.reason.strip()}")
+    if invalidation.feedback and invalidation.feedback.strip():
+        lines.append(
+            f"Guidance for this attempt: {invalidation.feedback.strip()}"
+        )
+    if invalidation.carry_previous and previous_result:
+        lines += [
+            "The invalidated previous result follows for reference only — do "
+            "not repeat its mistake:",
+            "<previous_attempt>",
+            previous_result,
+            "</previous_attempt>",
+        ]
+    return "\n".join(lines)
+
+
 @dataclass(slots=True)
 class _Journal:
     """Workflow-local journal backed by the ``artifact_store`` service.
 
     Each ``agent()`` result is keyed by ``hash(prompt, opts)`` and written as
     an artifact (``kind="workflow_journal"``, the key carried in ``tags`` and
-    ``title``). On resume the host looks the key up first and returns the
-    cached body without re-spawning. The store allocates its own ids, so the
-    key->artifact mapping lives in the tags index, not the id.
+    ``title``; body = versioned JSON envelope of prompt + result). On resume
+    the host looks the key up first and returns the cached body without
+    re-spawning — unless a *pending invalidation* (an invalidation record
+    newer than the newest result) forces a miss, in which case the node
+    re-runs with the invalidation feedback injected and its fresh result,
+    recorded under the same key, supersedes the flag. Upstream results are
+    interpolated into dependent prompts, so a changed re-run result shifts
+    every dependent key and re-runs exactly the affected subgraph
+    (reliability-substrate.md §4.3).
 
     *Not* ``SessionStore.open`` — that is session-level transcript replay, the
     wrong granularity (design §3.3).
@@ -331,17 +529,16 @@ class _Journal:
         served from the in-memory ``_cache`` that ``record`` populates. So if
         the store holds no ``workflow_journal`` artifacts, disable per-agent
         store lookups for the whole run: one probe replaces an
-        ``list_artifacts`` + ``read`` round-trip per unique agent."""
+        ``list_artifacts`` + ``read`` round-trip per unique agent. (No journal
+        entries also means no invalidation can apply — there is nothing
+        recorded to invalidate.)"""
         if self.store is None:
             self._store_has_entries = False
             return
         listing = await self.store.list_artifacts(
-            {"kind": "workflow_journal", "limit": 1}
+            {"kind": _JOURNAL_KIND, "limit": 1}
         )
-        artifacts = (
-            (listing.extras or {}).get("artifacts", []) if listing.extras else []
-        )
-        self._store_has_entries = bool(artifacts)
+        self._store_has_entries = bool(_listed_artifacts(listing))
 
     @staticmethod
     def key(prompt: str, opts: dict[str, Any]) -> str:
@@ -352,39 +549,78 @@ class _Journal:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
-    async def lookup(self, key: str) -> str | None:
-        if key in self._cache:
-            return self._cache[key]
-        if self.store is None or not self._store_has_entries:
-            return None
-        listing = await self.store.list_artifacts(
-            {"kind": "workflow_journal", "tags": [key], "limit": 1}
-        )
-        artifacts = (
-            (listing.extras or {}).get("artifacts", []) if listing.extras else []
-        )
-        if not artifacts:
-            return None
-        artifact_id = artifacts[0].get("id")
-        if not artifact_id:
-            return None
-        read = await self.store.read({"artifact_id": artifact_id})
-        if read.is_error or not read.extras:
-            return None
-        body = read.extras.get("body")
-        if isinstance(body, str):
-            self._cache[key] = body
-            return body
-        return None
+    async def lookup_state(self, key: str) -> _JournalState:
+        """Resume state for ``key``: cached result and any pending invalidation.
 
-    async def record(self, key: str, body: str) -> None:
+        The in-run ``_cache`` wins unconditionally: within one run a key is
+        resolved once (a mid-run invalidation applies from the next run)."""
+        if key in self._cache:
+            return _JournalState(cached=self._cache[key])
+        if self.store is None or not self._store_has_entries:
+            return _JournalState()
+        result_ts = float("-inf")
+        cached: str | None = None
+        listed = _listed_artifacts(
+            await self.store.list_artifacts(
+                {"kind": _JOURNAL_KIND, "tags": [key], "limit": 1}
+            )
+        )
+        if listed:
+            artifact_id = str(listed[0].get("id", ""))
+            result_ts = _artifact_timestamp(listed[0])
+            if artifact_id:
+                body = await _read_full_body(self.store, artifact_id)
+                if body is not None:
+                    _prompt, cached = _decode_journal_body(body)
+        invalidation = await self._pending_invalidation(key, newer_than=result_ts)
+        if cached is not None and invalidation is None:
+            self._cache[key] = cached
+        return _JournalState(cached=cached, invalidation=invalidation)
+
+    async def _pending_invalidation(
+        self, key: str, *, newer_than: float
+    ) -> JournalInvalidation | None:
+        assert self.store is not None
+        listed = _listed_artifacts(
+            await self.store.list_artifacts(
+                {"kind": _JOURNAL_INVALIDATION_KIND, "tags": [key], "limit": 1}
+            )
+        )
+        if not listed:
+            return None
+        ts = _artifact_timestamp(listed[0])
+        if ts <= newer_than:
+            return None  # superseded by a re-run result
+        artifact_id = str(listed[0].get("id", ""))
+        payload: dict[str, Any] = {}
+        if artifact_id:
+            body = await _read_full_body(self.store, artifact_id)
+            if body is not None:
+                try:
+                    decoded = json.loads(body)
+                    if isinstance(decoded, dict):
+                        payload = decoded
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning(
+                        "workflow journal: unreadable invalidation record for "
+                        f"key {key}; treating as bare invalidation"
+                    )
+        feedback = payload.get("feedback")
+        return JournalInvalidation(
+            reason=str(payload.get("reason", "")),
+            feedback=feedback if isinstance(feedback, str) else None,
+            carry_previous=bool(payload.get("carry_previous", False)),
+            timestamp=ts,
+        )
+
+    async def record(self, key: str, body: str, *, prompt: str) -> None:
         self._cache[key] = body
         if self.store is None:
             return
         await self.store.write_artifact(
-            kind="workflow_journal",
+            kind=_JOURNAL_KIND,
             title=key,
-            body=body,
+            body=_encode_journal_body(prompt, body),
             tags=[key],
         )
 
@@ -614,14 +850,22 @@ class _WorkflowRun:
             return parsed
 
         key = _Journal.key(prompt, opts)
-        cached = await self.journal.lookup(key)
-        if cached is not None:
-            parsed = _auto_parse(cached)
+        state = await self.journal.lookup_state(key)
+        if state.cached is not None and state.invalidation is None:
+            parsed = _auto_parse(state.cached)
             if model_cls is not None and isinstance(parsed, dict):
                 return model_cls.model_validate(parsed)
             return parsed
 
         current_prompt = prompt
+        if state.invalidation is not None:
+            # Pending invalidation → forced re-run. The feedback goes into the
+            # execution prompt only; the journal key (identity) is unchanged,
+            # so the fresh result recorded below supersedes the flag and
+            # shifts downstream keys naturally.
+            current_prompt = _invalidation_rerun_prompt(
+                prompt, state.invalidation, state.cached
+            )
         last_error: Exception | None = None
 
         for attempt in range(max(retry, 0) + 1):
@@ -699,7 +943,7 @@ class _WorkflowRun:
                     self.agents_failed += 1
                     raise
                 self.agents_succeeded += 1
-                await self.journal.record(key, result)
+                await self.journal.record(key, result, prompt=prompt)
                 return validated
 
             if _is_agent_error(parsed):
@@ -707,7 +951,7 @@ class _WorkflowRun:
             else:
                 self.agents_succeeded += 1
 
-            await self.journal.record(key, result)
+            await self.journal.record(key, result, prompt=prompt)
             return parsed
 
         assert last_error is not None
