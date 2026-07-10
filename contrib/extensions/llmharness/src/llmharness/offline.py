@@ -12,6 +12,7 @@ import contextlib
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from agentm.core.abi import (
@@ -282,6 +283,7 @@ async def audit_pipeline_over_trajectory(
     symbols: list[dict[str, Any]] | None = None,
     references: list[dict[str, Any]] | None = None,
     trace_id: str | None = None,
+    audit_dir: str | Path | None = None,
 ) -> OfflineRunResult:
     """Run extractor + auditor over a captured trajectory.
 
@@ -289,6 +291,10 @@ async def audit_pipeline_over_trajectory(
     LLM extraction pass (same as the online llmharness atom). The
     extractor produces symbols that enrich the context index the auditor
     navigates.
+
+    When ``audit_dir`` is set, each extraction and auditor step's inputs
+    and outputs are persisted under ``<audit_dir>/<session_id>/`` for
+    post-hoc review.
     """
 
     resolved_trace_id = trace_id if trace_id is not None else session_id
@@ -303,6 +309,11 @@ async def audit_pipeline_over_trajectory(
     reminder: Reminder | None = None
     resolved_symbols = list(symbols or [])
     resolved_references = list(references or [])
+
+    step_dir: Path | None = None
+    if audit_dir is not None:
+        step_dir = Path(audit_dir) / session_id
+        step_dir.mkdir(parents=True, exist_ok=True)
 
     from llmharness.agents.auditor.context import build_auditor_system_prompt
     from llmharness.atom import _extract_loaded_skills, _serialize_trajectory
@@ -323,6 +334,13 @@ async def audit_pipeline_over_trajectory(
             trajectory = _serialize_trajectory(prefix)
 
             if enable_index:
+                extraction_input = {
+                    "turn": turn_number,
+                    "prefix_len": prefix_len,
+                    "n_prior_symbols": len(resolved_symbols),
+                    "vocabulary": index_vocabulary,
+                    "model": index_model,
+                }
                 resolved_symbols = await _run_extraction_step(
                     trajectory,
                     cwd=cwd,
@@ -331,6 +349,13 @@ async def audit_pipeline_over_trajectory(
                     parent_session_id=session_id,
                     prior_symbols=resolved_symbols,
                 )
+                if step_dir is not None:
+                    tag = f"step_{turn_number:04d}"
+                    _write_audit_json(step_dir / f"{tag}_extraction_input.json", extraction_input)
+                    _write_audit_json(step_dir / f"{tag}_extraction_output.json", {
+                        "n_symbols": len(resolved_symbols),
+                        "symbols": resolved_symbols,
+                    })
 
             context_index = build_context_index(
                 trajectory=trajectory,
@@ -349,6 +374,24 @@ async def audit_pipeline_over_trajectory(
                 methodology=loaded_skills,
                 context_index=context_index,
             )
+            auditor_payload = {
+                "context_index": context_index,
+                "recent_verdicts": _serialize_verdicts(cumulative.recent_verdicts),
+                "continuation_notes_from_prior_firing": list(
+                    cumulative.last_continuation_notes
+                ),
+            }
+            if step_dir is not None:
+                tag = f"step_{turn_number:04d}"
+                _write_audit_json(step_dir / f"{tag}_auditor_input.json", {
+                    "turn": turn_number,
+                    "prefix_len": prefix_len,
+                    "system_prompt_len": len(aud_prompt),
+                    "payload": auditor_payload,
+                    "n_symbols": len(resolved_symbols),
+                    "n_references": len(resolved_references),
+                })
+
             aud_result = await child_used.run_auditor(
                 prompt_text=aud_prompt,
                 tools_config={
@@ -367,6 +410,16 @@ async def audit_pipeline_over_trajectory(
                 references=resolved_references,
             )
             verdict = aud_result.get("verdict")
+
+            if step_dir is not None:
+                tag = f"step_{turn_number:04d}"
+                verdict_data = verdict.to_dict() if verdict is not None else None
+                _write_audit_json(step_dir / f"{tag}_auditor_output.json", {
+                    "verdict": verdict_data,
+                    "error": aud_result.get("error"),
+                    "latency_ms": aud_result.get("latency_ms"),
+                })
+
             if verdict is not None:
                 cumulative.absorb_auditor_verdict(verdict.to_dict())
                 if verdict.surface_reminder and verdict.reminder_text:
@@ -389,6 +442,29 @@ async def audit_pipeline_over_trajectory(
         all_step_results=all_steps,
         surfaces=surfaces,
     )
+
+
+def _serialize_verdicts(verdicts: Any) -> list[Any]:
+    out: list[Any] = []
+    for v in verdicts:
+        if isinstance(v, dict):
+            out.append(v)
+        elif hasattr(v, "to_dict"):
+            out.append(v.to_dict())
+        else:
+            out.append(str(v))
+    return out
+
+
+def _write_audit_json(path: Path, data: Any) -> None:
+    """Best-effort write of audit data; never raises."""
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.debug("failed to write audit file {}", path)
 
 
 async def _run_extraction_step(
@@ -437,6 +513,7 @@ async def offline_audit(
     index_vocabulary: str = "default",
     stop_on_first_surface: bool = False,
     min_surface_turn_index: int = 0,
+    audit_dir: str | Path | None = None,
     **kwargs: Any,
 ) -> OfflineRunResult:
     """Audit a recorded trajectory and return surfaced reminder candidates.
@@ -476,6 +553,7 @@ async def offline_audit(
         stop_on_first_surface=stop_on_first_surface,
         child=child,
         start_turn=start_turn,
+        audit_dir=audit_dir,
     )
     if min_surface_turn_index > 0:
         result.surfaces = [

@@ -23,6 +23,11 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
+try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore[assignment]
+
 T = TypeVar("T")
 
 
@@ -151,7 +156,11 @@ class _RetryingStreamFn:
 
 def _is_generic_retryable(exc: BaseException) -> bool:
     status_code = getattr(exc, "status_code", None)
-    return status_code == 429
+    if status_code == 429:
+        return True
+    if httpx is not None and isinstance(exc, httpx.TransportError):
+        return True
+    return False
 
 
 def _wrap_provider(

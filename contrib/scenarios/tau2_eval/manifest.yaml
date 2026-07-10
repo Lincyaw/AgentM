@@ -1,0 +1,14 @@
+name: tau2_eval
+description: >
+  Minimal scenario for tau2-bench evaluation. Loads only the atoms needed
+  for LLM tool-use without bash/file tools — tau2_gym atom registers
+  the domain tools via extra_extensions.
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.retry_policy
+    config:
+      retry_streaming: true
+      wrap_providers: true

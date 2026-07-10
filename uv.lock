@@ -71,6 +71,8 @@ eval = [
     { name = "agentm-eval", extra = ["all"] },
     { name = "duckdb" },
     { name = "fpg" },
+    { name = "gymnasium" },
+    { name = "rank-bm25" },
     { name = "rca-scenario" },
 ]
 harbor = [
@@ -105,6 +107,7 @@ requires-dist = [
     { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.19.8" },
     { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
     { name = "fpg", marker = "extra == 'eval'", git = "https://github.com/Lincyaw/fpg-convention" },
+    { name = "gymnasium", marker = "extra == 'eval'", specifier = ">=1.0.0" },
     { name = "llmharness", marker = "extra == 'all-contrib'", editable = "contrib/extensions/llmharness" },
     { name = "llmharness", marker = "extra == 'llmharness'", editable = "contrib/extensions/llmharness" },
     { name = "loguru", specifier = ">=0.7" },
@@ -116,6 +119,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rank-bm25", marker = "extra == 'eval'", specifier = ">=0.2" },
     { name = "rca-scenario", marker = "extra == 'eval'", editable = "contrib/scenarios/rca" },
     { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "tomli-w", specifier = ">=1.0" },
@@ -157,13 +161,21 @@ all = [
     { name = "arl-env" },
     { name = "deepdiff" },
     { name = "docstring-parser" },
+    { name = "duckdb" },
+    { name = "fpg" },
     { name = "litellm" },
     { name = "llmharness" },
     { name = "pandas" },
     { name = "pyyaml" },
+    { name = "rcabench-platform", extra = ["llm-eval", "sdk"] },
     { name = "tabulate" },
     { name = "toml" },
     { name = "trajectory-index" },
+]
+rca = [
+    { name = "duckdb" },
+    { name = "fpg" },
+    { name = "rcabench-platform", extra = ["llm-eval", "sdk"] },
 ]
 rescue-window = [
     { name = "pyyaml" },
@@ -189,6 +201,7 @@ requires-dist = [
     { name = "addict", marker = "extra == 'tau2'", specifier = ">=2.4.0" },
     { name = "agentm", editable = "." },
     { name = "agentm-eval", extras = ["aftraj"], marker = "extra == 'all'", editable = "contrib/evals" },
+    { name = "agentm-eval", extras = ["rca"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["rescue-window"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["sandbox"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["tau2"], marker = "extra == 'all'", editable = "contrib/evals" },
@@ -196,6 +209,8 @@ requires-dist = [
     { name = "arl-env", marker = "extra == 'sandbox'", specifier = ">=0.19.8" },
     { name = "deepdiff", marker = "extra == 'tau2'", specifier = ">=8.4.2" },
     { name = "docstring-parser", marker = "extra == 'tau2'", specifier = ">=0.16" },
+    { name = "duckdb", marker = "extra == 'rca'", specifier = ">=1.4.4" },
+    { name = "fpg", marker = "extra == 'rca'", git = "https://github.com/Lincyaw/fpg-convention" },
     { name = "litellm", marker = "extra == 'tau2'", specifier = ">=1.80.15" },
     { name = "llmharness", marker = "extra == 'aftraj'", editable = "contrib/extensions/llmharness" },
     { name = "llmharness", marker = "extra == 'telbench'", editable = "contrib/extensions/llmharness" },
@@ -203,12 +218,13 @@ requires-dist = [
     { name = "pandas", marker = "extra == 'aftraj'", specifier = ">=2.0" },
     { name = "pyyaml", marker = "extra == 'rescue-window'", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'sandbox'", specifier = ">=6.0" },
+    { name = "rcabench-platform", extras = ["sdk", "llm-eval"], marker = "extra == 'rca'", specifier = ">=0.4.44" },
     { name = "tabulate", marker = "extra == 'tau2'", specifier = ">=0.9.0" },
     { name = "toml", marker = "extra == 'tau2'", specifier = ">=0.10.2" },
     { name = "trajectory-index", marker = "extra == 'aftraj'", editable = "contrib/extensions/trajectory_index" },
     { name = "typer", specifier = ">=0.25.1" },
 ]
-provides-extras = ["sandbox", "aftraj", "tau2", "telbench", "rescue-window", "all"]
+provides-extras = ["sandbox", "aftraj", "tau2", "telbench", "rescue-window", "rca", "all"]
 
 [[package]]
 name = "agentm-feishu"
@@ -824,6 +840,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cloudpickle"
+version = "3.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/fb/576f067976d320f5f0114a8d9fa1215425441bb35627b1993e5afd8111e5/cloudpickle-3.1.2.tar.gz", hash = "sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414", size = 22330, upload-time = "2025-11-03T09:25:26.604Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", size = 22228, upload-time = "2025-11-03T09:25:25.534Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -1063,6 +1088,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/bf/89/780e11f9588d9e7128a3f87788354c7946a9cbb1401ad38a48c4db9a4f07/execnet-2.1.2.tar.gz", hash = "sha256:63d83bfdd9a23e35b9c6a3261412324f964c2ec8dcd8d3c6916ee9373e0befcd", size = 166622, upload-time = "2025-11-12T09:56:37.75Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ab/84/02fc1827e8cdded4aa65baef11296a9bbe595c474f0d6d758af082d849fd/execnet-2.1.2-py3-none-any.whl", hash = "sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec", size = 40708, upload-time = "2025-11-12T09:56:36.333Z" },
+]
+
+[[package]]
+name = "farama-notifications"
+version = "0.0.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ec/91/14397890dde30adc4bee6462158933806207bc5dd10d7b4d09d5c33845cf/farama_notifications-0.0.6.tar.gz", hash = "sha256:b19acac4bb41d76e59e03394b5dd165f4761c86fa327f56307a35cbee3b60158", size = 2517, upload-time = "2026-04-24T08:43:57.603Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/f0/21f81892e4ed10f4ec3ef2e7cf8635fb76e7c0907c55d0da66be50094760/farama_notifications-0.0.6-py3-none-any.whl", hash = "sha256:f84839188efa1ce5bb361c2a84881b2dc2c0d0d7fb661ff00421820170930935", size = 2897, upload-time = "2026-04-24T08:43:56.785Z" },
 ]
 
 [[package]]
@@ -1344,6 +1378,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/06/62/826da0b0f01c7ba3f7ea0185968f551290deb28968d98b1edf604c895db8/grpcio-1.82.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:2472b72a55da8570e089f1ca22f34a350d86c109be2755f6ee1cca5ebbdd9b54", size = 7912573, upload-time = "2026-07-06T04:22:46.187Z" },
     { url = "https://files.pythonhosted.org/packages/4d/b4/d8824a66ac1ac7fbcdf63806f1a8725d95426654e859afa4606070c78740/grpcio-1.82.0-cp314-cp314-win32.whl", hash = "sha256:c9feb986151c2726789599b3672c1c9faa1d0824da921dc3f33a8cb1f93e2861", size = 4321824, upload-time = "2026-07-06T04:22:48.866Z" },
     { url = "https://files.pythonhosted.org/packages/da/08/02e581cc0bbb4c7b842f85e66a945b46d5bcc5927575c1086edfbc3360e7/grpcio-1.82.0-cp314-cp314-win_amd64.whl", hash = "sha256:b1eeb0480d86965263f8c8ae7ee5360c284d22176a196aab02fce7fba8d89dd8", size = 5141112, upload-time = "2026-07-06T04:22:51.443Z" },
+]
+
+[[package]]
+name = "gymnasium"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+    { name = "farama-notifications" },
+    { name = "numpy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4d/ff/14b6880d703dfaca204490979d3254ccd280c99550798993319902873658/gymnasium-1.3.0.tar.gz", hash = "sha256:6939e86e835d6b71b6ba6bfd360487420876deafc79bfb7bacba83a7c446bcf3", size = 830646, upload-time = "2026-04-22T13:47:14.155Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/73/fda6a25f3beeb5e49d74330b44092b9e5a547395ccd478d1103ddcbff1fc/gymnasium-1.3.0-py3-none-any.whl", hash = "sha256:6b8c159a8540dcbcb221722d7efda24d78ebbcbc3bd2ea1c2611aa2a34471fc2", size = 953904, upload-time = "2026-04-22T13:47:12.13Z" },
 ]
 
 [[package]]
@@ -2931,31 +2980,39 @@ wheels = [
 ]
 
 [[package]]
+name = "rank-bm25"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fc/0a/f9579384aa017d8b4c15613f86954b92a95a93d641cc849182467cf0bb3b/rank_bm25-0.2.2.tar.gz", hash = "sha256:096ccef76f8188563419aaf384a02f0ea459503fdf77901378d4fd9d87e5e51d", size = 8347, upload-time = "2022-02-16T12:10:52.196Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/21/f691fb2613100a62b3fa91e9988c991e9ca5b89ea31c0d3152a3210344f9/rank_bm25-0.2.2-py3-none-any.whl", hash = "sha256:7bd4a95571adadfc271746fa146a4bcfd89c0cf731e49c3d1ad863290adbe8ae", size = 8584, upload-time = "2022-02-16T12:10:50.626Z" },
+]
+
+[[package]]
 name = "rca-scenario"
 version = "0.1.0"
 source = { editable = "contrib/scenarios/rca" }
 dependencies = [
     { name = "agentm" },
-    { name = "agentm-eval", extra = ["rescue-window"] },
     { name = "duckdb" },
     { name = "fpg" },
     { name = "loguru" },
     { name = "pydantic" },
     { name = "pytz" },
-    { name = "rcabench-platform", extra = ["llm-eval", "sdk"] },
     { name = "tiktoken" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "agentm", editable = "." },
-    { name = "agentm-eval", extras = ["rescue-window"], editable = "contrib/evals" },
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "fpg", git = "https://github.com/Lincyaw/fpg-convention" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pytz", specifier = ">=2025.1" },
-    { name = "rcabench-platform", extras = ["sdk", "llm-eval"], specifier = ">=0.4.44" },
     { name = "tiktoken", specifier = ">=0.12.0" },
 ]
 

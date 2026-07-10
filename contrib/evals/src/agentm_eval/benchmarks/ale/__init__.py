@@ -51,12 +51,14 @@ _MAX_CREATE_ATTEMPTS = 20
 @dataclass
 class AleRunConfig:
     ale_repo: Path
-    data_root: Path
-    image: str
     scenario: str
     model: str | None
     exp_id: str
     out_dir: Path
+    data_root: Path | None = None      # upload mode: host task-data root
+    image: str | None = None           # sandbox runtime image (both modes)
+    task_images: str | None = None     # baked mode: registry prefix of per-task images
+    images_tag: str = "latest"
     profile: str = "default"
     agent_timeout: float = 0.0        # 0 → use the task card timeout
     eval_timeout: float = 7200.0
@@ -64,6 +66,10 @@ class AleRunConfig:
     keep_sandbox: bool = False
     remote_root: str = bridge.DEFAULT_REMOTE_ROOT
     workspace: str = bridge.DEFAULT_WORKSPACE
+
+    @property
+    def baked(self) -> bool:
+        return self.task_images is not None
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +111,25 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
     logger.info("[{}] loaded: timeout={}s prompt={} chars",
                 task_ref, task.timeout_s, len(task.prompt))
 
+    if cfg.baked:
+        from .images import DATA_CONTAINER_NAME, data_image_ref
+        data_image = data_image_ref(cfg.task_images, domain, name, cfg.images_tag)
+        sandbox_image = cfg.image          # shared runtime image (pool-friendly)
+        private_containers = [{
+            "name": DATA_CONTAINER_NAME,
+            "image": data_image,
+            "mountWorkspace": True,
+        }]
+        logger.info("[{}] runtime {} + data {}", task_ref, sandbox_image, data_image)
+    else:
+        sandbox_image = cfg.image
+        private_containers = None
+
     sandbox = arl.SandboxSession(
-        image=cfg.image,
+        image=sandbox_image,
         profile=cfg.profile,
         idle_timeout_seconds=max(task.timeout_s + 3600, 7200),
+        private_containers=private_containers,
     )
     await asyncio.to_thread(sandbox.create_sandbox)
     arl_session_id = sandbox.session_id
@@ -118,7 +139,10 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
     agent_session_id = ""
     try:
         # -- stage input + setup hook (pre-agent) -------------------------
-        await bridge.stage_task_input(grader, task, cfg.data_root, cfg.remote_root)
+        if cfg.baked:
+            await bridge.stage_input_from_container(sandbox, task, cfg.remote_root)
+        else:
+            await bridge.stage_task_input(grader, task, cfg.data_root, cfg.remote_root)
         start_fn = getattr(task.module, "start", None)
         if callable(start_fn):
             try:
@@ -141,7 +165,12 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
             )
 
         # -- reference + grade (post-agent) --------------------------------
-        await bridge.stage_task_reference(grader, task, cfg.data_root, cfg.remote_root)
+        if cfg.baked:
+            await bridge.stage_reference_from_container(
+                sandbox, task, cfg.remote_root,
+            )
+        else:
+            await bridge.stage_task_reference(grader, task, cfg.data_root, cfg.remote_root)
         evaluate_fn = task.module.evaluate
         raw = await asyncio.wait_for(
             evaluate_fn(task.task_obj, grader), timeout=cfg.eval_timeout,
@@ -263,16 +292,72 @@ class AleAdapter:
                         continue
                 typer.echo(f"{domain}/{name}")
 
+        @cli.command("build-images")
+        def build_images(
+            task: Annotated[list[str], typer.Option(
+                "--task", "-t", help="Task ref domain/name (repeatable)",
+            )],
+            data_root: Annotated[Path, typer.Option(
+                help="Task data root (needed once, at build time)",
+            )],
+            registry: Annotated[str, typer.Option(
+                help="Target registry prefix, e.g. docker.io namespace",
+            )],
+            tag: Annotated[str, typer.Option(help="Image tag")] = "latest",
+            base_image: Annotated[str, typer.Option(
+                help="Base image for the data image (needs sh+cp+find)",
+            )] = "busybox:latest",
+            push: Annotated[bool, typer.Option(help="Push after building")] = False,
+        ) -> None:
+            """Bake each task's data into ONE private image.
+
+            Builds <registry>/ale-<domain>-<task>-data:<tag> containing
+            input/ + software/ + reference/. At run time it becomes a hidden
+            private container; the agent's runtime image stays shared
+            (`run --task-images <registry> --image <runtime>`), so warm
+            pools remain reusable and runs upload nothing.
+            """
+            from .images import build_data_image
+            if not task:
+                typer.echo("no tasks given (-t domain/name)", err=True)
+                raise typer.Exit(2)
+            failed: list[str] = []
+            for ref in task:
+                domain, _, name = ref.partition("/")
+                try:
+                    image = build_data_image(
+                        data_root=data_root.resolve(),
+                        domain=domain, name=name,
+                        registry=registry, tag=tag,
+                        base_image=base_image, push=push,
+                    )
+                    typer.echo(f"built {ref}: {image}")
+                except Exception as e:  # noqa: BLE001
+                    failed.append(ref)
+                    typer.echo(f"FAILED {ref}: {e}", err=True)
+            if failed:
+                raise typer.Exit(1)
+
         @cli.command()
         def run(
             task: Annotated[list[str], typer.Option(
                 "--task", "-t", help="Task ref domain/name (repeatable)",
             )],
             ale_repo: Annotated[Path, typer.Option(help="agents-last-exam checkout")],
-            data_root: Annotated[Path, typer.Option(
-                help="Task data root: <root>/<domain>/<task>/<variant>/{input,software,reference}",
-            )],
-            image: Annotated[str, typer.Option(help="Sandbox container image")],
+            task_images: Annotated[Optional[str], typer.Option(
+                help="Baked mode: registry prefix of the per-task data images "
+                     "built by `build-images` (zero upload; data mounts as a "
+                     "hidden private container)",
+            )] = None,
+            images_tag: Annotated[str, typer.Option(help="Baked mode: image tag")] = "latest",
+            data_root: Annotated[Optional[Path], typer.Option(
+                help="Upload mode: host task-data root "
+                     "<root>/<domain>/<task>/<variant>/{input,software,reference}",
+            )] = None,
+            image: Annotated[Optional[str], typer.Option(
+                help="Sandbox runtime image the agent lives in "
+                     "(shared across tasks; must carry the task's system deps)",
+            )] = None,
             model: Annotated[Optional[str], typer.Option(help="Model profile")] = None,
             scenario: Annotated[str, typer.Option(help="AgentM scenario")] = "ale:arl",
             profile: Annotated[str, typer.Option(help="ARL warm-pool profile")] = "default",
@@ -293,6 +378,13 @@ class AleAdapter:
             """Run one or more ALE tasks end to end."""
             if not task:
                 typer.echo("no tasks given (-t domain/name)", err=True)
+                raise typer.Exit(2)
+            if image is None or (task_images is None and data_root is None):
+                typer.echo(
+                    "need --image <runtime> plus a data mode: "
+                    "--task-images <registry-prefix> (baked data images) "
+                    "or --data-root <dir> (upload)", err=True,
+                )
                 raise typer.Exit(2)
 
             # Gateway/auth resolve exactly like the `arl` CLI: env vars, then
@@ -324,13 +416,16 @@ class AleAdapter:
 
             with experiment_context(
                 "ale", model=model, exp_id=exp_id,
-                image=image, scenario=scenario, tasks=list(task),
+                image=image, task_images=task_images, images_tag=images_tag,
+                scenario=scenario, tasks=list(task),
                 attempts=attempts, agent_timeout=agent_timeout,
             ) as exp:
                 cfg = AleRunConfig(
                     ale_repo=ale_repo.resolve(),
-                    data_root=data_root.resolve(),
+                    data_root=data_root.resolve() if data_root else None,
                     image=image,
+                    task_images=task_images,
+                    images_tag=images_tag,
                     scenario=scenario,
                     model=model,
                     exp_id=exp.exp_id,

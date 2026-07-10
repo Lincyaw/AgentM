@@ -77,6 +77,8 @@ from pydantic import BaseModel, ConfigDict
 
 from agentm.extensions import ExtensionManifest
 
+import httpx
+
 from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.tool_schema import _force_strict
 
@@ -120,6 +122,10 @@ def _is_openai_retryable(exc: BaseException) -> bool:
     )
     if retryable_types and isinstance(exc, retryable_types):
         return True
+    # openai SDK doesn't wrap httpx transport errors during streaming —
+    # raw httpx exceptions (ReadTimeout, ReadError, etc.) escape.
+    if isinstance(exc, httpx.TransportError):
+        return True
     # Doubao / LiteLLM XGrammar JIT compiles the tool schema for
     # constrained decoding. The compile is non-deterministic: identical
     # payloads succeed most of the time and fail ~10-30% with a 400
@@ -161,8 +167,6 @@ def _strip_validation_constraints(node: Any) -> None:
             _strip_validation_constraints(value)
 
 def _default_httpx_client(*, verify: bool) -> Any:
-    import httpx
-
     # Without explicit read timeout, a half-dead TCP connection (server
     # crash, LB drops idle conn, NAT entry expired) leaves the request
     # hanging forever — the retry layer never fires because no exception
@@ -170,7 +174,7 @@ def _default_httpx_client(*, verify: bool) -> Any:
     # and fall into _create_with_retry.
     timeout = httpx.Timeout(
         connect=30.0,
-        read=180.0,
+        read=600.0,
         write=60.0,
         pool=30.0,
     )

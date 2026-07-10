@@ -450,6 +450,81 @@ async def stage_task_reference(
     await stage_dir(grader, host_ref, remote_ref)
 
 
+# ---------------------------------------------------------------------------
+# Baked-image staging: ONE private data image per task carries input/,
+# software/ and reference/. The agent's executor container cannot read the
+# private container's filesystem — only the shared workspace — so staging
+# runs INSIDE the data container (busybox → sh, not bash) and the timing of
+# the two copies preserves ALE's reference secrecy.
+# ---------------------------------------------------------------------------
+
+async def _exec_in_container(
+    sandbox: Any, container: str, name: str, script: str, *, timeout: int = 900,
+) -> None:
+    resp = await asyncio.to_thread(
+        sandbox.execute_container, container,
+        [{"name": name, "command": ["sh", "-c", script],
+          "timeout_seconds": timeout}],
+    )
+    result = resp.results[0]
+    output = getattr(result, "output", None)
+    exit_code = getattr(output, "exit_code", None) if output else None
+    if exit_code is None:
+        exit_code = 0 if getattr(result, "status", "") in ("succeeded", "success") else 1
+    if int(exit_code) != 0:
+        stderr = (getattr(output, "stderr", "") or "")[:300] if output else ""
+        raise RuntimeError(
+            f"{name} via private container {container!r} failed "
+            f"(rc={exit_code}): {stderr}"
+        )
+
+
+async def stage_input_from_container(
+    sandbox: Any,
+    task: AleTask,
+    remote_root: str,
+    *,
+    container: str = "ale-data",
+    baked_root: str = "/ale",
+) -> None:
+    """Pre-agent: copy input/ + software/ from the data container; mk output/."""
+    baked = posixpath.join(baked_root, task.domain, task.name, task.variant_name)
+    remote_base = posixpath.join(remote_root, task.domain, task.name, task.variant_name)
+    script = (
+        f"test -d {_q(baked + '/input')} || "
+        f"{{ echo 'baked task data missing at {baked}/input' >&2; exit 3; }}; "
+        f"mkdir -p {_q(remote_base + '/output')} {_q(remote_base + '/input')} && "
+        f"cp -a {_q(baked + '/input')}/. {_q(remote_base + '/input')}/ && "
+        f"if [ -d {_q(baked + '/software')} ]; then "
+        f"mkdir -p {_q(remote_base + '/software')} && "
+        f"cp -a {_q(baked + '/software')}/. {_q(remote_base + '/software')}/; fi"
+    )
+    await _exec_in_container(sandbox, container, "stage-input", script)
+
+
+async def stage_reference_from_container(
+    sandbox: Any,
+    task: AleTask,
+    remote_root: str,
+    *,
+    container: str = "ale-data",
+    baked_root: str = "/ale",
+) -> None:
+    """Post-agent ONLY: copy reference/ (the answer key) into the workspace."""
+    baked_ref = posixpath.join(
+        baked_root, task.domain, task.name, task.variant_name, "reference",
+    )
+    remote_ref = posixpath.join(
+        remote_root, task.domain, task.name, task.variant_name, "reference",
+    )
+    script = (
+        f"test -d {_q(baked_ref)} || "
+        f"{{ echo 'baked reference missing at {baked_ref}' >&2; exit 3; }}; "
+        f"mkdir -p {_q(remote_ref)} && cp -a {_q(baked_ref)}/. {_q(remote_ref)}/"
+    )
+    await _exec_in_container(sandbox, container, "stage-ref", script, timeout=600)
+
+
 __all__ = [
     "AleTask",
     "ArlGraderSession",
@@ -460,6 +535,8 @@ __all__ = [
     "extract_score",
     "install_cb_stub",
     "load_task",
+    "stage_input_from_container",
+    "stage_reference_from_container",
     "stage_task_input",
     "stage_task_reference",
 ]

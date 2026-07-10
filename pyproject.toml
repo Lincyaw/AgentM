@@ -49,6 +49,9 @@ eval = [
     "fpg>=0.1.0",
     # The verifier's hop/judge scenarios mount rca.default.duckdb_sql.
     "rca-scenario",
+    # tau2-bench gym interface
+    "gymnasium>=1.0.0",
+    "rank_bm25>=0.2",
 ]
 harbor = [
     "agentm-harbor>=0.1.0",
