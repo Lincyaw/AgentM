@@ -52,6 +52,7 @@ eval = [
     # tau2-bench gym interface
     "gymnasium>=1.0.0",
     "rank_bm25>=0.2",
+    "tenacity>=8.0",
 ]
 harbor = [
     "agentm-harbor>=0.1.0",

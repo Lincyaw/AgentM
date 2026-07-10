@@ -74,6 +74,7 @@ eval = [
     { name = "gymnasium" },
     { name = "rank-bm25" },
     { name = "rca-scenario" },
+    { name = "tenacity" },
 ]
 harbor = [
     { name = "agentm-harbor" },
@@ -121,6 +122,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rank-bm25", marker = "extra == 'eval'", specifier = ">=0.2" },
     { name = "rca-scenario", marker = "extra == 'eval'", editable = "contrib/scenarios/rca" },
+    { name = "tenacity", marker = "extra == 'eval'", specifier = ">=8.0" },
     { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "tomli-w", specifier = ">=1.0" },
     { name = "typer", specifier = ">=0.25.1" },
@@ -177,6 +179,11 @@ rca = [
     { name = "fpg" },
     { name = "rcabench-platform", extra = ["llm-eval", "sdk"] },
 ]
+rca-evolution = [
+    { name = "duckdb" },
+    { name = "fpg" },
+    { name = "rcabench-platform", extra = ["llm-eval", "sdk"] },
+]
 rescue-window = [
     { name = "pyyaml" },
 ]
@@ -202,6 +209,8 @@ requires-dist = [
     { name = "agentm", editable = "." },
     { name = "agentm-eval", extras = ["aftraj"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["rca"], marker = "extra == 'all'", editable = "contrib/evals" },
+    { name = "agentm-eval", extras = ["rca"], marker = "extra == 'rca-evolution'", editable = "contrib/evals" },
+    { name = "agentm-eval", extras = ["rca-evolution"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["rescue-window"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["sandbox"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["tau2"], marker = "extra == 'all'", editable = "contrib/evals" },
@@ -224,7 +233,7 @@ requires-dist = [
     { name = "trajectory-index", marker = "extra == 'aftraj'", editable = "contrib/extensions/trajectory_index" },
     { name = "typer", specifier = ">=0.25.1" },
 ]
-provides-extras = ["sandbox", "aftraj", "tau2", "telbench", "rescue-window", "rca", "all"]
+provides-extras = ["sandbox", "aftraj", "tau2", "telbench", "rescue-window", "rca", "rca-evolution", "all"]
 
 [[package]]
 name = "agentm-feishu"

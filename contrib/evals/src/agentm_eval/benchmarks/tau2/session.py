@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import warnings
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -31,26 +32,6 @@ def _ensure_tau2():
     if tau2_src not in sys.path:
         sys.path.insert(0, tau2_src)
 
-
-def _resolve_user_llm(
-    agent_model: str, user_llm: str | None, user_llm_args_json: str | None,
-) -> tuple[str, dict]:
-    """Derive user simulator LLM from agent profile when not explicitly set."""
-    if user_llm:
-        ulargs = json.loads(user_llm_args_json) if user_llm_args_json else {}
-        return user_llm, ulargs
-
-    from agentm.core.lib import resolve_model_profile
-
-    profile = resolve_model_profile(agent_model)
-    if profile is None:
-        return "openai/gpt-4.1-mini", {}
-    result: dict[str, Any] = {}
-    if profile.base_url:
-        result["api_base"] = profile.base_url
-    if profile.api_key:
-        result["api_key"] = profile.api_key
-    return f"openai/{profile.model}", result
 
 
 def _set_env_from_profile(model: str) -> None:
@@ -75,9 +56,6 @@ async def _run_one_task(
     model: str,
     domain: str,
     task_id: str,
-    scenario: str | None,
-    user_llm: str,
-    user_llm_args: dict,
     max_steps: int,
     eval_run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -88,21 +66,12 @@ async def _run_one_task(
     config = AgentSessionConfig(
         cwd=os.getcwd(),
         model=model,
-        scenario="tau2_eval",
+        scenario=str(Path(__file__).parent),
         no_skills=True,
         auto_commit=False,
         log_trace_command=True,
-        extra_extensions=[
-            ("contrib.extensions.tau2_gym", {
-                "domain": domain,
-                "task_id": task_id,
-                "user_llm": user_llm,
-                "user_llm_args": user_llm_args,
-                "max_steps": max_steps,
-            }),
-        ],
         loop_config=LoopConfig(max_turns=max_steps),
-        purpose=f"tau2-eval:{domain}:{task_id}",
+        purpose=f"tau2-eval:{model}:{domain}:{task_id}",
         eval_run_id=eval_run_id,
         eval_task_id=str(task_id),
         task_class=f"tau2:{domain}",
@@ -111,23 +80,14 @@ async def _run_one_task(
     session = await AgentSession.create(config)
     try:
         bridge = session.get_service("tau2_bridge")
-        initial_obs = bridge.last_obs if bridge else ""
 
-        if initial_obs:
-            prompt = (
-                "A customer has contacted you. Here is the conversation so far:\n\n"
-                f"{initial_obs}\n\n"
-                "Help the customer using the available tools."
-            )
-        else:
-            prompt = "A customer has contacted you. Greet them and ask how you can help."
-        await session.prompt(prompt)
+        await session.prompt("A customer has contacted you. Greet them and ask how you can help.")
         await session.idle(timeout=600.0)
 
-        if bridge and not bridge.terminated:
-            await bridge._step("done()")
+        if bridge:
+            bridge.finalize()
 
-        result = {
+        return {
             "task_id": task_id,
             "domain": domain,
             "session_id": session.session_id,
@@ -135,7 +95,6 @@ async def _run_one_task(
             "reward_info": bridge.reward_info if bridge else {},
             "terminated": bridge.terminated if bridge else False,
         }
-        return result
     finally:
         await session.shutdown()
 
@@ -144,19 +103,14 @@ def run(
     model: str = typer.Option(..., "--model", "-m", help="AgentM model profile"),
     domain: str = typer.Option("mock", "--domain", "-d"),
     task_id: str = typer.Option(..., "--task-id", "-t"),
-    scenario: str | None = typer.Option(None, "--scenario", help="AgentM scenario (default: minimal)"),
-    user_llm: str | None = typer.Option(None, "--user-llm", help="User simulator LLM (default: same as agent)"),
-    user_llm_args: str | None = typer.Option(None, "--user-llm-args", help="JSON dict"),
     max_steps: int = typer.Option(100, "--max-steps"),
 ):
     """Run a single tau2-bench task through an AgentM session."""
     _ensure_tau2()
     _set_env_from_profile(model)
 
-    resolved_user_llm, ulargs = _resolve_user_llm(model, user_llm, user_llm_args)
-
     result = asyncio.run(
-        _run_one_task(model, domain, task_id, scenario, resolved_user_llm, ulargs, max_steps)
+        _run_one_task(model, domain, task_id, max_steps)
     )
 
     print(f"\n{'='*60}")
@@ -176,8 +130,6 @@ def batch(
     domain: str = typer.Option("mock", "--domain", "-d"),
     num_tasks: int | None = typer.Option(None, "--num-tasks", "-n"),
     task_ids: str | None = typer.Option(None, "--task-ids", help="Comma-separated"),
-    scenario: str | None = typer.Option(None, "--scenario"),
-    user_llm: str | None = typer.Option(None, "--user-llm", help="User simulator LLM (default: same as agent)"),
     max_steps: int = typer.Option(100, "--max-steps"),
     concurrency: int = typer.Option(4, "-j"),
     exp_id: str | None = typer.Option(None, "--exp-id", help="Override experiment ID"),
@@ -185,7 +137,6 @@ def batch(
     """Run multiple tau2-bench tasks through AgentM sessions."""
     _ensure_tau2()
     _set_env_from_profile(model)
-    resolved_user_llm, user_llm_args = _resolve_user_llm(model, user_llm, None)
 
     from agentm_eval.experiment import experiment_context
     from agentm_eval.result import TaskResult
@@ -264,8 +215,8 @@ def batch(
             async with sem:
                 try:
                     r = await _run_one_task(
-                        model, domain, tid, scenario, resolved_user_llm,
-                        user_llm_args, max_steps, eval_run_id=exp.exp_id,
+                        model, domain, tid,
+                        max_steps, eval_run_id=exp.exp_id,
                     )
                 except Exception as e:
                     import traceback
