@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import AgentMessage
-from rescue_window.harness import (
+from agentm_eval.benchmarks.rescue_window.harness import (
     GroundTruth,
     ScoredOutcome,
     TrajectoryRef,

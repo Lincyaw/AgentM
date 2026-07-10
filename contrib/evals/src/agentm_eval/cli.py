@@ -10,7 +10,7 @@ import typer
 from loguru import logger
 
 from agentm_eval.experiment import Experiment, _default_output_root
-from agentm_eval.registry import discover, list_adapters
+from agentm_eval.registry import discover, list_benchmarks
 
 app = typer.Typer(
     name="eval",
@@ -24,24 +24,24 @@ discover()
 
 from agentm_eval import registry as _reg  # noqa: E402
 
-for _name, _desc in _reg.list_adapters():
+for _name, _desc in _reg.list_benchmarks():
     try:
         _sub = _reg.get_cli(_name)
         app.add_typer(_sub, name=_name)
     except Exception as _e:
-        logger.debug("Failed to register adapter CLI {}: {}", _name, _e)
+        logger.debug("Failed to register benchmark CLI {}: {}", _name, _e)
 
 
 @app.command("list")
-def list_benchmarks() -> None:
-    """List available benchmark adapters."""
-    adapters = list_adapters()
-    if not adapters:
-        typer.echo("No benchmark adapters available.")
+def list_bench() -> None:
+    """List available benchmarks."""
+    benches = list_benchmarks()
+    if not benches:
+        typer.echo("No benchmarks available.")
         return
     typer.echo(f"{'Benchmark':<25} Description")
     typer.echo("-" * 60)
-    for name, desc in adapters:
+    for name, desc in benches:
         typer.echo(f"{name:<25} {desc}")
 
 

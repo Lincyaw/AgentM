@@ -23,7 +23,6 @@ members = [
     "agentm-feishu",
     "agentm-harbor",
     "agentm-mcp-bridge",
-    "agentm-rescue-window",
     "agentm-weixin",
     "llmharness",
     "rca-scenario",
@@ -70,7 +69,6 @@ all-contrib = [
 ]
 eval = [
     { name = "agentm-eval", extra = ["all"] },
-    { name = "agentm-rescue-window" },
     { name = "duckdb" },
     { name = "fpg" },
     { name = "rca-scenario" },
@@ -103,7 +101,6 @@ requires-dist = [
     { name = "agentm-harbor", marker = "extra == 'harbor'", editable = "contrib/scenarios/harbor" },
     { name = "agentm-mcp-bridge", marker = "extra == 'all-contrib'", editable = "contrib/extensions/mcp_bridge" },
     { name = "agentm-mcp-bridge", marker = "extra == 'mcp'", editable = "contrib/extensions/mcp_bridge" },
-    { name = "agentm-rescue-window", marker = "extra == 'eval'", editable = "contrib/evals/rescue_window" },
     { name = "anthropic", specifier = ">=0.86.0" },
     { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.19.8" },
     { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
@@ -157,7 +154,6 @@ aftraj = [
 ]
 all = [
     { name = "addict" },
-    { name = "agentm-rescue-window" },
     { name = "arl-env" },
     { name = "deepdiff" },
     { name = "docstring-parser" },
@@ -170,7 +166,7 @@ all = [
     { name = "trajectory-index" },
 ]
 rescue-window = [
-    { name = "agentm-rescue-window" },
+    { name = "pyyaml" },
 ]
 sandbox = [
     { name = "arl-env" },
@@ -197,7 +193,6 @@ requires-dist = [
     { name = "agentm-eval", extras = ["sandbox"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["tau2"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["telbench"], marker = "extra == 'all'", editable = "contrib/evals" },
-    { name = "agentm-rescue-window", marker = "extra == 'rescue-window'", editable = "contrib/evals/rescue_window" },
     { name = "arl-env", marker = "extra == 'sandbox'", specifier = ">=0.19.8" },
     { name = "deepdiff", marker = "extra == 'tau2'", specifier = ">=8.4.2" },
     { name = "docstring-parser", marker = "extra == 'tau2'", specifier = ">=0.16" },
@@ -206,6 +201,7 @@ requires-dist = [
     { name = "llmharness", marker = "extra == 'telbench'", editable = "contrib/extensions/llmharness" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pandas", marker = "extra == 'aftraj'", specifier = ">=2.0" },
+    { name = "pyyaml", marker = "extra == 'rescue-window'", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'sandbox'", specifier = ">=6.0" },
     { name = "tabulate", marker = "extra == 'tau2'", specifier = ">=0.9.0" },
     { name = "toml", marker = "extra == 'tau2'", specifier = ">=0.10.2" },
@@ -280,23 +276,6 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
 ]
 provides-extras = ["dev"]
-
-[[package]]
-name = "agentm-rescue-window"
-version = "0.1.0"
-source = { editable = "contrib/evals/rescue_window" }
-dependencies = [
-    { name = "agentm" },
-    { name = "pyyaml" },
-    { name = "typer" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agentm" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "typer", specifier = ">=0.25.1" },
-]
 
 [[package]]
 name = "agentm-weixin"
@@ -2957,7 +2936,7 @@ version = "0.1.0"
 source = { editable = "contrib/scenarios/rca" }
 dependencies = [
     { name = "agentm" },
-    { name = "agentm-rescue-window" },
+    { name = "agentm-eval", extra = ["rescue-window"] },
     { name = "duckdb" },
     { name = "fpg" },
     { name = "loguru" },
@@ -2970,7 +2949,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "agentm", editable = "." },
-    { name = "agentm-rescue-window", editable = "contrib/evals/rescue_window" },
+    { name = "agentm-eval", extras = ["rescue-window"], editable = "contrib/evals" },
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "fpg", git = "https://github.com/Lincyaw/fpg-convention" },
     { name = "loguru", specifier = ">=0.7" },

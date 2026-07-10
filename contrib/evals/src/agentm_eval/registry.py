@@ -1,4 +1,4 @@
-"""Benchmark adapter registry — discovers and registers eval adapters."""
+"""Benchmark registry — discovers and registers eval benchmarks."""
 
 from __future__ import annotations
 
@@ -6,41 +6,41 @@ from typing import Any
 
 import typer
 
-_ADAPTERS: dict[str, tuple[str, callable]] = {}
+_BENCHMARKS: dict[str, tuple[str, callable]] = {}
 
 
 def register(name: str, description: str, factory: callable) -> None:
-    _ADAPTERS[name] = (description, factory)
+    _BENCHMARKS[name] = (description, factory)
 
 
-def get_adapter(name: str) -> Any:
-    if name not in _ADAPTERS:
-        available = ", ".join(sorted(_ADAPTERS))
+def get_benchmark(name: str) -> Any:
+    if name not in _BENCHMARKS:
+        available = ", ".join(sorted(_BENCHMARKS))
         raise KeyError(f"Unknown benchmark {name!r}. Available: {available}")
-    _, factory = _ADAPTERS[name]
+    _, factory = _BENCHMARKS[name]
     return factory()
 
 
-def list_adapters() -> list[tuple[str, str]]:
-    return [(name, desc) for name, (desc, _) in sorted(_ADAPTERS.items())]
+def list_benchmarks() -> list[tuple[str, str]]:
+    return [(name, desc) for name, (desc, _) in sorted(_BENCHMARKS.items())]
 
 
 def get_cli(name: str) -> typer.Typer:
-    adapter = get_adapter(name)
-    return adapter.create_cli()
+    bench = get_benchmark(name)
+    return bench.create_cli()
 
 
 def discover() -> None:
-    """Import all adapter modules to trigger registration."""
+    """Import all benchmark modules to trigger registration."""
     import importlib
 
     modules = [
-        "agentm_eval.adapters.sandbox",
-        "agentm_eval.adapters.aftraj_auditor",
-        "agentm_eval.adapters.aftraj_grounding",
-        "agentm_eval.adapters.tau2",
-        "agentm_eval.adapters.telbench",
-        "agentm_eval.adapters.rescue_window_adapter",
+        "agentm_eval.benchmarks.ale",
+        "agentm_eval.benchmarks.sandbox",
+        "agentm_eval.benchmarks.aftraj",
+        "agentm_eval.benchmarks.tau2",
+        "agentm_eval.benchmarks.telbench",
+        "agentm_eval.benchmarks.rescue_window",
     ]
     for mod in modules:
         try:
