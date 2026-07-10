@@ -42,13 +42,6 @@ Same trajectory continues:
 `[6]` Solver: So 25 out of 50 are even, giving a fraction of 25/49.
 → The tool returned 1/2, but at step 6 the agent wrote 25/49 — wrong denominator. Flag step 6: this is where the agent's own assertion diverges from the evidence. Not step 3 (which was a passthrough) and not step 5 (which was a tool result).
 
-**Unverified claim — needs contradiction, not just absence:**
-`[0]` user: "Who directed the 1994 film about a wrongly convicted banker?"
-`[1]` Manager → search_agent("find director")
-`[2]` search_agent: "Frank Darabont directed the film."
-`[3]` Manager: The director was Frank Darabont.
-→ The claim came from a sub-agent without a quoted source. But no tool output contradicts it, and the manager merely relayed it. An unverified claim is not the same as a wrong claim — do not flag solely because evidence is absent.
-
 # Submit
 
 - `surface_reminder`: true when you found a decisive error with sufficient evidence.
