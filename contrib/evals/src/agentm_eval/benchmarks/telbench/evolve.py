@@ -2,7 +2,7 @@
 
 Usage::
 
-    llmharness-evolve --reflections ./failed_cases/reflections/
+    telbench-evolve --reflections ./failed_cases/reflections/
 """
 
 from __future__ import annotations
@@ -22,7 +22,11 @@ except ImportError:
     _HAS_AGENTM = False
     logger.debug("telbench.evolve: agentm SDK not available")
 
-_PROMPTS_DIR = Path(__file__).parents[2] / "agents" / "tel" / "prompts"
+def _tel_prompts_dir() -> Path:
+    import llmharness.agents.tel as _tel
+    return Path(_tel.__file__).parent / "prompts"
+
+_PROMPTS_DIR = _tel_prompts_dir()
 
 app = typer.Typer(help="Evolve TEL prompts from reflection reports.")
 

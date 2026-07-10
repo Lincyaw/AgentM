@@ -599,11 +599,11 @@ requirements:
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_manager.py
       - path: src/agentm/core/abi/session_config.py
-      - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/cli.py
-      - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/evolve.py
-      - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/iterate.py
-      - path: contrib/scenarios/rca/src/rca_evolution/cli.py
-      - path: contrib/scenarios/rca/src/rca_evolution/loop.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/telbench/cli.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/telbench/evolve.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/telbench/iterate.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rca_evolution/cli.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rca_evolution/loop.py
       - path: contrib/scenarios/rca/pyproject.toml
       - path: contrib/evals/src/agentm_eval/benchmarks/rca/agent.py
       - path: contrib/evals/src/agentm_eval/benchmarks/rca/seed_dataset.py

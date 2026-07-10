@@ -27,6 +27,7 @@ rca = [
     "fpg>=0.1.0",
     "duckdb>=1.4.4",
 ]
+rca-evolution = ["agentm-eval[rca]"]
 all = [
     "agentm-eval[sandbox]",
     "agentm-eval[aftraj]",
@@ -34,6 +35,7 @@ all = [
     "agentm-eval[telbench]",
     "agentm-eval[rescue-window]",
     "agentm-eval[rca]",
+    "agentm-eval[rca-evolution]",
 ]
 
 [project.entry-points."llm_eval.agents"]
@@ -41,6 +43,11 @@ agentm = "agentm_eval.benchmarks.rca.agent:AgentMAgent"
 
 [project.scripts]
 agentm-eval = "agentm_eval.cli:main"
+telbench-eval = "agentm_eval.benchmarks.telbench.cli:main"
+telbench-evolve = "agentm_eval.benchmarks.telbench.evolve:main"
+telbench-iterate = "agentm_eval.benchmarks.telbench.iterate:main"
+agentm-aggregate = "agentm_eval.aggregate.cli:main"
+rca-evolution = "agentm_eval.benchmarks.rca_evolution.cli:main"
 
 [build-system]
 requires = ["hatchling"]

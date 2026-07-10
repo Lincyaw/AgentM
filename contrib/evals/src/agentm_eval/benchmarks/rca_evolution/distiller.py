@@ -13,7 +13,7 @@ from typing import Any
 
 from loguru import logger
 
-from rca_evolution.observer import DivergenceReport
+from .observer import DivergenceReport
 
 @dataclass(slots=True)
 class DistilledSkill:
@@ -170,7 +170,7 @@ async def distill_skill(
         loop_config=LoopConfig(max_turns=10),
         extensions=[
             ("agentm.extensions.builtin.operations", {"backend": "local"}),
-            ("rca_evolution.distiller_atom", {
+            ("agentm_eval.benchmarks.rca_evolution.distiller_atom", {
                 "reports": report_dicts,
                 "report_summary": summary,
                 "existing_skills": existing_skills,

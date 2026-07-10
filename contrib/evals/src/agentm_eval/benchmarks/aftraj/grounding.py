@@ -69,7 +69,7 @@ def aftraj_to_messages(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
 async def build_index(
     msgs: list[dict[str, Any]], *, model: str, vocab: str, full: bool, run_id: str,
 ) -> Any:
-    from trajectory_index.data import build_index_from_chunks, extract_incremental
+    from agentm_eval.benchmarks.trajectory_index_eval.extraction import build_index_from_chunks, extract_incremental
 
     chunks = await extract_incremental(
         msgs, model=model, run_id=run_id, chunk_size=(4, 6), vocabulary=vocab,

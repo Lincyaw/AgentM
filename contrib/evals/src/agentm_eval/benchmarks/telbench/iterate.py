@@ -6,7 +6,7 @@ artifacts are stored per-iteration; the main repo git history is untouched.
 
 Usage::
 
-    llmharness-iterate \\
+    telbench-iterate \\
         --data datasets/data/TELBench.jsonl \\
         --instance-ids ./failed_cases_first5.json \\
         --model azure-gpt \\
@@ -37,7 +37,11 @@ except ImportError:
 
 from .scoring import AggregateScores
 
-_PROMPTS_DIR = Path(__file__).parents[2] / "agents" / "tel" / "prompts"
+def _tel_prompts_dir() -> Path:
+    import llmharness.agents.tel as _tel
+    return Path(_tel.__file__).parent / "prompts"
+
+_PROMPTS_DIR = _tel_prompts_dir()
 _PROMPT_FILES = ("notepad.md", "reason.md")
 
 app = typer.Typer(help="Iterative TEL prompt evolution with auto keep/discard.")
@@ -171,7 +175,7 @@ def iterate(
 
     # --- Build common eval args ---
     eval_base: list[str] = [
-        "uv", "run", "llmharness-eval",
+        "uv", "run", "telbench-eval",
         "--data", str(data.resolve()),
         "--mode", "tel",
         "--auditor-prompt", "2pass",
@@ -205,7 +209,7 @@ def iterate(
         cur_dir.mkdir(parents=True, exist_ok=True)
         summary_path = cur_dir / "evolve_summary.md"
         cmd = [
-            "uv", "run", "llmharness-evolve",
+            "uv", "run", "telbench-evolve",
             "--reflections", str(reflect_dir),
             "--summary-file", str(summary_path),
         ]

@@ -18,7 +18,6 @@ from agentm.core.abi import (
     LoopAction,
     SessionShutdownEvent,
     Stop,
-    TextContent,
     ToolCallBlock,
     ToolResultBlock,
     ToolResultMessage,
@@ -35,6 +34,7 @@ from .agents import auditor_scenario
 from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from .schema import Reminder, Verdict
 from .state import CumulativeAuditState
+from .trajectory_utils import serialize_trajectory as _serialize_trajectory
 
 
 class ProviderConfig(BaseModel):
@@ -147,54 +147,6 @@ def _render_message_text(msg: AgentMessage) -> str:
     return " ".join(parts)
 
 
-def _tool_call_ids(messages: list[AgentMessage], tool_name: str) -> set[str]:
-    call_ids: set[str] = set()
-    for msg in messages:
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in msg.content:
-            if isinstance(block, ToolCallBlock) and block.name == tool_name:
-                call_ids.add(block.id)
-    return call_ids
-
-
-def _serialize_trajectory(
-    messages: list[AgentMessage],
-    *,
-    start_index: int = 0,
-) -> list[dict[str, Any]]:
-    from agentm.core.lib import to_jsonable
-
-    out: list[dict[str, Any]] = []
-    for i, msg in enumerate(messages, start=start_index):
-        d = to_jsonable(msg)
-        if isinstance(d, dict):
-            d["index"] = i
-            out.append(d)
-    return out
-
-
-def _extract_loaded_skills(messages: list[AgentMessage]) -> list[str]:
-    """Extract text content from all load_skill tool results in the conversation."""
-    skill_call_ids = _tool_call_ids(messages, "load_skill")
-    if not skill_call_ids:
-        return []
-    skills: list[str] = []
-    for msg in messages:
-        if isinstance(msg, ToolResultMessage):
-            for block in msg.content:
-                if not isinstance(block, ToolResultBlock):
-                    continue
-                if block.tool_call_id not in skill_call_ids or block.is_error:
-                    continue
-                text = " ".join(
-                    inner.text
-                    for inner in block.content
-                    if isinstance(inner, TextContent) and inner.text
-                )
-                if text:
-                    skills.append(text)
-    return skills
 
 
 def _has_successful_tool_result(

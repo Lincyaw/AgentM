@@ -2,7 +2,7 @@
 
 Usage::
 
-    llmharness-eval --data datasets/TELBench/TELBench.jsonl \\
+    telbench-eval --data datasets/TELBench/TELBench.jsonl \\
         --mode posthoc --model litellm-dsv4flash --limit 10
 """
 
@@ -283,7 +283,7 @@ def telbench(
 
 
 def main() -> None:
-    """Entry point for the ``llmharness-eval`` script."""
+    """Entry point for the ``telbench-eval`` script."""
     app()
 
 

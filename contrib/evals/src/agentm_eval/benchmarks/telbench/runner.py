@@ -47,9 +47,9 @@ async def evaluate_instance(
     from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
     from agentm.core.runtime import AgentSession, create_agent_session
 
-    from ...agents import auditor_scenario
-    from ...agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from ...state import CumulativeAuditState
+    from llmharness.agents import auditor_scenario
+    from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
+    from llmharness.state import CumulativeAuditState
 
     _ = extractor_interval  # deprecated no-op
 
@@ -158,7 +158,7 @@ async def evaluate_instance_tel(
     from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
     from agentm.core.runtime import AgentSession, create_agent_session
 
-    from ...agents.tel.tools import SUBMIT_TOOL_NAME
+    from llmharness.agents.tel.tools import SUBMIT_TOOL_NAME
 
     if prompt_name == "2pass":
         return await _run_tel_2pass(instance, provider=provider, model=model, cwd=cwd)
@@ -298,7 +298,11 @@ async def evaluate_instance_tel(
     )
 
 
-_TEL_WORKFLOW_SCRIPT = Path(__file__).parents[2] / "agents" / "tel" / "workflow.py"
+def _tel_agent_dir() -> Path:
+    import llmharness.agents.tel as _tel
+    return Path(_tel.__file__).parent
+
+_TEL_WORKFLOW_SCRIPT = _tel_agent_dir() / "workflow.py"
 
 
 async def _run_tel_2pass(

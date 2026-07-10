@@ -39,7 +39,6 @@ def discover() -> None:
         "agentm_eval.benchmarks.sandbox",
         "agentm_eval.benchmarks.aftraj",
         "agentm_eval.benchmarks.tau2",
-        "agentm_eval.benchmarks.telbench",
         "agentm_eval.benchmarks.rescue_window",
     ]
     for mod in modules:

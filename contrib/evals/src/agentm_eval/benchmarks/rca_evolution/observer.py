@@ -178,7 +178,7 @@ async def observe_case(
         loop_config=LoopConfig(max_turns=15),
         extensions=[
             ("agentm.extensions.builtin.operations", {"backend": "local"}),
-            ("rca_evolution.observer_atom", {
+            ("agentm_eval.benchmarks.rca_evolution.observer_atom", {
                 "trajectory_snapshot": snapshot,
                 "gt_info": gt_info,
                 "trajectory_summary": summary,

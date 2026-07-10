@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi import ExtensionAPI
 
-from rca_evolution.observer_tools import (
+from .observer_tools import (
     build_get_gt_info_tool,
     build_get_trajectory_summary_tool,
     build_get_turn_tool,

@@ -36,13 +36,6 @@ index = [
 [tool.uv.sources]
 trajectory-index = { workspace = true }
 
-[project.scripts]
-llmharness-distill = "llmharness.distill.cli:main"
-llmharness-aggregate = "llmharness.aggregate.cli:main"
-llmharness-eval = "llmharness.eval.telbench.cli:main"
-llmharness-evolve = "llmharness.eval.telbench.evolve:main"
-llmharness-iterate = "llmharness.eval.telbench.iterate:main"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

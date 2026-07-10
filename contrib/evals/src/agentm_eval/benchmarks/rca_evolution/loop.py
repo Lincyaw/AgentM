@@ -19,8 +19,8 @@ from typing import Any
 
 from loguru import logger
 
-from rca_evolution.distiller import DistilledSkill, distill_skill
-from rca_evolution.observer import DivergenceReport, observe_case
+from .distiller import DistilledSkill, distill_skill
+from .observer import DivergenceReport, observe_case
 
 @dataclass(slots=True)
 class IterationResult:

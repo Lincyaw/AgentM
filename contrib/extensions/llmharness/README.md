@@ -67,24 +67,11 @@ The pipeline is:
 | `src/llmharness/schema.py` | Public event, edge, verdict, and entry-type dataclasses. |
 | `src/llmharness/state.py` | Event-sourced cumulative audit state. |
 | `src/llmharness/context_index.py` | Derived auditor navigation surface. |
-| `src/llmharness/agents/extractor/` | Extractor child scenario, context atom, and index-edit tools. |
+| `src/llmharness/trajectory_utils.py` | Shared trajectory serialization helpers. |
+| `src/llmharness/offline.py` | Shared offline primitives (`run_phase_standalone`, `PhaseResult`). |
 | `src/llmharness/agents/auditor/` | Auditor child scenario, context atom, and `submit_verdict` tool. |
-| `src/llmharness/offline.py` | Public `offline_audit()` helper for recorded trajectories. |
-| `src/llmharness/eval/telbench/` | TELBench evaluation driver. |
-| `src/llmharness/aggregate/` | Case aggregation commands. |
-| `src/llmharness/distill/` | Distillation helpers and CLI. |
+| `src/llmharness/agents/analyst/` | Analyst child scenario and trace tools. |
+| `src/llmharness/agents/tel/` | TEL child scenario, tools, and workflow. |
 
-## CLI Entrypoints
-
-The currently importable console scripts are:
-
-| Script | Module |
-|---|---|
-| `llmharness-eval` | `llmharness.eval.telbench.cli:main` |
-| `llmharness-distill` | `llmharness.distill.cli:main` |
-| `llmharness-aggregate` | `llmharness.aggregate.cli:main` |
-
-The online atom persists audit state through AgentM session entries and
-`.agentm/audit_ops/`. Branching studies live in `agentm-rescue-window`; the
-llmharness package only provides the online atom and the offline audit
-primitive used by policies.
+Eval-specific code (TELBench runner, aggregate CLI, offline audit pipeline)
+has been moved to ``agentm_eval`` — this package contains only runtime code.
