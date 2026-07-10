@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from loguru import logger
+
 # Remote root for staged task data inside the ARL pod. Lives under the
 # workspace volume so arl upload/download (workspace-relative) can reach it
 # and it survives for the grader after the agent session shuts down.
@@ -250,6 +252,20 @@ class CommandResult(dict):
         return bool(self.get("success"))
 
 
+def _decode_result(resp: Any) -> tuple[int, str, str]:
+    """Decode the first step of an arl execute/execute_container response into
+    ``(exit_code, stdout, stderr)``. Trusts ``output.exit_code`` and falls back
+    to the ``status`` string when the runner didn't surface a code."""
+    result = resp.results[0]
+    output = getattr(result, "output", None)
+    stdout = getattr(output, "stdout", "") if output else ""
+    stderr = getattr(output, "stderr", "") if output else ""
+    exit_code = getattr(output, "exit_code", None) if output else None
+    if exit_code is None:
+        exit_code = 0 if getattr(result, "status", "") in ("succeeded", "success") else 1
+    return int(exit_code), stdout or "", stderr or ""
+
+
 class ArlGraderSession:
     """The session API surface ALE task hooks use, over ``arl.SandboxSession``.
 
@@ -288,18 +304,10 @@ class ArlGraderSession:
         if timeout and timeout > 0:
             step["timeout_seconds"] = int(timeout)
         resp = await self._thread(self._session.execute, [step])
-        result = resp.results[0]
-        output = getattr(result, "output", None)
-        stdout = getattr(output, "stdout", "") if output else ""
-        stderr = getattr(output, "stderr", "") if output else ""
-        exit_code = getattr(output, "exit_code", None) if output else None
-        if exit_code is None:
-            exit_code = 0 if getattr(result, "status", "") in ("succeeded", "success") else 1
+        exit_code, stdout, stderr = _decode_result(resp)
         return CommandResult(
-            success=int(exit_code) == 0,
-            stdout=stdout or "",
-            stderr=stderr or "",
-            return_code=int(exit_code),
+            success=exit_code == 0, stdout=stdout, stderr=stderr,
+            return_code=exit_code,
         )
 
     # -- API used by task hooks ------------------------------------------
@@ -394,13 +402,7 @@ async def stage_dir(
     executable: bool = False,
 ) -> None:
     """Upload a host directory tree into the pod at ``remote_dir``."""
-    payload = _tar_dir(local_dir)
-    stage_path = posixpath.join(remote_dir, ".ale_stage.tgz")
-    await grader.run_command(f"mkdir -p {_q(remote_dir)}")
-    await grader.write_bytes(stage_path, payload)
-    await grader.run_command(
-        f"tar -xzf {_q(stage_path)} -C {_q(remote_dir)} && rm -f {_q(stage_path)}"
-    )
+    await upload_remote_dir(grader, _tar_dir(local_dir), remote_dir)
     if executable:
         await grader.run_command(
             f"find {_q(remote_dir)} -type f -exec chmod +x {{}} +", check=False,
@@ -437,17 +439,28 @@ async def stage_task_reference(
     task: AleTask,
     data_root: Path,
     remote_root: str,
-) -> None:
-    """Stage reference/ AFTER the agent finished — the hidden answer key."""
+) -> bool:
+    """Stage reference/ AFTER the agent finished — the hidden answer key.
+
+    Returns True if a reference was staged. A no-op returning False when no
+    reference exists locally: some ALE graders score the agent output against
+    the input evidence with a rubric and never read reference/, so they can be
+    graded without the (often gated) answer key. Callers should record the
+    return value so a graded-without-key result is distinguishable from one
+    graded against a real reference.
+    """
     host_ref = data_root / task.domain / task.name / task.variant_name / "reference"
-    if not host_ref.is_dir():
-        raise FileNotFoundError(
-            f"reference data missing: {host_ref} — grading would be meaningless"
+    if not host_ref.is_dir() or not any(host_ref.iterdir()):
+        logger.info(
+            "[{}/{}] no local reference/ — skipping (grader may not need it)",
+            task.domain, task.name,
         )
+        return False
     remote_ref = posixpath.join(
         remote_root, task.domain, task.name, task.variant_name, "reference",
     )
     await stage_dir(grader, host_ref, remote_ref)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -466,16 +479,11 @@ async def _exec_in_container(
         [{"name": name, "command": ["sh", "-c", script],
           "timeout_seconds": timeout}],
     )
-    result = resp.results[0]
-    output = getattr(result, "output", None)
-    exit_code = getattr(output, "exit_code", None) if output else None
-    if exit_code is None:
-        exit_code = 0 if getattr(result, "status", "") in ("succeeded", "success") else 1
-    if int(exit_code) != 0:
-        stderr = (getattr(output, "stderr", "") or "")[:300] if output else ""
+    exit_code, _, stderr = _decode_result(resp)
+    if exit_code != 0:
         raise RuntimeError(
             f"{name} via private container {container!r} failed "
-            f"(rc={exit_code}): {stderr}"
+            f"(rc={exit_code}): {stderr[:300]}"
         )
 
 
@@ -500,6 +508,35 @@ async def stage_input_from_container(
         f"cp -a {_q(baked + '/software')}/. {_q(remote_base + '/software')}/; fi"
     )
     await _exec_in_container(sandbox, container, "stage-input", script)
+
+
+async def download_remote_dir(grader: ArlGraderSession, remote_dir: str) -> bytes:
+    """Tar a sandbox dir and pull it to host as gzip bytes (binary-safe).
+
+    Tars into a workspace-relative path so read_bytes takes the native SDK
+    download_file path rather than base64-over-shell (which inflates a large
+    archive ~33% and buffers it as a command-result string)."""
+    tgz = posixpath.join(grader._workspace, ".ale_dl.tgz")
+    await grader.run_command(
+        f"tar -czf {_q(tgz)} -C {_q(remote_dir)} . 2>/dev/null || "
+        f"tar -czf {_q(tgz)} -T /dev/null", check=False,
+    )
+    try:
+        return await grader.read_bytes(tgz)
+    finally:
+        await grader.run_command(f"rm -f {_q(tgz)}", check=False)
+
+
+async def upload_remote_dir(
+    grader: ArlGraderSession, tgz: bytes, remote_dir: str,
+) -> None:
+    """Restore a gzip tarball (from download_remote_dir) into a sandbox dir."""
+    stage = posixpath.join(remote_dir, ".ale_out.tgz")
+    await grader.run_command(f"mkdir -p {_q(remote_dir)}")
+    await grader.write_bytes(stage, tgz)
+    await grader.run_command(
+        f"tar -xzf {_q(stage)} -C {_q(remote_dir)} && rm -f {_q(stage)}"
+    )
 
 
 async def stage_reference_from_container(
@@ -534,9 +571,11 @@ __all__ = [
     "discover_tasks",
     "extract_score",
     "install_cb_stub",
+    "download_remote_dir",
     "load_task",
     "stage_input_from_container",
     "stage_reference_from_container",
+    "upload_remote_dir",
     "stage_task_input",
     "stage_task_reference",
 ]

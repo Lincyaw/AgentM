@@ -75,20 +75,21 @@ def build_data_image(
     """
     ctx = data_root / domain / name
     variant_dir = ctx / variant
-    for required, label in (
-        (variant_dir / "input", "input"),
-        (variant_dir / "reference", "reference"),
-    ):
-        if not required.is_dir():
-            raise FileNotFoundError(f"{domain}/{name}: missing {label} dir: {required}")
+    if not (variant_dir / "input").is_dir():
+        raise FileNotFoundError(f"{domain}/{name}: missing input dir: {variant_dir / 'input'}")
     has_software = (variant_dir / "software").is_dir()
+    # reference is optional at build time: when the hidden answer key isn't
+    # available yet (gated), build input/software/venv now and grade later by
+    # uploading reference from the host. When present, it's baked in.
+    ref_dir = variant_dir / "reference"
+    has_reference = ref_dir.is_dir() and any(ref_dir.iterdir())
     runtime_env = variant_dir / "input" / "runtime_env"
     bake_venv = (runtime_env / "pyproject.toml").is_file() or (
         runtime_env / "uv.lock"
     ).is_file()
 
     baked = f"{BAKED_DATA_ROOT}/{domain}/{name}/{variant}"
-    lines = [f"FROM {bake_venv and venv_base_image or base_image}"]
+    lines = [f"FROM {venv_base_image if bake_venv else base_image}"]
     if bake_venv:
         idx = f" UV_DEFAULT_INDEX={pip_index}" if pip_index else ""
         pip_i = f" -i {pip_index}" if pip_index else ""
@@ -103,7 +104,8 @@ def build_data_image(
         ]
     else:
         lines += [f"COPY {variant}/input {baked}/input"]
-    lines += [f"COPY {variant}/reference {baked}/reference"]
+    if has_reference:
+        lines += [f"COPY {variant}/reference {baked}/reference"]
     if has_software:
         chmod = (
             f"RUN find {baked}/software -type f -exec chmod +x {{}} +"

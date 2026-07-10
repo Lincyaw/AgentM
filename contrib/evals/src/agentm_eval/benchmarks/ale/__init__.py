@@ -66,6 +66,9 @@ class AleRunConfig:
     keep_sandbox: bool = False
     remote_root: str = bridge.DEFAULT_REMOTE_ROOT
     workspace: str = bridge.DEFAULT_WORKSPACE
+    defer_grading: bool = False        # run --no-eval: solve + save output, skip grade
+    outputs_dir: Path | None = None    # where agent-phase outputs are saved/loaded
+    reference_root: Path | None = None  # host reference source for grade phase
 
     @property
     def baked(self) -> bool:
@@ -76,29 +79,88 @@ class AleRunConfig:
 # Single-task pipeline
 # ---------------------------------------------------------------------------
 
-def run_one(task_ref: str, cfg: AleRunConfig, attempt: int = 0) -> TaskResult:
-    """Run one ``domain/task`` end to end. Runs in a worker thread with its
-    own event loop, mirroring the sandbox adapter's concurrency model."""
+def _run_scored(task_ref, cfg, attempt, async_fn, *, log_suffix=""):
+    """Run one task coroutine in a worker thread with a per-thread log sink,
+    stamp latency, and persist the score.json. Shared by run + grade."""
     started = time.monotonic()
     domain, _, name = task_ref.partition("/")
-    log_path = cfg.out_dir / "artifacts" / f"{domain}__{name}.log"
     thread_id = threading.get_ident()
     sink_id = logger.add(
-        str(log_path),
+        str(cfg.out_dir / "artifacts" / f"{domain}__{name}{log_suffix}.log"),
         filter=lambda record: record["thread"].id == thread_id,
         enqueue=True, backtrace=False, diagnose=False,
     )
     try:
-        result = asyncio.run(_run_one_async(task_ref, cfg, attempt))
+        result = asyncio.run(async_fn(task_ref, cfg, attempt))
     except Exception as e:  # noqa: BLE001
-        logger.exception("ALE task {} crashed", task_ref)
+        logger.exception("ALE {} crashed", task_ref)
         result = TaskResult(task_id=task_ref, status="error", error=str(e)[:2000])
     finally:
         logger.remove(sink_id)
     result.latency_ms = int((time.monotonic() - started) * 1000)
-    score_file = cfg.out_dir / "artifacts" / f"{domain}__{name}.score.json"
-    score_file.write_text(json.dumps(result.to_dict(), indent=2))
+    (cfg.out_dir / "artifacts" / f"{domain}__{name}.score.json").write_text(
+        json.dumps(result.to_dict(), indent=2)
+    )
     return result
+
+
+def run_one(task_ref: str, cfg: AleRunConfig, attempt: int = 0) -> TaskResult:
+    """Run one ``domain/task`` end to end (agent + optional grade)."""
+    return _run_scored(task_ref, cfg, attempt, _run_one_async)
+
+
+def grade_one(task_ref: str, cfg: AleRunConfig, attempt: int = 0) -> TaskResult:
+    """Grade a previously-saved agent output (phase 2 of ``run --no-eval``).
+
+    Recreates a minimal sandbox, uploads the archived output/ and the host
+    reference/, then runs the task's evaluate() through the shim.
+    """
+    return _run_scored(task_ref, cfg, attempt, _grade_one_async, log_suffix=".grade")
+
+
+async def _grade_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> TaskResult:
+    import arl
+
+    domain, _, name = task_ref.partition("/")
+    task = bridge.load_task(cfg.ale_repo, domain, name, remote_root=cfg.remote_root)
+    out_dir = task.task_obj.metadata.get("remote_output_dir")
+    archive = cfg.outputs_dir / f"{domain}__{name}__{attempt}.output.tgz"
+    if not archive.is_file():
+        return TaskResult(task_id=task_ref, status="error",
+                          error=f"no saved output archive: {archive}")
+
+    sandbox = arl.SandboxSession(image=cfg.image, profile=cfg.profile,
+                                 idle_timeout_seconds=7200)
+    await asyncio.to_thread(sandbox.create_sandbox)
+    grader = bridge.ArlGraderSession(sandbox, workspace=cfg.workspace)
+    try:
+        # restore agent output (upload_remote_dir creates out_dir itself)
+        await bridge.upload_remote_dir(grader, archive.read_bytes(), out_dir)
+        # optionally restage input/ for graders that read it (rubric graders)
+        if cfg.data_root is not None:
+            await bridge.stage_task_input(grader, task, cfg.data_root, cfg.remote_root)
+        ref_root = cfg.reference_root or cfg.data_root
+        ref_staged = await bridge.stage_task_reference(
+            grader, task, ref_root, cfg.remote_root,
+        )
+        raw = await asyncio.wait_for(
+            task.module.evaluate(task.task_obj, grader), timeout=cfg.eval_timeout,
+        )
+        reward = bridge.extract_score(raw)
+        logger.info("[{}] reward={} (raw={})", task_ref, reward, raw)
+        return TaskResult(
+            task_id=task_ref,
+            status="pass" if reward >= 1.0 else "fail",
+            score={"reward": reward},
+            metadata={"raw_eval": str(raw)[:500], "attempt": attempt,
+                      "phase": "grade", "output_archive": str(archive),
+                      "reference_staged": ref_staged},
+        )
+    finally:
+        try:
+            await asyncio.to_thread(sandbox.delete_sandbox)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> TaskResult:
@@ -156,41 +218,67 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
             task_ref, task.prompt, arl_session_id, cfg, agent_timeout, attempt,
         )
         agent_session_id = agent_result.get("session_id", "")
+        session_ids = [agent_session_id] if agent_session_id else []
         if agent_result.get("error"):
             return TaskResult(
                 task_id=task_ref, status="error",
                 error=f"agent: {agent_result['error']}",
-                session_ids=[s for s in (agent_session_id,) if s],
+                session_ids=session_ids,
                 metadata={"arl_session": arl_session_id},
             )
 
+        # -- agent-only phase: persist output/, defer grading --------------
+        out_dir = task.task_obj.metadata.get("remote_output_dir")
+        if cfg.defer_grading:
+            saved = "no-output-dir"
+            if out_dir and cfg.outputs_dir:
+                tgz = await bridge.download_remote_dir(grader, out_dir)
+                dest = cfg.outputs_dir / f"{domain}__{name}__{attempt}.output.tgz"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(tgz)
+                saved = str(dest)
+            return TaskResult(
+                task_id=task_ref, status="solved",  # ungraded phase (see result.py enum)
+                session_ids=session_ids,
+                metadata={
+                    "arl_session": arl_session_id,
+                    "agent_timed_out": bool(agent_result.get("timed_out")),
+                    "output_archive": saved, "remote_output_dir": out_dir,
+                    "attempt": attempt, "phase": "agent",
+                },
+            )
+
         # -- reference + grade (post-agent) --------------------------------
+        ref_staged = False
         if cfg.baked:
             await bridge.stage_reference_from_container(
                 sandbox, task, cfg.remote_root,
             )
+            ref_staged = True
         else:
-            await bridge.stage_task_reference(grader, task, cfg.data_root, cfg.remote_root)
-        evaluate_fn = task.module.evaluate
+            ref_root = cfg.reference_root or cfg.data_root
+            ref_staged = await bridge.stage_task_reference(
+                grader, task, ref_root, cfg.remote_root,
+            )
         raw = await asyncio.wait_for(
-            evaluate_fn(task.task_obj, grader), timeout=cfg.eval_timeout,
+            task.module.evaluate(task.task_obj, grader), timeout=cfg.eval_timeout,
         )
         reward = bridge.extract_score(raw)
         logger.info("[{}] reward={} (raw={})", task_ref, reward, raw)
 
-        status = "pass" if reward >= 1.0 else "fail"
-        if agent_result.get("timed_out"):
-            status = "fail"
+        timed_out = bool(agent_result.get("timed_out"))
+        status = "fail" if (reward < 1.0 or timed_out) else "pass"
         return TaskResult(
             task_id=task_ref,
             status=status,
             score={"reward": reward},
-            session_ids=[s for s in (agent_session_id,) if s],
+            session_ids=session_ids,
             metadata={
                 "arl_session": arl_session_id,
-                "agent_timed_out": bool(agent_result.get("timed_out")),
+                "agent_timed_out": timed_out,
                 "raw_eval": raw if isinstance(raw, (int, float, str)) else str(raw)[:500],
                 "attempt": attempt,
+                "reference_staged": ref_staged,
             },
         )
     finally:
@@ -374,8 +462,17 @@ class AleAdapter:
                 help="ARL config context from ~/.config/arl/config.yaml "
                      "(default: the CLI's current_context)",
             )] = None,
+            no_eval: Annotated[bool, typer.Option(
+                "--no-eval", help="Agent phase only: solve + save output/, defer "
+                "grading (use when the hidden reference isn't available yet). "
+                "Grade later with `agentm eval ale grade`.",
+            )] = False,
+            outputs_dir: Annotated[Optional[Path], typer.Option(
+                help="Where to save agent output archives for --no-eval "
+                     "(default: <exp>/outputs)",
+            )] = None,
         ) -> None:
-            """Run one or more ALE tasks end to end."""
+            """Run one or more ALE tasks end to end (or agent-only with --no-eval)."""
             if not task:
                 typer.echo("no tasks given (-t domain/name)", err=True)
                 raise typer.Exit(2)
@@ -435,6 +532,9 @@ class AleAdapter:
                     eval_timeout=eval_timeout,
                     max_turns=max_turns,
                     keep_sandbox=keep_sandbox,
+                    defer_grading=no_eval,
+                    outputs_dir=(outputs_dir.resolve() if outputs_dir
+                                 else exp.output_dir / "outputs"),
                 )
                 jobs = [(ref, k) for ref in task for k in range(attempts)]
                 results: list[TaskResult] = []
@@ -456,20 +556,92 @@ class AleAdapter:
                             results.append(result)
                             typer.echo(_fmt_line(result))
 
-                passed = sum(1 for r in results if r.status == "pass")
-                rewards = [
-                    float(r.score.get("reward", 0.0)) for r in results
-                ]
-                mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
-                summary = (
-                    f"ALE: {passed}/{len(results)} pass, "
-                    f"mean reward {mean_reward:.3f}"
-                )
-                exp.finish(status="completed", summary={
-                    "pass": passed, "total": len(results),
-                    "mean_reward": mean_reward,
-                })
+                if no_eval:
+                    solved = sum(1 for r in results if r.status == "solved")
+                    errs = sum(1 for r in results if r.status == "error")
+                    summary = (
+                        f"ALE agent-phase: {solved}/{len(results)} solved, "
+                        f"{errs} error. Outputs → {cfg.outputs_dir}. "
+                        f"Grade later: agentm eval ale grade --exp-id {exp.exp_id}"
+                    )
+                    exp.finish(status="completed", summary={
+                        "solved": solved, "error": errs, "total": len(results),
+                        "phase": "agent", "outputs_dir": str(cfg.outputs_dir),
+                    })
+                else:
+                    passed, mean_reward = _summarize(results)
+                    summary = (
+                        f"ALE: {passed}/{len(results)} pass, "
+                        f"mean reward {mean_reward:.3f}"
+                    )
+                    exp.finish(status="completed", summary={
+                        "pass": passed, "total": len(results),
+                        "mean_reward": mean_reward,
+                    })
                 typer.echo(summary)
+
+        @cli.command()
+        def grade(
+            task: Annotated[list[str], typer.Option(
+                "--task", "-t", help="Task ref domain/name (repeatable)",
+            )],
+            ale_repo: Annotated[Path, typer.Option(help="agents-last-exam checkout")],
+            outputs_dir: Annotated[Path, typer.Option(
+                help="Dir of saved agent output archives (from `run --no-eval`)",
+            )],
+            reference_root: Annotated[Path, typer.Option(
+                help="Host task-data root holding reference/ "
+                     "<root>/<domain>/<task>/<variant>/reference",
+            )],
+            image: Annotated[str, typer.Option(
+                help="Runtime image for the grading sandbox (match the task's deps)",
+            )],
+            data_root: Annotated[Optional[Path], typer.Option(
+                help="Optional: also restage input/ (for graders that read input)",
+            )] = None,
+            concurrency: Annotated[int, typer.Option("-j")] = 2,
+            attempts: Annotated[int, typer.Option("-n")] = 1,
+            eval_timeout: Annotated[float, typer.Option()] = 7200.0,
+            arl_context: Annotated[Optional[str], typer.Option()] = None,
+            exp_id: Annotated[Optional[str], typer.Option()] = None,
+        ) -> None:
+            """Grade saved agent outputs (phase 2 of --no-eval) once reference exists."""
+            if not task:
+                typer.echo("no tasks given (-t domain/name)", err=True)
+                raise typer.Exit(2)
+            if arl_context:
+                os.environ["ARL_CONTEXT"] = arl_context
+                os.environ.pop("ARL_GATEWAY_URL", None)
+                os.environ.pop("ARL_API_KEY", None)
+            from arl.config import resolve_from_config
+            gw_url, _ = resolve_from_config()
+            typer.echo(f"ARL gateway: {gw_url}")
+
+            with experiment_context(
+                "ale-grade", exp_id=exp_id, tasks=list(task),
+            ) as exp:
+                cfg = AleRunConfig(
+                    ale_repo=ale_repo.resolve(), scenario="", model=None,
+                    exp_id=exp.exp_id, out_dir=exp.output_dir, image=image,
+                    data_root=data_root.resolve() if data_root else None,
+                    reference_root=reference_root.resolve(),
+                    outputs_dir=outputs_dir.resolve(),
+                    eval_timeout=eval_timeout,
+                )
+                jobs = [(ref, k) for ref in task for k in range(attempts)]
+                results: list[TaskResult] = []
+                with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    futures = {pool.submit(grade_one, ref, cfg, k): (ref, k)
+                               for ref, k in jobs}
+                    for fut in as_completed(futures):
+                        r = fut.result()
+                        exp.record_result(r.to_dict())
+                        results.append(r)
+                        typer.echo(_fmt_line(r))
+                passed, mean = _summarize(results)
+                exp.finish(status="completed", summary={
+                    "pass": passed, "total": len(results), "mean_reward": mean})
+                typer.echo(f"ALE grade: {passed}/{len(results)} pass, mean reward {mean:.3f}")
 
         return cli
 
@@ -479,6 +651,13 @@ def _fmt_line(r: TaskResult) -> str:
     reward_txt = f"{reward:.3f}" if isinstance(reward, (int, float)) else "-"
     extra = f" ({r.error[:120]})" if r.error else ""
     return f"[{r.status:>5}] {r.task_id}  reward={reward_txt}  {r.latency_ms/1000:.0f}s{extra}"
+
+
+def _summarize(results: list[TaskResult]) -> tuple[int, float]:
+    """(#pass, mean reward) over a graded result set."""
+    passed = sum(1 for r in results if r.status == "pass")
+    rewards = [float(r.score.get("reward", 0.0)) for r in results]
+    return passed, (sum(rewards) / len(rewards) if rewards else 0.0)
 
 
 register("ale", AleAdapter.description, AleAdapter)
