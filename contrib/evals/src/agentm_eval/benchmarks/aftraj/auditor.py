@@ -41,7 +41,12 @@ _DEFAULT_CWD = Path("/tmp/aftraj-eval")
 
 
 def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
-    """Convert one AFTraj turn to a typed AgentMessage."""
+    """Convert one AFTraj turn to a typed AgentMessage.
+
+    Preserves the original agent role (Manager, search_agent, etc.) as a
+    prefix in the message content so downstream consumers can distinguish
+    which agent produced the output.
+    """
     role = turn.get("role", "unknown")
     thought = turn.get("thought") or ""
     action_raw = turn.get("action") or ""
@@ -60,8 +65,11 @@ def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
             ),
         ], timestamp=0.0)
 
-    # assistant
+    # Non-user, non-environment: an agent (Manager, search_agent, etc.)
+    agent_label = role if role not in ("assistant", "unknown") else ""
     blocks: list[Any] = []
+    if agent_label:
+        blocks.append(TextContent(type="text", text=f"[agent: {agent_label}]"))
     if thought:
         blocks.append(TextContent(type="text", text=f"[Thought] {thought}"))
 
