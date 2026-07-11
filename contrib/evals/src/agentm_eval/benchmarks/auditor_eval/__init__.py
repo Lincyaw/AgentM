@@ -57,6 +57,7 @@ async def _load_from_sessions(
 
 def _load_from_aftraj(
     data_dir: Path, *, limit: int | None, max_messages: int | None,
+    split: str | None = None,
 ) -> list[TrajectoryItem]:
     import pandas as pd
 
@@ -68,6 +69,17 @@ def _load_from_aftraj(
     all_rows: list[dict[str, Any]] = []
     safe_rows = [r.to_dict() for _, r in safe_df.iterrows()]
     unsafe_rows = [r.to_dict() for _, r in unsafe_df.iterrows()]
+
+    if split:
+        split_file = data_dir / f"splits_{split}.json"
+        if split_file.is_file():
+            split_data = json.loads(split_file.read_text())
+            test_safe = set(split_data.get(f"{split}_safe", []))
+            test_unsafe = set(split_data.get(f"{split}_unsafe", []))
+            test_ids = test_safe | test_unsafe
+            safe_rows = [r for r in safe_rows if str(r["conv_id"]) in test_ids]
+            unsafe_rows = [r for r in unsafe_rows if str(r["conv_id"]) in test_ids]
+
     for s, u in zip(safe_rows, unsafe_rows):
         all_rows.extend([s, u])
     leftover = safe_rows[len(unsafe_rows):] + unsafe_rows[len(safe_rows):]
@@ -247,6 +259,7 @@ class AuditorEvalAdapter:
             max_messages: Annotated[int | None, typer.Option("--max-messages", help="Truncate trajectory")] = None,
             limit: Annotated[int | None, typer.Option("--limit", help="Max trajectories (aftraj/telbench)")] = None,
             concurrency: Annotated[int, typer.Option("--concurrency", help="Parallel trajectories")] = 1,
+            split: Annotated[str | None, typer.Option("--split", help="AFTraj split (e.g. test)")] = None,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
             from agentm.env import autoload_dotenv
@@ -266,7 +279,7 @@ class AuditorEvalAdapter:
                 ))
 
             if aftraj_dir:
-                items.extend(_load_from_aftraj(aftraj_dir, limit=limit, max_messages=max_messages))
+                items.extend(_load_from_aftraj(aftraj_dir, limit=limit, max_messages=max_messages, split=split))
 
             if telbench_data:
                 items.extend(_load_from_telbench(telbench_data, limit=limit, max_messages=max_messages))

@@ -110,4 +110,4 @@ Call `submit_verdict` exactly once as your final action.
 - `reminder_text`: written to the main agent. Be concrete — name the contradiction or gap.
 - `evidence`: one item per verified fact — source (turn index or file) + what it shows. Required (non-empty) when `surface_reminder=true`.
 - `continuation_notes`: short notes for your next firing. Always at least one.
-- `matched_event_ids`: empty list (legacy field).
+- `matched_event_ids`: turn indices (0-based) that materially support the finding. Required (non-empty) when `surface_reminder=true`.
