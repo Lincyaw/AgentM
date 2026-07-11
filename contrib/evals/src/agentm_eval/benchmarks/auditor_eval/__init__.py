@@ -319,7 +319,7 @@ class AuditorEvalAdapter:
 
 
 def _parse_chunk_size(value: str | None) -> tuple[int, int] | None:
-    if not value:
+    if not value or value.lower() == "none":
         return None
     parts = value.split("-")
     return (int(parts[0]), int(parts[-1]))
