@@ -699,7 +699,7 @@ class TrajectoryIndex:
         cur_step: int | None = None
         reaching_version = -1                       # SSA version of `reaching`
 
-        for i, ref in enumerate(refs):
+        for ref in refs:
             use_idx = self._ref_step_index(ref)
             if use_idx != cur_step:
                 # crossed a step boundary: the prior step's defs become reaching
@@ -720,7 +720,7 @@ class TrajectoryIndex:
                 ref = replace(ref, grounded=True, grounds_ref_id=grounded_reaching.id)
                 self.references[ref.id] = ref
 
-            is_def = ref.kind in _PRODUCING_KINDS or i == 0
+            is_def = ref.kind in _PRODUCING_KINDS
             if is_def:
                 pending = ref
                 if ref.grounded:
