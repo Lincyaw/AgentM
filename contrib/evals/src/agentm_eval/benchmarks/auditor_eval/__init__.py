@@ -57,7 +57,7 @@ async def _load_from_sessions(
 
 def _load_from_aftraj(
     data_dir: Path, *, limit: int | None, max_messages: int | None,
-    split: str | None = None,
+    split: str | None = None, domain: str | None = None,
 ) -> list[TrajectoryItem]:
     import pandas as pd
 
@@ -65,6 +65,10 @@ def _load_from_aftraj(
 
     safe_df = pd.read_parquet(data_dir / "aftraj_safe.parquet")
     unsafe_df = pd.read_parquet(data_dir / "aftraj_unsafe.parquet")
+
+    if domain:
+        safe_df = safe_df[safe_df["domain"] == domain]
+        unsafe_df = unsafe_df[unsafe_df["domain"] == domain]
 
     all_rows: list[dict[str, Any]] = []
     safe_rows = [r.to_dict() for _, r in safe_df.iterrows()]
@@ -260,6 +264,7 @@ class AuditorEvalAdapter:
             limit: Annotated[int | None, typer.Option("--limit", help="Max trajectories (aftraj/telbench)")] = None,
             concurrency: Annotated[int, typer.Option("--concurrency", help="Parallel trajectories")] = 1,
             split: Annotated[str | None, typer.Option("--split", help="AFTraj split (e.g. test)")] = None,
+            domain: Annotated[str | None, typer.Option("--domain", help="AFTraj domain filter")] = None,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
             from agentm.env import autoload_dotenv
@@ -279,7 +284,7 @@ class AuditorEvalAdapter:
                 ))
 
             if aftraj_dir:
-                items.extend(_load_from_aftraj(aftraj_dir, limit=limit, max_messages=max_messages, split=split))
+                items.extend(_load_from_aftraj(aftraj_dir, limit=limit, max_messages=max_messages, split=split, domain=domain))
 
             if telbench_data:
                 items.extend(_load_from_telbench(telbench_data, limit=limit, max_messages=max_messages))

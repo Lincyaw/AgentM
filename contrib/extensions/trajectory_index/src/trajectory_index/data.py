@@ -362,7 +362,7 @@ def _build_references(
                 args = block.get("arguments", block.get("input", {}))
                 text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
             elif btype == "tool_result":
-                kind = "tool_output"
+                kind = "tool_output" if block.get("deterministic", True) else "mention"
                 sub = block.get("content", [])
                 text = " ".join(
                     str(s.get("text", "")) for s in sub if isinstance(s, dict)

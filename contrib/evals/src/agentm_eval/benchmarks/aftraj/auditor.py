@@ -70,7 +70,8 @@ def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
             ),
         ], timestamp=0.0)
 
-    # Sub-agent (search_agent, etc.): their output is a tool result
+    # Sub-agent (search_agent, etc.): their output is a tool result,
+    # but NOT deterministic — it's another LLM's output, not ground truth.
     is_manager = role in ("Manager", "assistant", "unknown")
     if not is_manager and not action_raw:
         return ToolResultMessage(role="tool_result", content=[
@@ -79,6 +80,7 @@ def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
                 tool_call_id="",
                 content=[TextContent(type="text", text=f"[{role}] {content_text}" if content_text else "(empty)")],
                 is_error=False,
+                deterministic=False,
             ),
         ], timestamp=0.0)
 

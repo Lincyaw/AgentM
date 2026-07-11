@@ -129,7 +129,10 @@ def _agentmsg_to_payload(msg: AgentMessage) -> dict[str, JsonValue]:
             for sub in block.content:
                 if isinstance(sub, TextContent):
                     sub_blocks.append({"type": "text", "text": sub.text})
-            blocks.append({"type": "tool_result", "content": sub_blocks})
+            tr: dict[str, JsonValue] = {"type": "tool_result", "content": sub_blocks}
+            if not block.deterministic:
+                tr["deterministic"] = False
+            blocks.append(tr)
     return {"role": msg.role, "content": blocks}
 
 

@@ -73,6 +73,7 @@ class ToolResultBlock:
     tool_call_id: str
     content: list[TextContent | ImageContent]
     is_error: bool = False
+    deterministic: bool = True
 
 
 # Discriminated union of content blocks that can appear inside an assistant
