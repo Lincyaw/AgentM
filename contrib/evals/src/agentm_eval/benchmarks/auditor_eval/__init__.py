@@ -240,6 +240,7 @@ class AuditorEvalAdapter:
             model: Annotated[str, typer.Option(help="Auditor model profile")] = "azure-gpt",
             index_model: Annotated[str, typer.Option("--index-model", help="Index extraction model")] = "azure-gpt",
             chunk_size: Annotated[str | None, typer.Option("--chunk-size")] = "8-12",
+            vocabulary: Annotated[str, typer.Option("--vocabulary", help="Index extraction vocabulary")] = "default",
             auditor_prompt: Annotated[str, typer.Option("--prompt")] = "index",
             exp_id: Annotated[str | None, typer.Option("--exp-id")] = None,
             rebuild_index: Annotated[bool, typer.Option("--rebuild-index")] = False,
@@ -284,7 +285,8 @@ class AuditorEvalAdapter:
 
             asyncio.run(_run_pipeline(
                 items, model=model, index_model=index_model,
-                chunk_size=parsed_chunk, auditor_prompt=auditor_prompt,
+                chunk_size=parsed_chunk, vocabulary=vocabulary,
+                auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
             ))
 
@@ -319,6 +321,7 @@ async def _run_pipeline(
     model: str,
     index_model: str,
     chunk_size: tuple[int, int] | None,
+    vocabulary: str,
     auditor_prompt: str,
     exp: Experiment,
     rebuild_index: bool,
@@ -387,7 +390,7 @@ async def _run_pipeline(
             )
             try:
                 result = await _run_one(
-                    chunk.messages, model=index_model, vocabulary="default",
+                    chunk.messages, model=index_model, vocabulary=vocabulary,
                     registry=chunk_registry if chunk_registry else None,
                     message_id_start=chunk.start, cwd=None,
                 )
