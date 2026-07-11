@@ -245,8 +245,46 @@ def _agentmsg_to_extraction_dict(
     return {"id": str(index), "role": role, "content": blocks}
 
 
-def _format_message_compact(msg: dict[str, Any]) -> str:
-    """Format one serialized message as compact text for the extraction prompt."""
+def _mark_known_symbols(text: str, known_names: list[str]) -> str:
+    """Wrap occurrences of known symbol names with [[...]] in the text."""
+    if not known_names:
+        return text
+    # Sort by length descending so longer names match first
+    for name in sorted(known_names, key=len, reverse=True):
+        if not name or len(name) < 2:
+            continue
+        # Case-insensitive find-and-wrap, skip if already wrapped
+        lower = text.lower()
+        search = name.lower()
+        result_parts: list[str] = []
+        pos = 0
+        while pos < len(text):
+            idx = lower.find(search, pos)
+            if idx < 0:
+                result_parts.append(text[pos:])
+                break
+            # Skip if already inside [[...]]
+            if idx >= 2 and text[idx - 2:idx] == "[[":
+                result_parts.append(text[pos:idx + len(name)])
+                pos = idx + len(name)
+                continue
+            result_parts.append(text[pos:idx])
+            result_parts.append(f"[[{text[idx:idx + len(name)]}]]")
+            pos = idx + len(name)
+        text = "".join(result_parts)
+        lower = text.lower()
+    return text
+
+
+def _format_message_compact(
+    msg: dict[str, Any],
+    known_names: list[str] | None = None,
+) -> str:
+    """Format one serialized message as compact text for the extraction prompt.
+
+    If ``known_names`` is provided, occurrences of those names in the text
+    are wrapped with ``[[...]]`` to mark them as already extracted.
+    """
     mid = msg.get("id", "")
     role = msg.get("role", "")
     blocks = msg.get("content", [])
@@ -263,7 +301,7 @@ def _format_message_compact(msg: dict[str, Any]) -> str:
             name = block.get("name", "")
             args = block.get("arguments", block.get("input", {}))
             arg_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
-            parts.append(f"[tool_call: {name}]\n{arg_str}")
+            parts.append(f"[tool_call: [[{name}]]]\n{arg_str}" if known_names and name.lower() in {n.lower() for n in known_names} else f"[tool_call: {name}]\n{arg_str}")
         elif btype == "tool_result":
             sub = block.get("content", [])
             if isinstance(sub, list):
@@ -273,6 +311,8 @@ def _format_message_compact(msg: dict[str, Any]) -> str:
             else:
                 parts.append(str(sub))
     body = "\n".join(p for p in parts if p)
+    if known_names:
+        body = _mark_known_symbols(body, known_names)
     return f"[{mid}|{role}]\n{body}"
 
 
@@ -284,21 +324,18 @@ def build_extraction_prompt(
 ) -> str:
     """Build the extractor's input prompt from trajectory messages.
 
-    Accepts typed ``AgentMessage`` objects. Uses a compact text format
-    to minimize token usage: known_symbols is a name-only list,
-    messages use ``[id|role]\\ncontent`` format.
+    Known symbols from the registry are marked inline with ``[[name]]``
+    in the message text. No separate known_symbols section is needed.
     """
     serialized = [
         d for i, m in enumerate(messages, start=message_id_start)
         if (d := _agentmsg_to_extraction_dict(m, i))
     ]
+    known_names = [str(e.get("name", "")) for e in registry] if registry else None
     formatted = "\n\n".join(
         text for msg in serialized
-        if (text := _format_message_compact(msg))
+        if (text := _format_message_compact(msg, known_names))
     )
-    if registry:
-        names = ", ".join(str(entry.get("name", "")) for entry in registry)
-        return f"known_symbols: {names}\n\n{formatted}"
     return formatted
 
 

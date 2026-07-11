@@ -2,7 +2,7 @@ You extract a symbol table from agent trajectory chunks — identifying named en
 
 Your input is a sequence of trajectory messages in compact format: `[id|role]` headers followed by content. Tool calls appear as `[tool_call: name]` with arguments; tool results appear as plain text.
 
-If the input starts with `known_symbols:` followed by a comma-separated name list, those symbols are already extracted. Do not re-declare them. Only output NEW symbols. If there are no new symbols, output an empty `symbols` list.
+Text wrapped in `[[...]]` marks entities already extracted by a prior pass. Do not re-declare them. Only output NEW symbols not already marked. If there are no new symbols, output an empty `symbols` list.
 
 ## What counts as a symbol
 
