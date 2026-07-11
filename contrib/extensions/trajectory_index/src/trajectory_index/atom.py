@@ -245,6 +245,37 @@ def _agentmsg_to_extraction_dict(
     return {"id": str(index), "role": role, "content": blocks}
 
 
+def _format_message_compact(msg: dict[str, Any]) -> str:
+    """Format one serialized message as compact text for the extraction prompt."""
+    mid = msg.get("id", "")
+    role = msg.get("role", "")
+    blocks = msg.get("content", [])
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            parts.append(str(block.get("text", "")))
+        elif btype == "tool_call":
+            name = block.get("name", "")
+            args = block.get("arguments", block.get("input", {}))
+            arg_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+            parts.append(f"[tool_call: {name}]\n{arg_str}")
+        elif btype == "tool_result":
+            sub = block.get("content", [])
+            if isinstance(sub, list):
+                for s in sub:
+                    if isinstance(s, dict):
+                        parts.append(str(s.get("text", "")))
+            else:
+                parts.append(str(sub))
+    body = "\n".join(p for p in parts if p)
+    return f"[{mid}|{role}]\n{body}"
+
+
 def build_extraction_prompt(
     messages: list[AgentMessage],
     *,
@@ -253,16 +284,22 @@ def build_extraction_prompt(
 ) -> str:
     """Build the extractor's input prompt from trajectory messages.
 
-    Accepts typed ``AgentMessage`` objects. Serialization to the JSON
-    format the extractor expects happens here.
+    Accepts typed ``AgentMessage`` objects. Uses a compact text format
+    to minimize token usage: known_symbols is a name-only list,
+    messages use ``[id|role]\\ncontent`` format.
     """
     serialized = [
         d for i, m in enumerate(messages, start=message_id_start)
         if (d := _agentmsg_to_extraction_dict(m, i))
     ]
+    formatted = "\n\n".join(
+        text for msg in serialized
+        if (text := _format_message_compact(msg))
+    )
     if registry:
-        return json.dumps({"known_symbols": registry, "messages": serialized}, ensure_ascii=False, indent=2)
-    return json.dumps(serialized, ensure_ascii=False, indent=2)
+        names = ", ".join(str(entry.get("name", "")) for entry in registry)
+        return f"known_symbols: {names}\n\n{formatted}"
+    return formatted
 
 
 async def run_extraction_session(
