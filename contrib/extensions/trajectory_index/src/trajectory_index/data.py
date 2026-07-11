@@ -299,10 +299,20 @@ class GeneratedRelation:
     turn_id: str
 
 
+_IDENT_CHAR_RE: Final = re.compile(r"[A-Za-z0-9_.\-/]")
+
+
 def _usable_reference_term(term: str) -> bool:
     """Drop tiny aliases that create noisy substring matches."""
     norm = re.sub(r"\W+", "", term, flags=re.UNICODE)
     return len(norm) >= 2
+
+
+def _ref_at_word_boundary(text: str, start: int, end: int) -> bool:
+    """Check that the match is not inside a longer identifier."""
+    if start > 0 and _IDENT_CHAR_RE.match(text[start - 1]):
+        return False
+    return not (end < len(text) and _IDENT_CHAR_RE.match(text[end]))
 
 
 def _symbol_aliases(sym: dict[str, Any]) -> list[str]:
@@ -370,6 +380,9 @@ def _build_references(
             for search_term, canonical in names:
                 pos = text_lower.find(search_term)
                 if pos < 0:
+                    continue
+                end = pos + len(search_term)
+                if not _ref_at_word_boundary(text, pos, end):
                     continue
                 dedup_key = (canonical, mid, kind)
                 if dedup_key in seen:
