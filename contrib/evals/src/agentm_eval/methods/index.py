@@ -211,6 +211,7 @@ class ExtractedChunk:
     run_id: str
     messages: list[AgentMessage]
     result: ExtractionResult
+    message_id_start: int = 0
 
 
 type OnChunkCallback = Callable[[ExtractedChunk, list[AgentMessage]], None]
@@ -285,7 +286,10 @@ async def extract_symbols(
                         name=ss.name, kind=ss.kind, entity_class="identifier",
                     ))
 
-        extracted = ExtractedChunk(run_id=run_id, messages=chunk.messages, result=result)
+        extracted = ExtractedChunk(
+            run_id=run_id, messages=chunk.messages, result=result,
+            message_id_start=chunk.start,
+        )
         results.append(extracted)
 
         if on_chunk:
@@ -385,9 +389,10 @@ async def build_index(
     for chunk in chunks:
         index.populate_from_extraction(
             chunk.result,
-            _to_index_dicts(chunk.messages),
+            chunk.messages,
             run_id=chunk.run_id,
             namespace_fn=namespace_fn,
+            message_id_start=chunk.message_id_start,
         )
 
     if resolve:

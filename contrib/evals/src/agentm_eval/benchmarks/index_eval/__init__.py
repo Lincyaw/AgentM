@@ -130,7 +130,10 @@ async def _run_sessions(
 
             n_chunks += 1
 
-            idx.populate_from_extraction(result, chunk.messages, run_id=sid)
+            idx.populate_from_extraction(
+                result, chunk.messages, run_id=sid,
+                message_id_start=chunk.start,
+            )
 
             # Pass 2+3 after each chunk (matches online behavior)
             await resolve_index(idx, model=model)

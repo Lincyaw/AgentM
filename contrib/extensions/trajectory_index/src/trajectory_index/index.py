@@ -800,19 +800,22 @@ class TrajectoryIndex:
         run_id: str = "",
         namespace_fn: Any | None = None,
         reference_confidence: float = 0.8,
+        message_id_start: int = 0,
     ) -> None:
         """Populate index from an extraction result and source messages.
 
         ``result`` must have a ``.symbols`` attribute (list of extracted symbols).
         ``messages`` can be typed ``AgentMessage`` objects or pre-serialized dicts.
         ``namespace_fn(run_id, sym_dict) -> str`` optionally scopes symbols.
+        ``message_id_start`` is the absolute offset of the first message in the
+        full trajectory — ensures step IDs are globally unique across chunks.
         """
         from .data import _build_references
 
         if messages and not isinstance(messages[0], dict):
             from .atom import _agentmsg_to_extraction_dict
             messages = [
-                d for i, m in enumerate(messages)
+                d for i, m in enumerate(messages, start=message_id_start)
                 if (d := _agentmsg_to_extraction_dict(m, i))
             ]
 
