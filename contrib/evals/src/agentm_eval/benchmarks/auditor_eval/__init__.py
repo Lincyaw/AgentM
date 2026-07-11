@@ -399,7 +399,7 @@ async def _process_one_item(
             chunk.messages, registry if registry else None, seen,
         )
         try:
-            result = await _run_one(
+            outcome = await _run_one(
                 chunk.messages, model=index_model, vocabulary=vocabulary,
                 registry=chunk_registry if chunk_registry else None,
                 message_id_start=chunk.start, cwd=None,
@@ -407,6 +407,9 @@ async def _process_one_item(
         except Exception:
             typer.echo(f"  {tid} chunk {ci+1} index extraction failed", err=True)
             continue
+        if outcome.session_id:
+            exp.record_trace(outcome.session_id, case_id=tid, role="index")
+        result = outcome.result
         if result is None:
             typer.echo(f"  {tid} chunk {ci+1} no parseable result", err=True)
             continue
@@ -616,6 +619,8 @@ def _save_auditor_step(
         "surfaces": [v.to_dict() for v in audit_result.surfaces],
     }
     exp.write_session_artifact(tid, "auditor", f"step_{msg_count:04d}.json", data)
+    for sid in audit_result.session_ids:
+        exp.record_trace(sid, case_id=tid, role="auditor", metadata={"msg_count": msg_count})
 
 
 register("auditor", AuditorEvalAdapter.description, AuditorEvalAdapter)

@@ -196,48 +196,80 @@ class Experiment:
             )
         return path
 
-    # --- Trajectory export ---
+    # --- Trace session tracking ---
 
-    def collect_trace_session_ids(self) -> dict[str, list[str]]:
-        """Discover real ClickHouse session IDs from auditor step files.
+    @property
+    def traces_path(self) -> Path:
+        return self.output_dir / "traces.jsonl"
 
-        Returns ``{trajectory_id: [session_id, ...]}`` by scanning
-        ``sessions/<tid>/auditor/step_*.json`` for ``session_ids`` fields.
+    def record_trace(
+        self,
+        trace_session_id: str,
+        *,
+        case_id: str,
+        role: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a real ClickHouse session ID produced during evaluation.
+
+        Every benchmark calls this for each session it spawns (index
+        extraction, auditor, TEL agent, etc.).  The ``role`` field
+        distinguishes session types (e.g. ``"index"``, ``"auditor"``,
+        ``"tel_agent"``).  ``case_id`` is the trajectory / instance ID
+        this session belongs to.
         """
-        sessions_root = self.output_dir / "sessions"
-        if not sessions_root.is_dir():
-            return {}
-        result: dict[str, list[str]] = {}
-        for tid_dir in sorted(sessions_root.iterdir()):
-            if not tid_dir.is_dir():
-                continue
-            tid = tid_dir.name
-            sids: list[str] = []
-            auditor_dir = tid_dir / "auditor"
-            if auditor_dir.is_dir():
-                for step_file in sorted(auditor_dir.glob("step_*.json")):
-                    try:
-                        data = json.loads(step_file.read_text())
-                        for sid in data.get("session_ids", []):
-                            if sid and sid not in sids:
-                                sids.append(sid)
-                    except Exception:
-                        continue
-            if sids:
-                result[tid] = sids
-        return result
+        record: dict[str, Any] = {
+            "trace_session_id": trace_session_id,
+            "case_id": case_id,
+            "role": role,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        if metadata:
+            record.update(metadata)
+        with open(self.traces_path, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.flush()
+
+    def load_traces(self) -> list[dict[str, Any]]:
+        if not self.traces_path.is_file():
+            return []
+        return [
+            json.loads(line)
+            for line in self.traces_path.read_text().splitlines()
+            if line.strip()
+        ]
+
+    def trace_session_ids(
+        self, *, role: str | None = None, case_id: str | None = None,
+    ) -> list[str]:
+        """Return recorded trace session IDs, optionally filtered."""
+        traces = self.load_traces()
+        if role:
+            traces = [t for t in traces if t.get("role") == role]
+        if case_id:
+            traces = [t for t in traces if t.get("case_id") == case_id]
+        seen: set[str] = set()
+        out: list[str] = []
+        for t in traces:
+            sid = t["trace_session_id"]
+            if sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+        return out
+
+    # --- Trajectory export ---
 
     def export_trajectory(
         self,
-        session_id: str,
+        trace_session_id: str,
         *,
         fmt: str = "ndjson",
         out_dir: Path | None = None,
     ) -> Path | None:
         """Export a single session's trajectory from ClickHouse."""
-        target = out_dir or self.session_dir(session_id)
+        target = out_dir or self.output_dir / "trajectories"
         target.mkdir(parents=True, exist_ok=True)
-        out_path = target / f"trajectory_{session_id}.{fmt}"
+        out_path = target / f"trajectory_{trace_session_id}.{fmt}"
         if out_path.is_file():
             return out_path
         try:
@@ -247,39 +279,37 @@ class Experiment:
             if not url:
                 logger.debug("trajectory export: ClickHouse unavailable")
                 return None
-            entries = clickhouse.session_entries(url, session_id)
+            entries = clickhouse.session_entries(url, trace_session_id)
             if not entries:
-                logger.debug("trajectory export empty for {}", session_id)
+                logger.debug("trajectory export empty for {}", trace_session_id)
                 return None
             lines = [json.dumps(e, ensure_ascii=False, default=str) for e in entries]
             out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return out_path
         except Exception as exc:
-            logger.debug("trajectory export error for {}: {}", session_id, exc)
+            logger.debug("trajectory export error for {}: {}", trace_session_id, exc)
             return None
 
     def export_all_trajectories(
-        self, *, fmt: str = "ndjson"
+        self, *, fmt: str = "ndjson", role: str | None = None,
     ) -> int:
-        """Export trajectories for all real ClickHouse sessions.
+        """Export trajectories for all recorded trace sessions.
 
-        Discovers session IDs from auditor step files and exports each
-        into ``sessions/<trajectory_id>/auditor/trajectory_<sid>.ndjson``.
+        Uses ``traces.jsonl`` written by ``record_trace()`` during eval.
+        Optionally filter by ``role`` (e.g. ``"auditor"``).
         """
-        trace_map = self.collect_trace_session_ids()
-        if not trace_map:
+        sids = self.trace_session_ids(role=role)
+        if not sids:
             logger.info("export: no trace sessions found for {}", self.exp_id)
             return 0
-        total = sum(len(v) for v in trace_map.values())
+        out_dir = self.output_dir / "trajectories"
         exported = 0
-        for tid, sids in trace_map.items():
-            out_dir = self.session_dir(tid) / "auditor"
-            for sid in sids:
-                if self.export_trajectory(sid, fmt=fmt, out_dir=out_dir) is not None:
-                    exported += 1
+        for sid in sids:
+            if self.export_trajectory(sid, fmt=fmt, out_dir=out_dir) is not None:
+                exported += 1
         logger.info(
-            "exported {}/{} trajectories ({} cases) for {}",
-            exported, total, len(trace_map), self.exp_id,
+            "exported {}/{} trajectories for {}",
+            exported, len(sids), self.exp_id,
         )
         return exported
 

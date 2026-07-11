@@ -152,6 +152,12 @@ def _prescan_structural(
     return updated, new_syms
 
 
+@dataclass(frozen=True, slots=True)
+class ExtractionOutcome:
+    result: ExtractionResult | None
+    session_id: str | None = None
+
+
 async def _run_one(
     messages: list[AgentMessage],
     *,
@@ -160,12 +166,22 @@ async def _run_one(
     registry: list[dict[str, Any]] | None,
     message_id_start: int,
     cwd: str | None,
-) -> ExtractionResult | None:
+) -> ExtractionOutcome:
+    from agentm.core.runtime import AgentSession
+
     from trajectory_index.atom import (
         build_extraction_config,
         build_extraction_prompt,
         run_extraction_session,
     )
+
+    _captured_sid: list[str] = []
+    _orig_create = AgentSession.create
+
+    async def _capturing_spawn(config: Any) -> Any:
+        session = await _orig_create(config)
+        _captured_sid.append(session.session_id)
+        return session
 
     config = build_extraction_config(
         cwd=cwd or os.getcwd(),
@@ -177,7 +193,11 @@ async def _run_one(
         registry=registry,
         message_id_start=message_id_start,
     )
-    return await run_extraction_session(config, prompt, vocabulary=vocabulary)
+    result = await run_extraction_session(
+        config, prompt, vocabulary=vocabulary, spawn=_capturing_spawn,
+    )
+    sid = _captured_sid[0] if _captured_sid else None
+    return ExtractionOutcome(result=result, session_id=sid)
 
 
 # ---------------------------------------------------------------------------
@@ -253,13 +273,13 @@ async def extract_symbols(
     from trajectory_index.index import normalize_name
 
     if chunk_size is None:
-        result = await _run_one(
+        outcome = await _run_one(
             messages, model=model, vocabulary=vocabulary,
             registry=None, message_id_start=0, cwd=cwd,
         )
-        if result is None:
+        if outcome.result is None:
             return []
-        extracted = ExtractedChunk(run_id=run_id, messages=messages, result=result)
+        extracted = ExtractedChunk(run_id=run_id, messages=messages, result=outcome.result)
         if on_chunk:
             on_chunk(extracted, messages)
         return [extracted]
@@ -281,7 +301,7 @@ async def extract_symbols(
             )
 
         try:
-            result = await _run_one(
+            outcome = await _run_one(
                 chunk.messages, model=model, vocabulary=vocabulary,
                 registry=chunk_registry if chunk_registry else None,
                 message_id_start=chunk.start, cwd=cwd,
@@ -289,6 +309,7 @@ async def extract_symbols(
         except Exception:
             logger.exception("chunk {}/{} extraction failed", i + 1, len(chunks))
             continue
+        result = outcome.result
         if result is None:
             logger.warning("chunk {}/{} no parseable result", i + 1, len(chunks))
             continue

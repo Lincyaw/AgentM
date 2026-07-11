@@ -153,18 +153,19 @@ def list_sessions(
 def export_traces(
     exp_id: Annotated[str, typer.Argument(help="Experiment ID")],
     format: Annotated[str, typer.Option("--format", "-f")] = "ndjson",
+    role: Annotated[str | None, typer.Option("--role", help="Filter by role (index, auditor, ...)")] = None,
     output_root: Annotated[Path | None, typer.Option("--output-root")] = None,
 ) -> None:
-    """Export trajectories for all registered sessions from ClickHouse."""
+    """Export trajectories for all trace sessions from ClickHouse."""
     exp = Experiment.load(exp_id, output_root)
-    sids = exp.session_ids()
-    if not sids:
-        typer.echo("No sessions registered. Use `agentm-eval sessions` to check.")
+    trace_sids = exp.trace_session_ids(role=role)
+    if not trace_sids:
+        typer.echo("No trace sessions recorded. Run an eval first or check `agentm-eval sessions`.")
         return
 
-    typer.echo(f"Exporting {len(sids)} sessions for {exp_id}...")
-    exported = exp.export_all_trajectories(fmt=format)
-    typer.echo(f"Exported {exported}/{len(sids)} to {exp.output_dir / 'sessions'}")
+    typer.echo(f"Exporting {len(trace_sids)} trace sessions for {exp_id}...")
+    exported = exp.export_all_trajectories(fmt=format, role=role)
+    typer.echo(f"Exported {exported}/{len(trace_sids)} to {exp.output_dir / 'trajectories'}")
 
 
 def main() -> None:
