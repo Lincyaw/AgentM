@@ -1,4 +1,9 @@
-"""Experiment lifecycle: ID generation, output directory, result recording."""
+"""Experiment lifecycle: ID generation, output directory, result recording.
+
+Unified experiment tracking: every eval run produces an experiment ID,
+registers sessions, provides per-session artifact directories, and
+supports trajectory export from ClickHouse.
+"""
 
 from __future__ import annotations
 
@@ -116,6 +121,131 @@ class Experiment:
         if task_id:
             overrides["eval_task_id"] = task_id
         return overrides
+
+    # --- Session registration ---
+
+    @property
+    def sessions_path(self) -> Path:
+        return self.output_dir / "sessions.jsonl"
+
+    def session_dir(self, session_id: str) -> Path:
+        return self.output_dir / "sessions" / session_id
+
+    def register_session(
+        self,
+        session_id: str,
+        *,
+        case_id: str | None = None,
+        trace_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Path:
+        """Register a session and return its artifact directory."""
+        record: dict[str, Any] = {
+            "session_id": session_id,
+            "registered_at": datetime.now(UTC).isoformat(),
+        }
+        if case_id is not None:
+            record["case_id"] = case_id
+        if trace_id is not None:
+            record["trace_id"] = trace_id
+        if metadata:
+            record.update(metadata)
+
+        with open(self.sessions_path, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.flush()
+
+        sdir = self.session_dir(session_id)
+        sdir.mkdir(parents=True, exist_ok=True)
+        return sdir
+
+    def load_sessions(self) -> list[dict[str, Any]]:
+        if not self.sessions_path.is_file():
+            return []
+        return [
+            json.loads(line)
+            for line in self.sessions_path.read_text().splitlines()
+            if line.strip()
+        ]
+
+    def session_ids(self) -> list[str]:
+        return [s["session_id"] for s in self.load_sessions()]
+
+    # --- Per-session artifact writing ---
+
+    def write_session_artifact(
+        self,
+        session_id: str,
+        category: str,
+        filename: str,
+        data: dict[str, Any] | str,
+    ) -> Path:
+        """Write a file into ``sessions/<session_id>/<category>/<filename>``."""
+        if category:
+            target_dir = self.session_dir(session_id) / category
+        else:
+            target_dir = self.session_dir(session_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / filename
+        if isinstance(data, str):
+            path.write_text(data, encoding="utf-8")
+        else:
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        return path
+
+    # --- Trajectory export ---
+
+    def export_trajectory(
+        self,
+        session_id: str,
+        *,
+        fmt: str = "ndjson",
+    ) -> Path | None:
+        """Export a single session's trajectory from ClickHouse."""
+        sdir = self.session_dir(session_id)
+        sdir.mkdir(parents=True, exist_ok=True)
+        out_path = sdir / f"trajectory.{fmt}"
+        try:
+            from agentm.core.observability import clickhouse
+
+            url = clickhouse.get_url()
+            if not url:
+                logger.debug("trajectory export: ClickHouse unavailable")
+                return None
+            entries = clickhouse.session_entries(url, session_id)
+            if not entries:
+                logger.debug("trajectory export empty for {}", session_id)
+                return None
+            lines = [json.dumps(e, ensure_ascii=False, default=str) for e in entries]
+            out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return out_path
+        except Exception as exc:
+            logger.debug("trajectory export error for {}: {}", session_id, exc)
+            return None
+
+    def export_all_trajectories(
+        self, *, fmt: str = "ndjson"
+    ) -> int:
+        """Export trajectories for all registered sessions. Returns success count."""
+        sids = self.session_ids()
+        if not sids:
+            return 0
+        exported = 0
+        for sid in sids:
+            out = self.session_dir(sid) / f"trajectory.{fmt}"
+            if out.is_file():
+                exported += 1
+                continue
+            if self.export_trajectory(sid, fmt=fmt) is not None:
+                exported += 1
+        logger.info(
+            "exported {}/{} trajectories for {}",
+            exported, len(sids), self.exp_id,
+        )
+        return exported
 
     def finish(
         self,

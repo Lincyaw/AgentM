@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import time
 import warnings
 from pathlib import Path
@@ -20,26 +19,23 @@ from typing import Any
 import typer
 from loguru import logger
 
+from agentm_eval.benchmarks.tau2 import ensure_tau2_path
+
 warnings.filterwarnings("ignore", category=UserWarning, module=r"gymnasium")
-
-
-def _ensure_tau2():
-    tau2_dir = os.environ.get(
-        "TAU2_BENCH_DIR",
-        os.path.expanduser("~/AoyangSpace/tau2-bench"),
-    )
-    tau2_src = os.path.join(tau2_dir, "src")
-    if tau2_src not in sys.path:
-        sys.path.insert(0, tau2_src)
 
 
 
 def _set_env_from_profile(model: str) -> None:
-    """Set OPENAI_API_BASE/KEY and TAU2_LLM_* env vars from the AgentM model
-    profile so tau2's user simulator and NL evaluator use the same endpoint."""
+    """Set TAU2_LLM_* env vars from a dedicated tau2-user-sim config.toml
+    profile so tau2's NL evaluator uses a reachable endpoint.
+
+    Does NOT set OPENAI_API_BASE — that would redirect all litellm calls
+    (including the user simulator) to the agent's endpoint, which may not
+    serve the model the simulator needs.
+    """
     from agentm.core.lib import resolve_model_profile
 
-    profile = resolve_model_profile(model)
+    profile = resolve_model_profile("tau2-user-sim")
     if profile is None:
         return
     if profile.base_url and not os.environ.get("OPENAI_API_BASE"):
@@ -106,7 +102,7 @@ def run(
     max_steps: int = typer.Option(100, "--max-steps"),
 ):
     """Run a single tau2-bench task through an AgentM session."""
-    _ensure_tau2()
+    ensure_tau2_path()
     _set_env_from_profile(model)
 
     result = asyncio.run(
@@ -135,7 +131,7 @@ def batch(
     exp_id: str | None = typer.Option(None, "--exp-id", help="Override experiment ID"),
 ):
     """Run multiple tau2-bench tasks through AgentM sessions."""
-    _ensure_tau2()
+    ensure_tau2_path()
     _set_env_from_profile(model)
 
     from agentm_eval.experiment import experiment_context

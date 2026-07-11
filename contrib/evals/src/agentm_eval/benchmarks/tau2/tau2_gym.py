@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import sys
 import time
 from typing import Any, Final
 
 from loguru import logger
+
+from agentm_eval.benchmarks.tau2 import ensure_tau2_path
 
 from agentm.core.abi import (
     BeforeAgentStartEvent,
@@ -62,25 +62,14 @@ You cannot do both at the same time.
 Try to be helpful and always follow the policy. Always make sure you generate valid JSON only."""
 
 
-def _ensure_tau2():
-    tau2_dir = os.environ.get(
-        "TAU2_BENCH_DIR",
-        os.path.expanduser("~/AoyangSpace/tau2-bench"),
-    )
-    tau2_src = os.path.join(tau2_dir, "src")
-    if tau2_src not in sys.path:
-        sys.path.insert(0, tau2_src)
-
-
 async def install(api, config: dict[str, Any]):
-    _ensure_tau2()
+    ensure_tau2_path()
 
     parts = api.purpose.split(":")
     if len(parts) < 4 or parts[0] != "tau2-eval":
         raise ValueError(
             f"tau2_gym: expected purpose='tau2-eval:{{model}}:{{domain}}:{{task_id}}', got {api.purpose!r}"
         )
-    model_name = parts[1]
     domain = parts[2]
     task_id = parts[3]
     max_steps = config.get("max_steps", 100)
@@ -89,16 +78,20 @@ async def install(api, config: dict[str, Any]):
     from tau2.runner.build import build_environment, build_user
     from tau2.runner.helpers import get_tasks
 
-    # Resolve user simulator LLM from model profile
-    user_llm = "openai/gpt-4.1-mini"
+    # Resolve user simulator LLM from a dedicated config.toml profile
+    user_sim_profile_name = config.get("user_sim_model", "tau2-user-sim")
     user_llm_args: dict[str, Any] = {}
-    profile = resolve_model_profile(model_name)
+    profile = resolve_model_profile(user_sim_profile_name)
     if profile:
         user_llm = f"openai/{profile.model}"
         if profile.base_url:
             user_llm_args["api_base"] = profile.base_url
         if profile.api_key:
             user_llm_args["api_key"] = profile.api_key
+    else:
+        raise ValueError(
+            f"tau2_gym: model profile {user_sim_profile_name!r} not found in config.toml"
+        )
 
     # Build tau2 components directly — no orchestrator, no Gym
     tasks = get_tasks(domain, task_ids=[str(task_id)])

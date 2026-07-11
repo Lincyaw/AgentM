@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from loguru import logger
 
+from . import _tel_agent_dir
 from .adapter import TelBenchInstance, spans_to_messages
 from .scoring import SpanScores, score_instance
 
@@ -60,6 +61,7 @@ async def evaluate_instance(
     eff_audit_interval = n_spans if mode == "posthoc" else audit_interval
 
     aud_scenario = auditor_scenario()
+    last_session_id = ""
 
     for turn_count in range(1, n_spans + 1):
         auditor_due = (turn_count % eff_audit_interval) == 0
@@ -82,6 +84,7 @@ async def evaluate_instance(
             )
             try:
                 session = await create_agent_session(AgentSession, config)
+                last_session_id = session.session_id
                 try:
                     child_msgs = await session.prompt(
                         json.dumps(
@@ -132,6 +135,8 @@ async def evaluate_instance(
         scores=scores,
         verdicts=all_verdicts,
         n_spans=n_spans,
+        session_id=last_session_id,
+        reason_session_id=last_session_id,
     )
 
 
@@ -297,10 +302,6 @@ async def evaluate_instance_tel(
         reason_session_id=sid,
     )
 
-
-def _tel_agent_dir() -> Path:
-    import llmharness.agents.tel as _tel
-    return Path(_tel.__file__).parent
 
 _TEL_WORKFLOW_SCRIPT = _tel_agent_dir() / "workflow.py"
 

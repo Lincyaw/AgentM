@@ -17,7 +17,8 @@ from agentm_eval.registry import register
 from agentm_eval.result import TaskResult
 
 
-def _ensure_tau2_importable() -> None:
+def ensure_tau2_path() -> None:
+    """Add tau2-bench's ``src`` dir to ``sys.path`` so ``import tau2`` works."""
     tau2_dir = os.environ.get(
         "TAU2_BENCH_DIR",
         str(Path.home() / "AoyangSpace" / "tau2-bench"),
@@ -87,7 +88,7 @@ class Tau2Adapter:
             rerun_failed: Annotated[Optional[str], typer.Option("--rerun-failed", help="Rerun infra_error tasks from a previous tau2 results.json")] = None,
         ) -> None:
             """Run tau2-bench evaluation."""
-            _ensure_tau2_importable()
+            ensure_tau2_path()
 
             agent_llm, agent_llm_args = _resolve_model(model, raw_llm)
             if user_model or user_raw_llm:
@@ -209,7 +210,7 @@ class Tau2Adapter:
         @cli.command("list-domains")
         def list_domains() -> None:
             """List available tau2-bench domains."""
-            _ensure_tau2_importable()
+            ensure_tau2_path()
             from tau2.registry import registry
 
             info = registry.get_info()

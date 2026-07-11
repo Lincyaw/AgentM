@@ -1,9 +1,8 @@
 """Shared offline primitives for spawning standalone auditor sessions.
 
 This module contains only the low-level building blocks (session spawn,
-terminal-tool extraction). The higher-level audit pipeline, offline_audit
-convenience wrapper, and StandaloneChildRunner live in
-``agentm_eval.harness.offline_audit`` — eval-only infrastructure.
+terminal-tool extraction). The higher-level StandaloneChildRunner lives
+in ``agentm_eval.benchmarks.aftraj.offline_audit``.
 """
 
 from __future__ import annotations

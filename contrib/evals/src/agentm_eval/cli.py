@@ -105,6 +105,10 @@ def show_report(
     typer.echo(f"Output:     {exp.output_dir}")
     typer.echo("")
 
+    sessions = exp.load_sessions()
+    if sessions:
+        typer.echo(f"Sessions: {len(sessions)} registered")
+
     results = exp.load_results()
     if not results:
         typer.echo("No results recorded.")
@@ -123,46 +127,44 @@ def show_report(
         typer.echo(f"\n{report_file.read_text()}")
 
 
+@app.command("sessions")
+def list_sessions(
+    exp_id: Annotated[str, typer.Argument(help="Experiment ID")],
+    output_root: Annotated[Path | None, typer.Option("--output-root")] = None,
+) -> None:
+    """List registered sessions for an experiment."""
+    exp = Experiment.load(exp_id, output_root)
+    sessions = exp.load_sessions()
+    if not sessions:
+        typer.echo("No sessions registered.")
+        return
+
+    typer.echo(f"{'Session ID':<36} {'Case ID':<40} {'Registered':<24}")
+    typer.echo("-" * 100)
+    for s in sessions:
+        sid = s.get("session_id", "?")
+        cid = s.get("case_id", "-")
+        ts = s.get("registered_at", "?")[:19]
+        typer.echo(f"{sid:<36} {cid:<40} {ts:<24}")
+    typer.echo(f"\n{len(sessions)} sessions total")
+
+
 @app.command("export")
 def export_traces(
     exp_id: Annotated[str, typer.Argument(help="Experiment ID")],
     format: Annotated[str, typer.Option("--format", "-f")] = "ndjson",
     output_root: Annotated[Path | None, typer.Option("--output-root")] = None,
 ) -> None:
-    """Export trajectories for an experiment from ClickHouse."""
+    """Export trajectories for all registered sessions from ClickHouse."""
     exp = Experiment.load(exp_id, output_root)
-    results = exp.load_results()
-
-    session_ids = []
-    for r in results:
-        sids = r.get("session_ids", [])
-        if isinstance(sids, list):
-            session_ids.extend(sids)
-        sid = r.get("session_id")
-        if sid and sid not in session_ids:
-            session_ids.append(sid)
-
-    if not session_ids:
-        typer.echo("No session IDs found in results.")
+    sids = exp.session_ids()
+    if not sids:
+        typer.echo("No sessions registered. Use `agentm-eval sessions` to check.")
         return
 
-    typer.echo(f"Exporting {len(session_ids)} sessions for {exp_id}...")
-
-    import subprocess
-
-    for sid in session_ids:
-        result = subprocess.run(
-            ["agentm", "trace", "messages", "--session", sid, "--format", format],
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            out_file = exp.artifacts_dir / f"{sid}.{format}"
-            out_file.write_bytes(result.stdout)
-            typer.echo(f"  {sid} → {out_file.name}")
-        else:
-            typer.echo(f"  {sid} FAILED: {result.stderr.decode()[:200]}", err=True)
-
-    typer.echo(f"Exported to {exp.artifacts_dir}")
+    typer.echo(f"Exporting {len(sids)} sessions for {exp_id}...")
+    exported = exp.export_all_trajectories(fmt=format)
+    typer.echo(f"Exported {exported}/{len(sids)} to {exp.output_dir / 'sessions'}")
 
 
 def main() -> None:

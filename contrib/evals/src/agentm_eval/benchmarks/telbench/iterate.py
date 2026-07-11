@@ -25,23 +25,13 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from loguru import logger
 
-try:
-    from agentm.env import autoload_dotenv
-    _HAS_AGENTM = True
-except ImportError:
-    autoload_dotenv = None  # type: ignore[assignment]
-    _HAS_AGENTM = False
-    logger.debug("telbench.iterate: agentm SDK not available; dotenv autoload disabled")
+from agentm.env import autoload_dotenv
 
+from . import _tel_agent_dir
 from .scoring import AggregateScores
 
-def _tel_prompts_dir() -> Path:
-    import llmharness.agents.tel as _tel
-    return Path(_tel.__file__).parent / "prompts"
-
-_PROMPTS_DIR = _tel_prompts_dir()
+_PROMPTS_DIR = _tel_agent_dir() / "prompts"
 _PROMPT_FILES = ("notepad.md", "reason.md")
 
 app = typer.Typer(help="Iterative TEL prompt evolution with auto keep/discard.")
@@ -166,8 +156,7 @@ def iterate(
     import os
     import subprocess
 
-    if _HAS_AGENTM:
-        autoload_dotenv()
+    autoload_dotenv()
 
     runs_dir = runs_dir.resolve()
     runs_dir.mkdir(parents=True, exist_ok=True)

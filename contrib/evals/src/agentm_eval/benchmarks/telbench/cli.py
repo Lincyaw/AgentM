@@ -17,25 +17,14 @@ from typing import Annotated, Any
 import typer
 from loguru import logger
 
+from agentm.env import autoload_dotenv
+
+from ...experiment import Experiment
 from .adapter import TelBenchInstance, load_telbench
 from .runner import EvalResult, evaluate_instance, evaluate_instance_tel, reflect_on_result
 from .scoring import AggregateScores, SpanScores, aggregate_scores
 
-try:
-    from agentm.env import autoload_dotenv
-    _HAS_AGENTM = True
-except ImportError:
-    autoload_dotenv = None  # type: ignore[assignment]
-    _HAS_AGENTM = False
-    logger.debug("telbench.cli: agentm SDK not available")
-
 app = typer.Typer(help="TELBench span-level error localization evaluation.")
-
-
-
-def _format_scores(scores: SpanScores) -> str:
-    fea = "Y" if scores.first_error_accurate else "N"
-    return f"P={scores.precision:.3f}  R={scores.recall:.3f}  F1={scores.f1:.3f}  FEA={fea}"
 
 
 def _format_aggregate(agg: AggregateScores) -> str:
@@ -70,7 +59,6 @@ def telbench(
     cwd: Annotated[Path, typer.Option("--cwd", help="Working directory for child sessions")] = Path(
         "."
     ),
-    provider: Annotated[str | None, typer.Option("--provider", help="LLM provider spec")] = None,
     model: Annotated[str | None, typer.Option("--model", help="config.toml profile name")] = None,
     auditor_prompt: Annotated[
         str, typer.Option("--auditor-prompt", help="Auditor prompt variant name")
@@ -86,13 +74,16 @@ def telbench(
         bool,
         typer.Option("--reflect", help="Run reflection on wrong cases after eval"),
     ] = False,
+    exp_id: Annotated[
+        str | None,
+        typer.Option("--exp-id", help="Experiment ID (default: auto-generated)"),
+    ] = None,
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline or TEL agent."""
     # Load .env the same way the ``agentm`` CLI does, so child sessions inherit
     # OTEL_EXPORTER_OTLP_ENDPOINT (trajectories ship to ClickHouse) and the
     # model/provider profile without the caller having to ``source .env`` first.
-    if _HAS_AGENTM:
-        autoload_dotenv()
+    autoload_dotenv()
 
     if mode not in ("posthoc", "online", "tel"):
         typer.echo(
@@ -130,6 +121,9 @@ def telbench(
     resolved_cwd = str(cwd.resolve())
     total = len(instances)
     typer.echo(f"Running {total} instances with concurrency={concurrency}")
+
+    exp = Experiment.create("telbench", model=resolved_model, exp_id=exp_id, mode=mode)
+    typer.echo(f"Experiment: {exp.exp_id} → {exp.output_dir}")
 
     eval_mode: Any = mode
 
@@ -185,21 +179,24 @@ def telbench(
                         f"P={result.scores.precision:.3f} R={result.scores.recall:.3f} "
                         f"F1={result.scores.f1:.3f} FEA={fea}"
                     )
+                    record = {
+                        "instance_id": result.instance_id,
+                        "session_id": result.session_id,
+                        "reason_session_id": result.reason_session_id,
+                        "predicted_error_indices": sorted(result.predicted_error_indices),
+                        "gold_error_indices": sorted(result.gold_error_indices),
+                        "n_spans": result.n_spans,
+                        "precision": result.scores.precision,
+                        "recall": result.scores.recall,
+                        "f1": result.scores.f1,
+                        "first_error_accurate": result.scores.first_error_accurate,
+                        "n_verdicts": len(result.verdicts),
+                    }
+                    if result.session_id:
+                        exp.register_session(result.session_id, case_id=result.instance_id)
+                    exp.record_result(record)
                     if output is not None:
-                        line = json.dumps(
-                            {
-                                "instance_id": result.instance_id,
-                                "predicted_error_indices": sorted(result.predicted_error_indices),
-                                "gold_error_indices": sorted(result.gold_error_indices),
-                                "n_spans": result.n_spans,
-                                "precision": result.scores.precision,
-                                "recall": result.scores.recall,
-                                "f1": result.scores.f1,
-                                "first_error_accurate": result.scores.first_error_accurate,
-                                "n_verdicts": len(result.verdicts),
-                            },
-                            ensure_ascii=False,
-                        )
+                        line = json.dumps(record, ensure_ascii=False)
                         async with write_lock:
                             with open(output, "a", encoding="utf-8") as fh:
                                 fh.write(line + "\n")
@@ -274,6 +271,18 @@ def telbench(
     agg = aggregate_scores(instance_scores)
     typer.echo(f"\n--- Aggregate ({agg.n_instances} instances, mode={mode}) ---")
     typer.echo(_format_aggregate(agg))
+
+    exp.finish(
+        summary={
+            "macro_precision": agg.macro_precision,
+            "macro_recall": agg.macro_recall,
+            "macro_f1": agg.macro_f1,
+            "first_error_accuracy": agg.first_error_accuracy,
+            "n_instances": agg.n_instances,
+            "mode": mode,
+        }
+    )
+    typer.echo(f"Experiment {exp.exp_id} finished → {exp.output_dir}")
 
     if reflect and wrong_cases:
         try:

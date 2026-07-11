@@ -12,21 +12,12 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from loguru import logger
 
-try:
-    from agentm.env import autoload_dotenv
-    _HAS_AGENTM = True
-except ImportError:
-    autoload_dotenv = None  # type: ignore[assignment]
-    _HAS_AGENTM = False
-    logger.debug("telbench.evolve: agentm SDK not available")
+from agentm.env import autoload_dotenv
 
-def _tel_prompts_dir() -> Path:
-    import llmharness.agents.tel as _tel
-    return Path(_tel.__file__).parent / "prompts"
+from . import _tel_agent_dir
 
-_PROMPTS_DIR = _tel_prompts_dir()
+_PROMPTS_DIR = _tel_agent_dir() / "prompts"
 
 app = typer.Typer(help="Evolve TEL prompts from reflection reports.")
 
@@ -121,9 +112,6 @@ def evolve(
         Path, typer.Option("--reflections", help="Directory containing reflection .md files")
     ],
     cwd: Annotated[Path, typer.Option("--cwd", help="Working directory")] = Path("."),
-    provider: Annotated[
-        str | None, typer.Option("--provider", help="LLM provider spec")
-    ] = None,
     model: Annotated[
         str | None, typer.Option("--model", help="config.toml profile name")
     ] = None,
@@ -134,8 +122,7 @@ def evolve(
     """Read reflection reports and evolve prompt files in-place."""
     import os
 
-    if _HAS_AGENTM:
-        autoload_dotenv()
+    autoload_dotenv()
 
     if not reflections.is_dir():
         typer.echo(f"Error: {reflections} is not a directory", err=True)
@@ -148,7 +135,7 @@ def evolve(
 
     typer.echo(f"Loaded {len(reflection_data)} reflections")
 
-    resolved_model = model or (os.environ.get("AGENTM_MODEL") if _HAS_AGENTM else None)
+    resolved_model = model or os.environ.get("AGENTM_MODEL")
 
     typer.echo("Running evolve agent…")
     summary = asyncio.run(

@@ -9,6 +9,7 @@ from typing import Annotated
 
 import typer
 
+from ...experiment import Experiment
 from .analysis import (
     aggregate,
     build_report,
@@ -128,6 +129,7 @@ def sample(
 def run(
     corpus: Annotated[Path | None, typer.Option("--corpus", help="Corpus manifest.")] = None,
     exp_id: Annotated[str | None, typer.Option("--exp-id", help="Load corpus from eval.db by experiment ID.")] = None,
+    run_exp_id: Annotated[str | None, typer.Option("--run-exp-id", help="Experiment ID for this rescue-window run's lifecycle tracking.")] = None,
     db: Annotated[str, typer.Option("--db", help="Path to eval.db.")] = "eval.db",
     out: Annotated[Path, typer.Option("--out", help="EvalUnit store JSONL path.")] = Path("runs/rescue-window/latest.jsonl"),
     data_root: Annotated[Path | None, typer.Option("--data-root")] = None,
@@ -178,11 +180,33 @@ def run(
     store = EvalUnitStore(out)
     session_store = _resolve_session_store(obs_dir)
 
+    experiment = Experiment.create(
+        "rescue-window",
+        model=actor_model,
+        exp_id=run_exp_id,
+        preset=preset,
+        adapter=adapter,
+    )
+
+    stats = {"n_sessions": 0, "n_correct": 0, "n_failed": 0}
+
     def _on(unit: EvalUnit) -> None:
         typer.echo(
             f"  {unit.status.upper()} {unit.prefix_id} {unit.treatment_id} "
             f"seed={unit.branch_seed} score={unit.normalized_score}"
         )
+        if unit.fork_session_id is not None:
+            experiment.register_session(
+                unit.fork_session_id,
+                case_id=unit.case_id,
+                metadata={"treatment_id": unit.treatment_id, "prefix_id": unit.prefix_id},
+            )
+            stats["n_sessions"] += 1
+        if unit.status == "failed":
+            stats["n_failed"] += 1
+        if unit.binary_success:
+            stats["n_correct"] += 1
+        experiment.record_result(unit.to_dict())
 
     written = asyncio.run(
         run_landscape(
@@ -199,7 +223,13 @@ def run(
             on_result=_on,
         )
     )
-    typer.echo(json.dumps({"rows_written": written, "store": str(out)}, indent=2))
+    experiment.finish(summary={"rows_written": written, "store": str(out), **stats})
+    typer.echo(
+        json.dumps(
+            {"rows_written": written, "store": str(out), "exp_id": experiment.exp_id, **stats},
+            indent=2,
+        )
+    )
 
 
 @app.command()

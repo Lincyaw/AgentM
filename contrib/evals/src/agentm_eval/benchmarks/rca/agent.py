@@ -148,19 +148,6 @@ def _coerce_max_turns(value: Any, fallback: int) -> int:
     return result if result > 0 else fallback
 
 
-def _coerce_bool(value: Any, *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off", ""}:
-        return False
-    return default
-
-
 @dataclass(frozen=True, slots=True)
 class _SessionRun:
     result: AgentResult
@@ -186,7 +173,6 @@ class AgentMAgent(BaseAgent):
         provider_tuple: tuple[str, dict[str, Any]] | None = None,
         exp_id: str | None = None,
         max_turns: Any = None,
-        chained_fork: Any = None,
         max_interventions: Any = None,
         **_extra: Any,
     ) -> None:
@@ -206,7 +192,6 @@ class AgentMAgent(BaseAgent):
                 self._model = self._provider_tuple[1].get("model", self._model)
         self._exp_id = exp_id
         self._max_turns = _coerce_max_turns(max_turns, _DEFAULT_MAX_TURNS)
-        self._chained_fork = _coerce_bool(chained_fork, default=False)
         if max_interventions is not None:
             logger.warning(
                 "AgentMAgent: max_interventions is ignored; rescue-window now owns "
@@ -239,12 +224,6 @@ class AgentMAgent(BaseAgent):
         data_dir: str,
         **kwargs: Any,
     ) -> AgentResult:
-        if self._chained_fork:
-            return await self._run_chained_fork(
-                incident=incident,
-                data_dir=data_dir,
-                **kwargs,
-            )
         return await self._run_single_session(
             incident=incident,
             data_dir=data_dir,
@@ -280,20 +259,6 @@ class AgentMAgent(BaseAgent):
             trajectory=run.result.trajectory,
             trace_id=run.result.trace_id,
             metadata=metadata,
-        )
-
-    async def _run_chained_fork(
-        self,
-        *,
-        incident: str,
-        data_dir: str,
-        **kwargs: Any,
-    ) -> AgentResult:
-        del incident, data_dir, kwargs
-        raise RuntimeError(
-            "AgentMAgent chained_fork was removed. Run the baseline RCA agent "
-            "normally, then use `rescue-window llmharness` for branch experiments "
-            "and `rescue-window export-run --adapter rca` for scoring/export."
         )
 
     async def _execute_session(

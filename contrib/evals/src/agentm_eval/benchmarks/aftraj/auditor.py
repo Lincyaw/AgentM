@@ -294,7 +294,7 @@ def _format_grounding_summary(index: Any) -> str | None:
 async def _build_index_for_trajectory(
     trajectory: list[dict[str, Any]], *, index_model: str, index_vocabulary: str,
 ) -> Any | None:
-    from agentm_eval.benchmarks.trajectory_index_eval.extraction import build_index_from_chunks, extract_incremental
+    from agentm_eval.benchmarks.aftraj.extraction import build_index_from_chunks, extract_incremental
 
     try:
         chunks = await extract_incremental(
@@ -335,7 +335,7 @@ async def _auditor_call(
     cwd: str, prompt_name: str, pre_built_index: Any | None = None,
 ) -> dict[str, Any]:
     from llmharness.agents.auditor.context import build_auditor_system_prompt, load_auditor_prompt
-    from agentm_eval.harness.offline_audit import StandaloneChildRunner
+    from agentm_eval.benchmarks.aftraj.offline_audit import StandaloneChildRunner
 
     grounding_summary: str | None = None
 
@@ -404,7 +404,7 @@ async def _incremental_index_step(
     idx: Any, new_turn: dict[str, Any], *,
     index_model: str, index_vocabulary: str,
 ) -> None:
-    from agentm_eval.benchmarks.trajectory_index_eval.extraction import ExtractedChunk, _build_index_from_chunks_into, extract
+    from agentm_eval.benchmarks.aftraj.extraction import ExtractedChunk, _build_index_from_chunks_into, extract
 
     registry = idx.registry_snapshot()
     result = await extract(

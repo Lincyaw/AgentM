@@ -87,7 +87,19 @@ def run(
     _stdlib_logging.getLogger("httpcore").setLevel(_stdlib_logging.WARNING)
     _stdlib_logging.getLogger("openai").setLevel(_stdlib_logging.WARNING)
 
+    from agentm_eval.experiment import Experiment
+
     from .loop import run_evolution_loop
+
+    exp = Experiment.create(
+        "rca-evolution",
+        model=model,
+        exp_id=f"{exp_prefix}-{model}",
+        scenario=scenario,
+        eval_config=str(eval_config),
+        max_iterations=max_iterations,
+    )
+    typer.echo(f"Experiment: {exp.exp_id} → {exp.output_dir}")
 
     result = asyncio.run(run_evolution_loop(
         eval_config=str(eval_config.resolve()),
@@ -102,6 +114,28 @@ def run(
         test_limit=test_limit,
         max_iterations=max_iterations,
     ))
+
+    import sqlite3
+    con = sqlite3.connect(str(db.resolve()))
+    con.row_factory = sqlite3.Row
+    for row in con.execute(
+        "SELECT source, trace_id FROM evaluation_data "
+        "WHERE exp_id LIKE ? AND stage = 'judged' AND trace_id IS NOT NULL",
+        (f"{exp_prefix}%",),
+    ):
+        exp.register_session(
+            row["trace_id"],
+            case_id=row["source"],
+            metadata={"source": "eval.db"},
+        )
+    con.close()
+
+    exp.finish(summary={
+        "initial_accuracy": result.initial_accuracy,
+        "final_accuracy": result.final_accuracy,
+        "iterations": len(result.iterations),
+        "skills_accepted": len(result.accepted_skills),
+    })
 
     typer.echo()
     typer.echo("=" * 60)
