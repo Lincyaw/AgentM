@@ -38,23 +38,20 @@ from trajectory_index.data import _symbol_aliases
 # ---------------------------------------------------------------------------
 
 
-def _fuzzy_match_symbol(
+def _match_known_symbol(
     name: str,
     registry: list[dict[str, Any]],
-    min_substr_len: int = 3,
-    min_similarity: float = 0.85,
+    min_len: int = 3,
 ) -> dict[str, Any] | None:
-    """Find an existing registry entry that fuzzy-matches ``name``.
+    """Find an existing registry entry by exact normalized match or substring.
 
-    Checks substring containment (either direction) and normalized
-    name similarity. Returns the matching entry or None.
+    Conservative: only matches when one name contains the other (after
+    normalization). No fuzzy similarity — that is Pass 2's job.
     """
-    from difflib import SequenceMatcher
-
     from trajectory_index.index import normalize_name
 
     norm = normalize_name(name)
-    if len(norm) < min_substr_len:
+    if len(norm) < min_len:
         return None
 
     for entry in registry:
@@ -63,21 +60,16 @@ def _fuzzy_match_symbol(
         if not entry_norm or entry_norm == norm:
             continue
 
-        # Substring match (either direction)
-        if len(norm) >= min_substr_len and len(entry_norm) >= min_substr_len:
-            if norm in entry_norm or entry_norm in norm:
-                return entry
-
-        # Similarity match
-        if SequenceMatcher(None, norm, entry_norm).ratio() >= min_similarity:
+        # Substring containment (either direction)
+        if len(entry_norm) >= min_len and (norm in entry_norm or entry_norm in norm):
             return entry
 
-        # Check aliases too
+        # Check aliases
         for alias in entry.get("aliases", []):
             alias_norm = normalize_name(str(alias))
             if alias_norm == norm:
                 return entry
-            if len(alias_norm) >= min_substr_len and (norm in alias_norm or alias_norm in norm):
+            if len(alias_norm) >= min_len and (norm in alias_norm or alias_norm in norm):
                 return entry
 
     return None
@@ -123,7 +115,7 @@ def _prescan_structural(
             continue
 
         # Try fuzzy match against existing symbols
-        match = _fuzzy_match_symbol(sym.name, updated)
+        match = _match_known_symbol(sym.name, updated)
         if match:
             # Add as alias to existing symbol
             aliases = match.get("aliases", [])
@@ -304,7 +296,7 @@ async def extract_symbols(
             if norm in seen:
                 continue
             # Fuzzy match: absorb as alias if close to existing symbol
-            match = _fuzzy_match_symbol(sym.name, registry)
+            match = _match_known_symbol(sym.name, registry)
             if match:
                 aliases = match.get("aliases", [])
                 if not isinstance(aliases, list):
