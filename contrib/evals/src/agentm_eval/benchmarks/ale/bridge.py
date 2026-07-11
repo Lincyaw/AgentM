@@ -376,6 +376,26 @@ class ArlGraderSession:
     async def check_status(self) -> bool:
         return (await self._exec("echo ok")).success
 
+    @property
+    def interface(self) -> "_GraderInterface":
+        """cua_bench exposes filesystem helpers under ``session.interface``;
+        ALE graders only ever call ``create_dir``/``delete_dir`` on it."""
+        return _GraderInterface(self)
+
+
+class _GraderInterface:
+    """Minimal ``session.interface`` shim — the only methods ALE graders use
+    are directory create/delete, mapped to shell mkdir/rm in the sandbox."""
+
+    def __init__(self, session: "ArlGraderSession") -> None:
+        self._session = session
+
+    async def create_dir(self, path: str) -> None:
+        await self._session._exec(f"mkdir -p {_q(path)}")
+
+    async def delete_dir(self, path: str) -> None:
+        await self._session._exec(f"rm -rf {_q(path)}")
+
 
 def _q(text: str) -> str:
     """Shell-quote for bash -lc composition."""
