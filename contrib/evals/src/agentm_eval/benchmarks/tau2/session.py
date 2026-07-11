@@ -43,9 +43,10 @@ def _set_env_from_profile(model: str) -> None:
     if profile.api_key and not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = profile.api_key
 
+    model_with_prefix = f"openai/{profile.model}"
     for key in ("TAU2_LLM_NL_ASSERTIONS", "TAU2_LLM_ENV_INTERFACE"):
         if not os.environ.get(key):
-            os.environ[key] = profile.model
+            os.environ[key] = model_with_prefix
 
 
 async def _run_one_task(
