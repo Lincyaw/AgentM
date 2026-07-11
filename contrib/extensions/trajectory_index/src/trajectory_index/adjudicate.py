@@ -241,7 +241,7 @@ async def resolve_aliases(
     exist in ``index.symbols`` (only the surviving canonical does), so resolve names
     from the index *before* applying, or call with ``apply=False`` to inspect first.
     """
-    candidates = index.alias_candidates(min_ratio=min_ratio)
+    candidates = index.alias_candidates(min_jaccard=min_ratio)
     if not candidates:
         return []
     if session_factory is None:

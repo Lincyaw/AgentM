@@ -246,6 +246,7 @@ class AuditorEvalAdapter:
             rebuild_index: Annotated[bool, typer.Option("--rebuild-index")] = False,
             max_messages: Annotated[int | None, typer.Option("--max-messages", help="Truncate trajectory")] = None,
             limit: Annotated[int | None, typer.Option("--limit", help="Max trajectories (aftraj/telbench)")] = None,
+            concurrency: Annotated[int, typer.Option("--concurrency", help="Parallel trajectories")] = 1,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
             from agentm.env import autoload_dotenv
@@ -288,6 +289,7 @@ class AuditorEvalAdapter:
                 chunk_size=parsed_chunk, vocabulary=vocabulary,
                 auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
+                concurrency=concurrency,
             ))
 
         return cli
@@ -315,8 +317,12 @@ def _index_to_context(idx: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _run_pipeline(
-    items: list[TrajectoryItem],
+async def _process_one_item(
+    i: int,
+    total: int,
+    tid: str,
+    messages: list[AgentMessage],
+    meta: dict[str, Any],
     *,
     model: str,
     index_model: str,
@@ -325,7 +331,8 @@ async def _run_pipeline(
     auditor_prompt: str,
     exp: Experiment,
     rebuild_index: bool,
-) -> None:
+) -> dict[str, Any]:
+    """Process a single trajectory: index extraction + auditor. Returns result dict."""
     from agentm_eval.methods.auditor import run_auditor
     from agentm_eval.methods.index import (
         _chunk_messages,
@@ -336,157 +343,179 @@ async def _run_pipeline(
     )
     from trajectory_index.index import TrajectoryIndex, normalize_name
 
-    total = len(items)
-    all_results: list[dict[str, Any]] = []
+    typer.echo(f"\n[{i+1}/{total}] {tid} ({meta.get('source', '?')}, {len(messages)} msgs)")
+    exp.register_session(tid, metadata={"n_messages": len(messages), **meta})
 
-    for i, (tid, messages, meta) in enumerate(items):
-        typer.echo(f"\n[{i+1}/{total}] {tid} ({meta.get('source', '?')}, {len(messages)} msgs)")
-        exp.register_session(tid, metadata={"n_messages": len(messages), **meta})
+    index_path = exp.session_dir(tid) / "index.json"
+    if index_path.is_file() and not rebuild_index:
+        typer.echo(f"  {tid}: index cached")
+        idx = TrajectoryIndex.load(index_path)
+        idx.build_dependencies()
 
-        # Check for cached index
-        index_path = exp.session_dir(tid) / "index.json"
-        if index_path.is_file() and not rebuild_index:
-            typer.echo("  index: cached")
-            idx = TrajectoryIndex.load(index_path)
-            idx.build_dependencies()
+        context = _index_to_context(idx)
+        try:
+            audit_result = await run_auditor(
+                messages, model=model,
+                auditor_prompt=auditor_prompt,
+                context_index=context,
+            )
+            _save_auditor_step(exp, tid, len(messages), audit_result, idx)
+        except Exception as exc:
+            typer.echo(f"  {tid}: auditor FAILED: {exc}", err=True)
+            audit_result = None
 
-            context = _index_to_context(idx)
-            try:
-                audit_result = await run_auditor(
-                    messages, model=model,
-                    auditor_prompt=auditor_prompt,
-                    context_index=context,
-                )
-                _save_auditor_step(exp, tid, len(messages), audit_result, idx)
-            except Exception as exc:
-                typer.echo(f"  auditor FAILED: {exc}", err=True)
-                audit_result = None
+        return _build_result(tid, messages, meta, idx, audit_result, cached=True)
 
-            result_dict = _build_result(tid, messages, meta, idx, audit_result, cached=True)
-            all_results.append(result_dict)
-            exp.record_result(result_dict)
+    idx = TrajectoryIndex()
+    registry: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    if chunk_size is None:
+        raw_chunks = [type("C", (), {"start": 0, "messages": messages})]
+    else:
+        raw_chunks = _chunk_messages(messages, chunk_size)
+
+    n_auditor_fires = 0
+    last_audit_result = None
+    all_verdicts: list[dict[str, Any]] = []
+
+    for ci, chunk in enumerate(raw_chunks):
+        chunk_end = chunk.start + len(chunk.messages)
+
+        chunk_registry, _structural = _prescan_structural(
+            chunk.messages, registry if registry else None, seen,
+        )
+        try:
+            result = await _run_one(
+                chunk.messages, model=index_model, vocabulary=vocabulary,
+                registry=chunk_registry if chunk_registry else None,
+                message_id_start=chunk.start, cwd=None,
+            )
+        except Exception:
+            typer.echo(f"  {tid} chunk {ci+1} index extraction failed", err=True)
+            continue
+        if result is None:
+            typer.echo(f"  {tid} chunk {ci+1} no parseable result", err=True)
             continue
 
-        # Interleaved: chunk → index → auditor
-        idx = TrajectoryIndex()
-        registry: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        if chunk_size is None:
-            raw_chunks = [type("C", (), {"start": 0, "messages": messages})]
-        else:
-            raw_chunks = _chunk_messages(messages, chunk_size)
-
-        n_auditor_fires = 0
-        last_audit_result = None
-        all_verdicts: list[dict[str, Any]] = []
-
-        for ci, chunk in enumerate(raw_chunks):
-            chunk_end = chunk.start + len(chunk.messages)
-
-            # --- Index ---
-            chunk_registry, _structural = _prescan_structural(
-                chunk.messages, registry if registry else None, seen,
-            )
-            try:
-                result = await _run_one(
-                    chunk.messages, model=index_model, vocabulary=vocabulary,
-                    registry=chunk_registry if chunk_registry else None,
-                    message_id_start=chunk.start, cwd=None,
-                )
-            except Exception:
-                typer.echo(f"  chunk {ci+1} index extraction failed", err=True)
-                continue
-            if result is None:
-                typer.echo(f"  chunk {ci+1} no parseable result", err=True)
-                continue
-
-            idx.populate_from_extraction(
-                result, chunk.messages, run_id=tid,
-                message_id_start=chunk.start,
-            )
-            await resolve_index(idx, model=index_model)
-
-            for sym in result.symbols:
-                norm = normalize_name(sym.name)
-                if norm not in seen:
-                    match = _match_known_symbol(sym.name, registry)
-                    if match:
-                        aliases = match.get("aliases", [])
-                        if not isinstance(aliases, list):
-                            aliases = []
-                        if sym.name not in aliases:
-                            aliases.append(sym.name)
-                            match["aliases"] = aliases
-                        seen.add(norm)
-                    else:
-                        seen.add(norm)
-                        entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
-                        if sym.aliases:
-                            entry["aliases"] = sym.aliases
-                        registry.append(entry)
-
-            stats = idx.stats(tid)
-
-            # --- Auditor ---
-            trajectory_prefix = messages[:chunk_end]
-            context = _index_to_context(idx)
-
-            try:
-                audit_result = await run_auditor(
-                    trajectory_prefix, model=model,
-                    auditor_prompt=auditor_prompt,
-                    context_index=context,
-                )
-                n_auditor_fires += 1
-                last_audit_result = audit_result
-                _save_auditor_step(exp, tid, chunk_end, audit_result, idx)
-                all_verdicts.extend(v.to_dict() for v in audit_result.verdicts)
-
-                n_surfaces = len(audit_result.surfaces)
-                surface_preview = ""
-                if audit_result.surfaces:
-                    text = audit_result.surfaces[0].reminder_text or ""
-                    surface_preview = f"  [{text[:80]}]"
-
-                typer.echo(
-                    f"  chunk {ci+1}: msgs 0-{chunk_end}  "
-                    f"{stats.symbol_count} syms  "
-                    f"{n_surfaces} surfaces{surface_preview}"
-                )
-            except Exception as exc:
-                typer.echo(f"  chunk {ci+1}: index ok, auditor failed: {exc}", err=True)
-
-        # Save final index + warnings
-        idx.dump(str(index_path))
-        stats = idx.stats(tid)
-        warns = idx.warning_summary()
-
-        exp.write_session_artifact(tid, "", "index_stats.json", {
-            "n_symbols": stats.symbol_count,
-            "n_references": stats.reference_count,
-            "n_dependencies": stats.dependency_count,
-            "warnings": warns,
-        })
-        warnings_data = [
-            {"kind": w.kind, "symbol": w.symbol_name, "detail": w.detail, "steps": list(w.step_ids)}
-            for w in idx.warnings()
-        ]
-        exp.write_session_artifact(tid, "", "warnings.json", warnings_data)
-
-        typer.echo(f"  total: {stats.symbol_count} syms, {stats.reference_count} refs, {n_auditor_fires} fires")
-        if warns:
-            parts = ", ".join(f"{v} {k}" for k, v in sorted(warns.items()))
-            typer.echo(f"  warnings: {parts}")
-
-        result_dict = _build_result(
-            tid, messages, meta, idx, last_audit_result,
-            n_fires=n_auditor_fires, all_verdicts=all_verdicts,
+        idx.populate_from_extraction(
+            result, chunk.messages, run_id=tid,
+            message_id_start=chunk.start,
         )
-        all_results.append(result_dict)
-        exp.record_result(result_dict)
+        await resolve_index(idx, model=index_model)
 
-    # --- Source-specific scoring ---
+        for sym in result.symbols:
+            norm = normalize_name(sym.name)
+            if norm not in seen:
+                match = _match_known_symbol(sym.name, registry)
+                if match:
+                    aliases = match.get("aliases", [])
+                    if not isinstance(aliases, list):
+                        aliases = []
+                    if sym.name not in aliases:
+                        aliases.append(sym.name)
+                        match["aliases"] = aliases
+                    seen.add(norm)
+                else:
+                    seen.add(norm)
+                    entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
+                    if sym.aliases:
+                        entry["aliases"] = sym.aliases
+                    registry.append(entry)
+
+        stats = idx.stats(tid)
+
+        trajectory_prefix = messages[:chunk_end]
+        context = _index_to_context(idx)
+
+        try:
+            audit_result = await run_auditor(
+                trajectory_prefix, model=model,
+                auditor_prompt=auditor_prompt,
+                context_index=context,
+            )
+            n_auditor_fires += 1
+            last_audit_result = audit_result
+            _save_auditor_step(exp, tid, chunk_end, audit_result, idx)
+            all_verdicts.extend(v.to_dict() for v in audit_result.verdicts)
+
+            n_surfaces = len(audit_result.surfaces)
+            surface_preview = ""
+            if audit_result.surfaces:
+                text = audit_result.surfaces[0].reminder_text or ""
+                surface_preview = f"  [{text[:80]}]"
+
+            typer.echo(
+                f"  {tid} chunk {ci+1}: msgs 0-{chunk_end}  "
+                f"{stats.symbol_count} syms  "
+                f"{n_surfaces} surfaces{surface_preview}"
+            )
+        except Exception as exc:
+            typer.echo(f"  {tid} chunk {ci+1}: index ok, auditor failed: {exc}", err=True)
+
+    idx.dump(str(index_path))
+    stats = idx.stats(tid)
+    warns = idx.warning_summary()
+
+    exp.write_session_artifact(tid, "", "index_stats.json", {
+        "n_symbols": stats.symbol_count,
+        "n_references": stats.reference_count,
+        "n_dependencies": stats.dependency_count,
+        "warnings": warns,
+    })
+    warnings_data = [
+        {"kind": w.kind, "symbol": w.symbol_name, "detail": w.detail, "steps": list(w.step_ids)}
+        for w in idx.warnings()
+    ]
+    exp.write_session_artifact(tid, "", "warnings.json", warnings_data)
+
+    typer.echo(f"  {tid}: {stats.symbol_count} syms, {stats.reference_count} refs, {n_auditor_fires} fires")
+    if warns:
+        parts = ", ".join(f"{v} {k}" for k, v in sorted(warns.items()))
+        typer.echo(f"  {tid}: warnings: {parts}")
+
+    return _build_result(
+        tid, messages, meta, idx, last_audit_result,
+        n_fires=n_auditor_fires, all_verdicts=all_verdicts,
+    )
+
+
+async def _run_pipeline(
+    items: list[TrajectoryItem],
+    *,
+    model: str,
+    index_model: str,
+    chunk_size: tuple[int, int] | None,
+    vocabulary: str,
+    auditor_prompt: str,
+    exp: Experiment,
+    rebuild_index: bool,
+    concurrency: int = 1,
+) -> None:
+    total = len(items)
+    sem = asyncio.Semaphore(concurrency)
+    all_results: list[dict[str, Any]] = []
+    lock = asyncio.Lock()
+
+    async def _guarded(i: int, tid: str, messages: list[AgentMessage], meta: dict[str, Any]) -> None:
+        async with sem:
+            result_dict = await _process_one_item(
+                i, total, tid, messages, meta,
+                model=model, index_model=index_model,
+                chunk_size=chunk_size, vocabulary=vocabulary,
+                auditor_prompt=auditor_prompt,
+                exp=exp, rebuild_index=rebuild_index,
+            )
+        async with lock:
+            all_results.append(result_dict)
+            exp.record_result(result_dict)
+
+    tasks = [
+        asyncio.create_task(_guarded(i, tid, messages, meta))
+        for i, (tid, messages, meta) in enumerate(items)
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
     _print_summary(all_results, exp)
 
 
