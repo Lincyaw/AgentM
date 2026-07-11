@@ -40,12 +40,17 @@ _DEFAULT_CWD = Path("/tmp/aftraj-eval")
 # ---------------------------------------------------------------------------
 
 
+_DELEGATE_RE = re.compile(r"^delegate\((\w+),\s*task\s*=\s*(.+)\)\s*$", re.DOTALL)
+
+
 def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
     """Convert one AFTraj turn to a typed AgentMessage.
 
-    Preserves the original agent role (Manager, search_agent, etc.) as a
-    prefix in the message content so downstream consumers can distinguish
-    which agent produced the output.
+    Maps multi-agent structure faithfully:
+    - Manager with ``delegate(agent, task=...)`` → assistant + ToolCallBlock
+    - Sub-agent response (search_agent, etc.) → ToolResultMessage
+    - Manager with JSON tool calls → assistant + ToolCallBlock
+    - environment → ToolResultMessage
     """
     role = turn.get("role", "unknown")
     thought = turn.get("thought") or ""
@@ -65,36 +70,54 @@ def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
             ),
         ], timestamp=0.0)
 
-    # Non-user, non-environment: an agent (Manager, search_agent, etc.)
-    agent_label = role if role not in ("assistant", "unknown") else ""
+    # Sub-agent (search_agent, etc.): their output is a tool result
+    is_manager = role in ("Manager", "assistant", "unknown")
+    if not is_manager and not action_raw:
+        return ToolResultMessage(role="tool_result", content=[
+            ToolResultBlock(
+                type="tool_result",
+                tool_call_id="",
+                content=[TextContent(type="text", text=f"[{role}] {content_text}" if content_text else "(empty)")],
+                is_error=False,
+            ),
+        ], timestamp=0.0)
+
+    # Manager (or unknown agent with actions)
     blocks: list[Any] = []
-    if agent_label:
-        blocks.append(TextContent(type="text", text=f"[agent: {agent_label}]"))
     if thought:
         blocks.append(TextContent(type="text", text=f"[Thought] {thought}"))
 
     if action_raw:
-        try:
-            calls = json.loads(action_raw) if isinstance(action_raw, str) else action_raw
-            if isinstance(calls, list):
-                for call in calls:
-                    if isinstance(call, dict):
-                        args_raw = call.get("arguments", "")
-                        if isinstance(args_raw, str):
-                            try:
-                                args_raw = json.loads(args_raw)
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        blocks.append(ToolCallBlock(
-                            type="tool_call",
-                            id="",
-                            name=call.get("name", "unknown"),
-                            arguments=args_raw if isinstance(args_raw, dict) else {},
-                        ))
-            else:
+        delegate_match = _DELEGATE_RE.match(action_raw) if isinstance(action_raw, str) else None
+        if delegate_match:
+            agent_name = delegate_match.group(1)
+            task_text = delegate_match.group(2).strip().strip('"').strip("'")
+            blocks.append(ToolCallBlock(
+                type="tool_call", id="",
+                name=f"delegate_{agent_name}",
+                arguments={"task": task_text},
+            ))
+        else:
+            try:
+                calls = json.loads(action_raw) if isinstance(action_raw, str) else action_raw
+                if isinstance(calls, list):
+                    for call in calls:
+                        if isinstance(call, dict):
+                            args_raw = call.get("arguments", "")
+                            if isinstance(args_raw, str):
+                                try:
+                                    args_raw = json.loads(args_raw)
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                            blocks.append(ToolCallBlock(
+                                type="tool_call", id="",
+                                name=call.get("name", "unknown"),
+                                arguments=args_raw if isinstance(args_raw, dict) else {},
+                            ))
+                else:
+                    blocks.append(TextContent(type="text", text=f"[Action] {action_raw}"))
+            except (json.JSONDecodeError, TypeError):
                 blocks.append(TextContent(type="text", text=f"[Action] {action_raw}"))
-        except (json.JSONDecodeError, TypeError):
-            blocks.append(TextContent(type="text", text=f"[Action] {action_raw}"))
 
     if content_text:
         blocks.append(TextContent(type="text", text=content_text))
