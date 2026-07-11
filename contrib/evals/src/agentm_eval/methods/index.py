@@ -38,16 +38,63 @@ from trajectory_index.data import _symbol_aliases
 # ---------------------------------------------------------------------------
 
 
+def _fuzzy_match_symbol(
+    name: str,
+    registry: list[dict[str, Any]],
+    min_substr_len: int = 3,
+    min_similarity: float = 0.85,
+) -> dict[str, Any] | None:
+    """Find an existing registry entry that fuzzy-matches ``name``.
+
+    Checks substring containment (either direction) and normalized
+    name similarity. Returns the matching entry or None.
+    """
+    from difflib import SequenceMatcher
+
+    from trajectory_index.index import normalize_name
+
+    norm = normalize_name(name)
+    if len(norm) < min_substr_len:
+        return None
+
+    for entry in registry:
+        canonical = str(entry.get("name", ""))
+        entry_norm = normalize_name(canonical)
+        if not entry_norm or entry_norm == norm:
+            continue
+
+        # Substring match (either direction)
+        if len(norm) >= min_substr_len and len(entry_norm) >= min_substr_len:
+            if norm in entry_norm or entry_norm in norm:
+                return entry
+
+        # Similarity match
+        if SequenceMatcher(None, norm, entry_norm).ratio() >= min_similarity:
+            return entry
+
+        # Check aliases too
+        for alias in entry.get("aliases", []):
+            alias_norm = normalize_name(str(alias))
+            if alias_norm == norm:
+                return entry
+            if len(alias_norm) >= min_substr_len and (norm in alias_norm or alias_norm in norm):
+                return entry
+
+    return None
+
+
 def _prescan_structural(
     messages: list[AgentMessage],
     registry: list[dict[str, Any]] | None,
     seen: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
-    """Code-level structural extraction before LLM.
+    """Code-level structural extraction + fuzzy alias expansion.
 
-    Scans tool_call blocks for tool names and SQL for table names.
-    Returns (updated_registry, structural_symbols) where structural_symbols
-    are ExtractedSymbol-like objects to merge into the final result.
+    1. Extracts tool names and SQL table names from structured blocks.
+    2. Fuzzy-matches new names against existing registry to expand aliases
+       (increases recall without creating duplicate symbols).
+
+    Returns (updated_registry, structural_symbols).
     """
     from trajectory_index.atom import _agentmsg_to_extraction_dict
     from trajectory_index.data import extract_structural_symbols
@@ -58,20 +105,37 @@ def _prescan_structural(
         if (d := _agentmsg_to_extraction_dict(m, i))
     ]
     structural = extract_structural_symbols(serialized)
-    if not structural:
-        return (list(registry) if registry else [], [])
 
     if seen is None:
         seen = set()
         if registry:
             for entry in registry:
                 seen.add(normalize_name(str(entry.get("name", ""))))
+                for alias in entry.get("aliases", []):
+                    seen.add(normalize_name(str(alias)))
 
     updated = list(registry) if registry else []
     new_syms = []
+
     for sym in structural:
         norm = normalize_name(sym.name)
-        if norm not in seen:
+        if norm in seen:
+            continue
+
+        # Try fuzzy match against existing symbols
+        match = _fuzzy_match_symbol(sym.name, updated)
+        if match:
+            # Add as alias to existing symbol
+            aliases = match.get("aliases", [])
+            if not isinstance(aliases, list):
+                aliases = []
+            if sym.name not in aliases:
+                aliases.append(sym.name)
+                match["aliases"] = aliases
+            seen.add(norm)
+            logger.debug("prescan: '{}' → alias of '{}'", sym.name, match.get("name"))
+        else:
+            # New symbol
             seen.add(norm)
             updated.append({"name": sym.name, "kind": sym.kind})
             new_syms.append(sym)
@@ -237,7 +301,20 @@ async def extract_symbols(
 
         for sym in result.symbols:
             norm = normalize_name(sym.name)
-            if norm not in seen:
+            if norm in seen:
+                continue
+            # Fuzzy match: absorb as alias if close to existing symbol
+            match = _fuzzy_match_symbol(sym.name, registry)
+            if match:
+                aliases = match.get("aliases", [])
+                if not isinstance(aliases, list):
+                    aliases = []
+                if sym.name not in aliases:
+                    aliases.append(sym.name)
+                    match["aliases"] = aliases
+                seen.add(norm)
+                logger.debug("extract: '{}' → alias of '{}'", sym.name, match.get("name"))
+            else:
                 seen.add(norm)
                 entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
                 if sym.aliases:
