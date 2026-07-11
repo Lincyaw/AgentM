@@ -268,20 +268,20 @@ async def resolve_aliases(
 
 _VALUE_COMPARE_INSTRUCTIONS = """\
 You check whether a value an agent acted on matches what a tool actually produced.
-Each item names a value-bearing entity (a metric, status, price, computed answer),
-the text where a tool GROUNDED its value, and the text where the agent USED a value
-for it. Decide, per item independently:
-  - confirm:    the used value matches the grounded value.
-  - contradict: the used value differs from the grounded value (acted on a wrong value).
-  - unclear:    the texts don't pin down comparable values.
-Judge the value, not the wording. Return ONLY:
+Each item names an entity, the full text of the step where a tool provided
+information about it (grounded), and the full text of the step where the agent
+referenced it (used). Decide, per item independently:
+  - confirm:    the agent's usage is consistent with what the tool provided.
+  - contradict: the agent stated or used a different value than what the tool provided.
+  - unclear:    the texts don't contain comparable values for this entity.
+Judge the substance, not the wording. Return ONLY:
 {"verdicts": [{"id": 0, "outcome": "confirm|contradict|unclear", "confidence": 0.9, "reason": "..."}]}
 """
 
 
-def _step_text(index: TrajectoryIndex, run_id: str, step_id: str, cap: int = 500) -> str:
+def _step_text(index: TrajectoryIndex, run_id: str, step_id: str) -> str:
     st = index.steps.get((run_id, step_id))
-    return (st.content or "")[:cap] if st else ""
+    return (st.content or "") if st else ""
 
 
 def _align_outcomes(n: int, raw: list[Any]) -> list[tuple[str, float, str]]:
@@ -303,15 +303,15 @@ async def compare_values(
     index: TrajectoryIndex, model: str | None = None, apply: bool = True,
     session_factory: SessionFactory | None = None,
 ) -> list[tuple[str, str]]:
-    """For value-class edges with a grounded binding to compare against, ask the model
-    confirm/contradict and flag ``contradicted``. Local: fires only on value entities.
+    """For dependency edges with a grounded binding, ask the model whether the
+    agent's usage is consistent with what the tool provided. Flags ``contradicted``.
 
     Returns (dependency_id, outcome) for every edge judged.
     """
     targets: list[tuple[Any, str]] = []
     for d in index.get_dependencies():
         sym = index.symbols.get(d.symbol_id)
-        if not sym or sym.entity_class != "value":
+        if not sym:
             continue
         grounded_step = (
             d.def_step_id if d.risk == "grounded"
