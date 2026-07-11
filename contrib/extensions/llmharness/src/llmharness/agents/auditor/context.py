@@ -41,25 +41,43 @@ def load_auditor_prompt(name: str = "index") -> str:
 
 
 def _build_index_summary(context_index: dict[str, Any]) -> str:
-    """Build a compact summary of the context index for the system prompt."""
+    """Build a compact summary of the context index for the system prompt.
+
+    Handles both the legacy format (entities/turns/observations) and the
+    trajectory-index format (symbols/references/attention_hints).
+    """
     entities = context_index.get("entities", [])
+    symbols = context_index.get("symbols", [])
     observations = context_index.get("observations", [])
+    references = context_index.get("references", [])
     candidates = context_index.get("candidates", [])
     turns = context_index.get("turns", [])
-    if not entities and not turns:
+
+    if not entities and not turns and not symbols:
         return ""
+
     lines: list[str] = []
-    lines.append(f"Trajectory: {len(turns)} turns, {len(entities)} entities, {len(observations)} observations")
-    type_counts = Counter(e.get("type", "unknown") for e in entities)
-    if type_counts:
-        lines.append(f"Entity types: {dict(type_counts)}")
-    state_counts = Counter(c.get("state", "?") for c in candidates)
-    if state_counts:
-        lines.append(f"Candidate states: {dict(state_counts)}")
+
+    if symbols:
+        kind_counts = Counter(s.get("kind", "unknown") for s in symbols)
+        lines.append(f"Index: {len(symbols)} symbols, {len(references)} references")
+        lines.append(f"Symbol kinds: {dict(kind_counts)}")
+        grounded = sum(1 for r in references if r.get("grounded"))
+        if references:
+            lines.append(f"Grounded references: {grounded}/{len(references)}")
+    else:
+        lines.append(f"Trajectory: {len(turns)} turns, {len(entities)} entities, {len(observations)} observations")
+        type_counts = Counter(e.get("type", "unknown") for e in entities)
+        if type_counts:
+            lines.append(f"Entity types: {dict(type_counts)}")
+        state_counts = Counter(c.get("state", "?") for c in candidates)
+        if state_counts:
+            lines.append(f"Candidate states: {dict(state_counts)}")
+
     attention_hints = context_index.get("attention_hints", [])
     if attention_hints:
         lines.append(f"Attention hints: {len(attention_hints)}")
-        for h in attention_hints[:3]:
+        for h in attention_hints[:5]:
             lines.append(f"  - [{h.get('kind', '?')}] {h.get('summary', '')[:200]}")
     return "\n".join(lines)
 

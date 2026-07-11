@@ -273,6 +273,7 @@ def build_auditor_config(
     """
     trajectory = _serialize_trajectory(list(messages)) if messages else []
 
+    ci = context_index if isinstance(context_index, dict) else {}
     return AgentSessionConfig(
         cwd=cwd,
         model=model,
@@ -282,11 +283,14 @@ def build_auditor_config(
             "auditor_context": {
                 "continuation_notes": list(continuation_notes or []),
                 "prompt_name": auditor_prompt,
+                "context_index": context_index,
             },
             "auditor_tools": {},
             "auditor_index_tools": {
                 "trajectory": trajectory,
                 "context_index": context_index,
+                "symbols": ci.get("symbols", []),
+                "references": ci.get("references", []),
             },
         },
         purpose="cognitive_audit_auditor_eval",

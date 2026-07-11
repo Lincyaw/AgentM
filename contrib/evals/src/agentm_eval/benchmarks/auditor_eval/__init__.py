@@ -42,6 +42,7 @@ class AuditorEvalAdapter:
             auditor_prompt: Annotated[str, typer.Option("--prompt")] = "index",
             exp_id: Annotated[str | None, typer.Option("--exp-id")] = None,
             rebuild_index: Annotated[bool, typer.Option("--rebuild-index")] = False,
+            max_messages: Annotated[int | None, typer.Option("--max-messages", help="Truncate trajectory to first N messages")] = None,
         ) -> None:
             """Run interleaved index + auditor on recorded sessions."""
             from agentm.env import autoload_dotenv
@@ -69,6 +70,7 @@ class AuditorEvalAdapter:
                 sids, model=model, index_model=index_model,
                 chunk_size=parsed_chunk, auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
+                max_messages=max_messages,
             ))
 
         return cli
@@ -88,24 +90,45 @@ async def _load_messages(session_id: str) -> list[Any]:
 
 
 def _index_to_context(idx: Any) -> dict[str, Any]:
-    """Convert a TrajectoryIndex to the context dict the auditor expects."""
-    grounding: dict[str, Any] = {"symbols": [], "warnings": []}
+    """Convert a TrajectoryIndex to the context dict the auditor tools expect.
+
+    Produces ``symbols`` and ``references`` lists for the primary lookup
+    path in ``auditor_index_tools._IndexState``, plus ``attention_hints``
+    mapped from grounding warnings.
+    """
+    symbols: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
+
     for sym in idx.symbols.values():
-        refs = idx.get_references(sym.id)
-        grounding["symbols"].append({
+        symbols.append({
+            "id": sym.id,
             "name": sym.canonical_name,
             "kind": sym.kind,
             "entity_class": sym.entity_class,
-            "n_references": len(refs),
-            "grounded": any(r.grounded for r in refs),
+            "aliases": sorted(sym.aliases),
         })
+        for ref in idx.get_references(sym.id):
+            references.append({
+                "symbol_id": sym.id,
+                "step_id": ref.step_id,
+                "kind": ref.kind,
+                "text": (ref.text or "")[:200],
+                "grounded": ref.grounded,
+            })
+
+    attention_hints: list[dict[str, Any]] = []
     for w in idx.warnings():
-        grounding["warnings"].append({
+        attention_hints.append({
             "kind": w.kind,
+            "summary": f"{w.symbol_name}: {w.detail}",
             "symbol": w.symbol_name,
-            "detail": w.detail,
         })
-    return grounding
+
+    return {
+        "symbols": symbols,
+        "references": references,
+        "attention_hints": attention_hints,
+    }
 
 
 async def _run_sessions(
@@ -117,6 +140,7 @@ async def _run_sessions(
     auditor_prompt: str,
     exp: Experiment,
     rebuild_index: bool,
+    max_messages: int | None = None,
 ) -> None:
     from agentm_eval.methods.auditor import run_auditor
     from agentm_eval.methods.index import (
@@ -140,6 +164,8 @@ async def _run_sessions(
             typer.echo("  NOT FOUND", err=True)
             continue
 
+        if max_messages is not None and len(messages) > max_messages:
+            messages = messages[:max_messages]
         typer.echo(f"  loaded {len(messages)} messages")
         exp.register_session(sid, metadata={"n_messages": len(messages)})
 
