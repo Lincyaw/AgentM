@@ -198,16 +198,48 @@ class Experiment:
 
     # --- Trajectory export ---
 
+    def collect_trace_session_ids(self) -> dict[str, list[str]]:
+        """Discover real ClickHouse session IDs from auditor step files.
+
+        Returns ``{trajectory_id: [session_id, ...]}`` by scanning
+        ``sessions/<tid>/auditor/step_*.json`` for ``session_ids`` fields.
+        """
+        sessions_root = self.output_dir / "sessions"
+        if not sessions_root.is_dir():
+            return {}
+        result: dict[str, list[str]] = {}
+        for tid_dir in sorted(sessions_root.iterdir()):
+            if not tid_dir.is_dir():
+                continue
+            tid = tid_dir.name
+            sids: list[str] = []
+            auditor_dir = tid_dir / "auditor"
+            if auditor_dir.is_dir():
+                for step_file in sorted(auditor_dir.glob("step_*.json")):
+                    try:
+                        data = json.loads(step_file.read_text())
+                        for sid in data.get("session_ids", []):
+                            if sid and sid not in sids:
+                                sids.append(sid)
+                    except Exception:
+                        continue
+            if sids:
+                result[tid] = sids
+        return result
+
     def export_trajectory(
         self,
         session_id: str,
         *,
         fmt: str = "ndjson",
+        out_dir: Path | None = None,
     ) -> Path | None:
         """Export a single session's trajectory from ClickHouse."""
-        sdir = self.session_dir(session_id)
-        sdir.mkdir(parents=True, exist_ok=True)
-        out_path = sdir / f"trajectory.{fmt}"
+        target = out_dir or self.session_dir(session_id)
+        target.mkdir(parents=True, exist_ok=True)
+        out_path = target / f"trajectory_{session_id}.{fmt}"
+        if out_path.is_file():
+            return out_path
         try:
             from agentm.core.observability import clickhouse
 
@@ -229,21 +261,25 @@ class Experiment:
     def export_all_trajectories(
         self, *, fmt: str = "ndjson"
     ) -> int:
-        """Export trajectories for all registered sessions. Returns success count."""
-        sids = self.session_ids()
-        if not sids:
+        """Export trajectories for all real ClickHouse sessions.
+
+        Discovers session IDs from auditor step files and exports each
+        into ``sessions/<trajectory_id>/auditor/trajectory_<sid>.ndjson``.
+        """
+        trace_map = self.collect_trace_session_ids()
+        if not trace_map:
+            logger.info("export: no trace sessions found for {}", self.exp_id)
             return 0
+        total = sum(len(v) for v in trace_map.values())
         exported = 0
-        for sid in sids:
-            out = self.session_dir(sid) / f"trajectory.{fmt}"
-            if out.is_file():
-                exported += 1
-                continue
-            if self.export_trajectory(sid, fmt=fmt) is not None:
-                exported += 1
+        for tid, sids in trace_map.items():
+            out_dir = self.session_dir(tid) / "auditor"
+            for sid in sids:
+                if self.export_trajectory(sid, fmt=fmt, out_dir=out_dir) is not None:
+                    exported += 1
         logger.info(
-            "exported {}/{} trajectories for {}",
-            exported, len(sids), self.exp_id,
+            "exported {}/{} trajectories ({} cases) for {}",
+            exported, total, len(trace_map), self.exp_id,
         )
         return exported
 
