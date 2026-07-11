@@ -346,16 +346,12 @@ async def resolve_index(
     *,
     model: str | None = None,
 ) -> None:
-    """Run Pass 2 (alias resolution) and Pass 3 + 3.5 (dataflow + value fidelity).
+    """Run Pass 2 (alias resolution) and Pass 3 (dataflow).
 
-    Best-effort: any LLM pass that fails is skipped; the deterministic
-    layers remain intact.
+    Best-effort: Pass 2 LLM failure is skipped; Pass 3 is deterministic.
     """
     from agentm.core.runtime import AgentSession
-    from trajectory_index.adjudicate import (
-        compare_values,
-        resolve_aliases,
-    )
+    from trajectory_index.adjudicate import resolve_aliases
 
     sf = AgentSession.create
 
@@ -366,13 +362,6 @@ async def resolve_index(
         logger.warning("Pass 2 (alias resolution) failed, skipping", exc_info=True)
 
     index.build_dependencies()
-
-    try:
-        results = await compare_values(index, model=model, apply=True, session_factory=sf)
-        contradicted = sum(1 for _, o in results if o == "contradict")
-        logger.info("Pass 3.5: {} edges judged, {} contradicted", len(results), contradicted)
-    except Exception:
-        logger.warning("Pass 3.5 (value fidelity) failed, skipping", exc_info=True)
 
 
 async def build_index(
