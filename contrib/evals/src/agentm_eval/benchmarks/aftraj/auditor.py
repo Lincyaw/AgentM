@@ -48,17 +48,17 @@ def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
     content_text = turn.get("content") or ""
 
     if role == "user":
-        return UserMessage(content=[TextContent(type="text", text=content_text or "(empty)")])
+        return UserMessage(role="user", content=[TextContent(type="text", text=content_text or "(empty)")], timestamp=0.0)
 
     if role == "environment":
-        return ToolResultMessage(content=[
+        return ToolResultMessage(role="tool_result", content=[
             ToolResultBlock(
                 type="tool_result",
                 tool_call_id="",
                 content=[TextContent(type="text", text=content_text or "(empty)")],
                 is_error=False,
             ),
-        ])
+        ], timestamp=0.0)
 
     # assistant
     blocks: list[Any] = []
@@ -94,7 +94,7 @@ def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
     if not blocks:
         blocks.append(TextContent(type="text", text="(empty)"))
 
-    return AssistantMessage(content=blocks)
+    return AssistantMessage(role="assistant", content=blocks, timestamp=0.0)
 
 
 def aftraj_to_messages(

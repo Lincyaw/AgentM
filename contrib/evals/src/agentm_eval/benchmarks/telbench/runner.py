@@ -45,18 +45,32 @@ async def evaluate_instance(
     extractor_interval: int = 5,  # deprecated no-op
 ) -> EvalResult:
     """Run the llmharness auditor pipeline on one TELBench instance and score."""
-    from agentm_eval.methods.auditor import run_auditor
+    from agentm_eval.methods.auditor import index_to_context, run_auditor
+    from agentm_eval.methods.index import build_index, extract_symbols
 
     _ = extractor_interval  # deprecated no-op
 
     messages = spans_to_messages(instance.spans)
     n_spans = len(messages)
 
+    context_index: dict[str, Any] | None = None
+    try:
+        chunks = await extract_symbols(
+            messages, model=model, run_id=instance.id,
+            chunk_size=(4, 8), vocabulary="default",
+        )
+        if chunks:
+            idx = await build_index(chunks, model=model, resolve=True)
+            context_index = index_to_context(idx)
+    except Exception:
+        logger.debug("telbench: index build failed for {}", instance.id, exc_info=True)
+
     eff_interval: int | None = None if mode == "posthoc" else audit_interval
 
     audit_result = await run_auditor(
         messages, model=model, provider=provider, cwd=cwd,
         auditor_prompt=auditor_prompt, audit_interval=eff_interval,
+        context_index=context_index,
     )
 
     all_verdicts = [v.to_dict() for v in audit_result.verdicts]
