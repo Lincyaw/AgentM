@@ -175,6 +175,9 @@ async def _run_sessions(
             )
 
         stats = idx.stats(sid)
+        warns = idx.warnings()
+        warn_summary = idx.warning_summary()
+
         result_dict = {
             "session_id": sid,
             "n_messages": len(messages),
@@ -182,13 +185,25 @@ async def _run_sessions(
             "n_symbols": stats.symbol_count,
             "n_references": stats.reference_count,
             "n_dependencies": stats.dependency_count,
+            "warnings": warn_summary,
         }
         all_results.append(result_dict)
         exp.record_result(result_dict)
+
+        warnings_data = [
+            {"kind": w.kind, "symbol": w.symbol_name, "detail": w.detail, "steps": list(w.step_ids)}
+            for w in warns
+        ]
         exp.write_session_artifact(sid, "", "index_stats.json", result_dict)
+        exp.write_session_artifact(sid, "", "warnings.json", warnings_data)
         idx.dump(str(exp.session_dir(sid) / "index.json"))
 
         typer.echo(f"  total: {stats.symbol_count} symbols, {stats.reference_count} refs, {stats.dependency_count} deps")
+        if warn_summary:
+            parts = ", ".join(f"{v} {k}" for k, v in sorted(warn_summary.items()))
+            typer.echo(f"  warnings: {parts}")
+            for w in warns[:10]:
+                typer.echo(f"    [{w.kind}] {w.symbol_name}: {w.detail}")
 
     if all_results:
         avg_sym = sum(r["n_symbols"] for r in all_results) / len(all_results)

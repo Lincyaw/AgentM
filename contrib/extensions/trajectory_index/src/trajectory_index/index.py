@@ -872,6 +872,95 @@ class TrajectoryIndex:
             dependency_count=len(self.dependencies),
         )
 
+    # ---- warnings (code-only, no LLM) ----
+
+    @dataclass(frozen=True, slots=True)
+    class Warning:
+        kind: str
+        symbol_id: str
+        symbol_name: str
+        detail: str
+        step_ids: tuple[str, ...] = ()
+
+    def warnings(self) -> list[Warning]:
+        """Compute grounding warnings from the index structure.
+
+        Pure code — no LLM. Runs after ``build_dependencies()``.
+        """
+        out: list[TrajectoryIndex.Warning] = []
+
+        for sym_id, sym in self.symbols.items():
+            refs = self._ref_ids_by_symbol.get(sym_id, [])
+            if not refs:
+                out.append(self.Warning(
+                    kind="orphan",
+                    symbol_id=sym_id,
+                    symbol_name=sym.canonical_name,
+                    detail="extracted but has 0 references in the trajectory",
+                ))
+                continue
+
+            ref_objs = [self.references[rid] for rid in refs]
+            ref_kinds = {r.kind for r in ref_objs}
+            has_grounded_def = any(r.grounded for r in ref_objs)
+
+            if not has_grounded_def:
+                steps = tuple(dict.fromkeys(r.step_id for r in ref_objs))
+                if ref_kinds == {"tool_input"} or ref_kinds <= {"tool_input", "mention"}:
+                    if "tool_input" in ref_kinds:
+                        out.append(self.Warning(
+                            kind="blind_query",
+                            symbol_id=sym_id,
+                            symbol_name=sym.canonical_name,
+                            detail="used in tool calls but never returned by any tool",
+                            step_ids=steps,
+                        ))
+                    else:
+                        out.append(self.Warning(
+                            kind="fabricated_name",
+                            symbol_id=sym_id,
+                            symbol_name=sym.canonical_name,
+                            detail="mentioned in reasoning but never returned by any tool",
+                            step_ids=steps,
+                        ))
+
+        # Dependency-level warnings
+        deps = self.get_dependencies()
+        premature = [d for d in deps if d.risk == "premature"]
+        ungrounded = [d for d in deps if d.risk == "ungrounded"]
+
+        for d in premature:
+            sym = self.symbols.get(d.symbol_id)
+            if sym:
+                out.append(self.Warning(
+                    kind="premature_use",
+                    symbol_id=d.symbol_id,
+                    symbol_name=sym.canonical_name,
+                    detail=f"used at step {d.use_step_id} before grounded at step {d.grounded_by_step_id}",
+                    step_ids=(d.use_step_id, d.def_step_id),
+                ))
+
+        for d in ungrounded:
+            sym = self.symbols.get(d.symbol_id)
+            if sym:
+                out.append(self.Warning(
+                    kind="ungrounded_use",
+                    symbol_id=d.symbol_id,
+                    symbol_name=sym.canonical_name,
+                    detail=f"used at step {d.use_step_id} with ungrounded def at step {d.def_step_id}",
+                    step_ids=(d.use_step_id, d.def_step_id),
+                ))
+
+        return sorted(out, key=lambda w: (
+            {"fabricated_name": 0, "blind_query": 1, "ungrounded_use": 2, "premature_use": 3, "orphan": 4}.get(w.kind, 5),
+            w.symbol_name,
+        ))
+
+    def warning_summary(self) -> dict[str, int]:
+        """Count warnings by kind."""
+        from collections import Counter
+        return dict(Counter(w.kind for w in self.warnings()))
+
     # ---- integrity ----
 
     def validate(self) -> list[str]:
