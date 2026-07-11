@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from typing import Any, Final
 
 from agentm.core.abi import (
@@ -245,15 +246,27 @@ def _agentmsg_to_extraction_dict(
     return {"id": str(index), "role": role, "content": blocks}
 
 
+_IDENT_CHAR = re.compile(r"[A-Za-z0-9_.\-/]")
+
+
+def _at_word_boundary(text: str, start: int, end: int) -> bool:
+    """Check that the match at text[start:end] is not inside a longer identifier."""
+    if start > 0 and _IDENT_CHAR.match(text[start - 1]):
+        return False
+    return not (end < len(text) and _IDENT_CHAR.match(text[end]))
+
+
 def _mark_known_symbols(text: str, known_names: list[str]) -> str:
-    """Wrap occurrences of known symbol names with [[...]] in the text."""
+    """Wrap occurrences of known symbol names with [[...]] in the text.
+
+    Only marks at word boundaries — a known symbol inside a longer
+    identifier is not marked (the longer form may be a different entity).
+    """
     if not known_names:
         return text
-    # Sort by length descending so longer names match first
     for name in sorted(known_names, key=len, reverse=True):
         if not name or len(name) < 2:
             continue
-        # Case-insensitive find-and-wrap, skip if already wrapped
         lower = text.lower()
         search = name.lower()
         result_parts: list[str] = []
@@ -263,16 +276,21 @@ def _mark_known_symbols(text: str, known_names: list[str]) -> str:
             if idx < 0:
                 result_parts.append(text[pos:])
                 break
+            end = idx + len(name)
             # Skip if already inside [[...]]
             if idx >= 2 and text[idx - 2:idx] == "[[":
-                result_parts.append(text[pos:idx + len(name)])
-                pos = idx + len(name)
+                result_parts.append(text[pos:end])
+                pos = end
+                continue
+            # Skip if inside a longer identifier
+            if not _at_word_boundary(text, idx, end):
+                result_parts.append(text[pos:end])
+                pos = end
                 continue
             result_parts.append(text[pos:idx])
-            result_parts.append(f"[[{text[idx:idx + len(name)]}]]")
-            pos = idx + len(name)
+            result_parts.append(f"[[{text[idx:end]}]]")
+            pos = end
         text = "".join(result_parts)
-        lower = text.lower()
     return text
 
 

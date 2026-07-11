@@ -12,7 +12,6 @@ import re
 from collections import defaultdict, deque
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
-from difflib import SequenceMatcher
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Literal
@@ -533,41 +532,58 @@ class TrajectoryIndex:
                 out.append(text[:_SNIPPET_CHARS])
         return tuple(out)
 
-    def alias_candidates(self, min_ratio: float = 0.82) -> list[AliasCandidate]:
+    @staticmethod
+    def _tokenize_name(name: str) -> set[str]:
+        """Split a symbol name into tokens on common delimiters."""
+        return {
+            t for t in re.split(r"[-_./\s]+", normalize_name(name))
+            if len(t) >= 2
+        }
+
+    @staticmethod
+    def _token_jaccard(tokens_a: set[str], tokens_b: set[str]) -> float:
+        if not tokens_a or not tokens_b:
+            return 0.0
+        return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+    def alias_candidates(self, min_jaccard: float = 0.5) -> list[AliasCandidate]:
         """Deterministically block structured-symbol pairs that MIGHT be one entity.
 
-        Cheap lexical signals only — a proper substring relation, or normalized-name
-        similarity ≥ ``min_ratio``. This proposes pairs; whether to merge is a
-        name-resolution model judgment (Pass 2) fed by :meth:`apply_alias_merges`. No
-        scenario-specific rules, no model here.
+        Uses token-level Jaccard similarity on names split by common
+        delimiters (``-_./``). This avoids false matches between names
+        that share long prefixes/suffixes but differ in the distinctive
+        token (e.g. ``ts-cancel-service`` vs ``ts-config-service``
+        shares only ``{ts, service}`` → jaccard 0.33, below threshold).
+
+        Substring containment is also checked. Pairs above threshold are
+        proposed for LLM judgment via :meth:`apply_alias_merges`.
         """
-        # Normalized name + context snippets computed once per symbol (reused across
-        # every pair the symbol appears in), not per emitted candidate.
         items = [
-            (sid, sym, normalize_name(sym.canonical_name), self._ref_snippets(sid))
+            (sid, sym, normalize_name(sym.canonical_name),
+             self._tokenize_name(sym.canonical_name), self._ref_snippets(sid))
             for sid, sym in self.symbols.items()
             if drives_defuse(sym.entity_class)
         ]
         out: list[AliasCandidate] = []
         for i in range(len(items)):
-            aid, asym, anorm, asnip = items[i]
+            aid, asym, anorm, atokens, asnip = items[i]
             for j in range(i + 1, len(items)):
-                bid, bsym, bnorm, bsnip = items[j]
+                bid, bsym, bnorm, btokens, bsnip = items[j]
                 if anorm == bnorm:
-                    continue  # exact-normalized dups already share a symbol via upsert
+                    continue
                 substring = (
                     (anorm in bnorm or bnorm in anorm)
                     and min(len(anorm), len(bnorm)) >= _MIN_BLOCK_SUBSTR
                 )
-                ratio = SequenceMatcher(None, anorm, bnorm).ratio()
-                if not substring and ratio < min_ratio:
+                jaccard = self._token_jaccard(atokens, btokens)
+                if not substring and jaccard < min_jaccard:
                     continue
                 out.append(AliasCandidate(
                     symbol_a_id=aid, symbol_b_id=bid,
                     name_a=asym.canonical_name, name_b=bsym.canonical_name,
                     kind_a=asym.kind, kind_b=bsym.kind,
                     signal="substring" if substring else "similar",
-                    score=round(ratio, 3),
+                    score=round(jaccard, 3),
                     context_a=asnip, context_b=bsnip,
                 ))
         return sorted(out, key=lambda c: (-c.score, c.symbol_a_id, c.symbol_b_id))
