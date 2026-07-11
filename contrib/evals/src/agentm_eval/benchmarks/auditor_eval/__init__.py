@@ -90,45 +90,8 @@ async def _load_messages(session_id: str) -> list[Any]:
 
 
 def _index_to_context(idx: Any) -> dict[str, Any]:
-    """Convert a TrajectoryIndex to the context dict the auditor tools expect.
-
-    Produces ``symbols`` and ``references`` lists for the primary lookup
-    path in ``auditor_index_tools._IndexState``, plus ``attention_hints``
-    mapped from grounding warnings.
-    """
-    symbols: list[dict[str, Any]] = []
-    references: list[dict[str, Any]] = []
-
-    for sym in idx.symbols.values():
-        symbols.append({
-            "id": sym.id,
-            "name": sym.canonical_name,
-            "kind": sym.kind,
-            "entity_class": sym.entity_class,
-            "aliases": sorted(sym.aliases),
-        })
-        for ref in idx.get_references(sym.id):
-            references.append({
-                "symbol_id": sym.id,
-                "step_id": ref.step_id,
-                "kind": ref.kind,
-                "text": (ref.text or "")[:200],
-                "grounded": ref.grounded,
-            })
-
-    attention_hints: list[dict[str, Any]] = []
-    for w in idx.warnings():
-        attention_hints.append({
-            "kind": w.kind,
-            "summary": f"{w.symbol_name}: {w.detail}",
-            "symbol": w.symbol_name,
-        })
-
-    return {
-        "symbols": symbols,
-        "references": references,
-        "attention_hints": attention_hints,
-    }
+    from agentm_eval.methods.auditor import index_to_context
+    return index_to_context(idx)
 
 
 async def _run_sessions(

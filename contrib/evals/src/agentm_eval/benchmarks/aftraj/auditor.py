@@ -254,58 +254,12 @@ def _load_data(
 
 
 # ---------------------------------------------------------------------------
-# Grounding pipeline
+# Index building
 # ---------------------------------------------------------------------------
 
 
-def _format_grounding_summary(index: Any) -> str | None:
-    deps = index.get_dependencies()
-    non_grounded = [d for d in deps if d.risk != "grounded"]
-    if not non_grounded:
-        return None
-
-    lines: list[str] = ["## GROUNDING ANALYSIS", ""]
-    lines.append(
-        "Attention hints from automated tracing. Each edge shows where a value "
-        "**originated** and where it was **relied on**. If the origin is wrong, "
-        "the origin step is the decisive error — not the downstream step that "
-        "relied on it."
-    )
-    lines.append("")
-    lines.append("Entities:")
-    for sym in index.symbols.values():
-        refs = index.get_references(sym.id)
-        if not refs:
-            continue
-        steps = sorted({r.step_id for r in refs}, key=lambda s: int(s))
-        g = any(r.grounded for r in refs)
-        ec = getattr(sym, "entity_class", "?")
-        lines.append(
-            f"- {sym.canonical_name} ({sym.kind}, {ec}) "
-            f"steps=[{','.join(steps)}] grounded={'yes' if g else 'no'}"
-        )
-    lines.append("")
-    lines.append("Weak edges (investigate the origin step first):")
-    for d in non_grounded:
-        sym = index.symbols.get(d.symbol_id)
-        name = sym.canonical_name if sym else d.symbol_id
-        detail = (
-            f'- [{d.risk}] "{name}" originated@step {d.def_step_id}, '
-            f"relied on@step {d.use_step_id}"
-        )
-        if d.risk == "contradicted":
-            def_val = getattr(d, "def_value", None) or ""
-            use_val = getattr(d, "use_value", None) or ""
-            if def_val or use_val:
-                detail += f' (tool said "{def_val}", agent used "{use_val}")'
-        elif d.risk == "premature" and d.grounded_by_step_id:
-            detail += f" (verified later at step {d.grounded_by_step_id})"
-        lines.append(detail)
-    return "\n".join(lines)
-
-
 async def _build_index_for_trajectory(
-    trajectory: list[dict[str, Any]], *, index_model: str, index_vocabulary: str,
+    trajectory: list[AgentMessage], *, index_model: str, index_vocabulary: str,
 ) -> Any | None:
     from agentm_eval.methods.index import build_index, extract_symbols
 
@@ -328,39 +282,34 @@ async def _build_index_for_trajectory(
 
 
 async def _auditor_call(
-    trajectory: list[dict[str, Any]], *,
+    trajectory: list[AgentMessage], *,
     model: str | None, index_model: str | None, index_vocabulary: str,
     cwd: str, prompt_name: str, pre_built_index: Any | None = None,
 ) -> dict[str, Any]:
-    from llmharness.agents.auditor.context import build_auditor_system_prompt, load_auditor_prompt
-    from agentm_eval.benchmarks.aftraj.offline_audit import StandaloneChildRunner
+    from agentm_eval.methods.auditor import AuditResult, index_to_context, run_auditor
 
-    grounding_summary: str | None = None
+    context_index: dict[str, Any] | None = None
 
     if pre_built_index is not None:
-        grounding_summary = _format_grounding_summary(pre_built_index)
+        context_index = index_to_context(pre_built_index)
     elif index_model is not None:
         idx = await _build_index_for_trajectory(
             trajectory, index_model=index_model, index_vocabulary=index_vocabulary,
         )
         if idx is not None:
-            grounding_summary = _format_grounding_summary(idx)
+            context_index = index_to_context(idx)
 
-    base_prompt = load_auditor_prompt(prompt_name)
-    prompt_text = build_auditor_system_prompt(
-        check_errors={}, continuation_notes=[], base_prompt=base_prompt,
-        context_index=None,
+    audit_result: AuditResult = await run_auditor(
+        trajectory, model=model, cwd=cwd,
+        auditor_prompt=prompt_name, context_index=context_index,
     )
-    if grounding_summary:
-        prompt_text = prompt_text.rstrip() + "\n\n" + grounding_summary
 
-    child = StandaloneChildRunner(cwd)
-    result = await child.run_auditor(
-        prompt_text=prompt_text, tools_config={}, model=model,
-        context_index=None, trajectory=trajectory, symbols=[], references=[],
-    )
-    result["grounding_summary"] = grounding_summary
-    return result
+    verdict = audit_result.verdicts[0] if audit_result.verdicts else None
+    return {
+        "verdict": verdict,
+        "error": None,
+        "grounding_summary": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +348,7 @@ async def _eval_safe(
 
 
 async def _incremental_index_step(
-    idx: Any, new_turn: dict[str, Any], *,
+    idx: Any, new_turn: AgentMessage, *,
     index_model: str, index_vocabulary: str,
 ) -> None:
     from agentm_eval.methods.index import extract_symbols

@@ -45,85 +45,27 @@ async def evaluate_instance(
     extractor_interval: int = 5,  # deprecated no-op
 ) -> EvalResult:
     """Run the llmharness auditor pipeline on one TELBench instance and score."""
-    from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
-    from agentm.core.runtime import AgentSession, create_agent_session
-
-    from llmharness.agents import auditor_scenario
-    from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from llmharness.state import CumulativeAuditState
+    from agentm_eval.methods.auditor import run_auditor
 
     _ = extractor_interval  # deprecated no-op
 
     messages = spans_to_messages(instance.spans)
     n_spans = len(messages)
-    cumulative = CumulativeAuditState.fresh()
 
-    eff_audit_interval = n_spans if mode == "posthoc" else audit_interval
+    eff_interval: int | None = None if mode == "posthoc" else audit_interval
 
-    aud_scenario = auditor_scenario()
-    last_session_id = ""
+    audit_result = await run_auditor(
+        messages, model=model, provider=provider, cwd=cwd,
+        auditor_prompt=auditor_prompt, audit_interval=eff_interval,
+    )
 
-    for turn_count in range(1, n_spans + 1):
-        auditor_due = (turn_count % eff_audit_interval) == 0
-
-        # --- Auditor ---
-        if auditor_due:
-            config = AgentSessionConfig(
-                cwd=cwd,
-                model=model,
-                provider=provider,
-                scenario=aud_scenario,
-                atom_config_overrides={
-                    "auditor_context": {
-                        "continuation_notes": list(cumulative.last_continuation_notes),
-                        "prompt_name": auditor_prompt,
-                    },
-                    "auditor_tools": {},
-                },
-                purpose="cognitive_audit_auditor",
-            )
-            try:
-                session = await create_agent_session(AgentSession, config)
-                last_session_id = session.session_id
-                try:
-                    child_msgs = await session.prompt(
-                        json.dumps(
-                            {
-                                "continuation_notes_from_prior_firing": list(
-                                    cumulative.last_continuation_notes
-                                ),
-                            },
-                            ensure_ascii=False,
-                            default=str,
-                        )
-                    )
-                finally:
-                    await session.shutdown()
-
-                if child_msgs:
-                    for msg in reversed(child_msgs):
-                        if not isinstance(msg, AssistantMessage):
-                            continue
-                        for block in reversed(msg.content):
-                            if (
-                                isinstance(block, ToolCallBlock)
-                                and block.name == SUBMIT_VERDICT_TOOL_NAME
-                            ):
-                                verdict_raw = block.arguments.get("verdict")
-                                if isinstance(verdict_raw, dict):
-                                    cumulative.absorb_auditor_verdict(verdict_raw)
-                                break
-            except Exception as exc:
-                logger.warning("telbench: auditor verdict absorption failed: {}", exc)
-
-    # --- Score ---
-    all_verdicts: list[dict[str, Any]] = []
+    all_verdicts = [v.to_dict() for v in audit_result.verdicts]
     matched_event_ids: set[int] = set()
-    for v in cumulative.recent_verdicts:
-        all_verdicts.append(v)
+    for v in all_verdicts:
         matched_event_ids.update(v.get("matched_event_ids", []))
 
     predicted_span_indices: set[int] = set()
+    last_session_id = audit_result.session_ids[-1] if audit_result.session_ids else ""
 
     gold = instance.gold_error_indices
     scores = score_instance(predicted_span_indices, gold, n_spans)
