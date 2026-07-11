@@ -207,6 +207,77 @@ def _try_parse_response(
 
 
 # ---------------------------------------------------------------------------
+# Structural symbol extraction (code, no LLM)
+# ---------------------------------------------------------------------------
+
+_SQL_TABLE_RE: Final = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([A-Za-z_][A-Za-z0-9_.]*)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralSymbol:
+    name: str
+    kind: str
+
+
+def extract_structural_symbols(
+    messages: list[dict[str, JsonValue]],
+) -> list[StructuralSymbol]:
+    """Extract symbols from structured message positions — no LLM needed.
+
+    Finds: tool names (from tool_call blocks), SQL table names (from
+    tool_input/tool_output text).
+    """
+    seen: set[str] = set()
+    out: list[StructuralSymbol] = []
+
+    def _add(name: str, kind: str) -> None:
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(StructuralSymbol(name=name, kind=kind))
+
+    def _scan_sql(text: str) -> None:
+        for m in _SQL_TABLE_RE.finditer(text):
+            table = m.group(1)
+            if len(table) >= 2 and not table.startswith("("):
+                _add(table, "table")
+
+    for msg in messages:
+        blocks = msg.get("content", [])
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+
+            if btype == "tool_call":
+                name = block.get("name")
+                if isinstance(name, str) and name:
+                    _add(name, "tool")
+                args = block.get("arguments", block.get("input", {}))
+                if isinstance(args, dict):
+                    args_text = json.dumps(args, ensure_ascii=False)
+                else:
+                    args_text = str(args)
+                _scan_sql(args_text)
+
+            elif btype == "tool_result":
+                sub = block.get("content", [])
+                if isinstance(sub, list):
+                    for s in sub:
+                        if isinstance(s, dict):
+                            _scan_sql(str(s.get("text", "")))
+                else:
+                    _scan_sql(str(sub))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Programmatic reference generation
 # ---------------------------------------------------------------------------
 

@@ -38,6 +38,47 @@ from trajectory_index.data import _symbol_aliases
 # ---------------------------------------------------------------------------
 
 
+def _prescan_structural(
+    messages: list[AgentMessage],
+    registry: list[dict[str, Any]] | None,
+    seen: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Code-level structural extraction before LLM.
+
+    Scans tool_call blocks for tool names and SQL for table names.
+    Returns (updated_registry, structural_symbols) where structural_symbols
+    are ExtractedSymbol-like objects to merge into the final result.
+    """
+    from trajectory_index.atom import _agentmsg_to_extraction_dict
+    from trajectory_index.data import extract_structural_symbols
+    from trajectory_index.index import normalize_name
+
+    serialized = [
+        d for i, m in enumerate(messages)
+        if (d := _agentmsg_to_extraction_dict(m, i))
+    ]
+    structural = extract_structural_symbols(serialized)
+    if not structural:
+        return (list(registry) if registry else [], [])
+
+    if seen is None:
+        seen = set()
+        if registry:
+            for entry in registry:
+                seen.add(normalize_name(str(entry.get("name", ""))))
+
+    updated = list(registry) if registry else []
+    new_syms = []
+    for sym in structural:
+        norm = normalize_name(sym.name)
+        if norm not in seen:
+            seen.add(norm)
+            updated.append({"name": sym.name, "kind": sym.kind})
+            new_syms.append(sym)
+
+    return updated, new_syms
+
+
 async def _run_one(
     messages: list[AgentMessage],
     *,
@@ -155,11 +196,21 @@ async def extract_symbols(
     results: list[ExtractedChunk] = []
 
     for i, chunk in enumerate(chunks):
-        chunk_registry = list(registry) if registry else None
+        # Code-level prescan: extract tool names, SQL tables, etc.
+        chunk_registry, structural = _prescan_structural(
+            chunk.messages, registry if registry else None, seen,
+        )
+        if structural:
+            logger.info(
+                "chunk {}/{}: prescan found {} structural symbols",
+                i + 1, len(chunks), len(structural),
+            )
+
         try:
             result = await _run_one(
                 chunk.messages, model=model, vocabulary=vocabulary,
-                registry=chunk_registry, message_id_start=chunk.start, cwd=cwd,
+                registry=chunk_registry if chunk_registry else None,
+                message_id_start=chunk.start, cwd=cwd,
             )
         except Exception:
             logger.exception("chunk {}/{} extraction failed", i + 1, len(chunks))
@@ -167,6 +218,16 @@ async def extract_symbols(
         if result is None:
             logger.warning("chunk {}/{} no parseable result", i + 1, len(chunks))
             continue
+
+        # Merge structural symbols into LLM result (deduped)
+        if structural:
+            from trajectory_index.agents.entity_extractor.schema import ExtractedSymbol
+            llm_names = {normalize_name(s.name) for s in result.symbols}
+            for ss in structural:
+                if normalize_name(ss.name) not in llm_names:
+                    result.symbols.append(ExtractedSymbol(
+                        name=ss.name, kind=ss.kind, entity_class="identifier",
+                    ))
 
         extracted = ExtractedChunk(run_id=run_id, messages=chunk.messages, result=result)
         results.append(extracted)

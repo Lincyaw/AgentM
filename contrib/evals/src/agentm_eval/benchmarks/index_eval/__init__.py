@@ -93,6 +93,7 @@ async def _run_sessions(
 ) -> None:
     from agentm_eval.methods.index import (
         _chunk_messages,
+        _prescan_structural,
         _run_one,
         resolve_index,
     )
@@ -124,11 +125,14 @@ async def _run_sessions(
             raw_chunks = _chunk_messages(messages, chunk_size)
 
         for ci, chunk in enumerate(raw_chunks):
-            chunk_registry = list(registry) if registry else None
+            chunk_registry, _structural = _prescan_structural(
+                chunk.messages, registry if registry else None, seen,
+            )
             try:
                 result = await _run_one(
                     chunk.messages, model=model, vocabulary=vocabulary,
-                    registry=chunk_registry, message_id_start=chunk.start, cwd=None,
+                    registry=chunk_registry if chunk_registry else None,
+                    message_id_start=chunk.start, cwd=None,
                 )
             except Exception:
                 typer.echo(f"  chunk {ci+1} extraction failed", err=True)
@@ -214,7 +218,12 @@ async def _run_sessions(
 async def _inspect_one(
     session_id: str, *, model: str, chunk_size: tuple[int, int] | None, vocabulary: str,
 ) -> None:
-    from agentm_eval.methods.index import _chunk_messages, _run_one, resolve_index
+    from agentm_eval.methods.index import (
+        _chunk_messages,
+        _prescan_structural,
+        _run_one,
+        resolve_index,
+    )
     from trajectory_index.index import TrajectoryIndex, normalize_name
 
     messages = await _load_messages(session_id)
@@ -230,11 +239,14 @@ async def _inspect_one(
         raw_chunks = _chunk_messages(messages, chunk_size)
 
     for ci, chunk in enumerate(raw_chunks):
-        chunk_registry = list(registry) if registry else None
+        chunk_registry, _structural = _prescan_structural(
+            chunk.messages, registry if registry else None, seen,
+        )
         try:
             result = await _run_one(
                 chunk.messages, model=model, vocabulary=vocabulary,
-                registry=chunk_registry, message_id_start=chunk.start, cwd=None,
+                registry=chunk_registry if chunk_registry else None,
+                message_id_start=chunk.start, cwd=None,
             )
         except Exception:
             typer.echo(f"  chunk {ci+1} extraction failed", err=True)
