@@ -35,6 +35,7 @@ import os
 import posixpath
 import sys
 import tarfile
+import threading
 import types
 import uuid
 from dataclasses import dataclass, field
@@ -53,6 +54,12 @@ except Exception:  # pragma: no cover - older SDKs
 # and it survives for the grader after the agent session shuts down.
 DEFAULT_WORKSPACE = "/workspace"
 DEFAULT_REMOTE_ROOT = f"{DEFAULT_WORKSPACE}/agenthle"
+
+# Serializes the task-import critical section (sys.path + sys.modules mutation
+# and exec_module). Tasks run concurrently across threads (`-j`), and each
+# `from score_outputs import ...` binds into the task module at exec time, so
+# imports must not interleave; once loaded, bound names are thread-safe.
+_IMPORT_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -165,18 +172,43 @@ def load_task(
     if not main_py.is_file():
         raise FileNotFoundError(main_py)
 
-    # Mirror ALE's TaskLoader sys.path behaviour: task dir + scripts/.
-    for extra in (str(task_dir), str(task_dir / "scripts")):
-        if Path(extra).is_dir() and extra not in sys.path:
-            sys.path.insert(0, extra)
+    # Import is a global-state critical section (sys.path/sys.modules); serialize
+    # it so concurrent task loads (`-j`) don't interleave their imports.
+    with _IMPORT_LOCK:
+        # Mirror ALE's TaskLoader sys.path behaviour (task dir + scripts/), but
+        # MOVE these to the front every load: many tasks' scripts/ dirs pile up
+        # on sys.path, and `import score_outputs` resolves by sys.path order, so
+        # this task's scripts/ must win — hence remove-then-insert, not
+        # insert-if-absent. scripts/ ends up at index 0.
+        for extra in (str(task_dir), str(task_dir / "scripts")):
+            if Path(extra).is_dir():
+                while extra in sys.path:
+                    sys.path.remove(extra)
+                sys.path.insert(0, extra)
 
-    mod_name = f"ale_task_{domain}_{name}".replace("-", "_")
-    spec = importlib.util.spec_from_file_location(mod_name, main_py)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {main_py}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
+        # Tasks import helpers by generic names from their own scripts/ dir
+        # (`from score_outputs import ...`). One process serves many tasks, so a
+        # previously-loaded task's `score_outputs` would stay cached in
+        # sys.modules and shadow this task's — raising "cannot import name X
+        # from score_outputs". Drop any module imported from a *foreign* task
+        # scripts/ dir so this task re-imports its own. Shared framework modules
+        # (tasks/*.py, not under a scripts/ dir) and this task's own are kept.
+        tasks_root = f"{ale_repo / 'tasks'}{os.sep}"
+        scripts_marker = f"{os.sep}scripts{os.sep}"
+        this_scripts = f"{task_dir / 'scripts'}{os.sep}"
+        for m_name, m in list(sys.modules.items()):
+            m_file = getattr(m, "__file__", None) or ""
+            if (m_file.startswith(tasks_root) and scripts_marker in m_file
+                    and not m_file.startswith(this_scripts)):
+                del sys.modules[m_name]
+
+        mod_name = f"ale_task_{domain}_{name}".replace("-", "_")
+        spec = importlib.util.spec_from_file_location(mod_name, main_py)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {main_py}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        spec.loader.exec_module(module)
 
     variants = module.load()
     if not variants:
