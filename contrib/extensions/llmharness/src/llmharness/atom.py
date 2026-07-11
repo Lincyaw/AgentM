@@ -249,6 +249,104 @@ def _terminal_tool_args(
 
 
 # ---------------------------------------------------------------------------
+# Composable auditor API (standalone, no ExtensionAPI required)
+# ---------------------------------------------------------------------------
+
+_AUDITOR_MAX_RETRIES: Final = 3
+_AUDITOR_RETRY_BASE_DELAY: Final[float] = 2.0
+
+
+def build_auditor_config(
+    *,
+    cwd: str,
+    model: str | None = None,
+    provider: tuple[str, dict[str, Any]] | None = None,
+    auditor_prompt: str = "index",
+    continuation_notes: list[str] | None = None,
+    messages: list[AgentMessage] | None = None,
+    context_index: dict[str, Any] | None = None,
+    parent_session_id: str | None = None,
+) -> AgentSessionConfig:
+    """Build an ``AgentSessionConfig`` for a standalone auditor session.
+
+    Accepts typed ``AgentMessage`` objects. Serialization happens here.
+    """
+    trajectory = _serialize_trajectory(list(messages)) if messages else []
+
+    return AgentSessionConfig(
+        cwd=cwd,
+        model=model,
+        provider=provider,
+        scenario=auditor_scenario(),
+        atom_config_overrides={
+            "auditor_context": {
+                "continuation_notes": list(continuation_notes or []),
+                "prompt_name": auditor_prompt,
+            },
+            "auditor_tools": {},
+            "auditor_index_tools": {
+                "trajectory": trajectory,
+                "context_index": context_index,
+            },
+        },
+        purpose="cognitive_audit_auditor_eval",
+        parent_session_id=parent_session_id,
+    )
+
+
+def build_auditor_prompt(
+    continuation_notes: list[str] | None = None,
+) -> str:
+    """Build the user-message payload for an auditor session."""
+    return json.dumps(
+        {"continuation_notes_from_prior_firing": list(continuation_notes or [])},
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+async def run_auditor_session(
+    config: AgentSessionConfig,
+    prompt: str,
+    *,
+    spawn: Any = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Run the auditor child, return ``(verdict_raw_dict, session_id)``.
+
+    ``spawn`` creates a session from a config. Defaults to
+    ``AgentSession.create``; callers inside an atom pass
+    ``api.spawn_child_session``.
+    """
+    from agentm.core.runtime import AgentSession
+
+    if spawn is None:
+        spawn = AgentSession.create
+
+    for attempt in range(_AUDITOR_MAX_RETRIES):
+        try:
+            child = await spawn(config)
+            sid = child.session_id
+            try:
+                child_msgs: list[AgentMessage] = await child.prompt(prompt)
+                verdict_raw = _terminal_tool_args(child_msgs, SUBMIT_VERDICT_TOOL_NAME)
+                if isinstance(verdict_raw, dict):
+                    return verdict_raw.get("verdict", verdict_raw), sid
+                return None, sid
+            finally:
+                with contextlib.suppress(Exception):
+                    await child.shutdown()
+        except Exception:
+            if attempt < _AUDITOR_MAX_RETRIES - 1:
+                delay = _AUDITOR_RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning("auditor session failed, retry {}/{} in {:.0f}s",
+                               attempt + 1, _AUDITOR_MAX_RETRIES - 1, delay)
+                await asyncio.sleep(delay)
+            else:
+                logger.exception("auditor session failed after {} attempts", _AUDITOR_MAX_RETRIES)
+    return None, ""
+
+
+# ---------------------------------------------------------------------------
 # install
 # ---------------------------------------------------------------------------
 

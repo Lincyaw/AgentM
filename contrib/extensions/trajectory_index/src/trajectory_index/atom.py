@@ -34,7 +34,6 @@ from .data import JsonValue, ProviderSpec
 from .index import (
     Step,
     StepRole,
-    Symbol,
     TrajectoryIndex,
 )
 
@@ -231,19 +230,39 @@ def build_extraction_config(
     )
 
 
+def _agentmsg_to_extraction_dict(
+    msg: AgentMessage, index: int,
+) -> dict[str, JsonValue]:
+    """Serialize one AgentMessage to the extraction input format."""
+    from .data import _truncate_block
+
+    payload = _agentmsg_to_payload(msg)
+    role = payload.get("role", "")
+    content = payload.get("content", [])
+    if not isinstance(content, list) or not content:
+        return {}
+    blocks: list[JsonValue] = [_truncate_block(b) for b in content if isinstance(b, dict)]
+    return {"id": str(index), "role": role, "content": blocks}
+
+
 def build_extraction_prompt(
-    messages: list[dict[str, JsonValue]],
+    messages: list[AgentMessage],
     *,
     registry: list[dict[str, Any]] | None = None,
     message_id_start: int = 0,
 ) -> str:
-    """Serialize trajectory messages into the extractor's input prompt."""
-    from .data import _reindex_messages
+    """Build the extractor's input prompt from trajectory messages.
 
-    reindexed = _reindex_messages(messages, start=message_id_start)
+    Accepts typed ``AgentMessage`` objects. Serialization to the JSON
+    format the extractor expects happens here.
+    """
+    serialized = [
+        d for i, m in enumerate(messages, start=message_id_start)
+        if (d := _agentmsg_to_extraction_dict(m, i))
+    ]
     if registry:
-        return json.dumps({"known_symbols": registry, "messages": reindexed}, ensure_ascii=False, indent=2)
-    return json.dumps(reindexed, ensure_ascii=False, indent=2)
+        return json.dumps({"known_symbols": registry, "messages": serialized}, ensure_ascii=False, indent=2)
+    return json.dumps(serialized, ensure_ascii=False, indent=2)
 
 
 async def run_extraction_session(
@@ -303,8 +322,8 @@ async def run_extraction_session(
 
 async def run_extraction(
     api: ExtensionAPI,
-    messages: list[dict[str, JsonValue]],
-    provider: ProviderSpec | None = None,
+    messages: list[AgentMessage],
+    *,
     registry: list[dict[str, Any]] | None = None,
     message_id_start: int = 0,
     vocabulary: str = "default",
@@ -314,11 +333,12 @@ async def run_extraction(
     config = build_extraction_config(
         cwd=api.cwd,
         model=model,
-        provider=provider,
         vocabulary=vocabulary,
         parent_session_id=api.session_id,
     )
-    prompt = build_extraction_prompt(messages, registry=registry, message_id_start=message_id_start)
+    prompt = build_extraction_prompt(
+        messages, registry=registry, message_id_start=message_id_start,
+    )
     return await run_extraction_session(
         config, prompt, spawn=api.spawn_child_session, vocabulary=vocabulary,
     )
@@ -329,12 +349,26 @@ async def run_extraction(
 # ---------------------------------------------------------------------------
 
 
+def _serialize_for_index(messages: list[AgentMessage]) -> list[dict[str, JsonValue]]:
+    """Convert AgentMessage list to the dict format populate_from_extraction expects."""
+    return [
+        d for i, m in enumerate(messages)
+        if (d := _agentmsg_to_extraction_dict(m, i))
+    ]
+
+
 def _populate_index(
     index: TrajectoryIndex,
     result: ExtractionResult,
     steps: list[Step],
     messages: list[dict[str, JsonValue]],
 ) -> None:
+    # Steps are already added by the caller; delegate symbol + reference
+    # population to the public method on TrajectoryIndex.
+    # We pass steps_by_id so the index can resolve turn_id → Step.
+    # Note: populate_from_extraction handles add_step internally when
+    # called from eval; the atom pre-adds steps, so we call the lower-level
+    # upsert + reference path directly.
     from .data import _build_references
 
     steps_by_id = {s.step_id: s for s in steps}
@@ -348,12 +382,9 @@ def _populate_index(
             entity_class=ext_sym.entity_class,
         )
 
-    def _resolve(name: str) -> Symbol | None:
-        return index.resolve_symbol_by_name(name)
-
     refs, _rels = _build_references(index.registry_snapshot(), messages)
     for ref in refs:
-        sym = _resolve(ref.symbol_name)
+        sym = index.resolve_symbol_by_name(ref.symbol_name)
         if not sym:
             continue
         step = steps_by_id.get(ref.turn_id)
@@ -380,14 +411,13 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         assert isinstance(index, TrajectoryIndex)
         run_id = api.session_id
 
-        branch = api.session.get_branch()
-        clean_msgs = _branch_to_clean_messages(branch)
-        if not clean_msgs:
+        all_messages = api.session.get_messages()
+        if not all_messages:
             return ToolResult(content=[TextContent(type="text", text="No messages to index.")])
 
         watermark = index.indexed_message_count
-        new_msgs = clean_msgs[watermark:]
-        if not new_msgs:
+        new_messages = all_messages[watermark:]
+        if not new_messages:
             stats = index.stats(run_id)
             return ToolResult(content=[TextContent(
                 type="text",
@@ -399,17 +429,10 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                 ),
             )])
 
-        from .data import _reindex_messages
-
-        prompt_msgs = _reindex_messages(new_msgs, start=watermark)
-        new_steps = _clean_messages_to_steps(prompt_msgs, run_id, start_index=watermark)
-        for step in new_steps:
-            index.add_step(step)
-
         registry = index.registry_snapshot() if watermark > 0 else None
         result = await run_extraction(
             api,
-            new_msgs,
+            new_messages,
             registry=registry,
             message_id_start=watermark,
             vocabulary=cfg.vocabulary,
@@ -421,8 +444,12 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                 is_error=True,
             )
 
-        _populate_index(index, result, new_steps, prompt_msgs)
-        index.indexed_message_count = len(clean_msgs)
+        index.populate_from_extraction(
+            result,
+            _serialize_for_index(new_messages),
+            run_id=run_id,
+        )
+        index.indexed_message_count = len(all_messages)
 
         # Model-judgment passes (best-effort — any model failure leaves the
         # deterministic layer intact). Each is an independent local judgment.
@@ -469,7 +496,7 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                 TextContent(
                     type="text",
                     text=(
-                        f"Indexed {len(new_msgs)} new messages "
+                        f"Indexed {len(new_messages)} new messages "
                         f"(total {stats.step_count} steps) -> "
                         f"{stats.symbol_count} symbols, "
                         f"{stats.reference_count} references, "

@@ -9,13 +9,14 @@ When `known_symbols` is present, do not re-declare them. Only output NEW symbols
 
 ## What counts as a symbol
 
-Named entities and concrete values the agent actively interacts with: services queried, tools invoked, files read, metrics checked, tables scanned, APIs called, errors encountered, statuses/verdicts returned, answers or results computed.
+A symbol is a **named resource** — something with a proper name that exists independently of this conversation.
 
-A symbol's `name` is the **entity itself** — a token, identifier, value, or proper noun — never a sentence or clause that merely contains it. Extract the bare entity, not the phrase wrapping it.
+The decisive test: **is this a resource with a fixed name, or is it data/observation about a resource?**
 
-Skip:
-- items that merely appear in a schema listing, column enumeration, or bulk output without being individually discussed or queried;
-- **prose descriptions and observations** — a described issue, a stated concern, a judgement. These describe a thought, not a thing. Do not extract them as symbols.
+- Resource (extract): a service, tool, file, table, API endpoint, metric key, function, configuration key — things you could look up by name.
+- Data (skip): a value, status code, error message, count, description, verdict, conclusion — information ABOUT resources, not resources themselves.
+
+The symbol table is a navigation index. A user looks up a resource name to find which turns mention it. Observation values are visible by reading those turns directly.
 
 ## Aliases
 
@@ -23,28 +24,17 @@ If an entity appears under multiple surface forms, pick the most canonical as `n
 - name: "ts-ui-dashboard", aliases: ["ui dashboard", "dashboard service"]
 - name: "container_cpu_usage_seconds_total", aliases: ["container.cpu.usage"]
 
-Aliases are critical — they enable downstream reference matching across naming variations.
-
 ## Entity class
 
-`entity_class` is the **name/value axis**, and it is **independent of `kind`**.
-Judge by what the symbol denotes, not by capitalization or where it appears.
+`entity_class` is the **name/value axis**, independent of `kind`.
 
-Decisive question: *is the symbol itself a piece of data, or the name of a resource?*
-
-- `identifier` — the symbol **names a resource** you refer to or operate on; the
-  string simply *is* the thing.
-- `value` — the symbol **is data**: a value, measurement, status, verdict, answer,
-  or result — including an expression or formula, which stands for the value it
-  computes to.
+- `identifier` — the string IS the entity. Almost all symbols are identifiers.
+- `value` — a tracked quantity the agent monitors across turns.
 - `unknown` — a vague or anaphoric surface with no clear referent on its own.
-
-`kind` and `entity_class` are orthogonal: `kind` says *what type* the thing is (from
-the vocabulary), `entity_class` says *name or value*. **Never** put a `kind` word in
-`entity_class`, or an `entity_class` word (identifier / value / unknown) in `kind`.
 
 ## Rules
 
 - Output valid JSON only. No markdown fences, no explanation.
-- Every symbol needs a `kind` from the vocabulary, a short `summary`, and an `entity_class`.
+- Every symbol needs a `kind` from the vocabulary and an `entity_class`.
+- `summary` is optional — include only when the name alone is ambiguous.
 - Prefer specific names over generic descriptions.

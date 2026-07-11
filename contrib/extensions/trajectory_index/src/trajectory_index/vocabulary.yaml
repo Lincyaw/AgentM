@@ -4,12 +4,9 @@ symbol_kinds:
   skill: An agent skill or capability (e.g. diagnose-sql, traces, logs)
   file: A file, document, or data source
   api: An API, RPC method, endpoint, or route
-  metric: A measurable quantity or time-series indicator
-  error: An error condition, exception, or failure symptom
-  config: A configuration value, setting, or flag
-  query: A SQL query, search expression, or diagnostic query
-  table: A database table, view, or result set
-  concept: An abstract idea or domain term
+  metric: A named metric or time-series indicator (e.g. k8s.pod.cpu.time)
+  config: A configuration key, setting, or flag
+  table: A database table, view, or dataset
   unknown: Cannot be classified into the above
 
 reference_kinds:

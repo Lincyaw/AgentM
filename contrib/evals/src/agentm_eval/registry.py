@@ -40,6 +40,7 @@ def discover() -> None:
         "agentm_eval.benchmarks.aftraj",
         "agentm_eval.benchmarks.tau2",
         "agentm_eval.benchmarks.rescue_window",
+        "agentm_eval.benchmarks.index_eval",
     ]
     for mod in modules:
         try:

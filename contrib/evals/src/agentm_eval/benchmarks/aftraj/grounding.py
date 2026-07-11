@@ -18,47 +18,11 @@ from agentm_eval.experiment import experiment_context
 from agentm_eval.registry import register
 from agentm_eval.result import TaskResult
 
+from .auditor import aftraj_to_messages
+
 _DEFAULT_DATA_DIR = Path.home() / "AoyangSpace/references/agent-foresight/AFTraj"
 _DEFAULT_MODEL = "azure-gpt"
 _DEFAULT_VOCAB = "multi_agent"
-
-
-# ---------------------------------------------------------------------------
-# AFTraj → messages
-# ---------------------------------------------------------------------------
-
-
-def aftraj_to_messages(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    msgs: list[dict[str, Any]] = []
-    for i, t in enumerate(turns):
-        role = t.get("role", "unknown")
-        content = (t.get("content") or "").strip()
-        thought = (t.get("thought") or "").strip()
-        action = t.get("action")
-        if role == "user":
-            msgs.append({"id": str(i), "role": "user",
-                         "content": [{"type": "text", "text": content or "(empty)"}]})
-        elif role == "environment":
-            msgs.append({"id": str(i), "role": "tool_result",
-                         "content": [{"type": "tool_result",
-                                      "content": [{"type": "text", "text": content or "(empty)"}],
-                                      "is_error": False}]})
-        else:
-            blocks: list[dict[str, Any]] = []
-            if thought:
-                blocks.append({"type": "text", "text": f"[Thought] {thought}"})
-            if action:
-                for it in (action if isinstance(action, list) else [action]):
-                    if isinstance(it, dict):
-                        blocks.append({"type": "tool_call", "name": str(it.get("name", "tool")),
-                                       "arguments": it.get("arguments", {})})
-                    else:
-                        blocks.append({"type": "tool_call", "name": "action", "arguments": str(it)})
-            if content:
-                blocks.append({"type": "text", "text": content})
-            msgs.append({"id": str(i), "role": "assistant",
-                         "content": blocks or [{"type": "text", "text": "(empty)"}]})
-    return msgs
 
 
 # ---------------------------------------------------------------------------
@@ -66,29 +30,15 @@ def aftraj_to_messages(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-async def build_index(
+async def build_grounding_index(
     msgs: list[dict[str, Any]], *, model: str, vocab: str, full: bool, run_id: str,
 ) -> Any:
-    from agentm_eval.benchmarks.aftraj.extraction import build_index_from_chunks, extract_incremental
+    from agentm_eval.methods.index import build_index, extract_symbols
 
-    chunks = await extract_incremental(
+    chunks = await extract_symbols(
         msgs, model=model, run_id=run_id, chunk_size=(4, 6), vocabulary=vocab,
     )
-    idx = build_index_from_chunks([chunks])
-    if full:
-        from agentm.core.runtime.session import AgentSession
-        from trajectory_index.adjudicate import compare_values, resolve_aliases, resolve_references
-
-        sf = AgentSession.create
-        groups = await resolve_aliases(idx, model=model, apply=False, session_factory=sf)
-        if groups:
-            idx.apply_alias_merges(groups)
-        await resolve_references(idx, model=model, apply=False, session_factory=sf)
-        idx.build_dependencies()
-        await compare_values(idx, model=model, apply=True, session_factory=sf)
-    else:
-        idx.build_dependencies()
-    return idx
+    return await build_index(chunks, model=model, resolve=full)
 
 
 def _load(data_dir: Path, domain: str | None, n: int) -> list[Any]:
@@ -136,7 +86,7 @@ class AftrajGroundingAdapter:
 
             async def go() -> None:
                 idxs = await asyncio.gather(*[
-                    build_index(
+                    build_grounding_index(
                         aftraj_to_messages(_turns(r)), model=model, vocab=vocab,
                         full=not fast, run_id=str(r.conv_id)[:16],
                     ) for r in rows
@@ -179,7 +129,7 @@ class AftrajGroundingAdapter:
             rows = [r for d in doms for r in _load(data_dir, d, n)]
 
             async def one(msgs: list[dict[str, Any]], rid: str) -> dict[str, tuple[str, str]]:
-                idx = await build_index(msgs, model=model, vocab=vocab, full=False, run_id=rid)
+                idx = await build_grounding_index(msgs, model=model, vocab=vocab, full=False, run_id=rid)
                 return {s.canonical_name: (s.kind, s.entity_class) for s in idx.symbols.values()}
 
             async def go() -> None:
@@ -229,7 +179,7 @@ class AftrajGroundingAdapter:
             ) as exp:
                 async def go() -> None:
                     idxs = await asyncio.gather(*[
-                        build_index(
+                        build_grounding_index(
                             aftraj_to_messages(_turns(r)), model=model, vocab=vocab,
                             full=True, run_id=str(r.conv_id)[:16],
                         ) for r in rows

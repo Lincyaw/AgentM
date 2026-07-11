@@ -17,6 +17,16 @@ from typing import Annotated, Any, Optional
 import typer
 from loguru import logger
 
+from agentm.core.abi import (
+    AgentMessage,
+    AssistantMessage,
+    TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
+    ToolResultMessage,
+    UserMessage,
+)
+
 from agentm_eval.experiment import experiment_context
 from agentm_eval.registry import register
 from agentm_eval.result import TaskResult
@@ -30,17 +40,31 @@ _DEFAULT_CWD = Path("/tmp/aftraj-eval")
 # ---------------------------------------------------------------------------
 
 
-def _aftraj_turn_to_serialized(
-    turn: dict[str, Any], index: int,
-) -> dict[str, Any]:
+def _aftraj_turn_to_message(turn: dict[str, Any]) -> AgentMessage:
+    """Convert one AFTraj turn to a typed AgentMessage."""
     role = turn.get("role", "unknown")
-    blocks: list[dict[str, Any]] = []
-
     thought = turn.get("thought") or ""
-    if thought:
-        blocks.append({"type": "text", "text": f"[Thought] {thought}"})
-
     action_raw = turn.get("action") or ""
+    content_text = turn.get("content") or ""
+
+    if role == "user":
+        return UserMessage(content=[TextContent(type="text", text=content_text or "(empty)")])
+
+    if role == "environment":
+        return ToolResultMessage(content=[
+            ToolResultBlock(
+                type="tool_result",
+                tool_call_id="",
+                content=[TextContent(type="text", text=content_text or "(empty)")],
+                is_error=False,
+            ),
+        ])
+
+    # assistant
+    blocks: list[Any] = []
+    if thought:
+        blocks.append(TextContent(type="text", text=f"[Thought] {thought}"))
+
     if action_raw:
         try:
             calls = json.loads(action_raw) if isinstance(action_raw, str) else action_raw
@@ -53,43 +77,32 @@ def _aftraj_turn_to_serialized(
                                 args_raw = json.loads(args_raw)
                             except (json.JSONDecodeError, TypeError):
                                 pass
-                        blocks.append({
-                            "type": "tool_call",
-                            "name": call.get("name", "unknown"),
-                            "arguments": args_raw,
-                        })
+                        blocks.append(ToolCallBlock(
+                            type="tool_call",
+                            id="",
+                            name=call.get("name", "unknown"),
+                            arguments=args_raw if isinstance(args_raw, dict) else {},
+                        ))
             else:
-                blocks.append({"type": "text", "text": f"[Action] {action_raw}"})
+                blocks.append(TextContent(type="text", text=f"[Action] {action_raw}"))
         except (json.JSONDecodeError, TypeError):
-            blocks.append({"type": "text", "text": f"[Action] {action_raw}"})
+            blocks.append(TextContent(type="text", text=f"[Action] {action_raw}"))
 
-    content = turn.get("content") or ""
-    if content:
-        if role == "environment":
-            blocks.append({
-                "type": "tool_result",
-                "content": [{"type": "text", "text": content}],
-            })
-        else:
-            blocks.append({"type": "text", "text": content})
+    if content_text:
+        blocks.append(TextContent(type="text", text=content_text))
 
     if not blocks:
-        blocks.append({"type": "text", "text": "(empty)"})
+        blocks.append(TextContent(type="text", text="(empty)"))
 
-    msg_type = "user" if role == "user" else (
-        "tool_result" if role == "environment" else "assistant"
-    )
-    return {
-        "id": str(index), "index": index, "role": role,
-        "type": msg_type, "content": blocks,
-    }
+    return AssistantMessage(content=blocks)
 
 
-def aftraj_to_trajectory(
+def aftraj_to_messages(
     turns: list[dict[str, Any]], *, up_to: int | None = None,
-) -> list[dict[str, Any]]:
+) -> list[AgentMessage]:
+    """Convert AFTraj turns to typed AgentMessage list."""
     end = len(turns) if up_to is None else min(up_to + 1, len(turns))
-    return [_aftraj_turn_to_serialized(t, i) for i, t in enumerate(turns[:end])]
+    return [_aftraj_turn_to_message(t) for t in turns[:end]]
 
 
 # ---------------------------------------------------------------------------
@@ -294,31 +307,16 @@ def _format_grounding_summary(index: Any) -> str | None:
 async def _build_index_for_trajectory(
     trajectory: list[dict[str, Any]], *, index_model: str, index_vocabulary: str,
 ) -> Any | None:
-    from agentm_eval.benchmarks.aftraj.extraction import build_index_from_chunks, extract_incremental
+    from agentm_eval.methods.index import build_index, extract_symbols
 
     try:
-        chunks = await extract_incremental(
+        chunks = await extract_symbols(
             trajectory, model=index_model, run_id="",
             chunk_size=(4, 6), vocabulary=index_vocabulary,
         )
         if not chunks:
             return None
-        idx = build_index_from_chunks([chunks])
-        try:
-            from agentm.core.runtime.session import AgentSession
-            from trajectory_index.adjudicate import compare_values, resolve_aliases, resolve_references
-
-            sf = AgentSession.create
-            groups = await resolve_aliases(idx, model=index_model, apply=False, session_factory=sf)
-            if groups:
-                idx.apply_alias_merges(groups)
-            await resolve_references(idx, model=index_model, apply=False, session_factory=sf)
-            idx.build_dependencies()
-            await compare_values(idx, model=index_model, apply=True, session_factory=sf)
-        except Exception:
-            logger.debug("grounding passes 2-3.5 failed, using Pass 1+3 only", exc_info=True)
-            idx.build_dependencies()
-        return idx
+        return await build_index(chunks, model=index_model, resolve=True)
     except Exception:
         logger.debug("index build failed", exc_info=True)
         return None
@@ -377,7 +375,7 @@ async def _eval_safe(
     turns_raw = row["turns"]
     if isinstance(turns_raw, str):
         turns_raw = json.loads(turns_raw)
-    trajectory = aftraj_to_trajectory(turns_raw)
+    trajectory = aftraj_to_messages(turns_raw)
     t0 = time.monotonic()
     result = await _auditor_call(
         trajectory, model=model, index_model=index_model,
@@ -404,18 +402,14 @@ async def _incremental_index_step(
     idx: Any, new_turn: dict[str, Any], *,
     index_model: str, index_vocabulary: str,
 ) -> None:
-    from agentm_eval.benchmarks.aftraj.extraction import ExtractedChunk, _build_index_from_chunks_into, extract
+    from agentm_eval.methods.index import extract_symbols
 
-    registry = idx.registry_snapshot()
-    result = await extract(
-        [new_turn], registry=registry, message_id_start=int(new_turn.get("id", 0)),
-        vocabulary=index_vocabulary, model=index_model,
+    chunks = await extract_symbols(
+        [new_turn], model=index_model, vocabulary=index_vocabulary,
     )
-    if result is None:
+    if not chunks:
         return
-    prompt_input: dict[str, Any] = {"known_symbols": registry, "messages": [new_turn]}
-    chunk = ExtractedChunk(run_id="", prompt_input=prompt_input, result=result)
-    _build_index_from_chunks_into(idx, chunk)
+    idx.populate_from_extraction(chunks[0].result, [new_turn])
     idx.build_dependencies()
 
 
@@ -423,7 +417,7 @@ async def _eval_unsafe_incremental(
     row: dict[str, Any], *, model: str | None, index_model: str | None,
     index_vocabulary: str, cwd: str, prompt_name: str,
 ) -> dict[str, Any]:
-    from trajectory_index.data import build_index_from_chunks
+    from agentm_eval.methods.index import build_index
 
     turns_raw = row["turns"]
     if isinstance(turns_raw, str):
@@ -442,10 +436,10 @@ async def _eval_unsafe_incremental(
     last_error: str | None = None
     last_grounding: str | None = None
 
-    idx = build_index_from_chunks([]) if index_model else None
+    idx = (await build_index([], resolve=False)) if index_model else None
 
     for k in range(num_turns):
-        prefix = aftraj_to_trajectory(turns_raw, up_to=k)
+        prefix = aftraj_to_messages(turns_raw, up_to=k)
         new_turn = prefix[-1]
 
         if idx is not None and index_model is not None:

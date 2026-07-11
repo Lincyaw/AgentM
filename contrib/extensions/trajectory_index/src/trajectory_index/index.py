@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from hashlib import sha1
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 type MetadataValue = str | int | float | bool | None
 type NameKey = tuple[str, str]
@@ -301,6 +301,34 @@ def grounded_from_kind(kind: str) -> bool:
     grounded during dependency build if it copies a prior grounded value.
     """
     return kind in _PRODUCING_KINDS
+
+
+def _message_step_content(msg: dict[str, object]) -> tuple[str, str | None]:
+    """Extract text content and tool name from a trace message dict."""
+    parts: list[str] = []
+    tool_name: str | None = None
+    blocks = msg.get("content", [])
+    if not isinstance(blocks, list):
+        return "", None
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            parts.append(str(block.get("text", "")))
+        elif btype == "tool_call":
+            name = block.get("name")
+            tool_name = str(name) if name is not None else None
+            args = block.get("arguments", block.get("input", {}))
+            arg_text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+            parts.append(f"[tool_call: {tool_name}]\n{arg_text}")
+        elif btype == "tool_result":
+            sub = block.get("content", [])
+            if isinstance(sub, list):
+                parts.extend(str(s.get("text", "")) for s in sub if isinstance(s, dict))
+            else:
+                parts.append(str(sub))
+    return "\n".join(part for part in parts if part), tool_name
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +777,77 @@ class TrajectoryIndex:
         if ids:
             return self.symbols[sorted(ids)[0]]
         return None
+
+    def populate_from_extraction(
+        self,
+        result: Any,
+        messages: list[Any],
+        *,
+        run_id: str = "",
+        namespace_fn: Any | None = None,
+        reference_confidence: float = 0.8,
+    ) -> None:
+        """Populate index from an extraction result and source messages.
+
+        ``result`` must have a ``.symbols`` attribute (list of extracted symbols).
+        ``messages`` can be typed ``AgentMessage`` objects or pre-serialized dicts.
+        ``namespace_fn(run_id, sym_dict) -> str`` optionally scopes symbols.
+        """
+        from .data import _build_references
+
+        if messages and not isinstance(messages[0], dict):
+            from .atom import _agentmsg_to_extraction_dict
+            messages = [
+                d for i, m in enumerate(messages)
+                if (d := _agentmsg_to_extraction_dict(m, i))
+            ]
+
+        role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}
+        base_idx = len(self.steps)
+        steps_by_id: dict[str, Step] = {}
+
+        for i, msg in enumerate(messages):
+            mid = str(msg.get("id", f"s{base_idx + i}"))
+            role = role_map.get(str(msg.get("role", "")), StepRole.USER)
+            content, tool_name = _message_step_content(msg)
+            step = Step(
+                run_id=run_id,
+                step_id=mid,
+                index=int(mid) if mid.isdigit() else base_idx + i,
+                role=role,
+                content=content,
+                tool_name=tool_name,
+            )
+            self.add_step(step)
+            steps_by_id[mid] = step
+
+        for ext_sym in result.symbols:
+            sym_dict = {"name": ext_sym.name, "kind": ext_sym.kind, "aliases": getattr(ext_sym, "aliases", None) or []}
+            ns = namespace_fn(run_id, sym_dict) if namespace_fn else ""
+            self.upsert_symbol(
+                name=ext_sym.name,
+                kind=ext_sym.kind.lower(),
+                summary=ext_sym.summary,
+                aliases=getattr(ext_sym, "aliases", None) or [],
+                namespace=ns,
+                entity_class=getattr(ext_sym, "entity_class", "identifier"),
+            )
+
+        all_syms = self.registry_snapshot()
+        namespaces = {str(s["name"]): namespace_fn(run_id, s) if namespace_fn else "" for s in all_syms}
+        refs, _rels = _build_references(all_syms, messages)
+        for ref in refs:
+            sym = self.resolve_symbol_by_name(
+                ref.symbol_name,
+                namespace=namespaces.get(ref.symbol_name, ""),
+            )
+            step = steps_by_id.get(ref.turn_id)
+            if sym and step:
+                self.add_reference(
+                    symbol=sym, step=step, text=ref.text,
+                    kind=ref.kind, start=ref.start,
+                    confidence=reference_confidence,
+                )
 
     def stats(self, run_id: str = "") -> IndexStats:
         return IndexStats(
