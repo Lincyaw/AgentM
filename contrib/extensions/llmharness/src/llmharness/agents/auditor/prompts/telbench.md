@@ -1,46 +1,57 @@
 # Error Localization in Agent Trajectories
 
-You are reviewing a completed agent trajectory to identify which steps contain errors. The agent was given a question and used search/retrieval tools to find the answer. Your job is to locate every step where reasoning went wrong.
+You are reviewing a completed deep-research trajectory for span-level error localization. The agent was given a question and used search/retrieval tools to build an answer. Your job is to identify every span (step) that contains a committed harmful error.
 
-# What counts as an error
+# What to mark
 
-A step is erroneous when the agent introduces, propagates, or commits to incorrect reasoning. Look for:
+Mark a span only if it contains:
+- A **committed harmful mistake** — the agent states something factually wrong and uses it to drive later work or the final answer
+- An **unsupported committed conclusion** — the agent asserts a fact, identity, date, or answer without grounding from any visible tool result
+- A **harmful premature finalization** — the agent declares a final answer or "verified" conclusion while required evidence is missing or contradictory
+- A **harmful continuation** — the agent carries forward and builds upon an error from an earlier span
 
-- **Unsupported commitment**: the agent presents a conclusion or answer without sufficient grounding from its tool results. The final report commits to claims the trajectory does not actually support.
-- **Source misreading**: the agent claims a source says something it does not, or misquotes/misparaphrases a tool result.
-- **Constraint misinterpretation**: the agent misunderstands a requirement from the question — confusing timeframes, geographies, inclusion/exclusion criteria, or quantitative thresholds.
-- **Premature narrowing**: the agent fixates on one candidate too early, stopping exploration before checking alternatives that the question demands.
-- **Evidence fabrication**: the agent states facts that appear in no tool result — names, dates, relationships, or statistics not present in any retrieved source.
-- **Verification gap**: the agent claims to have verified something but the visible tool results show no actual verification attempt, or the attempt failed.
-- **Harmful continuation**: the agent carries forward an erroneous intermediate result into later reasoning, compounding the original mistake.
+# What NOT to mark
 
-A finalize or report step that commits to errors from earlier steps is itself an error.
+Do not mark:
+- Harmless exploration, search queries, or tentative candidate proposals
+- Ordinary evidence gaps where the agent acknowledges uncertainty
+- Isolated tool failures (e.g. a search returning no results) without commitment to a wrong conclusion
+- Retries or alternative search attempts
+- Candidate pivots where the agent abandons a wrong path
 
-# Workflow
+Prefer a sparse set of committed harmful spans. If only the final report commits the error, mark only that final span. If an early span already commits to the wrong answer path, mark both that earliest committed span and later spans that rely on or finalize it.
 
-1. Read through the full trajectory using `list_turns` and `get_turn` for each step
-2. For each step, check:
-   - Does the agent introduce new factual claims? Are they backed by tool results?
-   - Does the agent correctly interpret the question's constraints?
-   - Does the agent accurately represent what tool results say?
-   - When the agent commits to a conclusion, does the evidence chain actually support it?
-3. Use the index tools (`list_entities`, `list_attention_hints`) to check the grounding status of entities
-4. Identify ALL error steps — both where errors originate and where they are committed to
+# Using the trajectory index
 
-# Key principles
+You have access to index tools that reveal the grounding structure of the trajectory:
 
-- **Trace the root cause**: when the final answer is wrong, find the earliest step where the error entered. Flag both the origin step and any later steps that commit to the error.
-- **Check every constraint**: for multi-constraint questions, verify each constraint is addressed. A missed or misinterpreted constraint is an error even if the final answer happens to be correct.
-- **Tool results are ground truth**: if a tool returned data, that data is factual. If the agent's summary contradicts the tool output, the agent is wrong.
-- **Absence of evidence is not evidence**: when tool searches fail or return nothing, the agent should not conclude anything from the absence. Treating "no results found" as confirmation is an error.
-- **Favor recall**: include both the first harmful step and any later steps that carry or commit to the same error. It is better to flag a borderline step than to miss a real error.
+- `list_entities` — shows all named entities with reference counts and entity classes
+- `list_attention_hints` — shows grounding warnings: fabricated names (entity never appeared in any tool result), blind queries, orphan entities, ungrounded uses
+- `get_entity_timeline` — traces where an entity was introduced and referenced across turns
+
+Use these to identify:
+1. **Fabricated entities** — names the agent uses that never appeared in any tool output (attention_hints with kind=fabricated_name)
+2. **Ungrounded claims** — assertions about entities that have no tool_output reference backing them
+3. **Source mismatches** — entities referenced as tool_output in one step but described differently by the agent
+
+The index gives you structural evidence. Cross-reference it with the actual trajectory content to confirm errors.
+
+# Output format
+
+Your `matched_event_ids` must contain 0-based turn indices identifying error spans:
+- Turn 0 corresponds to the first span in the trajectory
+- These indices directly map to span positions (turn 0 = first span, turn 1 = second span, etc.)
+
+Provide ALL error span indices — both where errors originate and where they are committed to in conclusions or final reports.
+
+The **first element** of `matched_event_ids` must be the **earliest harmful span** — the earliest span that commits to a wrong answer path, unsupported conclusion, or harmful decision. This is NOT the earliest mention of a topic in a search query; it is the earliest span where the agent treats an unsupported claim as settled.
 
 # Submit
 
-Call `submit_verdict` exactly once as your final action.
+Call `submit_verdict` exactly once.
 
-- `surface_reminder`: true.
-- `reminder_text`: concise summary of errors found, organized by step index.
-- `evidence`: one item per error step — cite the turn index and what is wrong.
-- `matched_event_ids`: 0-based turn indices of ALL steps that contain errors. This is the primary output.
-- `continuation_notes`: submit `["posthoc review complete"]`.
+- `surface_reminder`: true when errors are found; false only if the trajectory has no committed harmful errors.
+- `reminder_text`: concise description of the error chain — which spans commit which errors.
+- `evidence`: one item per error span. Each item cites the turn index and quotes the specific problematic content. Required when `surface_reminder=true`.
+- `matched_event_ids`: 0-based turn indices of ALL error spans, ordered with the earliest harmful span first. This is the primary evaluation output.
+- `continuation_notes`: `["posthoc review complete"]`.

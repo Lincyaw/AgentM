@@ -181,8 +181,10 @@ def _score_telbench(all_results: list[dict[str, Any]]) -> dict[str, Any]:
 
     total_p, total_r, total_f1, n_fea = 0.0, 0.0, 0.0, 0
     for r in records:
-        gold = set(r.get("gold_error_indices", []))
-        pred = set(r.get("pred_span_indices", []))
+        gold_list = r.get("gold_error_indices", [])
+        pred_list = r.get("pred_span_indices", [])
+        gold = set(gold_list)
+        pred = set(pred_list)
         if not gold:
             continue
         tp = len(pred & gold)
@@ -192,7 +194,7 @@ def _score_telbench(all_results: list[dict[str, Any]]) -> dict[str, Any]:
         total_p += p
         total_r += rec
         total_f1 += f
-        if pred and min(pred) == min(gold):
+        if pred_list and gold_list and pred_list[0] == gold_list[0]:
             n_fea += 1
 
     n = len(records)
@@ -224,15 +226,21 @@ def _extract_pred_step(verdicts: list[dict[str, Any]], n_turns: int) -> int:
 
 
 def _extract_pred_spans(verdicts: list[dict[str, Any]]) -> list[int]:
-    """Extract predicted error span indices from auditor verdicts (for TELBench)."""
-    spans: set[int] = set()
+    """Extract predicted error span indices from auditor verdicts (for TELBench).
+
+    Preserves the order from the auditor's ``matched_event_ids`` (earliest
+    harmful span first) for FEA scoring, while deduplicating.
+    """
+    seen: set[int] = set()
+    ordered: list[int] = []
     for v in verdicts:
         if not v.get("surface_reminder"):
             continue
         for eid in v.get("matched_event_ids", []):
-            if isinstance(eid, int):
-                spans.add(eid)
-    return sorted(spans)
+            if isinstance(eid, int) and eid not in seen:
+                seen.add(eid)
+                ordered.append(eid)
+    return ordered
 
 
 # ---------------------------------------------------------------------------
