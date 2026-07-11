@@ -346,7 +346,7 @@ async def resolve_index(
     *,
     model: str | None = None,
 ) -> None:
-    """Run Pass 2 (alias + coreference) and Pass 3 + 3.5 (dataflow + value fidelity).
+    """Run Pass 2 (alias resolution) and Pass 3 + 3.5 (dataflow + value fidelity).
 
     Best-effort: any LLM pass that fails is skipped; the deterministic
     layers remain intact.
@@ -355,22 +355,15 @@ async def resolve_index(
     from trajectory_index.adjudicate import (
         compare_values,
         resolve_aliases,
-        resolve_references,
     )
 
     sf = AgentSession.create
 
     try:
         groups = await resolve_aliases(index, model=model, apply=True, session_factory=sf)
-        logger.info("Pass 2a: merged {} alias groups", len(groups))
+        logger.info("Pass 2: merged {} alias groups", len(groups))
     except Exception:
-        logger.warning("Pass 2a (alias resolution) failed, skipping", exc_info=True)
-
-    try:
-        n = await resolve_references(index, model=model, apply=True, session_factory=sf)
-        logger.info("Pass 2b: resolved {} anaphors", n)
-    except Exception:
-        logger.warning("Pass 2b (coreference) failed, skipping", exc_info=True)
+        logger.warning("Pass 2 (alias resolution) failed, skipping", exc_info=True)
 
     index.build_dependencies()
 
