@@ -232,6 +232,22 @@ def load_task(
         timeout_s = 7200
 
     meta = task_obj.metadata or {}
+    # The variant name drives every staged path (<root>/<domain>/<name>/<variant>).
+    # Prefer an explicit key, but most tasks don't set one and instead encode the
+    # real variant only in their metadata *paths* (task_dir/input_dir =
+    # .../<name>/<variant>/...). Deriving it from there — rather than defaulting
+    # to "base" — is essential for the non-"base" tasks (e.g. zscaler_fy2025,
+    # n10_critical_u01_correlators), whose data lives under that real variant dir
+    # and whose grader reads input_dir from it.
+    variant_name = str(meta.get("variant") or meta.get("VARIANT_NAME") or "")
+    if not variant_name:
+        marker = f"/{name}/"
+        for key in ("task_dir", "input_dir", "software_dir", "output_dir"):
+            p = meta.get(key)
+            if isinstance(p, str) and marker in p:
+                variant_name = p.split(marker, 1)[1].split("/", 1)[0]
+                break
+        variant_name = variant_name or "base"
     return AleTask(
         domain=domain,
         name=name,
@@ -241,7 +257,7 @@ def load_task(
         module=module,
         task_dir=task_dir,
         timeout_s=timeout_s,
-        variant_name=str(meta.get("variant") or meta.get("VARIANT_NAME") or "base"),
+        variant_name=variant_name,
         card=card,
     )
 
