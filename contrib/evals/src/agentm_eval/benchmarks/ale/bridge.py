@@ -36,11 +36,17 @@ import posixpath
 import sys
 import tarfile
 import types
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from loguru import logger
+
+try:  # long grader commands (uv sync + sims) outlive the execute HTTP window
+    from arl import GatewayOperationTimeout
+except Exception:  # pragma: no cover - older SDKs
+    GatewayOperationTimeout = ()  # type: ignore[assignment]
 
 # Remote root for staged task data inside the ARL pod. Lives under the
 # workspace volume so arl upload/download (workspace-relative) can reach it
@@ -302,13 +308,62 @@ class ArlGraderSession:
             "command": ["bash", "-lc", command],
         }
         if timeout and timeout > 0:
-            step["timeout_seconds"] = int(timeout)
-        resp = await self._thread(self._session.execute, [step])
+            # The gateway reads the camelCase key (StepRequest json tag
+            # "timeoutSeconds"); execute() forwards the raw dict unvalidated,
+            # so a snake_case key would be silently dropped and the command
+            # would inherit the short default sidecar deadline instead.
+            step["timeoutSeconds"] = int(timeout)
+        op_id = str(uuid.uuid4())
+        try:
+            resp = await self._thread(
+                self._session.execute, [step], operation_id=op_id
+            )
+        except GatewayOperationTimeout as exc:
+            # The command outlived the execute HTTP window (e.g. a grader's
+            # `uv sync` + simulation). The op keeps running server-side; poll
+            # its operation_id until it finishes instead of scoring a false 0.
+            resp = await self._poll_operation(
+                getattr(exc, "operation_id", op_id) or op_id, timeout=timeout
+            )
         exit_code, stdout, stderr = _decode_result(resp)
         return CommandResult(
             success=exit_code == 0, stdout=stdout, stderr=stderr,
             return_code=exit_code,
         )
+
+    async def _poll_operation(self, op_id: str, *, timeout: float | None = None):
+        """Wait for a pending execute operation to complete and return its
+        ExecuteResponse. Polls the gateway's operation endpoint; the op is done
+        once ``result`` is populated (even on non-zero exit), and an ``error``
+        means infra failure."""
+        client = getattr(self._session, "_client", None)
+        sid = getattr(self._session, "session_id", None)
+        if client is None or sid is None:
+            raise RuntimeError(
+                "execute operation timed out and this session cannot poll it"
+            )
+        # Poll a bit past the command's own timeout; default generously since
+        # graders run offline sims that legitimately take many minutes.
+        ceiling = float(timeout) if timeout and timeout > 0 else 3600.0
+        deadline = ceiling + 120.0
+        waited = 0.0
+        interval = 5.0
+        while True:
+            info = await self._thread(client.get_execute_operation, sid, op_id)
+            if getattr(info, "result", None) is not None:
+                return info.result
+            err = getattr(info, "error", "") or ""
+            status = (getattr(info, "status", "") or "").lower()
+            if err or status in ("failed", "error", "cancelled", "canceled"):
+                raise RuntimeError(
+                    f"execute operation {op_id} failed: {err or status}"
+                )
+            if waited >= deadline:
+                raise RuntimeError(
+                    f"execute operation {op_id} still pending after {waited:.0f}s"
+                )
+            await asyncio.sleep(interval)
+            waited += interval
 
     # -- API used by task hooks ------------------------------------------
 
