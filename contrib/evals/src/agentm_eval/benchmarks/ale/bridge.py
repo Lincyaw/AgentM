@@ -467,7 +467,14 @@ class ArlGraderSession:
     async def list_dir(self, path: str) -> list[str]:
         result = await self._exec(f"ls -1A {_q(path)}")
         if not result.success:
-            return []
+            return []  # non-existent path → empty listing
+        # `ls -1A <file>` prints the file's own name, not a directory listing;
+        # callers that recurse on "listable" (e.g. cvrp's _download_remote_tree)
+        # would then treat a file as a dir and build bogus paths. Match
+        # os.listdir semantics: raise on a non-directory so they fall back to
+        # downloading it as a file.
+        if not (await self._exec(f"test -d {_q(path)}")).success:
+            raise NotADirectoryError(path)
         return [line for line in result.stdout.splitlines() if line]
 
     async def screenshot(self, *args: Any, **kwargs: Any) -> None:
