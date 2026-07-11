@@ -634,3 +634,23 @@ numbers — do not change prompts mid-run):
   in-repo test the task is changing) and the agent/deriver framing (a
   green run of a stale test is not "done"). Keep it principle-level, no
   case specifics — same anti-overfit discipline as the committed change.
+
+## 2026-07-11 — tau2-bench evaluation parity investigation
+
+- **User sim model profile fix** (L2: codebase convention). User sim was using
+  the agent's model profile (azure-chat) instead of a dedicated one. Created
+  `tau2-user-sim` config.toml profile. Fixed atom + session env setup.
+  Result: user sim errors 40→0, evaluator errors eliminated.
+- **Evaluator litellm provider prefix** (L2: same root cause). `TAU2_LLM_NL_ASSERTIONS`
+  needed `openai/` prefix for litellm routing. Committed bbcf0117.
+- **tau2 config.py temperature override** (L3: external research). tau2 hardcodes
+  `temperature=0.0` for NL evaluator/env_interface, but GPT 5.5's API rejects
+  temperature=0. Added env-var overrides (`TAU2_LLM_NL_ASSERTIONS_TEMPERATURE`,
+  `TAU2_LLM_ENV_INTERFACE_TEMPERATURE`) with conditional dict emission.
+- **[flagged] 74% pass rate is parity with native tau2** (L4: north-star reasoning).
+  Ran native tau2 with identical endpoints on our 30 failed tasks: 15/30 pass.
+  Head-to-head on 20 shared tasks: both atom and native score 15/20, but on
+  DIFFERENT tasks (non-determinism). The 13pp gap (74% atom vs ~87% native
+  projected) is stochastic variance at temperature=1, not a systematic atom bug.
+  Confirmed: same user sim args, same agent model, same conversation lengths.
+  Improving further requires multiple trials.
