@@ -143,8 +143,6 @@ async def _run_sessions(
                     seen.add(norm)
                     new_symbols.append(sym)
                     entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
-                    if sym.summary:
-                        entry["summary"] = sym.summary
                     if sym.aliases:
                         entry["aliases"] = sym.aliases
                     registry.append(entry)
@@ -152,7 +150,7 @@ async def _run_sessions(
             n_new = len(new_symbols)
             stats_snap = idx.stats(sid)
             symbols_data = [
-                {"name": s.name, "kind": s.kind, "entity_class": s.entity_class, "summary": s.summary}
+                {"name": s.name, "kind": s.kind, "entity_class": s.entity_class}
                 for s in new_symbols
             ]
             exp.write_session_artifact(sid, "index", f"chunk_{n_chunks:03d}.json", {

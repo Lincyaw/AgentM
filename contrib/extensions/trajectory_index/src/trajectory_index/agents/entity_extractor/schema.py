@@ -7,10 +7,6 @@ from pydantic import BaseModel, Field
 class ExtractedSymbol(BaseModel):
     name: str = Field(description="Canonical symbol name")
     kind: str = Field(description="Symbol kind from the vocabulary")
-    summary: str | None = Field(
-        default=None,
-        description="Short phrase for disambiguation when the name alone is ambiguous. Omit when the name is self-explanatory.",
-    )
     aliases: list[str] = Field(default_factory=list, description="Alternative surface forms")
     entity_class: str = Field(
         default="identifier",

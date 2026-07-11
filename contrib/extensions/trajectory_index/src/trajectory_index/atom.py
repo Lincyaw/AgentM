@@ -451,7 +451,6 @@ def _populate_index(
         index.upsert_symbol(
             name=ext_sym.name,
             kind=ext_sym.kind.lower(),
-            summary=ext_sym.summary,
             aliases=ext_sym.aliases,
             entity_class=ext_sym.entity_class,
         )

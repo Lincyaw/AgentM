@@ -240,8 +240,6 @@ async def extract_symbols(
             if norm not in seen:
                 seen.add(norm)
                 entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
-                if sym.summary:
-                    entry["summary"] = sym.summary
                 if sym.aliases:
                     entry["aliases"] = sym.aliases
                 registry.append(entry)

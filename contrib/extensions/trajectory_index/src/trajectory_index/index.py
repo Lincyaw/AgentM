@@ -760,8 +760,6 @@ class TrajectoryIndex:
                 "kind": s.kind,
                 "entity_class": s.entity_class,
             }
-            if s.summary:
-                entry["summary"] = s.summary
             if s.aliases:
                 entry["aliases"] = sorted(s.aliases)
             out.append(entry)
@@ -827,7 +825,6 @@ class TrajectoryIndex:
             self.upsert_symbol(
                 name=ext_sym.name,
                 kind=ext_sym.kind.lower(),
-                summary=ext_sym.summary,
                 aliases=getattr(ext_sym, "aliases", None) or [],
                 namespace=ns,
                 entity_class=getattr(ext_sym, "entity_class", "identifier"),

@@ -33,5 +33,4 @@ If an entity appears under multiple surface forms, pick the most canonical as `n
 
 - Output valid JSON only. No markdown fences, no explanation.
 - Every symbol needs a `kind` from the vocabulary and an `entity_class`.
-- `summary` is optional — include only when the name alone is ambiguous.
 - Prefer specific names over generic descriptions.
