@@ -42,11 +42,14 @@ def _match_known_symbol(
     name: str,
     registry: list[dict[str, Any]],
     min_len: int = 3,
+    min_ratio: float = 0.6,
 ) -> dict[str, Any] | None:
     """Find an existing registry entry by exact normalized match or substring.
 
     Conservative: only matches when one name contains the other (after
-    normalization). No fuzzy similarity — that is Pass 2's job.
+    normalization) AND the shorter name is at least ``min_ratio`` of the
+    longer name's length. This prevents short substrings (e.g. ``abn``)
+    from absorbing unrelated longer names.
     """
     from trajectory_index.index import normalize_name
 
@@ -54,22 +57,36 @@ def _match_known_symbol(
     if len(norm) < min_len:
         return None
 
+    def _substr_ok(a: str, b: str) -> bool:
+        """Check substring containment at token boundaries with length guard."""
+        if a in b:
+            shorter, longer = a, b
+        elif b in a:
+            shorter, longer = b, a
+        else:
+            return False
+        if len(shorter) < min_len or len(shorter) / len(longer) < min_ratio:
+            return False
+        # Must match at a token boundary (start/end of string or after _./-)
+        idx = longer.find(shorter)
+        at_start = idx == 0 or longer[idx - 1] in "_.-/"
+        at_end = idx + len(shorter) == len(longer) or longer[idx + len(shorter)] in "_.-/"
+        return at_start and at_end
+
     for entry in registry:
         canonical = str(entry.get("name", ""))
         entry_norm = normalize_name(canonical)
         if not entry_norm or entry_norm == norm:
             continue
 
-        # Substring containment (either direction)
-        if len(entry_norm) >= min_len and (norm in entry_norm or entry_norm in norm):
+        if _substr_ok(norm, entry_norm):
             return entry
 
-        # Check aliases
         for alias in entry.get("aliases", []):
             alias_norm = normalize_name(str(alias))
             if alias_norm == norm:
                 return entry
-            if len(alias_norm) >= min_len and (norm in alias_norm or alias_norm in norm):
+            if _substr_ok(norm, alias_norm):
                 return entry
 
     return None
