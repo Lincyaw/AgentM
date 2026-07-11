@@ -54,19 +54,6 @@ class IndexEvalAdapter:
 
             asyncio.run(_run_sessions(sids, model=model, chunk_size=parsed_chunk, vocabulary=vocabulary, exp=exp))
 
-        @cli.command()
-        def inspect(
-            session_id: Annotated[str, typer.Argument(help="Session ID")],
-            model: Annotated[str, typer.Option()] = "azure-gpt",
-            chunk_size: Annotated[str | None, typer.Option("--chunk-size")] = "3-6",
-            vocabulary: Annotated[str, typer.Option()] = "default",
-        ) -> None:
-            """Extract and dump the index for a single session (no experiment)."""
-            from agentm.env import autoload_dotenv
-            autoload_dotenv()
-
-            asyncio.run(_inspect_one(session_id, model=model, chunk_size=_parse_chunk_size(chunk_size), vocabulary=vocabulary))
-
         return cli
 
 
@@ -215,77 +202,6 @@ async def _run_sessions(
     typer.echo(f"Experiment: {exp.exp_id} → {exp.output_dir}")
 
 
-async def _inspect_one(
-    session_id: str, *, model: str, chunk_size: tuple[int, int] | None, vocabulary: str,
-) -> None:
-    from agentm_eval.methods.index import (
-        _chunk_messages,
-        _prescan_structural,
-        _run_one,
-        resolve_index,
-    )
-    from trajectory_index.index import TrajectoryIndex, normalize_name
-
-    messages = await _load_messages(session_id)
-    typer.echo(f"Loaded {len(messages)} messages from {session_id}")
-
-    idx = TrajectoryIndex()
-    registry: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    if chunk_size is None:
-        raw_chunks = [type("C", (), {"start": 0, "messages": messages})]
-    else:
-        raw_chunks = _chunk_messages(messages, chunk_size)
-
-    for ci, chunk in enumerate(raw_chunks):
-        chunk_registry, _structural = _prescan_structural(
-            chunk.messages, registry if registry else None, seen,
-        )
-        try:
-            result = await _run_one(
-                chunk.messages, model=model, vocabulary=vocabulary,
-                registry=chunk_registry if chunk_registry else None,
-                message_id_start=chunk.start, cwd=None,
-            )
-        except Exception:
-            typer.echo(f"  chunk {ci+1} extraction failed", err=True)
-            continue
-        if result is None:
-            typer.echo(f"  chunk {ci+1} no parseable result", err=True)
-            continue
-
-        n = len(result.symbols)
-        idx.populate_from_extraction(result, chunk.messages, run_id=session_id)
-        await resolve_index(idx, model=model)
-
-        for sym in result.symbols:
-            norm = normalize_name(sym.name)
-            if norm not in seen:
-                seen.add(norm)
-                entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
-                if sym.summary:
-                    entry["summary"] = sym.summary
-                if sym.aliases:
-                    entry["aliases"] = sym.aliases
-                registry.append(entry)
-
-        stats_snap = idx.stats(session_id)
-        syms = ", ".join(s.name for s in result.symbols[:5])
-        if n > 5:
-            syms += f", ... (+{n - 5})"
-        typer.echo(
-            f"  chunk {ci+1}: {len(chunk.messages)} msgs → {n} new symbols [{syms}] "
-            f"(total: {stats_snap.symbol_count} syms, {stats_snap.reference_count} refs, "
-            f"{stats_snap.dependency_count} deps)"
-        )
-
-    stats = idx.stats(session_id)
-    typer.echo(f"\nIndex: {stats.symbol_count} symbols, {stats.reference_count} refs, {stats.dependency_count} deps")
-
-    typer.echo("\nSymbols:")
-    for sym in sorted(idx.symbols.values(), key=lambda s: s.canonical_name):
-        typer.echo(f"  {sym.kind:12s} {sym.entity_class:10s} {sym.canonical_name}")
 
 
 register("index", IndexEvalAdapter.description, IndexEvalAdapter)
