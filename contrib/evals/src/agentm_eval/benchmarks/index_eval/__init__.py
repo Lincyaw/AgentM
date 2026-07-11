@@ -129,18 +129,19 @@ async def _run_sessions(
                 continue
 
             n_chunks += 1
-            n_new = len(result.symbols)
 
             idx.populate_from_extraction(result, chunk.messages, run_id=sid)
 
             # Pass 2+3 after each chunk (matches online behavior)
             await resolve_index(idx, model=model)
 
-            # Accumulate registry for next chunk
+            # Accumulate registry for next chunk; track truly new symbols
+            new_symbols = []
             for sym in result.symbols:
                 norm = normalize_name(sym.name)
                 if norm not in seen:
                     seen.add(norm)
+                    new_symbols.append(sym)
                     entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
                     if sym.summary:
                         entry["summary"] = sym.summary
@@ -148,10 +149,11 @@ async def _run_sessions(
                         entry["aliases"] = sym.aliases
                     registry.append(entry)
 
+            n_new = len(new_symbols)
             stats_snap = idx.stats(sid)
             symbols_data = [
                 {"name": s.name, "kind": s.kind, "entity_class": s.entity_class, "summary": s.summary}
-                for s in result.symbols
+                for s in new_symbols
             ]
             exp.write_session_artifact(sid, "index", f"chunk_{n_chunks:03d}.json", {
                 "chunk": n_chunks,
