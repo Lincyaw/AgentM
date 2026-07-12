@@ -275,6 +275,7 @@ class AuditorEvalAdapter:
             domain: Annotated[str | None, typer.Option("--domain", help="AFTraj domain filter")] = None,
             enable_claim_analysis: Annotated[bool, typer.Option("--claim-analysis/--no-claim-analysis", help="Enable Level 2 claim analysis")] = False,
             enable_constraints: Annotated[bool, typer.Option("--constraints/--no-constraints", help="Enable constraint satisfaction analysis (needs question metadata; TELBench only)")] = False,
+            constraint_rendering: Annotated[str, typer.Option("--constraint-rendering", help="How constraint findings render to the auditor: verdict | facts")] = "verdict",
             case_file: Annotated[Path | None, typer.Option("--case-file", help="File with case IDs to run (one per line)")] = None,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
@@ -325,6 +326,7 @@ class AuditorEvalAdapter:
                 concurrency=concurrency,
                 claim_analysis=enable_claim_analysis,
                 constraint_analysis=enable_constraints,
+                constraint_rendering=constraint_rendering,
             ))
 
         return cli
@@ -345,6 +347,18 @@ def _parse_chunk_size(value: str | None) -> tuple[int, int] | None:
 def _index_to_context(idx: Any) -> dict[str, Any]:
     from agentm_eval.methods.auditor import index_to_context
     return index_to_context(idx)
+
+
+def _load_constraint_artifact(exp: Experiment, tid: str) -> dict[str, Any] | None:
+    """Load the constraint analysis record (transcript + prune log) if present."""
+    path = exp.session_dir(tid) / "constraints.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        typer.echo(f"  {tid}: constraints.json unreadable: {exc}", err=True)
+        return None
 
 
 async def _run_constraint_analysis(
@@ -369,13 +383,38 @@ async def _run_constraint_analysis(
         typer.echo(f"  {tid}: constraint analysis failed: {exc}", err=True)
 
 
-def _merge_constraint_context(context: dict[str, Any], idx: Any) -> None:
-    """Surface constraint findings to the auditor: attention hints + a
-    structured block rendered into the system prompt."""
-    context["attention_hints"] = [
-        *context.get("attention_hints", []),
-        *idx.constraint_attention(),
-    ]
+def _merge_constraint_context(
+    context: dict[str, Any], idx: Any, *,
+    rendering: str = "verdict",
+    artifact: dict[str, Any] | None = None,
+) -> None:
+    """Surface constraint findings to the auditor.
+
+    ``rendering="verdict"``: status labels + attention hints (legacy mode,
+    kept as the A arm of the rendering A/B).
+    ``rendering="facts"``: evidence-shaped fact blocks with the localization
+    fact set and a mandatory coverage statement — no designated error step,
+    no verdict labels for ungated (oracle-judged) kinds.
+    """
+    if rendering == "verdict":
+        context["attention_hints"] = [
+            *context.get("attention_hints", []),
+            *idx.constraint_attention(),
+        ]
+    context["constraint_rendering"] = rendering
+
+    transcript = (artifact or {}).get("transcript", [])
+    prune_log = (artifact or {}).get("prune_log", [])
+    entails_detail = {
+        t["key"]: str(t.get("detail", ""))
+        for t in transcript if t.get("relation") == "entails"
+    }
+    final_commit_step = next(
+        (t["key"] for t in transcript
+         if t.get("relation") == "commit" and t.get("verdict")),
+        None,
+    )
+
     context["constraint_findings"] = [
         {
             "constraint_id": f.constraint_id,
@@ -383,16 +422,49 @@ def _merge_constraint_context(context: dict[str, Any], idx: Any) -> None:
                 idx.constraints[f.constraint_id].description
                 if f.constraint_id in idx.constraints else f.constraint_id
             ),
+            "machine_checkable": (
+                idx.constraints[f.constraint_id].normalized is not None
+                if f.constraint_id in idx.constraints else False
+            ),
             "candidate": f.candidate,
             "status": f.status,
             "evidence_step_ids": list(f.evidence_step_ids),
-            "commit_step_id": f.commit_step_id,
+            # localization FACT SET — consumers must not treat any single
+            # entry as "the" error step (two anchor conventions failed gold
+            # validation)
+            "first_assertion_step_id": f.first_assertion_step_id or f.commit_step_id,
+            "final_commit_step_id": f.commit_step_id or final_commit_step,
+            "quote": entails_detail.get(f.constraint_id, ""),
             "confidence": f.confidence,
             "confidence_source": f.confidence_source,
             "reason": f.reason,
         }
         for f in idx.constraint_findings
     ]
+
+    # Coverage statement (P2 extended to the presentation layer): what ran,
+    # what abstained, what was pruned — so absence of a note is never read
+    # as absence of a problem.
+    status_counts: dict[str, int] = {}
+    for f in idx.constraint_findings:
+        status_counts[f.status] = status_counts.get(f.status, 0) + 1
+    abstentions = sorted({
+        f.reason for f in idx.constraint_findings
+        if f.status == "unknown" and f.reason
+    })
+    prune_counts: dict[str, int] = {}
+    for p in prune_log:
+        stage = str(p.get("stage", "?"))
+        prune_counts[stage] = prune_counts.get(stage, 0) + 1
+    n_grounded = sum(
+        1 for s in idx.steps.values() if s.role == "tool_result" and s.content
+    )
+    context["constraint_coverage"] = {
+        "status_counts": status_counts,
+        "abstention_reasons": abstentions[:6],
+        "prune_counts": prune_counts,
+        "n_grounded_steps": n_grounded,
+    }
 
 
 async def _run_claim_analysis(
@@ -437,6 +509,7 @@ async def _process_one_item(
     rebuild_index: bool,
     claim_analysis: bool = False,
     constraint_analysis: bool = False,
+    constraint_rendering: str = "verdict",
 ) -> dict[str, Any]:
     """Process a single trajectory: index extraction + (optional) claim analysis + auditor."""
     from agentm_eval.methods.auditor import run_auditor
@@ -470,7 +543,10 @@ async def _process_one_item(
 
         context = _index_to_context(idx)
         if idx.constraint_findings:
-            _merge_constraint_context(context, idx)
+            _merge_constraint_context(
+                context, idx, rendering=constraint_rendering,
+                artifact=_load_constraint_artifact(exp, tid),
+            )
         if claim_analysis:
             context = await _run_claim_analysis(messages, idx, context, model)
         try:
@@ -558,7 +634,10 @@ async def _process_one_item(
             constraints_ran = True
         context = _index_to_context(idx)
         if idx.constraint_findings:
-            _merge_constraint_context(context, idx)
+            _merge_constraint_context(
+                context, idx, rendering=constraint_rendering,
+                artifact=_load_constraint_artifact(exp, tid),
+            )
         if claim_analysis:
             context = await _run_claim_analysis(trajectory_prefix, idx, context, model)
 
@@ -635,6 +714,7 @@ async def _run_pipeline(
     concurrency: int = 1,
     claim_analysis: bool = False,
     constraint_analysis: bool = False,
+    constraint_rendering: str = "verdict",
 ) -> None:
     total = len(items)
     sem = asyncio.Semaphore(concurrency)
@@ -651,6 +731,7 @@ async def _run_pipeline(
                 exp=exp, rebuild_index=rebuild_index,
                 claim_analysis=claim_analysis,
                 constraint_analysis=constraint_analysis,
+                constraint_rendering=constraint_rendering,
             )
         async with lock:
             all_results.append(result_dict)

@@ -735,10 +735,16 @@ def _emit_findings(
     commit: Commit,
     steps: list[Step],
 ) -> list[ConstraintFinding]:
-    """Pass L: violated/omitted anchor at the first assertion of the
-    committed binding (see :func:`_first_assertion_step`); verified anchors
-    at its evidence steps."""
-    anchor = _first_assertion_step(steps, commit)
+    """Pass L: emit localization FACTS, never a designated error step.
+
+    Two code-heuristic anchor conventions failed their gold-validation gate
+    on TELBench (final restatement: 10/40 gold hits; first assertion: 7/39)
+    — localization is a semantic judgment that belongs to the auditor. Each
+    finding therefore carries the fact set {first assertion step, final
+    commitment step, evidence steps} and the consumer decides what to make
+    of it (P7: anchors are per-benchmark empirical, and none has passed).
+    """
+    first_assert = _first_assertion_step(steps, commit)
     findings: list[ConstraintFinding] = []
     for c in constraints:
         v = verdicts.get(c.id, _UNKNOWN)
@@ -747,9 +753,8 @@ def _emit_findings(
             candidate=commit.binding,
             status=v.status,
             evidence_step_ids=v.evidence_step_ids,
-            commit_step_id=(
-                anchor.step_id if v.status in ("violated", "omitted") else None
-            ),
+            commit_step_id=commit.step.step_id,
+            first_assertion_step_id=first_assert.step_id,
             confidence=round(v.confidence, 3),
             confidence_source=v.source,
             reason=v.reason,

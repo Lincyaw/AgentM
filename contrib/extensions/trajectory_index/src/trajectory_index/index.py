@@ -216,7 +216,8 @@ class ConstraintFinding:
     candidate: str
     status: FindingStatus
     evidence_step_ids: tuple[str, ...] = ()
-    commit_step_id: str | None = None
+    commit_step_id: str | None = None            # final commitment step (fact)
+    first_assertion_step_id: str | None = None   # earliest assertion of the binding (fact)
     confidence: float = 1.0
     confidence_source: str = ""      # "code" | "oracle:<relation>"
     reason: str = ""
@@ -1042,7 +1043,7 @@ class TrajectoryIndex:
                 "kind": f"constraint_{f.status}",
                 "summary": summary,
                 "symbol": f.candidate,
-                "step_id": f.commit_step_id or "",
+                "step_id": f.first_assertion_step_id or f.commit_step_id or "",
             })
         return out
 
@@ -1185,6 +1186,7 @@ class TrajectoryIndex:
                 "status": f.status,
                 "evidence_step_ids": list(f.evidence_step_ids),
                 "commit_step_id": f.commit_step_id,
+                "first_assertion_step_id": f.first_assertion_step_id,
                 "confidence": f.confidence,
                 "confidence_source": f.confidence_source,
                 "reason": f.reason,
@@ -1424,6 +1426,10 @@ class TrajectoryIndex:
                 commit_step_id=(
                     f.get("commit_step_id")
                     if isinstance(f.get("commit_step_id"), str) else None
+                ),
+                first_assertion_step_id=(
+                    f.get("first_assertion_step_id")
+                    if isinstance(f.get("first_assertion_step_id"), str) else None
                 ),
                 confidence=float(f.get("confidence", 1.0)),
                 confidence_source=str(f.get("confidence_source", "")),

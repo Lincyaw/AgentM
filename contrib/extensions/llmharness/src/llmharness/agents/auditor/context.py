@@ -40,6 +40,103 @@ def load_auditor_prompt(name: str = "index") -> str:
 # ---------------------------------------------------------------------------
 
 
+_FACTS_CAP = 16  # findings rendered in full; beyond this, capped WITH a "K of N" note
+
+
+def _render_constraint_facts(context_index: dict[str, Any]) -> str:
+    """Evidence-shaped constraint rendering (the "facts" arm).
+
+    Contract (from the index-as-hints review): no designated error step —
+    a localization fact set instead; no verdict labels for oracle-judged
+    kinds (only code-decided checks state outcomes); equal detail budget
+    for supportive and adverse facts; a mandatory coverage statement so
+    absence of a note is never read as absence of a problem.
+    """
+    findings = context_index.get("constraint_findings") or []
+    coverage = context_index.get("constraint_coverage") or {}
+
+    lines: list[str] = []
+    lines.append(
+        "\nConstraint evidence notes (automated index checks — ADVISORY ONLY: "
+        "they may be incomplete or wrong, and none of the step numbers below "
+        "is a designated error location. The trajectory text is authoritative; "
+        "verify before relying on any note.)"
+    )
+
+    first = findings[0]
+    binding = first.get("candidate", "")
+    fa = first.get("first_assertion_step_id")
+    fc = first.get("final_commit_step_id")
+    commit_line = f"Committed answer: '{binding}'"
+    steps_facts = []
+    if fa:
+        steps_facts.append(f"first asserted at step {fa}")
+    if fc and fc != fa:
+        steps_facts.append(f"final statement at step {fc}")
+    if steps_facts:
+        commit_line += " — " + ", ".join(steps_facts)
+    lines.append(commit_line)
+
+    shown = findings[:_FACTS_CAP]
+    for f in shown:
+        desc = str(f.get("description", ""))
+        lines.append(f"  - constraint: {desc}")
+        ev = f.get("evidence_step_ids") or []
+        status = f.get("status", "unknown")
+        src = str(f.get("confidence_source", ""))
+        reason = str(f.get("reason", ""))
+        quote = str(f.get("quote", ""))
+
+        if ev:
+            lines.append(f"      evidence steps: {', '.join(str(e) for e in ev)}")
+        if src == "code" and status in ("verified", "violated"):
+            # code-decided (gated): the outcome is a fact
+            lines.append(f"      code check: {reason}")
+        elif status in ("verified", "violated"):
+            # oracle-judged (ungated): report the check's raw outcome, not a label
+            outcome = "supports it" if status == "verified" else "conflicts with it"
+            note = f"      index entailment check over the mapped steps {outcome}"
+            if quote:
+                note += f" ({quote[:160]})"
+            elif reason:
+                note += f" ({reason[:160]})"
+            lines.append(note)
+        elif status == "omitted":
+            lines.append(
+                "      no evidence located by index checks "
+                f"({reason[:160] if reason else 'lexical and coverage checks negative'}) "
+                "— may also mean the checks missed it; verify independently"
+            )
+        else:
+            lines.append(
+                f"      not settled by index checks ({reason[:160] if reason else 'no verdict'})"
+            )
+
+    cov_parts: list[str] = []
+    counts = coverage.get("status_counts") or {}
+    if counts:
+        cov_parts.append(
+            "constraints by check outcome: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        )
+    n_grounded = coverage.get("n_grounded_steps")
+    if n_grounded is not None:
+        cov_parts.append(f"evidence universe: {n_grounded} tool-output steps")
+    prunes = coverage.get("prune_counts") or {}
+    if prunes:
+        cov_parts.append(
+            "steps excluded by blocking: "
+            + ", ".join(f"{k}:{v}" for k, v in sorted(prunes.items()))
+        )
+    if len(findings) > len(shown):
+        cov_parts.append(f"showing {len(shown)} of {len(findings)} findings")
+    abst = coverage.get("abstention_reasons") or []
+    lines.append("Coverage: " + ("; ".join(cov_parts) if cov_parts else "n/a"))
+    for a in abst:
+        lines.append(f"  abstained: {a}")
+    return "\n".join(lines)
+
+
 def _build_index_summary(context_index: dict[str, Any]) -> str:
     """Build a compact summary of the context index for the system prompt.
 
@@ -81,13 +178,15 @@ def _build_index_summary(context_index: dict[str, Any]) -> str:
             lines.append(f"  - [{h.get('kind', '?')}] {h.get('summary', '')[:200]}")
 
     constraint_findings = context_index.get("constraint_findings") or []
-    if constraint_findings:
+    if constraint_findings and context_index.get("constraint_rendering") == "facts":
+        lines.append(_render_constraint_facts(context_index))
+    elif constraint_findings:
         lines.append("\nConstraint analysis (question requirements vs gathered evidence):")
         for f in constraint_findings[:12]:
             status = f.get("status", "?")
             desc = str(f.get("description", ""))[:140]
             candidate = f.get("candidate", "")
-            anchor = f.get("commit_step_id")
+            anchor = f.get("first_assertion_step_id") or f.get("commit_step_id")
             src = f.get("confidence_source", "")
             line = f"  - [{status}] '{desc}' for candidate '{candidate}'"
             if status in ("violated", "omitted") and anchor:
