@@ -15,8 +15,9 @@ driver (:func:`analyze_constraints`) only chains passes.
 
 Contracts honored here:
 
-* oracle judgments run over code-selected, code-bounded windows and assert
-  only positive facts about the presented content (P4);
+* oracle judgments run over code-selected windows of WHOLE steps — selection
+  never cuts content mid-step, and every deselection is a logged prune; the
+  judgments assert only positive facts about the presented content (P4);
 * machine-checkable constraints are decided by code — the oracle just
   locates the value (P6);
 * a missing/unparseable verdict is unknown and never escalates (P5);
@@ -47,14 +48,16 @@ from .index import (
     TrajectoryIndex,
 )
 
-# --- bounds (P4-i: every oracle window is code-selected and code-bounded) ---
+# No mid-content truncation anywhere in this module: oracle windows are
+# whole-step selections (P4-i bounds by SELECTION, logged as prunes — never
+# by cutting content). An oversized window fails the model call and every
+# affected tuple degrades to unknown (P5) — honest failure beats a silently
+# partial view. The one numeric knob left is the sweep abstention budget:
+# it guards a NEGATIVE claim (needle-in-haystack recall over long context is
+# the known small-model weak spot), fails safe (over budget → unknown), and
+# is a parameter to be calibrated on the dev slice (validation plan step 3).
 
-_MAX_CANDIDATES = 8           # commit judgment: candidate list cap
-_MAX_ABOUT_STEPS = 24         # About batch: blocked-step cap (most recent kept)
-_MAX_EVIDENCE_STEPS = 8       # Entails: evidence-set cap per constraint
-_SNIPPET_CHARS = 1200         # per-step text cap in oracle windows
-_COMMIT_TEXT_CHARS = 2400     # final-step text cap in the commit judgment
-_SWEEP_TOTAL_CHARS = 20000    # sweep abstains above this (no negative over a truncated view)
+_SWEEP_CHAR_BUDGET = 20000    # default sweep abstention budget (chars)
 _MIN_LEXICAL_TOKEN = 4        # lexical-negative token length floor
 
 _STOPWORDS = frozenset({
@@ -349,9 +352,6 @@ async def _detect_commit(
 ) -> Commit | None:
     """Pass E1: which candidate does the agent answer with, and where."""
     candidates = _candidate_symbols(index, steps)
-    for sym in candidates[_MAX_CANDIDATES:]:
-        diag.prune("commit", sym.canonical_name, f"candidate list capped at {_MAX_CANDIDATES}")
-    candidates = candidates[:_MAX_CANDIDATES]
 
     final = next(
         (s for s in reversed(steps) if s.role == StepRole.ASSISTANT and s.content),
@@ -362,7 +362,7 @@ async def _detect_commit(
         return None
 
     payload = json.dumps({
-        "final_message": final.content[:_COMMIT_TEXT_CHARS],
+        "final_message": final.content,
         "candidates": [
             {"index": i, "name": sym.canonical_name, "kind": sym.kind}
             for i, sym in enumerate(candidates)
@@ -440,10 +440,7 @@ def _block_about(
         if s.step_id not in blocked_ids:
             diag.prune("about", s.step_id,
                        "no candidate mention and no shared symbol with a mentioning step")
-    for s in blocked[:-_MAX_ABOUT_STEPS]:
-        diag.prune("about", s.step_id,
-                   f"About window capped at {_MAX_ABOUT_STEPS} (most recent kept)")
-    return blocked[-_MAX_ABOUT_STEPS:]
+    return blocked
 
 
 async def _map_about(
@@ -461,8 +458,7 @@ async def _map_about(
         return []
 
     rows = [
-        {"id": i, "target": commit.symbol.canonical_name,
-         "excerpt": s.content[:_SNIPPET_CHARS]}
+        {"id": i, "target": commit.symbol.canonical_name, "excerpt": s.content}
         for i, s in enumerate(blocked)
     ]
     raw = await _ask_model(
@@ -509,29 +505,6 @@ Return ONLY:
 """
 
 
-def _evidence_window(
-    constraints: list[Constraint],
-    about_steps: list[Step],
-    diag: Diagnostics,
-) -> list[Step]:
-    """Code half of Pass E3: per-constraint top-K by lexical overlap, unioned."""
-    def overlap(c: Constraint, s: Step) -> int:
-        toks = _content_tokens(c.description)
-        lowered = s.content.lower()
-        return sum(1 for t in toks if t in lowered)
-
-    keep: dict[str, Step] = {}
-    for c in constraints:
-        ranked = sorted(about_steps, key=lambda s: (-overlap(c, s), s.index))
-        for s in ranked[:_MAX_EVIDENCE_STEPS]:
-            keep[s.step_id] = s
-    for s in about_steps:
-        if s.step_id not in keep:
-            diag.prune("entails", s.step_id,
-                       f"evidence window capped at {_MAX_EVIDENCE_STEPS} per constraint")
-    return sorted(keep.values(), key=lambda s: s.index)
-
-
 async def _judge_entailment(
     constraints: list[Constraint],
     commit: Commit,
@@ -541,15 +514,17 @@ async def _judge_entailment(
     session_factory: SessionFactory,
     diag: Diagnostics,
 ) -> dict[str, Verdict]:
-    """Pass E3: settle each constraint against the candidate's evidence window.
+    """Pass E3: settle each constraint against the candidate's evidence set.
 
-    Machine-checkable constraints are decided by code from the oracle's
-    quoted value (P6). "neither" leaves no verdict — the constraint flows to
-    Pass J's Omitted path.
+    The window is ALL About-true steps in reading order, content in full —
+    the selection already happened in Pass E2's blocking (logged), and no
+    content is ever cut. Machine-checkable constraints are decided by code
+    from the oracle's quoted value (P6). "neither" leaves no verdict — the
+    constraint flows to Pass J's Omitted path.
     """
     if not about_steps:
         return {}
-    window = _evidence_window(constraints, about_steps, diag)
+    window = sorted(about_steps, key=lambda s: s.index)
     window_ids = {s.step_id for s in window}
 
     payload = json.dumps({
@@ -559,7 +534,7 @@ async def _judge_entailment(
             for i, c in enumerate(constraints)
         ],
         "evidence": [
-            {"id": s.step_id, "excerpt": s.content[:_SNIPPET_CHARS]}
+            {"id": s.step_id, "excerpt": s.content}
             for s in window
         ],
     }, ensure_ascii=False, indent=2)
@@ -624,6 +599,7 @@ async def _check_omitted(
     model: str | None,
     session_factory: SessionFactory,
     diag: Diagnostics,
+    sweep_char_budget: int = _SWEEP_CHAR_BUDGET,
 ) -> dict[str, Verdict]:
     """Pass J: Omitted only when the lexical negative AND the attested
     coverage sweep both say absent; anything else stays unknown (P5)."""
@@ -642,14 +618,14 @@ async def _check_omitted(
     if not sweep_targets:
         return verdicts
 
-    # The abstain gate counts UNTRUNCATED length, and past it the sweep reads
-    # full step texts: a "no evidence" verdict over any partial view is the
+    # The abstain gate counts full length, and past it the sweep reads full
+    # step texts: a "no evidence" verdict over any partial view is the
     # vacuous-closed-world bug in miniature, so the sweep either sees
     # everything or asserts nothing.
     total_chars = sum(len(s.content) for s in grounded)
-    if total_chars > _SWEEP_TOTAL_CHARS:
+    if total_chars > sweep_char_budget:
         diag.record("sweep", "-", "abstain", 0.0,
-                    f"{total_chars} chars > {_SWEEP_TOTAL_CHARS}")
+                    f"{total_chars} chars > budget {sweep_char_budget}")
         for c in sweep_targets:
             verdicts[c.id] = Verdict(
                 "unknown", 0.0, "code", (),
@@ -745,6 +721,7 @@ async def analyze_constraints(
     constraints: list[Constraint] | None = None,
     model: str | None = None,
     session_factory: SessionFactory | None = None,
+    sweep_char_budget: int = _SWEEP_CHAR_BUDGET,
 ) -> ConstraintAnalysis:
     """Chain Pass 0 → E1 → E2 → E3 → J → L; store results on the index.
 
@@ -752,6 +729,11 @@ async def analyze_constraints(
     degrades the affected tuples to unknown, which never escalates (P5).
     Idempotent: reruns replace ``index.constraints`` / ``constraint_findings``
     wholesale.
+
+    ``sweep_char_budget`` is the abstention threshold for the Omitted
+    coverage sweep — the one numeric knob in this module. It guards a
+    negative claim and fails safe (over budget → unknown, never a finding);
+    calibrate it per oracle model on the dev slice.
     """
     if session_factory is None:
         raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
@@ -803,6 +785,7 @@ async def analyze_constraints(
     verdicts.update(await _check_omitted(
         unsettled, grounded, commit,
         model=model, session_factory=session_factory, diag=diag,
+        sweep_char_budget=sweep_char_budget,
     ))
 
     # Pass L

@@ -63,8 +63,10 @@ The old "local judgments only" slogan is retired — evidence aggregation for
 relational constraints is inherently a judgment over a step *set*, and
 coverage checking is inherently global. The honest model/code line:
 
-- (i) every oracle call reads a **code-selected, code-bounded** window
-  (hard cap on steps and tokens);
+- (i) every oracle call reads a **code-selected window of whole steps** —
+  selection never cuts content mid-step (a partial view silently poisons
+  the judgment); deselection is a logged prune; an oversized window fails
+  the call and degrades to unknown rather than being trimmed;
 - (ii) code owns selection, aggregation over unbounded scope, arithmetic,
   and everything decidable;
 - (iii) an oracle judgment may assert only **positive facts about presented

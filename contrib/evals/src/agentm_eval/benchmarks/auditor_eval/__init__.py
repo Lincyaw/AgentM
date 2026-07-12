@@ -403,7 +403,7 @@ async def _run_claim_analysis(
 
     from agentm_eval.methods.claim_analysis import run_claim_analysis
 
-    trajectory = [d for i, m in enumerate(messages) if (d := _agentmsg_to_extraction_dict(m, i))]
+    trajectory = [d for i, m in enumerate(messages) if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))]
     symbols = context.get("symbols", [])
     references = context.get("references", [])
 

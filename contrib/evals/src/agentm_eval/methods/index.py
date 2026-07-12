@@ -111,7 +111,7 @@ def _prescan_structural(
 
     serialized = [
         d for i, m in enumerate(messages)
-        if (d := _agentmsg_to_extraction_dict(m, i))
+        if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
     ]
     structural = extract_structural_symbols(serialized)
 
@@ -379,7 +379,7 @@ def _to_index_dicts(messages: list[AgentMessage]) -> list[dict[str, Any]]:
 
     return [
         d for i, m in enumerate(messages)
-        if (d := _agentmsg_to_extraction_dict(m, i))
+        if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
     ]
 
 

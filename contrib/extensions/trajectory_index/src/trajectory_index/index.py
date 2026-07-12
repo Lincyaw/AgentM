@@ -869,9 +869,12 @@ class TrajectoryIndex:
 
         if messages and not isinstance(messages[0], dict):
             from .atom import _agentmsg_to_extraction_dict
+            # truncate=False: steps/references are the substrate every
+            # downstream pass reads — content goes in whole. Truncation is
+            # legitimate only in the extractor's own prompt window.
             messages = [
                 d for i, m in enumerate(messages, start=message_id_start)
-                if (d := _agentmsg_to_extraction_dict(m, i))
+                if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
             ]
 
         role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}

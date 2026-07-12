@@ -235,9 +235,16 @@ def build_extraction_config(
 
 
 def _agentmsg_to_extraction_dict(
-    msg: AgentMessage, index: int,
+    msg: AgentMessage, index: int, truncate: bool = True,
 ) -> dict[str, JsonValue]:
-    """Serialize one AgentMessage to the extraction input format."""
+    """Serialize one AgentMessage to the extraction input format.
+
+    ``truncate=True`` caps long text blocks — appropriate ONLY for building
+    the extractor's prompt (its context window is Pass 1's own declared
+    unsoundness). Index substrate (steps, references) must be built with
+    ``truncate=False``: every downstream pass reads step content, and a
+    mid-content cut there silently poisons them all.
+    """
     from .data import _truncate_block
 
     payload = _agentmsg_to_payload(msg)
@@ -245,7 +252,9 @@ def _agentmsg_to_extraction_dict(
     content = payload.get("content", [])
     if not isinstance(content, list) or not content:
         return {}
-    blocks: list[JsonValue] = [_truncate_block(b) for b in content if isinstance(b, dict)]
+    blocks: list[JsonValue] = [
+        (_truncate_block(b) if truncate else b) for b in content if isinstance(b, dict)
+    ]
     return {"id": str(index), "role": role, "content": blocks}
 
 
@@ -448,7 +457,7 @@ def _serialize_for_index(messages: list[AgentMessage]) -> list[dict[str, JsonVal
     """Convert AgentMessage list to the dict format populate_from_extraction expects."""
     return [
         d for i, m in enumerate(messages)
-        if (d := _agentmsg_to_extraction_dict(m, i))
+        if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
     ]
 
 
