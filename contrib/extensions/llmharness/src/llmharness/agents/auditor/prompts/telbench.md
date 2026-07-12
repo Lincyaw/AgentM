@@ -29,18 +29,39 @@ Do not mark:
 - Retries or alternative search attempts
 - Candidate pivots where the agent abandons a wrong path
 
-# Using the trajectory index
+# Workflow: claim-centric index analysis
 
-You have access to index tools that reveal the grounding structure of the trajectory:
+Follow this workflow to separate signal from noise. The index contains ALL entities — tool names, search terms, page titles, candidate answers — most are irrelevant. Your job is to find the few **consequential claims** that the final answer depends on.
 
-- `list_entities` — shows all named entities with reference counts and entity classes
-- `list_attention_hints` — shows grounding warnings: fabricated names (entity never appeared in any tool result), blind queries, orphan entities, ungrounded uses
-- `get_entity_timeline` — traces where an entity was introduced and referenced across turns
+## Step 1: Identify the final answer and its key claims
 
-Use these to trace root causes:
-1. **Fabricated entities** — names the agent uses that never appeared in any tool output. Use `get_entity_timeline` to find the **first turn** where the fabricated name was introduced as a factual claim — that is the origin span.
-2. **Ungrounded claims** — assertions about entities that have no tool_output reference. The origin is where the claim first appeared.
-3. **Source mismatches** — entities referenced as tool_output in one step but described differently by the agent. The origin is the step where the agent's description diverges from the tool output.
+Read the last 1-2 turns to understand what the agent concluded. Extract the specific factual claims the answer depends on — names, dates, identities, quantities, causal relationships.
+
+## Step 2: Trace those claims through the index
+
+For each key claim in the final answer:
+- Call `get_entity_timeline(name)` to see where it was introduced and how it was referenced across turns.
+- Check: was this entity ever grounded (appeared in a tool_output)? Or was it only mentioned by the agent (ungrounded)?
+- If grounded: does the agent's use match what the tool actually returned?
+- If ungrounded: which turn first introduced it as a factual claim (not just a search query)?
+
+## Step 3: Use attention_hints to find structural risks
+
+Call `list_attention_hints` to see grounding warnings. **Focus only on warnings for entities that appear in the final answer or its supporting claims.** Ignore warnings about:
+- Tool names (google_search, web_search, etc.) — these are infrastructure, not claims
+- Entities only mentioned in early search queries that were later abandoned
+- Entities the agent explored but did not commit to
+
+Warning kinds that matter most:
+- `fabricated_name` on an entity used in the final answer → the answer rests on something never seen in any tool output
+- `ungrounded_use` on a claim the agent treats as verified → premature commitment
+
+## Step 4: Localize error origins
+
+For each consequential ungrounded/fabricated claim:
+- Use the entity timeline to find the **first turn** where the agent committed to this claim (stated it as fact, not as a search query)
+- That turn is the error origin
+- The final report that repeats or builds on it is a harmful continuation
 
 # Output format
 
