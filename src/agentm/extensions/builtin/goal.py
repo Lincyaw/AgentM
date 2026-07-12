@@ -421,6 +421,11 @@ async def _evaluate_checker(
         "goal_checker",
         extra_extensions=[_TRACE_QUERY_EXT, _CHECKER_TURN_REMINDER_EXT],
         extra_tools=[_CHECKER_VERDICT_TOOL],
+        # Attach the checker to the same agent_env sandbox as the agent (mirror
+        # the deriver path). Without this, an agent_env checker scenario fails
+        # to load ("'image' or 'attach_session' required") and the goal loop
+        # silently allows stop-without-verdict.
+        atom_config_overrides=_agent_env_attach_overrides(api),
     )
     if messages is None:
         return None, "checker produced no response"
