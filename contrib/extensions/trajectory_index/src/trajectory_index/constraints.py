@@ -604,6 +604,21 @@ async def _check_omitted(
     """Pass J: Omitted only when the lexical negative AND the attested
     coverage sweep both say absent; anything else stays unknown (P5)."""
     verdicts: dict[str, Verdict] = {}
+
+    if not grounded:
+        # Empty evidence universe: with zero tool-output steps we cannot
+        # tell "the agent never verified anything" from "ingestion lost
+        # provenance" (e.g. spans arriving as raw text with no roles). A
+        # negative over an empty universe is vacuous — abstain. The
+        # grounding warnings already flag the no-tool-output condition.
+        diag.record("sweep", "-", "abstain", 0.0, "no grounded tool-output steps")
+        for c in unsettled:
+            verdicts[c.id] = Verdict(
+                "unknown", 0.0, "code", (),
+                "no grounded tool-output steps in trajectory; cannot judge omission",
+            )
+        return verdicts
+
     grounded_texts = [s.content for s in grounded]
 
     sweep_targets: list[Constraint] = []
