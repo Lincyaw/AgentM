@@ -45,14 +45,17 @@ ledger cannot cover.
 
 ### P3 — Transcript determinism
 
-Every model influence on a verdict flows through a **recorded oracle tuple**;
-Pass J/L contain no model calls. Therefore the derived layer is a
+Every model influence on a verdict flows through a **recorded oracle tuple**
+(this includes the Omitted coverage sweep — an oracle tuple consumed by Pass
+J's code, not a Pass J model call). Therefore the derived layer is a
 deterministic, idempotent function of (base facts, oracle transcript):
 rebuild wholesale, same answers → same verdicts. Ablating a tuple and
 re-deriving yields the verdict's **dependence lineage** — which recorded
 answers it stands on — enabling eval attribution. (It does not yield oracle
 counterfactuals: judgments are batched, so one item's presence conditions
-another's answer at generation time.)
+another's answer at generation time. Replay-based re-derivation from a
+persisted transcript is not implemented yet; today the transcript serves
+attribution and audit.)
 
 ### P4 — Bounded-context judgments, positive polarity
 
@@ -155,7 +158,7 @@ tuple or late-span references. Evidence steps are blocked per candidate by
 code (entity-link and lexical overlap **on step text**, not entity names);
 every prune is logged (P2).
 
-### Pass J — relational join (pure code)
+### Pass J — relational join (code over recorded tuples)
 
 ```
 Verified(c, cand)   :- Entails(S, c, cand) = true

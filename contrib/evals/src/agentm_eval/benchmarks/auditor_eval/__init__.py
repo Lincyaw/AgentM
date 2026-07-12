@@ -452,13 +452,19 @@ async def _process_one_item(
     typer.echo(f"\n[{i+1}/{total}] {tid} ({meta.get('source', '?')}, {len(messages)} msgs)")
     exp.register_session(tid, metadata={"n_messages": len(messages), **meta})
 
+    if constraint_analysis and not meta.get("question"):
+        typer.echo(f"  {tid}: --constraints skipped (no question in metadata)")
+
     index_path = exp.session_dir(tid) / "index.json"
     if index_path.is_file() and not rebuild_index:
         typer.echo(f"  {tid}: index cached")
         idx = TrajectoryIndex.load(index_path)
         idx.build_dependencies()
 
-        if constraint_analysis and meta.get("question") and not idx.constraint_findings:
+        # `constraints` is the ran-before marker: Pass 0 stores it even when
+        # no finding was emitted (e.g. no commit), so a cached no-finding
+        # case is not re-analyzed on every run.
+        if constraint_analysis and meta.get("question") and not idx.constraints:
             await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
             idx.dump(str(index_path))
 
@@ -492,6 +498,7 @@ async def _process_one_item(
     n_auditor_fires = 0
     last_audit_result = None
     all_verdicts: list[dict[str, Any]] = []
+    constraints_ran = False
 
     for ci, chunk in enumerate(raw_chunks):
         chunk_end = chunk.start + len(chunk.messages)
@@ -548,6 +555,7 @@ async def _process_one_item(
             # Constraints are a posthoc, full-trajectory analysis — run once,
             # after the index is complete.
             await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
+            constraints_ran = True
         context = _index_to_context(idx)
         if idx.constraint_findings:
             _merge_constraint_context(context, idx)
@@ -578,6 +586,14 @@ async def _process_one_item(
             )
         except Exception as exc:
             typer.echo(f"  {tid} chunk {ci+1}: index ok, auditor failed: {exc}", err=True)
+
+    if constraint_analysis and meta.get("question") and not constraints_ran and idx.steps:
+        # The in-loop run is bound to the last chunk, which `continue`s past
+        # it when that chunk's extraction fails. The index is still built from
+        # the prior chunks — run the analysis now so findings persist for
+        # cached reruns (no auditor fired on the final state in this case).
+        typer.echo(f"  {tid}: constraint analysis ran post-loop (last chunk failed)")
+        await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
 
     idx.dump(str(index_path))
     stats = idx.stats(tid)

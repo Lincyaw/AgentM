@@ -54,7 +54,6 @@ _MAX_ABOUT_STEPS = 24         # About batch: blocked-step cap (most recent kept)
 _MAX_EVIDENCE_STEPS = 8       # Entails: evidence-set cap per constraint
 _SNIPPET_CHARS = 1200         # per-step text cap in oracle windows
 _COMMIT_TEXT_CHARS = 2400     # final-step text cap in the commit judgment
-_SWEEP_SNIPPET_CHARS = 700    # per-step cap inside the coverage sweep
 _SWEEP_TOTAL_CHARS = 20000    # sweep abstains above this (no negative over a truncated view)
 _MIN_LEXICAL_TOKEN = 4        # lexical-negative token length floor
 
@@ -225,14 +224,23 @@ async def extract_constraints(
 # ---------------------------------------------------------------------------
 
 
+_NUM_OPS: dict[str, Any] = {
+    "==": lambda a, b: a == b, "<=": lambda a, b: a <= b,
+    ">=": lambda a, b: a >= b, "<": lambda a, b: a < b, ">": lambda a, b: a > b,
+}
+
+
 def check_normalized(
     normalized: dict[str, Any], quote: str,
 ) -> tuple[FindingStatus, str] | None:
     """Decide a machine-checkable constraint against a model-located quote.
 
-    Returns (status, detail), or None when no comparable value can be parsed
-    from the quote — then the tuple stays unknown: code could not decide, and
-    the oracle's opinion on arithmetic is not accepted (P6).
+    Returns (status, detail), or None when code cannot decide — no comparable
+    value in the quote, or SEVERAL values that disagree (a sentence quote like
+    "active 1985-2007, born 1955" carries years on both sides of a range, and
+    code cannot tell which is decisive without semantics). Then the tuple
+    stays unknown: the oracle's opinion on arithmetic is not accepted (P6),
+    and ambiguity never escalates (P5).
     """
     if not quote:
         return None
@@ -243,23 +251,26 @@ def check_normalized(
         if not years:
             return None
         lo, hi = int(normalized.get("lo", 0)), int(normalized.get("hi", 9999))
-        ok = any(lo <= y <= hi for y in years)
-        return ("verified" if ok else "violated", f"years {years} vs range [{lo}, {hi}]")
+        inside = [lo <= y <= hi for y in years]
+        if all(inside):
+            return ("verified", f"years {years} all in [{lo}, {hi}]")
+        if not any(inside):
+            return ("violated", f"years {years} all outside [{lo}, {hi}]")
+        return None  # mixed — quote carries years on both sides of the range
 
     if kind == "number":
-        m = _NUMBER_RE.search(quote)
-        if not m:
+        vals = [float(m) for m in _NUMBER_RE.findall(quote)]
+        op_fn = _NUM_OPS.get(str(normalized.get("op", "==")))
+        if not vals or op_fn is None:
             return None
-        val = float(m.group(0))
         target = float(normalized.get("value", 0))
+        checks = [bool(op_fn(v, target)) for v in vals]
         op = str(normalized.get("op", "=="))
-        ops = {
-            "==": val == target, "<=": val <= target, ">=": val >= target,
-            "<": val < target, ">": val > target,
-        }
-        if op not in ops:
-            return None
-        return ("verified" if ops[op] else "violated", f"{val} {op} {target}")
+        if all(checks):
+            return ("verified", f"values {vals} all satisfy {op} {target}")
+        if not any(checks):
+            return ("violated", f"values {vals} all fail {op} {target}")
+        return None  # mixed — several values disagree; which is decisive is semantics
 
     return None
 
@@ -311,11 +322,12 @@ def _candidate_symbols(index: TrajectoryIndex, steps: list[Step]) -> list[Symbol
     """Answer candidates: identifier-class symbols referenced in the last few
     assistant steps, most-referenced first (pure code)."""
     tail = [s for s in steps if s.role == StepRole.ASSISTANT][-3:]
-    tail_ids = {s.step_id for s in tail}
+    # step_id is unique only within a run — key on (run_id, step_id)
+    tail_keys = {(s.run_id, s.step_id) for s in tail}
 
     counts: dict[str, int] = {}
     for ref in index.references.values():
-        if ref.step_id in tail_ids:
+        if (ref.run_id, ref.step_id) in tail_keys:
             counts[ref.symbol_id] = counts.get(ref.symbol_id, 0) + 1
 
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -405,17 +417,21 @@ def _block_about(
     with a step that does (one hop — satellite entities: the parent, the
     book, the year).
     """
-    refs_by_step: dict[str, set[str]] = {}
+    # step_id is unique only within a run — key on (run_id, step_id)
+    refs_by_step: dict[tuple[str, str], set[str]] = {}
     for r in index.references.values():
-        refs_by_step.setdefault(r.step_id, set()).add(r.symbol_id)
+        refs_by_step.setdefault((r.run_id, r.step_id), set()).add(r.symbol_id)
 
     direct = [s for s in grounded if _mentions(s.content, commit.symbol)]
     direct_ids = {s.step_id for s in direct}
-    direct_syms = {sid for s in direct for sid in refs_by_step.get(s.step_id, set())}
+    direct_syms = {
+        sid for s in direct for sid in refs_by_step.get((s.run_id, s.step_id), set())
+    }
 
     linked = [
         s for s in grounded
-        if s.step_id not in direct_ids and refs_by_step.get(s.step_id, set()) & direct_syms
+        if s.step_id not in direct_ids
+        and refs_by_step.get((s.run_id, s.step_id), set()) & direct_syms
     ]
     blocked = sorted(direct + linked, key=lambda s: s.index)
 
@@ -483,8 +499,9 @@ establish about the candidate — judge only the presented content:
   - "neither": these excerpts do not settle this constraint either way.
     (This says nothing about evidence elsewhere — only about these excerpts.)
 
-For constraints involving dates or numbers, always copy the exact value into
-"quote" — do not do the comparison arithmetic yourself.
+For constraints involving dates or numbers, "quote" must be the MINIMAL
+phrase containing only the decisive value (e.g. "born 1965", not the whole
+sentence) — and never do the comparison arithmetic yourself.
 List the excerpt ids you relied on in "steps".
 
 Return ONLY:
@@ -625,14 +642,12 @@ async def _check_omitted(
     if not sweep_targets:
         return verdicts
 
-    snippets = [
-        {"id": s.step_id, "excerpt": s.content[:_SWEEP_SNIPPET_CHARS]}
-        for s in grounded
-    ]
-    total_chars = sum(len(sn["excerpt"]) for sn in snippets)
+    # The abstain gate counts UNTRUNCATED length, and past it the sweep reads
+    # full step texts: a "no evidence" verdict over any partial view is the
+    # vacuous-closed-world bug in miniature, so the sweep either sees
+    # everything or asserts nothing.
+    total_chars = sum(len(s.content) for s in grounded)
     if total_chars > _SWEEP_TOTAL_CHARS:
-        # Abstain: a negative over a truncated view is the vacuous-closed-world
-        # bug in miniature.
         diag.record("sweep", "-", "abstain", 0.0,
                     f"{total_chars} chars > {_SWEEP_TOTAL_CHARS}")
         for c in sweep_targets:
@@ -641,6 +656,7 @@ async def _check_omitted(
                 f"sweep abstained: grounded text {total_chars} chars over cap",
             )
         return verdicts
+    snippets = [{"id": s.step_id, "excerpt": s.content} for s in grounded]
 
     payload = json.dumps({
         "constraints": [
