@@ -79,6 +79,21 @@ def _build_index_summary(context_index: dict[str, Any]) -> str:
         lines.append(f"Attention hints: {len(attention_hints)}")
         for h in attention_hints[:5]:
             lines.append(f"  - [{h.get('kind', '?')}] {h.get('summary', '')[:200]}")
+
+    claim_structure = context_index.get("claim_structure")
+    if claim_structure:
+        span_roles = claim_structure.get("span_roles", {})
+        commit_spans = sorted(int(k) for k, v in span_roles.items() if v in ("commit", "verify", "finalize"))
+        explore_spans = sorted(int(k) for k, v in span_roles.items() if v == "explore")
+        lines.append(f"\nClaim analysis (Level 2):")
+        lines.append(f"  Commitment spans: {commit_spans}")
+        lines.append(f"  Exploration spans (NOT errors): {explore_spans}")
+        points = claim_structure.get("commitment_points", [])
+        if points:
+            lines.append(f"  Ungrounded commitments:")
+            for cp in points[:8]:
+                lines.append(f"    span {cp.get('span')}: {cp.get('entity','')} (grounded={cp.get('grounded',False)}) — {cp.get('reason','')[:100]}")
+
     return "\n".join(lines)
 
 

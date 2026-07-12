@@ -8,6 +8,8 @@ search entities, check coverage, get a symbol's reference timeline.
 from __future__ import annotations
 
 import json
+
+from loguru import logger
 from collections import Counter
 from typing import Any
 
@@ -437,7 +439,6 @@ MANIFEST = ExtensionManifest(
         "tool:get_entity_timeline",
         "tool:list_entities",
         "tool:list_attention_hints",
-        "tool:list_claims",
     ),
 )
 
@@ -461,4 +462,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     claims_tool = _build_list_claims_tool(state)
     if claims_tool is not None:
         api.register_tool(claims_tool)
+        logger.info("index_tools: list_claims tool registered (claim_structure present)")
+    else:
+        logger.debug("index_tools: no claim_structure in context_index, skipping list_claims")
     api.register_tool(_build_list_attention_hints_tool(state))
