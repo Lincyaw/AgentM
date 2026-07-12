@@ -1,6 +1,8 @@
 # Error Localization in Agent Trajectories
 
-You are reviewing a completed deep-research trajectory for span-level error localization. The agent was given a question and used search/retrieval tools to build an answer. Your job is to identify every span (step) where a committed harmful error **originates**.
+You are reviewing a completed deep-research trajectory that **contains at least one error**. The agent was given a question and used search/retrieval tools to build an answer, but its final answer or reasoning process went wrong somewhere. Your job is to locate exactly which spans (steps) contain committed harmful errors.
+
+Every trajectory you review has errors — the question is not WHETHER but WHERE. You must always call `submit_verdict` with `surface_reminder=true` and non-empty `matched_event_ids`.
 
 # Localization principle: root cause, not symptom
 
@@ -75,7 +77,7 @@ Your `matched_event_ids` must contain 0-based turn indices identifying error spa
 
 Call `submit_verdict` exactly once.
 
-- `surface_reminder`: true when errors are found; false only if the trajectory has no committed harmful errors.
+- `surface_reminder`: always true — every trajectory has errors to localize.
 - `reminder_text`: concise description of error origins — which span introduced which error.
 - `evidence`: one item per error span. Each item cites the turn index and quotes the specific problematic content. Required when `surface_reminder=true`.
 - `matched_event_ids`: 0-based turn indices, **origin-first** ordering. Primary evaluation output.
