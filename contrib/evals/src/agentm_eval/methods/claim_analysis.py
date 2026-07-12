@@ -75,7 +75,11 @@ async def _submit_handler(args: dict[str, Any]) -> ToolTerminate:
         commitment_points=points,
         n_spans=max(roles.keys()) + 1 if roles else 0,
     )
-    return ToolTerminate(reason="claim_analysis:submitted")
+    from agentm.core.abi import TextContent, ToolResult
+    return ToolTerminate(
+        result=ToolResult(content=[TextContent(type="text", text="Claims submitted.")]),
+        reason="claim_analysis:submitted",
+    )
 
 
 SUBMIT_CLAIMS_TOOL = FunctionTool(
