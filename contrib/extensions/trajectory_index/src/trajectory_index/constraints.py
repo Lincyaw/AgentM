@@ -714,14 +714,31 @@ async def _check_omitted(
 # ---------------------------------------------------------------------------
 
 
+def _first_assertion_step(steps: list[Step], commit: Commit) -> Step:
+    """Earliest assistant step asserting the committed binding (pure code).
+
+    The minimal bad prefix of "commit without verification" ends where the
+    agent FIRST commits the claim, not at its final restatement — validated
+    against TELBench gold (30/40 omitted-case golds lie strictly earlier
+    than the final report; only 10/40 include it). P7: anchors follow the
+    benchmark's measured label convention.
+    """
+    for s in steps:
+        if s.role == StepRole.ASSISTANT and s.content and _mentions(s.content, commit.names):
+            return s
+    return commit.step
+
+
 def _emit_findings(
     constraints: list[Constraint],
     verdicts: dict[str, Verdict],
     commit: Commit,
+    steps: list[Step],
 ) -> list[ConstraintFinding]:
-    """Pass L: violated/omitted anchor at the commit step (the minimal bad
-    prefix of a precedence property ends there — P7); verified anchors at
-    its evidence steps."""
+    """Pass L: violated/omitted anchor at the first assertion of the
+    committed binding (see :func:`_first_assertion_step`); verified anchors
+    at its evidence steps."""
+    anchor = _first_assertion_step(steps, commit)
     findings: list[ConstraintFinding] = []
     for c in constraints:
         v = verdicts.get(c.id, _UNKNOWN)
@@ -731,7 +748,7 @@ def _emit_findings(
             status=v.status,
             evidence_step_ids=v.evidence_step_ids,
             commit_step_id=(
-                commit.step.step_id if v.status in ("violated", "omitted") else None
+                anchor.step_id if v.status in ("violated", "omitted") else None
             ),
             confidence=round(v.confidence, 3),
             confidence_source=v.source,
@@ -822,7 +839,7 @@ async def analyze_constraints(
     ))
 
     # Pass L
-    analysis.findings = _emit_findings(constraints, verdicts, commit)
+    analysis.findings = _emit_findings(constraints, verdicts, commit, steps)
     index.constraint_findings = analysis.findings
 
     by_status: dict[str, int] = {}

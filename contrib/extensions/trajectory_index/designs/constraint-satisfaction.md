@@ -206,6 +206,13 @@ Anchors are per-kind policy validated against gold label conventions on the
 dev slice (P7) — if fabrication gold also proves commitment-centric, the
 first row's anchor moves; nothing else changes.
 
+Measured (TELBench failed-232 run): "commit step" means the step where the
+agent FIRST asserts the committed binding, not its final restatement — of
+40 omitted-finding cases, gold lay strictly earlier than the final report
+in 30 and included it in only 10, while the auditor followed the supplied
+anchor in 39. The implementation anchors at the earliest assistant step
+mentioning the binding (`_first_assertion_step`).
+
 ## Data model
 
 ```python
