@@ -1,225 +1,269 @@
 # Constraint Satisfaction Analysis — Design
 
 Extends the trajectory grounding analysis (SCHEMA.md) with constraint-level
-verification. The current system catches entity grounding errors (32% of
-TELBench gold); this extension targets the 40% value/reasoning errors it
+verification, on an explicit theoretical footing borrowed from program
+analysis. The current system catches entity grounding errors (~32% of
+TELBench gold); this extension targets the ~40% value/reasoning errors it
 misses.
 
-## Motivation
+A first draft of this design mapped constraints onto per-symbol def-use
+edges. Review found that structurally unsound (evidence for a constraint
+routinely lives on satellite entities unreachable from the answer entity's
+chain; per-edge verdicts cannot express relational constraints; "no mapping
+found" was misread as "agent never verified"). This version replaces it.
 
-Current index tells you: "entity X is ungrounded" or "entity X's value was
-contradicted." But it cannot tell you:
+## Theoretical framing
 
-- **Constraint omission**: agent never verified constraint C (no evidence chain
-  for it)
-- **Constraint misinterpretation**: agent had the right value but judged
-  "satisfies constraint C" incorrectly (e.g., "1765 is before the 18th century")
-- **Constraint relaxation**: agent silently weakened a constraint to fit its
-  answer (e.g., dropped "American" from "American actor born in 1960s")
+What we analyze, and what each layer owes:
 
-These are reasoning errors that leave no grounding trace — every entity is
-grounded, every value matches, but the conclusion is wrong.
+1. **A trajectory is one concrete trace, not a program.** The right frame is
+   runtime verification / trace monitoring, not all-paths static analysis:
+   correct agent behavior is the spec; the question is at which prefix the
+   trace violates it.
 
-## Design: Two New Passes
+2. **The goal is proving bugs present, not proving them absent.** This is
+   the under-approximation regime of Incorrectness Logic (O'Hearn 2019): a
+   reported error must come with a witness from the trace. Missed errors are
+   tolerable; false accusations are not. TELBench span-F1 punishes false
+   positives, so the regime matches the metric.
 
-Following SCHEMA.md's principle: "the LLM makes local judgments; all global
-traversal is code."
+3. **May/Must layering — the two-layer contract.**
+   - The *index* is a may-analysis: it over-approximates candidate issues
+     (attention hints). Its obligation is recall — real errors should be in
+     the candidate set. It never asserts an error.
+   - The *auditor* is a must-check: it confirms a candidate only with
+     concrete trace evidence (the incorrectness witness). Its obligation is
+     precision.
+   This is CEGAR's shape: a cheap abstraction proposes counterexample
+   candidates; an expensive concrete check confirms or refutes them. The
+   index→auditor pipeline already had this shape implicitly; this contract
+   makes the approximation direction of each layer explicit, and forbids the
+   index from emitting must-level claims (the old `constraint_unverified`
+   was exactly that violation).
 
-### Pass 0 — Constraint Extraction
+4. **Abstraction with a soundiness ledger.** The index is an abstract
+   domain; extraction is the abstraction function α. Ours is *not* a sound
+   over-approximation: extraction misses entities, truncation drops text,
+   alias merges err. Per the soundiness stance (Livshits et al., CACM 2015),
+   each unsoundness source is declared and, where possible, code-detectable
+   (e.g. "this step's text was truncated"), so downstream passes can
+   discount conclusions that stand on it.
+
+5. **Constraints are relational queries, not dataflow properties.** Def-use
+   chains are per-symbol (unary); constraint satisfaction joins evidence
+   across entities — the evidence for "parent was an auctioneer" lives on
+   the parent entity, not on the answer entity. The right formalism is
+   Datalog-style analysis (Doop): base facts (EDB) plus derivation rules
+   (IDB joins). The LLM's role is a **tuple oracle** for uncertain
+   relations: it fills in individual tuples; all joins and propagation are
+   code. This preserves "the model gives a point, code propagates" at the
+   correct granularity.
+
+6. **Three-valued verdicts.** Every oracle judgment is {true, false,
+   unknown}; joins propagate by Kleene semantics; **unknown never escalates
+   into a warning**. A missing or unparseable model verdict defaults to
+   unknown — the failure polarity stays conservative (contrast: the old
+   design turned a missing mapping into an `unverified` alarm).
+
+7. **Safety vs liveness decides localization.** (Alpern–Schneider)
+   - Fabrication / contradicted use are *safety* properties: a unique
+     earliest bad prefix exists — the first step that uses the bad value.
+   - Constraint omission is *liveness-like*: on a finished trace its
+     violation point is the **commitment step** (the agent commits to an
+     answer never having verified C), not any intermediate step.
+   TELBench gold labels are commitment-centric — they mark liveness
+   violation points. Mixing the two localization semantics is the root of
+   the observed off-by-one errors. Localization policy is per property
+   class, in code, zero LLM cost.
+
+## Architecture
 
 ```
-Input:  question text only (no trajectory)
-Method: 1 LLM call (lightweight, question is ~100 tokens)
-Output: [{id, type, description}]
+Pass 0    Constraint extraction + normalization   [LLM + code]
+Pass 1–3  PARSE / RESOLVE / DATAFLOW              [existing, unchanged]
+Pass E    Fact extraction (tuple oracle)          [LLM local judgments]
+Pass J    Relational join                         [code, Kleene 3-valued]
+Pass L    Localization                            [code, per property class]
+Auditor   Must-check with witness                 [LLM]
 ```
 
-Types: temporal, identity, occupation, location, relationship, event,
-attribute, quantity, format.
+### Pass 0 — constraint extraction + normalization
 
-Example:
+From the question text only, one LLM call:
+
 ```json
-[
-  {"id": "c1", "type": "temporal",   "desc": "born in the 1960s"},
-  {"id": "c2", "type": "occupation", "desc": "worked as a technician before acting"},
-  {"id": "c3", "type": "event",      "desc": "first film role in 1988"},
-  {"id": "c4", "type": "event",      "desc": "major breakthrough/recognition in 2001"}
-]
+{"id": "c1", "subject": "answer",
+ "desc": "born in the 1960s",
+ "normalized": {"kind": "year_range", "lo": 1960, "hi": 1969}}
 ```
 
-Does NOT decompose multi-hop reasoning chains — those emerge from the
-trajectory, not the question. Only extracts answer-level constraints.
+- `subject` binds the constraint to a variable (usually the answer
+  candidate); relational constraints name both sides.
+- `normalized` is emitted only when the constraint is machine-checkable
+  (dates, quantities, counts). For those, satisfaction is decided **by
+  code** (interval / number comparison over values located in step text);
+  the LLM only locates candidate numbers, never does date arithmetic —
+  the auditing model must not be able to repeat the audited agent's own
+  temporal-reasoning mistake. Semantic constraints (occupation,
+  relationship) stay free-text and go to the oracle.
+- No preset type enum: `normalized.kind` exists only where it is
+  load-bearing (it dispatches to a specific code checker).
 
-### Pass 4 — Constraint Satisfaction Adjudication
+### Pass E — fact extraction (LLM as tuple oracle)
 
-After DATAFLOW (Pass 3) and compare_values (Pass 3.5), runs as a new
-adjudication in `adjudicate.py`.
+Uncertain relations, each filled by batched local judgments:
+
+- `Commit(step, candidate)` — the agent commits to this candidate as its
+  answer. Detection policy: the last assistant step asserting an
+  answer-class entity; if none exists (aborted / failed trace), `Commit` is
+  empty — then no `constraint_violated` can fire and omission findings
+  degrade to low confidence.
+- `About(step, candidate)` — this grounded step's content is evidence about
+  this candidate, directly or via a satellite entity (the parent, the book,
+  the year). This relation is what makes cross-entity evidence reachable —
+  it does not depend on per-symbol def-use connectivity.
+- `Entails(steps, c, candidate)` / `Contradicts(steps, c, candidate)` —
+  the grounded content of this step *set* establishes / refutes constraint
+  c for this candidate. Judged per (constraint, candidate) over all mapped
+  steps jointly, not per edge — relational constraints ("worked as X before
+  acting") need joint evidence that no single edge carries.
+
+Candidate scoping: candidates are answer-kind entities with a `Commit`
+tuple or late-span references. Evidence steps are blocked per candidate by
+code (entity-link and lexical overlap **on step text**, not on entity
+names) before any oracle call; oracle calls are batched.
+
+### Pass J — relational join (pure code)
 
 ```
-Input:  Constraint list + existing Dependency edges + get_turn tool
-Method: for each (constraint, relevant dependency edge), LLM judges
-        "does the grounded value at this edge satisfy this constraint?"
-Output: satisfy / violate / unclear per (constraint, edge) pair
+Verified(c, cand)   :- ∃ steps: About(steps, cand) ∧ Entails(steps, c, cand)=true
+Violated(c, cand)   :- ∃ steps: About(steps, cand) ∧ Contradicts(steps, c, cand)=true
+CommitError(c, s)   :- Commit(s, cand) ∧ Violated(c, cand)
+Omitted(c, s)       :- Commit(s, cand)
+                        ∧ no Verified/Violated/unknown tuple for (c, cand)
+                        ∧ code-negative: no tool-output step in the whole
+                          trace shares c's content tokens or normalized values
 ```
 
-#### Step 4a — Constraint-Edge Mapping (code + LLM)
+- Violations by **non-committed** candidates are exploration, not errors:
+  the join keys on the committed candidate. (A grounded "Kipling born 1865"
+  that violates "born in the 1860s" is the agent correctly *rejecting*
+  Kipling — it must not fire.)
+- `Omitted` requires the code-checkable negative, not merely "the mapping
+  pipeline returned nothing": **unmapped ≠ unverified**. Any unknown tuple
+  for (c, cand) suppresses `Omitted`.
 
-Link constraints to relevant dependency edges. For each constraint, find
-candidate edges by:
-1. Code: find entities in the final answer span (last step with references)
-2. Code: for each final-answer entity, get its def-use chain from DATAFLOW
-3. LLM (local): for each (constraint, def-use edge), ask "is this edge
-   about this constraint?" — yes/no/unclear
+### Pass L — localization (pure code)
 
-This is N_constraints × N_edges judgments, but most are trivially "no"
-(a birth-year constraint is irrelevant to an edge about film titles). In
-practice ~5-15 relevant pairs per trajectory.
+| error class | property class | violation point |
+|---|---|---|
+| ungrounded / contradicted use | safety | earliest use step |
+| CommitError | safety at commit | commit step |
+| Omitted | liveness | commit step |
 
-#### Step 4b — Satisfaction Check (LLM, local)
+### Auditor contract
 
-For each relevant (constraint, edge) pair from 4a:
-- Read the grounded def value (from DATAFLOW's def_value field)
-- Ask LLM: "does value V satisfy constraint C?"
-- Returns: satisfy / violate / unclear + reason
+The index layer ships *candidates with suggested spans*, never verdicts.
+The auditor confirms each candidate with a witness (quoted trace content)
+or drops it. New warning kinds are gated per kind, so a noisy kind can be
+disabled without losing the others.
 
-This is a local judgment — compare one value against one constraint. No
-trajectory context needed.
-
-#### Step 4c — Aggregation (code, global)
-
-For each constraint:
-- If no edges mapped → **unverified** (constraint omission)
-- If all mapped edges satisfy → **satisfied**
-- If any edge violates → **violated** at the use_step of that edge
-- If agent's final answer treats a violated constraint as satisfied →
-  **misinterpreted** at the commitment step
-
-Output: per-constraint status + span localization.
-
-## Data Model Extension
+## Data model
 
 ```python
-# New: constraint
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Constraint:
     id: str
-    type: str
-    description: str
+    subject: str                     # variable the predicate is about
+    description: str                 # free text
+    normalized: Mapping[str, Any] | None = None  # only when machine-checkable
 
-# Extended: Dependency gets optional constraint_id
-@dataclass
-class Dependency:
-    ...  # existing fields
-    constraint_id: str | None = None
-    satisfaction: Literal["satisfy", "violate", "unclear", None] = None
+type FindingStatus = Literal["verified", "violated", "omitted", "unknown"]
 
-# New: per-trajectory constraint status
-@dataclass
-class ConstraintStatus:
+@dataclass(frozen=True, slots=True)
+class ConstraintFinding:
     constraint_id: str
-    status: Literal["satisfied", "violated", "unverified", "misinterpreted"]
-    evidence_span: str | None  # span where satisfaction was determined
-    error_span: str | None     # span where agent committed to wrong judgment
+    candidate: str                   # committed candidate it was judged for
+    status: FindingStatus
+    evidence_step_ids: tuple[str, ...]
+    commit_step_id: str | None       # localization anchor for commit-class errors
+    confidence: float = 1.0
 ```
 
-## Interaction with Existing Passes
+`TrajectoryIndex` gains `constraints` and `constraint_findings`; **both are
+serialized in `dump()`/`load()`** (the auditor consumes a loaded index).
+Pass E/J/L output is derived state under the same idempotence contract as
+Pass 3: any alias merge or dependency rebuild invalidates it wholesale; the
+passes rebuild from facts. Pass E/J/L run strictly after all Pass 2/3
+mutations.
 
-```
-Question ──→ [Pass 0: constraint extraction] ──→ Constraint list
-                                                      │
-Trajectory ──→ [Pass 1: PARSE]                        │
-           ──→ [Pass 2: RESOLVE]                      │
-           ──→ [Pass 3: DATAFLOW]                     │
-           ──→ [Pass 3.5: compare_values] ──→ Entity table + Dependencies
-                                                      │
-                                              [Pass 4a: constraint-edge mapping]
-                                              [Pass 4b: satisfaction check]
-                                              [Pass 4c: aggregation]
-                                                      │
-                                              Constraint statuses + error spans
-                                                      │
-                                              [Auditor: verify + localize]
-```
+`warnings()` stays "pure code, no LLM" as documented. Constraint findings
+surface through a parallel accessor (`constraint_attention()`), merged into
+the auditor's attention-hint feed by the caller — the documented
+recomputability invariant of `warnings()` is untouched.
 
-Pass 0 runs independently (only needs question text).
-Passes 1-3.5 run as before (unchanged).
-Pass 4 consumes outputs of both Pass 0 and Passes 1-3.5.
+## Review findings addressed
 
-## What This Catches vs What It Doesn't
+| review finding | resolution |
+|---|---|
+| per-symbol chains can't reach satellite-entity evidence | `About` relation maps steps→candidate independent of def-use connectivity |
+| "unverified" unsound by construction | three-valued verdicts; `Omitted` needs code-checkable negative + Commit |
+| per-edge verdicts can't express relational constraints | `Entails`/`Contradicts` judged per (constraint, candidate) over the step set |
+| rejected candidates trigger false violations | joins key on the committed candidate only |
+| lexical filter matches entity names, not evidence | blocking runs on step text; placeholder symbols excluded |
+| def_value/use_value often None; compare_values sends step text | oracle inputs are step texts, cost accounted accordingly |
+| adjudicator repeats the agent's own date arithmetic errors | machine-checkable constraints normalized in Pass 0, decided by code |
+| "misinterpreted" status had no producer | dropped; `CommitError` covers commit-time misjudgment |
+| final-answer-span assumption unreliable | explicit `Commit` detection policy with an empty-commit degradation path |
 
-### Catches
-- Constraint omission: no evidence chain for constraint C → unverified
-- Constraint misinterpretation: value satisfies C but agent judged wrong
-- Constraint relaxation: agent weakened C → violated but treated as satisfied
-- Value mismatch: already caught by compare_values (Pass 3.5)
+## Validation plan (ordered)
 
-### Doesn't Catch
-- Pure reasoning errors: all facts correct, logical inference wrong
-- Causal reasoning: post-hoc-ergo-propter-hoc
-- Question misreading: agent pursues wrong goal entirely
-- Multi-hop intermediate constraint failures: constraints that emerge from
-  the trajectory, not the question
+1. **One-call baseline first.** Question + final answer + the grounded
+   tool-output snippets already in the index → a single LLM call listing
+   verified / violated / unaddressed constraints with cited steps. This is
+   Pass E+J collapsed into one call, with the whole-evidence view. If the
+   pass structure cannot beat it on a dev slice, the decomposition is
+   losing information — stop and rethink.
+2. **Dev slice** (~30 hand-labeled (constraint, evidence-steps, verdict)
+   triples) to attribute failures to mapping vs judgment vs aggregation vs
+   localization. Offline script, not pytest.
+3. **Per-kind precision gates** measured on the dev slice before enabling
+   any new warning kind by default.
+4. TELBench full run only after 1–3.
 
-### Off-by-one Localization
-
-This extension improves DETECTION (which constraints failed) but does not
-directly solve LOCALIZATION (which span to flag). The off-by-one problem
-(gold marks span N, we mark N+1) requires a separate span attribution
-policy — mapping error type to localization rule. Proposed separately.
+The impact estimate from the taxonomy (~21% of gold errors touch constraint
+handling) is a **taxonomy-derived ceiling**, not an expected yield —
+detection, mapping, and localization losses all discount it.
 
 ## Cost
 
-- Pass 0: 1 lightweight LLM call (question only)
-- Pass 4a: ~5-15 local LLM judgments (constraint × relevant edge)
-- Pass 4b: ~5-10 local LLM judgments (relevant pairs only)
-- Total: ~2 additional LLM calls equivalent per trajectory
+- Pass 0: 1 call (question only).
+- Pass E: ~2 batched calls (About blocking; Entails/Contradicts per
+  committed candidate). Machine-checkable constraints cost 0 oracle calls.
+- Pass J/L: code.
+- Upper bound +3 calls/trajectory, comparable to the existing 4
+  (extraction, alias, coreference, compare_values). Oracle inputs are step
+  texts, so token cost is dominated by evidence-step length, not call count.
 
-## Implementation Notes
+## Out of scope
 
-- Pass 0: standalone function, can be a simple prompt + JSON parse
-- Pass 4: new function in `adjudicate.py`, following `compare_values` pattern
-- Constraint list stored on TrajectoryIndex (new field)
-- ConstraintStatus stored alongside warnings
-- Auditor receives constraint statuses via `list_attention_hints` or a
-  new `list_constraint_statuses` tool
-
-## Estimated Impact
-
-Based on TELBench error type distribution:
-- constraint_check_omission (114 spans): high detectability
-- constraint_semantics_error (320 spans): medium detectability
-- constraint_relaxation (113 spans): medium detectability
-- Total: ~547/2552 (21%) of gold errors potentially catchable
-
-Optimistic: +5pp F1 (0.53 → 0.58)
-Conservative: +3pp F1 (0.53 → 0.56)
-
-## Open Questions
-
-1. How to handle multi-hop questions where constraints emerge from the
-   trajectory? Current plan only extracts answer-level constraints from the
-   question text.
-
-2. Constraint-edge mapping (4a) requires understanding what each edge is
-   "about." Can this be done reliably with local LLM judgments on
-   (constraint_text, def_value, use_value) triples?
-
-3. Should constraint statuses be surfaced to the auditor as attention_hints
-   (passive) or as a structured tool (active)? Previous experience shows
-   the auditor may ignore passive context.
-
-## Prior Art
-
-- DRIFT (NJU-LINK): 4-stage claim-centric pipeline. Their Claim Keeper
-  tracks claim lifecycle (exploratory → consequential → finalized). Our
-  constraint extraction is analogous but scoped to answer-level constraints,
-  not trajectory-derived claims.
-- AgentForesight: step-level online auditing. Their prompt iteration (v7-v16)
-  showed that "restating vs introducing" distinction is key for multi-agent
-  trajectories — orthogonal to constraint satisfaction.
+- AFTraj: its "constraints" are preconditions / invariants / success
+  criteria, not entity attributes; Pass 0's prompt is TELBench-shaped.
+  Pass E/J stay gated off for AFTraj until a domain prompt exists — the
+  62.5% F1 there must not be exposed to downside.
+- Multi-hop constraints that emerge mid-trajectory (from tool results, not
+  the question).
+- Pure reasoning errors with no constraint anchor (unsupported inference
+  over fully grounded facts).
 
 ## References
 
-- SCHEMA.md: existing grounding analysis design
-- adjudicate.py: compare_values (Pass 3.5) — pattern to follow
-- index.py: TrajectoryIndex data model
-- TELBench case studies: 0001, 0006, 0009, 0159, 0657 (in session notes)
+- SCHEMA.md — the grounding analysis this extends.
+- O'Hearn, *Incorrectness Logic*, POPL 2020 — under-approximate bug-finding.
+- Cousot & Cousot — abstract interpretation; soundness as over-approximation.
+- Livshits et al., *In Defense of Soundiness*, CACM 2015 — declared
+  unsoundness sources.
+- Doop / Datalog-based pointer analysis — analysis as relations + joins.
+- Bruns & Godefroid — three-valued model checking.
+- Alpern & Schneider — safety/liveness decomposition; bad prefixes.
+- Clarke et al. — CEGAR.
