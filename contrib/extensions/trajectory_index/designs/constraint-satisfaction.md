@@ -206,12 +206,31 @@ Anchors are per-kind policy validated against gold label conventions on the
 dev slice (P7) — if fabrication gold also proves commitment-centric, the
 first row's anchor moves; nothing else changes.
 
-Measured (TELBench failed-232 run): "commit step" means the step where the
-agent FIRST asserts the committed binding, not its final restatement — of
-40 omitted-finding cases, gold lay strictly earlier than the final report
-in 30 and included it in only 10, while the auditor followed the supplied
-anchor in 39. The implementation anchors at the earliest assistant step
-mentioning the binding (`_first_assertion_step`).
+Measured (TELBench failed-232 runs): BOTH code-heuristic anchor conventions
+failed their gold-validation gate — final-restatement hit gold in 10/40
+omitted cases (auditor followed 39/40), first-assertion hit 7/39 (auditor
+followed 21/39). Gold marks where the erroneous *reasoning* commits, which
+is error-type-dependent and semantic; no entity-mention heuristic locates
+it. Consequence (rendering review, three critique rounds): **the index
+never designates an error step.** Pass L emits the localization FACT SET
+{first assertion step, final commitment step, evidence steps}; the auditor
+localizes.
+
+Rendering A/B over byte-identical indexes/findings on the same 232 cases
+settled the presentation question:
+
+| arm | rendering | F1 | FEA |
+|---|---|---|---|
+| A | verdict labels + single anchor | 0.1462 | 0.0862 |
+| B | fact blocks + fact set + coverage statement | **0.1614** | **0.1034** |
+
+(B wins 27 cases, loses 16; freshest full-pipeline baseline on the same
+slice: 0.1416.) Presentation form causally affects auditor behavior: facts
+beat verdicts. The rendering contract: verdict-shaped output only for
+gate-passing kinds (P6 code checks are born gated); oracle-judged kinds
+render as check-result facts; a mandatory coverage statement (status
+counts incl. unknown, abstentions, prune counts, K-of-N on any cap)
+extends P2 to the presentation layer; equal detail budget per polarity.
 
 ## Data model
 
