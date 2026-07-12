@@ -273,6 +273,8 @@ class AuditorEvalAdapter:
             concurrency: Annotated[int, typer.Option("--concurrency", help="Parallel trajectories")] = 1,
             split: Annotated[str | None, typer.Option("--split", help="AFTraj split (e.g. test)")] = None,
             domain: Annotated[str | None, typer.Option("--domain", help="AFTraj domain filter")] = None,
+            enable_claim_analysis: Annotated[bool, typer.Option("--claim-analysis/--no-claim-analysis", help="Enable Level 2 claim analysis")] = False,
+            case_file: Annotated[Path | None, typer.Option("--case-file", help="File with case IDs to run (one per line)")] = None,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
             from agentm.env import autoload_dotenv
@@ -297,6 +299,10 @@ class AuditorEvalAdapter:
             if telbench_data:
                 items.extend(_load_from_telbench(telbench_data, limit=limit, max_messages=max_messages))
 
+            if case_file and case_file.is_file():
+                allowed = {line.strip() for line in case_file.read_text().splitlines() if line.strip()}
+                items = [(tid, msgs, meta) for tid, msgs, meta in items if tid in allowed]
+
             if not items:
                 typer.echo("No trajectories. Use --session, --aftraj-dir, or --telbench-data.", err=True)
                 raise typer.Exit(1)
@@ -316,6 +322,7 @@ class AuditorEvalAdapter:
                 auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
                 concurrency=concurrency,
+                claim_analysis=enable_claim_analysis,
             ))
 
         return cli
@@ -338,6 +345,27 @@ def _index_to_context(idx: Any) -> dict[str, Any]:
     return index_to_context(idx)
 
 
+async def _run_claim_analysis(
+    messages: list[AgentMessage], idx: Any, context: dict[str, Any], model: str,
+) -> dict[str, Any]:
+    """Run Level 2 claim analysis and merge result into context."""
+    from trajectory_index.atom import _agentmsg_to_extraction_dict
+
+    from agentm_eval.methods.claim_analysis import run_claim_analysis
+
+    trajectory = [d for i, m in enumerate(messages) if (d := _agentmsg_to_extraction_dict(m, i))]
+    symbols = context.get("symbols", [])
+    references = context.get("references", [])
+
+    ledger = await run_claim_analysis(
+        trajectory, symbols=symbols, references=references,
+        context_index=context, model=model,
+    )
+    if ledger:
+        context["claim_structure"] = ledger.to_context()
+    return context
+
+
 # ---------------------------------------------------------------------------
 # Core pipeline — shared across all data sources
 # ---------------------------------------------------------------------------
@@ -357,8 +385,9 @@ async def _process_one_item(
     auditor_prompt: str,
     exp: Experiment,
     rebuild_index: bool,
+    claim_analysis: bool = False,
 ) -> dict[str, Any]:
-    """Process a single trajectory: index extraction + auditor. Returns result dict."""
+    """Process a single trajectory: index extraction + (optional) claim analysis + auditor."""
     from agentm_eval.methods.auditor import run_auditor
     from agentm_eval.methods.index import (
         _chunk_messages,
@@ -379,6 +408,8 @@ async def _process_one_item(
         idx.build_dependencies()
 
         context = _index_to_context(idx)
+        if claim_analysis:
+            context = await _run_claim_analysis(messages, idx, context, model)
         try:
             audit_result = await run_auditor(
                 messages, model=model,
@@ -456,6 +487,8 @@ async def _process_one_item(
 
         trajectory_prefix = messages[:chunk_end]
         context = _index_to_context(idx)
+        if claim_analysis:
+            context = await _run_claim_analysis(trajectory_prefix, idx, context, model)
 
         try:
             audit_result = await run_auditor(
@@ -520,6 +553,7 @@ async def _run_pipeline(
     exp: Experiment,
     rebuild_index: bool,
     concurrency: int = 1,
+    claim_analysis: bool = False,
 ) -> None:
     total = len(items)
     sem = asyncio.Semaphore(concurrency)
@@ -534,6 +568,7 @@ async def _run_pipeline(
                 chunk_size=chunk_size, vocabulary=vocabulary,
                 auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
+                claim_analysis=claim_analysis,
             )
         async with lock:
             all_results.append(result_dict)
