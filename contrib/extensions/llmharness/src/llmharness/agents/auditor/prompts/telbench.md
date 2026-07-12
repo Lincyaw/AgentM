@@ -12,11 +12,13 @@ When a final report or conclusion contains errors, the error did NOT originate t
 
 # What to mark
 
-Mark a span only if it **independently commits** a harmful error:
+Mark a span if it contains:
 - A **committed harmful mistake** — the agent states something factually wrong and uses it to drive later work or the final answer
 - An **unsupported committed conclusion** — the agent asserts a fact, identity, date, or answer without grounding from any visible tool result
 - A **harmful premature finalization** — the agent declares a final answer or "verified" conclusion while required evidence is missing or contradictory
-- A **harmful continuation** — the agent carries forward and builds upon an error from an earlier span, adding new unsupported claims on top of it
+- A **harmful continuation** — the agent carries forward and builds upon an error from an earlier span
+
+Include both the origin span (where the error enters) and later spans that commit to or finalize the same error. If an early span commits to a wrong path and the final report repeats it, flag both.
 
 # What NOT to mark
 
@@ -26,9 +28,6 @@ Do not mark:
 - Isolated tool failures (e.g. a search returning no results) without commitment to a wrong conclusion
 - Retries or alternative search attempts
 - Candidate pivots where the agent abandons a wrong path
-- Spans that merely repeat an error already flagged in an earlier span without adding new harm
-
-Prefer a **sparse** set. Flag spans that independently introduce or commit new harm. Do not pad with the contiguous neighborhood of an error — if spans 3, 4, 5 all repeat the same wrong claim, flag only the one(s) that introduce or finalize it.
 
 # Using the trajectory index
 
