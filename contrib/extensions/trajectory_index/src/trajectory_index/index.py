@@ -174,6 +174,54 @@ class Relation:
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
+# --- Constraint satisfaction layer (Pass 0/E/J/L; designs/constraint-satisfaction.md) ---
+
+# Verdict for one (constraint, committed candidate) pair. "unknown" never
+# escalates into a warning (P5); "omitted" requires the conjoined lexical +
+# attested-coverage negatives (P4-iii).
+type FindingStatus = Literal["verified", "violated", "omitted", "unknown"]
+
+_FINDING_STATUS_VALUES: frozenset[str] = frozenset(
+    {"verified", "violated", "omitted", "unknown"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Constraint:
+    """An answer-level requirement extracted from the question (Pass 0).
+
+    ``normalized`` is present only when the predicate is machine-checkable
+    (dates, quantities) — then satisfaction is decided by code and the model
+    only locates candidate values in text (P6).
+    """
+
+    id: str
+    subject: str
+    description: str
+    normalized: Mapping[str, MetadataValue] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConstraintFinding:
+    """Pass J/L verdict for one (constraint, committed candidate) pair.
+
+    ``confidence`` is an ordinal ranking prior over findings, never a
+    probability (oracle confidences are uncalibrated self-reports; code
+    checks are ~1.0 — the min over mixed sources has no unit).
+    ``confidence_source`` records what attained the min so the auditor can
+    weigh source type instead of trusting the scalar.
+    """
+
+    constraint_id: str
+    candidate: str
+    status: FindingStatus
+    evidence_step_ids: tuple[str, ...] = ()
+    commit_step_id: str | None = None
+    confidence: float = 1.0
+    confidence_source: str = ""      # "code" | "oracle:<relation>"
+    reason: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Query / result models
 # ---------------------------------------------------------------------------
@@ -356,6 +404,10 @@ class TrajectoryIndex:
         # Def-use / grounding layer (Pass 3). Built by build_dependencies().
         self.dependencies: dict[str, Dependency] = {}
         self._dep_ids_by_symbol: dict[str, list[str]] = defaultdict(list)
+
+        # Constraint layer (Pass 0/E/J/L). Populated by constraints.analyze_constraints().
+        self.constraints: dict[str, Constraint] = {}
+        self.constraint_findings: list[ConstraintFinding] = []
 
         self.indexed_message_count: int = 0
 
@@ -634,6 +686,9 @@ class TrajectoryIndex:
             # dependencies are derived from symbols; a merge invalidates them.
             self.dependencies = {}
             self._dep_ids_by_symbol = defaultdict(list)
+            # constraint findings name candidate symbols; a merge invalidates
+            # them wholesale (Pass E/J/L rebuild from facts + transcript).
+            self.constraint_findings = []
 
     # ---- def-use / grounding layer (Pass 3: dataflow, deterministic) ----
 
@@ -964,6 +1019,30 @@ class TrajectoryIndex:
         from collections import Counter
         return dict(Counter(w.kind for w in self.warnings()))
 
+    def constraint_attention(self) -> list[dict[str, str]]:
+        """Constraint findings as attention hints (violated / omitted only).
+
+        Kept separate from :meth:`warnings` — which stays pure code — because
+        these stand on recorded oracle tuples. The caller merges them into
+        the auditor's attention-hint feed.
+        """
+        out: list[dict[str, str]] = []
+        for f in self.constraint_findings:
+            if f.status not in ("violated", "omitted"):
+                continue
+            c = self.constraints.get(f.constraint_id)
+            desc = c.description if c else f.constraint_id
+            summary = f"constraint '{desc}' {f.status} for candidate '{f.candidate}'"
+            if f.reason:
+                summary += f" — {f.reason}"
+            out.append({
+                "kind": f"constraint_{f.status}",
+                "summary": summary,
+                "symbol": f.candidate,
+                "step_id": f.commit_step_id or "",
+            })
+        return out
+
     # ---- integrity ----
 
     def validate(self) -> list[str]:
@@ -1087,6 +1166,28 @@ class TrajectoryIndex:
             }
             for d in self.dependencies.values()
         ]
+        constraints = [
+            {
+                "id": c.id,
+                "subject": c.subject,
+                "description": c.description,
+                "normalized": dict(c.normalized) if c.normalized else None,
+            }
+            for c in self.constraints.values()
+        ]
+        constraint_findings = [
+            {
+                "constraint_id": f.constraint_id,
+                "candidate": f.candidate,
+                "status": f.status,
+                "evidence_step_ids": list(f.evidence_step_ids),
+                "commit_step_id": f.commit_step_id,
+                "confidence": f.confidence,
+                "confidence_source": f.confidence_source,
+                "reason": f.reason,
+            }
+            for f in self.constraint_findings
+        ]
         data = {
             "stats": {
                 "steps": len(self.steps),
@@ -1094,6 +1195,8 @@ class TrajectoryIndex:
                 "references": len(self.references),
                 "relations": len(self.relations),
                 "dependencies": len(self.dependencies),
+                "constraints": len(self.constraints),
+                "constraint_findings": len(self.constraint_findings),
                 "indexed_message_count": self.indexed_message_count,
             },
             "steps": steps,
@@ -1101,6 +1204,8 @@ class TrajectoryIndex:
             "references": refs,
             "relations": relations,
             "dependencies": dependencies,
+            "constraints": constraints,
+            "constraint_findings": constraint_findings,
         }
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1284,6 +1389,43 @@ class TrajectoryIndex:
             )
             index.dependencies[dep.id] = dep
             index._dep_ids_by_symbol[sym_id].append(dep.id)
+
+        for c in data.get("constraints", []):
+            cid = str(c.get("id", ""))
+            if not cid:
+                continue
+            normalized = c.get("normalized")
+            index.constraints[cid] = Constraint(
+                id=cid,
+                subject=str(c.get("subject", "answer")),
+                description=str(c.get("description", "")),
+                normalized=normalized if isinstance(normalized, dict) else None,
+            )
+
+        for f in data.get("constraint_findings", []):
+            raw_status = f.get("status")
+            status: FindingStatus = (
+                raw_status if raw_status in _FINDING_STATUS_VALUES else "unknown"
+            )
+            if raw_status and raw_status not in _FINDING_STATUS_VALUES:
+                _log.warning(
+                    f"load: constraint finding status {raw_status!r} invalid, defaulting to 'unknown'"
+                )
+            index.constraint_findings.append(ConstraintFinding(
+                constraint_id=str(f.get("constraint_id", "")),
+                candidate=str(f.get("candidate", "")),
+                status=status,
+                evidence_step_ids=tuple(
+                    str(s) for s in f.get("evidence_step_ids", []) if isinstance(s, str | int)
+                ),
+                commit_step_id=(
+                    f.get("commit_step_id")
+                    if isinstance(f.get("commit_step_id"), str) else None
+                ),
+                confidence=float(f.get("confidence", 1.0)),
+                confidence_source=str(f.get("confidence_source", "")),
+                reason=str(f.get("reason", "")),
+            ))
 
         return index
 

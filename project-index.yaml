@@ -1342,6 +1342,43 @@ requirements:
     depends_on:
       - REQ-204-trajectory-index-trace-discovery
 
+  - id: REQ-209-trajectory-index-constraint-satisfaction
+    title: Constraint satisfaction analysis (Pass 0/E/J/L) over the trajectory index
+    description: >
+      Extends the grounding analysis with constraint-level verification for
+      question-answering trajectories, organized as compiler passes with an
+      explicit model/code boundary (contracts P1-P7 in the design doc).
+      Pass 0 extracts answer-level constraints from the question; machine-
+      checkable ones (dates, quantities) carry a normalized form that code
+      decides (the oracle only locates values). Pass E fills oracle tuples
+      over code-selected bounded windows: Commit (which candidate the agent
+      answers with), About (which grounded steps carry evidence about it,
+      incl. satellite entities), Entails/Contradicts judged per (constraint,
+      candidate) over the evidence step set jointly. Pass J is a pure-code
+      Kleene three-valued join — unknown never escalates; Omitted requires
+      two independent absence checks (lexical code-negative over the whole
+      trace AND an attested coverage sweep with citation-on-yes, abstention
+      on truncation). Pass L anchors violated/omitted at the commit step.
+      Every model influence flows through a recorded transcript (Pass J/L is
+      a deterministic function of facts + transcript); every code-side prune
+      is logged. Findings persist through dump/load; alias merges invalidate
+      them wholesale. Surfaced to the auditor via constraint_attention() and
+      a rendered prompt section; enabled in auditor-eval via --constraints
+      (TELBench only — AFTraj stays gated off).
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/constraints.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/index.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/auditor_eval/__init__.py
+      - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/context.py
+    tests: []
+    docs:
+      - path: contrib/extensions/trajectory_index/designs/constraint-satisfaction.md
+    depends_on:
+      - REQ-208-trajectory-index-readwrite-layer
+
   - id: REQ-119-core-kernel-residuals
     title: Core kernel removes hard-coded layout literals and dead Tool surface
     description: >

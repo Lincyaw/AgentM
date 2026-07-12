@@ -274,6 +274,7 @@ class AuditorEvalAdapter:
             split: Annotated[str | None, typer.Option("--split", help="AFTraj split (e.g. test)")] = None,
             domain: Annotated[str | None, typer.Option("--domain", help="AFTraj domain filter")] = None,
             enable_claim_analysis: Annotated[bool, typer.Option("--claim-analysis/--no-claim-analysis", help="Enable Level 2 claim analysis")] = False,
+            enable_constraints: Annotated[bool, typer.Option("--constraints/--no-constraints", help="Enable constraint satisfaction analysis (needs question metadata; TELBench only)")] = False,
             case_file: Annotated[Path | None, typer.Option("--case-file", help="File with case IDs to run (one per line)")] = None,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
@@ -323,6 +324,7 @@ class AuditorEvalAdapter:
                 exp=exp, rebuild_index=rebuild_index,
                 concurrency=concurrency,
                 claim_analysis=enable_claim_analysis,
+                constraint_analysis=enable_constraints,
             ))
 
         return cli
@@ -343,6 +345,54 @@ def _parse_chunk_size(value: str | None) -> tuple[int, int] | None:
 def _index_to_context(idx: Any) -> dict[str, Any]:
     from agentm_eval.methods.auditor import index_to_context
     return index_to_context(idx)
+
+
+async def _run_constraint_analysis(
+    idx: Any, tid: str, question: str, model: str, exp: Experiment,
+) -> None:
+    """Run constraint satisfaction (Pass 0/E/J/L) on a built index.
+
+    Best-effort: a failure leaves the index without findings, which the
+    auditor treats as no constraint signal. The full analysis record
+    (findings + oracle transcript + prune log) lands in constraints.json.
+    """
+    from agentm.core.runtime import AgentSession
+    from trajectory_index.constraints import analyze_constraints
+
+    try:
+        analysis = await analyze_constraints(
+            idx, run_id=tid, question=question, model=model,
+            session_factory=AgentSession.create,
+        )
+        exp.write_session_artifact(tid, "", "constraints.json", analysis.to_artifact())
+    except Exception as exc:
+        typer.echo(f"  {tid}: constraint analysis failed: {exc}", err=True)
+
+
+def _merge_constraint_context(context: dict[str, Any], idx: Any) -> None:
+    """Surface constraint findings to the auditor: attention hints + a
+    structured block rendered into the system prompt."""
+    context["attention_hints"] = [
+        *context.get("attention_hints", []),
+        *idx.constraint_attention(),
+    ]
+    context["constraint_findings"] = [
+        {
+            "constraint_id": f.constraint_id,
+            "description": (
+                idx.constraints[f.constraint_id].description
+                if f.constraint_id in idx.constraints else f.constraint_id
+            ),
+            "candidate": f.candidate,
+            "status": f.status,
+            "evidence_step_ids": list(f.evidence_step_ids),
+            "commit_step_id": f.commit_step_id,
+            "confidence": f.confidence,
+            "confidence_source": f.confidence_source,
+            "reason": f.reason,
+        }
+        for f in idx.constraint_findings
+    ]
 
 
 async def _run_claim_analysis(
@@ -386,6 +436,7 @@ async def _process_one_item(
     exp: Experiment,
     rebuild_index: bool,
     claim_analysis: bool = False,
+    constraint_analysis: bool = False,
 ) -> dict[str, Any]:
     """Process a single trajectory: index extraction + (optional) claim analysis + auditor."""
     from agentm_eval.methods.auditor import run_auditor
@@ -407,7 +458,13 @@ async def _process_one_item(
         idx = TrajectoryIndex.load(index_path)
         idx.build_dependencies()
 
+        if constraint_analysis and meta.get("question") and not idx.constraint_findings:
+            await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
+            idx.dump(str(index_path))
+
         context = _index_to_context(idx)
+        if idx.constraint_findings:
+            _merge_constraint_context(context, idx)
         if claim_analysis:
             context = await _run_claim_analysis(messages, idx, context, model)
         try:
@@ -486,7 +543,14 @@ async def _process_one_item(
         stats = idx.stats(tid)
 
         trajectory_prefix = messages[:chunk_end]
+        is_last_chunk = ci == len(raw_chunks) - 1
+        if constraint_analysis and meta.get("question") and is_last_chunk:
+            # Constraints are a posthoc, full-trajectory analysis — run once,
+            # after the index is complete.
+            await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
         context = _index_to_context(idx)
+        if idx.constraint_findings:
+            _merge_constraint_context(context, idx)
         if claim_analysis:
             context = await _run_claim_analysis(trajectory_prefix, idx, context, model)
 
@@ -554,6 +618,7 @@ async def _run_pipeline(
     rebuild_index: bool,
     concurrency: int = 1,
     claim_analysis: bool = False,
+    constraint_analysis: bool = False,
 ) -> None:
     total = len(items)
     sem = asyncio.Semaphore(concurrency)
@@ -569,6 +634,7 @@ async def _run_pipeline(
                 auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
                 claim_analysis=claim_analysis,
+                constraint_analysis=constraint_analysis,
             )
         async with lock:
             all_results.append(result_dict)

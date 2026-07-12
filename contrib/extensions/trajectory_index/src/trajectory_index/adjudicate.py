@@ -149,6 +149,7 @@ async def _ask_model(
     payload: str,
     model: str | None,
     session_factory: SessionFactory,
+    purpose: str = "alias_resolution",
 ) -> list[Any] | None:
     """One plain-JSON model call; returns the ``verdicts`` list or None.
 
@@ -169,7 +170,7 @@ async def _ask_model(
         cwd=str(Path.cwd()),
         model=model,
         scenario="minimal",
-        purpose="alias_resolution",
+        purpose=purpose,
         loop_config=LoopConfig(max_turns=1),
         log_trace_command=False,
     )
@@ -189,11 +190,11 @@ async def _ask_model(
     )
     obj = extract_json(text)
     if obj is None:
-        logger.warning("alias resolution: model returned no parseable JSON")
+        logger.warning("{}: model returned no parseable JSON", purpose)
         return None
     verdicts = obj.get("verdicts")
     if not isinstance(verdicts, list):
-        logger.warning("alias resolution: JSON missing 'verdicts' list")
+        logger.warning("{}: JSON missing 'verdicts' list", purpose)
         return None
     return verdicts
 

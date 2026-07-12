@@ -80,17 +80,36 @@ def _build_index_summary(context_index: dict[str, Any]) -> str:
         for h in attention_hints[:5]:
             lines.append(f"  - [{h.get('kind', '?')}] {h.get('summary', '')[:200]}")
 
+    constraint_findings = context_index.get("constraint_findings") or []
+    if constraint_findings:
+        lines.append("\nConstraint analysis (question requirements vs gathered evidence):")
+        for f in constraint_findings[:12]:
+            status = f.get("status", "?")
+            desc = str(f.get("description", ""))[:140]
+            candidate = f.get("candidate", "")
+            anchor = f.get("commit_step_id")
+            src = f.get("confidence_source", "")
+            line = f"  - [{status}] '{desc}' for candidate '{candidate}'"
+            if status in ("violated", "omitted") and anchor:
+                line += f" (anchor: step {anchor})"
+            if src:
+                line += f" [{src}]"
+            lines.append(line)
+            reason = str(f.get("reason", ""))
+            if reason and status in ("violated", "omitted"):
+                lines.append(f"      {reason[:160]}")
+
     claim_structure = context_index.get("claim_structure")
     if claim_structure:
         span_roles = claim_structure.get("span_roles", {})
         commit_spans = sorted(int(k) for k, v in span_roles.items() if v in ("commit", "verify", "finalize"))
         explore_spans = sorted(int(k) for k, v in span_roles.items() if v == "explore")
-        lines.append(f"\nClaim analysis (Level 2):")
+        lines.append("\nClaim analysis (Level 2):")
         lines.append(f"  Commitment spans: {commit_spans}")
         lines.append(f"  Exploration spans (NOT errors): {explore_spans}")
         points = claim_structure.get("commitment_points", [])
         if points:
-            lines.append(f"  Ungrounded commitments:")
+            lines.append("  Ungrounded commitments:")
             for cp in points[:8]:
                 lines.append(f"    span {cp.get('span')}: {cp.get('entity','')} (grounded={cp.get('grounded',False)}) — {cp.get('reason','')[:100]}")
 
