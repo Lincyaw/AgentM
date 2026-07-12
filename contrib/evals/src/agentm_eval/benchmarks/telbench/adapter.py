@@ -51,8 +51,30 @@ _OBS_MARKERS = (
     re.compile(r"^\s*Title:.*\bURL\b"),
     re.compile(r"stdout='"),
 )
+# Search-result compound spans: `query\n---\nfetched page(s)` — the `---`
+# separates result items. Anchored at the span head or right after the
+# separator: agent reports also contain `---` (markdown rules) and URLs in
+# prose, so an unanchored content match would misclassify final reports —
+# the most commitment-heavy agent spans — as observations.
+_SEP_RE = re.compile(r"\n---\n")
+_WEB_HEAD_RE = re.compile(r"^\s*(?:Title:|https?://)")
 _PLAN_RE = re.compile(r"^\{['\"]subtask")
 _OBS_SCAN_CHARS = 2000  # markers appear structurally near the head
+
+
+def _compound_observation(r: str) -> bool:
+    """Fetched-content span shape: web-content head, or `query\\n---\\npage`
+    where the segment after the first separator has a web-content head.
+    Markdown-heading spans are agent reports, never observations."""
+    if r.startswith("#"):
+        return False
+    if _WEB_HEAD_RE.match(r):
+        return True
+    m = _SEP_RE.search(r)
+    if m:
+        after = r[m.end():m.end() + 200].lstrip()
+        return bool(_WEB_HEAD_RE.match(after))
+    return False
 
 
 def classify_span(raw: str) -> str:
@@ -66,6 +88,8 @@ def classify_span(raw: str) -> str:
     if _PLAN_RE.match(r):
         return "plan"
     if any(p.search(r[:_OBS_SCAN_CHARS]) for p in _OBS_MARKERS):
+        return "observation"
+    if _compound_observation(r):
         return "observation"
     return "agent"
 

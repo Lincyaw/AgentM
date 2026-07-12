@@ -46,6 +46,7 @@ from .index import (
     StepRole,
     Symbol,
     TrajectoryIndex,
+    normalize_name,
 )
 
 # No mid-content truncation anywhere in this module: oracle windows are
@@ -109,11 +110,26 @@ class Diagnostics:
 
 @dataclass(frozen=True, slots=True)
 class Commit:
-    """Pass E1 output: the candidate the agent answered with."""
+    """Pass E1 output: what the agent answered with, and where.
 
-    symbol: Symbol
+    ``binding`` is the committed answer as text — the symbol's canonical
+    name when the phrase resolves to an indexed entity, else the extracted
+    phrase itself. Keeping the phrase usable when resolution fails is what
+    frees commit detection from Pass 1 extraction recall (the answer entity
+    is exactly the one hard trajectories fail to extract).
+    """
+
+    binding: str
     step: Step
     confidence: float
+    symbol: Symbol | None = None
+
+    @property
+    def names(self) -> set[str]:
+        out = {self.binding}
+        if self.symbol is not None:
+            out |= self.symbol.all_names
+        return {n for n in out if n.strip()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,79 +326,80 @@ def lexical_evidence_exists(
 # ---------------------------------------------------------------------------
 
 _COMMIT_INSTRUCTIONS = """\
-You are shown the final assistant message of an agent trajectory and a
-numbered list of candidate entities. Decide which single candidate the agent
-COMMITS to as its final answer. Committing means presenting it as the
-answer/conclusion — not mentioning it as a rejected or considered option.
-Pick -1 if the agent does not commit to any listed candidate (e.g. the
-trajectory aborts, or the answer is not in the list).
+You are shown the task/question an agent worked on and its final message.
+Extract the answer the agent COMMITS to — the entity/value it presents as
+its conclusion. Committing means presenting it as the answer, not
+mentioning it as a rejected or considered option.
 
-Return ONLY: {"verdicts": [{"id": 0, "candidate": <index or -1>, "confidence": 0.9}]}
+- "answer": the committed answer as a SHORT verbatim phrase copied from the
+  final message (a name, a title, a value — not a sentence). Empty string
+  if the agent commits to nothing (aborts, reports failure, gives no answer).
+
+Return ONLY: {"verdicts": [{"id": 0, "answer": "...", "confidence": 0.9}]}
 """
 
 
-def _candidate_symbols(index: TrajectoryIndex, steps: list[Step]) -> list[Symbol]:
-    """Answer candidates: identifier-class symbols referenced in the last few
-    assistant steps, most-referenced first (pure code)."""
-    tail = [s for s in steps if s.role == StepRole.ASSISTANT][-3:]
-    # step_id is unique only within a run — key on (run_id, step_id)
-    tail_keys = {(s.run_id, s.step_id) for s in tail}
+def _resolve_binding(index: TrajectoryIndex, phrase: str) -> Symbol | None:
+    """Resolve an extracted answer phrase to an indexed symbol (pure code).
 
-    counts: dict[str, int] = {}
-    for ref in index.references.values():
-        if (ref.run_id, ref.step_id) in tail_keys:
-            counts[ref.symbol_id] = counts.get(ref.symbol_id, 0) + 1
-
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    return [
-        sym for sid, _n in ranked
-        if (sym := index.symbols.get(sid))
-        and sym.entity_class == "identifier"
-        and sym.kind != "tool"
-    ]
+    Exact normalized lookup first, then containment over symbol names.
+    Failure is fine — the Commit keeps the phrase as its binding.
+    """
+    sym = index.resolve_symbol_by_name(phrase)
+    if sym is not None:
+        return sym
+    norm = normalize_name(phrase)
+    if len(norm) < 3:
+        return None
+    for s in index.symbols.values():
+        for name in s.all_names:
+            n = normalize_name(name)
+            if n and (n in norm or norm in n):
+                return s
+    return None
 
 
 async def _detect_commit(
     index: TrajectoryIndex,
     steps: list[Step],
     *,
+    question: str,
     model: str | None,
     session_factory: SessionFactory,
     diag: Diagnostics,
 ) -> Commit | None:
-    """Pass E1: which candidate does the agent answer with, and where."""
-    candidates = _candidate_symbols(index, steps)
-
+    """Pass E1: extract the committed answer from the final message (oracle,
+    free text), then resolve it to an indexed symbol (code, best-effort)."""
     final = next(
         (s for s in reversed(steps) if s.role == StepRole.ASSISTANT and s.content),
         None,
     )
-    if not candidates or final is None:
-        diag.record("commit", "-", None, 0.0, "no candidates or final assistant step")
+    if final is None:
+        diag.record("commit", "-", None, 0.0, "no final assistant step")
         return None
 
     payload = json.dumps({
+        "question": question,
         "final_message": final.content,
-        "candidates": [
-            {"index": i, "name": sym.canonical_name, "kind": sym.kind}
-            for i, sym in enumerate(candidates)
-        ],
     }, ensure_ascii=False, indent=2)
     raw = await _ask_model(
         _COMMIT_INSTRUCTIONS, payload, model,
         session_factory=session_factory, purpose="constraint_commit",
     )
     item = _index_by_id(raw or []).get(0)
-    pick = -1
-    if item:
-        try:
-            pick = int(item.get("candidate", -1))
-        except (TypeError, ValueError):
-            logger.debug("constraints: commit verdict has non-integer candidate: {}", item)
+    phrase = str(item.get("answer", "")).strip() if item else ""
     conf = _safe_float(item, "confidence") if item else 0.0
-    chosen = candidates[pick] if 0 <= pick < len(candidates) else None
-    diag.record("commit", final.step_id, chosen.canonical_name if chosen else None, conf)
-    return Commit(symbol=chosen, step=final, confidence=conf) if chosen else None
+    if not phrase:
+        diag.record("commit", final.step_id, None, conf, "no committed answer extracted")
+        return None
+
+    sym = _resolve_binding(index, phrase)
+    binding = sym.canonical_name if sym is not None else phrase
+    diag.record(
+        "commit", final.step_id, binding, conf,
+        f"phrase={phrase[:80]!r} resolved={'yes' if sym else 'no'}",
+    )
+    return Commit(binding=binding, step=final, confidence=conf, symbol=sym)
 
 
 # ---------------------------------------------------------------------------
@@ -400,9 +417,9 @@ Return ONLY: {"verdicts": [{"id": 0, "about": true, "confidence": 0.9}]}
 """
 
 
-def _mentions(text: str, sym: Symbol) -> bool:
+def _mentions(text: str, names: set[str]) -> bool:
     lowered = text.lower()
-    return any(n.lower() in lowered for n in sym.all_names if n.strip())
+    return any(n.lower() in lowered for n in names)
 
 
 def _block_about(
@@ -422,7 +439,7 @@ def _block_about(
     for r in index.references.values():
         refs_by_step.setdefault((r.run_id, r.step_id), set()).add(r.symbol_id)
 
-    direct = [s for s in grounded if _mentions(s.content, commit.symbol)]
+    direct = [s for s in grounded if _mentions(s.content, commit.names)]
     direct_ids = {s.step_id for s in direct}
     direct_syms = {
         sid for s in direct for sid in refs_by_step.get((s.run_id, s.step_id), set())
@@ -458,7 +475,7 @@ async def _map_about(
         return []
 
     rows = [
-        {"id": i, "target": commit.symbol.canonical_name, "excerpt": s.content}
+        {"id": i, "target": commit.binding, "excerpt": s.content}
         for i, s in enumerate(blocked)
     ]
     raw = await _ask_model(
@@ -528,7 +545,7 @@ async def _judge_entailment(
     window_ids = {s.step_id for s in window}
 
     payload = json.dumps({
-        "candidate": commit.symbol.canonical_name,
+        "candidate": commit.binding,
         "constraints": [
             {"id": i, "desc": c.description, "machine_checkable": c.normalized is not None}
             for i, c in enumerate(constraints)
@@ -710,7 +727,7 @@ def _emit_findings(
         v = verdicts.get(c.id, _UNKNOWN)
         findings.append(ConstraintFinding(
             constraint_id=c.id,
-            candidate=commit.symbol.canonical_name,
+            candidate=commit.binding,
             status=v.status,
             evidence_step_ids=v.evidence_step_ids,
             commit_step_id=(
@@ -778,12 +795,13 @@ async def analyze_constraints(
 
     # Pass E1 — empty Commit: no violation can fire, omission has no anchor (v1: stop).
     commit = await _detect_commit(
-        index, steps, model=model, session_factory=session_factory, diag=diag,
+        index, steps, question=question or "",
+        model=model, session_factory=session_factory, diag=diag,
     )
     if commit is None:
         logger.info("constraints: agent commits to no candidate; no findings emitted")
         return analysis
-    analysis.candidate = commit.symbol.canonical_name
+    analysis.candidate = commit.binding
     analysis.commit_step_id = commit.step.step_id
 
     # Pass E2 / E3
@@ -812,6 +830,6 @@ async def analyze_constraints(
         by_status[f.status] = by_status.get(f.status, 0) + 1
     logger.info(
         "constraints: candidate='{}' findings={}",
-        commit.symbol.canonical_name, by_status,
+        commit.binding, by_status,
     )
     return analysis
