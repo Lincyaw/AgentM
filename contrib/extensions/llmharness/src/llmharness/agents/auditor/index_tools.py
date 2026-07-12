@@ -371,6 +371,62 @@ def _build_list_turns_tool(state: _IndexState) -> FunctionTool:
     )
 
 
+def _build_list_claims_tool(state: _IndexState) -> FunctionTool | None:
+    """Build list_claims tool from claim_structure in context_index."""
+    ci = state.context_index or {}
+    claim_structure = ci.get("claim_structure")
+    if not claim_structure:
+        return None
+
+    class Args(BaseModel):
+        pass
+
+    async def handler(args: dict[str, Any]) -> ToolResult:
+        span_roles = claim_structure.get("span_roles", {})
+        commitment_points = claim_structure.get("commitment_points", [])
+
+        lines: list[str] = []
+        lines.append("Claim structure analysis (from Level 2):")
+        lines.append("")
+
+        commit_spans = sorted(
+            int(k) for k, v in span_roles.items()
+            if v in ("commit", "verify", "finalize")
+        )
+        explore_spans = sorted(
+            int(k) for k, v in span_roles.items()
+            if v == "explore"
+        )
+        lines.append(f"Commitment spans: {commit_spans}")
+        lines.append(f"Exploration spans: {explore_spans}")
+        lines.append("")
+
+        if commitment_points:
+            lines.append("Commitment points (potential errors):")
+            for cp in commitment_points:
+                grounded = cp.get("grounded", False)
+                entity = cp.get("entity", "")
+                reason = cp.get("reason", "")
+                lines.append(
+                    f"  span {cp['span']}: entity='{entity}' "
+                    f"grounded={grounded} — {reason}"
+                )
+
+        return _text_result("\n".join(lines))
+
+    return FunctionTool(
+        name="list_claims",
+        description=(
+            "List the claim structure from Level 2 analysis: which spans are "
+            "commitment points (decisions/conclusions/finalizations) vs "
+            "exploration (search/retrieval). Focus error localization on "
+            "commitment spans — exploration spans are almost never errors."
+        ),
+        parameters=Args,
+        fn=handler,
+    )
+
+
 MANIFEST = ExtensionManifest(
     name="auditor_index_tools",
     description="Register trajectory and index query tools for the auditor.",
@@ -381,6 +437,7 @@ MANIFEST = ExtensionManifest(
         "tool:get_entity_timeline",
         "tool:list_entities",
         "tool:list_attention_hints",
+        "tool:list_claims",
     ),
 )
 
@@ -401,4 +458,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(_build_search_entities_tool(state))
     api.register_tool(_build_get_entity_timeline_tool(state))
     api.register_tool(_build_list_entities_tool(state))
+    claims_tool = _build_list_claims_tool(state)
+    if claims_tool is not None:
+        api.register_tool(claims_tool)
     api.register_tool(_build_list_attention_hints_tool(state))
