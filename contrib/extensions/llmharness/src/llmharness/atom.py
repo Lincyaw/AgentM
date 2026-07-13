@@ -498,7 +498,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                 model=cfg.index_model,
             )
             if extraction is not None:
-                symbols = [s.model_dump() for s in extraction.symbols]
+                symbols = [s.model_dump() for s in extraction.parsed_symbols()]
                 ci = build_context_index(
                     trajectory=traj,
                     symbols=symbols,

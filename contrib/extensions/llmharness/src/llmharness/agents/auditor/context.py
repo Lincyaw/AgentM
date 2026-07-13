@@ -141,43 +141,51 @@ _SOURCE_NOTES_CAP = 12
 
 
 def _render_source_claims(context_index: dict[str, Any]) -> str:
-    """Source-verification notes: window-scoped checks of the agent's own
-    verification claims. Facts only (this kind is ungated); polarity-balanced
-    (supported claims listed with the same detail as unsupported ones)."""
+    """Claim-evidence notes: each of the agent's settled-fact claims folded
+    against the trajectory's observation content (supports/conflicts edges +
+    attested-coverage sweep). Facts only (this kind is ungated);
+    polarity-balanced (supported claims listed with the same detail as
+    unsupported ones)."""
     notes = context_index.get("source_claim_notes") or []
     cov = context_index.get("source_claim_coverage") or {}
 
     lines = [
-        "\nSource-verification notes (ADVISORY: each of the agent's "
-        "verification claims was checked against the observation excerpts it "
-        "had just received — window-scoped; 'not present' says nothing about "
-        "other sources. Verify before relying on any note.)"
+        "\nClaim-evidence notes (ADVISORY: each of the agent's settled-fact "
+        "claims was checked against the observation content in this "
+        "trajectory. 'unsourced' means the whole recorded observation set "
+        "was swept and contains neither support nor contradiction — the "
+        "source may still exist outside the record. Verify before relying "
+        "on any note.)"
     ]
     shown = notes[:_SOURCE_NOTES_CAP]
     for n in shown:
         step = n.get("step_id", "?")
         claim = str(n.get("claim", ""))[:180]
-        srcs = ", ".join(str(s) for s in n.get("source_step_ids", []))
-        outcome = n.get("outcome", "unknown")
-        quote = str(n.get("quote", ""))[:160]
+        status = n.get("status", "unknown")
+        evidence = n.get("evidence") or []
         lines.append(f"  - step {step} claims: \"{claim}\"")
-        if outcome == "supported":
-            lines.append(f"      supported by adjacent excerpts (steps {srcs})"
-                         + (f": \"{quote}\"" if quote else ""))
-        elif outcome == "conflicted":
-            lines.append(f"      adjacent excerpts (steps {srcs}) CONTAIN CONFLICTING content"
-                         + (f": \"{quote}\"" if quote else ""))
-        elif outcome == "not_present":
-            lines.append(f"      claimed fact NOT PRESENT in adjacent excerpts (steps {srcs}) "
-                         "— may exist elsewhere; verify")
+        if status in ("supported", "conflicted"):
+            for ev in evidence[:3]:
+                verb = "supported by" if ev.get("kind") == "supports" else "CONTRADICTED by"
+                quote = str(ev.get("quote", ""))[:160]
+                lines.append(f"      {verb} step {ev.get('step_id', '?')}"
+                             + (f": \"{quote}\"" if quote else ""))
+        elif status == "unsourced":
+            lines.append("      UNSOURCED: no supporting or conflicting content "
+                         "anywhere in the recorded observations (full sweep)")
         else:
-            lines.append(f"      check returned no verdict (steps {srcs})")
+            lines.append("      status unknown (evidence sweep incomplete)")
 
+    counts = cov.get("status_counts") or {}
     cov_line = (
-        f"Coverage: {cov.get('n_detected', len(notes))} verification claims detected, "
-        f"{cov.get('n_checked', len(notes))} checked, "
-        f"{cov.get('n_unchecked', 0)} unchecked (no adjacent observations)"
+        f"Coverage: {cov.get('n_claims', len(notes))} claims, statuses "
+        + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
     )
+    if cov.get("universe_empty"):
+        cov_line += (
+            " — NOTE: this trajectory's record contains NO observation "
+            "content at all; every claim is necessarily unsourced in-trace"
+        )
     if len(notes) > len(shown):
         cov_line += f"; showing {len(shown)} of {len(notes)}"
     lines.append(cov_line)

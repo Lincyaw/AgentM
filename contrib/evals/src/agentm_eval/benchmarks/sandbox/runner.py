@@ -256,6 +256,23 @@ def run_agent_session(
         else:
             operations_config["private_containers"] = []
 
+        # Task sidecars (e.g. an isolated game/referee server) run as
+        # additional private containers in the same pod; compose-style
+        # service hostnames collapse to localhost there, so adapters also
+        # supply main-container env overrides pointing at localhost.
+        sidecar_getter = getattr(adapter, "get_sidecar_containers", None)
+        if callable(sidecar_getter):
+            operations_config["private_containers"].extend(
+                sidecar_getter(task, config.registry, config.prefix, config.tag)
+            )
+        main_env_getter = getattr(adapter, "get_main_env", None)
+        main_env = main_env_getter(task) if callable(main_env_getter) else {}
+        if main_env:
+            operations_config["config_env"] = {"vars": main_env}
+        resources_getter = getattr(adapter, "get_resources", None)
+        if callable(resources_getter):
+            operations_config.update(resources_getter(task))
+
         session_config = AgentSessionConfig(
             cwd=os.getcwd(),
             scenario=config.scenario,
@@ -406,7 +423,15 @@ def _run_and_eval_one_inner(
         }
     arl_session_id = agent_arl_sessions[0].id
 
-    session = arl.SandboxSession.attach(arl_session_id)
+    # Long verifiers (LLM-judge pipelines, compile-and-test suites) run as a
+    # single execute call; the HTTP timeout must cover the adapter's effective
+    # eval timeout or the client gives up while the operation is still running.
+    timeout_for = getattr(adapter, "eval_timeout_for", None)
+    eval_timeout = (
+        timeout_for(task, config.eval_timeout) if callable(timeout_for)
+        else config.eval_timeout
+    )
+    session = arl.SandboxSession.attach(arl_session_id, timeout=eval_timeout + 120)
     with _active_eval_lock:
         _active_eval_sessions.add(session)
     scores: dict[str, Any] | None = None

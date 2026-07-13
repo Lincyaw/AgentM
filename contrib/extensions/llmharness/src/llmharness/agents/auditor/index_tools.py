@@ -8,13 +8,12 @@ search entities, check coverage, get a symbol's reference timeline.
 from __future__ import annotations
 
 import json
-
-from loguru import logger
 from collections import Counter
 from typing import Any
 
 from agentm.core.abi import ExtensionAPI, FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
+from loguru import logger
 from pydantic import BaseModel, Field
 
 

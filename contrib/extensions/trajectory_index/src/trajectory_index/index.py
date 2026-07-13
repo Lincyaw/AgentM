@@ -278,6 +278,27 @@ class Edge:
 
 
 @dataclass(frozen=True, slots=True)
+class ClaimFinding:
+    """Pass 3 output: one claim's evidence status, folded from edges by code.
+
+    ``status`` values: ``supported`` (a supports edge exists), ``conflicted``
+    (a conflicts edge exists — dominates), ``unsourced`` (the edge pass swept
+    the WHOLE observation universe with complete coverage and found neither),
+    ``unknown`` (coverage broken — never escalates, P5). ``universe_empty``
+    distinguishes "swept and found nothing" from "there was nothing to
+    sweep" (a trajectory whose serialization carries no observation content
+    at all — a strong trajectory-level fact in its own right).
+    """
+
+    claim_id: str
+    run_id: str
+    step_id: str
+    status: str
+    edge_ids: tuple[str, ...] = ()
+    universe_empty: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Constraint:
     """An answer-level requirement extracted from the question (Pass 0).
 
@@ -527,6 +548,9 @@ class TrajectoryIndex:
 
         # Edges (Pass 2 output, endpoint- and quote-verified). Keyed by edge id.
         self.edges: dict[str, Edge] = {}
+
+        # Claim statuses (Pass 3 output, pure-code fold over edges + coverage).
+        self.claim_findings: list[ClaimFinding] = []
 
         # Constraint layer (Pass 0/E/J/L). Populated by constraints.analyze_constraints().
         self.constraints: dict[str, Constraint] = {}
@@ -1420,6 +1444,14 @@ class TrajectoryIndex:
             }
             for e in self.edges.values()
         ]
+        claim_findings = [
+            {
+                "claim_id": f.claim_id, "run_id": f.run_id, "step_id": f.step_id,
+                "status": f.status, "edge_ids": list(f.edge_ids),
+                "universe_empty": f.universe_empty,
+            }
+            for f in self.claim_findings
+        ]
         constraints = [
             {
                 "id": c.id,
@@ -1463,6 +1495,7 @@ class TrajectoryIndex:
             "dependencies": dependencies,
             "claims": claims,
             "edges": edges,
+            "claim_findings": claim_findings,
             "constraints": constraints,
             "constraint_findings": constraint_findings,
         }
@@ -1690,6 +1723,16 @@ class TrajectoryIndex:
                 quote=str(e.get("quote", "")),
                 confidence=float(e.get("confidence", 0.0)),
             )
+
+        for cf in data.get("claim_findings", []):
+            index.claim_findings.append(ClaimFinding(
+                claim_id=str(cf.get("claim_id", "")),
+                run_id=str(cf.get("run_id", "")),
+                step_id=str(cf.get("step_id", "")),
+                status=str(cf.get("status", "unknown")),
+                edge_ids=tuple(str(e) for e in cf.get("edge_ids", [])),
+                universe_empty=bool(cf.get("universe_empty", False)),
+            ))
 
         for c in data.get("constraints", []):
             cid = str(c.get("id", ""))

@@ -337,8 +337,10 @@ class AuditorEvalAdapter:
                 claim_analysis=enable_claim_analysis,
                 constraint_analysis=enable_constraints or "constraints" in pass_set,
                 constraint_rendering=constraint_rendering,
+                # source (context injection) depends on edges (the sweep)
                 source_checks=enable_source_checks or "source" in pass_set,
-                build_edges="edges" in pass_set,
+                build_edges=("edges" in pass_set or "source" in pass_set
+                             or enable_source_checks),
                 run_audit="audit" in pass_set,
             ))
 
@@ -374,57 +376,59 @@ def _load_constraint_artifact(exp: Experiment, tid: str) -> dict[str, Any] | Non
         return None
 
 
-async def _run_source_checks(
-    idx: Any, tid: str, model: str, exp: Experiment, context: dict[str, Any],
-) -> None:
-    """Run the source-claim consistency pass and merge facts into context.
+def _merge_claim_status_context(idx: Any, tid: str, context: dict[str, Any]) -> None:
+    """Surface claim statuses (Pass 3 fold) to the auditor context.
 
-    Best-effort; a failure leaves no notes (absence of notes is declared in
-    the coverage line, never read as absence of problems).
+    Absence of notes is declared in the coverage block, never read as
+    absence of problems.
     """
-    from agentm.core.runtime import AgentSession
-    from trajectory_index.verification import check_source_claims
-
-    try:
-        analysis = await check_source_claims(
-            idx, run_id=tid, model=model, session_factory=AgentSession.create,
-        )
-    except Exception as exc:
-        typer.echo(f"  {tid}: source-claim check failed: {exc}", err=True)
+    findings = [f for f in idx.claim_findings if f.run_id == tid]
+    if not findings:
         return
-    exp.write_session_artifact(tid, "", "source_claims.json", analysis.to_artifact())
-    if not analysis.n_detected:
-        return
-    context["source_claim_notes"] = [
-        {
-            "step_id": c.step_id, "claim": c.claim,
-            "source_step_ids": list(c.source_step_ids),
-            "outcome": c.outcome, "quote": c.quote,
-        }
-        for c in analysis.claims
-    ]
+    claims_by_id = {c.id: c for c in idx.claims.values()}
+    edges_by_id = idx.edges
+    notes = []
+    for f in findings:
+        claim = claims_by_id.get(f.claim_id)
+        if claim is None:
+            continue
+        evidence = [
+            {"step_id": e.dst, "kind": e.kind, "quote": e.quote}
+            for eid in f.edge_ids if (e := edges_by_id.get(eid)) is not None
+        ]
+        notes.append({
+            "step_id": f.step_id, "claim": claim.text,
+            "status": f.status, "evidence": evidence,
+        })
+    context["source_claim_notes"] = notes
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f.status] = counts.get(f.status, 0) + 1
     context["source_claim_coverage"] = {
-        "n_detected": analysis.n_detected,
-        "n_checked": len(analysis.claims),
-        "n_unchecked": analysis.n_unchecked,
+        "n_claims": len(findings),
+        "status_counts": counts,
+        "universe_empty": bool(findings and findings[0].universe_empty),
     }
 
 
 async def _run_edge_pass(idx: Any, tid: str, model: str, exp: Experiment) -> None:
-    """Run Pass 2 edge construction (grounds: claim → source observation).
+    """Run Pass 2 edge construction + the Pass 3 claim-status fold.
 
-    Best-effort: a failure leaves the index without edges, which downstream
-    consumers treat as no linkage signal. The full pass record (edges +
-    oracle transcript + prune log) lands in pass2_edges.json.
+    Best-effort: a failure leaves the index without edges; the fold then
+    yields unknown statuses (coverage broken), never a fabricated negative.
+    Full records land in pass2_edges.json and claim_statuses.json.
     """
     from agentm.core.runtime import AgentSession
-    from trajectory_index.edges import build_grounds_edges
+    from trajectory_index.edges import build_claim_edges
+    from trajectory_index.verification import fold_claim_statuses
 
     try:
-        result = await build_grounds_edges(
+        result = await build_claim_edges(
             idx, run_id=tid, model=model, session_factory=AgentSession.create,
         )
         exp.write_session_artifact(tid, "", "pass2_edges.json", result.to_artifact())
+        analysis = fold_claim_statuses(idx, result, run_id=tid)
+        exp.write_session_artifact(tid, "", "claim_statuses.json", analysis.to_artifact())
     except Exception as exc:
         typer.echo(f"  {tid}: edge pass failed: {exc}", err=True)
 
@@ -694,7 +698,7 @@ async def _process_one_item(
             idx.dump(str(index_path))
 
         if build_edges and idx.claims and not any(
-            e.kind == "grounds" for e in idx.edges.values()
+            e.kind in ("supports", "conflicts") for e in idx.edges.values()
         ):
             await _run_edge_pass(idx, tid, index_model, exp)
             idx.dump(str(index_path))
@@ -706,7 +710,7 @@ async def _process_one_item(
                 artifact=_load_constraint_artifact(exp, tid),
             )
         if source_checks:
-            await _run_source_checks(idx, tid, index_model, exp, context)
+            _merge_claim_status_context(idx, tid, context)
         if claim_analysis:
             context = await _run_claim_analysis(messages, idx, context, model)
         audit_result = None
@@ -738,6 +742,7 @@ async def _process_one_item(
     last_audit_result = None
     all_verdicts: list[dict[str, Any]] = []
     constraints_ran = False
+    edges_ran = False
     annotated_raw: list[dict[str, Any]] = []
     populate_diag = Diagnostics()
 
@@ -802,14 +807,19 @@ async def _process_one_item(
             # after the index is complete.
             await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
             constraints_ran = True
+        if build_edges and is_last_chunk and idx.claims:
+            # Pass 2 + the Pass 3 fold need the complete node set; run once,
+            # before the final audit so the statuses reach its context.
+            await _run_edge_pass(idx, tid, index_model, exp)
+            edges_ran = True
         context = _index_to_context(idx)
         if idx.constraint_findings:
             _merge_constraint_context(
                 context, idx, rendering=constraint_rendering,
                 artifact=_load_constraint_artifact(exp, tid),
             )
-        if source_checks and is_last_chunk:
-            await _run_source_checks(idx, tid, index_model, exp, context)
+        if source_checks:
+            _merge_claim_status_context(idx, tid, context)
         if claim_analysis:
             context = await _run_claim_analysis(trajectory_prefix, idx, context, model)
 
@@ -849,8 +859,9 @@ async def _process_one_item(
         typer.echo(f"  {tid}: constraint analysis ran post-loop (last chunk failed)")
         await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
 
-    if build_edges and idx.claims:
-        # Pass 2 is a posthoc, full-index pass — run once after extraction.
+    if build_edges and not edges_ran and idx.claims:
+        # The in-loop run is bound to the last chunk, which `continue`s past
+        # it when that chunk's extraction fails — run now so edges persist.
         await _run_edge_pass(idx, tid, index_model, exp)
 
     idx.dump(str(index_path))

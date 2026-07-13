@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .harbor import HarborAdapter, LhtbAdapter
+from .harbor import HarborAdapter, LhtbAdapter, SeniorSweAdapter
 from .swebench import SWEBenchAdapter
 from .terminal_bench import TerminalBenchAdapter
 
@@ -17,6 +17,7 @@ ADAPTERS: dict[str, type | object] = {
     "harbor": HarborAdapter,
     "tb2": HarborAdapter,
     "lhtb": LhtbAdapter,
+    "senior-swe": SeniorSweAdapter,
     "swebench-verified": lambda: SWEBenchAdapter(variant="verified"),
     "swebench-pro": lambda: SWEBenchAdapter(variant="pro"),
 }
