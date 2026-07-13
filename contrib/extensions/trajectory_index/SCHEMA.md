@@ -53,21 +53,39 @@ and everything outside it is agent action text.
 
 ## 1 · Pass 1 — nodes (one trajectory visit)
 
-Pass 1 populates the objects of §0 that the record does not carry
-structurally: for an attested $\mathrm{tool\_result}$ step,
+**Why this pass exists.** A recorded trajectory is a wall of text. Every
+question the index wants to answer downstream — *does the evidence
+contradict what the agent concluded? which entities did the agent rely
+on without a source? did the answer meet the question's constraints?* —
+presupposes facts the raw text does not carry: which characters are
+evidence and which are the agent talking ($\mathrm{auth}_i$, hence $E$),
+what the agent actually asserted ($C$), and which names refer to which
+things ($\Sigma$). Pass 1's purpose is to establish exactly these
+**ground facts, once**: it is the only pass that reads the trajectory
+text; every later analysis queries the resulting node tables instead of
+re-reading (and re-paying for, and re-disagreeing about) the text. This
+is also why recognition is a model's job here and nowhere else:
+authorship, assertion, and naming are semantic judgments — keyword and
+regex recognizers were tried and failed silently at scale — while
+everything after Pass 1 can work with exact lookups over what Pass 1
+established.
+
+Concretely, Pass 1 populates the objects of §0 that the record does not
+carry structurally: for an attested $\mathrm{tool\_result}$ step,
 $O_i = \{[0, |x_i|)\}$ by structure and needs no extraction; for every
 other step, $O_i$ is recognized here — and recognition can only ADD
 observation status, attested roles are never overridden. Downstream
 passes consume the derived observation/action segments; nothing selects
 evidence by role.
 
-The extractor model visits $T$ once, in chunks of a few steps, and
-re-emits each annotated step body **verbatim** with
-`⟦tag attrs|content⟧` spans inserted. Verification is
-strip-and-compare: removing every span must reproduce the exact text the
-extractor was shown (whitespace-tolerant), which makes every span offset
-exact; a diverging re-emission rejects that step's annotations whole,
-into a recorded prune log. Three node kinds:
+**Mechanism.** The extractor model visits $T$ once, in chunks of a few
+steps, and re-emits each annotated step body **verbatim** with
+`⟦tag attrs|content⟧` spans inserted. A model's recognition cannot be
+taken on faith, so verification is strip-and-compare: removing every
+span must reproduce the exact text the extractor was shown
+(whitespace-tolerant), which makes every span offset exact; a diverging
+re-emission rejects that step's annotations whole, into a recorded
+prune log. Three node kinds:
 
 | node | tag | definition | verification |
 |---|---|---|---|
