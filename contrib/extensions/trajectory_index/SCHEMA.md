@@ -125,40 +125,178 @@ no prompt-window truncation, and every character is annotatable.
 
 ## 2 · Pass 2 — edges (relations between nodes)
 
-The model proposes **local pairwise** relations; code verifies the
-decidable part of every proposal and records every rejection.
+Pass 2 consumes only the Pass 1 node tables — it never re-reads the
+trajectory text. This pins its ceiling up front: every conclusion below
+is relative to the **indexed** evidence space ($E$ always means the
+indexed one), and a retrieved region Pass 1 failed to label is invisible
+to every sweep — no negative can be stronger than Pass 1's recall of
+$O$.
+
+### 2.1 Object: typed relations over nodes
+
+Pass 2 populates one labeled relation table over Pass 1 nodes:
+
+$$R \subseteq V \times V \times L, \qquad V = C \cup E \cup \Sigma$$
+
+Evidence edges are one label family; identity edges (`same_as`, an
+equivalence over $\Sigma$'s surface forms, §2.7) are another; `about`
+(relevance) is a reserved label — named, not yet specified. The
+extension rule mirrors Pass 1's: anything that relates two regions is a
+new label here, never a new inline annotation.
 
 **Evidence edges**:
 
 $$\mathrm{evd} \subseteq C \times E \times \{\mathrm{supports}, \mathrm{conflicts}\}$$
 
-judged over the full bipartite $C \times E$: code partitions $E$
-deterministically into whole-step groups $P_1, \dots, P_J$ under a
-character budget with
+Scope: an evidence edge relates nodes of ONE trajectory — $c$ and $e_j$
+always share the run. The symbol table $\Sigma$ is currently global
+across runs (a `same_as` edge may therefore cross trajectories); until
+$\Sigma$ is run-scoped this is a stated consequence, not a feature —
+cross-run coreference is out of scope.
 
-$$\bigcup_{j=1}^{J} P_j = E$$
+### 2.2 Judgment: pairwise textual entailment
 
-(this coverage is what later entitles a negative), shows each partition
-to the oracle with ALL claims (sampled twice, union — sampling can only
-surface candidates, never assert one), and each proposal carries a
-witness quote $q$. A proposed edge $(c, e_j, k, q)$ is kept only if
+The unit judgment is textual entailment over one pair — hypothesis the
+claim text, label $\in \{\mathrm{entail}, \mathrm{contradict},
+\mathrm{neutral}\}$; entail/contradict become an edge, neutral becomes
+nothing. The premise needs care: $O_j$ is the retrieval POOL
+(document-scale, unbounded); the judged premise is the excerpt
+verification narrows to. The pass as a whole is FEVER-shaped
+(retrieval / verification / aggregation), in two model stages with code
+around them:
 
-  * both endpoints exist;
-  * the FULL quote is verbatim inside $O_j$ (whitespace-normalized
-    containment, not a prefix match);
-  * $q$ is not the claim's own words (a claim is not its own evidence).
+- **retrieval** (high recall): code partitions $E$ deterministically
+  into whole-step groups $P_1, \dots, P_J$ under a character budget;
+  per partition, the model nominates candidate evidence steps for every
+  claim — no polarity, no quotes, an easy listing task. Recall lives at
+  this stage, which is why sampling does too: samples are unioned.
+- **verification** (high precision): per claim, one focused call over
+  its nominated excerpts only, judging polarity and copying the decisive
+  passage; small context, adversarially phrased ("try to refute this
+  pairing").
 
-Each kept edge records the timeline **fact**
+A step whose observation content alone exceeds the budget is split at
+its observation-REGION boundaries (a sandwich step's $O_i$ intervals are
+the natural sub-units — no mid-content cut). If a single region still
+exceeds what one call can faithfully see, that partition is marked
+coverage-degraded rather than swept: a "successful" call over content
+the model may not actually have attended to must not entitle a negative.
+
+Single-shot batch judgment (all claims × a 60K-char partition in one
+generation) is the degenerate one-stage form; implicit $|C| \times |P|$
+matching inside one generation underreports systematically, which is why
+the pipeline splits — the same reason FEVER separates sentence selection
+from claim verification.
+
+### 2.3 Certificates: the model proposes, code verifies
+
+Every proposed edge carries a witness — a quote $q$ claimed to occur in
+$O_j$. The trust boundary first: **a certificate attests that the quote
+exists, not that it entails or contradicts the claim** — relevance and
+polarity remain model judgments. This is exactly where precision can
+leak (a verbatim but non-probative quote), and why verification is a
+focused per-pair judgment rather than a side effect of retrieval.
+
+What code checks is the decidable fragment: endpoints exist, label
+valid, FULL-quote verbatim containment within a single observation
+region (whitespace-normalized; not a prefix match, not spliced across
+region seams), and $q$ is not the claim's own words. Stored edges
+$\subseteq$ certificate-valid proposals; duplicate proposals (same
+claim, step, label) collapse to the first verified one. Proposals may be
+sampled freely — a sample can only ADD candidates; assertions pass only
+through the verifier (proof-carrying proposals).
+
+A stated limitation of the self-quote gate: it is verbatim containment
+only. Paraphrase circularity (an observation restating the agent's
+words) and env-laundered agent text (the agent writes a file and reads
+it back — authorship correctly labels the read as env) pass the
+decidable gate and remain model-side precision leaks.
+
+### 2.4 Coverage: what entitles a negative
+
+"No evidence for $c$" is negation as failure — sound only under a
+closed-world condition, and the condition is PER CLAIM. Three parts, all
+required for claim $c$:
+
+1. **content coverage** — the partitions exhaust the space:
+   $\bigcup_{j} P_j = E$ and no partition is coverage-degraded (§2.2);
+   ($E = \varnothing$ makes this vacuously true — the
+   $\mathrm{evidence\_empty}$ flag of §3 marks that degenerate sweep);
+2. **attention coverage** — every partition's retrieval carries an
+   explicit row for $c$, attested by at least one successful sample of
+   that partition; an empty candidate list is a decision, not an
+   omission;
+3. **judgment coverage** — every pair retrieval nominated for $c$ was
+   decided by a verification call. A failed verification demotes $c$ —
+   and only $c$ — to unknown, never to unsourced; nominated-but-
+   unverified candidates are never stored as edges (retrieval carries no
+   polarity).
+
+Content coverage alone (the excerpts were in the prompt) attests nothing
+about attention; the retrieval row is the attestation of attention; the
+verification decision is the attestation of judgment. Even with all
+three, `unsourced` is sound only RELATIVE TO RETRIEVAL RECALL — it is an
+attested-attention negative, not an attested-judgment one: a nomination
+retrieval missed converts directly into a false unsourced. This mirrors
+the Pass 1 recall ceiling stated at the top of §2, one layer down; it is
+also why sampling lives at the retrieval stage.
+
+### 2.5 Time is a fact, not a filter
+
+Each kept edge records the timeline fact
 
 $$\mathrm{position}(c, e_j) = \mathrm{sign}(j - i) \in \{\mathrm{before}, \mathrm{same}, \mathrm{after}\}, \qquad c = (i, [a,b))$$
 
-never a filter: consistency is time-agnostic, and an after-conflicts
-edge ("committed early, refuted later, never retracted") is signal, not
-noise.
+(negative sign = the evidence step precedes the claim's = before; when
+the claim's step cannot be located, position is recorded as unknown,
+never guessed). Never a filter: consistency is time-agnostic, diagnosis
+is time-sensitive — before-supports reads as grounded progress,
+after-conflicts as "committed early, refuted later, never retracted".
+Both are signal. One accepted loss: `same` collapses within-step order
+(the stored claim carries its step, not its character interval) —
+downstream must read co-location, nothing more, into it.
 
-**Identity edges**: alias/coreference resolution — an equivalence over
-$\Sigma$'s surface forms; code blocks candidate pairs, the model judges
-each locally, code merges and rewrites anaphors.
+### 2.6 Failure monotonicity
+
+The four statuses are totally ordered by information:
+
+$$\mathrm{unknown} \;<\; \mathrm{unsourced} \;<\; \mathrm{supported} \;<\; \mathrm{conflicted}$$
+
+Each step up requires strictly more attested input — coverage, then a
+verified supports certificate, then a verified conflicts certificate;
+conflicted dominating is "more information", not "worse news". The
+monotonicity claim is then precise: $\mathrm{status}(c)$ (the §3 fold)
+is a monotone function of $(\text{verified edges at } c,\ \text{coverage
+bits of } c)$, and every failure SHRINKS those inputs — a failed oracle
+call removes coverage (→ unknown), a rejected certificate removes one
+proposal, a retrieval miss removes a nomination. So every failure moves
+status down this order, never up. Sampling is monotone on the candidate
+side and gated on the assertion side, so repetition is safe.
+
+The order is informational, not evaluative. Read as alarms: a failure
+can UNDER-alarm (a missed conflicts edge leaves a wrong claim looking
+supported) but never OVER-alarm (no failure path fabricates a conflict).
+The fail-stop guarantee is the second direction only.
+
+This safety story is scoped to evidence edges. It does NOT extend to
+identity edges, whose failure direction is inverted (§2.7).
+
+### 2.7 Identity edges
+
+`same_as`: alias/coreference resolution — an equivalence over $\Sigma$'s
+surface forms; code blocks candidate pairs, the model judges each
+locally, code merges and rewrites anaphors.
+
+Identity sits OUTSIDE the certificate discipline: no decidable witness
+exists for "these two surfaces name one thing" beyond endpoint
+existence. And the merge is a union-find closure — monotone toward MORE
+identification: repetition adds merges rather than being safe, and one
+false `same_as` contaminates its whole equivalence class through
+transitivity. The gate is therefore conservatism instead of
+certificates: block candidate pairs aggressively, judge each pair
+independently, and prefer a missed merge (two nodes for one entity —
+recoverable) over a false one (one node for two entities —
+contaminating).
 
 ## 3 · Pass 3 — judgments (folds over nodes + edges)
 
@@ -172,9 +310,9 @@ $$\mathrm{status}(c) =
 \mathrm{unknown} & \text{otherwise} \quad \text{(never escalates)}
 \end{cases}$$
 
-Coverage is complete when every partition of $E$ had at least one
-successful oracle call (content coverage is attested; recall within a
-shown partition remains the oracle's). The flag
+Coverage is complete in the per-claim §2.4 sense — content, attention,
+and judgment coverage all holding for that claim; a verification failure
+demotes exactly the claims it touched to unknown. The flag
 $\mathrm{evidence\_empty} \iff E = \varnothing$ distinguishes "swept
 $E$ and found nothing" from "the record carries no observation content
 at all" — itself a strong trajectory-level fact.
@@ -205,7 +343,18 @@ judges confirm/contradict — a local pairwise call in the Pass 2 mold.
 constraints against the same $E$, swept in the same partitioned way,
 joined with the same Kleene discipline (unknown never escalates; an
 omission verdict requires both a lexical code-negative and the attested
-coverage sweep).
+coverage sweep). Committing to an answer is the agent's implicit claim
+that every requirement holds, so a requirement with no independent
+evidence (`omitted`) is an unverified commitment, and one the evidence
+refutes (`violated`) is a committed-against-evidence error — both are
+source-verification signals the auditor localizes at the FIRST assertion
+of the answer. No self-verification: the evidence set excludes the
+commit step itself (a decidable step-id exclusion) — when Pass 1 labels
+the final report's answer synthesis as an observation region, the agent
+restating "I used method X" must not count as tool confirmation of X.
+This layer detects unverified/refuted commitments; it does not judge
+whether the agent gathered the RIGHT source (that needs a reference
+outside the trajectory) — see out-of-scope.
 
 ## 4 · What leaves the index
 
@@ -249,6 +398,12 @@ wholesale on rerun.
 
 - Premises embedded in tool-call arguments (assumption smuggling) — a
   claim-adjacent node kind not yet extracted.
-- Erroneous *actions* (searching the wrong thing) — an error in what was
-  done, not in what was asserted; commit/constraint territory.
+- Wrong-source errors (the agent verified against a source that does not
+  actually establish the answer, or searched the wrong thing). Partially
+  reachable: the constraint layer catches when a committed answer's
+  requirements are unverified or refuted BY the trajectory's own evidence
+  (a closed check). It cannot catch when the gathered source is itself
+  wrong or irrelevant to the requirement — judging a source's validity
+  needs a reference outside the trajectory (task constraints reach some
+  of this; world knowledge, which the index never imports, the rest).
 - Cross-run coreference; non-textual grounding.

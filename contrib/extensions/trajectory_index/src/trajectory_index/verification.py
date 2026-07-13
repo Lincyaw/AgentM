@@ -7,20 +7,22 @@ deterministic algebra (P6 — code owns the decidable):
 * ``conflicted``  — a conflicts edge exists (dominates: one witnessed
   contradiction outweighs any number of supports);
 * ``supported``   — otherwise a supports edge exists;
-* ``unsourced``   — neither, AND every partition of the evidence
-  space was shown to the oracle at least once (content coverage is
-  attested; recall within a shown partition is still the oracle's — a
-  support one more sample would have surfaced can be missed, which fails
-  toward a false negative on support, never toward a fabricated edge);
-  ``evidence_empty`` marks the degenerate sweep over a trajectory whose
-  serialization carries no observation content at all;
-* ``unknown``     — neither, and coverage is broken (a partition's oracle
-  calls all failed) — never escalates (P5).
+* ``unsourced``   — neither, AND the per-claim closed-world condition of
+  SCHEMA §2.4 holds for THIS claim: content coverage (all partitions
+  swept, none degraded), attention coverage (an explicit retrieval row
+  in every partition), judgment coverage (every nomination verified).
+  Still sound only relative to retrieval recall — a missed nomination
+  fails toward a false negative on support, never toward a fabricated
+  edge. ``evidence_empty`` marks the degenerate sweep over a trajectory
+  whose serialization carries no observation content at all;
+* ``unknown``     — neither edge, and some coverage condition failed for
+  this claim — never escalates (P5): a failed verification call demotes
+  exactly the claims it touched, never entitles a negative.
 
-Earlier versions of this module ran their own oracle call over
-lexical-overlap windows; both are gone — window guessing was code doing
-extraction, and the separate judgment call double-read content the edge
-pass had already read.
+Statuses are totally ordered by information (SCHEMA §2.6):
+unknown < unsourced < supported < conflicted. The fold is monotone in
+(verified edges at c, coverage bits of c); every upstream failure
+shrinks those inputs, so failures under-alarm, never over-alarm.
 """
 from __future__ import annotations
 
@@ -80,7 +82,7 @@ def fold_claim_statuses(
             edges_by_claim.setdefault(e.src, []).append(e)
 
     evidence_empty = edge_result.coverage.n_observation_steps == 0
-    complete = edge_result.coverage.complete
+    content_complete = edge_result.coverage.complete
 
     for claim in sorted(
         (c for c in index.claims.values() if not run_id or c.run_id == run_id),
@@ -89,11 +91,16 @@ def fold_claim_statuses(
         edges = edges_by_claim.get(claim.id, [])
         conflict_ids = tuple(e.id for e in edges if e.kind == "conflicts")
         support_ids = tuple(e.id for e in edges if e.kind == "supports")
+        # per-claim closed world: an empty sweep attends/judges vacuously;
+        # a claim the edge pass never saw (no coverage record) is unknown
+        cc = edge_result.claim_coverage.get(claim.id)
+        attended = cc.attended if cc is not None else evidence_empty
+        judged = cc.judged if cc is not None else evidence_empty
         if conflict_ids:
             status, edge_ids = "conflicted", conflict_ids + support_ids
         elif support_ids:
             status, edge_ids = "supported", support_ids
-        elif complete:
+        elif content_complete and attended and judged:
             status, edge_ids = "unsourced", ()
         else:
             status, edge_ids = "unknown", ()
@@ -110,6 +117,6 @@ def fold_claim_statuses(
         f for f in index.claim_findings if run_id and f.run_id != run_id
     ] + analysis.findings
 
-    logger.info("claim statuses: {} (evidence_empty={}, coverage complete={})",
-                analysis.counts(), evidence_empty, complete)
+    logger.info("claim statuses: {} (evidence_empty={}, content complete={})",
+                analysis.counts(), evidence_empty, content_complete)
     return analysis

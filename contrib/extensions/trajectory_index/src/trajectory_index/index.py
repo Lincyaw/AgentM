@@ -107,20 +107,33 @@ class Step:
     obs_regions: tuple[tuple[int, int], ...] = ()
 
     @property
+    def observation_region_texts(self) -> tuple[str, ...]:
+        """Each observation region's text, separately.
+
+        Attested tool_result roles contribute their whole content as one
+        region; otherwise the Pass 1 obs regions. Quote verification is
+        per region (SCHEMA §2.3): a quote must sit inside ONE region,
+        never spliced across a seam — verifiers use this, not the joined
+        segment.
+        """
+        if self.role == StepRole.TOOL_RESULT:
+            return (self.content,)
+        return tuple(self.content[a:b] for a, b in self.obs_regions)
+
+    @property
     def observation_segment(self) -> str | None:
         """The retrieved/environment portion of this step, or None.
 
-        Attested tool_result roles contribute their whole content; Pass 1
-        obs spans extend the evidence space to trajectories whose
-        serialization lost structural roles (all downstream evidence
-        selection reads this, never ``role`` directly). Multiple regions
-        join with a newline.
+        Pass 1 obs regions extend the evidence space to trajectories
+        whose serialization lost structural roles (all downstream
+        evidence selection reads this, never ``role`` directly).
+        Multiple regions join with a newline — display and prompt use
+        only; verification goes through ``observation_region_texts``.
         """
-        if self.role == StepRole.TOOL_RESULT:
-            return self.content
-        if self.obs_regions:
-            return "\n".join(self.content[a:b] for a, b in self.obs_regions)
-        return None
+        texts = self.observation_region_texts
+        if not texts:
+            return None
+        return "\n".join(texts)
 
     @property
     def action_segment(self) -> str | None:

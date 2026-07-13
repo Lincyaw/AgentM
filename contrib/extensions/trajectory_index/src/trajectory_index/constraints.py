@@ -726,19 +726,32 @@ async def analyze_constraints(
     analysis.candidate = commit.binding
     analysis.commit_step_id = commit.step.step_id
 
+    # No self-verification: the agent's own commitment step cannot be
+    # evidence that its answer satisfies a constraint. When Pass 1 labels
+    # the final report's answer synthesis as an observation region (the
+    # extracted-final-answer block is retrieved-looking), E3 would read the
+    # agent restating "I used method X" as tool confirmation of X — a
+    # circular verified. Excluding the commit step keeps constraint
+    # evidence to what INDEPENDENTLY grounds the answer (P6: decidable, a
+    # step-id exclusion, no semantics).
+    evidence = [s for s in grounded if s.step_id != commit.step.step_id]
+    if len(evidence) != len(grounded):
+        diag.record("evidence", commit.step.step_id, None, 0.0,
+                    "commit step excluded from constraint evidence (no self-verification)")
+
     # Pass E2 / E3
     about_steps = await _map_about(
-        grounded, commit, model=model, session_factory=session_factory, diag=diag,
+        evidence, commit, model=model, session_factory=session_factory, diag=diag,
     )
     verdicts = await _judge_entailment(
         constraints, commit, about_steps,
         model=model, session_factory=session_factory, diag=diag,
     )
 
-    # Pass J
+    # Pass J — same independent-evidence set (self-verification excluded)
     unsettled = [c for c in constraints if c.id not in verdicts]
     verdicts.update(await _check_omitted(
-        unsettled, grounded, commit,
+        unsettled, evidence, commit,
         model=model, session_factory=session_factory, diag=diag,
         sweep_char_budget=sweep_char_budget,
     ))

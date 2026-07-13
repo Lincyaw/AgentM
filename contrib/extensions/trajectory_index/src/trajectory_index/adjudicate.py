@@ -150,8 +150,9 @@ async def _ask_model(
     model: str | None,
     session_factory: SessionFactory,
     purpose: str = "alias_resolution",
+    key: str = "verdicts",
 ) -> list[Any] | None:
-    """One plain-JSON model call; returns the ``verdicts`` list or None.
+    """One plain-JSON model call; returns the list under ``key`` or None.
 
     ``session_factory`` creates a session from an ``AgentSessionConfig``.
     The atom passes ``api.spawn_child_session``; offline callers pass
@@ -192,9 +193,9 @@ async def _ask_model(
     if obj is None:
         logger.warning("{}: model returned no parseable JSON", purpose)
         return None
-    verdicts = obj.get("verdicts")
+    verdicts = obj.get(key)
     if not isinstance(verdicts, list):
-        logger.warning("{}: JSON missing 'verdicts' list", purpose)
+        logger.warning("{}: JSON missing '{}' list", purpose, key)
         return None
     return verdicts
 
