@@ -32,6 +32,7 @@ agentm eval export <exp_id>
 | Terminal Bench 1.0 | `sandbox --bench tb1` | F2P / P2P step scores |
 | Harbor (TB 2.0) | `sandbox --bench harbor` | reward (0-1 float) |
 | LHTB (Long-Horizon Terminal-Bench) | `sandbox --bench lhtb` | reward (0-1 float), solved ≥ 0.95 |
+| senior-swe-bench (Snorkel v2026.06) | `sandbox --bench senior-swe` | reward (binary 0/1), LLM-judge verifier |
 | SWE-bench Verified | `sandbox --bench swebench-verified` | Patch extraction |
 | SWE-bench Pro | `sandbox --bench swebench-pro` | Patch extraction |
 | AFTraj-2K auditor | `aftraj-auditor` | F1, ASS, FAR, StepAcc |
@@ -128,12 +129,105 @@ The `lhtb` format is the Harbor adapter plus LHTB conventions: a task
 counts as solved at reward ≥ 0.95 (upstream definition), and each task's
 `[verifier] timeout_sec` from `task.toml` extends `--eval-timeout` when
 larger. Upstream runs give agents a 90-minute budget per task, hence
-`--agent-timeout 5400`.
+`--agent-timeout 5400`. Task resource sizing (`[environment]
+cpus/memory_mb`) is forwarded to the sandbox (note: ARL managed pools pin
+resources at first creation per image, so a pool created before this
+takes effect keeps its old sizing until GC'd).
 
-Caveat: `sudoku-recovery` relies on Harbor's healthcheck to pre-start its
-game daemon as root and declares an unprivileged `[agent] user`; the ARL
-runner honors neither, so the agent starts the daemon itself with full
-privileges and that task's anti-cheat guarantees are void here.
+Compose sidecar tasks (chess-mate) run their non-`main` services as ARL
+private containers in the agent's pod. Three in-pod deltas the adapter
+handles automatically: service hostnames collapse to localhost (agent
+Dockerfile ENV URLs are rewritten), ports that collide with the ARL
+executor's reserved 8080 are remapped (+10000, with the sidecar's own
+`*_PORT` env updated to match), and the sidecar's ENTRYPOINT/CMD is
+passed explicitly because the gateway otherwise replaces an unset
+command with `sleep infinity`. The verifier gets `[verifier.env]` from
+task.toml injected (e.g. chess-mate's `RESULT_TOKEN`), with
+`${VAR:-default}` references expanded against the host environment.
+
+Caveats:
+
+- `sudoku-recovery` relies on Harbor's healthcheck to pre-start its game
+  daemon as root and declares an unprivileged `[agent] user`; the ARL
+  runner honors neither, so the agent starts the daemon itself with full
+  privileges and that task's anti-cheat guarantees are void here.
+- Prebuilt images can lag the git tree. A byte-level audit (2026-07-13,
+  every git `environment/` file COPYed by each Dockerfile diffed against
+  the pinned image's content) found 44/46 tasks consistent and 2 stale:
+  - `unknown-config-semantics` — git revised the whole `cfg` harness
+    (HMAC-chained daemon log) after the `:20260615` image; the uploaded
+    verifier fails with a `missing HMAC key` infrastructure error, so two
+    different models both scored 0.0. Rebuilt image:
+    `opspai/lhtb-unknown-config-semantics:20260713` (run it via
+    `--registry pair-cn-guangzhou.cr.volces.com/opspai --prefix lhtb
+    --tag 20260713`, without `--source-images`).
+  - `chess-mate` — git reworked the task into a docker-compose sidecar
+    architecture (agent container + isolated Stockfish `game` referee); no
+    published image matches. Supported via ARL private containers: build
+    and push both images from the git checkout
+    (`docker build -t opspai/lhtb-chess-mate:20260713 environment/` and
+    `docker build -f environment/Dockerfile.game -t
+    opspai/lhtb-chess-mate-game:20260713 environment/`), then run like
+    `unknown-config-semantics` above — the adapter derives the sidecar
+    from `docker-compose.yaml` automatically.
+  Apparent mismatches on the four `apex-*-matter` tasks and
+  `tabular-data-feature-covshift` are deliberate anti-cheat build steps
+  (world-builder inputs and dataset generators are consumed and deleted
+  during `docker build`), not staleness. If any other task scores 0.0
+  with a verifier-infrastructure error rather than a grading failure,
+  rebuild its image from `environment/Dockerfile` and re-run.
+
+### Running senior-swe-bench (Snorkel v2026.06)
+
+[senior-swe-bench](https://github.com/snorkel-ai/senior-swe-bench-v2026.06)
+is a 50-task Harbor dataset of senior-level fixes/features across real repos
+(better-auth, electric, gitea, immich, posthog, prefect, turborepo, …). Two
+things make it different from LHTB:
+
+1. **No prebuilt images.** Every `task.toml` uses a local `base_image` tag;
+   the `environment/Dockerfile` clones the target repo at build time, rewinds
+   to the pre-fix commit, and builds the workspace. Both `harbor run -d` and
+   `harbor run --repo` build locally — there is nothing to pull. We build once
+   and push under our own registry:
+
+   ```bash
+   GIT_LFS_SKIP_SMUDGE=1 git clone \
+       https://github.com/snorkel-ai/senior-swe-bench-v2026.06.git
+   agentm eval sandbox build --bench senior-swe \
+       --repo senior-swe-bench-v2026.06/tasks \
+       --registry docker.io/opspai --prefix ssb --tag v1 --push
+   ```
+
+2. **LLM-judge verifier.** `test.sh` runs deterministic tests plus rubric,
+   taste, and (on 25/50 tasks) a validation-agent judge. The judge model and
+   credentials come from `[verifier.env]` in each `task.toml`; the adapter
+   expands those `${VAR:-default}` placeholders against the **host** env at
+   eval time, so export judge creds before running. The adapter additionally
+   forwards `DEEPSEEK_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` from
+   the host when set (the task.toml allowlist predates non-big-three
+   providers). Route the judges to DeepSeek via litellm's native provider;
+   `OPENAI_API_KEY` must also be set because the verifier's
+   `have_credentials()` gate only recognizes Portkey/Anthropic/OpenAI keys:
+
+   ```bash
+   export OPENAI_API_KEY=$DEEPSEEK_API_KEY               # credential gate only
+   export SSB_OVERRIDE_ALL_JUDGE_MODEL=deepseek/deepseek-chat
+   export SSB_OVERRIDE_CLASSIFIER_MODEL=deepseek/deepseek-chat
+   export SSB_OVERRIDE_VA_HARNESS=mini-swe-agent      # validation-stage tasks
+   export SSB_OVERRIDE_VA_MODEL=deepseek/deepseek-chat
+
+   agentm eval sandbox batch --bench senior-swe \
+       --repo senior-swe-bench-v2026.06/tasks \
+       --registry pair-cn-guangzhou.cr.volces.com/opspai --prefix ssb --tag v1 \
+       --model litellm-dsv4flash --scenario terminal_bench:arl \
+       --agent-timeout 7200 --eval-timeout 900 -j 5
+   ```
+
+`reward.txt` is binary 0/1. An EMPTY reward.txt is not a 0 — it marks an
+invalid trial (verifier-infra failure: judge unreachable, validation-agent
+crash, etc.); the adapter records `invalid_trial` on those. The
+per-task `[verifier] timeout_sec` extends `--eval-timeout` when larger, same
+as LHTB.
 
 ## Experiment output
 

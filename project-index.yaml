@@ -1712,7 +1712,50 @@ requirements:
       replay hundreds of authenticated moves. Tasks ship prebuilt docker.io
       images declared in ``task.toml``, so runs go through ``--source-images``
       with the pull-through mirror registry and need no image build or
-      mirror step.
+      mirror step. Compose sidecar tasks (chess-mate's isolated Stockfish
+      referee) map non-main services to ARL private containers in the agent's
+      pod, with three in-pod deltas handled by the adapter: service hostnames
+      rewritten to localhost in agent-image ENV URLs, ports colliding with
+      the executor's reserved 8080 remapped (sidecar *_PORT env kept in
+      sync), and the sidecar image's ENTRYPOINT/CMD passed explicitly because
+      the gateway defaults unset private-container commands to
+      sleep-infinity. Task resource sizing from ``[environment]
+      cpus/memory_mb`` is forwarded to sandbox creation, and
+      ``[verifier.env]`` (host-env-expanded) is exported to test.sh — both
+      standard Harbor schema fields shared with the senior-swe adapter.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/formats.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/runner.py
+    tests: []
+    docs:
+      - path: contrib/evals/README.md
+    depends_on:
+      - REQ-195-swebench-pro-harbor-eval
+
+  - id: REQ-214-senior-swe-bench
+    title: Benchmark runner supports senior-swe-bench (Snorkel v2026.06)
+    description: >
+      The sandbox benchmark runner must run the 50-task senior-swe-bench
+      Harbor dataset (github.com/snorkel-ai/senior-swe-bench-v2026.06) through
+      a dedicated ``senior-swe`` format. Unlike other Harbor benches, its
+      task.toml declares no registry image, so environments are built locally
+      from ``environment/Dockerfile`` and pushed under the
+      ``{registry}/{prefix}-{task}:{tag}`` convention (``--source-images`` is
+      unsupported: ``get_source_image`` returns None). Its verifier is an
+      LLM-judge pipeline (deterministic tests plus rubric, taste, and a
+      validation-agent judge) that reads judge credentials and model overrides
+      from ``[verifier.env]`` in task.toml; the adapter expands those
+      ``${VAR:-default}`` placeholders against the host environment and exports
+      them into the verifier shell, so the judge can be routed to any
+      OpenAI-compatible endpoint (e.g. DeepSeek). reward.txt is binary 0/1; an
+      empty reward.txt marks an invalid trial (verifier-infra failure), which
+      the adapter records as ``invalid_trial`` rather than a silent 0. The
+      per-task ``[verifier] timeout_sec`` extends the CLI ``--eval-timeout``
+      when larger.
     priority: P2
     status: implemented
     confidence: confirmed
@@ -1723,7 +1766,7 @@ requirements:
     docs:
       - path: contrib/evals/README.md
     depends_on:
-      - REQ-195-swebench-pro-harbor-eval
+      - REQ-213-lhtb-benchmark
 
   - id: REQ-194-terminal-bench-adapt-scenario
     title: Terminal Bench ARL adapt scenario with online atom self-modification
