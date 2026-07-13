@@ -17,9 +17,8 @@ A trajectory is a finite sequence of steps
 
 $$T = \langle s_1, \dots, s_N \rangle, \qquad s_i = (i, r_i, x_i)$$
 
-where $i$ is the position, $x_i$ a text (the step content, built
-deterministically from the recorded message blocks by the single shared
-walk `data.message_parts`), and the role
+where $i$ is the position, $x_i$ a text (the step content, rebuilt
+deterministically from the recorded message blocks), and the role
 $r_i \in \{\mathrm{user}, \mathrm{assistant}, \mathrm{tool\_call},
 \mathrm{tool\_result}, \mathrm{system}\}$. A role is **attested** when
 the record's structure carries it (a real harness message); degraded
@@ -51,26 +50,27 @@ and everything outside it is agent action text.
 
 ## 1 · Pass 1 — nodes (one trajectory visit)
 
-Pass 1 is what populates the objects of §0 that the record does not
-carry structurally: for an attested $\mathrm{tool\_result}$ step,
+Pass 1 populates the objects of §0 that the record does not carry
+structurally: for an attested $\mathrm{tool\_result}$ step,
 $O_i = \{[0, |x_i|)\}$ by structure and needs no extraction; for every
-other step, $O_i$ is recognized here (and a Pass 1 label can only ADD
-observation status — attested roles are never overridden). Downstream
-passes read only the derived accessors `observation_segment` /
-`action_segment`; nothing reads the role for evidence selection.
+other step, $O_i$ is recognized here — and recognition can only ADD
+observation status, attested roles are never overridden. Downstream
+passes consume the derived observation/action segments; nothing selects
+evidence by role.
 
-The extractor model visits $T$ once, in chunks of 2–4 steps, and
+The extractor model visits $T$ once, in chunks of a few steps, and
 re-emits each annotated step body **verbatim** with
-`⟦tag attrs|content⟧` spans (`markup.py`). Code strips all spans and
-compares against the view it sent (whitespace-tolerant alignment):
-equality makes every span offset exact; inequality rejects the step's
-annotations whole, into the prune log. Three node kinds:
+`⟦tag attrs|content⟧` spans inserted. Verification is
+strip-and-compare: removing every span must reproduce the exact text the
+extractor was shown (whitespace-tolerant), which makes every span offset
+exact; a diverging re-emission rejects that step's annotations whole,
+into a recorded prune log. Three node kinds:
 
-| node | tag | definition | code verification |
+| node | tag | definition | verification |
 |---|---|---|---|
-| provenance | `⟦obs\|…⟧` | the intervals of $O_i$ | strip-compare → exact offsets; overlaps merged; attested roles never overridden |
+| provenance | `⟦obs\|…⟧` | the intervals of $O_i$ | strip-and-compare → exact offsets; overlaps merged; attested roles never overridden |
 | claim | `⟦claim\|…⟧` | $c = (i, [a,b))$ — a sentence the agent asserts **as settled fact**: verification statements, conclusions/identifications, settled negative findings; plans, questions, hedges excluded (the test is stance, not wording or polarity) | text is the content slice $x_i[a{:}b]$ — verbatim by construction |
-| symbol | `⟦sym …\|…⟧` | $\sigma = (\mathrm{name}, \mathrm{kind}, \mathrm{class})$, declared at first mention; other marked surfaces of the same name become aliases automatically | occurrences located by exact name/alias match (code); an occurrence inside $O$ is a grounded (tool-backed) def |
+| symbol | `⟦sym …\|…⟧` | $\sigma = (\mathrm{name}, \mathrm{kind}, \mathrm{class})$, declared at first mention; other marked surfaces of the same name become aliases automatically | occurrences located by exact name/alias matching; an occurrence inside $O$ is a grounded (tool-backed) def |
 
 The claim set is $C = \{c_1, \dots, c_K\}$; the symbol table $\Sigma$
 carries the occurrence relation
@@ -84,30 +84,30 @@ relation.
 Cost note: re-emission makes output ≈ chunk size, which is what makes
 small chunks the operating point. The extractor's prompt window (prefix
 truncation of very long steps) is Pass 1's declared unsoundness —
-annotations falling in the ellipsis are rejected, recorded.
+annotations falling past the cut are rejected, recorded.
 
 ## 2 · Pass 2 — edges (relations between nodes)
 
 The model proposes **local pairwise** relations; code verifies the
 decidable part of every proposal and records every rejection.
 
-**Evidence edges** (`edges.py`):
+**Evidence edges**:
 
 $$\mathrm{evd} \subseteq C \times E \times \{\mathrm{supports}, \mathrm{conflicts}\}$$
 
 judged over the full bipartite $C \times E$: code partitions $E$
-deterministically into whole-step groups $P_1, \dots, P_J$ under a char
-budget with
+deterministically into whole-step groups $P_1, \dots, P_J$ under a
+character budget with
 
 $$\bigcup_{j=1}^{J} P_j = E$$
 
 (this coverage is what later entitles a negative), shows each partition
 to the oracle with ALL claims (sampled twice, union — sampling can only
 surface candidates, never assert one), and each proposal carries a
-witness quote $q$. Code keeps an edge $(c, e_j, k, q)$ only if
+witness quote $q$. A proposed edge $(c, e_j, k, q)$ is kept only if
 
   * both endpoints exist;
-  * the FULL quote is verbatim in $O_j$ (whitespace-normalized
+  * the FULL quote is verbatim inside $O_j$ (whitespace-normalized
     containment, not a prefix match);
   * $q$ is not the claim's own words (a claim is not its own evidence).
 
@@ -119,13 +119,13 @@ never a filter: consistency is time-agnostic, and an after-conflicts
 edge ("committed early, refuted later, never retracted") is signal, not
 noise.
 
-**Identity edges** (`adjudicate.py`): alias/coreference resolution — an
-equivalence over $\Sigma$'s surface forms; code blocks candidate pairs,
-the model judges each locally, code merges and rewrites anaphors.
+**Identity edges**: alias/coreference resolution — an equivalence over
+$\Sigma$'s surface forms; code blocks candidate pairs, the model judges
+each locally, code merges and rewrites anaphors.
 
 ## 3 · Pass 3 — judgments (folds over nodes + edges)
 
-**Claim status** (`verification.py`, pure code, zero model calls):
+**Claim status** (pure code, zero model calls):
 
 $$\mathrm{status}(c) =
 \begin{cases}
@@ -145,7 +145,7 @@ at all" — itself a strong trajectory-level fact.
 **Def-use grounding** (code, global — "the model gives a point, code
 propagates it"): each symbol use links to its reaching def (SSA-style
 versions, code-assigned); grounding propagates from occurrences in $O$;
-each edge gets a risk:
+each def-use edge gets a risk:
 
 - `grounded` — reaching def was tool-backed; safe.
 - `premature` — used before grounding, but grounded later and consistent.
@@ -154,15 +154,14 @@ each edge gets a risk:
 - `stale` — used an older grounded version while a newer one exists
   *(defined, not yet emitted — needs coreference to an older version)*.
 
-Value fidelity (`compare_values`): for value edges with a grounded
-binding, the model judges confirm/contradict — a local pairwise call in
-the Pass 2 mold.
+Value fidelity: for value edges with a grounded binding, the model
+judges confirm/contradict — a local pairwise call in the Pass 2 mold.
 
-**Constraint layer** (`constraints.py`, Pass 0/E/J/L): a third consumer
-folding question-derived constraints against the same $E$, swept in the
-same partitioned way, joined with the same Kleene discipline (unknown
-never escalates; Omitted requires the lexical code-negative AND the
-attested coverage sweep).
+**Constraint layer**: a third consumer folding question-derived
+constraints against the same $E$, swept in the same partitioned way,
+joined with the same Kleene discipline (unknown never escalates; an
+omission verdict requires both a lexical code-negative and the attested
+coverage sweep).
 
 ## 4 · What leaves the index
 
@@ -172,10 +171,23 @@ record — rendered as ADVISORY context for the auditor. The index never
 designates an error step and never issues a global verdict: it is the
 LSP, the auditor is the analyst.
 
-## Data model (implementation shapes)
+## Concept → implementation
+
+| concept | where |
+|---|---|
+| step content $x_i$ + extractor view (one shared walk) | `data.message_parts`, `data.view_body_with_map` |
+| annotation grammar, strip-and-compare, alignment | `markup.py` |
+| Pass 1 populate + verification | `index.TrajectoryIndex.populate_from_extraction` |
+| $O_i$, segments | `index.Step.obs_spans`, `observation_segment` / `action_segment` |
+| evidence edges, partitioned sweep, coverage | `edges.build_claim_edges` |
+| identity edges (alias/coreference) | `adjudicate.py` |
+| claim status fold | `verification.fold_claim_statuses` |
+| def-use grounding, risks | `index.build_dependencies`, `data._build_references` |
+| constraint layer | `constraints.analyze_constraints` |
+| extractor prompt (annotation contract) | `agents/entity_extractor/prompts/default.md` |
 
 ```python
-Step:         run_id, step_id, index, role, content, obs_spans          # + segments as properties
+Step:         run_id, step_id, index, role, content, obs_spans
 Claim:        id, run_id, step_id, text                                 # verbatim content slice
 Symbol:       id, canonical_name, kind, aliases, entity_class
 Reference:    symbol_id, location, kind, grounded, form, value          # an occurrence
