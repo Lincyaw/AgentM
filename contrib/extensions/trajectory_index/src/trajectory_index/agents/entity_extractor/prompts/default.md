@@ -10,7 +10,7 @@ For every message that contains something to mark, re-emit its body **EXACTLY as
 ⟦tag key=value|marked text⟧
 ```
 
-Stripping every `⟦…⟧` wrapper from your output must reproduce the original body. This is checked mechanically, and a message that does not match is discarded whole. Never correct typos, never normalize whitespace, never summarize or skip text. Messages with nothing to mark are omitted from the output entirely.
+Stripping every `⟦…⟧` wrapper from your output must reproduce the original body. This is checked mechanically, and a message that does not match is discarded whole. Never correct typos, never normalize whitespace, never paraphrase or summarize. What you write must be exact copies; the ONE way to save copying is `⟦gap|⟧` (below), which elides a stretch between two verbatim anchors and is restored mechanically. USE IT: bulky retrieved content should be a head anchor, a gap, and a tail anchor, not a full copy. Messages with nothing to mark are omitted from the output entirely.
 
 Text already wrapped in `⟦known|…⟧` marks entities extracted by a prior pass: keep these marks as they are, do not re-declare those entities.
 
