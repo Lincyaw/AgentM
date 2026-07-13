@@ -482,32 +482,17 @@ def _provenance_kind(step: Step, kind: str, start: int, end: int) -> str:
     return kind
 
 
-def _message_step_content(msg: dict[str, object]) -> tuple[str, str | None]:
-    """Extract text content and tool name from a trace message dict."""
-    parts: list[str] = []
-    tool_name: str | None = None
-    blocks = msg.get("content", [])
-    if not isinstance(blocks, list):
-        return "", None
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type", "")
-        if btype == "text":
-            parts.append(str(block.get("text", "")))
-        elif btype == "tool_call":
-            name = block.get("name")
-            tool_name = str(name) if name is not None else None
-            args = block.get("arguments", block.get("input", {}))
-            arg_text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
-            parts.append(f"[tool_call: {tool_name}]\n{arg_text}")
-        elif btype == "tool_result":
-            sub = block.get("content", [])
-            if isinstance(sub, list):
-                parts.extend(str(s.get("text", "")) for s in sub if isinstance(s, dict))
-            else:
-                parts.append(str(sub))
-    return "\n".join(part for part in parts if part), tool_name
+def _message_step_content(msg: dict[str, Any]) -> tuple[str, str | None]:
+    """Step content + tool name, from the single shared message walk.
+
+    Derived from ``data.message_parts`` — the same pairs the extractor's
+    view is built from — so the two representations that offset alignment
+    depends on cannot drift apart.
+    """
+    from .data import message_parts
+
+    pairs, tool_name = message_parts(msg)
+    return "\n".join(c for c, _ in pairs if c), tool_name
 
 
 # ---------------------------------------------------------------------------
@@ -937,7 +922,8 @@ class TrajectoryIndex:
                 )
                 risk = "premature" if grounded_by else "ungrounded"
 
-            dep_id = stable_id("dep", run_id, reaching.step_id, ref.step_id, symbol_id)
+            # ref ids discriminate multiple uses of one reaching def in a step
+            dep_id = stable_id("dep", run_id, reaching.id, ref.id, symbol_id)
             dep = Dependency(
                 id=dep_id,
                 symbol_id=symbol_id,
@@ -1161,7 +1147,8 @@ class TrajectoryIndex:
                 text = cstep.content[start_c:end_c].strip()
                 if not text:
                     continue
-                cid = stable_id("clm", run_id, mid, text[:80])
+                # start offset discriminates same-prefix claims within a step
+                cid = stable_id("clm", run_id, mid, start_c, text[:80])
                 self.claims[cid] = Claim(id=cid, run_id=run_id, step_id=mid, text=text)
 
         all_syms = self.registry_snapshot()

@@ -58,53 +58,76 @@ def _truncate_block(block: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return out
 
 
-def view_body_with_map(msg: dict[str, JsonValue]) -> tuple[str, list[int | None]]:
-    """The extractor's view of a message body + a view→content offset map.
+def message_parts(msg: dict[str, JsonValue]) -> tuple[list[tuple[str, str]], str | None]:
+    """THE single message walk: (content_part, view_part) pairs + tool name.
 
-    Takes the UNTRUNCATED serialized message dict. The view is what the
-    extraction prompt shows (long text blocks prefix-truncated with a
-    trailing ellipsis); the map gives, for each view offset (plus one
-    end-of-string entry), the corresponding offset into the step content
-    built by ``index._message_step_content`` — or None for synthesized
-    characters (the truncation ellipsis). The two builders must stay in
-    lockstep: both walk blocks in order, format tool calls as
-    ``[tool_call: name]\\narg-json``, flatten tool_result sub-blocks, and
-    join non-empty parts with a newline.
+    Both the step content (``index._message_step_content``) and the
+    extractor's view (:func:`view_body_with_map`) derive from these pairs
+    — one walk, so the two representations that offset alignment depends
+    on cannot drift apart.
+
+    View parts differ from content parts in exactly two length-preserving-
+    or-suffix ways: long text is prefix-truncated with a trailing ellipsis
+    (the extractor's prompt window), and literal annotation delimiters
+    (``⟦``/``⟧``, should they ever occur in recorded content) are
+    substituted with plain brackets so the markup parser never meets an
+    unbalanced literal — the substitution preserves length, offsets map
+    1:1, and stored step content keeps the original characters.
     """
     import json as _json
 
-    pairs: list[tuple[str, str]] = []   # (content_part, view_part)
+    from .markup import CLOSE, OPEN
+
+    def _view(text: str) -> str:
+        if len(text) > _MAX_TEXT_CHARS:
+            text = text[:_MAX_TEXT_CHARS] + "..."
+        return text.replace(OPEN, "[").replace(CLOSE, "]")
+
+    pairs: list[tuple[str, str]] = []
+    tool_name: str | None = None
     blocks = msg.get("content", [])
     if isinstance(blocks, list):
-        def _text_pair(text: str) -> tuple[str, str]:
-            if len(text) > _MAX_TEXT_CHARS:
-                return text, text[:_MAX_TEXT_CHARS] + "..."
-            return text, text
-
         for block in blocks:
             if not isinstance(block, dict):
                 continue
             btype = block.get("type", "")
             if btype == "text":
-                pairs.append(_text_pair(str(block.get("text", ""))))
+                text = str(block.get("text", ""))
+                pairs.append((text, _view(text)))
             elif btype == "tool_call":
                 name = block.get("name")
+                tool_name = str(name) if name is not None else None
                 args = block.get("arguments", block.get("input", {}))
                 arg_text = (
                     _json.dumps(args, ensure_ascii=False)
                     if isinstance(args, dict) else str(args)
                 )
-                part = f"[tool_call: {name}]\n{arg_text}"
-                pairs.append((part, part))
+                part = f"[tool_call: {tool_name}]\n{arg_text}"
+                pairs.append((part, _view(part)))
             elif btype == "tool_result":
                 sub = block.get("content", [])
                 if isinstance(sub, list):
-                    pairs.extend(
-                        _text_pair(str(s.get("text", "")))
-                        for s in sub if isinstance(s, dict)
-                    )
+                    for s in sub:
+                        if isinstance(s, dict):
+                            text = str(s.get("text", ""))
+                            pairs.append((text, _view(text)))
                 else:
-                    pairs.append(_text_pair(str(sub)))
+                    text = str(sub)
+                    pairs.append((text, _view(text)))
+    return pairs, tool_name
+
+
+def view_body_with_map(msg: dict[str, JsonValue]) -> tuple[str, list[int | None]]:
+    """The extractor's view of a message body + a view→content offset map.
+
+    Takes the UNTRUNCATED serialized message dict. The view is what the
+    extraction prompt shows; the map gives, for each view offset (plus one
+    end-of-string entry), the corresponding offset into the step content —
+    or None for synthesized characters (the truncation ellipsis). Both
+    sides come from :func:`message_parts`, non-empty parts joined with a
+    newline.
+    """
+    pairs, _tool = message_parts(msg)
 
     view_parts: list[str] = []
     mapping: list[int | None] = []
@@ -118,7 +141,10 @@ def view_body_with_map(msg: dict[str, JsonValue]) -> tuple[str, list[int | None]
             mapping.append(content_off)   # the join newline
             content_off += 1
         first = False
-        keep = len(view_part) if view_part == content_part else len(view_part) - 3
+        keep = (
+            len(view_part) if len(view_part) == len(content_part)
+            else len(view_part) - 3       # truncated: trailing "..." is synthesized
+        )
         for k in range(len(view_part)):
             mapping.append(content_off + k if k < keep else None)
         view_parts.append(view_part)
@@ -315,8 +341,15 @@ def extract_structural_symbols(
 ) -> list[StructuralSymbol]:
     """Extract symbols from structured message positions — no LLM needed.
 
-    Finds: tool names (from tool_call blocks), SQL table names (from
-    tool_input/tool_output text).
+    Two sources, both decidable, neither semantic recognition:
+
+    * tool names — structural-position lookup (the ``name`` field of
+      ``tool_call`` blocks);
+    * SQL table names — formal-grammar parsing: the token after
+      FROM/JOIN/INTO/UPDATE/TABLE is a table reference by the grammar of
+      SQL itself, not by guessing what the text means. Registry-priming
+      only (recall hint for the extractor's ⟦known⟧ marks); the model
+      remains the authority on what gets declared a symbol.
     """
     seen: set[str] = set()
     out: list[StructuralSymbol] = []
