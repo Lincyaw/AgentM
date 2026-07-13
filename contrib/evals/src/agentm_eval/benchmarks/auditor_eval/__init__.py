@@ -276,6 +276,7 @@ class AuditorEvalAdapter:
             enable_claim_analysis: Annotated[bool, typer.Option("--claim-analysis/--no-claim-analysis", help="Enable Level 2 claim analysis")] = False,
             enable_constraints: Annotated[bool, typer.Option("--constraints/--no-constraints", help="Enable constraint satisfaction analysis (needs question metadata; TELBench only)")] = False,
             constraint_rendering: Annotated[str, typer.Option("--constraint-rendering", help="How constraint findings render to the auditor: verdict | facts")] = "verdict",
+            enable_source_checks: Annotated[bool, typer.Option("--source-checks/--no-source-checks", help="Check the agent's verification claims against adjacent observations")] = False,
             case_file: Annotated[Path | None, typer.Option("--case-file", help="File with case IDs to run (one per line)")] = None,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
@@ -327,6 +328,7 @@ class AuditorEvalAdapter:
                 claim_analysis=enable_claim_analysis,
                 constraint_analysis=enable_constraints,
                 constraint_rendering=constraint_rendering,
+                source_checks=enable_source_checks,
             ))
 
         return cli
@@ -359,6 +361,42 @@ def _load_constraint_artifact(exp: Experiment, tid: str) -> dict[str, Any] | Non
     except (OSError, json.JSONDecodeError) as exc:
         typer.echo(f"  {tid}: constraints.json unreadable: {exc}", err=True)
         return None
+
+
+async def _run_source_checks(
+    idx: Any, tid: str, model: str, exp: Experiment, context: dict[str, Any],
+) -> None:
+    """Run the source-claim consistency pass and merge facts into context.
+
+    Best-effort; a failure leaves no notes (absence of notes is declared in
+    the coverage line, never read as absence of problems).
+    """
+    from agentm.core.runtime import AgentSession
+    from trajectory_index.verification import check_source_claims
+
+    try:
+        analysis = await check_source_claims(
+            idx, run_id=tid, model=model, session_factory=AgentSession.create,
+        )
+    except Exception as exc:
+        typer.echo(f"  {tid}: source-claim check failed: {exc}", err=True)
+        return
+    exp.write_session_artifact(tid, "", "source_claims.json", analysis.to_artifact())
+    if not analysis.n_detected:
+        return
+    context["source_claim_notes"] = [
+        {
+            "step_id": c.step_id, "claim": c.claim,
+            "source_step_ids": list(c.source_step_ids),
+            "outcome": c.outcome, "quote": c.quote,
+        }
+        for c in analysis.claims
+    ]
+    context["source_claim_coverage"] = {
+        "n_detected": analysis.n_detected,
+        "n_checked": len(analysis.claims),
+        "n_unchecked": analysis.n_unchecked,
+    }
 
 
 async def _run_constraint_analysis(
@@ -510,6 +548,7 @@ async def _process_one_item(
     claim_analysis: bool = False,
     constraint_analysis: bool = False,
     constraint_rendering: str = "verdict",
+    source_checks: bool = False,
 ) -> dict[str, Any]:
     """Process a single trajectory: index extraction + (optional) claim analysis + auditor."""
     from agentm_eval.methods.auditor import run_auditor
@@ -547,6 +586,8 @@ async def _process_one_item(
                 context, idx, rendering=constraint_rendering,
                 artifact=_load_constraint_artifact(exp, tid),
             )
+        if source_checks:
+            await _run_source_checks(idx, tid, index_model, exp, context)
         if claim_analysis:
             context = await _run_claim_analysis(messages, idx, context, model)
         try:
@@ -638,6 +679,8 @@ async def _process_one_item(
                 context, idx, rendering=constraint_rendering,
                 artifact=_load_constraint_artifact(exp, tid),
             )
+        if source_checks and is_last_chunk:
+            await _run_source_checks(idx, tid, index_model, exp, context)
         if claim_analysis:
             context = await _run_claim_analysis(trajectory_prefix, idx, context, model)
 
@@ -715,6 +758,7 @@ async def _run_pipeline(
     claim_analysis: bool = False,
     constraint_analysis: bool = False,
     constraint_rendering: str = "verdict",
+    source_checks: bool = False,
 ) -> None:
     total = len(items)
     sem = asyncio.Semaphore(concurrency)
@@ -732,6 +776,7 @@ async def _run_pipeline(
                 claim_analysis=claim_analysis,
                 constraint_analysis=constraint_analysis,
                 constraint_rendering=constraint_rendering,
+                source_checks=source_checks,
             )
         async with lock:
             all_results.append(result_dict)

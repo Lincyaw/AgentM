@@ -137,6 +137,53 @@ def _render_constraint_facts(context_index: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_SOURCE_NOTES_CAP = 12
+
+
+def _render_source_claims(context_index: dict[str, Any]) -> str:
+    """Source-verification notes: window-scoped checks of the agent's own
+    verification claims. Facts only (this kind is ungated); polarity-balanced
+    (supported claims listed with the same detail as unsupported ones)."""
+    notes = context_index.get("source_claim_notes") or []
+    cov = context_index.get("source_claim_coverage") or {}
+
+    lines = [
+        "\nSource-verification notes (ADVISORY: each of the agent's "
+        "verification claims was checked against the observation excerpts it "
+        "had just received — window-scoped; 'not present' says nothing about "
+        "other sources. Verify before relying on any note.)"
+    ]
+    shown = notes[:_SOURCE_NOTES_CAP]
+    for n in shown:
+        step = n.get("step_id", "?")
+        claim = str(n.get("claim", ""))[:180]
+        srcs = ", ".join(str(s) for s in n.get("source_step_ids", []))
+        outcome = n.get("outcome", "unknown")
+        quote = str(n.get("quote", ""))[:160]
+        lines.append(f"  - step {step} claims: \"{claim}\"")
+        if outcome == "supported":
+            lines.append(f"      supported by adjacent excerpts (steps {srcs})"
+                         + (f": \"{quote}\"" if quote else ""))
+        elif outcome == "conflicted":
+            lines.append(f"      adjacent excerpts (steps {srcs}) CONTAIN CONFLICTING content"
+                         + (f": \"{quote}\"" if quote else ""))
+        elif outcome == "not_present":
+            lines.append(f"      claimed fact NOT PRESENT in adjacent excerpts (steps {srcs}) "
+                         "— may exist elsewhere; verify")
+        else:
+            lines.append(f"      check returned no verdict (steps {srcs})")
+
+    cov_line = (
+        f"Coverage: {cov.get('n_detected', len(notes))} verification claims detected, "
+        f"{cov.get('n_checked', len(notes))} checked, "
+        f"{cov.get('n_unchecked', 0)} unchecked (no adjacent observations)"
+    )
+    if len(notes) > len(shown):
+        cov_line += f"; showing {len(shown)} of {len(notes)}"
+    lines.append(cov_line)
+    return "\n".join(lines)
+
+
 def _build_index_summary(context_index: dict[str, Any]) -> str:
     """Build a compact summary of the context index for the system prompt.
 
@@ -197,6 +244,10 @@ def _build_index_summary(context_index: dict[str, Any]) -> str:
             reason = str(f.get("reason", ""))
             if reason and status in ("violated", "omitted"):
                 lines.append(f"      {reason[:160]}")
+
+    source_notes = context_index.get("source_claim_notes") or []
+    if source_notes:
+        lines.append(_render_source_claims(context_index))
 
     claim_structure = context_index.get("claim_structure")
     if claim_structure:
