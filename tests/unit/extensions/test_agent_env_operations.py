@@ -6,7 +6,6 @@ from typing import Any, cast
 
 import pytest
 
-from agentm.extensions.builtin import _agent_env as agent_env_mod
 from agentm.extensions.builtin._agent_env import (
     AgentEnvConfig,
     install_agent_env,
@@ -99,53 +98,3 @@ async def test_install_attach_passes_timeout_and_registers_operations(
     assert api.services["agent_env.session_id"] == "sandbox-session"
     assert set(api.operations) == {"bash"}
     assert api.resource_writer is not None
-
-
-@pytest.mark.asyncio
-async def test_async_execute_recovers_pending_operation_result(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    expected = object()
-
-    class FakeGatewayOperationTimeout(TimeoutError):
-        def __init__(self, operation_id: str) -> None:
-            self.operation_id = operation_id
-            super().__init__(f"timed out; operation_id={operation_id}")
-
-    monkeypatch.setitem(
-        sys.modules,
-        "arl",
-        SimpleNamespace(GatewayOperationTimeout=FakeGatewayOperationTimeout),
-    )
-
-    class FakeAsyncSession:
-        def __init__(self) -> None:
-            self.op_calls: list[str] = []
-            self._responses = [
-                SimpleNamespace(status="running", result=None, error=""),
-                SimpleNamespace(status="done", result=expected, error=""),
-            ]
-
-        @property
-        def session_id(self) -> str:
-            return "session-1"
-
-        async def execute(
-            self,
-            steps: list[dict[str, Any]],
-            **_kwargs: Any,
-        ) -> Any:
-            raise FakeGatewayOperationTimeout("op-1")
-
-        async def get_execute_operation(self, operation_id: str) -> Any:
-            self.op_calls.append(operation_id)
-            return self._responses.pop(0)
-
-    session = FakeAsyncSession()
-    result = await agent_env_mod._async_execute(
-        session,  # type: ignore[arg-type]
-        [{"cmd": "sleep 10", "timeout": 1}],
-    )
-
-    assert result is expected
-    assert session.op_calls == ["op-1", "op-1"]

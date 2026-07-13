@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import posixpath
-import time
 from collections.abc import Callable
 from inspect import isawaitable, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
@@ -28,10 +27,7 @@ if TYPE_CHECKING:
 _AGENT_ENV_SESSION_SERVICE = "agent_env.session_id"
 _AGENT_ENV_EXPERIMENT_SERVICE = "agent_env.experiment_id"
 _AGENT_ENV_WORK_DIR_SERVICE = "agent_env.work_dir"
-_OPERATION_POLL_INTERVAL_SECONDS = 2.0
 _OPERATION_TIMEOUT_GRACE_SECONDS = 30.0
-_OPERATION_STATUS_DONE = "done"
-_OPERATION_STATUS_ERROR = "error"
 
 
 class AgentEnvConfig(BaseModel):
@@ -135,89 +131,25 @@ def _arl_class(arl_module: Any, *names: str) -> Any:
     raise AttributeError(f"arl module has none of: {', '.join(names)}")
 
 
-async def _get_execute_operation(
-    session: "ArlSandboxSession",
-    operation_id: str,
-) -> Any:
-    getter = getattr(session, "get_execute_operation", None)
-    if getter is not None:
-        return await _call_maybe_async(getter, operation_id)
-
-    session_id = getattr(session, "session_id", None)
-    if not isinstance(session_id, str) or not session_id:
-        raise RuntimeError(
-            f"cannot recover ARL execute operation {operation_id}: missing session_id"
-        )
-
-    import arl  # type: ignore[import-not-found]
-
-    client = _gateway_client_class(arl)()
-    try:
-        return await _call_maybe_async(
-            client.get_execute_operation, session_id, operation_id
-        )
-    finally:
-        await _close_client(client)
-
-
-async def _recover_execute_operation(
-    session: "ArlSandboxSession",
-    steps: list[dict[str, Any]],
-    operation_id: str,
-    started_at: float,
-) -> Any:
-    budget = _step_timeout_budget(steps)
-    deadline = started_at + budget if budget is not None else None
-
-    while True:
-        operation = await _get_execute_operation(
-            session,
-            operation_id,
-        )
-        if operation.result is not None:
-            return operation.result
-
-        status = (operation.status or "").lower()
-        if status == _OPERATION_STATUS_ERROR:
-            raise RuntimeError(
-                operation.error or f"ARL execute operation {operation_id} failed"
-            )
-        if status == _OPERATION_STATUS_DONE:
-            raise RuntimeError(
-                f"ARL execute operation {operation_id} finished without result"
-            )
-
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"ARL execute operation {operation_id} still pending after "
-                    f"{budget:.0f}s"
-                )
-            sleep_for = min(_OPERATION_POLL_INTERVAL_SECONDS, remaining)
-        else:
-            sleep_for = _OPERATION_POLL_INTERVAL_SECONDS
-        await asyncio.sleep(sleep_for)
-
-
 async def _async_execute(
     session: "ArlSandboxSession",
     steps: list[dict[str, Any]],
     *,
     on_output: Callable[[str, str], None] | None = None,
 ) -> Any:
-    from arl import GatewayOperationTimeout  # type: ignore[import-not-found]
+    """Execute steps in the sandbox.
 
-    started_at = time.monotonic()
-    try:
-        return await _call_maybe_async(session.execute, steps, on_output=on_output)
-    except GatewayOperationTimeout as exc:
-        return await _recover_execute_operation(
-            session,
-            steps,
-            exc.operation_id,
-            started_at,
-        )
+    ARL execute operations are idempotent, so the SDK recovers a dropped
+    connection internally (``recover=True``): it polls the operation by id
+    until it resolves. ``recover_timeout`` bounds that wait to the step's own
+    timeout budget so a genuinely dead session still fails fast.
+    """
+    return await _call_maybe_async(
+        session.execute,
+        steps,
+        on_output=on_output,
+        recover_timeout=_step_timeout_budget(steps),
+    )
 
 
 # ---------------------------------------------------------------------------
