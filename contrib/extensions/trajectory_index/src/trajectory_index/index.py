@@ -187,6 +187,23 @@ _FINDING_STATUS_VALUES: frozenset[str] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class Claim:
+    """A settled-fact assertion by the agent, extracted verbatim in Pass 1.
+
+    First-class extraction output alongside symbols: the trajectory is
+    visited once and downstream passes (source-claim consistency,
+    constraint linkage, commitment detection) consume the same claims —
+    no per-consumer re-extraction. Verbatim presence in the step content
+    is code-verified at populate time.
+    """
+
+    id: str
+    run_id: str
+    step_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class Constraint:
     """An answer-level requirement extracted from the question (Pass 0).
 
@@ -405,6 +422,9 @@ class TrajectoryIndex:
         # Def-use / grounding layer (Pass 3). Built by build_dependencies().
         self.dependencies: dict[str, Dependency] = {}
         self._dep_ids_by_symbol: dict[str, list[str]] = defaultdict(list)
+
+        # Claims (Pass 1 output, verbatim-verified). Keyed by claim id.
+        self.claims: dict[str, Claim] = {}
 
         # Constraint layer (Pass 0/E/J/L). Populated by constraints.analyze_constraints().
         self.constraints: dict[str, Constraint] = {}
@@ -908,6 +928,22 @@ class TrajectoryIndex:
                 entity_class=getattr(ext_sym, "entity_class", "identifier"),
             )
 
+        # Claims: store verbatim-verified assertions (code check — a claim the
+        # extractor paraphrased or misattributed is rejected and logged).
+        from loguru import logger as _clog
+        for ext_claim in getattr(result, "claims", []) or []:
+            mid = str(ext_claim.message_id)
+            step = steps_by_id.get(mid)
+            text = ext_claim.text.strip()
+            if step is None:
+                _clog.debug("populate: claim references unknown message {}: {!r}", mid, text[:60])
+                continue
+            if text[:60].lower() not in step.content.lower():
+                _clog.debug("populate: non-verbatim claim rejected at step {}: {!r}", mid, text[:60])
+                continue
+            cid = stable_id("clm", run_id, mid, text[:80])
+            self.claims[cid] = Claim(id=cid, run_id=run_id, step_id=mid, text=text)
+
         all_syms = self.registry_snapshot()
         namespaces = {str(s["name"]): namespace_fn(run_id, s) if namespace_fn else "" for s in all_syms}
         refs, _rels = _build_references(all_syms, messages)
@@ -1170,6 +1206,10 @@ class TrajectoryIndex:
             }
             for d in self.dependencies.values()
         ]
+        claims = [
+            {"id": c.id, "run_id": c.run_id, "step_id": c.step_id, "text": c.text}
+            for c in self.claims.values()
+        ]
         constraints = [
             {
                 "id": c.id,
@@ -1200,6 +1240,7 @@ class TrajectoryIndex:
                 "references": len(self.references),
                 "relations": len(self.relations),
                 "dependencies": len(self.dependencies),
+                "claims": len(self.claims),
                 "constraints": len(self.constraints),
                 "constraint_findings": len(self.constraint_findings),
                 "indexed_message_count": self.indexed_message_count,
@@ -1209,6 +1250,7 @@ class TrajectoryIndex:
             "references": refs,
             "relations": relations,
             "dependencies": dependencies,
+            "claims": claims,
             "constraints": constraints,
             "constraint_findings": constraint_findings,
         }
@@ -1394,6 +1436,18 @@ class TrajectoryIndex:
             )
             index.dependencies[dep.id] = dep
             index._dep_ids_by_symbol[sym_id].append(dep.id)
+
+        for c in data.get("claims", []):
+            cid = str(c.get("id", ""))
+            text = str(c.get("text", ""))
+            if not cid or not text:
+                continue
+            index.claims[cid] = Claim(
+                id=cid,
+                run_id=str(c.get("run_id", "")),
+                step_id=str(c.get("step_id", "")),
+                text=text,
+            )
 
         for c in data.get("constraints", []):
             cid = str(c.get("id", ""))

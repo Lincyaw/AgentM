@@ -9,9 +9,11 @@ adjacent observation window.
 
 Shape (same contracts as constraints.py, P1-P7):
 
-* code detects verification-claim sentences in assistant steps (lexical
-  markers) and selects the observation window — whole steps, full text,
-  every deselection logged (P2/P4);
+* claims come from Pass 1's unified extraction (``index.claims`` — one
+  visit of the trajectory yields symbols AND claims; downstream passes
+  consume the same first-class facts, never re-extract); code selects
+  the observation window — whole steps, full text, every deselection
+  logged (P2/P4);
 * one batched oracle call judges each claim against ITS window only:
   supported / conflicted / not_present — all three are window-scoped
   statements ("not present in these excerpts" says nothing about other
@@ -25,7 +27,6 @@ Shape (same contracts as constraints.py, P1-P7):
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,18 +36,7 @@ from .adjudicate import SessionFactory, _ask_model, _index_by_id, _safe_float
 from .constraints import Diagnostics, _content_tokens
 from .index import Step, StepRole, TrajectoryIndex
 
-# Verification/sourcing claim markers (assistant text). Lexical detection is
-# deliberately generous — precision comes from the oracle check, and an
-# unchecked claim is only an absent fact, never an alarm.
-_CLAIM_RE = re.compile(
-    r"\b(verif\w+|confirm\w+|according to|the source (?:shows|states|says)|"
-    r"as (?:shown|stated|reported)|establish\w+|cross-check\w+|validated?|"
-    r"matches? the|consistent with)\b",
-    re.IGNORECASE,
-)
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")  # noqa: RUF001 — CJK enders intended
-
-_MAX_CLAIMS_PER_STEP = 2      # claim sentences per step (selection, logged)
+_MAX_CLAIMS_PER_STEP = 3      # claims per step accepted from the extractor (logged)
 _MAX_WINDOW_STEPS = 6         # observation steps per claim window (selection, logged)
 
 
@@ -88,33 +78,36 @@ class SourceClaimAnalysis:
 
 
 # ---------------------------------------------------------------------------
-# Code half: claim detection + window selection
+# Claim source + window selection (code)
 # ---------------------------------------------------------------------------
 
+# Claims come from Pass 1's unified extraction (index.claims — one visit of
+# the trajectory extracts symbols AND claims; every downstream consumer reads
+# the same first-class facts, no per-pass re-extraction). Claim detection is
+# semantic and lives in the extractor prompt; verbatim presence was already
+# code-verified at populate time. A keyword detector was tried and rejected:
+# it misses paraphrase ("the birth year lines up") and false-fires on intent
+# ("I need to confirm this next") and negation ("unconfirmed").
 
-def _claim_sentences(text: str) -> list[str]:
-    """Sentences containing a verification marker (whole sentences, verbatim)."""
-    out = []
-    for sent in _SENT_SPLIT_RE.split(text):
-        if _CLAIM_RE.search(sent) and len(sent.strip()) >= 20:
-            out.append(sent.strip())
-    return out
 
-
-def _detect_claims(
-    steps: list[Step], diag: Diagnostics,
+def _claims_from_index(
+    index: TrajectoryIndex, steps: list[Step], diag: Diagnostics,
 ) -> list[tuple[Step, str]]:
-    """(step, claim sentence) pairs from assistant steps; prunes logged."""
+    """(step, claim text) pairs from the index's first-class claims."""
+    steps_by_id = {s.step_id: s for s in steps}
+    per_step: dict[str, int] = {}
     out: list[tuple[Step, str]] = []
-    for s in steps:
-        if s.role != StepRole.ASSISTANT or not s.content:
+    for claim in sorted(index.claims.values(), key=lambda c: c.step_id):
+        step = steps_by_id.get(claim.step_id)
+        if step is None:
             continue
-        sents = _claim_sentences(s.content)
-        for sent in sents[:_MAX_CLAIMS_PER_STEP]:
-            out.append((s, sent))
-        for sent in sents[_MAX_CLAIMS_PER_STEP:]:
-            diag.prune("claims", s.step_id,
-                       f"claim cap {_MAX_CLAIMS_PER_STEP}/step: {sent[:60]!r}")
+        n = per_step.get(step.step_id, 0)
+        if n >= _MAX_CLAIMS_PER_STEP:
+            diag.prune("claims", step.step_id,
+                       f"claim cap {_MAX_CLAIMS_PER_STEP}/step: {claim.text[:60]!r}")
+            continue
+        per_step[step.step_id] = n + 1
+        out.append((step, claim.text))
     return out
 
 
@@ -219,9 +212,11 @@ async def check_source_claims(
         (s for s in index.steps.values() if not run_id or s.run_id == run_id),
         key=lambda s: s.index,
     )
-    detected = _detect_claims(steps, diag)
+    detected = _claims_from_index(index, steps, diag)
     analysis.n_detected = len(detected)
     if not detected:
+        logger.info("source claims: index carries no claims for this run "
+                    "(old index without unified extraction, or none asserted)")
         return analysis
 
     items: list[tuple[Step, str, list[Step]]] = []

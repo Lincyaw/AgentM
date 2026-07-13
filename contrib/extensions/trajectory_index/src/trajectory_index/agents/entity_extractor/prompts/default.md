@@ -29,8 +29,18 @@ If an entity appears under multiple surface forms, pick the most canonical as `n
 - `value` — a tracked quantity the agent monitors across turns.
 - `unknown` — a vague or anaphoric surface with no clear referent on its own.
 
+## Claims
+
+Besides symbols, extract the agent's **verification/sourcing claims**: sentences in assistant messages where the agent asserts, as settled fact, that something is confirmed, verified, matched, or established by evidence/sources it gathered.
+
+- Copy the claim sentence VERBATIM into `text`; set `message_id` to the message it appears in (the id from the `[id|role]` header).
+- Assertions only — not plans ("I will verify next"), not questions, not tentative hypotheses ("this could match"), not negations ("unconfirmed").
+- Paraphrased verification counts: "the birth year lines up with the criteria" is a claim even without the word "verified".
+- A message may contain several claims or none. If none in the chunk, output an empty `claims` list.
+
 ## Rules
 
 - Output valid JSON only. No markdown fences, no explanation.
 - Every symbol needs a `kind` from the vocabulary and an `entity_class`.
 - Prefer specific names over generic descriptions.
+- Top-level output keys: `symbols`, `claims`.

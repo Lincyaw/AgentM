@@ -20,5 +20,22 @@ class ExtractedSymbol(BaseModel):
     )
 
 
+class ExtractedClaim(BaseModel):
+    """A settled-fact assertion by the agent, extracted verbatim.
+
+    Claims are first-class extraction output alongside symbols: the
+    trajectory is visited once and every downstream pass (source-claim
+    consistency, constraint linkage, commitment detection) consumes the
+    same extracted claims instead of re-scanning the trajectory.
+    """
+
+    message_id: str = Field(description="Message id the claim sentence appears in")
+    text: str = Field(description="The claim sentence, copied verbatim")
+
+
 class ExtractionResult(BaseModel):
     symbols: list[ExtractedSymbol] = Field(description="All extracted symbols")
+    claims: list[ExtractedClaim] = Field(
+        default_factory=list,
+        description="Verification/sourcing assertions the agent presents as settled",
+    )
