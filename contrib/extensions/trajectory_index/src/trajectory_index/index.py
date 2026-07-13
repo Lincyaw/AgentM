@@ -111,7 +111,7 @@ class Step:
         """The retrieved/environment portion of this step, or None.
 
         Attested tool_result roles contribute their whole content; Pass 1
-        obs spans extend the evidence universe to trajectories whose
+        obs spans extend the evidence space to trajectories whose
         serialization lost structural roles (all downstream evidence
         selection reads this, never ``role`` directly). Multiple regions
         join with a newline.
@@ -291,8 +291,8 @@ class ClaimFinding:
 
     ``status`` values: ``supported`` (a supports edge exists), ``conflicted``
     (a conflicts edge exists — dominates), ``unsourced`` (the edge pass swept
-    the WHOLE observation universe with complete coverage and found neither),
-    ``unknown`` (coverage broken — never escalates, P5). ``universe_empty``
+    the WHOLE evidence space with complete coverage and found neither),
+    ``unknown`` (coverage broken — never escalates, P5). ``evidence_empty``
     distinguishes "swept and found nothing" from "there was nothing to
     sweep" (a trajectory whose serialization carries no observation content
     at all — a strong trajectory-level fact in its own right).
@@ -303,7 +303,7 @@ class ClaimFinding:
     step_id: str
     status: str
     edge_ids: tuple[str, ...] = ()
-    universe_empty: bool = False
+    evidence_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1438,7 +1438,7 @@ class TrajectoryIndex:
             {
                 "claim_id": f.claim_id, "run_id": f.run_id, "step_id": f.step_id,
                 "status": f.status, "edge_ids": list(f.edge_ids),
-                "universe_empty": f.universe_empty,
+                "evidence_empty": f.evidence_empty,
             }
             for f in self.claim_findings
         ]
@@ -1721,7 +1721,7 @@ class TrajectoryIndex:
                 step_id=str(cf.get("step_id", "")),
                 status=str(cf.get("status", "unknown")),
                 edge_ids=tuple(str(e) for e in cf.get("edge_ids", [])),
-                universe_empty=bool(cf.get("universe_empty", False)),
+                evidence_empty=bool(cf.get("evidence_empty", cf.get("universe_empty", False))),
             ))
 
         for c in data.get("constraints", []):

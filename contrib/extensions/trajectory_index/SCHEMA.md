@@ -45,7 +45,7 @@ everything, e.g. an attested $\mathrm{tool\_result}$), a pure agent step
 ($O_i = \varnothing$), and an interleaved query/content/summary sandwich
 (several disjoint intervals).
 
-The derived **evidence universe** is
+The derived **evidence space** is
 
 $$E = \{\, e_i = (i, O_i) \;:\; O_i \neq \varnothing \,\}$$
 
@@ -141,7 +141,7 @@ $$\mathrm{status}(c) =
 Coverage is complete when every partition of $E$ had at least one
 successful oracle call (content coverage is attested; recall within a
 shown partition remains the oracle's). The flag
-$\mathrm{universe\_empty} \iff E = \varnothing$ distinguishes "swept
+$\mathrm{evidence\_empty} \iff E = \varnothing$ distinguishes "swept
 $E$ and found nothing" from "the record carries no observation content
 at all" — itself a strong trajectory-level fact.
 
@@ -203,7 +203,7 @@ Symbol:       id, canonical_name, kind, aliases, entity_class
 Reference:    symbol_id, location, kind, grounded, form, value          # an occurrence
 Edge:         kind ∈ {supports, conflicts}, src=claim, dst=step,
               quote, evidence_position ∈ {before, same, after}
-ClaimFinding: claim_id, status, edge_ids, universe_empty                 # Pass 3 fold output
+ClaimFinding: claim_id, status, edge_ids, evidence_empty                 # Pass 3 fold output
 Dependency:   def_ref/use_ref, version, risk, def_value, use_value      # def-use edge
 ```
 

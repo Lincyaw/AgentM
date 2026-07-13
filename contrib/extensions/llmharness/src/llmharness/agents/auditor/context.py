@@ -121,7 +121,7 @@ def _render_constraint_facts(context_index: dict[str, Any]) -> str:
         )
     n_grounded = coverage.get("n_grounded_steps")
     if n_grounded is not None:
-        cov_parts.append(f"evidence universe: {n_grounded} tool-output steps")
+        cov_parts.append(f"evidence space: {n_grounded} tool-output steps")
     prunes = coverage.get("prune_counts") or {}
     if prunes:
         cov_parts.append(
@@ -184,7 +184,7 @@ def _render_source_claims(context_index: dict[str, Any]) -> str:
         f"Coverage: {cov.get('n_claims', len(notes))} claims, statuses "
         + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
     )
-    if cov.get("universe_empty"):
+    if cov.get("evidence_empty"):
         cov_line += (
             " — NOTE: this trajectory's record contains NO observation "
             "content at all; every claim is necessarily unsourced in-trace"

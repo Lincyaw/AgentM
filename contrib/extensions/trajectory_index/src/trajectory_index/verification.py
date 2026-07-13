@@ -7,12 +7,12 @@ deterministic algebra (P6 — code owns the decidable):
 * ``conflicted``  — a conflicts edge exists (dominates: one witnessed
   contradiction outweighs any number of supports);
 * ``supported``   — otherwise a supports edge exists;
-* ``unsourced``   — neither, AND every partition of the observation
-  universe was shown to the oracle at least once (content coverage is
+* ``unsourced``   — neither, AND every partition of the evidence
+  space was shown to the oracle at least once (content coverage is
   attested; recall within a shown partition is still the oracle's — a
   support one more sample would have surfaced can be missed, which fails
   toward a false negative on support, never toward a fabricated edge);
-  ``universe_empty`` marks the degenerate sweep over a trajectory whose
+  ``evidence_empty`` marks the degenerate sweep over a trajectory whose
   serialization carries no observation content at all;
 * ``unknown``     — neither, and coverage is broken (a partition's oracle
   calls all failed) — never escalates (P5).
@@ -52,7 +52,7 @@ class ClaimStatusAnalysis:
                 {
                     "claim_id": f.claim_id, "step_id": f.step_id,
                     "status": f.status, "edge_ids": list(f.edge_ids),
-                    "universe_empty": f.universe_empty,
+                    "evidence_empty": f.evidence_empty,
                 }
                 for f in self.findings
             ],
@@ -79,7 +79,7 @@ def fold_claim_statuses(
         if e.kind in ("supports", "conflicts") and (not run_id or e.run_id == run_id):
             edges_by_claim.setdefault(e.src, []).append(e)
 
-    universe_empty = edge_result.coverage.n_observation_steps == 0
+    evidence_empty = edge_result.coverage.n_observation_steps == 0
     complete = edge_result.coverage.complete
 
     for claim in sorted(
@@ -103,13 +103,13 @@ def fold_claim_statuses(
             step_id=claim.step_id,
             status=status,
             edge_ids=edge_ids,
-            universe_empty=universe_empty,
+            evidence_empty=evidence_empty,
         ))
 
     index.claim_findings = [
         f for f in index.claim_findings if run_id and f.run_id != run_id
     ] + analysis.findings
 
-    logger.info("claim statuses: {} (universe_empty={}, coverage complete={})",
-                analysis.counts(), universe_empty, complete)
+    logger.info("claim statuses: {} (evidence_empty={}, coverage complete={})",
+                analysis.counts(), evidence_empty, complete)
     return analysis

@@ -22,7 +22,7 @@ never issues a global verdict.
                         and including the claim's step — whole segments
     partition (code)    deterministic char-budget partitions, whole steps
                         only; together the partitions COVER the candidate
-                        universe, which is what entitles the downstream
+                        evidence space, which is what entitles the downstream
                         fold to an attested "unsourced" negative (P4)
     propose   (oracle)  per partition, every claim judged against that
                         partition's excerpts; positive polarity; sampled
@@ -64,7 +64,7 @@ _EDGE_KINDS = ("supports", "conflicts")
 
 @dataclass(slots=True)
 class EdgeCoverage:
-    """Did the oracle sweep see the whole candidate universe?
+    """Did the oracle sweep see the whole candidate evidence space?
 
     ``complete`` requires every partition to have at least one successful
     sample — the entitlement for the fold's "unsourced" negative.

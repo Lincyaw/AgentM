@@ -396,7 +396,7 @@ async def _map_about(
 ) -> list[Step]:
     """Pass E2: grounded steps carrying evidence about the committed candidate.
 
-    Sweeps the WHOLE grounded universe in deterministic char-budget
+    Sweeps the WHOLE grounded evidence space in deterministic char-budget
     partitions — code does not pre-filter relevance (the earlier lexical
     blocking was code recognizing "aboutness" and pruned anaphoric
     evidence before any model saw it). Positive polarity per partition; a
@@ -557,10 +557,10 @@ async def _check_omitted(
     verdicts: dict[str, Verdict] = {}
 
     if not grounded:
-        # Empty evidence universe: with zero tool-output steps we cannot
+        # Empty evidence space: with zero tool-output steps we cannot
         # tell "the agent never verified anything" from "ingestion lost
         # provenance" (e.g. spans arriving as raw text with no roles). A
-        # negative over an empty universe is vacuous — abstain. The
+        # negative over an empty evidence space is vacuous — abstain. The
         # grounding warnings already flag the no-tool-output condition.
         diag.record("sweep", "-", "abstain", 0.0, "no grounded tool-output steps")
         for c in unsettled:
@@ -748,7 +748,7 @@ async def analyze_constraints(
         (s for s in index.steps.values() if not run_id or s.run_id == run_id),
         key=lambda s: s.index,
     )
-    # Evidence universe: attested tool_result steps plus Pass 1
+    # Evidence evidence space: attested tool_result steps plus Pass 1
     # provenance-labeled observation content (observation_segment covers
     # both — mixed steps contribute their retrieved portion only).
     grounded = [s for s in steps if s.observation_segment]

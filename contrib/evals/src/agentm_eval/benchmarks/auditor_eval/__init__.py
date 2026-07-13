@@ -408,7 +408,7 @@ def _merge_claim_status_context(idx: Any, tid: str, context: dict[str, Any]) -> 
     context["source_claim_coverage"] = {
         "n_claims": len(findings),
         "status_counts": counts,
-        "universe_empty": bool(findings and findings[0].universe_empty),
+        "evidence_empty": bool(findings and findings[0].evidence_empty),
     }
 
 
