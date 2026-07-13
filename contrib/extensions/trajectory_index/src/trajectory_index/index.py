@@ -239,6 +239,31 @@ class Claim:
 
 
 @dataclass(frozen=True, slots=True)
+class Edge:
+    """A Pass 2 relation between two index nodes.
+
+    Pass 1 emits nodes; Pass 2 connects them. The model proposes edges,
+    code verifies the decidable part: both endpoints exist, and ``quote``
+    — the passage in the destination node's content that witnesses the
+    relation — is verbatim-present there. An edge that fails verification
+    is rejected and logged, never stored.
+
+    ``kind`` names the relation. First kind: ``grounds`` — a claim node
+    refers to content in an observation step (its source), regardless of
+    whether that content agrees with the claim (agreement is a Pass 3
+    judgment, not an edge).
+    """
+
+    id: str
+    kind: str
+    run_id: str
+    src: str                 # source node id (e.g. claim id)
+    dst: str                 # destination node id (e.g. step id)
+    quote: str = ""          # verbatim witness in the destination content
+    confidence: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class Constraint:
     """An answer-level requirement extracted from the question (Pass 0).
 
@@ -485,6 +510,9 @@ class TrajectoryIndex:
 
         # Claims (Pass 1 output, verbatim-verified). Keyed by claim id.
         self.claims: dict[str, Claim] = {}
+
+        # Edges (Pass 2 output, endpoint- and quote-verified). Keyed by edge id.
+        self.edges: dict[str, Edge] = {}
 
         # Constraint layer (Pass 0/E/J/L). Populated by constraints.analyze_constraints().
         self.constraints: dict[str, Constraint] = {}
@@ -1307,6 +1335,14 @@ class TrajectoryIndex:
             {"id": c.id, "run_id": c.run_id, "step_id": c.step_id, "text": c.text}
             for c in self.claims.values()
         ]
+        edges = [
+            {
+                "id": e.id, "kind": e.kind, "run_id": e.run_id,
+                "src": e.src, "dst": e.dst,
+                "quote": e.quote, "confidence": e.confidence,
+            }
+            for e in self.edges.values()
+        ]
         constraints = [
             {
                 "id": c.id,
@@ -1338,6 +1374,7 @@ class TrajectoryIndex:
                 "relations": len(self.relations),
                 "dependencies": len(self.dependencies),
                 "claims": len(self.claims),
+                "edges": len(self.edges),
                 "constraints": len(self.constraints),
                 "constraint_findings": len(self.constraint_findings),
                 "indexed_message_count": self.indexed_message_count,
@@ -1348,6 +1385,7 @@ class TrajectoryIndex:
             "relations": relations,
             "dependencies": dependencies,
             "claims": claims,
+            "edges": edges,
             "constraints": constraints,
             "constraint_findings": constraint_findings,
         }
@@ -1546,6 +1584,20 @@ class TrajectoryIndex:
                 run_id=str(c.get("run_id", "")),
                 step_id=str(c.get("step_id", "")),
                 text=text,
+            )
+
+        for e in data.get("edges", []):
+            eid = str(e.get("id", ""))
+            if not eid:
+                continue
+            index.edges[eid] = Edge(
+                id=eid,
+                kind=str(e.get("kind", "")),
+                run_id=str(e.get("run_id", "")),
+                src=str(e.get("src", "")),
+                dst=str(e.get("dst", "")),
+                quote=str(e.get("quote", "")),
+                confidence=float(e.get("confidence", 0.0)),
             )
 
         for c in data.get("constraints", []):

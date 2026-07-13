@@ -38,6 +38,7 @@ from typing import Any
 from loguru import logger
 
 from .adjudicate import SessionFactory, _ask_model, _index_by_id, _safe_float
+from .diagnostics import Diagnostics, content_tokens
 from .index import (
     Constraint,
     ConstraintFinding,
@@ -58,53 +59,17 @@ from .index import (
 # is a parameter to be calibrated on the dev slice (validation plan step 3).
 
 _SWEEP_CHAR_BUDGET = 20000    # default sweep abstention budget (chars)
-_MIN_LEXICAL_TOKEN = 4        # lexical-negative token length floor
-
-_STOPWORDS = frozenset({
-    "the", "and", "that", "with", "from", "this", "have", "been", "were",
-    "was", "for", "are", "not", "his", "her", "their", "its", "who", "than",
-    "then", "when", "what", "which", "where", "before", "after", "during",
-    "into", "about", "there", "they", "them", "also", "some", "same",
-})
 
 _YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
-
-def _content_tokens(text: str) -> set[str]:
-    return {
-        t for t in re.split(r"\W+", text.lower())
-        if len(t) >= _MIN_LEXICAL_TOKEN and t not in _STOPWORDS
-    }
+# Shared across passes; re-exported here for existing importers.
+_content_tokens = content_tokens
 
 
 # ---------------------------------------------------------------------------
-# Diagnostics sink + pass-to-pass value types
+# Pass-to-pass value types
 # ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class Diagnostics:
-    """The one sink every pass writes into.
-
-    ``transcript`` is the oracle-tuple record (P3): one row per model
-    judgment. ``prune_log`` records every code-side pruning decision (P2).
-    """
-
-    transcript: list[dict[str, Any]] = field(default_factory=list)
-    prune_log: list[dict[str, Any]] = field(default_factory=list)
-
-    def record(
-        self, relation: str, key: str, verdict: Any,
-        confidence: float, detail: str = "",
-    ) -> None:
-        self.transcript.append({
-            "relation": relation, "key": key, "verdict": verdict,
-            "confidence": round(confidence, 3), "detail": detail,
-        })
-
-    def prune(self, stage: str, what: str, why: str) -> None:
-        self.prune_log.append({"stage": stage, "what": what, "why": why})
 
 
 @dataclass(frozen=True, slots=True)

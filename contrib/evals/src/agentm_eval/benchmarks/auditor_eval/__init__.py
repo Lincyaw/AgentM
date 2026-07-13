@@ -278,10 +278,18 @@ class AuditorEvalAdapter:
             constraint_rendering: Annotated[str, typer.Option("--constraint-rendering", help="How constraint findings render to the auditor: verdict | facts")] = "verdict",
             enable_source_checks: Annotated[bool, typer.Option("--source-checks/--no-source-checks", help="Check the agent's verification claims against adjacent observations")] = False,
             case_file: Annotated[Path | None, typer.Option("--case-file", help="File with case IDs to run (one per line)")] = None,
+            passes: Annotated[str, typer.Option("--passes", help="Comma-separated passes to run: extract, constraints, source, audit. 'extract' always runs; e.g. --passes extract for index-only validation")] = "extract,audit",
         ) -> None:
             """Run interleaved index + auditor evaluation."""
             from agentm.env import autoload_dotenv
             autoload_dotenv()
+
+            known_passes = {"extract", "edges", "constraints", "source", "audit"}
+            pass_set = {p.strip() for p in passes.split(",") if p.strip()}
+            unknown = pass_set - known_passes
+            if unknown:
+                typer.echo(f"Unknown passes: {sorted(unknown)} (known: {sorted(known_passes)})", err=True)
+                raise typer.Exit(1)
 
             items: list[TrajectoryItem] = []
 
@@ -315,6 +323,7 @@ class AuditorEvalAdapter:
             exp = Experiment.create(
                 "auditor-eval", model=model, exp_id=exp_id,
                 source=source, index_model=index_model,
+                vocabulary=vocabulary, passes=",".join(sorted(pass_set)),
             )
             typer.echo(f"Experiment: {exp.exp_id} → {exp.output_dir}")
             typer.echo(f"Trajectories: {len(items)}, source={source}, model={model}")
@@ -326,9 +335,11 @@ class AuditorEvalAdapter:
                 exp=exp, rebuild_index=rebuild_index,
                 concurrency=concurrency,
                 claim_analysis=enable_claim_analysis,
-                constraint_analysis=enable_constraints,
+                constraint_analysis=enable_constraints or "constraints" in pass_set,
                 constraint_rendering=constraint_rendering,
-                source_checks=enable_source_checks,
+                source_checks=enable_source_checks or "source" in pass_set,
+                build_edges="edges" in pass_set,
+                run_audit="audit" in pass_set,
             ))
 
         return cli
@@ -397,6 +408,25 @@ async def _run_source_checks(
         "n_checked": len(analysis.claims),
         "n_unchecked": analysis.n_unchecked,
     }
+
+
+async def _run_edge_pass(idx: Any, tid: str, model: str, exp: Experiment) -> None:
+    """Run Pass 2 edge construction (grounds: claim → source observation).
+
+    Best-effort: a failure leaves the index without edges, which downstream
+    consumers treat as no linkage signal. The full pass record (edges +
+    oracle transcript + prune log) lands in pass2_edges.json.
+    """
+    from agentm.core.runtime import AgentSession
+    from trajectory_index.edges import build_grounds_edges
+
+    try:
+        result = await build_grounds_edges(
+            idx, run_id=tid, model=model, session_factory=AgentSession.create,
+        )
+        exp.write_session_artifact(tid, "", "pass2_edges.json", result.to_artifact())
+    except Exception as exc:
+        typer.echo(f"  {tid}: edge pass failed: {exc}", err=True)
 
 
 async def _run_constraint_analysis(
@@ -505,6 +535,52 @@ def _merge_constraint_context(
     }
 
 
+def _pass1_nodes_artifact(
+    idx: Any, run_id: str, emitted_provenance: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Readable Pass 1 node dump for extraction-quality inspection.
+
+    What the extractor emitted vs what survived code verification: per-step
+    provenance with segment heads, verbatim claims, symbols. Rejected labels
+    (boundary unverifiable, unknown message) are the emitted-minus-applied
+    difference, listed explicitly. Full step content lives in index.json.
+    """
+    steps = sorted(
+        (s for s in idx.steps.values() if not run_id or s.run_id == run_id),
+        key=lambda s: s.index,
+    )
+    applied_ids = {s.step_id for s in steps if s.provenance}
+    return {
+        "steps": [
+            {
+                "index": s.index,
+                "role": s.role,
+                "provenance": s.provenance,
+                "obs_offset": s.obs_offset,
+                "action_head": (s.action_segment or "")[:200],
+                "obs_head": (s.observation_segment or "")[:200],
+            }
+            for s in steps
+        ],
+        "claims": [
+            {"step_id": c.step_id, "text": c.text}
+            for c in sorted(idx.claims.values(), key=lambda c: (c.run_id, c.step_id))
+            if not run_id or c.run_id == run_id
+        ],
+        "symbols": [
+            {
+                "name": s.canonical_name, "kind": s.kind,
+                "entity_class": s.entity_class, "aliases": sorted(s.aliases),
+            }
+            for s in idx.symbols.values()
+        ],
+        "provenance_emitted": emitted_provenance,
+        "provenance_rejected": [
+            p for p in emitted_provenance if p["message_id"] not in applied_ids
+        ],
+    }
+
+
 def _provenance_view(messages: list[AgentMessage], idx: Any, run_id: str) -> list[AgentMessage]:
     """The auditor's trajectory view with Pass 1 provenance applied.
 
@@ -584,6 +660,8 @@ async def _process_one_item(
     constraint_analysis: bool = False,
     constraint_rendering: str = "verdict",
     source_checks: bool = False,
+    build_edges: bool = False,
+    run_audit: bool = True,
 ) -> dict[str, Any]:
     """Process a single trajectory: index extraction + (optional) claim analysis + auditor."""
     from agentm_eval.methods.auditor import run_auditor
@@ -615,6 +693,12 @@ async def _process_one_item(
             await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
             idx.dump(str(index_path))
 
+        if build_edges and idx.claims and not any(
+            e.kind == "grounds" for e in idx.edges.values()
+        ):
+            await _run_edge_pass(idx, tid, index_model, exp)
+            idx.dump(str(index_path))
+
         context = _index_to_context(idx)
         if idx.constraint_findings:
             _merge_constraint_context(
@@ -625,16 +709,17 @@ async def _process_one_item(
             await _run_source_checks(idx, tid, index_model, exp, context)
         if claim_analysis:
             context = await _run_claim_analysis(messages, idx, context, model)
-        try:
-            audit_result = await run_auditor(
-                _provenance_view(messages, idx, tid), model=model,
-                auditor_prompt=auditor_prompt,
-                context_index=context,
-            )
-            _save_auditor_step(exp, tid, len(messages), audit_result, idx)
-        except Exception as exc:
-            typer.echo(f"  {tid}: auditor FAILED: {exc}", err=True)
-            audit_result = None
+        audit_result = None
+        if run_audit:
+            try:
+                audit_result = await run_auditor(
+                    _provenance_view(messages, idx, tid), model=model,
+                    auditor_prompt=auditor_prompt,
+                    context_index=context,
+                )
+                _save_auditor_step(exp, tid, len(messages), audit_result, idx)
+            except Exception as exc:
+                typer.echo(f"  {tid}: auditor FAILED: {exc}", err=True)
 
         return _build_result(tid, messages, meta, idx, audit_result, cached=True)
 
@@ -651,6 +736,7 @@ async def _process_one_item(
     last_audit_result = None
     all_verdicts: list[dict[str, Any]] = []
     constraints_ran = False
+    emitted_provenance: list[dict[str, Any]] = []
 
     for ci, chunk in enumerate(raw_chunks):
         chunk_end = chunk.start + len(chunk.messages)
@@ -674,6 +760,11 @@ async def _process_one_item(
             typer.echo(f"  {tid} chunk {ci+1} no parseable result", err=True)
             continue
 
+        emitted_provenance.extend(
+            {"message_id": str(p.message_id), "label": p.label,
+             "observation_start": p.observation_start}
+            for p in getattr(result, "provenance", []) or []
+        )
         idx.populate_from_extraction(
             result, chunk.messages, run_id=tid,
             message_id_start=chunk.start,
@@ -719,6 +810,9 @@ async def _process_one_item(
         if claim_analysis:
             context = await _run_claim_analysis(trajectory_prefix, idx, context, model)
 
+        if not run_audit:
+            typer.echo(f"  {tid} chunk {ci+1}: msgs 0-{chunk_end}  {stats.symbol_count} syms  (audit skipped)")
+            continue
         try:
             audit_result = await run_auditor(
                 _provenance_view(trajectory_prefix, idx, tid), model=model,
@@ -752,7 +846,14 @@ async def _process_one_item(
         typer.echo(f"  {tid}: constraint analysis ran post-loop (last chunk failed)")
         await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
 
+    if build_edges and idx.claims:
+        # Pass 2 is a posthoc, full-index pass — run once after extraction.
+        await _run_edge_pass(idx, tid, index_model, exp)
+
     idx.dump(str(index_path))
+    exp.write_session_artifact(
+        tid, "", "pass1_nodes.json", _pass1_nodes_artifact(idx, tid, emitted_provenance),
+    )
     stats = idx.stats(tid)
     warns = idx.warning_summary()
 
@@ -794,6 +895,8 @@ async def _run_pipeline(
     constraint_analysis: bool = False,
     constraint_rendering: str = "verdict",
     source_checks: bool = False,
+    build_edges: bool = False,
+    run_audit: bool = True,
 ) -> None:
     total = len(items)
     sem = asyncio.Semaphore(concurrency)
@@ -812,6 +915,8 @@ async def _run_pipeline(
                 constraint_analysis=constraint_analysis,
                 constraint_rendering=constraint_rendering,
                 source_checks=source_checks,
+                build_edges=build_edges,
+                run_audit=run_audit,
             )
         async with lock:
             all_results.append(result_dict)
