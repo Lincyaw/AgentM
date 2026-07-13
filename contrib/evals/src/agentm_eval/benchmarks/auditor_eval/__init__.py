@@ -793,7 +793,13 @@ async def _process_one_item(
             message_id_start=chunk.start,
             diagnostics=populate_diag,
         )
-        await resolve_index(idx, model=index_model)
+        # Identity resolution (alias/coreference) keeps the index merged for
+        # its consumers. Interleaved audit consumes after EVERY chunk, so it
+        # needs per-chunk resolution; without an auditor the only consumers
+        # (edges/constraints/folds) run after the last chunk — one
+        # resolution there is enough, saving a model call per chunk.
+        if run_audit or ci == len(raw_chunks) - 1:
+            await resolve_index(idx, model=index_model)
 
         for sym in result.parsed_symbols():
             norm = normalize_name(sym.name)
