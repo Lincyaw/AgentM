@@ -32,7 +32,7 @@ from typing import Any
 from loguru import logger
 
 from .adjudicate import SessionFactory, _ask_model, _index_by_id, _safe_float
-from .constraints import Diagnostics
+from .constraints import Diagnostics, _content_tokens
 from .index import Step, StepRole, TrajectoryIndex
 
 # Verification/sourcing claim markers (assistant text). Lexical detection is
@@ -118,27 +118,60 @@ def _detect_claims(
     return out
 
 
+_MIN_LINK_TOKENS = 2          # lexical link: shared content tokens to qualify
+
+
 def _observation_window(
-    steps: list[Step], claim_step: Step, diag: Diagnostics,
+    steps: list[Step], claim_step: Step, claim_text: str, diag: Diagnostics,
 ) -> list[Step]:
-    """The observation steps this claim reacts to: those between the previous
-    assistant step and the claim step; whole steps, most recent kept when
-    over the cap (selection, logged)."""
+    """The observation steps a claim should be checked against.
+
+    Adjacent observations (between the previous assistant step and the
+    claim) PLUS lexically-linked observations from anywhere earlier —
+    verification claims typically appear in summary/report spans citing
+    retrievals from much earlier, so adjacency alone leaves ~70% of claims
+    uncheckable (measured on TELBench). Whole steps, full text; over-cap
+    deselection keeps the highest-overlap steps and is logged.
+    """
     prev_assistant_idx = -1
     for s in steps:
         if s.index >= claim_step.index:
             break
         if s.role == StepRole.ASSISTANT and s.content:
             prev_assistant_idx = s.index
-    window = [
-        s for s in steps
-        if s.role == StepRole.TOOL_RESULT and s.content
-        and prev_assistant_idx < s.index < claim_step.index
-    ]
-    for s in window[:-_MAX_WINDOW_STEPS]:
-        diag.prune("window", s.step_id,
-                   f"window cap {_MAX_WINDOW_STEPS} (most recent kept)")
-    return window[-_MAX_WINDOW_STEPS:]
+
+    claim_tokens = _content_tokens(claim_text)
+    adjacent: list[Step] = []
+    linked: list[tuple[int, Step]] = []
+    for s in steps:
+        if s.role != StepRole.TOOL_RESULT or not s.content or s.index >= claim_step.index:
+            continue
+        if s.index > prev_assistant_idx:
+            adjacent.append(s)
+            continue
+        overlap = sum(1 for t in claim_tokens if t in s.content.lower())
+        if overlap >= _MIN_LINK_TOKENS:
+            linked.append((overlap, s))
+
+    linked.sort(key=lambda x: (-x[0], x[1].index))
+    merged = {s.step_id: s for s in adjacent}
+    for _, s in linked:
+        merged.setdefault(s.step_id, s)
+
+    window = sorted(merged.values(), key=lambda s: s.index)
+    if len(window) > _MAX_WINDOW_STEPS:
+        # keep adjacent first, then highest-overlap linked
+        keep = {s.step_id for s in adjacent[-_MAX_WINDOW_STEPS:]}
+        for _, s in linked:
+            if len(keep) >= _MAX_WINDOW_STEPS:
+                break
+            keep.add(s.step_id)
+        for s in window:
+            if s.step_id not in keep:
+                diag.prune("window", s.step_id,
+                           f"window cap {_MAX_WINDOW_STEPS} (adjacent + top-overlap kept)")
+        window = [s for s in window if s.step_id in keep]
+    return window
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +226,7 @@ async def check_source_claims(
 
     items: list[tuple[Step, str, list[Step]]] = []
     for step, sent in detected:
-        window = _observation_window(steps, step, diag)
+        window = _observation_window(steps, step, sent, diag)
         if window:
             items.append((step, sent, window))
         else:
