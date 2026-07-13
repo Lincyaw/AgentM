@@ -49,7 +49,7 @@ from loguru import logger
 
 from .adjudicate import SessionFactory, _ask_model, _safe_float
 from .diagnostics import Diagnostics
-from .index import Claim, Edge, Step, TrajectoryIndex, _find_boundary, stable_id
+from .index import Claim, Edge, Step, TrajectoryIndex, stable_id
 
 _PARTITION_CHAR_BUDGET = 60_000   # max excerpt chars per oracle call (whole steps)
 _MAX_EDGES_PER_CLAIM = 6          # highest-confidence edges kept per claim (pruned, logged)
@@ -109,6 +109,18 @@ class EdgePassResult:
 # ---------------------------------------------------------------------------
 # assemble + partition (code)
 # ---------------------------------------------------------------------------
+
+
+def _quote_in_segment(segment: str, quote: str) -> bool:
+    """FULL-quote verbatim containment, whitespace-normalized only.
+
+    The quote is the load-bearing witness for the edge — the entire
+    passage must appear in the observation segment, not a prefix of it
+    (a prefix match would let the model fabricate everything past the
+    matched head).
+    """
+    norm_quote = " ".join(quote.split())
+    return bool(norm_quote) and norm_quote in " ".join(segment.split())
 
 
 def _self_quote(claim_text: str, quote: str) -> bool:
@@ -269,7 +281,7 @@ async def build_claim_edges(
                        f"direction: step {dst.step_id} after claim step {made_at.step_id}")
             continue
         segment = dst.observation_segment or ""
-        if not quote.strip() or _find_boundary(segment, quote) < 0:
+        if not _quote_in_segment(segment, quote):
             diag.prune("edges", claim.id,
                        f"quote not verbatim in step {dst.step_id}: {quote[:60]!r}")
             continue

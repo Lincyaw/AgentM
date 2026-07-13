@@ -7,9 +7,11 @@ deterministic algebra (P6 — code owns the decidable):
 * ``conflicted``  — a conflicts edge exists (dominates: one witnessed
   contradiction outweighs any number of supports);
 * ``supported``   — otherwise a supports edge exists;
-* ``unsourced``   — neither, AND the edge pass swept the whole observation
-  universe with complete coverage (the deterministic partitions cover the
-  candidate set — that attestation is what entitles this negative, P4);
+* ``unsourced``   — neither, AND every partition of the observation
+  universe was shown to the oracle at least once (content coverage is
+  attested; recall within a shown partition is still the oracle's — a
+  support one more sample would have surfaced can be missed, which fails
+  toward a false negative on support, never toward a fabricated edge);
   ``universe_empty`` marks the degenerate sweep over a trajectory whose
   serialization carries no observation content at all;
 * ``unknown``     — neither, and coverage is broken (a partition's oracle

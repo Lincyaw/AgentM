@@ -379,14 +379,6 @@ class GeneratedReference:
     start: int
 
 
-@dataclass(slots=True)
-class GeneratedRelation:
-    from_symbol: str
-    to_symbol: str
-    relation_type: str
-    turn_id: str
-
-
 _IDENT_CHAR_RE: Final = re.compile(r"[A-Za-z0-9_.\-/]")
 
 
@@ -413,8 +405,9 @@ def _symbol_aliases(sym: dict[str, Any]) -> list[str]:
 def _build_references(
     symbols: list[dict[str, Any]],
     messages: list[dict[str, JsonValue]],
-) -> tuple[list[GeneratedReference], list[GeneratedRelation]]:
-    """Grep symbol names + aliases in messages to produce references."""
+) -> list[GeneratedReference]:
+    """Grep symbol names + aliases in messages to produce references
+    (exact name/alias matching — deterministic given Pass 1 names)."""
     names: list[tuple[str, str]] = []  # (search_term_lower, canonical_name)
     seen_terms: set[tuple[str, str]] = set()
     for sym in symbols:
@@ -493,4 +486,4 @@ def _build_references(
 
             cum_offset += len(text) + 1
 
-    return refs, []
+    return refs

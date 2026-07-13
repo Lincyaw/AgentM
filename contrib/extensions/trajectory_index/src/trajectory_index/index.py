@@ -262,10 +262,10 @@ class Edge:
     relation — is verbatim-present there. An edge that fails verification
     is rejected and logged, never stored.
 
-    ``kind`` names the relation. First kind: ``grounds`` — a claim node
-    refers to content in an observation step (its source), regardless of
-    whether that content agrees with the claim (agreement is a Pass 3
-    judgment, not an edge).
+    ``kind`` names the relation. Current kinds: ``supports`` /
+    ``conflicts`` — one claim against one observation excerpt; polarity
+    sits on the edge because it is a local pairwise fact, while the
+    global per-claim status is the Pass 3 fold's job (verification.py).
     """
 
     id: str
@@ -461,31 +461,6 @@ def grounded_from_kind(kind: str) -> bool:
     grounded during dependency build if it copies a prior grounded value.
     """
     return kind in _PRODUCING_KINDS
-
-
-_BOUNDARY_MIN_PREFIX = 12   # shortest boundary prefix accepted as a match
-
-
-def _find_boundary(content: str, boundary: str) -> int:
-    """Locate a provenance boundary in step content — exact search only.
-
-    The extractor copies the boundary verbatim, but models drift after the
-    first tens of characters. A prefix of the boundary is sufficient to
-    locate the split point and is still verbatim-verified, so try the full
-    string first, then progressively shorter prefixes down to a floor that
-    keeps matches meaningful. Returns -1 when nothing verifiable matches.
-    """
-    boundary = boundary.strip()
-    if not boundary:
-        return -1
-    first_line = boundary.splitlines()[0].strip()
-    for probe in (boundary, first_line, boundary[:40].strip(), boundary[:20].strip()):
-        if len(probe) < _BOUNDARY_MIN_PREFIX:
-            continue
-        offset = content.find(probe)
-        if offset >= 0:
-            return offset
-    return -1
 
 
 def _message_step_content(msg: dict[str, object]) -> tuple[str, str | None]:
@@ -1171,7 +1146,7 @@ class TrajectoryIndex:
 
         all_syms = self.registry_snapshot()
         namespaces = {str(s["name"]): namespace_fn(run_id, s) if namespace_fn else "" for s in all_syms}
-        refs, _rels = _build_references(all_syms, messages)
+        refs = _build_references(all_syms, messages)
         for ref in refs:
             rsym = self.resolve_symbol_by_name(
                 ref.symbol_name,
