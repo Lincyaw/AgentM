@@ -66,21 +66,20 @@ def message_parts(msg: dict[str, JsonValue]) -> tuple[list[tuple[str, str]], str
     — one walk, so the two representations that offset alignment depends
     on cannot drift apart.
 
-    View parts differ from content parts in exactly two length-preserving-
-    or-suffix ways: long text is prefix-truncated with a trailing ellipsis
-    (the extractor's prompt window), and literal annotation delimiters
-    (``⟦``/``⟧``, should they ever occur in recorded content) are
-    substituted with plain brackets so the markup parser never meets an
-    unbalanced literal — the substitution preserves length, offsets map
-    1:1, and stored step content keeps the original characters.
+    View parts differ from content parts in exactly one length-preserving
+    way: literal annotation delimiters (``⟦``/``⟧``, should they ever
+    occur in recorded content) are substituted with plain brackets so the
+    markup parser never meets an unbalanced literal — the substitution
+    preserves length, offsets map 1:1, and stored step content keeps the
+    original characters. The view is otherwise the FULL text: gap elision
+    keeps the model's output bounded, so the prompt window needs no
+    truncation and every character is annotatable.
     """
     import json as _json
 
     from .markup import CLOSE, OPEN
 
     def _view(text: str) -> str:
-        if len(text) > _MAX_TEXT_CHARS:
-            text = text[:_MAX_TEXT_CHARS] + "..."
         return text.replace(OPEN, "[").replace(CLOSE, "]")
 
     pairs: list[tuple[str, str]] = []

@@ -69,6 +69,7 @@ This obs region runs from the Title line to the Retrieved line; the page body be
 
 Rules:
 
+- Any retrieved region longer than about ten lines MUST be written as anchors and gaps, never copied in full.
 - The text on each side of a gap is an anchor: at least one full line (a dozen characters or more), copied exactly, and UNIQUE within the message. Boilerplate lines repeat in multi-page dumps; if your anchor is not unique, extend it until it is. When in doubt, copy more.
 - Never elide text you are annotating: the exact stretches you wrap as claims, constraints, or symbol surfaces are the boundaries of those annotations and must be written out in full. A gap may skip the text between annotations, never the annotated text itself.
 

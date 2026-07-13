@@ -118,10 +118,10 @@ identifier, vague/anaphoric → unknown. Nodes only — no relations, no
 verdicts: a chunked extractor cannot see both endpoints of a cross-step
 relation.
 
-Cost note: re-emission makes output ≈ chunk size, which is what makes
-small chunks the operating point. The extractor's prompt window (prefix
-truncation of very long steps) is Pass 1's declared unsoundness —
-annotations falling past the cut are rejected, recorded.
+Cost note: gap elision (below, §"the annotation atom" table aside)
+keeps re-emission output proportional to annotation density rather than
+text size, which is what lets the extractor see steps IN FULL — there is
+no prompt-window truncation, and every character is annotatable.
 
 ## 2 · Pass 2 — edges (relations between nodes)
 
