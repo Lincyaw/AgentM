@@ -29,10 +29,14 @@ never issues a global verdict.
                         ``_N_SAMPLES`` times and unioned — sampling can
                         only surface more candidate edges, never assert
                         one (verification gates them all)
-    verify    (code)    endpoints exist, direction holds, quote is
-                        verbatim in the destination's observation segment
-                        and is not the claim's own words; failures are
-                        rejected and logged, never stored (P2)
+    verify    (code)    endpoints exist, quote is verbatim (FULL text)
+                        in the destination's observation segment and is
+                        not the claim's own words; failures are rejected
+                        and logged, never stored (P2). Timeline is a
+                        FACT, not a filter: evidence_position records
+                        before/same/after the claim — an after-conflicts
+                        edge ("committed early, refuted later") is signal,
+                        not noise
 
 Contracts: oracle judgments land in the transcript (P3); a failed call
 breaks coverage for that partition (recorded) and can only weaken
@@ -47,7 +51,7 @@ from typing import Any
 
 from loguru import logger
 
-from .adjudicate import SessionFactory, _ask_model, _safe_float
+from .adjudicate import SessionFactory, _ask_model
 from .diagnostics import Diagnostics
 from .index import Claim, Edge, Step, TrajectoryIndex, stable_id
 
@@ -95,7 +99,7 @@ class EdgePassResult:
             "edges": [
                 {
                     "id": e.id, "kind": e.kind, "src": e.src, "dst": e.dst,
-                    "quote": e.quote, "confidence": e.confidence,
+                    "quote": e.quote, "evidence_position": e.evidence_position,
                 }
                 for e in self.edges
             ],
@@ -176,7 +180,7 @@ had received). For each claim, report the excerpts that bear on it:
     "none" is normal and needs no entry.
 
 Return ONLY:
-{"verdicts": [{"claim": 0, "step": "12", "relation": "supports|conflicts", "quote": "...", "confidence": 0.9}]}
+{"verdicts": [{"claim": 0, "step": "12", "relation": "supports|conflicts", "quote": "..."}]}
 """
 
 
@@ -226,7 +230,7 @@ async def build_claim_edges(
     partitions = partition_by_budget(observations, _PARTITION_CHAR_BUDGET)
     result.coverage.n_partitions = len(partitions)
 
-    proposals: list[tuple[Claim, Step, str, str, float]] = []
+    proposals: list[tuple[Claim, Step, str, str]] = []
     for pi, partition in enumerate(partitions):
         payload = json.dumps({
             "claims": claim_rows,
@@ -260,26 +264,18 @@ async def build_claim_edges(
                 if relation not in _EDGE_KINDS:
                     diag.prune("edges", claim.id, f"unknown relation {relation!r}")
                     continue
-                proposals.append((
-                    claim, dst, relation,
-                    str(item.get("quote", "")), _safe_float(item, "confidence"),
-                ))
+                proposals.append((claim, dst, relation, str(item.get("quote", ""))))
         if ok == 0:
             result.coverage.n_failed_partitions += 1
             diag.record("edges", f"partition:{pi}", None, 0.0,
                         f"all {samples} samples failed for partition of {len(partition)} steps; "
                         "coverage broken")
 
-    # verify (code): direction + verbatim non-self quote + (src, dst, kind)
-    # dedup keeping the highest confidence. The claim's own step is admitted
-    # (a claim and its evidence often share one mixed-provenance step).
+    # verify (code): verbatim non-self quote + (src, dst, kind) dedup
+    # (first verified proposal wins). Timeline is recorded as a fact, never
+    # used as a filter — consistency is time-agnostic.
     verified: dict[str, dict[tuple[str, str], Edge]] = {}
-    for claim, dst, relation, quote, conf in proposals:
-        made_at = claim_steps.get(claim.id)
-        if made_at is not None and dst.index > made_at.index:
-            diag.prune("edges", claim.id,
-                       f"direction: step {dst.step_id} after claim step {made_at.step_id}")
-            continue
+    for claim, dst, relation, quote in proposals:
         segment = dst.observation_segment or ""
         if not _quote_in_segment(segment, quote):
             diag.prune("edges", claim.id,
@@ -290,9 +286,17 @@ async def build_claim_edges(
             continue
         per_claim = verified.setdefault(claim.id, {})
         key = (dst.step_id, relation)
-        prior = per_claim.get(key)
-        if prior is not None and prior.confidence >= conf:
+        if key in per_claim:
             continue
+        made_at = claim_steps.get(claim.id)
+        if made_at is None:
+            position = ""
+        elif dst.index < made_at.index:
+            position = "before"
+        elif dst.index == made_at.index:
+            position = "same"
+        else:
+            position = "after"
         per_claim[key] = Edge(
             id=stable_id("edg", claim.run_id, relation, claim.id, dst.step_id),
             kind=relation,
@@ -300,13 +304,14 @@ async def build_claim_edges(
             src=claim.id,
             dst=dst.step_id,
             quote=quote,
-            confidence=round(conf, 3),
+            evidence_position=position,
         )
-        diag.record(relation, claim.id, dst.step_id, conf, f"quote={quote[:60]!r}")
+        diag.record(relation, claim.id, dst.step_id, 0.0,
+                    f"{position or 'unpositioned'}: quote={quote[:60]!r}")
 
     kept: list[Edge] = []
     for claim_id, per_claim in verified.items():
-        edges = sorted(per_claim.values(), key=lambda e: (-e.confidence, e.dst))
+        edges = sorted(per_claim.values(), key=lambda e: e.dst)
         for extra in edges[_MAX_EDGES_PER_CLAIM:]:
             diag.prune("edges", claim_id,
                        f"edge cap {_MAX_EDGES_PER_CLAIM}/claim: dropped {extra.kind}:{extra.dst}")

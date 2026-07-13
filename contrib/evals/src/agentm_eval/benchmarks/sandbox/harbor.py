@@ -89,8 +89,19 @@ class HarborAdapter:
         return True
 
     def _verifier_env(self, task: TaskSpec) -> dict[str, str]:
-        """Env vars exported to test.sh. Base Harbor exports none."""
-        return {}
+        """Env vars exported to test.sh: task.toml ``[verifier.env]``
+        (standard Harbor schema field — e.g. chess-mate's RESULT_TOKEN gates
+        the referee's /result endpoint). ``${VAR}``/``${VAR:-default}``
+        references expand against the host environment; literals pass
+        through unchanged."""
+        raw = task.extra.get("verifier", {})
+        declared = raw.get("env", {}) if isinstance(raw, dict) else {}
+        env: dict[str, str] = {}
+        for key, value in declared.items():
+            expanded = _expand_host_env(str(value))
+            if expanded:
+                env[key] = expanded
+        return env
 
     def eval_timeout_for(self, task: TaskSpec, timeout: int) -> int:
         """Effective verifier timeout: task.toml ``[verifier] timeout_sec``
@@ -174,11 +185,17 @@ class HarborAdapter:
         env_prefix = "".join(
             f"{k}={shlex.quote(str(v))} " for k, v in self._verifier_env(task).items()
         )
+        # timeoutSeconds is REQUIRED for verifiers that run longer than the
+        # gateway's default sidecar-call timeout (5 min): without it the
+        # gateway cancels the exec mid-run and returns empty stdout with no
+        # reward.txt, which looks like an invalid trial. Pass the effective
+        # eval timeout so the gateway extends its own deadline to match.
         r = session.execute([{  # type: ignore[attr-defined]
             "name": "eval",
             "command": ["bash", "-lc",
                 f"{env_prefix}timeout {timeout} bash /tests/test.sh 2>&1"],
             "work_dir": "/app",
+            "timeoutSeconds": timeout,
         }])
         eval_out = r.results[0].output.stdout
 
@@ -337,6 +354,17 @@ class LhtbAdapter(HarborAdapter):
                     remapped = self._remapped_port(int(value))
                     if remapped != int(value):
                         env_overrides[key] = str(remapped)
+                # The gateway replaces an unset container command with
+                # `sleep infinity` (private containers were designed for
+                # exec-style evaluators), which silently disables a serving
+                # sidecar. Pass the image's own ENTRYPOINT/CMD explicitly.
+                entrypoint, cmd = _dockerfile_entrypoint_cmd(svc_dockerfile)
+                if entrypoint:
+                    spec["command"] = entrypoint
+                    if cmd:
+                        spec["args"] = cmd
+                elif cmd:
+                    spec["command"] = cmd
             if env_overrides:
                 spec["env"] = env_overrides
             sidecars.append(spec)
@@ -373,8 +401,8 @@ class LhtbAdapter(HarborAdapter):
         return overrides
 
 
-def _dockerfile_env(dockerfile: Path) -> dict[str, str]:
-    """Parse ``ENV k=v ...`` assignments (with line continuations)."""
+def _dockerfile_lines(dockerfile: Path) -> list[str]:
+    """Dockerfile lines with backslash continuations joined."""
     joined: list[str] = []
     buf = ""
     for raw in dockerfile.read_text().splitlines():
@@ -384,8 +412,15 @@ def _dockerfile_env(dockerfile: Path) -> dict[str, str]:
             continue
         joined.append(buf + line)
         buf = ""
+    if buf:
+        joined.append(buf)
+    return joined
+
+
+def _dockerfile_env(dockerfile: Path) -> dict[str, str]:
+    """Parse ``ENV k=v ...`` assignments (with line continuations)."""
     env: dict[str, str] = {}
-    for line in joined:
+    for line in _dockerfile_lines(dockerfile):
         stripped = line.strip()
         if not stripped.upper().startswith("ENV "):
             continue
@@ -398,6 +433,37 @@ def _dockerfile_env(dockerfile: Path) -> dict[str, str]:
                 key, _, value = part.partition("=")
                 env[key] = value
     return env
+
+
+def _dockerfile_entrypoint_cmd(dockerfile: Path) -> tuple[list[str], list[str]]:
+    """Last ENTRYPOINT and CMD of a Dockerfile (exec or shell form)."""
+    import json as _json
+
+    entrypoint: list[str] = []
+    cmd: list[str] = []
+    for line in _dockerfile_lines(dockerfile):
+        stripped = line.strip()
+        upper = stripped.upper()
+        for keyword, slot in (("ENTRYPOINT", "entrypoint"), ("CMD", "cmd")):
+            if not upper.startswith(keyword + " ") and upper != keyword:
+                continue
+            rest = stripped[len(keyword):].strip()
+            value: list[str]
+            if rest.startswith("["):
+                try:
+                    parsed = _json.loads(rest)
+                    value = [str(p) for p in parsed] if isinstance(parsed, list) else []
+                except ValueError:
+                    value = []
+            elif rest:
+                value = ["/bin/sh", "-c", rest]
+            else:
+                value = []
+            if slot == "entrypoint":
+                entrypoint = value
+            else:
+                cmd = value
+    return entrypoint, cmd
 
 
 _ENV_REF = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
@@ -440,21 +506,34 @@ class SeniorSweAdapter(HarborAdapter):
         return None
 
     def _verifier_env(self, task: TaskSpec) -> dict[str, str]:
-        raw = task.extra.get("verifier", {})
-        declared = raw.get("env", {}) if isinstance(raw, dict) else {}
-        env: dict[str, str] = {}
-        for key, value in declared.items():
-            expanded = _expand_host_env(str(value))
-            if expanded:
-                env[key] = expanded
+        env = super()._verifier_env(task)
         for key in self.EXTRA_VERIFIER_ENV:
             if key not in env and os.environ.get(key):
                 env[key] = os.environ[key]
         return env
 
+    # The judges' litellm code path imports fastapi + orjson (and more), none
+    # of which are in the task image or the verifier-requirements.txt test.sh
+    # installs — so every judge call dies with ModuleNotFoundError and the run
+    # is scored as an invalid trial. Installing the litellm[proxy] extra pulls
+    # the whole set in one shot; verified end-to-end that it makes both the
+    # rubric and taste judges run. Pre-install before test.sh (tolerant; the
+    # image's pip predates --break-system-packages, so fall back to plain).
+    VERIFIER_PIP_DEPS = ("litellm[proxy]",)
+
     def evaluate(
         self, session: object, task: TaskSpec, *, timeout: int = 300
     ) -> dict:
+        if self.VERIFIER_PIP_DEPS:
+            deps = " ".join(shlex.quote(d) for d in self.VERIFIER_PIP_DEPS)
+            session.execute([{  # type: ignore[attr-defined]
+                "name": "verifier-deps",
+                "command": ["bash", "-lc",
+                    f"python3 -m pip install --break-system-packages -q {deps} "
+                    f"2>/dev/null || python3 -m pip install -q {deps} 2>/dev/null || true"],
+                "work_dir": "/app",
+                "timeoutSeconds": 600,
+            }])
         result = super().evaluate(session, task, timeout=timeout)
         if result.get("reward") is None:
             result["invalid_trial"] = True

@@ -167,8 +167,11 @@ def _render_source_claims(context_index: dict[str, Any]) -> str:
         if status in ("supported", "conflicted"):
             for ev in evidence[:3]:
                 verb = "supported by" if ev.get("kind") == "supports" else "CONTRADICTED by"
+                pos = ev.get("position", "")
+                when = {"after": " (evidence arrived AFTER the claim)",
+                        "same": " (same step)"}.get(pos, "")
                 quote = str(ev.get("quote", ""))[:160]
-                lines.append(f"      {verb} step {ev.get('step_id', '?')}"
+                lines.append(f"      {verb} step {ev.get('step_id', '?')}{when}"
                              + (f": \"{quote}\"" if quote else ""))
         elif status == "unsourced":
             lines.append("      UNSOURCED: no supporting or conflicting content "

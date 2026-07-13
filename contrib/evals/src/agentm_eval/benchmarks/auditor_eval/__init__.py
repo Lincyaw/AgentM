@@ -393,7 +393,8 @@ def _merge_claim_status_context(idx: Any, tid: str, context: dict[str, Any]) -> 
         if claim is None:
             continue
         evidence = [
-            {"step_id": e.dst, "kind": e.kind, "quote": e.quote}
+            {"step_id": e.dst, "kind": e.kind, "quote": e.quote,
+             "position": e.evidence_position}
             for eid in f.edge_ids if (e := edges_by_id.get(eid)) is not None
         ]
         notes.append({

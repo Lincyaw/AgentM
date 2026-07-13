@@ -1,71 +1,170 @@
-# Trajectory grounding analysis — design
+# Trajectory index — formal model
 
-Over the extracted symbol graph, catch when the agent **relied on something no tool
-ever gave it** — a fabricated *name*, or a fabricated *value* on a real name.
+The index is a static-analysis stack over one recorded agent trajectory.
+This file defines the objects each pass produces and consumes; the
+governing contracts (P1–P7) live in `designs/constraint-satisfaction.md`,
+the layered-architecture rationale in
+`designs/trajectory-analysis-architecture.md`.
 
-A **taint** analysis: a value is *grounded* if it came from a tool (trusted),
-*ungrounded* if the model conjured it. Relying on an ungrounded value is the bug.
-A name is the value-free special case (it just exists or not); a value can also be
-*wrong* — contradict what the tool returned.
+The division of labor everywhere: **the model does all recognition and
+local pairwise judgment; code does only the decidable** — verbatim
+checks, exact lookups, deterministic parsing and partitioning, set and
+lattice algebra. No fact is ever extracted by a regex or keyword table.
 
-## Three stages (compiler-style)
+## 0 · The trajectory
 
-Rule: the LLM only makes **local** judgments; **all global traversal is code**
-("the model gives a point, code propagates it").
+A trajectory is a finite sequence of steps
 
-**1 · PARSE** — extract + tag.
-- LLM: extract entities and set `entity_class`. Decisive test — *could a tool report
-  different content for this while it stays the same thing?* yes → `value`,
-  no → `identifier`, vague/anaphoric → `unknown`.
-- Code: from message structure, tag each occurrence def/use and `grounded`
-  (tool_output = grounded def; tool_input / mention = ungrounded use); assign SSA
-  versions.
+    T = ⟨s_1, …, s_N⟩            s_i = (i, role_i, x_i)
 
-**2 · RESOLVE** — make every reference point at the right entity.
-- alias (`resolve_aliases`): "are these two surface forms the same entity?"
-- coreference (`resolve_references`): "which earlier entity does this anaphor
-  (`this` / `it`) denote?"
-- Code blocks candidates, the LLM decides each locally, code merges / rewrites.
+where `i` is the position, `x_i` a text (the step content, built
+deterministically from the recorded message blocks by the single shared
+walk `data.message_parts`), and `role_i ∈ {user, assistant, tool_call,
+tool_result, system}`. A role is **attested** when the record's
+structure carries it (a real harness message); degraded serializations
+(benchmark span dumps) arrive with uninformative roles.
 
-**3 · DATAFLOW** — def-use + grounding (code, global).
-- Each use links to its reaching def (most-recent at a strictly earlier step);
-  grounding propagates forward; each edge gets a risk.
-- value fidelity (`compare_values`): for value edges with a grounded binding, the
-  LLM judges confirm / contradict.
+**Authorship partition.** Every step content splits into agent-authored
+and environment-authored regions:
 
-## Risk (per def-use edge)
+    x_i  =  A_i ⊎ O_i            O_i = obs_spans_i ⊆ intervals(x_i)
+
+For attested `tool_result` steps, `O_i = [0, |x_i|)` by structure; for
+everything else `O_i` comes from Pass 1 and may be empty or several
+disjoint intervals (query/content/summary sandwiches). The derived
+**evidence universe** is
+
+    E  =  { e_i = (i, O_i)  :  O_i ≠ ∅ }
+
+and everything outside it is agent action text. Downstream passes read
+only the accessors `observation_segment` / `action_segment`; nothing
+reads `role` for evidence selection.
+
+## 1 · Pass 1 — nodes (one trajectory visit)
+
+The extractor model visits T once, in chunks of 2–4 steps, and re-emits
+each annotated step body **verbatim** with `⟦tag attrs|content⟧` spans
+(`markup.py`). Code strips all spans and compares against the view it
+sent (whitespace-tolerant alignment): equality makes every span offset
+exact; inequality rejects the step's annotations whole, into the prune
+log. Three node kinds:
+
+| node | tag | definition | code verification |
+|---|---|---|---|
+| provenance | `⟦obs\|…⟧` | the intervals of `O_i` | strip-compare → exact offsets; overlaps merged; attested roles never overridden |
+| claim | `⟦claim\|…⟧` | `c = (i, [a,b))` — a sentence the agent asserts **as settled fact**: verification statements, conclusions/identifications, settled negative findings; plans, questions, hedges excluded (the test is stance, not wording or polarity) | text is the content slice `x_i[a:b]` — verbatim by construction |
+| symbol | `⟦sym …\|…⟧` | `σ = (name, kind, class)`, declared at first mention; other marked surfaces of the same `name` become aliases automatically | occurrences located by exact name/alias match (code); an occurrence inside `O` is a grounded (tool-backed) def |
+
+The claim set is `C = {c_1, …, c_K}`; the symbol table Σ carries the
+occurrence relation `occ ⊆ Σ × locations`. `class` is the name/value
+axis, independent of `kind`: *could a tool report different content for
+this while it stays the same thing?* yes → `value`, no → `identifier`,
+vague/anaphoric → `unknown`. Nodes only — no relations, no verdicts: a
+chunked extractor cannot see both endpoints of a cross-step relation.
+
+Cost note: re-emission makes output ≈ chunk size, which is what makes
+small chunks the operating point. The extractor's prompt window (prefix
+truncation of very long steps) is Pass 1's declared unsoundness —
+annotations falling in the ellipsis are rejected, recorded.
+
+## 2 · Pass 2 — edges (relations between nodes)
+
+The model proposes **local pairwise** relations; code verifies the
+decidable part of every proposal and records every rejection.
+
+**Evidence edges** (`edges.py`):
+
+    evd ⊆ C × E × {supports, conflicts}
+
+judged over the full bipartite C × E: code partitions E
+deterministically into whole-step groups under a char budget
+(⋃ partitions = E — this coverage is what later entitles a negative),
+shows each partition to the oracle with ALL claims (sampled twice,
+union — sampling can only surface candidates, never assert one), and
+each proposal carries a witness quote. Code keeps an edge only if
+
+  * both endpoints exist;
+  * the FULL quote is verbatim in `O_j` (whitespace-normalized
+    containment, not a prefix match);
+  * the quote is not the claim's own words (a claim is not its own
+    evidence).
+
+Each kept edge records the timeline **fact**
+`evidence_position = sign(j − i) ∈ {before, same, after}` — never a
+filter: consistency is time-agnostic, and an after-conflicts edge
+("committed early, refuted later, never retracted") is signal, not
+noise.
+
+**Identity edges** (`adjudicate.py`): alias/coreference resolution — an
+equivalence over Σ's surface forms; code blocks candidate pairs, the
+model judges each locally, code merges and rewrites anaphors.
+
+## 3 · Pass 3 — judgments (folds over nodes + edges)
+
+**Claim status** (`verification.py`, pure code, zero model calls):
+
+    status(c) = conflicted   if ∃ (c, e, conflicts) ∈ evd      — dominates
+              | supported    else if ∃ (c, e, supports) ∈ evd
+              | unsourced    else if coverage complete          — attested negative
+              | unknown      otherwise                          — never escalates
+
+Coverage is complete when every partition of E had at least one
+successful oracle call (content coverage is attested; recall within a
+shown partition remains the oracle's). `universe_empty` distinguishes
+"swept E and found nothing" from "E = ∅" — a record carrying no
+observation content at all, itself a strong trajectory-level fact.
+
+**Def-use grounding** (code, global — "the model gives a point, code
+propagates it"): each symbol use links to its reaching def (SSA-style
+versions, code-assigned); grounding propagates from occurrences in `O`;
+each edge gets a risk:
 
 - `grounded` — reaching def was tool-backed; safe.
 - `premature` — used before grounding, but grounded later and consistent.
 - `ungrounded` — never grounded anywhere; fabricated (name or value).
 - `contradicted` — used a value a later grounded binding differs from.
-- `stale` — used an older grounded version while a newer one exists *(defined, not
-  yet emitted — needs coreference to an older version)*.
+- `stale` — used an older grounded version while a newer one exists
+  *(defined, not yet emitted — needs coreference to an older version)*.
 
-`entity_class` is independent of `kind`: `kind` is the type (from the vocabulary),
-`entity_class` is the name/value axis. There is no regex gate — the LLM owns the
-name/value/vague call.
+Value fidelity (`compare_values`): for value edges with a grounded
+binding, the model judges confirm/contradict — a local pairwise call in
+the Pass 2 mold.
 
-## Data model
+**Constraint layer** (`constraints.py`, Pass 0/E/J/L): a third consumer
+folding question-derived constraints against the same E, swept in the
+same partitioned way, joined with the same Kleene discipline (unknown
+never escalates; Omitted requires the lexical code-negative AND the
+attested coverage sweep).
+
+## 4 · What leaves the index
+
+Everything surfaced downstream is a **fact with provenance** — a node,
+an edge with its witness quote and position, a status with its coverage
+record — rendered as ADVISORY context for the auditor. The index never
+designates an error step and never issues a global verdict: it is the
+LSP, the auditor is the analyst.
+
+## Data model (implementation shapes)
 
 ```python
-type EntityClass = Literal["identifier", "value", "unknown"]
-type RefForm     = Literal["direct", "anaphor"]
-type Risk        = Literal["grounded", "premature", "ungrounded", "contradicted", "stale"]
-
-Symbol:     ... entity_class
-Reference:  ... grounded: bool, form, value, resolved_from
-Dependency: def_step/def_ref/def_version, use_step/use_ref, risk,
-            grounded_by_step_id, def_value, use_value
+Step:         run_id, step_id, index, role, content, obs_spans          # + segments as properties
+Claim:        id, run_id, step_id, text                                 # verbatim content slice
+Symbol:       id, canonical_name, kind, aliases, entity_class
+Reference:    symbol_id, location, kind, grounded, form, value          # an occurrence
+Edge:         kind ∈ {supports, conflicts}, src=claim, dst=step,
+              quote, evidence_position ∈ {before, same, after}
+ClaimFinding: claim_id, status, edge_ids, universe_empty                 # Pass 3 fold output
+Dependency:   def_ref/use_ref, version, risk, def_value, use_value      # def-use edge
 ```
-SSA `version` = the ordinal of a def among an entity's defs (code-assigned, no
-separate table).
 
-## Out of scope
+Every pass is best-effort and idempotent: a model failure degrades the
+affected tuples (never fabricates), and derived layers are rebuilt
+wholesale on rerun.
 
-- Reasoning errors where every name and value is grounded but the conclusion does
-  not follow (an unsupported inference) — leaves no grounding trace.
+## Out of scope (current)
+
+- Premises embedded in tool-call arguments (assumption smuggling) — a
+  claim-adjacent node kind not yet extracted.
+- Erroneous *actions* (searching the wrong thing) — an error in what was
+  done, not in what was asserted; commit/constraint territory.
 - Cross-run coreference; non-textual grounding.
-
-Each stage is best-effort and idempotent: a model failure leaves the deterministic
-layer intact; the derived layer is rebuilt wholesale.

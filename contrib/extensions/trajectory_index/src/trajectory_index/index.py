@@ -266,6 +266,14 @@ class Edge:
     ``conflicts`` — one claim against one observation excerpt; polarity
     sits on the edge because it is a local pairwise fact, while the
     global per-claim status is the Pass 3 fold's job (verification.py).
+
+    ``evidence_position`` records the timeline fact (code-computed step
+    comparison): the evidence precedes the claim, shares its step, or
+    arrived after it. Consistency is time-agnostic, so no position is
+    rejected — an after-conflicts edge is the "committed early, refuted
+    later, never retracted" signature; an after-supports edge marks a
+    premature commitment that happened to be right. Interpretation is
+    the auditor's.
     """
 
     id: str
@@ -274,7 +282,7 @@ class Edge:
     src: str                 # source node id (e.g. claim id)
     dst: str                 # destination node id (e.g. step id)
     quote: str = ""          # verbatim witness in the destination content
-    confidence: float = 0.0
+    evidence_position: str = ""   # before | same | after ("" = unknown/legacy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1422,7 +1430,7 @@ class TrajectoryIndex:
             {
                 "id": e.id, "kind": e.kind, "run_id": e.run_id,
                 "src": e.src, "dst": e.dst,
-                "quote": e.quote, "confidence": e.confidence,
+                "quote": e.quote, "evidence_position": e.evidence_position,
             }
             for e in self.edges.values()
         ]
@@ -1703,7 +1711,7 @@ class TrajectoryIndex:
                 src=str(e.get("src", "")),
                 dst=str(e.get("dst", "")),
                 quote=str(e.get("quote", "")),
-                confidence=float(e.get("confidence", 0.0)),
+                evidence_position=str(e.get("evidence_position", "")),
             )
 
         for cf in data.get("claim_findings", []):
