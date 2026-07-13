@@ -20,7 +20,9 @@ Annotations may nest (a `⟦sym|…⟧` inside a `⟦obs|…⟧` segment is fine
 
 ### `⟦sym kind=… class=…|surface⟧` — symbol declaration
 
-Mark the FIRST mention of each new named entity — something with a proper name that exists independently of this conversation. The decisive test: **is this a resource with a fixed name, or is it data/observation about a resource?** Values, statuses, counts, verdicts are data — do not mark them.
+Mark the FIRST mention of each new named entity — something with a proper name that exists independently of this conversation. The decisive test: **is this a resource with a fixed name, or is it data/observation about a resource?** One-off values, statuses, verdicts are data — do not mark them.
+
+EXCEPTION — tracked quantities: a specific number/date the agent RELIES ON across turns (a search criterion, threshold, target figure: "1.7 million individuals", "approximately 20%", "founded in 1901") IS a symbol with `class=value`. These are the quantities the agent's reasoning stands on; downstream analysis checks where they came from. Mark the first mention; use the quantity surface as the name.
 
 - `kind` — from the vocabulary below.
 - `class` — `identifier` (the string IS the entity; most symbols), `value` (a tracked quantity the agent monitors across turns), or `unknown` (vague/anaphoric surface). Omit for `identifier`.
