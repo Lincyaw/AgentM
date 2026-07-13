@@ -159,6 +159,66 @@ def align(emitted: str, original: str) -> list[int] | None:
 
 
 # ---------------------------------------------------------------------------
+# Gap resolution (anchored skipping, diff-hunk style)
+# ---------------------------------------------------------------------------
+
+GAP_TAG = "gap"
+_MIN_GAP_ANCHOR = 12   # verbatim chars required on each side of a gap
+
+
+def align_gapped(
+    plain: str, gap_offsets: list[int], view: str,
+    *, min_anchor: int = _MIN_GAP_ANCHOR,
+) -> tuple[list[int] | None, str]:
+    """Map gapped re-emission onto the view: ``head ⟦gap|⟧ tail`` semantics.
+
+    ``plain`` is the stripped re-emission; ``gap_offsets`` are the plain
+    positions where ``⟦gap|⟧`` markers sat. The fragments between gaps
+    must occur in the view in order, each EXACTLY once in its remaining
+    search window (ambiguity rejects — a mis-anchored gap would corrupt
+    every downstream offset); the skipped content is whatever the view
+    holds between the matched fragments. The first fragment anchors at
+    the view start and the last at the view end unless a leading/trailing
+    gap says otherwise. Matching is exact (no whitespace forgiveness —
+    anchors are short, copy them faithfully).
+
+    Returns (mapping with ``len(plain)+1`` entries, "") on success or
+    (None, reason) on failure.
+    """
+    bounds = [0, *sorted(set(gap_offsets)), len(plain)]
+    fragments = [
+        (bounds[k], plain[bounds[k]:bounds[k + 1]])
+        for k in range(len(bounds) - 1)
+    ]
+
+    mapping: list[int] = [0] * (len(plain) + 1)
+    pos = 0
+    for k, (frag_start, frag) in enumerate(fragments):
+        if not frag:
+            continue
+        first, last = k == 0, k == len(fragments) - 1
+        if not first and len(frag) < min_anchor:
+            return None, f"gap anchor too short ({len(frag)} < {min_anchor} chars)"
+        if first and frag_start == 0:
+            if not view.startswith(frag):
+                return None, "leading fragment does not match the view start"
+            idx = 0
+        else:
+            idx = view.find(frag, pos)
+            if idx < 0:
+                return None, f"gap anchor not found: {frag[:40]!r}"
+            if view.find(frag, idx + 1) >= 0:
+                return None, f"gap anchor ambiguous (occurs twice): {frag[:40]!r}"
+        if last and frag_start + len(frag) == len(plain) and idx + len(frag) != len(view):
+            return None, "trailing fragment does not reach the view end"
+        for off in range(len(frag)):
+            mapping[frag_start + off] = idx + off
+        pos = idx + len(frag)
+    mapping[len(plain)] = len(view)
+    return mapping, ""
+
+
+# ---------------------------------------------------------------------------
 # Input-side marking (known symbols)
 # ---------------------------------------------------------------------------
 

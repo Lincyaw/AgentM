@@ -51,6 +51,27 @@ The test is the agent's stance, not polarity: exclude anything NOT presented as 
 - Wrap whole sentences so the claim is self-contained. A fragment like "But none of these fit." is useless without its referent; extend the wrap to include what "these" refers to when the neighboring sentence supplies it.
 - When the claim IS the agent's final answer to the task (the committed conclusion, typically in the final report), add `role=commit`: `⟦claim role=commit|The answer is Edgar Irving Williams.⟧`. At most a few claims per trajectory carry this role.
 
+### `⟦gap|⟧` (copy elision)
+
+`⟦gap|⟧` means "a stretch of the original text is omitted here". You copy the text before it and after it verbatim; the omitted middle is restored mechanically from the original, located by exact match of your surrounding text. Nothing is lost: a region that contains a gap still covers the omitted text in full.
+
+It may appear anywhere you are copying original text: at top level, or inside the content of any annotation. Its main use is skipping the bulk of long retrieved content:
+
+```
+⟦obs|Title: Word of the Day: Jingoism URL: https://www.merriam-webster.com/...⟦gap|⟧Retrieved 27 June 2022, from the archive.⟧
+```
+
+This obs region runs from the Title line to the Retrieved line; the page body between them is not copied but still belongs to the region. Several gaps chain naturally, each middle piece anchoring both its neighbors:
+
+```
+⟦obs|First result: Acme Corp, founded 1901...⟦gap|⟧Second result: Acme Ltd, founded 1936...⟦gap|⟧12 further results omitted by the tool.⟧
+```
+
+Rules:
+
+- The text on each side of a gap is an anchor: at least one full line (a dozen characters or more), copied exactly, and UNIQUE within the message. Boilerplate lines repeat in multi-page dumps; if your anchor is not unique, extend it until it is. When in doubt, copy more.
+- Never elide text you are annotating: the exact stretches you wrap as claims, constraints, or symbol surfaces are the boundaries of those annotations and must be written out in full. A gap may skip the text between annotations, never the annotated text itself.
+
 ### `⟦constraint …|…⟧` (task requirement)
 
 In TASK text only (the user's question or instructions, never the agent's own prose): wrap each requirement the final answer must satisfy.

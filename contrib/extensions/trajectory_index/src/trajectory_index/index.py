@@ -1034,7 +1034,7 @@ class TrajectoryIndex:
         from loguru import logger as _clog
 
         from .data import _build_references, view_body_with_map
-        from .markup import MarkupError, align
+        from .markup import GAP_TAG, MarkupError, align, align_gapped
         from .markup import parse as parse_markup
 
         if messages and not isinstance(messages[0], dict):
@@ -1078,11 +1078,19 @@ class TrajectoryIndex:
                 _prune(f"step {mid}", f"malformed markup: {exc}")
                 continue
             view, vmap = view_body_with_map(msg)
-            amap = align(plain, view)
-            if amap is None:
-                _prune(f"step {mid}",
-                       f"re-emission diverges from original ({len(plain)} vs {len(view)} chars)")
-                continue
+            gap_offsets = [a.start for a in annotations if a.tag == GAP_TAG]
+            annotations = [a for a in annotations if a.tag != GAP_TAG]
+            if gap_offsets:
+                amap, gap_err = align_gapped(plain, gap_offsets, view)
+                if amap is None:
+                    _prune(f"step {mid}", f"gapped re-emission rejected: {gap_err}")
+                    continue
+            else:
+                amap = align(plain, view)
+                if amap is None:
+                    _prune(f"step {mid}",
+                           f"re-emission diverges from original ({len(plain)} vs {len(view)} chars)")
+                    continue
 
             def _to_content(
                 plain_off: int,
