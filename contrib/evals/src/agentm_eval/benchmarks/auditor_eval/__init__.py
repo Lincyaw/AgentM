@@ -706,9 +706,13 @@ async def _process_one_item(
         idx = TrajectoryIndex.load(index_path)
         idx.build_dependencies()
 
-        # Constraint NODES come from Pass 1; findings are the analysis
-        # output. A cached index with nodes but no findings re-runs the
-        # judgment chain (cheap: no-commit cases stop at E1).
+        # Recompute an analysis pass only when it is REQUESTED and its
+        # output is absent. When the pass is not in --passes (e.g. a bare
+        # `--passes audit` ablation that only re-runs the auditor), the
+        # cached analysis is reused as-is — never recomputed. The "found
+        # nothing" vs "never ran" ambiguity is resolved by the request
+        # flag: an unrequested pass is trusted-cached, requested+empty
+        # re-runs (cheap; no-commit cases stop at E1).
         if constraint_analysis and idx.constraints and not idx.constraint_findings:
             await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
             idx.dump(str(index_path))
@@ -719,14 +723,16 @@ async def _process_one_item(
             await _run_edge_pass(idx, tid, index_model, exp)
             idx.dump(str(index_path))
 
+        # Context surfaces whatever analysis the cached index CARRIES,
+        # independent of which passes ran this invocation — so an
+        # audit-only re-run still shows the cached constraint and
+        # claim-status notes. Both merges self-guard on presence.
         context = _index_to_context(idx)
-        if idx.constraint_findings:
-            _merge_constraint_context(
-                context, idx, rendering=constraint_rendering,
-                artifact=_load_constraint_artifact(exp, tid),
-            )
-        if source_checks:
-            _merge_claim_status_context(idx, tid, context)
+        _merge_constraint_context(
+            context, idx, rendering=constraint_rendering,
+            artifact=_load_constraint_artifact(exp, tid),
+        )
+        _merge_claim_status_context(idx, tid, context)
         if claim_analysis:
             context = await _run_claim_analysis(messages, idx, context, model)
         audit_result = None
