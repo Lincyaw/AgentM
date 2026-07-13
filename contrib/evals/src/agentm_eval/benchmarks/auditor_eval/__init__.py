@@ -505,6 +505,41 @@ def _merge_constraint_context(
     }
 
 
+def _provenance_view(messages: list[AgentMessage], idx: Any, run_id: str) -> list[AgentMessage]:
+    """The auditor's trajectory view with Pass 1 provenance applied.
+
+    Steps the extractor labeled pure observation render with a tool_result
+    role — the same signal an attested trajectory carries structurally
+    (and what the deleted keyword classifier used to reconstruct, minus
+    its silent misses). Mixed steps keep their assistant role: their
+    content is genuinely both, and the split lives in the index.
+    """
+    from agentm.core.abi.messages import TextContent, ToolResultBlock, ToolResultMessage
+
+    steps_by_index = {
+        s.index: s for s in idx.steps.values() if not run_id or s.run_id == run_id
+    }
+    if not any(s.provenance == "observation" for s in steps_by_index.values()):
+        return messages
+    out: list[AgentMessage] = []
+    for i, m in enumerate(messages):
+        s = steps_by_index.get(i)
+        if s is not None and s.provenance == "observation" and getattr(m, "role", "") == "assistant":
+            out.append(ToolResultMessage(
+                role="tool_result",
+                content=[ToolResultBlock(
+                    type="tool_result",
+                    tool_call_id="",
+                    content=[TextContent(type="text", text=s.content)],
+                    is_error=False,
+                )],
+                timestamp=float(i),
+            ))
+        else:
+            out.append(m)
+    return out
+
+
 async def _run_claim_analysis(
     messages: list[AgentMessage], idx: Any, context: dict[str, Any], model: str,
 ) -> dict[str, Any]:
@@ -592,7 +627,7 @@ async def _process_one_item(
             context = await _run_claim_analysis(messages, idx, context, model)
         try:
             audit_result = await run_auditor(
-                messages, model=model,
+                _provenance_view(messages, idx, tid), model=model,
                 auditor_prompt=auditor_prompt,
                 context_index=context,
             )
@@ -686,7 +721,7 @@ async def _process_one_item(
 
         try:
             audit_result = await run_auditor(
-                trajectory_prefix, model=model,
+                _provenance_view(trajectory_prefix, idx, tid), model=model,
                 auditor_prompt=auditor_prompt,
                 context_index=context,
             )

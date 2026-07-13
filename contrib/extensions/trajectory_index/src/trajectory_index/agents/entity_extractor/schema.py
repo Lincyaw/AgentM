@@ -33,9 +33,40 @@ class ExtractedClaim(BaseModel):
     text: str = Field(description="The claim sentence, copied verbatim")
 
 
+class ExtractedProvenance(BaseModel):
+    """Provenance label for a message whose serialization lost structural roles.
+
+    Only messages carrying retrieved/environment material are listed;
+    unlisted messages default to agent action. The "mixed" boundary is
+    copied verbatim so code can locate it deterministically — a boundary
+    not found in the message rejects the label (logged), it is never
+    guessed.
+    """
+
+    message_id: str = Field(description="Message id the label applies to")
+    label: str = Field(
+        description=(
+            "'observation': essentially the whole message is retrieved/"
+            "environment material. 'mixed': agent text followed by "
+            "retrieved material."
+        ),
+    )
+    observation_start: str | None = Field(
+        default=None,
+        description=(
+            "mixed only: the exact first line of where retrieved material "
+            "begins, copied verbatim"
+        ),
+    )
+
+
 class ExtractionResult(BaseModel):
     symbols: list[ExtractedSymbol] = Field(description="All extracted symbols")
     claims: list[ExtractedClaim] = Field(
         default_factory=list,
         description="Verification/sourcing assertions the agent presents as settled",
+    )
+    provenance: list[ExtractedProvenance] = Field(
+        default_factory=list,
+        description="Messages that carry retrieved/environment material",
     )

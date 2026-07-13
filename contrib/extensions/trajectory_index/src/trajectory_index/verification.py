@@ -34,7 +34,7 @@ from loguru import logger
 
 from .adjudicate import SessionFactory, _ask_model, _index_by_id, _safe_float
 from .constraints import Diagnostics, _content_tokens
-from .index import Step, StepRole, TrajectoryIndex
+from .index import Step, TrajectoryIndex
 
 _MAX_CLAIMS_PER_STEP = 3      # claims per step accepted from the extractor (logged)
 _MAX_WINDOW_STEPS = 6         # observation steps per claim window (selection, logged)
@@ -130,19 +130,20 @@ def _observation_window(
     for s in steps:
         if s.index >= claim_step.index:
             break
-        if s.role == StepRole.ASSISTANT and s.content:
+        if s.action_segment and s.observation_segment is None:
             prev_assistant_idx = s.index
 
     claim_tokens = _content_tokens(claim_text)
     adjacent: list[Step] = []
     linked: list[tuple[int, Step]] = []
     for s in steps:
-        if s.role != StepRole.TOOL_RESULT or not s.content or s.index >= claim_step.index:
+        seg = s.observation_segment
+        if not seg or s.index >= claim_step.index:
             continue
         if s.index > prev_assistant_idx:
             adjacent.append(s)
             continue
-        overlap = sum(1 for t in claim_tokens if t in s.content.lower())
+        overlap = sum(1 for t in claim_tokens if t in seg.lower())
         if overlap >= _MIN_LINK_TOKENS:
             linked.append((overlap, s))
 
@@ -235,7 +236,7 @@ async def check_source_claims(
         {
             "id": i,
             "claim": sent,
-            "excerpts": [{"step": w.step_id, "text": w.content} for w in window],
+            "excerpts": [{"step": w.step_id, "text": w.observation_segment or ""} for w in window],
         }
         for i, (step, sent, window) in enumerate(items)
     ]

@@ -43,7 +43,6 @@ from .index import (
     ConstraintFinding,
     FindingStatus,
     Step,
-    StepRole,
     Symbol,
     TrajectoryIndex,
     normalize_name,
@@ -371,7 +370,7 @@ async def _detect_commit(
     """Pass E1: extract the committed answer from the final message (oracle,
     free text), then resolve it to an indexed symbol (code, best-effort)."""
     final = next(
-        (s for s in reversed(steps) if s.role == StepRole.ASSISTANT and s.content),
+        (s for s in reversed(steps) if s.action_segment),
         None,
     )
     if final is None:
@@ -380,7 +379,7 @@ async def _detect_commit(
 
     payload = json.dumps({
         "question": question,
-        "final_message": final.content,
+        "final_message": final.action_segment,
     }, ensure_ascii=False, indent=2)
     raw = await _ask_model(
         _COMMIT_INSTRUCTIONS, payload, model,
@@ -439,7 +438,7 @@ def _block_about(
     for r in index.references.values():
         refs_by_step.setdefault((r.run_id, r.step_id), set()).add(r.symbol_id)
 
-    direct = [s for s in grounded if _mentions(s.content, commit.names)]
+    direct = [s for s in grounded if _mentions(s.observation_segment or "", commit.names)]
     direct_ids = {s.step_id for s in direct}
     direct_syms = {
         sid for s in direct for sid in refs_by_step.get((s.run_id, s.step_id), set())
@@ -475,7 +474,7 @@ async def _map_about(
         return []
 
     rows = [
-        {"id": i, "target": commit.binding, "excerpt": s.content}
+        {"id": i, "target": commit.binding, "excerpt": s.observation_segment or ""}
         for i, s in enumerate(blocked)
     ]
     raw = await _ask_model(
@@ -551,7 +550,7 @@ async def _judge_entailment(
             for i, c in enumerate(constraints)
         ],
         "evidence": [
-            {"id": s.step_id, "excerpt": s.content}
+            {"id": s.step_id, "excerpt": s.observation_segment or ""}
             for s in window
         ],
     }, ensure_ascii=False, indent=2)
@@ -636,7 +635,7 @@ async def _check_omitted(
             )
         return verdicts
 
-    grounded_texts = [s.content for s in grounded]
+    grounded_texts = [s.observation_segment or "" for s in grounded]
 
     sweep_targets: list[Constraint] = []
     for c in unsettled:
@@ -654,7 +653,7 @@ async def _check_omitted(
     # step texts: a "no evidence" verdict over any partial view is the
     # vacuous-closed-world bug in miniature, so the sweep either sees
     # everything or asserts nothing.
-    total_chars = sum(len(s.content) for s in grounded)
+    total_chars = sum(len(s.observation_segment or "") for s in grounded)
     if total_chars > sweep_char_budget:
         diag.record("sweep", "-", "abstain", 0.0,
                     f"{total_chars} chars > budget {sweep_char_budget}")
@@ -664,7 +663,7 @@ async def _check_omitted(
                 f"sweep abstained: grounded text {total_chars} chars over cap",
             )
         return verdicts
-    snippets = [{"id": s.step_id, "excerpt": s.content} for s in grounded]
+    snippets = [{"id": s.step_id, "excerpt": s.observation_segment or ""} for s in grounded]
 
     payload = json.dumps({
         "constraints": [
@@ -724,7 +723,8 @@ def _first_assertion_step(steps: list[Step], commit: Commit) -> Step:
     benchmark's measured label convention.
     """
     for s in steps:
-        if s.role == StepRole.ASSISTANT and s.content and _mentions(s.content, commit.names):
+        seg = s.action_segment
+        if seg and _mentions(seg, commit.names):
             return s
     return commit.step
 
@@ -813,7 +813,10 @@ async def analyze_constraints(
         (s for s in index.steps.values() if not run_id or s.run_id == run_id),
         key=lambda s: s.index,
     )
-    grounded = [s for s in steps if s.role == StepRole.TOOL_RESULT and s.content]
+    # Evidence universe: attested tool_result steps plus Pass 1
+    # provenance-labeled observation content (observation_segment covers
+    # both — mixed steps contribute their retrieved portion only).
+    grounded = [s for s in steps if s.observation_segment]
 
     # Pass E1 — empty Commit: no violation can fire, omission has no anchor (v1: stop).
     commit = await _detect_commit(

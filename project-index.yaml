@@ -1379,6 +1379,39 @@ requirements:
     depends_on:
       - REQ-208-trajectory-index-readwrite-layer
 
+  - id: REQ-212-trajectory-index-pass1-nodes
+    title: "Pass 1 unified node extraction: symbols, claims, provenance"
+    description: >
+      Pass 1 is the single trajectory visit and emits every per-message fact
+      as a first-class node consumed by all downstream passes (O(1) per
+      consumer, no re-extraction): symbols, verbatim claims (settled-fact
+      assertions), and provenance labels for trajectories whose serialization
+      lost structural roles (observation / mixed with a verbatim boundary).
+      Code never extracts — it verifies: claims by verbatim substring check,
+      mixed boundaries by prefix-laddered exact search, rejected labels
+      logged. Attested tool_result roles are never overridden; labels can
+      only add observation status. Step.observation_segment /
+      Step.action_segment are the accessors every evidence-consuming pass
+      reads (constraints grounded universe, source-claim windows); the
+      TELBench adapter keyword classifier was deleted in favor of this.
+      Validated on incremental 2-4-message chunks: model labels are a strict
+      superset of the keyword classifier on 9/10 sample cases and recover
+      zero-observation trajectories (56% of the hard-232 set) to 20-40-step
+      evidence universes.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/agents/entity_extractor/schema.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/agents/entity_extractor/prompts/default.md
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/index.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/telbench/adapter.py
+    tests: []
+    docs:
+      - path: contrib/extensions/trajectory_index/designs/trajectory-analysis-architecture.md
+    depends_on:
+      - REQ-208-trajectory-index-readwrite-layer
+
   - id: REQ-119-core-kernel-residuals
     title: Core kernel removes hard-coded layout literals and dead Tool surface
     description: >

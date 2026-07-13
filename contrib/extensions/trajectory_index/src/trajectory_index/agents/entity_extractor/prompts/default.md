@@ -38,9 +38,20 @@ Besides symbols, extract the agent's **verification/sourcing claims**: sentences
 - Paraphrased verification counts: "the birth year lines up with the criteria" is a claim even without the word "verified".
 - A message may contain several claims or none. If none in the chunk, output an empty `claims` list.
 
+## Provenance
+
+Some trajectories lose their message roles in serialization — retrieved content and agent prose both arrive as plain messages. Mark the messages whose content is **retrieved/environment material rather than the agent's own words**: fetched web pages, search-result dumps, command output, file contents, API responses.
+
+- `label: "observation"` — essentially the whole message is such material.
+- `label: "mixed"` — the message starts with the agent's own text (a search query, a note) followed by retrieved material. Copy the first ~10 words OF THE RETRIEVED MATERIAL ITSELF into `observation_start`, VERBATIM. Never use a separator line (`---`) or the agent's text as the boundary.
+- The agent's own summaries, reports, and reasoning are NEVER observations, even when they quote sources.
+- Judge EVERY message independently, including short ones — a message that is only command output or a fetched page is an observation regardless of what surrounds it.
+- Unlisted messages default to agent action. When unsure, do not mark.
+- Skip messages already presented with a tool-result role — their provenance is attested.
+
 ## Rules
 
 - Output valid JSON only. No markdown fences, no explanation.
 - Every symbol needs a `kind` from the vocabulary and an `entity_class`.
 - Prefer specific names over generic descriptions.
-- Top-level output keys: `symbols`, `claims`.
+- Top-level output keys: `symbols`, `claims`, `provenance`.

@@ -24,7 +24,7 @@ trace analyses over the recovered structure. Two consequences:
 The stack:
 
 ```
-L0  NORMALIZE   raw input → Event IR + provenance lattice     [code sniffers + recorded oracle labels + abstention]
+L0  NORMALIZE   raw input → Event IR + provenance lattice     [attested roles + Pass 1 labels (code-verified) + abstention]
 L1  STRUCTURE   Event IR → episode tree + typed edges         [code seeds + bounded oracle labels]
 L2  DATAFLOW    (existing PARSE/RESOLVE/DATAFLOW, authority-generalized)
 L3  SEMANTICS   spec sources → obligations × commitments      [generalized Pass 0/E/J/L]
@@ -36,6 +36,31 @@ incident proved it), L1/L4 are the genuinely new analysis class, and each
 must clear a per-kind precision gate before shipping (P1).
 
 ## L0 — Front end: the Trajectory IR
+
+### Pass layering: nodes → edges → judgments
+
+Decided 2026-07-13. The whole stack splits by what each pass is allowed
+to produce, mirroring a compiler front end:
+
+- **Pass 1 — nodes only.** The extractor visits the trajectory once
+  (incrementally, per chunk) and emits every per-message fact as a
+  first-class node: symbols, claims, provenance labels — and, planned,
+  commits and constraints. All nodes are verbatim-verified by code at
+  populate time. O(1) per consumer: downstream passes read the index,
+  never re-scan the trajectory.
+- **Pass 2 — edges.** Relations between nodes (grounding claim→
+  observation, about constraint→evidence, alias/anaphora). Model
+  proposes, code verifies endpoint existence and direction. Never in
+  Pass 1: an edge needs both endpoints to exist as nodes first, and
+  cross-chunk endpoints are invisible to an incremental extractor.
+- **Pass 3 — judgments.** Three-valued verdicts over code-assembled
+  sets (entailment, source consistency, omission). Code contributes only
+  set assembly, coverage accounting, and the Kleene join.
+
+The division of labor everywhere: **the model does all recognition and
+judgment; code does only verbatim checks, exact table lookups,
+deterministic parsing, and set/lattice algebra.** No fact is ever
+"extracted" by a regex or keyword table.
 
 ### Event vocabulary
 
@@ -91,18 +116,36 @@ migration is a field widening, not a rewrite.
 
 ### Ingestion of provenance-degraded input
 
-Three tiers, in order, each recorded:
+Decided 2026-07-13 (supersedes the earlier code-sniffer tier): **code
+never extracts — code only verifies.** The keyword sniffer that lived in
+the TELBench adapter (`classify_span`) silently missed whole trajectory
+families (56% of the hard-232 set had zero recognized observations, which
+starved every evidence-consuming pass downstream); that is the structural
+failure mode of code doing recognition, and it applies to any future
+sniffer too. The tiers are now:
 
-1. **Code structural sniffers.** Format detection on content: JSON
-   tool-payload shapes, harness role markers, call-id echoes that let
-   `binds_to` be paired. Deterministic, logged (P2). (The TELBench
-   adapter's `classify_span` is an instance of this tier.)
-2. **Oracle role labeling.** For spans code cannot classify: a
-   bounded-window, positive-polarity judgment recorded as an oracle tuple
-   (P3/P4). Resulting authority carries `prov_quality="recovered"` with
-   `prov_basis` lineage.
-3. **Abstention.** Everything else gets `authority="unknown"` — a
-   first-class IR value, not a preprocessing failure.
+1. **Attested roles win.** A structurally attested role (a real
+   `tool_result` message from the substrate) is never overridden.
+2. **Pass 1 provenance labels.** For unattested messages the extractor —
+   the one model that visits the whole trajectory — labels
+   `observation` / `mixed` messages as first-class extraction nodes,
+   alongside symbols and claims. `mixed` carries a verbatim boundary;
+   code verifies it by exact (prefix-laddered) substring search and
+   rejects unverifiable labels with a log line (P2). A label can only
+   ADD observation status to an assistant step, never remove attested
+   status. (`Step.observation_segment` / `Step.action_segment` are the
+   accessors every downstream pass reads; nothing reads `role` for
+   evidence selection anymore.)
+3. **Abstention.** Unlabeled messages stay agent action — a recorded
+   default, not a preprocessing failure.
+
+Measured (2-4-message incremental chunks, 10 TELBench cases): model
+labels are a strict superset of the deleted keyword classifier's
+positives on 9/10 cases (1 genuine miss), recover 0→20-40-step evidence
+universes on dead cases, reject ≈0 boundaries after the
+no-separator-boundary prompt rule, and are MORE precise than single-chunk
+labeling on query-chain spans (single-chunk over-labeled query chains as
+observations).
 
 Position: **recovered observation-authority is usable for grounding**, but
 its lineage must survive to the finding (via `confidence_source`), so the
@@ -352,5 +395,6 @@ well enough — if the decomposition cannot beat it on the dev slice, stop.
   (the field L0 widens).
 - src/trajectory_index/constraints.py — empty-universe guard (the special
   case the provenance profile generalizes).
-- agentm_eval/benchmarks/telbench/adapter.py `classify_span` — tier-1
-  sniffer instance; the motivating provenance incident.
+- agentm_eval/benchmarks/telbench/adapter.py — deterministic format
+  conversion only; its keyword `classify_span` sniffer (the motivating
+  provenance incident) was deleted in favor of Pass 1 labels.

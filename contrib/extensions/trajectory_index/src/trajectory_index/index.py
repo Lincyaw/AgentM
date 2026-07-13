@@ -98,6 +98,41 @@ class Step:
     tool_name: str | None = None
     timestamp: float | None = None
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
+    # Pass 1 provenance label for steps whose role is not structurally
+    # attested: "observation" (whole content is retrieved/environment
+    # material) or "mixed" (agent text followed by retrieved material,
+    # split at ``obs_offset``). The label can only ADD observation status
+    # to an assistant step — an attested tool_result role always wins.
+    provenance: str | None = None
+    obs_offset: int | None = None
+
+    @property
+    def observation_segment(self) -> str | None:
+        """The retrieved/environment portion of this step, or None.
+
+        Attested tool_result roles contribute their whole content; Pass 1
+        provenance labels extend the evidence universe to trajectories
+        whose serialization lost structural roles (all downstream evidence
+        selection reads this, never ``role`` directly).
+        """
+        if self.role == StepRole.TOOL_RESULT:
+            return self.content
+        if self.provenance == "observation":
+            return self.content
+        if self.provenance == "mixed" and self.obs_offset is not None:
+            return self.content[self.obs_offset:]
+        return None
+
+    @property
+    def action_segment(self) -> str | None:
+        """The agent-authored portion of an assistant step, or None."""
+        if self.role != StepRole.ASSISTANT:
+            return None
+        if self.provenance == "observation":
+            return None
+        if self.provenance == "mixed" and self.obs_offset is not None:
+            return self.content[:self.obs_offset]
+        return self.content
 
 
 @dataclass(slots=True)
@@ -366,6 +401,31 @@ def grounded_from_kind(kind: str) -> bool:
     grounded during dependency build if it copies a prior grounded value.
     """
     return kind in _PRODUCING_KINDS
+
+
+_BOUNDARY_MIN_PREFIX = 12   # shortest boundary prefix accepted as a match
+
+
+def _find_boundary(content: str, boundary: str) -> int:
+    """Locate a provenance boundary in step content — exact search only.
+
+    The extractor copies the boundary verbatim, but models drift after the
+    first tens of characters. A prefix of the boundary is sufficient to
+    locate the split point and is still verbatim-verified, so try the full
+    string first, then progressively shorter prefixes down to a floor that
+    keeps matches meaningful. Returns -1 when nothing verifiable matches.
+    """
+    boundary = boundary.strip()
+    if not boundary:
+        return -1
+    first_line = boundary.splitlines()[0].strip()
+    for probe in (boundary, first_line, boundary[:40].strip(), boundary[:20].strip()):
+        if len(probe) < _BOUNDARY_MIN_PREFIX:
+            continue
+        offset = content.find(probe)
+        if offset >= 0:
+            return offset
+    return -1
 
 
 def _message_step_content(msg: dict[str, object]) -> tuple[str, str | None]:
@@ -898,14 +958,45 @@ class TrajectoryIndex:
                 if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
             ]
 
+        from loguru import logger as _clog
+
         role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}
         base_idx = len(self.steps)
         steps_by_id: dict[str, Step] = {}
+
+        # Provenance labels (Pass 1 node, model recognition): applied while
+        # constructing steps so the label rides the frozen Step. Code does
+        # only the decidable part — the "mixed" boundary must be found
+        # verbatim in the content, otherwise the label is rejected and
+        # logged (the step stays an action; a lost label is a recorded
+        # false negative, never a fabricated observation).
+        prov_by_mid: dict[str, Any] = {
+            str(p.message_id): p for p in getattr(result, "provenance", []) or []
+        }
 
         for i, msg in enumerate(messages):
             mid = str(msg.get("id", f"s{base_idx + i}"))
             role = role_map.get(str(msg.get("role", "")), StepRole.USER)
             content, tool_name = _message_step_content(msg)
+            provenance: str | None = None
+            obs_offset: int | None = None
+            ext_prov = prov_by_mid.pop(mid, None)
+            if ext_prov is not None and role != StepRole.TOOL_RESULT:
+                label = str(getattr(ext_prov, "label", ""))
+                if label == "observation":
+                    provenance = label
+                elif label == "mixed":
+                    boundary = (getattr(ext_prov, "observation_start", None) or "").strip()
+                    offset = _find_boundary(content, boundary)
+                    if offset >= 0:
+                        provenance, obs_offset = label, offset
+                    else:
+                        _clog.debug(
+                            "populate: mixed provenance boundary not found at step {}: {!r}",
+                            mid, boundary[:60],
+                        )
+                else:
+                    _clog.debug("populate: unknown provenance label {!r} at step {}", label, mid)
             step = Step(
                 run_id=run_id,
                 step_id=mid,
@@ -913,9 +1004,14 @@ class TrajectoryIndex:
                 role=role,
                 content=content,
                 tool_name=tool_name,
+                provenance=provenance,
+                obs_offset=obs_offset,
             )
             self.add_step(step)
             steps_by_id[mid] = step
+
+        for mid, _ in prov_by_mid.items():
+            _clog.debug("populate: provenance references unknown message {}", mid)
 
         for ext_sym in result.symbols:
             sym_dict = {"name": ext_sym.name, "kind": ext_sym.kind, "aliases": getattr(ext_sym, "aliases", None) or []}
@@ -930,7 +1026,6 @@ class TrajectoryIndex:
 
         # Claims: store verbatim-verified assertions (code check — a claim the
         # extractor paraphrased or misattributed is rejected and logged).
-        from loguru import logger as _clog
         for ext_claim in getattr(result, "claims", []) or []:
             mid = str(ext_claim.message_id)
             step = steps_by_id.get(mid)
@@ -1133,6 +1228,8 @@ class TrajectoryIndex:
                 "content": s.content,
                 "tool_name": s.tool_name,
                 "timestamp": s.timestamp,
+                "provenance": s.provenance,
+                "obs_offset": s.obs_offset,
                 "metadata": dict(s.metadata) if s.metadata else {},
             }
             for s in self.steps.values()
@@ -1280,6 +1377,8 @@ class TrajectoryIndex:
                 tool_name=s.get("tool_name") if isinstance(s.get("tool_name"), str) else None,
                 timestamp=s.get("timestamp") if isinstance(s.get("timestamp"), int | float) else None,
                 metadata=s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {},
+                provenance=s.get("provenance") if isinstance(s.get("provenance"), str) else None,
+                obs_offset=s.get("obs_offset") if isinstance(s.get("obs_offset"), int) else None,
             )
             index.add_step(step)
 
