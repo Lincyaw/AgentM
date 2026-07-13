@@ -336,6 +336,30 @@ class LhtbAdapter(HarborAdapter):
             return []
         return [s for s in services if s != "main"]
 
+    def _sidecar_image(
+        self, task: TaskSpec, svc: str, registry: str, prefix: str, tag: str
+    ) -> str:
+        """Sidecar image reference.
+
+        A compose sidecar is pushed alongside its main image and shares that
+        image's repo and tag, with the service name appended before the tag:
+        ``opspai/lhtb-chess-mate:20260713`` -> ``opspai/lhtb-chess-mate-game:
+        20260713``. Deriving from the main source image (rather than the
+        build-time ``{prefix}-{task}-{svc}:{tag}`` convention) keeps the
+        sidecar pinned to the same registry namespace and rebuild tag as main,
+        so an ``opspai/``-prefixed main image yields an ``opspai/`` sidecar.
+        Falls back to the build convention when the task declares no source
+        image.
+        """
+        src = self.get_source_image(task)
+        if not src:
+            return image_name(f"{task.name}-{svc}", registry, prefix, tag)
+        repo, sep, src_tag = src.rpartition(":")
+        # A ':' only delimits a tag when the trailing part has no '/' (else it
+        # is a registry host:port, and the ref carries no tag).
+        ref = f"{repo}-{svc}:{src_tag}" if sep and "/" not in src_tag else f"{src}-{svc}"
+        return f"{registry}/{ref}" if registry else ref
+
     def get_sidecar_containers(
         self, task: TaskSpec, registry: str, prefix: str, tag: str
     ) -> list[dict]:
@@ -343,7 +367,7 @@ class LhtbAdapter(HarborAdapter):
         for svc in self._compose_sidecar_services(task):
             spec: dict = {
                 "name": svc,
-                "image": image_name(f"{task.name}-{svc}", registry, prefix, tag),
+                "image": self._sidecar_image(task, svc, registry, prefix, tag),
             }
             env_overrides: dict[str, str] = {}
             svc_dockerfile = Path(task.path) / "environment" / f"Dockerfile.{svc}"

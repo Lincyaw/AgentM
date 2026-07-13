@@ -110,7 +110,14 @@ def generate_skaffold(
     artifacts = []
     for task in tasks:
         img = image_name(task.name, registry, prefix, tag).rsplit(":", 1)[0]
-        artifacts.append({"image": img, "context": task.path})
+        # Harbor-family tasks (e.g. senior-swe) keep the whole build recipe
+        # under environment/ -- the Dockerfile plus any files it COPYs. Use
+        # that directory as the build context so those COPYs resolve (Docker
+        # resolves COPY relative to the context, not the Dockerfile). tb1 tasks
+        # with a root Dockerfile keep the task dir as context.
+        env_dir = Path(task.path) / "environment"
+        context = str(env_dir) if (env_dir / "Dockerfile").is_file() else task.path
+        artifacts.append({"image": img, "context": context})
     return {
         "apiVersion": "skaffold/v4beta11",
         "kind": "Config",
