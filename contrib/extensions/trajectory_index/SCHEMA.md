@@ -26,22 +26,38 @@ the record's structure carries it (a real harness message); degraded
 serializations (benchmark span dumps) arrive with uninformative roles.
 
 **Authorship partition.** Every step content splits into agent-authored
-and environment-authored regions:
+and environment-authored character regions. Let
+$\mathrm{pos}(x_i) = \{0, \dots, |x_i|-1\}$ be the character positions
+of $x_i$, and let $O_i$ (the *observation spans*) be a set of pairwise
+disjoint intervals over them:
 
-$$x_i = A_i \uplus O_i, \qquad O_i = \mathrm{obs\_spans}_i \subseteq \mathrm{intervals}(x_i)$$
+$$\mathrm{pos}(x_i) \;=\; A_i \,\uplus \bigcup_{[a,b) \in O_i} [a, b), \qquad O_i \subseteq \mathrm{intervals}(x_i)$$
 
-For attested $\mathrm{tool\_result}$ steps, $O_i = [0, |x_i|)$ by
-structure; for everything else $O_i$ comes from Pass 1 and may be empty
-or several disjoint intervals (query/content/summary sandwiches). The
-derived **evidence universe** is
+The positions inside $O_i$'s intervals are environment-authored
+(retrieved pages, tool output); the complement $A_i$ is agent-authored
+(queries, reasoning, reports). The disjoint union $\uplus$ carries the
+two defining properties: no character belongs to both sides, and none
+belongs to neither. Three shapes are the degenerate and general cases of
+the same definition: a step that is wholly environment output
+($O_i$ covers everything, e.g. an attested $\mathrm{tool\_result}$),
+a pure agent step ($O_i = \varnothing$), and an interleaved
+query/content/summary sandwich (several disjoint intervals).
+
+The derived **evidence universe** is
 
 $$E = \{\, e_i = (i, O_i) \;:\; O_i \neq \varnothing \,\}$$
 
-and everything outside it is agent action text. Downstream passes read
-only the accessors `observation_segment` / `action_segment`; nothing
-reads the role for evidence selection.
+and everything outside it is agent action text.
 
 ## 1 · Pass 1 — nodes (one trajectory visit)
+
+Pass 1 is what populates the objects of §0 that the record does not
+carry structurally: for an attested $\mathrm{tool\_result}$ step,
+$O_i = \{[0, |x_i|)\}$ by structure and needs no extraction; for every
+other step, $O_i$ is recognized here (and a Pass 1 label can only ADD
+observation status — attested roles are never overridden). Downstream
+passes read only the derived accessors `observation_segment` /
+`action_segment`; nothing reads the role for evidence selection.
 
 The extractor model visits $T$ once, in chunks of 2–4 steps, and
 re-emits each annotated step body **verbatim** with
