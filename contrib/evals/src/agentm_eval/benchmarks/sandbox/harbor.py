@@ -494,22 +494,48 @@ class SeniorSweAdapter(HarborAdapter):
     """
 
     # Provider vars the judges' litellm needs but task.toml's [verifier.env]
-    # does not declare (its allowlist predates non-big-three providers).
-    # Forwarded from the host only when set.
+    # does not declare (its allowlist predates non-big-three providers), or
+    # declares as an empty ``${VAR:-}`` default that shadows the host value.
+    # Forwarded from the host when the host value is non-empty.
     EXTRA_VERIFIER_ENV = (
         "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_API_BASE",
     )
 
+    # llm_utils.have_credentials() gates the judges on one of these being set;
+    # a DeepSeek-only setup would otherwise be silently skipped.
+    _JUDGE_CREDENTIAL_VARS = ("PORTKEY_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+
+    # The judge pipeline (workspace build + rubric + taste + optional
+    # validation agent, each an LLM round-trip) routinely runs many minutes,
+    # well past task.toml's timeout_sec. If the eval step's own timeout fires
+    # first, ARL kills test.sh before it writes reward.txt and the empty file
+    # reads as an invalid trial. Floor the eval timeout above the real cost.
+    _MIN_EVAL_TIMEOUT = 2400
+
     def get_source_image(self, task: TaskSpec) -> str | None:
         return None
 
+    def eval_timeout_for(self, task: TaskSpec, timeout: int) -> int:
+        return max(super().eval_timeout_for(task, timeout), self._MIN_EVAL_TIMEOUT)
+
     def _verifier_env(self, task: TaskSpec) -> dict[str, str]:
         env = super()._verifier_env(task)
+        # task.toml expands undeclared/optional keys to "" -- treat empty as
+        # absent so a real host value wins.
         for key in self.EXTRA_VERIFIER_ENV:
-            if key not in env and os.environ.get(key):
+            if not env.get(key) and os.environ.get(key):
                 env[key] = os.environ[key]
+        # The judges accept a DeepSeek slug via SSB_OVERRIDE_* but their
+        # credential gate only recognizes PORTKEY/ANTHROPIC/OPENAI. Mirror the
+        # DeepSeek key into OPENAI_API_KEY to pass the gate; litellm still
+        # authenticates the deepseek/ model through DEEPSEEK_API_KEY.
+        if env.get("DEEPSEEK_API_KEY") and not any(
+            env.get(k) for k in self._JUDGE_CREDENTIAL_VARS
+        ):
+            env["OPENAI_API_KEY"] = env["DEEPSEEK_API_KEY"]
         return env
 
     # The judges' litellm code path imports fastapi + orjson (and more), none

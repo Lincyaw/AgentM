@@ -203,14 +203,17 @@ things make it different from LHTB:
    credentials come from `[verifier.env]` in each `task.toml`; the adapter
    expands those `${VAR:-default}` placeholders against the **host** env at
    eval time, so export judge creds before running. The adapter additionally
-   forwards `DEEPSEEK_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` from
-   the host when set (the task.toml allowlist predates non-big-three
-   providers). Route the judges to DeepSeek via litellm's native provider;
-   `OPENAI_API_KEY` must also be set because the verifier's
-   `have_credentials()` gate only recognizes Portkey/Anthropic/OpenAI keys:
+   forwards `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
+   `OPENAI_API_BASE` from the host when set, treating a task.toml `${VAR:-}`
+   empty default as absent so the host value wins (the allowlist predates
+   non-big-three providers). Route the judges to DeepSeek via litellm's native
+   provider — set `DEEPSEEK_API_KEY` and the `SSB_OVERRIDE_*` slugs; the
+   adapter mirrors `DEEPSEEK_API_KEY` into `OPENAI_API_KEY` so the verifier's
+   `have_credentials()` gate (which only recognizes Portkey/Anthropic/OpenAI
+   keys) passes without a manual export:
 
    ```bash
-   export OPENAI_API_KEY=$DEEPSEEK_API_KEY               # credential gate only
+   export DEEPSEEK_API_KEY=sk-...                     # judge + gate (auto-bridged)
    export SSB_OVERRIDE_ALL_JUDGE_MODEL=deepseek/deepseek-chat
    export SSB_OVERRIDE_CLASSIFIER_MODEL=deepseek/deepseek-chat
    export SSB_OVERRIDE_VA_HARNESS=mini-swe-agent      # validation-stage tasks
@@ -225,9 +228,13 @@ things make it different from LHTB:
 
 `reward.txt` is binary 0/1. An EMPTY reward.txt is not a 0 — it marks an
 invalid trial (verifier-infra failure: judge unreachable, validation-agent
-crash, etc.); the adapter records `invalid_trial` on those. The
-per-task `[verifier] timeout_sec` extends `--eval-timeout` when larger, same
-as LHTB.
+crash, etc.); the adapter records `invalid_trial` on those. The judge
+pipeline (build + rubric + taste + optional validation agent, each an LLM
+round-trip) runs many minutes, so the adapter floors the senior-swe eval
+timeout at 2400s — a small `--eval-timeout` no longer truncates test.sh
+mid-run (which was surfacing as a spurious `invalid_trial`). The per-task
+`[verifier] timeout_sec` still extends `--eval-timeout` when larger, same as
+LHTB.
 
 ## Experiment output
 
