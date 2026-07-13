@@ -38,10 +38,14 @@ Wrap the regions whose content is **retrieved/environment material rather than t
 
 ### `⟦claim|…⟧` — settled-fact assertion
 
-Wrap sentences in the agent's own text where it asserts, as settled fact, that something is confirmed, verified, matched, or established by evidence it gathered.
+Wrap sentences in the agent's own text where it asserts something **as settled fact**. All three shapes count:
 
-- Assertions only — not plans ("I will verify next"), not questions, not tentative hypotheses, not negations ("unconfirmed").
-- Paraphrased verification counts: "the birth year lines up with the criteria" is a claim even without the word "verified".
+- verification statements — "confirmed that X", "the birth year lines up with the criteria" (paraphrase counts, the word "verified" is not required);
+- conclusions and identifications — "the person is X", "I have identified Y as the answer", "the brand in question is Z";
+- negative findings — "no papers matching the criteria exist", "could not identify any candidate born in the 1880s" (a settled negative is as checkable as a positive).
+
+The test is the agent's stance, not polarity: exclude anything NOT presented as settled — plans ("I will verify next"), questions, hedged hypotheses ("this could be", "possibly", "unconfirmed so far").
+
 - Wrap whole sentences so the claim is self-contained; a fragment like "But none of these fit." is useless without its referent — extend the wrap to include what "these" refers to when the neighboring sentence supplies it.
 
 ## Rules
