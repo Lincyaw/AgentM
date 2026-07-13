@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-_MIN_LEXICAL_TOKEN = 4        # lexical token length floor
+_MIN_LEXICAL_TOKEN = 4        # lexical token length floor (alphabetic scripts)
 _STOPWORDS = frozenset({
     "the", "and", "that", "with", "from", "this", "have", "been", "were",
     "was", "for", "are", "not", "his", "her", "their", "its", "who", "than",
@@ -19,13 +19,31 @@ _STOPWORDS = frozenset({
     "into", "about", "there", "they", "them", "also", "some", "same",
 })
 
+# CJK scripts don't whitespace-segment: a run like 服务网关超时 arrives as ONE
+# \w+ token and would never overlap another text's tokens, silently
+# disabling every lexical guard for Chinese/Japanese/Korean content.
+# Character bigrams give CJK the overlap signal words give alphabetic text.
+_CJK_RE = re.compile(r"[㐀-鿿぀-ヿ가-힯]")
+
 
 def content_tokens(text: str) -> set[str]:
-    """Content-bearing lowercase tokens — the shared lexical primitive."""
-    return {
-        t for t in re.split(r"\W+", text.lower())
-        if len(t) >= _MIN_LEXICAL_TOKEN and t not in _STOPWORDS
-    }
+    """Content-bearing lowercase tokens — the shared lexical primitive.
+
+    Alphabetic tokens: length floor + stopword filter. CJK runs:
+    character bigrams (plus the lone character for length-1 runs).
+    Deterministic; no semantics — this feeds NEGATIVE-only lexical guards.
+    """
+    tokens: set[str] = set()
+    for t in re.split(r"\W+", text.lower()):
+        if not t:
+            continue
+        if _CJK_RE.search(t):
+            if len(t) == 1:
+                tokens.add(t)
+            tokens.update(t[i:i + 2] for i in range(len(t) - 1))
+        elif len(t) >= _MIN_LEXICAL_TOKEN and t not in _STOPWORDS:
+            tokens.add(t)
+    return tokens
 
 
 @dataclass(slots=True)

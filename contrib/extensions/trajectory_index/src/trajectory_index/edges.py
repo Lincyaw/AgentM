@@ -134,7 +134,7 @@ def _self_quote(claim_text: str, quote: str) -> bool:
     return norm_quote in norm_claim or norm_claim in norm_quote
 
 
-def _partition_by_budget(steps: list[Step], budget: int) -> list[list[Step]]:
+def partition_by_budget(steps: list[Step], budget: int) -> list[list[Step]]:
     """Greedy in-order partition into whole-step groups under ``budget`` chars.
 
     A single step larger than the budget forms its own partition — the
@@ -223,7 +223,7 @@ async def build_claim_edges(
         for i, c in enumerate(claims)
     ]
 
-    partitions = _partition_by_budget(observations, _PARTITION_CHAR_BUDGET)
+    partitions = partition_by_budget(observations, _PARTITION_CHAR_BUDGET)
     result.coverage.n_partitions = len(partitions)
 
     proposals: list[tuple[Claim, Step, str, str, float]] = []

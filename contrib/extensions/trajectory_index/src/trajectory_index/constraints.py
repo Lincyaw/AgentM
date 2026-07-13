@@ -386,46 +386,7 @@ def _mentions(text: str, names: set[str]) -> bool:
     return any(n.lower() in lowered for n in names)
 
 
-def _block_about(
-    index: TrajectoryIndex,
-    grounded: list[Step],
-    commit: Commit,
-    diag: Diagnostics,
-) -> list[Step]:
-    """Code half of Pass E2: block candidate evidence steps, log every prune.
-
-    A step is blocked in if it mentions the candidate, or shares a symbol
-    with a step that does (one hop — satellite entities: the parent, the
-    book, the year).
-    """
-    # step_id is unique only within a run — key on (run_id, step_id)
-    refs_by_step: dict[tuple[str, str], set[str]] = {}
-    for r in index.references.values():
-        refs_by_step.setdefault((r.run_id, r.step_id), set()).add(r.symbol_id)
-
-    direct = [s for s in grounded if _mentions(s.observation_segment or "", commit.names)]
-    direct_ids = {s.step_id for s in direct}
-    direct_syms = {
-        sid for s in direct for sid in refs_by_step.get((s.run_id, s.step_id), set())
-    }
-
-    linked = [
-        s for s in grounded
-        if s.step_id not in direct_ids
-        and refs_by_step.get((s.run_id, s.step_id), set()) & direct_syms
-    ]
-    blocked = sorted(direct + linked, key=lambda s: s.index)
-
-    blocked_ids = {s.step_id for s in blocked}
-    for s in grounded:
-        if s.step_id not in blocked_ids:
-            diag.prune("about", s.step_id,
-                       "no candidate mention and no shared symbol with a mentioning step")
-    return blocked
-
-
 async def _map_about(
-    index: TrajectoryIndex,
     grounded: list[Step],
     commit: Commit,
     *,
@@ -433,29 +394,38 @@ async def _map_about(
     session_factory: SessionFactory,
     diag: Diagnostics,
 ) -> list[Step]:
-    """Pass E2: grounded steps carrying evidence about the committed candidate."""
-    blocked = _block_about(index, grounded, commit, diag)
-    if not blocked:
-        return []
+    """Pass E2: grounded steps carrying evidence about the committed candidate.
 
-    rows = [
-        {"id": i, "target": commit.binding, "excerpt": s.observation_segment or ""}
-        for i, s in enumerate(blocked)
-    ]
-    raw = await _ask_model(
-        _ABOUT_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2),
-        model, session_factory=session_factory, purpose="constraint_about",
-    )
-    by_id = _index_by_id(raw or [])
+    Sweeps the WHOLE grounded universe in deterministic char-budget
+    partitions — code does not pre-filter relevance (the earlier lexical
+    blocking was code recognizing "aboutness" and pruned anaphoric
+    evidence before any model saw it). Positive polarity per partition; a
+    failed partition loses only its own steps, recorded.
+    """
+    from .edges import _PARTITION_CHAR_BUDGET, partition_by_budget
 
     about: list[Step] = []
-    for i, s in enumerate(blocked):
-        item = by_id.get(i)
-        is_about = bool(item.get("about", False)) if item else False
-        conf = _safe_float(item, "confidence") if item else 0.0
-        diag.record("about", s.step_id, is_about, conf)
-        if is_about:
-            about.append(s)
+    for partition in partition_by_budget(grounded, _PARTITION_CHAR_BUDGET):
+        rows = [
+            {"id": i, "target": commit.binding, "excerpt": s.observation_segment or ""}
+            for i, s in enumerate(partition)
+        ]
+        raw = await _ask_model(
+            _ABOUT_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2),
+            model, session_factory=session_factory, purpose="constraint_about",
+        )
+        if raw is None:
+            diag.record("about", "-", None, 0.0,
+                        f"partition of {len(partition)} steps failed; its steps unmapped")
+            continue
+        by_id = _index_by_id(raw)
+        for i, s in enumerate(partition):
+            item = by_id.get(i)
+            is_about = bool(item.get("about", False)) if item else False
+            conf = _safe_float(item, "confidence") if item else 0.0
+            diag.record("about", s.step_id, is_about, conf)
+            if is_about:
+                about.append(s)
     return about
 
 
@@ -796,7 +766,7 @@ async def analyze_constraints(
 
     # Pass E2 / E3
     about_steps = await _map_about(
-        index, grounded, commit, model=model, session_factory=session_factory, diag=diag,
+        grounded, commit, model=model, session_factory=session_factory, diag=diag,
     )
     verdicts = await _judge_entailment(
         constraints, commit, about_steps,

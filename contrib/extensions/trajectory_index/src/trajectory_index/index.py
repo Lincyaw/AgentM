@@ -463,6 +463,25 @@ def grounded_from_kind(kind: str) -> bool:
     return kind in _PRODUCING_KINDS
 
 
+def _provenance_kind(step: Step, kind: str, start: int, end: int) -> str:
+    """Upgrade a block-derived reference kind with Pass 1 provenance.
+
+    On role-degraded records everything arrives as text blocks, so every
+    occurrence is kind="mention" even inside a ``⟦obs⟧``-labeled region —
+    which made the grounding layer call Pass-1-attested observation
+    content "fabricated". An occurrence fully inside the step's
+    observation spans IS tool output; the upgrade only ADDs observation
+    status (attested roles keep their block-derived kind, including the
+    deliberate non-deterministic downgrade).
+    """
+    if kind != "mention" or not step.obs_spans:
+        return kind
+    for a, b in step.obs_spans:
+        if start >= a and end <= b:
+            return "tool_output"
+    return kind
+
+
 def _message_step_content(msg: dict[str, object]) -> tuple[str, str | None]:
     """Extract text content and tool name from a trace message dict."""
     parts: list[str] = []
@@ -608,6 +627,7 @@ class TrajectoryIndex:
     ) -> Reference:
         if end is None:
             end = start + len(text)
+        kind = _provenance_kind(step, kind, start, end)
         loc = Location(step.run_id, step.step_id, start, end)
         ref_id = stable_id(
             "ref", loc.run_id, loc.step_id, loc.start, loc.end, symbol.id,
