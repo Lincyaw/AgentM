@@ -47,6 +47,18 @@ Wrap sentences in the agent's own text where it asserts something **as settled f
 The test is the agent's stance, not polarity: exclude anything NOT presented as settled — plans ("I will verify next"), questions, hedged hypotheses ("this could be", "possibly", "unconfirmed so far").
 
 - Wrap whole sentences so the claim is self-contained; a fragment like "But none of these fit." is useless without its referent — extend the wrap to include what "these" refers to when the neighboring sentence supplies it.
+- When the claim IS the agent's final answer to the task (the committed conclusion, typically in the final report), add `role=commit`: `⟦claim role=commit|The answer is Edgar Irving Williams.⟧`. At most a few claims per trajectory carry this role.
+
+### `⟦constraint …|…⟧` — task requirement
+
+In TASK text only (the user's question or instructions — never in the agent's own prose): wrap each requirement the final answer must satisfy.
+
+- One constraint per requirement; wrap the requirement phrase verbatim.
+- `subject` — what the requirement is about; omit when it is the answer entity itself (e.g. `subject="the answer's brother"` for a relative's property).
+- For machine-checkable number/date comparisons, add typed attrs so code can decide them:
+  - `⟦constraint kind=year_range lo=1885 hi=1889|born in the late 1880s⟧`
+  - `⟦constraint kind=number op="==" value=3|exactly three co-founders⟧` (op: ==, <=, >=, <, >)
+- Omit the typed attrs for semantic requirements (occupation, nationality, relationship).
 
 ## Rules
 

@@ -80,7 +80,7 @@ at most one label per dimension:
 | dimension | question | label space | today's node |
 |---|---|---|---|
 | source | who produced this text? | agent, env (generalizes to the authority lattice: subagents, users, harness) | `obs` = the env value; unlabeled = agent |
-| stance | what is this utterance doing? | assert, and later: assume, require, commit, intend, retract, … | `claim` = the assert value |
+| stance | what is this utterance doing? | assert (claim; `role=commit` marks the final answer), require (constraint), and later: assume, intend, retract, … | `claim`, `constraint` |
 | reference | what does this text point at? | entities (name × kind × class) | `sym` |
 
 The source dimension is a total labeling (every character has exactly
@@ -88,8 +88,8 @@ one author); stance and reference are sparse region annotations. The
 current three node kinds are the minimal configuration of this schema —
 one value per dimension, each with a downstream consumer. The extension
 rule follows: a new node kind must be a new label on one of these
-dimensions (premise, constraint, commit are stance values — no new
-machinery, one new tag), and anything that does not fit — "these five
+dimensions (constraint and commit landed exactly this way — one new tag / one
+attribute; premise is next), and anything that does not fit — "these five
 steps form an episode", "this claim retracts that one" — is a relation
 BETWEEN regions and belongs to Pass 2 edges or the structure layer,
 never to inline annotation.
@@ -106,6 +106,7 @@ annotations whole, into a recorded prune log. Three node kinds:
 |---|---|---|---|
 | provenance | `⟦obs\|…⟧` | the intervals of $O_i$ | strip-and-compare → exact offsets; overlaps merged; attested roles never overridden |
 | claim | `⟦claim\|…⟧` | $c = (i, [a,b))$ — a sentence the agent asserts **as settled fact**: verification statements, conclusions/identifications, settled negative findings; plans, questions, hedges excluded (the test is stance, not wording or polarity) | text is the content slice $x_i[a{:}b]$ — verbatim by construction |
+| constraint | `⟦constraint …\|…⟧` | a task requirement, in task text only (stance: require); machine-checkable comparisons carry typed attrs (`kind=year_range lo hi`, `kind=number op value`) | text verbatim by construction; attrs validated by code, unparseable attrs degrade to a semantic constraint, logged |
 | symbol | `⟦sym …\|…⟧` | $\sigma = (\mathrm{name}, \mathrm{kind}, \mathrm{class})$, declared at first mention; other marked surfaces of the same name become aliases automatically | occurrences located by exact name/alias matching; an occurrence inside $O$ is a grounded (tool-backed) def |
 
 The claim set is $C = \{c_1, \dots, c_K\}$; the symbol table $\Sigma$

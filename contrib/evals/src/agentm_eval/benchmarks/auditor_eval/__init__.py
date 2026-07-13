@@ -125,9 +125,23 @@ def _load_from_telbench(
     if limit is not None:
         instances = instances[:limit]
 
+    from agentm.core.abi.messages import TextContent, UserMessage
+
     items: list[TrajectoryItem] = []
     for inst in instances:
         msgs = spans_to_messages(inst.spans)
+        # Input preprocessing: the task IS part of the trajectory. With the
+        # question as step 0 (attested user role), Pass 1 extracts
+        # ⟦constraint⟧ nodes from it like any other node — no separate
+        # extraction call. All later message indices shift by one; results
+        # map predictions back to span space (see _build_result).
+        question_step = bool(inst.question.strip())
+        if question_step:
+            msgs = [UserMessage(
+                role="user",
+                content=[TextContent(type="text", text=inst.question)],
+                timestamp=-1.0,
+            ), *msgs]
         if max_messages is not None:
             msgs = msgs[:max_messages]
         items.append((
@@ -136,6 +150,7 @@ def _load_from_telbench(
             {
                 "source": "telbench",
                 "question": inst.question,
+                "question_step": question_step,
                 "gold_error_indices": sorted(inst.gold_error_indices),
                 "n_spans": len(inst.spans),
             },
@@ -691,10 +706,10 @@ async def _process_one_item(
         idx = TrajectoryIndex.load(index_path)
         idx.build_dependencies()
 
-        # `constraints` is the ran-before marker: Pass 0 stores it even when
-        # no finding was emitted (e.g. no commit), so a cached no-finding
-        # case is not re-analyzed on every run.
-        if constraint_analysis and meta.get("question") and not idx.constraints:
+        # Constraint NODES come from Pass 1; findings are the analysis
+        # output. A cached index with nodes but no findings re-runs the
+        # judgment chain (cheap: no-commit cases stop at E1).
+        if constraint_analysis and idx.constraints and not idx.constraint_findings:
             await _run_constraint_analysis(idx, tid, str(meta["question"]), index_model, exp)
             idx.dump(str(index_path))
 
@@ -979,7 +994,11 @@ def _build_result(
 
     if meta.get("source") == "telbench":
         result["gold_error_indices"] = meta.get("gold_error_indices", [])
-        result["pred_span_indices"] = _extract_pred_spans(verdicts)
+        preds = _extract_pred_spans(verdicts)
+        if meta.get("question_step"):
+            # message space → span space (step 0 is the question)
+            preds = [i - 1 for i in preds if i >= 1]
+        result["pred_span_indices"] = preds
 
     return result
 

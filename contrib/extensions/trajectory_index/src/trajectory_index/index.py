@@ -250,6 +250,7 @@ class Claim:
     run_id: str
     step_id: str
     text: str
+    role: str = ""          # "" = plain assertion; "commit" = the final answer
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +489,26 @@ def _provenance_kind(step: Step, kind: str, start: int, end: int) -> str:
         if start >= a and end <= b:
             return "tool_output"
     return kind
+
+
+def _constraint_normalized(attrs: dict[str, str]) -> dict[str, MetadataValue] | None:
+    """Validate model-emitted machine-checkable attrs (code owns the types).
+
+    Recognized shapes: kind=year_range lo=<int> hi=<int>;
+    kind=number op∈{==,<=,>=,<,>} value=<number>. Anything else → None
+    (the constraint stays semantic — the oracle judges it, code does not).
+    """
+    kind = attrs.get("kind", "")
+    try:
+        if kind == "year_range":
+            return {"kind": "year_range", "lo": int(attrs["lo"]), "hi": int(attrs["hi"])}
+        if kind == "number":
+            op = attrs.get("op", "==")
+            if op in {"==", "<=", ">=", "<", ">"}:
+                return {"kind": "number", "op": op, "value": float(attrs["value"])}
+    except (KeyError, ValueError):
+        return None
+    return None
 
 
 def _message_step_content(msg: dict[str, Any]) -> tuple[str, str | None]:
@@ -1042,7 +1063,8 @@ class TrajectoryIndex:
 
         # node collections parsed out of the markup, keyed by message id
         obs_by_mid: dict[str, tuple[tuple[int, int], ...]] = {}
-        claims_by_mid: dict[str, list[tuple[int, int]]] = {}
+        claims_by_mid: dict[str, list[tuple[int, int, str]]] = {}
+        constraints_new: list[tuple[str, int, int, dict[str, str]]] = []
         syms: list[tuple[str, dict[str, str]]] = []   # (surface, attrs)
 
         for i, msg in enumerate(messages):
@@ -1085,7 +1107,11 @@ class TrajectoryIndex:
                 if a.tag == "obs":
                     obs_regions.append((start_c, end_c))
                 elif a.tag == "claim":
-                    claims_by_mid.setdefault(mid, []).append((start_c, end_c))
+                    claims_by_mid.setdefault(mid, []).append(
+                        (start_c, end_c, str(a.attrs.get("role", ""))),
+                    )
+                elif a.tag == "constraint":
+                    constraints_new.append((mid, start_c, end_c, dict(a.attrs)))
                 elif a.tag == "sym":
                     syms.append((plain[a.start:a.end], dict(a.attrs)))
                 else:
@@ -1151,13 +1177,37 @@ class TrajectoryIndex:
             cstep = steps_by_id.get(mid)
             if cstep is None:
                 continue
-            for start_c, end_c in spans_list:
+            for start_c, end_c, role in spans_list:
                 text = cstep.content[start_c:end_c].strip()
                 if not text:
                     continue
                 # start offset discriminates same-prefix claims within a step
                 cid = stable_id("clm", run_id, mid, start_c, text[:80])
-                self.claims[cid] = Claim(id=cid, run_id=run_id, step_id=mid, text=text)
+                self.claims[cid] = Claim(
+                    id=cid, run_id=run_id, step_id=mid, text=text, role=role,
+                )
+
+        # Constraints: task requirements, verbatim; machine-checkable
+        # normalization comes from model-emitted attrs, code-validated
+        # (unparseable attrs degrade to a semantic constraint, logged).
+        for mid, start_c, end_c, attrs in constraints_new:
+            nstep = steps_by_id.get(mid)
+            if nstep is None:
+                continue
+            text = nstep.content[start_c:end_c].strip()
+            if not text:
+                continue
+            normalized = _constraint_normalized(attrs)
+            if attrs.get("kind") and normalized is None:
+                _prune(f"step {mid}",
+                       f"constraint attrs unparseable, kept as semantic: {attrs!r}")
+            conid = stable_id("con", run_id, mid, start_c, text[:80])
+            self.constraints[conid] = Constraint(
+                id=conid,
+                subject=attrs.get("subject", "answer"),
+                description=text,
+                normalized=normalized,
+            )
 
         all_syms = self.registry_snapshot()
         namespaces = {str(s["name"]): namespace_fn(run_id, s) if namespace_fn else "" for s in all_syms}
@@ -1423,7 +1473,7 @@ class TrajectoryIndex:
             for d in self.dependencies.values()
         ]
         claims = [
-            {"id": c.id, "run_id": c.run_id, "step_id": c.step_id, "text": c.text}
+            {"id": c.id, "run_id": c.run_id, "step_id": c.step_id, "text": c.text, "role": c.role}
             for c in self.claims.values()
         ]
         edges = [
@@ -1698,6 +1748,7 @@ class TrajectoryIndex:
                 run_id=str(c.get("run_id", "")),
                 step_id=str(c.get("step_id", "")),
                 text=text,
+                role=str(c.get("role", "")),
             )
 
         for e in data.get("edges", []):

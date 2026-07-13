@@ -6,7 +6,9 @@ a compiler pipeline: each pass is one function with an explicit
 input → output signature, all diagnostics flow into one sink, and the
 driver (:func:`analyze_constraints`) only chains passes.
 
-    Pass 0   extract_constraints   question text        → [Constraint]
+    (constraint nodes come from Pass 1 — the task text is part of the
+    trajectory; there is no separate extraction pass here)
+
     Pass E1  _detect_commit        index, steps         → Commit | None
     Pass E2  _map_about            grounded steps       → evidence steps
     Pass E3  _judge_entailment     constraints, window  → {cid: Verdict}
@@ -146,63 +148,6 @@ class ConstraintAnalysis:
 
 
 # ---------------------------------------------------------------------------
-# Pass 0 — constraint extraction + normalization (LLM, question only)
-# ---------------------------------------------------------------------------
-
-_EXTRACT_INSTRUCTIONS = """\
-Extract the requirements the final answer must satisfy from this question.
-A constraint is one requirement stated in the question. Extract only what the
-question states — do not invent, decompose reasoning chains, or add
-background knowledge.
-
-For each constraint:
-  - "subject": what the requirement is about — "answer" for the answer entity
-    itself, or a named related party ("the answer's parent", "the film").
-  - "desc": the requirement in plain words.
-  - "normalized": ONLY when the requirement is a checkable number/date
-    comparison, emit exactly one of:
-      {"kind": "year_range", "lo": <int>, "hi": <int>}
-      {"kind": "number", "op": "==", "value": <number>}  (op: ==, <=, >=, <, >)
-    Omit "normalized" entirely for semantic requirements (occupation,
-    nationality, relationship, event descriptions).
-
-Return ONLY a JSON object:
-{"verdicts": [{"id": 0, "subject": "...", "desc": "...", "normalized": {...} or null}, ...]}
-"""
-
-
-async def extract_constraints(
-    question: str,
-    model: str | None = None,
-    session_factory: SessionFactory | None = None,
-) -> list[Constraint]:
-    """Pass 0: one LLM call over the question text only."""
-    if session_factory is None:
-        raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
-    raw = await _ask_model(
-        _EXTRACT_INSTRUCTIONS, question.strip(), model,
-        session_factory=session_factory, purpose="constraint_extraction",
-    )
-    out: list[Constraint] = []
-    for i, item in enumerate(raw or []):
-        if not isinstance(item, dict):
-            continue
-        desc = str(item.get("desc", "")).strip()
-        if not desc:
-            continue
-        normalized = item.get("normalized")
-        if not isinstance(normalized, dict) or not normalized.get("kind"):
-            normalized = None
-        out.append(Constraint(
-            id=f"c{i}",
-            subject=str(item.get("subject", "answer")).strip() or "answer",
-            description=desc,
-            normalized=normalized,
-        ))
-    return out
-
-
-# ---------------------------------------------------------------------------
 # Code checkers (P6) — the decidable subproblem never goes to the model
 # ---------------------------------------------------------------------------
 
@@ -332,19 +277,38 @@ async def _detect_commit(
     session_factory: SessionFactory,
     diag: Diagnostics,
 ) -> Commit | None:
-    """Pass E1: extract the committed answer from the final message (oracle,
-    free text), then resolve it to an indexed symbol (code, best-effort)."""
-    final = next(
-        (s for s in reversed(steps) if s.action_segment),
-        None,
+    """Pass E1: extract the committed answer, then resolve it to an indexed
+    symbol (code, best-effort).
+
+    A Pass 1 commit-role claim (``⟦claim role=commit|…⟧``) anchors the
+    step and narrows the oracle's input to the committed sentence itself;
+    without one, the oracle reads the final assistant message whole.
+    """
+    steps_by_id = {s.step_id: s for s in steps}
+    commit_claims = sorted(
+        (
+            (steps_by_id[c.step_id], c)
+            for c in index.claims.values()
+            if c.role == "commit" and c.step_id in steps_by_id
+        ),
+        key=lambda pair: pair[0].index,
     )
+    final: Step | None
+    if commit_claims:
+        final, claim = commit_claims[-1]     # the last commitment stands
+        commit_text: str | None = claim.text
+        diag.record("commit", final.step_id, None, 0.0,
+                    f"Pass 1 commit claim anchors the step: {claim.text[:80]!r}")
+    else:
+        final = next((s for s in reversed(steps) if s.action_segment), None)
+        commit_text = final.action_segment if final is not None else None
     if final is None:
         diag.record("commit", "-", None, 0.0, "no final assistant step")
         return None
 
     payload = json.dumps({
         "question": question,
-        "final_message": final.action_segment,
+        "final_message": commit_text,
     }, ensure_ascii=False, indent=2)
     raw = await _ask_model(
         _COMMIT_INSTRUCTIONS, payload, model,
@@ -712,12 +676,14 @@ async def analyze_constraints(
     session_factory: SessionFactory | None = None,
     sweep_char_budget: int = _SWEEP_CHAR_BUDGET,
 ) -> ConstraintAnalysis:
-    """Chain Pass 0 → E1 → E2 → E3 → J → L; store results on the index.
+    """Chain E1 → E2 → E3 → J → L over Pass 1 constraint nodes.
 
-    Best-effort like the other adjudication passes: any oracle failure
-    degrades the affected tuples to unknown, which never escalates (P5).
-    Idempotent: reruns replace ``index.constraints`` / ``constraint_findings``
-    wholesale.
+    Constraints come from the index (extracted by Pass 1 from the task
+    text — the question is part of the trajectory, so there is no
+    separate extraction call). Best-effort like the other adjudication
+    passes: any oracle failure degrades the affected tuples to unknown,
+    which never escalates (P5). Idempotent: reruns replace
+    ``constraint_findings`` wholesale (constraint nodes are Pass 1's).
 
     ``sweep_char_budget`` is the abstention threshold for the Omitted
     coverage sweep — the one numeric knob in this module. It guards a
@@ -730,25 +696,21 @@ async def analyze_constraints(
     analysis = ConstraintAnalysis()
     diag = analysis.diagnostics
 
-    # Pass 0
     if constraints is None:
-        if not question:
-            raise ValueError("either constraints or question must be provided")
-        constraints = await extract_constraints(
-            question, model=model, session_factory=session_factory,
-        )
+        constraints = list(index.constraints.values())
+    else:
+        index.constraints = {c.id: c for c in constraints}
     analysis.constraints = list(constraints)
-    index.constraints = {c.id: c for c in constraints}
     index.constraint_findings = []
     if not constraints:
-        logger.info("constraints: Pass 0 extracted nothing; analysis is empty")
+        logger.info("constraints: no constraint nodes in the index; analysis is empty")
         return analysis
 
     steps = sorted(
         (s for s in index.steps.values() if not run_id or s.run_id == run_id),
         key=lambda s: s.index,
     )
-    # Evidence evidence space: attested tool_result steps plus Pass 1
+    # Evidence space: attested tool_result steps plus Pass 1
     # provenance-labeled observation content (observation_segment covers
     # both — mixed steps contribute their retrieved portion only).
     grounded = [s for s in steps if s.observation_segment]
