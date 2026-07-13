@@ -1,9 +1,9 @@
 """Trajectory markup — the unified Pass 1 annotation language.
 
 The extractor re-emits each annotated message's body verbatim with
-``⟦tag key=value|content⟧`` spans inserted. Code verifies by stripping
+``⟦tag key=value|content⟧`` annotations inserted. Code verifies by stripping
 every annotation and comparing against the original body: equality makes
-every span offset exact — no substring search, no boundary drift, and
+every annotation offset exact — no substring search, no boundary drift, and
 multi-segment provenance (agent/observation sandwiches) for free.
 
 Grammar (nesting allowed):
@@ -55,7 +55,7 @@ class Annotation:
 
 
 def parse(annotated: str) -> tuple[str, list[Annotation]]:
-    """Strip annotations, returning (plain text, spans with plain offsets).
+    """Strip annotations, returning (plain text, annotations with plain offsets).
 
     Raises :class:`MarkupError` on malformed markup — the caller rejects
     the whole message's annotations (logged), never repairs silently.
@@ -105,7 +105,7 @@ def parse(annotated: str) -> tuple[str, list[Annotation]]:
 
 
 def strip(annotated: str) -> str:
-    """Plain text only (parse and discard spans)."""
+    """Plain text only (parse and discard annotations)."""
     return parse(annotated)[0]
 
 

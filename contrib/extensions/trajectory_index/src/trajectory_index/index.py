@@ -104,7 +104,7 @@ class Step:
     # query/content/summary sandwiches a single boundary cannot. Labels can
     # only ADD observation status to an assistant step — an attested
     # tool_result role always wins and needs no spans.
-    obs_spans: tuple[tuple[int, int], ...] = ()
+    obs_regions: tuple[tuple[int, int], ...] = ()
 
     @property
     def observation_segment(self) -> str | None:
@@ -118,8 +118,8 @@ class Step:
         """
         if self.role == StepRole.TOOL_RESULT:
             return self.content
-        if self.obs_spans:
-            return "\n".join(self.content[a:b] for a, b in self.obs_spans)
+        if self.obs_regions:
+            return "\n".join(self.content[a:b] for a, b in self.obs_regions)
         return None
 
     @property
@@ -127,11 +127,11 @@ class Step:
         """The agent-authored portion of an assistant step, or None."""
         if self.role != StepRole.ASSISTANT:
             return None
-        if not self.obs_spans:
+        if not self.obs_regions:
             return self.content
         parts: list[str] = []
         pos = 0
-        for a, b in self.obs_spans:
+        for a, b in self.obs_regions:
             if a > pos:
                 parts.append(self.content[pos:a])
             pos = max(pos, b)
@@ -143,9 +143,9 @@ class Step:
     @property
     def provenance(self) -> str | None:
         """Derived display label: None / "mixed" / "observation"."""
-        if not self.obs_spans:
+        if not self.obs_regions:
             return None
-        covered = sum(b - a for a, b in self.obs_spans)
+        covered = sum(b - a for a, b in self.obs_regions)
         return "observation" if covered >= len(self.content.strip()) else "mixed"
 
 
@@ -482,9 +482,9 @@ def _provenance_kind(step: Step, kind: str, start: int, end: int) -> str:
     status (attested roles keep their block-derived kind, including the
     deliberate non-deterministic downgrade).
     """
-    if kind != "mention" or not step.obs_spans:
+    if kind != "mention" or not step.obs_regions:
         return kind
-    for a, b in step.obs_spans:
+    for a, b in step.obs_regions:
         if start >= a and end <= b:
             return "tool_output"
     return kind
@@ -1069,7 +1069,7 @@ class TrajectoryIndex:
             ) -> int | None:
                 return _vmap[_amap[plain_off]]
 
-            obs_spans: list[tuple[int, int]] = []
+            obs_regions: list[tuple[int, int]] = []
             for a in annotations:
                 if a.tag == "known" or a.end <= a.start:
                     continue
@@ -1083,17 +1083,17 @@ class TrajectoryIndex:
                            f"⟦{a.tag}⟧ span falls in the truncation ellipsis")
                     continue
                 if a.tag == "obs":
-                    obs_spans.append((start_c, end_c))
+                    obs_regions.append((start_c, end_c))
                 elif a.tag == "claim":
                     claims_by_mid.setdefault(mid, []).append((start_c, end_c))
                 elif a.tag == "sym":
                     syms.append((plain[a.start:a.end], dict(a.attrs)))
                 else:
                     _prune(f"step {mid}", f"unknown annotation tag {a.tag!r}")
-            if obs_spans:
-                obs_spans.sort()
+            if obs_regions:
+                obs_regions.sort()
                 merged: list[tuple[int, int]] = []
-                for span in obs_spans:
+                for span in obs_regions:
                     if merged and span[0] <= merged[-1][1]:
                         merged[-1] = (merged[-1][0], max(merged[-1][1], span[1]))
                     else:
@@ -1117,7 +1117,7 @@ class TrajectoryIndex:
                 role=role,
                 content=content,
                 tool_name=tool_name,
-                obs_spans=spans,
+                obs_regions=spans,
             )
             self.add_step(step)
             steps_by_id[mid] = step
@@ -1348,7 +1348,7 @@ class TrajectoryIndex:
                 "content": s.content,
                 "tool_name": s.tool_name,
                 "timestamp": s.timestamp,
-                "obs_spans": [list(span) for span in s.obs_spans],
+                "obs_regions": [list(span) for span in s.obs_regions],
                 "metadata": dict(s.metadata) if s.metadata else {},
             }
             for s in self.steps.values()
@@ -1507,20 +1507,20 @@ class TrajectoryIndex:
 
         for s in data.get("steps", []):
             content = str(s.get("content", ""))
-            raw_spans = s.get("obs_spans")
+            raw_spans = s.get("obs_regions", s.get("obs_spans"))
             if isinstance(raw_spans, list):
-                obs_spans = tuple(
+                obs_regions = tuple(
                     (int(sp[0]), int(sp[1]))
                     for sp in raw_spans
                     if isinstance(sp, list) and len(sp) == 2
                 )
             elif s.get("provenance") == "observation":
                 # legacy single-label format
-                obs_spans = ((0, len(content)),)
+                obs_regions = ((0, len(content)),)
             elif s.get("provenance") == "mixed" and isinstance(s.get("obs_offset"), int):
-                obs_spans = ((int(s["obs_offset"]), len(content)),)
+                obs_regions = ((int(s["obs_offset"]), len(content)),)
             else:
-                obs_spans = ()
+                obs_regions = ()
             step = Step(
                 run_id=str(s.get("run_id", "")),
                 step_id=str(s["step_id"]),
@@ -1530,7 +1530,7 @@ class TrajectoryIndex:
                 tool_name=s.get("tool_name") if isinstance(s.get("tool_name"), str) else None,
                 timestamp=s.get("timestamp") if isinstance(s.get("timestamp"), int | float) else None,
                 metadata=s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {},
-                obs_spans=obs_spans,
+                obs_regions=obs_regions,
             )
             index.add_step(step)
 

@@ -196,7 +196,7 @@ class HarborAdapter:
                 f"{env_prefix}timeout {timeout} bash /tests/test.sh 2>&1"],
             "work_dir": "/app",
             "timeoutSeconds": timeout,
-        }])
+        }], recover_timeout=timeout + 120)
         eval_out = r.results[0].output.stdout
 
         reward = None
@@ -533,7 +533,7 @@ class SeniorSweAdapter(HarborAdapter):
                     f"2>/dev/null || python3 -m pip install -q {deps} 2>/dev/null || true"],
                 "work_dir": "/app",
                 "timeoutSeconds": 600,
-            }])
+            }], recover_timeout=720)
         result = super().evaluate(session, task, timeout=timeout)
         if result.get("reward") is None:
             result["invalid_trial"] = True

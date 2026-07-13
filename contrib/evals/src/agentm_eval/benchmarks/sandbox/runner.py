@@ -200,63 +200,6 @@ _active_agent_lock = threading.Lock()
 _active_eval_sessions: set[Any] = set()
 _active_eval_lock = threading.Lock()
 
-_OPERATION_POLL_SECONDS = 10.0
-
-
-class _ResilientEvalSession:
-    """Wrap an attached ARL session so long verifier steps survive a dropped
-    HTTP connection. A single ``session.execute`` holds one synchronous POST
-    for the whole step; a multi-minute verifier reliably outlives whatever
-    load balancer or proxy sits in front of the gateway, which resets the
-    connection (``httpx.ReadError``) or times it out
-    (``GatewayOperationTimeout``). ARL execute operations are idempotent and
-    keep running server-side, so on any transport failure we poll
-    ``get_execute_operation`` by the step's operation id until it finishes.
-    Short steps take the fast path and never poll. Every other attribute
-    (upload_file, execute_container, shutdown, …) delegates to the real
-    session unchanged."""
-
-    def __init__(self, session: Any) -> None:
-        self._session = session
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
-
-    def execute(self, steps: list[dict[str, Any]], **kwargs: Any) -> Any:
-        import time as _time
-
-        import arl  # type: ignore[import-not-found]
-        import httpx
-
-        op_id = kwargs.pop("operation_id", None) or str(uuid.uuid4())
-        started = _time.monotonic()
-        try:
-            return self._session.execute(steps, operation_id=op_id, **kwargs)
-        except arl.GatewayOperationTimeout as exc:  # type: ignore[attr-defined]
-            op_id = getattr(exc, "operation_id", op_id) or op_id
-        except (httpx.HTTPError, ConnectionError, OSError) as exc:
-            logger.info("eval exec connection dropped, recovering via poll: {}", exc)
-
-        budget = 0
-        for step in steps:
-            raw = step.get("timeoutSeconds") or step.get("timeout_seconds") or step.get("timeout")
-            if isinstance(raw, (int, float)):
-                budget += int(raw)
-        deadline = started + (budget or 900) + 120
-        client = arl.GatewayClient()
-        try:
-            while _time.monotonic() < deadline:
-                info = client.get_execute_operation(self._session.session_id, op_id)
-                if info.result is not None:
-                    return info.result
-                if (info.status or "").lower() == "error":
-                    raise RuntimeError(info.error or f"eval operation {op_id} failed")
-                _time.sleep(_OPERATION_POLL_SECONDS)
-            raise TimeoutError(f"eval operation {op_id} still pending past budget")
-        finally:
-            client.close()
-
-
 @dataclass(frozen=True, slots=True)
 class RunEvalConfig:
     adapter: Any
@@ -487,10 +430,16 @@ def _run_and_eval_one_inner(
         timeout_for(task, config.eval_timeout) if callable(timeout_for)
         else config.eval_timeout
     )
+    # A long verifier runs as one synchronous execute POST that outlives the
+    # LB/proxy in front of the gateway, which resets or times out the
+    # connection. ARL execute operations are idempotent, so the SDK recovers
+    # internally (recover=True) by polling the operation to completion; no
+    # client-side wrapper is needed. The adapter bounds that poll via
+    # recover_timeout on the long steps.
     session = arl.SandboxSession.attach(arl_session_id, timeout=eval_timeout + 120)
     with _active_eval_lock:
         _active_eval_sessions.add(session)
-    eval_session = _ResilientEvalSession(session)
+    eval_session = session
     scores: dict[str, Any] | None = None
     eval_error: Exception | None = None
     try:

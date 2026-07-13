@@ -563,7 +563,7 @@ def _pass1_nodes_artifact(
                 "index": s.index,
                 "role": s.role,
                 "provenance": s.provenance,
-                "obs_spans": [list(sp) for sp in s.obs_spans],
+                "obs_regions": [list(sp) for sp in s.obs_regions],
                 "action_head": (s.action_segment or "")[:200],
                 "obs_head": (s.observation_segment or "")[:200],
             }

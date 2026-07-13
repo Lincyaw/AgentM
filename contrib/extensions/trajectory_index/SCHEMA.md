@@ -22,20 +22,19 @@ deterministically from the recorded message blocks), and the role
 $r_i \in \{\mathrm{user}, \mathrm{assistant}, \mathrm{tool\_call},
 \mathrm{tool\_result}, \mathrm{system}\}$. A role is **attested** when
 the record's structure carries it (a real harness message); degraded
-serializations (benchmark span dumps) arrive with uninformative roles.
+serializations (benchmark record dumps) arrive with uninformative roles.
 
 **Authorship labeling.** Every character of a step's content has exactly
 one author — the agent wrote it, or the environment produced it
 (retrieved page, tool output). Formally this is a labeling function over
-character positions (the sequence-labeling view familiar from span
+character positions (the sequence-labeling view familiar from NLP text
 annotation):
 
 $$\mathrm{auth}_i : \{0, \dots, |x_i|-1\} \to \{\mathrm{agent}, \mathrm{env}\}$$
 
-The **observation spans** $O_i$ are the maximal runs of env-labeled
+The **observation regions** $O_i$ are the maximal runs of env-labeled
 positions, written as half-open character intervals $[a, b)$ (the
-standard span convention — same as Python slices and NLP standoff
-annotation); the agent-authored remainder is $A_i$. Because
+standard convention of Python slices and NLP standoff annotation); the agent-authored remainder is $A_i$. Because
 $\mathrm{auth}_i$ is a total function, the two sides partition the step
 by construction: no character has two authors, none has zero.
 
@@ -69,12 +68,38 @@ Pass 1 establishes these ground facts **once**:
   recognition can only ADD observation status, never override an
   attested role.
 
+**The annotation atom.** Every Pass 1 fact is one triple
+
+$$\text{atom} = (\text{region},\ \text{dimension},\ \text{label})$$
+
+a text region $[a,b)$ of a step, the dimension of the question being
+answered about it, and that question's answer. There are three
+orthogonal dimensions — the same region can carry an atom in each, but
+at most one label per dimension:
+
+| dimension | question | label space | today's node |
+|---|---|---|---|
+| source | who produced this text? | agent, env (generalizes to the authority lattice: subagents, users, harness) | `obs` = the env value; unlabeled = agent |
+| stance | what is this utterance doing? | assert, and later: assume, require, commit, intend, retract, … | `claim` = the assert value |
+| reference | what does this text point at? | entities (name × kind × class) | `sym` |
+
+The source dimension is a total labeling (every character has exactly
+one author); stance and reference are sparse region annotations. The
+current three node kinds are the minimal configuration of this schema —
+one value per dimension, each with a downstream consumer. The extension
+rule follows: a new node kind must be a new label on one of these
+dimensions (premise, constraint, commit are stance values — no new
+machinery, one new tag), and anything that does not fit — "these five
+steps form an episode", "this claim retracts that one" — is a relation
+BETWEEN regions and belongs to Pass 2 edges or the structure layer,
+never to inline annotation.
+
 **Mechanism.** The extractor visits $T$ once, in chunks of a few steps,
 re-emitting each annotated step body **verbatim** with
-`⟦tag attrs|content⟧` spans inserted. Recognition is not taken on faith
-— verification is strip-and-compare: removing every span must reproduce
+`⟦tag attrs|content⟧` annotations inserted. Recognition is not taken on faith
+— verification is strip-and-compare: removing every annotation must reproduce
 the exact text the extractor was shown (whitespace-tolerant), making
-every span offset exact; a diverging re-emission rejects that step's
+every annotation offset exact; a diverging re-emission rejects that step's
 annotations whole, into a recorded prune log. Three node kinds:
 
 | node | tag | definition | verification |
@@ -196,7 +221,7 @@ LSP, the auditor is the analyst.
 | step content $x_i$ + extractor view (one shared walk) | `data.message_parts`, `data.view_body_with_map` |
 | annotation grammar, strip-and-compare, alignment | `markup.py` |
 | Pass 1 populate + verification | `index.TrajectoryIndex.populate_from_extraction` |
-| $O_i$, segments | `index.Step.obs_spans`, `observation_segment` / `action_segment` |
+| $O_i$, segments | `index.Step.obs_regions`, `observation_segment` / `action_segment` |
 | evidence edges, partitioned sweep, coverage | `edges.build_claim_edges` |
 | identity edges (alias/coreference) | `adjudicate.py` |
 | claim status fold | `verification.fold_claim_statuses` |
@@ -205,7 +230,7 @@ LSP, the auditor is the analyst.
 | extractor prompt (annotation contract) | `agents/entity_extractor/prompts/default.md` |
 
 ```python
-Step:         run_id, step_id, index, role, content, obs_spans
+Step:         run_id, step_id, index, role, content, obs_regions
 Claim:        id, run_id, step_id, text                                 # verbatim content slice
 Symbol:       id, canonical_name, kind, aliases, entity_class
 Reference:    symbol_id, location, kind, grounded, form, value          # an occurrence
