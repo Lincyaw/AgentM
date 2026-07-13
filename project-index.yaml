@@ -1768,6 +1768,28 @@ requirements:
     depends_on:
       - REQ-213-lhtb-benchmark
 
+  - id: REQ-215-completion-guard
+    title: Completion-guard atom mirrors terminus_2 double-confirm
+    description: >
+      The Terminal-Bench baseline must not lose work when the model ends its
+      turn prematurely. The ``completion_guard`` atom hooks
+      ``decide_turn_action`` and, on a voluntary ``ModelEndTurn``, injects a
+      confirmation prompt and continues the loop, letting the run stop only
+      after ``confirmations`` consecutive finishes (resetting whenever the
+      model resumes work). This mirrors the reference agent (terminus_2)
+      double-confirm so benchmark comparisons isolate model ability from
+      scaffold. It is a self-contained eval aid, distinct from the heavier
+      ``goal`` oversight. Loaded by the ``terminal_bench:arl`` scenario, which
+      also carries the robustness trio ``tool_error_messages`` /
+      ``retry_policy`` / ``thinking_retry`` across all its manifests.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/completion_guard.py
+      - path: contrib/scenarios/terminal_bench/manifest.arl.yaml
+    tests: []
+
   - id: REQ-194-terminal-bench-adapt-scenario
     title: Terminal Bench ARL adapt scenario with online atom self-modification
     description: >

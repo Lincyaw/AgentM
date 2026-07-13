@@ -8,6 +8,9 @@ extensions:
     config:
       backend: local
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.tool_error_messages
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm.extensions.builtin.thinking_retry
   - module: agentm.extensions.builtin.turn_reminder
     config:
       finalize_tool: submit_verdict

@@ -31,12 +31,19 @@ extensions:
     config:
       default_timeout: 1200
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.tool_error_messages
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm.extensions.builtin.thinking_retry
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
+        You are solving a command-line task in a Linux environment. Work
+        autonomously until the task is fully done and verified before you
+        end your turn.
+
         Your working directory is /app. Treat relative paths such as
         INSTRUCTION.md and task project directories as relative to /app.
-        Validation commands can be slow — use generous timeouts (1200s+)
+        Validation commands can be slow. Use generous timeouts (1200s+)
         and do not wrap them in shorter shell-level timeout limits unless
         the task explicitly requires it.
   - module: agentm.extensions.builtin.llm_compaction
@@ -49,3 +56,6 @@ extensions:
   - module: agentm.extensions.builtin.background_exec
     config:
       timeout: 120
+  - module: agentm.extensions.builtin.completion_guard
+    config:
+      confirmations: 1

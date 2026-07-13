@@ -18,6 +18,9 @@ extensions:
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.tool_error_messages
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm.extensions.builtin.thinking_retry
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
