@@ -51,3 +51,40 @@ class ExtractionResult(BaseModel):
         default_factory=list,
         description="Messages that carry at least one annotation",
     )
+
+    def parsed_symbols(self) -> list[ExtractedSymbol]:
+        """Symbols declared in the markup, deduplicated by canonical name.
+
+        Registry/bookkeeping view only — index population re-parses with
+        offset verification. Malformed messages are skipped here (populate
+        records them properly).
+        """
+        from trajectory_index.markup import MarkupError, parse
+
+        by_name: dict[str, ExtractedSymbol] = {}
+        for am in self.annotated:
+            try:
+                plain, annotations = parse(am.text)
+            except MarkupError:
+                continue
+            for a in annotations:
+                if a.tag != "sym":
+                    continue
+                surface = plain[a.start:a.end].strip()
+                canonical = (a.attrs.get("name") or surface).strip()
+                if not canonical:
+                    continue
+                alias = [surface] if surface and surface.lower() != canonical.lower() else []
+                prior = by_name.get(canonical.lower())
+                if prior is None:
+                    by_name[canonical.lower()] = ExtractedSymbol(
+                        name=canonical,
+                        kind=a.attrs.get("kind", "unknown"),
+                        aliases=alias,
+                        entity_class=a.attrs.get("class", "identifier"),
+                    )
+                else:
+                    for al in alias:
+                        if al not in prior.aliases:
+                            prior.aliases.append(al)
+        return list(by_name.values())

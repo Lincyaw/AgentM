@@ -62,6 +62,30 @@ judgment; code does only verbatim checks, exact table lookups,
 deterministic parsing, and set/lattice algebra.** No fact is ever
 "extracted" by a regex or keyword table.
 
+### Pass 1 output format: annotation markup (2026-07-13)
+
+Pass 1 nodes are emitted in one unified annotation language rather than
+per-kind JSON records (``markup.py``): the extractor re-emits each
+annotated message body verbatim with ``⟦tag attrs|content⟧`` spans
+inserted — ``sym`` (first mention; different surfaces of one canonical
+``name`` become aliases automatically), ``obs`` (retrieved/environment
+segment, several per message), ``claim`` (settled-fact assertion).
+Input-side known symbols are marked ``⟦known|…⟧`` in the same grammar
+(delimiters U+27E6/7 — ``[[…]]`` collides with wiki links in fetched
+content).
+
+Verification is strip-and-compare: all ``⟦…⟧`` removed must reproduce
+the extractor's view of the message (whitespace-tolerant alignment),
+which makes every span offset EXACT. This replaced the per-kind verbatim
+substring checks (claim prefix check, provenance boundary prefix ladder)
+and fixed their shared failure: a single ``mixed`` boundary cannot split
+the query/content/summary sandwich spans, which pushed trailing agent
+prose into observation segments and let Pass 2 grounds edges degenerate
+into self-quotes. ``Step.obs_spans`` is now a region list; a failed
+re-emission rejects the message's annotations whole, into the prune log
+(P2). The cost — output ≈ chunk size — is what makes 2-4-message chunks
+the operating point.
+
 ### Event vocabulary
 
 Six event kinds plus an orthogonal **provenance record** on every event:

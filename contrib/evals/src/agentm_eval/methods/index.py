@@ -314,16 +314,6 @@ async def extract_symbols(
             logger.warning("chunk {}/{} no parseable result", i + 1, len(chunks))
             continue
 
-        # Merge structural symbols into LLM result (deduped)
-        if structural:
-            from trajectory_index.agents.entity_extractor.schema import ExtractedSymbol
-            llm_names = {normalize_name(s.name) for s in result.symbols}
-            for ss in structural:
-                if normalize_name(ss.name) not in llm_names:
-                    result.symbols.append(ExtractedSymbol(
-                        name=ss.name, kind=ss.kind, entity_class="identifier",
-                    ))
-
         extracted = ExtractedChunk(
             run_id=run_id, messages=chunk.messages, result=result,
             message_id_start=chunk.start,
@@ -333,7 +323,7 @@ async def extract_symbols(
         if on_chunk:
             on_chunk(extracted, chunk.messages)
 
-        for sym in result.symbols:
+        for sym in result.parsed_symbols():
             norm = normalize_name(sym.name)
             if norm in seen:
                 continue

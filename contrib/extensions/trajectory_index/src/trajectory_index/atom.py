@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
-import re
 from typing import Any, Final
 
 from agentm.core.abi import (
@@ -258,91 +256,26 @@ def _agentmsg_to_extraction_dict(
     return {"id": str(index), "role": role, "content": blocks}
 
 
-_IDENT_CHAR = re.compile(r"[A-Za-z0-9_.\-/]")
-
-
-def _at_word_boundary(text: str, start: int, end: int) -> bool:
-    """Check that the match at text[start:end] is not inside a longer identifier."""
-    if start > 0 and _IDENT_CHAR.match(text[start - 1]):
-        return False
-    return not (end < len(text) and _IDENT_CHAR.match(text[end]))
-
-
-def _mark_known_symbols(text: str, known_names: list[str]) -> str:
-    """Wrap occurrences of known symbol names with [[...]] in the text.
-
-    Only marks at word boundaries — a known symbol inside a longer
-    identifier is not marked (the longer form may be a different entity).
-    """
-    if not known_names:
-        return text
-    for name in sorted(known_names, key=len, reverse=True):
-        if not name or len(name) < 2:
-            continue
-        lower = text.lower()
-        search = name.lower()
-        result_parts: list[str] = []
-        pos = 0
-        while pos < len(text):
-            idx = lower.find(search, pos)
-            if idx < 0:
-                result_parts.append(text[pos:])
-                break
-            end = idx + len(name)
-            # Skip if already inside [[...]]
-            if idx >= 2 and text[idx - 2:idx] == "[[":
-                result_parts.append(text[pos:end])
-                pos = end
-                continue
-            # Skip if inside a longer identifier
-            if not _at_word_boundary(text, idx, end):
-                result_parts.append(text[pos:end])
-                pos = end
-                continue
-            result_parts.append(text[pos:idx])
-            result_parts.append(f"[[{text[idx:end]}]]")
-            pos = end
-        text = "".join(result_parts)
-    return text
-
-
 def _format_message_compact(
     msg: dict[str, Any],
     known_names: list[str] | None = None,
 ) -> str:
     """Format one serialized message as compact text for the extraction prompt.
 
-    If ``known_names`` is provided, occurrences of those names in the text
-    are wrapped with ``[[...]]`` to mark them as already extracted.
+    The body is the same view string the populate-side verification
+    recomputes (``data.view_body_with_map``) — the two must agree exactly,
+    or every annotated message would fail the strip-and-compare check.
+    Known symbols are marked ``⟦known|name⟧`` on top of that body; the
+    marks strip away with all other annotations at verification time.
     """
+    from .data import view_body_with_map
+    from .markup import mark_known
+
     mid = msg.get("id", "")
     role = msg.get("role", "")
-    blocks = msg.get("content", [])
-    if not isinstance(blocks, list):
-        return ""
-    parts: list[str] = []
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type", "")
-        if btype == "text":
-            parts.append(str(block.get("text", "")))
-        elif btype == "tool_call":
-            name = block.get("name", "")
-            args = block.get("arguments", block.get("input", {}))
-            arg_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
-            parts.append(f"[tool_call: [[{name}]]]\n{arg_str}" if known_names and name.lower() in {n.lower() for n in known_names} else f"[tool_call: {name}]\n{arg_str}")
-        elif btype == "tool_result":
-            sub = block.get("content", [])
-            if isinstance(sub, list):
-                for s in sub:
-                    if isinstance(s, dict):
-                        parts.append(str(s.get("text", "")))
-            else:
-                parts.append(str(sub))
-    body = "\n".join(p for p in parts if p)
+    body, _ = view_body_with_map(msg)
     if known_names:
-        body = _mark_known_symbols(body, known_names)
+        body = mark_known(body, known_names)
     return f"[{mid}|{role}]\n{body}"
 
 
@@ -354,12 +287,14 @@ def build_extraction_prompt(
 ) -> str:
     """Build the extractor's input prompt from trajectory messages.
 
-    Known symbols from the registry are marked inline with ``[[name]]``
-    in the message text. No separate known_symbols section is needed.
+    Known symbols from the registry are marked inline with ``⟦known|name⟧``
+    in the message text. Serialization is untruncated here — the view
+    builder applies its own prompt-window truncation, identically on the
+    prompt side and the verification side.
     """
     serialized = [
         d for i, m in enumerate(messages, start=message_id_start)
-        if (d := _agentmsg_to_extraction_dict(m, i))
+        if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
     ]
     known_names = [str(e.get("name", "")) for e in registry] if registry else None
     formatted = "\n\n".join(
@@ -459,48 +394,6 @@ def _serialize_for_index(messages: list[AgentMessage]) -> list[dict[str, JsonVal
         d for i, m in enumerate(messages)
         if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
     ]
-
-
-def _populate_index(
-    index: TrajectoryIndex,
-    result: ExtractionResult,
-    steps: list[Step],
-    messages: list[dict[str, JsonValue]],
-) -> None:
-    # Steps are already added by the caller; delegate symbol + reference
-    # population to the public method on TrajectoryIndex.
-    # We pass steps_by_id so the index can resolve turn_id → Step.
-    # Note: populate_from_extraction handles add_step internally when
-    # called from eval; the atom pre-adds steps, so we call the lower-level
-    # upsert + reference path directly.
-    from .data import _build_references
-
-    steps_by_id = {s.step_id: s for s in steps}
-
-    for ext_sym in result.symbols:
-        index.upsert_symbol(
-            name=ext_sym.name,
-            kind=ext_sym.kind.lower(),
-            aliases=ext_sym.aliases,
-            entity_class=ext_sym.entity_class,
-        )
-
-    refs, _rels = _build_references(index.registry_snapshot(), messages)
-    for ref in refs:
-        sym = index.resolve_symbol_by_name(ref.symbol_name)
-        if not sym:
-            continue
-        step = steps_by_id.get(ref.turn_id)
-        if not step:
-            continue
-        index.add_reference(
-            symbol=sym,
-            step=step,
-            text=ref.text,
-            kind=ref.kind,
-            start=ref.start,
-            confidence=0.8,
-        )
 
 
 # ---------------------------------------------------------------------------

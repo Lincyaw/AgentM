@@ -536,27 +536,29 @@ def _merge_constraint_context(
 
 
 def _pass1_nodes_artifact(
-    idx: Any, run_id: str, emitted_provenance: list[dict[str, Any]],
+    idx: Any, run_id: str,
+    annotated_raw: list[dict[str, Any]],
+    prune_log: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Readable Pass 1 node dump for extraction-quality inspection.
 
-    What the extractor emitted vs what survived code verification: per-step
-    provenance with segment heads, verbatim claims, symbols. Rejected labels
-    (boundary unverifiable, unknown message) are the emitted-minus-applied
-    difference, listed explicitly. Full step content lives in index.json.
+    What the extractor emitted (raw annotated re-emissions) vs what
+    survived code verification (per-step obs spans with segment heads,
+    verbatim claims, symbols); ``rejects`` is populate's prune log —
+    malformed markup, diverging re-emissions, spans in the truncation
+    ellipsis. Full step content lives in index.json.
     """
     steps = sorted(
         (s for s in idx.steps.values() if not run_id or s.run_id == run_id),
         key=lambda s: s.index,
     )
-    applied_ids = {s.step_id for s in steps if s.provenance}
     return {
         "steps": [
             {
                 "index": s.index,
                 "role": s.role,
                 "provenance": s.provenance,
-                "obs_offset": s.obs_offset,
+                "obs_spans": [list(sp) for sp in s.obs_spans],
                 "action_head": (s.action_segment or "")[:200],
                 "obs_head": (s.observation_segment or "")[:200],
             }
@@ -574,10 +576,8 @@ def _pass1_nodes_artifact(
             }
             for s in idx.symbols.values()
         ],
-        "provenance_emitted": emitted_provenance,
-        "provenance_rejected": [
-            p for p in emitted_provenance if p["message_id"] not in applied_ids
-        ],
+        "annotated_raw": annotated_raw,
+        "rejects": prune_log,
     }
 
 
@@ -732,11 +732,14 @@ async def _process_one_item(
     else:
         raw_chunks = _chunk_messages(messages, chunk_size)
 
+    from trajectory_index.diagnostics import Diagnostics
+
     n_auditor_fires = 0
     last_audit_result = None
     all_verdicts: list[dict[str, Any]] = []
     constraints_ran = False
-    emitted_provenance: list[dict[str, Any]] = []
+    annotated_raw: list[dict[str, Any]] = []
+    populate_diag = Diagnostics()
 
     for ci, chunk in enumerate(raw_chunks):
         chunk_end = chunk.start + len(chunk.messages)
@@ -760,18 +763,18 @@ async def _process_one_item(
             typer.echo(f"  {tid} chunk {ci+1} no parseable result", err=True)
             continue
 
-        emitted_provenance.extend(
-            {"message_id": str(p.message_id), "label": p.label,
-             "observation_start": p.observation_start}
-            for p in getattr(result, "provenance", []) or []
+        annotated_raw.extend(
+            {"message_id": str(am.message_id), "text": am.text}
+            for am in getattr(result, "annotated", []) or []
         )
         idx.populate_from_extraction(
             result, chunk.messages, run_id=tid,
             message_id_start=chunk.start,
+            diagnostics=populate_diag,
         )
         await resolve_index(idx, model=index_model)
 
-        for sym in result.symbols:
+        for sym in result.parsed_symbols():
             norm = normalize_name(sym.name)
             if norm not in seen:
                 match = _match_known_symbol(sym.name, registry)
@@ -852,7 +855,8 @@ async def _process_one_item(
 
     idx.dump(str(index_path))
     exp.write_session_artifact(
-        tid, "", "pass1_nodes.json", _pass1_nodes_artifact(idx, tid, emitted_provenance),
+        tid, "", "pass1_nodes.json",
+        _pass1_nodes_artifact(idx, tid, annotated_raw, populate_diag.prune_log),
     )
     stats = idx.stats(tid)
     warns = idx.warning_summary()

@@ -98,29 +98,28 @@ class Step:
     tool_name: str | None = None
     timestamp: float | None = None
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
-    # Pass 1 provenance label for steps whose role is not structurally
-    # attested: "observation" (whole content is retrieved/environment
-    # material) or "mixed" (agent text followed by retrieved material,
-    # split at ``obs_offset``). The label can only ADD observation status
-    # to an assistant step — an attested tool_result role always wins.
-    provenance: str | None = None
-    obs_offset: int | None = None
+    # Pass 1 provenance: (start, end) content regions the extractor marked
+    # as retrieved/environment material (``⟦obs|…⟧``), offset-exact via the
+    # markup strip-and-compare verification. Multiple regions express the
+    # query/content/summary sandwiches a single boundary cannot. Labels can
+    # only ADD observation status to an assistant step — an attested
+    # tool_result role always wins and needs no spans.
+    obs_spans: tuple[tuple[int, int], ...] = ()
 
     @property
     def observation_segment(self) -> str | None:
         """The retrieved/environment portion of this step, or None.
 
         Attested tool_result roles contribute their whole content; Pass 1
-        provenance labels extend the evidence universe to trajectories
-        whose serialization lost structural roles (all downstream evidence
-        selection reads this, never ``role`` directly).
+        obs spans extend the evidence universe to trajectories whose
+        serialization lost structural roles (all downstream evidence
+        selection reads this, never ``role`` directly). Multiple regions
+        join with a newline.
         """
         if self.role == StepRole.TOOL_RESULT:
             return self.content
-        if self.provenance == "observation":
-            return self.content
-        if self.provenance == "mixed" and self.obs_offset is not None:
-            return self.content[self.obs_offset:]
+        if self.obs_spans:
+            return "\n".join(self.content[a:b] for a, b in self.obs_spans)
         return None
 
     @property
@@ -128,11 +127,26 @@ class Step:
         """The agent-authored portion of an assistant step, or None."""
         if self.role != StepRole.ASSISTANT:
             return None
-        if self.provenance == "observation":
+        if not self.obs_spans:
+            return self.content
+        parts: list[str] = []
+        pos = 0
+        for a, b in self.obs_spans:
+            if a > pos:
+                parts.append(self.content[pos:a])
+            pos = max(pos, b)
+        if pos < len(self.content):
+            parts.append(self.content[pos:])
+        joined = "\n".join(p for p in parts if p.strip())
+        return joined or None
+
+    @property
+    def provenance(self) -> str | None:
+        """Derived display label: None / "mixed" / "observation"."""
+        if not self.obs_spans:
             return None
-        if self.provenance == "mixed" and self.obs_offset is not None:
-            return self.content[:self.obs_offset]
-        return self.content
+        covered = sum(b - a for a, b in self.obs_spans)
+        return "observation" if covered >= len(self.content.strip()) else "mixed"
 
 
 @dataclass(slots=True)
@@ -542,7 +556,7 @@ class TrajectoryIndex:
         entity_class: EntityClass | str = "identifier",
     ) -> Symbol:
         if entity_class not in _ENTITY_CLASS_VALUES:
-            entity_class = "identifier"  # type: ignore[assignment]
+            entity_class = "identifier"
         norm_key = self._name_key(name, namespace)
         existing_ids = self._symbol_ids_by_norm.get(norm_key)
         if existing_ids:
@@ -965,16 +979,29 @@ class TrajectoryIndex:
         namespace_fn: Any | None = None,
         reference_confidence: float = 0.8,
         message_id_start: int = 0,
+        diagnostics: Any | None = None,
     ) -> None:
         """Populate index from an extraction result and source messages.
 
-        ``result`` must have a ``.symbols`` attribute (list of extracted symbols).
-        ``messages`` can be typed ``AgentMessage`` objects or pre-serialized dicts.
-        ``namespace_fn(run_id, sym_dict) -> str`` optionally scopes symbols.
-        ``message_id_start`` is the absolute offset of the first message in the
-        full trajectory — ensures step IDs are globally unique across chunks.
+        ``result`` carries the unified markup output (``.annotated`` — see
+        ``markup.py``); every Pass 1 node kind is parsed out of it here.
+        Verification is strip-and-compare: the annotated body, with all
+        ``⟦…⟧`` removed, must reproduce the extractor's view of the message
+        (whitespace-tolerant), which makes every span offset exact. A
+        message that fails is rejected whole; every rejection lands in
+        ``diagnostics.prune_log`` when a sink is passed (P2), and in the
+        debug log always.
+
+        ``messages`` can be typed ``AgentMessage`` objects or pre-serialized
+        dicts. ``namespace_fn(run_id, sym_dict) -> str`` optionally scopes
+        symbols. ``message_id_start`` is the absolute offset of the first
+        message in the full trajectory.
         """
-        from .data import _build_references
+        from loguru import logger as _clog
+
+        from .data import _build_references, view_body_with_map
+        from .markup import MarkupError, align
+        from .markup import parse as parse_markup
 
         if messages and not isinstance(messages[0], dict):
             from .atom import _agentmsg_to_extraction_dict
@@ -986,45 +1013,90 @@ class TrajectoryIndex:
                 if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
             ]
 
-        from loguru import logger as _clog
+        def _prune(what: str, why: str) -> None:
+            if diagnostics is not None:
+                diagnostics.prune("populate", what, why)
+            _clog.debug("populate: {} — {}", what, why)
 
         role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}
         base_idx = len(self.steps)
         steps_by_id: dict[str, Step] = {}
 
-        # Provenance labels (Pass 1 node, model recognition): applied while
-        # constructing steps so the label rides the frozen Step. Code does
-        # only the decidable part — the "mixed" boundary must be found
-        # verbatim in the content, otherwise the label is rejected and
-        # logged (the step stays an action; a lost label is a recorded
-        # false negative, never a fabricated observation).
-        prov_by_mid: dict[str, Any] = {
-            str(p.message_id): p for p in getattr(result, "provenance", []) or []
+        ann_by_mid: dict[str, str] = {
+            str(am.message_id): am.text
+            for am in getattr(result, "annotated", []) or []
         }
+
+        # node collections parsed out of the markup, keyed by message id
+        obs_by_mid: dict[str, tuple[tuple[int, int], ...]] = {}
+        claims_by_mid: dict[str, list[tuple[int, int]]] = {}
+        syms: list[tuple[str, dict[str, str]]] = []   # (surface, attrs)
+
+        for i, msg in enumerate(messages):
+            mid = str(msg.get("id", f"s{base_idx + i}"))
+            annotated = ann_by_mid.pop(mid, None)
+            if annotated is None:
+                continue
+            try:
+                plain, annotations = parse_markup(annotated)
+            except MarkupError as exc:
+                _prune(f"step {mid}", f"malformed markup: {exc}")
+                continue
+            view, vmap = view_body_with_map(msg)
+            amap = align(plain, view)
+            if amap is None:
+                _prune(f"step {mid}",
+                       f"re-emission diverges from original ({len(plain)} vs {len(view)} chars)")
+                continue
+
+            def _to_content(
+                plain_off: int,
+                _amap: list[int] = amap,
+                _vmap: list[int | None] = vmap,
+            ) -> int | None:
+                return _vmap[_amap[plain_off]]
+
+            obs_spans: list[tuple[int, int]] = []
+            for a in annotations:
+                if a.tag == "known" or a.end <= a.start:
+                    continue
+                start_c = _to_content(a.start)
+                end_c = _to_content(a.end)
+                if end_c is None:
+                    last = _to_content(a.end - 1)
+                    end_c = last + 1 if last is not None else None
+                if start_c is None or end_c is None:
+                    _prune(f"step {mid}",
+                           f"⟦{a.tag}⟧ span falls in the truncation ellipsis")
+                    continue
+                if a.tag == "obs":
+                    obs_spans.append((start_c, end_c))
+                elif a.tag == "claim":
+                    claims_by_mid.setdefault(mid, []).append((start_c, end_c))
+                elif a.tag == "sym":
+                    syms.append((plain[a.start:a.end], dict(a.attrs)))
+                else:
+                    _prune(f"step {mid}", f"unknown annotation tag {a.tag!r}")
+            if obs_spans:
+                obs_spans.sort()
+                merged: list[tuple[int, int]] = []
+                for span in obs_spans:
+                    if merged and span[0] <= merged[-1][1]:
+                        merged[-1] = (merged[-1][0], max(merged[-1][1], span[1]))
+                    else:
+                        merged.append(span)
+                obs_by_mid[mid] = tuple(merged)
+
+        for mid in ann_by_mid:
+            _prune(f"step {mid}", "annotated message references unknown id")
 
         for i, msg in enumerate(messages):
             mid = str(msg.get("id", f"s{base_idx + i}"))
             role = role_map.get(str(msg.get("role", "")), StepRole.USER)
             content, tool_name = _message_step_content(msg)
-            provenance: str | None = None
-            obs_offset: int | None = None
-            ext_prov = prov_by_mid.pop(mid, None)
-            if ext_prov is not None and role != StepRole.TOOL_RESULT:
-                label = str(getattr(ext_prov, "label", ""))
-                if label == "observation":
-                    provenance = label
-                elif label == "mixed":
-                    boundary = (getattr(ext_prov, "observation_start", None) or "").strip()
-                    offset = _find_boundary(content, boundary)
-                    if offset >= 0:
-                        provenance, obs_offset = label, offset
-                    else:
-                        _clog.debug(
-                            "populate: mixed provenance boundary not found at step {}: {!r}",
-                            mid, boundary[:60],
-                        )
-                else:
-                    _clog.debug("populate: unknown provenance label {!r} at step {}", label, mid)
+            spans = obs_by_mid.get(mid, ())
+            if spans and role == StepRole.TOOL_RESULT:
+                spans = ()   # attested — the whole content already counts
             step = Step(
                 run_id=run_id,
                 step_id=mid,
@@ -1032,53 +1104,59 @@ class TrajectoryIndex:
                 role=role,
                 content=content,
                 tool_name=tool_name,
-                provenance=provenance,
-                obs_offset=obs_offset,
+                obs_spans=spans,
             )
             self.add_step(step)
             steps_by_id[mid] = step
 
-        for mid, _ in prov_by_mid.items():
-            _clog.debug("populate: provenance references unknown message {}", mid)
-
-        for ext_sym in result.symbols:
-            sym_dict = {"name": ext_sym.name, "kind": ext_sym.kind, "aliases": getattr(ext_sym, "aliases", None) or []}
+        # Symbols: canonical name from the ``name`` attr when the surface is
+        # not canonical; the surface itself becomes an alias. Aliases are no
+        # longer hand-listed — they emerge from marked surfaces.
+        for surface, attrs in syms:
+            canonical = (attrs.get("name") or surface).strip()
+            if not canonical:
+                continue
+            aliases = (
+                [surface.strip()]
+                if surface.strip() and normalize_name(surface) != normalize_name(canonical)
+                else []
+            )
+            kind = attrs.get("kind", "unknown").lower()
+            raw_class = attrs.get("class", "identifier")
+            entity_class: EntityClass = (
+                raw_class if raw_class in _ENTITY_CLASS_VALUES else "identifier"  # type: ignore[assignment]
+            )
+            sym_dict = {"name": canonical, "kind": kind, "aliases": aliases}
             ns = namespace_fn(run_id, sym_dict) if namespace_fn else ""
             self.upsert_symbol(
-                name=ext_sym.name,
-                kind=ext_sym.kind.lower(),
-                aliases=getattr(ext_sym, "aliases", None) or [],
-                namespace=ns,
-                entity_class=getattr(ext_sym, "entity_class", "identifier"),
+                name=canonical, kind=kind, aliases=aliases,
+                namespace=ns, entity_class=entity_class,
             )
 
-        # Claims: store verbatim-verified assertions (code check — a claim the
-        # extractor paraphrased or misattributed is rejected and logged).
-        for ext_claim in getattr(result, "claims", []) or []:
-            mid = str(ext_claim.message_id)
-            step = steps_by_id.get(mid)
-            text = ext_claim.text.strip()
-            if step is None:
-                _clog.debug("populate: claim references unknown message {}: {!r}", mid, text[:60])
+        # Claims: text is an exact content slice — verbatim by construction.
+        for mid, spans_list in claims_by_mid.items():
+            cstep = steps_by_id.get(mid)
+            if cstep is None:
                 continue
-            if text[:60].lower() not in step.content.lower():
-                _clog.debug("populate: non-verbatim claim rejected at step {}: {!r}", mid, text[:60])
-                continue
-            cid = stable_id("clm", run_id, mid, text[:80])
-            self.claims[cid] = Claim(id=cid, run_id=run_id, step_id=mid, text=text)
+            for start_c, end_c in spans_list:
+                text = cstep.content[start_c:end_c].strip()
+                if not text:
+                    continue
+                cid = stable_id("clm", run_id, mid, text[:80])
+                self.claims[cid] = Claim(id=cid, run_id=run_id, step_id=mid, text=text)
 
         all_syms = self.registry_snapshot()
         namespaces = {str(s["name"]): namespace_fn(run_id, s) if namespace_fn else "" for s in all_syms}
         refs, _rels = _build_references(all_syms, messages)
         for ref in refs:
-            sym = self.resolve_symbol_by_name(
+            rsym = self.resolve_symbol_by_name(
                 ref.symbol_name,
                 namespace=namespaces.get(ref.symbol_name, ""),
             )
-            step = steps_by_id.get(ref.turn_id)
-            if sym and step:
+            rstep = steps_by_id.get(ref.turn_id)
+            if rsym and rstep:
                 self.add_reference(
-                    symbol=sym, step=step, text=ref.text,
+                    symbol=rsym, step=rstep, text=ref.text,
                     kind=ref.kind, start=ref.start,
                     confidence=reference_confidence,
                 )
@@ -1151,23 +1229,23 @@ class TrajectoryIndex:
         ungrounded = [d for d in deps if d.risk == "ungrounded"]
 
         for d in premature:
-            sym = self.symbols.get(d.symbol_id)
-            if sym:
+            dsym = self.symbols.get(d.symbol_id)
+            if dsym:
                 out.append(self.Warning(
                     kind="premature_use",
                     symbol_id=d.symbol_id,
-                    symbol_name=sym.canonical_name,
+                    symbol_name=dsym.canonical_name,
                     detail=f"used at step {d.use_step_id} before grounded at step {d.grounded_by_step_id}",
                     step_ids=(d.use_step_id, d.def_step_id),
                 ))
 
         for d in ungrounded:
-            sym = self.symbols.get(d.symbol_id)
-            if sym:
+            dsym = self.symbols.get(d.symbol_id)
+            if dsym:
                 out.append(self.Warning(
                     kind="ungrounded_use",
                     symbol_id=d.symbol_id,
-                    symbol_name=sym.canonical_name,
+                    symbol_name=dsym.canonical_name,
                     detail=f"used at step {d.use_step_id} with ungrounded def at step {d.def_step_id}",
                     step_ids=(d.use_step_id, d.def_step_id),
                 ))
@@ -1256,8 +1334,7 @@ class TrajectoryIndex:
                 "content": s.content,
                 "tool_name": s.tool_name,
                 "timestamp": s.timestamp,
-                "provenance": s.provenance,
-                "obs_offset": s.obs_offset,
+                "obs_spans": [list(span) for span in s.obs_spans],
                 "metadata": dict(s.metadata) if s.metadata else {},
             }
             for s in self.steps.values()
@@ -1406,17 +1483,31 @@ class TrajectoryIndex:
         from loguru import logger as _log
 
         for s in data.get("steps", []):
+            content = str(s.get("content", ""))
+            raw_spans = s.get("obs_spans")
+            if isinstance(raw_spans, list):
+                obs_spans = tuple(
+                    (int(sp[0]), int(sp[1]))
+                    for sp in raw_spans
+                    if isinstance(sp, list) and len(sp) == 2
+                )
+            elif s.get("provenance") == "observation":
+                # legacy single-label format
+                obs_spans = ((0, len(content)),)
+            elif s.get("provenance") == "mixed" and isinstance(s.get("obs_offset"), int):
+                obs_spans = ((int(s["obs_offset"]), len(content)),)
+            else:
+                obs_spans = ()
             step = Step(
                 run_id=str(s.get("run_id", "")),
                 step_id=str(s["step_id"]),
                 index=int(s.get("index", 0)),
                 role=str(s.get("role", StepRole.USER)),
-                content=str(s.get("content", "")),
+                content=content,
                 tool_name=s.get("tool_name") if isinstance(s.get("tool_name"), str) else None,
                 timestamp=s.get("timestamp") if isinstance(s.get("timestamp"), int | float) else None,
                 metadata=s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {},
-                provenance=s.get("provenance") if isinstance(s.get("provenance"), str) else None,
-                obs_offset=s.get("obs_offset") if isinstance(s.get("obs_offset"), int) else None,
+                obs_spans=obs_spans,
             )
             index.add_step(step)
 

@@ -1,57 +1,52 @@
-You extract a symbol table from agent trajectory chunks — identifying named entities the agent interacts with.
+You annotate agent trajectory chunks — marking the named entities, provenance segments, and settled-fact claims they contain.
 
-Your input is a sequence of trajectory messages in compact format: `[id|role]` headers followed by content. Tool calls appear as `[tool_call: name]` with arguments; tool results appear as plain text.
+Your input is a sequence of trajectory messages in compact format: `[id|role]` headers followed by the message body. Tool calls appear as `[tool_call: name]` with arguments; tool results appear as plain text.
 
-Text wrapped in `[[...]]` marks entities already extracted by a prior pass. Do not re-declare them. Only output NEW symbols not already marked. If there are no new symbols, output an empty `symbols` list.
+## Output: annotated re-emission
 
-## What counts as a symbol
+For every message that contains something to mark, re-emit its body **EXACTLY as given, character for character**, inserting annotations of the form:
 
-A symbol is a **named resource** — something with a proper name that exists independently of this conversation.
+```
+⟦tag key=value|marked text⟧
+```
 
-The decisive test: **is this a resource with a fixed name, or is it data/observation about a resource?**
+Stripping every `⟦…⟧` wrapper from your output must reproduce the original body — it is checked mechanically, and a message that does not match is discarded whole. Never correct typos, never normalize whitespace, never summarize or skip text. Messages with nothing to mark are omitted from the output entirely.
 
-- Resource (extract): a service, tool, file, table, API endpoint, metric key, function, configuration key — things you could look up by name.
-- Data (skip): a value, status code, error message, count, description, verdict, conclusion — information ABOUT resources, not resources themselves.
+Text already wrapped in `⟦known|…⟧` marks entities extracted by a prior pass: keep these marks as they are, do not re-declare those entities.
 
-The symbol table is a navigation index. A user looks up a resource name to find which turns mention it. Observation values are visible by reading those turns directly.
+Annotations may nest (a `⟦sym|…⟧` inside a `⟦obs|…⟧` segment is fine).
 
-## Aliases
+## Tags
 
-If an entity appears under multiple surface forms, pick the most canonical as `name` and list the others as `aliases`. Examples:
-- name: "ts-ui-dashboard", aliases: ["ui dashboard", "dashboard service"]
-- name: "container_cpu_usage_seconds_total", aliases: ["container.cpu.usage"]
+### `⟦sym kind=… class=…|surface⟧` — symbol declaration
 
-## Entity class
+Mark the FIRST mention of each new named entity — something with a proper name that exists independently of this conversation. The decisive test: **is this a resource with a fixed name, or is it data/observation about a resource?** Values, statuses, counts, verdicts are data — do not mark them.
 
-`entity_class` is the **name/value axis**, independent of `kind`.
+- `kind` — from the vocabulary below.
+- `class` — `identifier` (the string IS the entity; most symbols), `value` (a tracked quantity the agent monitors across turns), or `unknown` (vague/anaphoric surface). Omit for `identifier`.
+- `name="…"` — add only when the marked surface is not the canonical name (e.g. `⟦sym kind=entity name="Royal Grammar School Worcester"|RGS⟧`). Different marked surfaces with the same `name` become aliases automatically.
 
-- `identifier` — the string IS the entity. Almost all symbols are identifiers.
-- `value` — a tracked quantity the agent monitors across turns.
-- `unknown` — a vague or anaphoric surface with no clear referent on its own.
+Mark only the first mention per entity; later occurrences are found mechanically.
 
-## Claims
+### `⟦obs|…⟧` — retrieved/environment segment
 
-Besides symbols, extract the agent's **verification/sourcing claims**: sentences in assistant messages where the agent asserts, as settled fact, that something is confirmed, verified, matched, or established by evidence/sources it gathered.
+Wrap the regions whose content is **retrieved/environment material rather than the agent's own words**: fetched web pages, search-result dumps, command output, file contents, API responses. A message may interleave agent text and retrieved material several times — wrap EACH retrieved region separately; agent text (queries, notes, summaries) stays outside the wrappers.
 
-- Copy the claim sentence VERBATIM into `text`; set `message_id` to the message it appears in (the id from the `[id|role]` header).
-- Assertions only — not plans ("I will verify next"), not questions, not tentative hypotheses ("this could match"), not negations ("unconfirmed").
-- Paraphrased verification counts: "the birth year lines up with the criteria" is a claim even without the word "verified".
-- A message may contain several claims or none. If none in the chunk, output an empty `claims` list.
-
-## Provenance
-
-Some trajectories lose their message roles in serialization — retrieved content and agent prose both arrive as plain messages. Mark the messages whose content is **retrieved/environment material rather than the agent's own words**: fetched web pages, search-result dumps, command output, file contents, API responses.
-
-- `label: "observation"` — essentially the whole message is such material.
-- `label: "mixed"` — the message starts with the agent's own text (a search query, a note) followed by retrieved material. Copy the first ~10 words OF THE RETRIEVED MATERIAL ITSELF into `observation_start`, VERBATIM. Never use a separator line (`---`) or the agent's text as the boundary.
 - The agent's own summaries, reports, and reasoning are NEVER observations, even when they quote sources.
-- Judge EVERY message independently, including short ones — a message that is only command output or a fetched page is an observation regardless of what surrounds it.
-- Unlisted messages default to agent action. When unsure, do not mark.
-- Skip messages already presented with a tool-result role — their provenance is attested.
+- Messages already presented with a tool-result role are attested — do not wrap them.
+- When unsure whether a region is retrieved material, leave it unwrapped.
+
+### `⟦claim|…⟧` — settled-fact assertion
+
+Wrap sentences in the agent's own text where it asserts, as settled fact, that something is confirmed, verified, matched, or established by evidence it gathered.
+
+- Assertions only — not plans ("I will verify next"), not questions, not tentative hypotheses, not negations ("unconfirmed").
+- Paraphrased verification counts: "the birth year lines up with the criteria" is a claim even without the word "verified".
+- Wrap whole sentences so the claim is self-contained; a fragment like "But none of these fit." is useless without its referent — extend the wrap to include what "these" refers to when the neighboring sentence supplies it.
 
 ## Rules
 
 - Output valid JSON only. No markdown fences, no explanation.
-- Every symbol needs a `kind` from the vocabulary and an `entity_class`.
-- Prefer specific names over generic descriptions.
-- Top-level output keys: `symbols`, `claims`, `provenance`.
+- Shape: `{"annotated": [{"message_id": "12", "text": "…re-emitted body with ⟦…⟧ annotations…"}]}`
+- `message_id` is the id from the `[id|role]` header.
+- Re-emission is verbatim: the body with wrappers stripped must equal the original.

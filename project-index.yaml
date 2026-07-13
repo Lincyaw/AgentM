@@ -1393,14 +1393,17 @@ requirements:
       Step.action_segment are the accessors every evidence-consuming pass
       reads (constraints grounded universe, source-claim windows); the
       TELBench adapter keyword classifier was deleted in favor of this.
-      Validated on incremental 2-4-message chunks: model labels are a strict
-      superset of the keyword classifier on 9/10 sample cases and recover
-      zero-observation trajectories (56% of the hard-232 set) to 20-40-step
-      evidence universes.
+      Nodes are emitted in the unified annotation markup (markup.py):
+      the extractor re-emits annotated message bodies verbatim with
+      "[[tag attrs|content]]"-style spans (U+27E6/7 delimiters); code
+      verifies by strip-and-compare, making span offsets exact and
+      multi-segment provenance (obs_spans) expressible. Validated on
+      incremental 2-4-message chunks.
     priority: P2
     status: implemented
     confidence: confirmed
     code:
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/markup.py
       - path: contrib/extensions/trajectory_index/src/trajectory_index/agents/entity_extractor/schema.py
       - path: contrib/extensions/trajectory_index/src/trajectory_index/agents/entity_extractor/prompts/default.md
       - path: contrib/extensions/trajectory_index/src/trajectory_index/index.py
@@ -1631,6 +1634,7 @@ requirements:
       - path: contrib/scenarios/sandbox/manifest.yaml
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/bench.py
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/runner.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/__init__.py
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/terminal_bench.py
     tests:
       - path: tests/integration/test_agent_env_real_session.py

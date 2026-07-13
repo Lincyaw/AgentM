@@ -33,7 +33,8 @@ from typing import Any
 from loguru import logger
 
 from .adjudicate import SessionFactory, _ask_model, _index_by_id, _safe_float
-from .constraints import Diagnostics, _content_tokens
+from .diagnostics import Diagnostics
+from .diagnostics import content_tokens as _content_tokens
 from .index import Step, TrajectoryIndex
 
 _MAX_CLAIMS_PER_STEP = 3      # claims per step accepted from the extractor (logged)

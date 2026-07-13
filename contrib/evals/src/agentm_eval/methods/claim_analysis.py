@@ -10,7 +10,6 @@ Pipeline: Index (lexical) → Claim Analysis (semantic) → Auditor (localizatio
 from __future__ import annotations
 
 import contextlib
-import json
 from dataclasses import dataclass
 from typing import Any
 
