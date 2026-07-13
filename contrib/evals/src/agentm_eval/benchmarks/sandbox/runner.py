@@ -392,6 +392,11 @@ def _run_and_eval_one_inner(
     except Exception as e:
         client.close()
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": f"list sessions: {e}"}
+    # The gateway also lists deleted sessions (e.g. left over from an earlier
+    # run that reused this experiment id); attaching to one 410s at eval time.
+    agent_arl_sessions = [
+        s for s in agent_arl_sessions if getattr(s, "deleted_at", None) is None
+    ]
     if not agent_arl_sessions:
         client.close()
         state_file.unlink(missing_ok=True)

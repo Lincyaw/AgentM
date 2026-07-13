@@ -105,7 +105,7 @@ requires-dist = [
     { name = "agentm-mcp-bridge", marker = "extra == 'all-contrib'", editable = "contrib/extensions/mcp_bridge" },
     { name = "agentm-mcp-bridge", marker = "extra == 'mcp'", editable = "contrib/extensions/mcp_bridge" },
     { name = "anthropic", specifier = ">=0.86.0" },
-    { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.19.8" },
+    { name = "arl-env", marker = "extra == 'agent-env'", editable = "../agent-env/sdk/python/arl" },
     { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
     { name = "fpg", marker = "extra == 'eval'", git = "https://github.com/Lincyaw/fpg-convention" },
     { name = "gymnasium", marker = "extra == 'eval'", specifier = ">=1.0.0" },
@@ -215,7 +215,7 @@ requires-dist = [
     { name = "agentm-eval", extras = ["sandbox"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["tau2"], marker = "extra == 'all'", editable = "contrib/evals" },
     { name = "agentm-eval", extras = ["telbench"], marker = "extra == 'all'", editable = "contrib/evals" },
-    { name = "arl-env", marker = "extra == 'sandbox'", specifier = ">=0.19.8" },
+    { name = "arl-env", marker = "extra == 'sandbox'", editable = "../agent-env/sdk/python/arl" },
     { name = "deepdiff", marker = "extra == 'tau2'", specifier = ">=8.4.2" },
     { name = "docstring-parser", marker = "extra == 'tau2'", specifier = ">=0.16" },
     { name = "duckdb", marker = "extra == 'rca'", specifier = ">=1.4.4" },
@@ -543,17 +543,30 @@ wheels = [
 
 [[package]]
 name = "arl-env"
-version = "0.19.8"
-source = { registry = "https://pypi.org/simple" }
+version = "0.19.9"
+source = { editable = "../agent-env/sdk/python/arl" }
 dependencies = [
     { name = "httpx" },
+    { name = "protobuf" },
     { name = "pydantic" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/57/7e14577a75793d45e5a741bdcf8681b12d2a456f939b690094bc7ffb4e8e/arl_env-0.19.8.tar.gz", hash = "sha256:cdd875464502264bb86174dbbe6d0295014ad2d041f83006a10565b72defd11f", size = 43199, upload-time = "2026-07-07T07:43:13.531Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/3a/2ff2ca95a40f580201a0ac03cb3e68a610f532729bc2576bef5d754ce0cb/arl_env-0.19.8-py3-none-any.whl", hash = "sha256:102701139de625d31d03f527acd6f8c7ac7404f47e522ae661189ece511936e2", size = 39430, upload-time = "2026-07-07T07:43:12.501Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "iroh", marker = "extra == 'direct'", specifier = ">=1.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0" },
+    { name = "protobuf", specifier = ">=7.35.1" },
+    { name = "pydantic", specifier = ">=2" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.2.1" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=2.8.1" },
+    { name = "rich", specifier = ">=13.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
+    { name = "websockets", marker = "extra == 'shell'", specifier = ">=12.0" },
 ]
+provides-extras = ["shell", "direct", "dev"]
 
 [[package]]
 name = "ast-serialize"

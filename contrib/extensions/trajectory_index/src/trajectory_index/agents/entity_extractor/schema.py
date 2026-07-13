@@ -1,4 +1,16 @@
-"""Extraction result schema."""
+"""Extraction result schema.
+
+Pass 1 output is the unified annotation markup (see ``markup.py``): the
+extractor re-emits each annotated message body verbatim with
+``⟦tag attrs|content⟧`` spans inserted. One output channel carries every
+node kind — symbols (``sym``), provenance segments (``obs``), claims
+(``claim``) — and code verifies the whole message by strip-and-compare,
+which makes every span offset exact. Messages without annotations are
+omitted (nothing to re-emit).
+
+``ExtractedSymbol`` remains as the shape of code-side structural prescan
+symbols and of symbols parsed back out of the markup.
+"""
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -20,53 +32,22 @@ class ExtractedSymbol(BaseModel):
     )
 
 
-class ExtractedClaim(BaseModel):
-    """A settled-fact assertion by the agent, extracted verbatim.
+class AnnotatedMessage(BaseModel):
+    """One message body re-emitted verbatim with annotations inserted."""
 
-    Claims are first-class extraction output alongside symbols: the
-    trajectory is visited once and every downstream pass (source-claim
-    consistency, constraint linkage, commitment detection) consumes the
-    same extracted claims instead of re-scanning the trajectory.
-    """
-
-    message_id: str = Field(description="Message id the claim sentence appears in")
-    text: str = Field(description="The claim sentence, copied verbatim")
-
-
-class ExtractedProvenance(BaseModel):
-    """Provenance label for a message whose serialization lost structural roles.
-
-    Only messages carrying retrieved/environment material are listed;
-    unlisted messages default to agent action. The "mixed" boundary is
-    copied verbatim so code can locate it deterministically — a boundary
-    not found in the message rejects the label (logged), it is never
-    guessed.
-    """
-
-    message_id: str = Field(description="Message id the label applies to")
-    label: str = Field(
+    message_id: str = Field(description="Message id from the [id|role] header")
+    text: str = Field(
         description=(
-            "'observation': essentially the whole message is retrieved/"
-            "environment material. 'mixed': agent text followed by "
-            "retrieved material."
-        ),
-    )
-    observation_start: str | None = Field(
-        default=None,
-        description=(
-            "mixed only: the exact first line of where retrieved material "
-            "begins, copied verbatim"
+            "The message body, copied EXACTLY as given, with "
+            "⟦tag attrs|content⟧ annotations inserted. Stripping the "
+            "annotations must reproduce the original body character for "
+            "character."
         ),
     )
 
 
 class ExtractionResult(BaseModel):
-    symbols: list[ExtractedSymbol] = Field(description="All extracted symbols")
-    claims: list[ExtractedClaim] = Field(
+    annotated: list[AnnotatedMessage] = Field(
         default_factory=list,
-        description="Verification/sourcing assertions the agent presents as settled",
-    )
-    provenance: list[ExtractedProvenance] = Field(
-        default_factory=list,
-        description="Messages that carry retrieved/environment material",
+        description="Messages that carry at least one annotation",
     )

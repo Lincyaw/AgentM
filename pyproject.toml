@@ -102,6 +102,7 @@ members = [
 # a published wheel takes over transparently outside the workspace.
 [tool.uv.sources]
 fpg = { git = "https://github.com/Lincyaw/fpg-convention" }
+arl-env = { path = "../agent-env/sdk/python/arl", editable = true }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
 agentm-harbor = { workspace = true }

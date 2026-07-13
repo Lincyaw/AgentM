@@ -191,6 +191,11 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
         image=sandbox_image,
         profile=cfg.profile,
         idle_timeout_seconds=max(task.timeout_s + 3600, 7200),
+        # Large private-container data images (e.g. idp_ensemble_scoring ships
+        # a 12 GB input layer) can take minutes to pull before the pod is
+        # ready; give allocation a generous window so the claim isn't reaped
+        # as "not ready" mid-pull.
+        allocation_timeout_seconds=2400,
         private_containers=private_containers,
     )
     await asyncio.to_thread(sandbox.create_sandbox)

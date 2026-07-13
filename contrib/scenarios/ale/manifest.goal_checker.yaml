@@ -1,0 +1,19 @@
+name: ale:goal_checker
+description: |
+  ALE goal-completion checker. Runs in the agent's attached sandbox; inspects
+  the produced deliverables in /workspace against the derived conditions and
+  the task's output contract, then submits a verdict. Checker role prompt +
+  submit_verdict tool are injected by the goal atom.
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      work_dir: /workspace
+  - module: agentm.extensions.builtin.tool_result_cap
+    config: {max_tokens: 50000, preview_tokens: 50000}
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+    config: {default_timeout: 600}
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.turn_reminder
+    config: {finalize_tool: submit_verdict, warn_within: 3}

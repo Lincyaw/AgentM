@@ -1,0 +1,17 @@
+name: ale:goal_deriver
+description: |
+  ALE goal-condition deriver. Runs in the SAME attached sandbox as the agent
+  (goal atom injects attach_session); explores /workspace + the task's stated
+  output contract to derive checkable completion conditions. The deriver role
+  prompt + the task are injected by the goal atom.
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      work_dir: /workspace
+  - module: agentm.extensions.builtin.tool_result_cap
+    config: {max_tokens: 50000, preview_tokens: 50000}
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+    config: {default_timeout: 600}
+  - module: agentm.extensions.builtin.observability

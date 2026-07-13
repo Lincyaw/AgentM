@@ -1,0 +1,61 @@
+name: ale:full
+description: |
+  Agents' Last Exam tasks via ARL sandbox — FULL toolset. Same attached-
+  sandbox flow as ale:arl (the harness pre-creates the sandbox, stages the
+  task data, and passes attach_session), but the agent is given the richer
+  AgentM capabilities the minimal ale:arl omitted: task tracking (planning),
+  persistent memory, sub-agent delegation, and a tool index. This closes the
+  scaffold gap against purpose-built CLI agents (e.g. hermes) that ship todo/
+  memory/delegation by default.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      attach_session: ${AGENTM_AGENT_ENV_ATTACH_SESSION}
+      work_dir: /workspace
+      delete_on_shutdown: false
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
+  - module: agentm.extensions.builtin.file_tools
+    config:
+      verify_readback: true
+  - module: agentm.extensions.builtin.tool_bash
+    config:
+      default_timeout: 1200
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.tool_index
+  - module: agentm.extensions.builtin.task_tracking
+  - module: agentm.extensions.builtin.memory
+    config:
+      path: /workspace/.agentm/memory
+      index_in_system_prompt: true
+  - module: agentm.extensions.builtin.sub_agent
+    config:
+      max_workers: 4
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      # Neutral, benchmark-aligned framing: state only the true operating
+      # context and let the task's own instruction drive. No task-solving
+      # methodology is injected (the ALE/hermes harness does not add one).
+      prompt: |
+        You are an autonomous agent completing a task inside a Linux
+        sandbox. Follow the task statement exactly, including the absolute
+        input/software/output paths it specifies. The sandbox has no GUI but
+        DOES have network access to a package mirror, so you may install any
+        packages you need (`uv pip install <pkg>` / `pip install <pkg>`);
+        common scientific Python libraries are already installed. Commands
+        can be slow — use generous timeouts rather than shell-level timeout
+        wrappers.
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120

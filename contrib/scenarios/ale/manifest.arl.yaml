@@ -32,11 +32,18 @@ extensions:
         input, software, and output directories — follow them exactly.
         Do not modify anything under the task's input/ directory; write
         final deliverables only into the task's output/ directory. The
-        sandbox has no GUI and no internet access: rely only on staged
-        files and the provided software wrappers. Long commands can be
-        slow — use generous timeouts rather than shell-level timeout
-        wrappers. Finish by verifying your outputs against the task's
-        stated output contract.
+        sandbox has no GUI. Common scientific Python libraries (numpy,
+        scipy, pandas, matplotlib, scikit-learn, biopython, networkx,
+        sympy, statsmodels, h5py, pyyaml, Pillow) are preinstalled in the
+        default `python3`; if a task ships its own runtime_env/.venv or a
+        software wrapper, prefer that. You DO have network access to a
+        package mirror: if you need another library, install it with
+        `uv pip install <pkg>` or `pip install <pkg>` rather than
+        re-implementing it by hand — do not hand-roll numerical routines
+        (RMSD, FFT, regression, etc.) when a library provides them. Long
+        commands can be slow — use generous timeouts rather than
+        shell-level timeout wrappers. Finish by verifying your outputs
+        against the task's stated output contract.
   - module: agentm.extensions.builtin.llm_compaction
     config:
       tool_result_max_tokens: 8000

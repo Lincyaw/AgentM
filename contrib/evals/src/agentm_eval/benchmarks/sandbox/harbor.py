@@ -210,3 +210,30 @@ class HarborAdapter:
         if avg_rewards:
             lines.append(f"  Avg reward:     {sum(avg_rewards) / len(avg_rewards):.3f}")
         return "\n".join(lines)
+
+
+class LhtbAdapter(HarborAdapter):
+    """LHTB (Long-Horizon Terminal-Bench, github.com/zli12321/LHTB).
+
+    Standard Harbor task layout with two bench-specific conventions:
+    solved means reward >= 0.95 (not 1.0), and each task.toml declares a
+    ``[verifier] timeout_sec`` that can exceed the CLI default (some
+    verifiers replay hundreds of authenticated moves). Point ``--repo``
+    at the checkout's ``tasks/`` directory and run with
+    ``--source-images`` — all 46 tasks ship prebuilt docker.io images.
+    """
+
+    SOLVED_THRESHOLD = 0.95
+
+    def evaluate(
+        self, session: object, task: TaskSpec, *, timeout: int = 300
+    ) -> dict:
+        verifier = task.extra.get("verifier", {})
+        task_timeout = verifier.get("timeout_sec") if isinstance(verifier, dict) else None
+        if isinstance(task_timeout, (int, float)) and task_timeout > timeout:
+            timeout = int(task_timeout)
+        return super().evaluate(session, task, timeout=timeout)
+
+    def is_pass(self, result: dict) -> bool:
+        reward = result.get("reward")
+        return isinstance(reward, (int, float)) and reward >= self.SOLVED_THRESHOLD

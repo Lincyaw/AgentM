@@ -58,6 +58,75 @@ def _truncate_block(block: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return out
 
 
+def view_body_with_map(msg: dict[str, JsonValue]) -> tuple[str, list[int | None]]:
+    """The extractor's view of a message body + a view→content offset map.
+
+    Takes the UNTRUNCATED serialized message dict. The view is what the
+    extraction prompt shows (long text blocks prefix-truncated with a
+    trailing ellipsis); the map gives, for each view offset (plus one
+    end-of-string entry), the corresponding offset into the step content
+    built by ``index._message_step_content`` — or None for synthesized
+    characters (the truncation ellipsis). The two builders must stay in
+    lockstep: both walk blocks in order, format tool calls as
+    ``[tool_call: name]\\narg-json``, flatten tool_result sub-blocks, and
+    join non-empty parts with a newline.
+    """
+    import json as _json
+
+    pairs: list[tuple[str, str]] = []   # (content_part, view_part)
+    blocks = msg.get("content", [])
+    if isinstance(blocks, list):
+        def _text_pair(text: str) -> tuple[str, str]:
+            if len(text) > _MAX_TEXT_CHARS:
+                return text, text[:_MAX_TEXT_CHARS] + "..."
+            return text, text
+
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            if btype == "text":
+                pairs.append(_text_pair(str(block.get("text", ""))))
+            elif btype == "tool_call":
+                name = block.get("name")
+                args = block.get("arguments", block.get("input", {}))
+                arg_text = (
+                    _json.dumps(args, ensure_ascii=False)
+                    if isinstance(args, dict) else str(args)
+                )
+                part = f"[tool_call: {name}]\n{arg_text}"
+                pairs.append((part, part))
+            elif btype == "tool_result":
+                sub = block.get("content", [])
+                if isinstance(sub, list):
+                    pairs.extend(
+                        _text_pair(str(s.get("text", "")))
+                        for s in sub if isinstance(s, dict)
+                    )
+                else:
+                    pairs.append(_text_pair(str(sub)))
+
+    view_parts: list[str] = []
+    mapping: list[int | None] = []
+    content_off = 0
+    first = True
+    for content_part, view_part in pairs:
+        if not content_part:
+            continue
+        if not first:
+            view_parts.append("\n")
+            mapping.append(content_off)   # the join newline
+            content_off += 1
+        first = False
+        keep = len(view_part) if view_part == content_part else len(view_part) - 3
+        for k in range(len(view_part)):
+            mapping.append(content_off + k if k < keep else None)
+        view_parts.append(view_part)
+        content_off += len(content_part)
+    mapping.append(content_off)          # end-of-string
+    return "".join(view_parts), mapping
+
+
 def clean_trace_messages(entries: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
     """Clean trace entries to extraction input: keep id, role, content blocks.
 
@@ -157,20 +226,39 @@ def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[
 
 
 def _validate_vocabulary(result: ExtractionResult, vocabulary: str = "default") -> str | None:
-    """Check extraction result symbol kinds and entity_class against vocabulary."""
+    """Validate annotated-message markup: well-formedness + sym attributes.
+
+    Runs at parse time so a malformed response triggers the retry loop.
+    Content fidelity (strip == original body) is checked later at populate
+    time, where the originals are available.
+    """
     from .index import _ENTITY_CLASS_VALUES
+    from .markup import MarkupError, parse
 
     symbol_values, _reference_values, _relation_values = _load_vocabulary_values(vocabulary)
 
     errors: list[str] = []
-    for sym in result.symbols:
-        if sym.kind not in symbol_values:
-            errors.append(f"symbol '{sym.name}' has invalid kind '{sym.kind}'")
-        if sym.entity_class not in _ENTITY_CLASS_VALUES:
-            errors.append(f"symbol '{sym.name}' has invalid entity_class '{sym.entity_class}'")
+    for am in result.annotated:
+        try:
+            _plain, annotations = parse(am.text)
+        except MarkupError as exc:
+            errors.append(f"message {am.message_id}: {exc}")
+            continue
+        for a in annotations:
+            if a.tag != "sym":
+                continue
+            kind = a.attrs.get("kind", "unknown")
+            if kind not in symbol_values:
+                errors.append(f"message {am.message_id}: sym kind '{kind}' invalid")
+            klass = a.attrs.get("class", "identifier")
+            if klass not in _ENTITY_CLASS_VALUES:
+                errors.append(f"message {am.message_id}: sym class '{klass}' invalid")
     if errors:
         valid_kinds = ", ".join(v for v in symbol_values if v != "unknown")
-        return f"Vocabulary errors: {'; '.join(errors)}. Valid symbol kinds: {valid_kinds}. Valid entity_class: identifier, value, unknown."
+        return (
+            f"Markup errors: {'; '.join(errors[:8])}. "
+            f"Valid sym kinds: {valid_kinds}. Valid sym class: identifier, value, unknown."
+        )
     return None
 
 

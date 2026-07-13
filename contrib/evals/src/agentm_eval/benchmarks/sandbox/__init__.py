@@ -136,8 +136,9 @@ class SandboxAdapter:
             if task:
                 tasks = [t for t in tasks if t.name in task]
 
-            mirrorable = [(t, adapter.get_source_image(t)) for t in tasks]
-            mirrorable = [(t, src) for t, src in mirrorable if src]
+            mirrorable: list[tuple[Any, str]] = [
+                (t, src) for t in tasks if (src := adapter.get_source_image(t))
+            ]
             if not mirrorable:
                 typer.echo("No images to mirror.", err=True)
                 raise typer.Exit(1)
@@ -303,7 +304,10 @@ class SandboxAdapter:
                     adapter=adapter, model=model, registry=registry,
                     prefix=prefix, tag=tag, eval_timeout=eval_timeout,
                     agent_timeout=agent_timeout, scenario=scenario,
-                    run_id=exp.exp_id[:24], exp_id=exp.exp_id,
+                    # Unique part of exp_id (timestamp + uuid) is at the TAIL;
+                    # a head slice collides across runs and re-attaches evals
+                    # to a previous run's (deleted) sandboxes.
+                    run_id=exp.exp_id[-24:], exp_id=exp.exp_id,
                     prompt_prefix=prompt_prefix, bench=bench,
                     source_images=source_images,
                 )
@@ -345,7 +349,7 @@ class SandboxAdapter:
                 finally:
                     signal.signal(signal.SIGINT, prev_handler)
                     cleanup_eval_sessions()
-                    cleanup_experiments(prefix, model, exp.exp_id[:24], tasks, attempts)
+                    cleanup_experiments(prefix, model, exp.exp_id[-24:], tasks, attempts)
 
                 for attempt_idx in range(attempts):
                     results = all_attempt_results[attempt_idx]

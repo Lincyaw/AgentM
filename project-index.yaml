@@ -364,14 +364,14 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/evals/rescue_window/src/rescue_window/model/schema.py
-      - path: contrib/evals/rescue_window/src/rescue_window/harness/runner.py
-      - path: contrib/evals/rescue_window/src/rescue_window/harness/experiment.py
-      - path: contrib/evals/rescue_window/src/rescue_window/harness/treatments.py
-      - path: contrib/evals/rescue_window/src/rescue_window/harness/replay.py
-      - path: contrib/evals/rescue_window/src/rescue_window/cli.py
-      - path: contrib/evals/rescue_window/src/rescue_window/harness/provider_profiles.py
-      - path: contrib/evals/rescue_window/src/rescue_window/harness/corpus.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/model/schema.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/runner.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/experiment.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/treatments.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/replay.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/cli.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/provider_profiles.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/corpus.py
       - path: contrib/extensions/llmharness/src/llmharness/offline.py
     tests: []
     docs:
@@ -615,7 +615,6 @@ requirements:
     docs:
       - path: README.md
       - path: .claude/skills/agentm-sdk/references/provider-and-cli.md
-      - path: contrib/evals/rescue_window/README.md
       - path: contrib/scenarios/mcp_demo/README.md
       - path: contrib/scenarios/rca/README.md
       - path: .claude/designs/pluggable-architecture.md
@@ -1630,9 +1629,9 @@ requirements:
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/_agent_env.py
       - path: contrib/scenarios/sandbox/manifest.yaml
-      - path: contrib/evals/bench.py
-      - path: contrib/evals/benchmarks/base.py
-      - path: contrib/evals/benchmarks/terminal_bench.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/bench.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/runner.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/terminal_bench.py
     tests:
       - path: tests/integration/test_agent_env_real_session.py
       - path: tests/unit/extensions/test_agent_env_operations.py
@@ -1657,14 +1656,13 @@ requirements:
     confidence: confirmed
     code:
       - path: contrib/evals/.gitignore
-      - path: contrib/evals/bench.py
-      - path: contrib/evals/benchmarks/base.py
-      - path: contrib/evals/benchmarks/terminal_bench.py
-      - path: contrib/evals/benchmarks/Dockerfile.terminal-bench-eval
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/bench.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/runner.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/terminal_bench.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/Dockerfile.terminal-bench-eval
     tests: []
     docs:
       - path: contrib/evals/README.md
-      - path: contrib/evals/longcli/README.md
     depends_on:
       - REQ-187-agent-env-pool-scaling
 
@@ -1689,14 +1687,39 @@ requirements:
     confidence: confirmed
     code:
       - path: contrib/scenarios/terminal_bench/manifest.arl_task.yaml
-      - path: contrib/evals/bench.py
-      - path: contrib/evals/benchmarks/harbor.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/bench.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/agent.py
     tests: []
     docs:
       - path: contrib/evals/README.md
     depends_on:
       - REQ-187-agent-env-pool-scaling
+
+  - id: REQ-213-lhtb-benchmark
+    title: Benchmark runner supports LHTB (Long-Horizon Terminal-Bench)
+    description: >
+      The sandbox benchmark runner must run the 46-task LHTB suite
+      (github.com/zli12321/LHTB) through a dedicated ``lhtb`` format that
+      layers LHTB conventions over the generic Harbor adapter: a task counts
+      as solved at reward >= 0.95 (the upstream definition, not 1.0), and the
+      per-task ``[verifier] timeout_sec`` declared in ``task.toml`` extends
+      the CLI ``--eval-timeout`` when larger, since some LHTB verifiers
+      replay hundreds of authenticated moves. Tasks ship prebuilt docker.io
+      images declared in ``task.toml``, so runs go through ``--source-images``
+      with the pull-through mirror registry and need no image build or
+      mirror step.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/formats.py
+    tests: []
+    docs:
+      - path: contrib/evals/README.md
+    depends_on:
+      - REQ-195-swebench-pro-harbor-eval
 
   - id: REQ-194-terminal-bench-adapt-scenario
     title: Terminal Bench ARL adapt scenario with online atom self-modification
@@ -2061,7 +2084,7 @@ requirements:
     code:
       - path: src/agentm/core/observability/clickhouse.py
       - path: src/agentm/cli_trace.py
-      - path: contrib/evals/bench.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/runner.py
     tests: []
     docs:
       - path: .claude/skills/trace-analysis/SKILL.md

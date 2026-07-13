@@ -31,6 +31,7 @@ agentm eval export <exp_id>
 |---|---|---|
 | Terminal Bench 1.0 | `sandbox --bench tb1` | F2P / P2P step scores |
 | Harbor (TB 2.0) | `sandbox --bench harbor` | reward (0-1 float) |
+| LHTB (Long-Horizon Terminal-Bench) | `sandbox --bench lhtb` | reward (0-1 float), solved ≥ 0.95 |
 | SWE-bench Verified | `sandbox --bench swebench-verified` | Patch extraction |
 | SWE-bench Pro | `sandbox --bench swebench-pro` | Patch extraction |
 | AFTraj-2K auditor | `aftraj-auditor` | F1, ASS, FAR, StepAcc |
@@ -102,6 +103,37 @@ agentm eval sandbox batch --bench harbor \
     --scenario terminal_bench:arl \
     --agent-timeout 7200 --eval-timeout 3000 -j 5
 ```
+
+### Running LHTB (Long-Horizon Terminal-Bench)
+
+[LHTB](https://github.com/zli12321/LHTB) is a 46-task long-horizon companion
+to Terminal-Bench 2.0 in standard Harbor task layout. All tasks declare
+prebuilt docker.io images in `task.toml`, so no image prep is needed —
+run straight through the pull-through mirror:
+
+```bash
+# Clone (LFS blobs live only under solution/, not needed for evaluation)
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/zli12321/LHTB.git
+
+agentm eval sandbox batch --bench lhtb \
+    --repo ~/AoyangSpace/LHTB/tasks \
+    --registry pair-cn-guangzhou.cr.volces.com --source-images \
+    --prefix lhtb \
+    --model litellm-dsv4flash \
+    --scenario terminal_bench:arl \
+    --agent-timeout 5400 --eval-timeout 600 -j 5
+```
+
+The `lhtb` format is the Harbor adapter plus LHTB conventions: a task
+counts as solved at reward ≥ 0.95 (upstream definition), and each task's
+`[verifier] timeout_sec` from `task.toml` extends `--eval-timeout` when
+larger. Upstream runs give agents a 90-minute budget per task, hence
+`--agent-timeout 5400`.
+
+Caveat: `sudoku-recovery` relies on Harbor's healthcheck to pre-start its
+game daemon as root and declares an unprivileged `[agent] user`; the ARL
+runner honors neither, so the agent starts the daemon itself with full
+privileges and that task's anti-cheat guarantees are void here.
 
 ## Experiment output
 
