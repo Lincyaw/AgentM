@@ -32,7 +32,6 @@ class IndexEvalAdapter:
             chunk_size: Annotated[str | None, typer.Option("--chunk-size", help="'3-6' or omit for full")] = "3-6",
             vocabulary: Annotated[str, typer.Option()] = "default",
             exp_id: Annotated[str | None, typer.Option("--exp-id")] = None,
-            chunk_concurrency: Annotated[int, typer.Option("--chunk-concurrency", help="Parallel Pass-1 chunk extractions per session")] = 8,
             session_concurrency: Annotated[int, typer.Option("--session-concurrency", help="Parallel sessions")] = 4,
         ) -> None:
             """Run trajectory-index extraction on recorded sessions."""
@@ -56,7 +55,7 @@ class IndexEvalAdapter:
 
             asyncio.run(_run_sessions(
                 sids, model=model, chunk_size=parsed_chunk, vocabulary=vocabulary, exp=exp,
-                chunk_concurrency=chunk_concurrency, session_concurrency=session_concurrency,
+                session_concurrency=session_concurrency,
             ))
 
         return cli
@@ -82,7 +81,6 @@ async def _run_sessions(
     chunk_size: tuple[int, int] | None,
     vocabulary: str,
     exp: Experiment,
-    chunk_concurrency: int = 8,
     session_concurrency: int = 4,
 ) -> None:
     from agentm_eval.methods.index import build_index, extract_symbols
@@ -100,11 +98,11 @@ async def _run_sessions(
                 return None
             exp.register_session(sid, metadata={"n_messages": len(messages)})
 
-            # Pass 1 (extraction) runs chunks in parallel; cross-chunk name
-            # unification is deferred to Pass 2 in build_index (resolve once).
+            # Pass 1 (extraction): chunks extracted sequentially with inline
+            # registry accumulation; Pass 2 (build_index) resolves aliases once.
             chunks = await extract_symbols(
                 messages, model=model, vocabulary=vocabulary,
-                chunk_size=chunk_size, run_id=sid, concurrency=chunk_concurrency,
+                chunk_size=chunk_size, run_id=sid,
             )
             idx = await build_index(chunks, model=model, resolve=True)
 

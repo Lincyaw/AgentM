@@ -20,7 +20,6 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 from collections.abc import Callable
@@ -264,19 +263,15 @@ async def extract_symbols(
     on_chunk: OnChunkCallback | None = None,
     run_id: str = "",
     cwd: str | None = None,
-    concurrency: int = 1,
 ) -> list[ExtractedChunk]:
     """Extract symbols from trajectory messages.
 
     Accepts typed ``AgentMessage`` objects. When ``chunk_size`` is None,
     runs a single extraction. When set (e.g. ``(2, 5)``), splits into
-    chunks.
-
-    ``concurrency`` > 1 runs Pass 1 chunk extraction in parallel. Parallel
-    chunks are extracted independently (no cross-chunk registry accumulation),
-    so cross-chunk name unification is deferred to Pass 2 (alias resolution in
-    :func:`build_index`). ``concurrency == 1`` keeps the sequential path with
-    registry accumulation and inline fuzzy-dedup.
+    chunks extracted sequentially: each chunk sees the accumulated registry
+    of prior symbols (``⟦known|…⟧``) and inline fuzzy-dedup folds same-entity
+    surface forms as it goes, so cross-chunk unification happens during
+    extraction rather than being deferred.
     """
     from trajectory_index.index import normalize_name
 
@@ -293,35 +288,6 @@ async def extract_symbols(
         return [extracted]
 
     chunks = _chunk_messages(messages, chunk_size)
-
-    if concurrency > 1:
-        sem = asyncio.Semaphore(concurrency)
-
-        async def _extract_one(i: int, chunk: _MessageChunk) -> ExtractedChunk | None:
-            async with sem:
-                try:
-                    outcome = await _run_one(
-                        chunk.messages, model=model, vocabulary=vocabulary,
-                        registry=None, message_id_start=chunk.start, cwd=cwd,
-                    )
-                except Exception:
-                    logger.exception("chunk {}/{} extraction failed", i + 1, len(chunks))
-                    return None
-                if outcome.result is None:
-                    logger.warning("chunk {}/{} no parseable result", i + 1, len(chunks))
-                    return None
-                ex = ExtractedChunk(
-                    run_id=run_id, messages=chunk.messages, result=outcome.result,
-                    message_id_start=chunk.start,
-                )
-                if on_chunk:
-                    on_chunk(ex, chunk.messages)
-                return ex
-
-        gathered = await asyncio.gather(
-            *(_extract_one(i, c) for i, c in enumerate(chunks))
-        )
-        return [c for c in gathered if c is not None]
 
     registry: list[dict[str, Any]] = []
     seen: set[str] = set()
