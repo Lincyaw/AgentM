@@ -43,13 +43,16 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from .adjudicate import SessionFactory, _ask_model
-from .diagnostics import Diagnostics
-from .index import Claim, Edge, Step, TrajectoryIndex, stable_id
+from ..ir.diagnostics import Diagnostics
+from ..ir.models import Claim, Edge, Step, stable_id
+from ..oracle import SessionFactory, _ask_model
+
+if TYPE_CHECKING:
+    from ..ir.index import TrajectoryIndex
 
 _PARTITION_CHAR_BUDGET = 60_000   # max excerpt chars per oracle call (whole excerpts)
 _MAX_SUPPORT_EDGES_PER_CLAIM = 6  # supports capped in trajectory order; conflicts never

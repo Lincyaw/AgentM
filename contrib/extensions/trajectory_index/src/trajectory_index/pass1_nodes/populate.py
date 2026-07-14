@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .models import (
+from ..ir.models import (
     _ENTITY_CLASS_VALUES,
     Claim,
     Constraint,
@@ -26,7 +26,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from .index import TrajectoryIndex
+    from ..ir.index import TrajectoryIndex
 
 
 def _constraint_normalized(attrs: dict[str, str]) -> dict[str, MetadataValue] | None:
@@ -56,7 +56,7 @@ def _message_step_content(msg: dict[str, Any]) -> tuple[str, str | None]:
     view is built from — so the two representations that offset alignment
     depends on cannot drift apart.
     """
-    from .data import message_parts
+    from .serialize import message_parts
 
     pairs, tool_name = message_parts(msg)
     return "\n".join(c for c, _ in pairs if c), tool_name
@@ -91,12 +91,12 @@ def populate_from_extraction(
     """
     from loguru import logger as _clog
 
-    from .data import _build_references, view_body_with_map
     from .markup import GAP_TAG, MarkupError, align, align_gapped
     from .markup import parse as parse_markup
+    from .serialize import _build_references, view_body_with_map
 
     if messages and not isinstance(messages[0], dict):
-        from .atom import _agentmsg_to_extraction_dict
+        from ..atom import _agentmsg_to_extraction_dict
         # truncate=False: steps/references are the substrate every
         # downstream pass reads — content goes in whole. Truncation is
         # legitimate only in the extractor's own prompt window.

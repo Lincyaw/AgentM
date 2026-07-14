@@ -20,12 +20,9 @@ extensions:
     config:
       allow:
         - read
-        - list_turns
-        - get_turn
-        - list_entities
-        - search_entities
-        - get_entity_timeline
-        - list_claim_checks
+        - search_symbols
+        - get_symbol_context
+        - get_insights
         - submit_verdict
   # After tool_filter (registration order = handler order on
   # before_agent_start): injects the FILTERED catalog into the system
@@ -43,4 +40,7 @@ extensions:
       warn_within: 5
   - module: llmharness.agents.auditor.context
   - module: llmharness.agents.auditor.tools
-  - module: llmharness.agents.auditor.index_tools
+  # Query the persisted trajectory index (search_symbols / get_symbol_context /
+  # get_insights). Loaded read-only from index_path, provided per session via
+  # atom_config_overrides (see llmharness.atom.build_auditor_config).
+  - module: trajectory_index.query_atom

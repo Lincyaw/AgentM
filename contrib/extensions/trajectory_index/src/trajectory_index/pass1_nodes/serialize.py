@@ -18,7 +18,7 @@ from typing import Any, Final
 
 from loguru import logger
 
-from .agents.entity_extractor.schema import ExtractionResult
+from ..agents.entity_extractor.schema import ExtractionResult
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -258,7 +258,7 @@ def _validate_vocabulary(result: ExtractionResult, vocabulary: str = "default") 
     Content fidelity (strip == original body) is checked later at populate
     time, where the originals are available.
     """
-    from .index import _ENTITY_CLASS_VALUES
+    from ..ir.models import _ENTITY_CLASS_VALUES
     from .markup import MarkupError, parse
 
     symbol_values, _reference_values, _relation_values = _load_vocabulary_values(vocabulary)

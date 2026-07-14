@@ -30,7 +30,7 @@ from agentm.core.abi import AgentMessage
 from loguru import logger
 
 from trajectory_index.agents.entity_extractor.schema import ExtractionResult
-from trajectory_index.data import _symbol_aliases
+from trajectory_index.pass1_nodes.serialize import _symbol_aliases
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ def _match_known_symbol(
     longer name's length. This prevents short substrings (e.g. ``abn``)
     from absorbing unrelated longer names.
     """
-    from trajectory_index.index import normalize_name
+    from trajectory_index.ir.index import normalize_name
 
     norm = normalize_name(name)
     if len(norm) < min_len:
@@ -106,8 +106,8 @@ def _prescan_structural(
     Returns (updated_registry, structural_symbols).
     """
     from trajectory_index.atom import _agentmsg_to_extraction_dict
-    from trajectory_index.data import extract_structural_symbols
-    from trajectory_index.index import normalize_name
+    from trajectory_index.pass1_nodes.serialize import extract_structural_symbols
+    from trajectory_index.ir.index import normalize_name
 
     serialized = [
         d for i, m in enumerate(messages)
@@ -273,7 +273,7 @@ async def extract_symbols(
     surface forms as it goes, so cross-chunk unification happens during
     extraction rather than being deferred.
     """
-    from trajectory_index.index import normalize_name
+    from trajectory_index.ir.index import normalize_name
 
     if chunk_size is None:
         outcome = await _run_one(
@@ -387,7 +387,7 @@ async def resolve_index(
     Best-effort: Pass 2 LLM failure is skipped; Pass 3 is deterministic.
     """
     from agentm.core.runtime import AgentSession
-    from trajectory_index.adjudicate import resolve_aliases
+    from trajectory_index.pass2_edges.identity import resolve_aliases
 
     sf = AgentSession.create
 
@@ -415,7 +415,7 @@ async def build_index(
       Pass 3: def-use / grounding (deterministic)
       Pass 3.5: value fidelity comparison (LLM, best-effort)
     """
-    from trajectory_index.index import TrajectoryIndex
+    from trajectory_index.ir.index import TrajectoryIndex
 
     index = TrajectoryIndex()
     for chunk in chunks:

@@ -28,14 +28,13 @@ from pydantic import BaseModel, Field
 
 from .agents import extractor_scenario
 from .agents.entity_extractor.schema import ExtractionResult
-from .data import JsonValue, ProviderSpec
-from .index import TrajectoryIndex
+from .ir.index import TrajectoryIndex
+from .pass1_nodes.serialize import JsonValue, ProviderSpec
+from .query_tools import INDEX_SERVICE_KEY, register_query_tools
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-
-INDEX_SERVICE_KEY: Final = "trajectory_index.index"
 
 
 class TrajectoryIndexConfig(BaseModel):
@@ -79,6 +78,7 @@ MANIFEST = ExtensionManifest(
         "tool:index_trajectory",
         "tool:search_symbols",
         "tool:get_symbol_context",
+        "tool:get_insights",
     ),
     config_schema=TrajectoryIndexConfig,
 )
@@ -129,7 +129,7 @@ def _try_parse_response(
     vocabulary: str = "default",
 ) -> tuple[ExtractionResult | None, str | None]:
     """Try to parse an ExtractionResult from assistant messages."""
-    from .data import _try_parse_response as _parse
+    from .pass1_nodes.serialize import _try_parse_response as _parse
 
     return _parse(messages, vocabulary)
 
@@ -171,7 +171,7 @@ def _agentmsg_to_extraction_dict(
     ``truncate=False``: every downstream pass reads step content, and a
     mid-content cut there silently poisons them all.
     """
-    from .data import _truncate_block
+    from .pass1_nodes.serialize import _truncate_block
 
     payload = _agentmsg_to_payload(msg)
     role = payload.get("role", "")
@@ -196,8 +196,8 @@ def _format_message_compact(
     Known symbols are marked ``⟦known|name⟧`` on top of that body; the
     marks strip away with all other annotations at verification time.
     """
-    from .data import view_body_with_map
-    from .markup import mark_known
+    from .pass1_nodes.markup import mark_known
+    from .pass1_nodes.serialize import view_body_with_map
 
     mid = msg.get("id", "")
     role = msg.get("role", "")
@@ -394,7 +394,7 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         model = cfg.resolve_model or cfg.model
         sf = api.spawn_child_session  # §11: atom passes its own factory
         if cfg.resolve_aliases:
-            from .adjudicate import resolve_aliases, resolve_references
+            from .pass2_edges.identity import resolve_aliases, resolve_references
 
             try:
                 groups = await resolve_aliases(index, model=model, apply=False, session_factory=sf)
@@ -410,7 +410,7 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
 
         # Pass 3.5 — value fidelity (independent of alias resolution).
         try:
-            from .adjudicate import compare_values
+            from .pass3_folds.grounding import compare_values
 
             await compare_values(index, model=model, apply=True, session_factory=sf)
         except Exception:
@@ -420,9 +420,9 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         # Wholesale-replaces this run's edges/claim_findings/constraint_findings,
         # so it reasons over the full run each call, not just the new delta.
         if cfg.analyze_claims:
-            from .constraints import analyze_constraints
-            from .edges import build_claim_edges
-            from .verification import fold_claim_statuses
+            from .pass2_edges.claims import build_claim_edges
+            from .pass3_folds.claim_status import fold_claim_statuses
+            from .pass3_folds.constraints import analyze_constraints
 
             try:
                 edge_result = await build_claim_edges(
@@ -482,114 +482,6 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
     )
 
 
-def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
-    class SearchParams(BaseModel):
-        query: str = Field(description="Search query (symbol name, concept, or keyword)")
-        kinds: list[str] | None = Field(default=None, description="Filter by symbol kinds")
-        limit: int = Field(default=10, description="Max results")
-
-    async def _handle(args: dict[str, JsonValue]) -> ToolResult:
-        params = SearchParams.model_validate(args)
-        index = api.get_service(INDEX_SERVICE_KEY)
-        assert isinstance(index, TrajectoryIndex)
-
-        kind_filter = set(params.kinds) if params.kinds else None
-
-        results = index.search(
-            params.query,
-            kinds=kind_filter,
-            limit=params.limit,
-            include_references=True,
-            include_related=True,
-        )
-        if not results:
-            return ToolResult(content=[TextContent(type="text", text="No symbols found.")])
-
-        lines: list[str] = []
-        for r in results:
-            sym = r.symbol
-            lines.append(
-                f"- **{sym.canonical_name}** ({sym.kind}, score={r.score:.2f})  id={sym.id}"
-            )
-            if sym.summary:
-                lines.append(f"  {sym.summary}")
-            if r.references:
-                refs = ", ".join(f"step {ref.step_id}:{ref.kind}" for ref in r.references[:3])
-                lines.append(f"  references: {refs}")
-            if r.related:
-                rels = ", ".join(
-                    f"{rel.symbol.canonical_name}({rel.score:.2f})" for rel in r.related[:3]
-                )
-                lines.append(f"  related: {rels}")
-
-        return ToolResult(content=[TextContent(type="text", text="\n".join(lines))])
-
-    return FunctionTool(
-        name="search_symbols",
-        description="Search for symbols in the trajectory semantic index.",
-        parameters=SearchParams,
-        fn=_handle,
-    )
-
-
-def _build_context_tool(api: ExtensionAPI) -> FunctionTool:
-    class ContextParams(BaseModel):
-        symbol_id: str = Field(description="Symbol ID to get context for")
-
-    async def _handle(args: dict[str, JsonValue]) -> ToolResult:
-        params = ContextParams.model_validate(args)
-        index = api.get_service(INDEX_SERVICE_KEY)
-        assert isinstance(index, TrajectoryIndex)
-
-        try:
-            ctx = index.get_context(params.symbol_id)
-        except KeyError:
-            return ToolResult(
-                content=[TextContent(type="text", text=f"Symbol not found: {params.symbol_id}")],
-                is_error=True,
-            )
-
-        lines: list[str] = []
-        sym = ctx.symbol
-        lines.append(f"# {sym.canonical_name} ({sym.kind})")
-        if sym.summary:
-            lines.append(f"\n{sym.summary}")
-        if sym.aliases:
-            lines.append(f"\nAliases: {', '.join(sorted(sym.aliases))}")
-
-        if ctx.definition:
-            d = ctx.definition
-            lines.append(f'\n## Definition\nStep {d.step_id}: "{d.text}" ({d.kind})')
-
-        if ctx.timeline:
-            lines.append("\n## Timeline")
-            for item in ctx.timeline[:15]:
-                lines.append(
-                    f"- [{item.step.role}] step {item.step.step_id}: "
-                    f'"{item.reference.text}" ({item.reference.kind})'
-                )
-
-        if ctx.related:
-            lines.append("\n## Related symbols")
-            for rel in ctx.related[:10]:
-                rel_types = ", ".join(r.type for r in rel.relations[:3])
-                lines.append(
-                    f"- {rel.symbol.canonical_name} ({rel.symbol.kind}) "
-                    f"— {rel_types} (score={rel.score:.2f})"
-                )
-
-        return ToolResult(content=[TextContent(type="text", text="\n".join(lines))])
-
-    return FunctionTool(
-        name="get_symbol_context",
-        description=(
-            "Get full context for a specific symbol: definition, timeline, "
-            "related symbols, and surrounding trajectory snippets."
-        ),
-        parameters=ContextParams,
-        fn=_handle,
-    )
-
 
 # ---------------------------------------------------------------------------
 # install
@@ -601,5 +493,4 @@ def install(api: ExtensionAPI, config: TrajectoryIndexConfig) -> None:
     api.set_service(INDEX_SERVICE_KEY, index)
 
     api.register_tool(_build_index_tool(api, config))
-    api.register_tool(_build_search_tool(api))
-    api.register_tool(_build_context_tool(api))
+    register_query_tools(api)  # search_symbols / get_symbol_context / get_insights

@@ -35,21 +35,23 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from .adjudicate import SessionFactory, _ask_model, _index_by_id, _safe_float
-from .diagnostics import Diagnostics, content_tokens
-from .index import (
+from ..ir.diagnostics import Diagnostics, content_tokens
+from ..ir.models import (
     Constraint,
     ConstraintFinding,
     FindingStatus,
     Step,
     Symbol,
-    TrajectoryIndex,
     normalize_name,
 )
+from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
+
+if TYPE_CHECKING:
+    from ..ir.index import TrajectoryIndex
 
 # No mid-content truncation anywhere in this module: oracle windows are
 # whole-step selections (P4-i bounds by SELECTION, logged as prunes — never
@@ -366,7 +368,7 @@ async def _map_about(
     evidence before any model saw it). Positive polarity per partition; a
     failed partition loses only its own steps, recorded.
     """
-    from .edges import _PARTITION_CHAR_BUDGET, _step_chars, partition_by_budget
+    from ..pass2_edges.claims import _PARTITION_CHAR_BUDGET, _step_chars, partition_by_budget
 
     about: list[Step] = []
     for partition in partition_by_budget(grounded, _PARTITION_CHAR_BUDGET, _step_chars):

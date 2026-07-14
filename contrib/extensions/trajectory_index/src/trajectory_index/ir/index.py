@@ -6,13 +6,16 @@ keeping the query interface stable.
 
 This module is the facade: it holds the ``TrajectoryIndex`` container and its
 primitive write/read operations, and re-exports the IR from ``models.py`` so
-``from trajectory_index.index import Symbol`` keeps working. The multi-step
-passes live in dedicated modules and are exposed here as thin methods:
+``from trajectory_index.ir.index import Symbol`` keeps working. The multi-step
+passes live in per-pass packages and are exposed here as thin methods:
 
-    populate.py     Pass 1   markup extraction result → IR
-    aliasing.py     Pass 2a  alias blocking + merge
-    grounding.py    Pass 3   def-use dataflow + warnings
-    persistence.py           dump / load / validate
+    pass1_nodes.populate        Pass 1   markup extraction result → IR
+    pass2_edges.identity        Pass 2a  alias/coref blocking + merge
+    pass2_edges.claims          Pass 2b  claim ↔ observation edges
+    pass3_folds.grounding       Pass 3   def-use dataflow + warnings + value fidelity
+    pass3_folds.claim_status    Pass 3   claim-status fold
+    pass3_folds.constraints     Pass 3   constraint satisfaction
+    ir.persistence                       dump / load / validate
 
 See ``designs/`` and SCHEMA.md for the pass contracts.
 """
@@ -24,13 +27,16 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import aliasing, grounding, persistence, populate
-from .grounding import (
+from ..pass1_nodes import populate
+from ..pass2_edges import identity
+from ..pass3_folds import grounding
+from ..pass3_folds.grounding import (
     _PRODUCING_KINDS,
     _provenance_kind,
     drives_defuse,
     grounded_from_kind,
 )
+from . import persistence
 from .models import (
     _ENTITY_CLASS_VALUES,
     _FINDING_STATUS_VALUES,
@@ -295,7 +301,7 @@ class TrajectoryIndex:
         self._relation_ids_by_symbol[to_symbol.id].append(relation_id)
         return relation
 
-    # ---- Pass 2a: alias resolution (aliasing.py) ----
+    # ---- Pass 2a: alias resolution (pass2_edges.identity) ----
 
     def alias_candidates(self, min_jaccard: float = 0.5) -> list[AliasCandidate]:
         """Deterministically block structured-symbol pairs that MIGHT be one entity.
@@ -303,11 +309,11 @@ class TrajectoryIndex:
         The merge DECISION is a name-resolution model judgment (Pass 2), injected
         via :meth:`apply_alias_merges`; this only proposes the pairs.
         """
-        return aliasing.alias_candidates(self, min_jaccard)
+        return identity.alias_candidates(self, min_jaccard)
 
     def apply_alias_merges(self, groups: list[list[str]]) -> None:
         """Fold each decided group of symbol ids into one canonical symbol."""
-        aliasing.apply_alias_merges(self, groups)
+        identity.apply_alias_merges(self, groups)
 
     # ---- Pass 3: def-use / grounding (grounding.py) ----
 

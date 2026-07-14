@@ -129,7 +129,7 @@ def _load_from_telbench(
 
     items: list[TrajectoryItem] = []
     for inst in instances:
-        msgs = spans_to_messages(inst.spans)
+        msgs = spans_to_messages(inst.spans, framework=inst.framework)
         # Input preprocessing: the task IS part of the trajectory. With the
         # question as step 0 (attested user role), Pass 1 extracts
         # ⟦constraint⟧ nodes from it like any other node — no separate
@@ -288,12 +288,12 @@ class AuditorEvalAdapter:
             concurrency: Annotated[int, typer.Option("--concurrency", help="Parallel trajectories")] = 1,
             split: Annotated[str | None, typer.Option("--split", help="AFTraj split (e.g. test)")] = None,
             domain: Annotated[str | None, typer.Option("--domain", help="AFTraj domain filter")] = None,
-            enable_claim_analysis: Annotated[bool, typer.Option("--claim-analysis/--no-claim-analysis", help="Enable Level 2 claim analysis")] = False,
             enable_constraints: Annotated[bool, typer.Option("--constraints/--no-constraints", help="Enable constraint satisfaction analysis (needs question metadata; TELBench only)")] = False,
-            constraint_rendering: Annotated[str, typer.Option("--constraint-rendering", help="How constraint findings render to the auditor: verdict | facts")] = "verdict",
             enable_source_checks: Annotated[bool, typer.Option("--source-checks/--no-source-checks", help="Check the agent's verification claims against adjacent observations")] = False,
             case_file: Annotated[Path | None, typer.Option("--case-file", help="File with case IDs to run (one per line)")] = None,
             passes: Annotated[str, typer.Option("--passes", help="Comma-separated passes to run: extract, constraints, source, audit. 'extract' always runs; e.g. --passes extract for index-only validation")] = "extract,audit",
+            two_phase: Annotated[bool, typer.Option("--two-phase/--single-phase", help="Auditor asks a discriminate-then-localize follow-up in the same session (post-hoc audit only)")] = False,
+            critic: Annotated[bool, typer.Option("--critic/--no-critic", help="An independent critic agent verifies and re-localizes the auditor verdict (post-hoc audit only)")] = False,
         ) -> None:
             """Run interleaved index + auditor evaluation."""
             from agentm.env import autoload_dotenv
@@ -349,14 +349,14 @@ class AuditorEvalAdapter:
                 auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
                 concurrency=concurrency,
-                claim_analysis=enable_claim_analysis,
                 constraint_analysis=enable_constraints or "constraints" in pass_set,
-                constraint_rendering=constraint_rendering,
                 # source (context injection) depends on edges (the sweep)
                 source_checks=enable_source_checks or "source" in pass_set,
                 build_edges=("edges" in pass_set or "source" in pass_set
                              or enable_source_checks),
                 run_audit="audit" in pass_set,
+                two_phase=two_phase,
+                critic=critic,
             ))
 
         return cli
@@ -374,59 +374,6 @@ def _parse_chunk_size(value: str | None) -> tuple[int, int] | None:
     return (int(parts[0]), int(parts[-1]))
 
 
-def _index_to_context(idx: Any) -> dict[str, Any]:
-    from agentm_eval.methods.auditor import index_to_context
-    return index_to_context(idx)
-
-
-def _load_constraint_artifact(exp: Experiment, tid: str) -> dict[str, Any] | None:
-    """Load the constraint analysis record (transcript + prune log) if present."""
-    path = exp.session_dir(tid) / "constraints.json"
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        typer.echo(f"  {tid}: constraints.json unreadable: {exc}", err=True)
-        return None
-
-
-def _merge_claim_status_context(idx: Any, tid: str, context: dict[str, Any]) -> None:
-    """Surface claim statuses (Pass 3 fold) to the auditor context.
-
-    Absence of notes is declared in the coverage block, never read as
-    absence of problems.
-    """
-    findings = [f for f in idx.claim_findings if f.run_id == tid]
-    if not findings:
-        return
-    claims_by_id = {c.id: c for c in idx.claims.values()}
-    edges_by_id = idx.edges
-    notes = []
-    for f in findings:
-        claim = claims_by_id.get(f.claim_id)
-        if claim is None:
-            continue
-        evidence = [
-            {"step_id": e.dst, "kind": e.kind, "quote": e.quote,
-             "position": e.evidence_position}
-            for eid in f.edge_ids if (e := edges_by_id.get(eid)) is not None
-        ]
-        notes.append({
-            "step_id": f.step_id, "claim": claim.text,
-            "status": f.status, "evidence": evidence,
-        })
-    context["source_claim_notes"] = notes
-    counts: dict[str, int] = {}
-    for f in findings:
-        counts[f.status] = counts.get(f.status, 0) + 1
-    context["source_claim_coverage"] = {
-        "n_claims": len(findings),
-        "status_counts": counts,
-        "evidence_empty": bool(findings and findings[0].evidence_empty),
-    }
-
-
 async def _run_edge_pass(idx: Any, tid: str, model: str, exp: Experiment) -> None:
     """Run Pass 2 edge construction + the Pass 3 claim-status fold.
 
@@ -435,8 +382,8 @@ async def _run_edge_pass(idx: Any, tid: str, model: str, exp: Experiment) -> Non
     Full records land in pass2_edges.json and claim_statuses.json.
     """
     from agentm.core.runtime import AgentSession
-    from trajectory_index.edges import build_claim_edges
-    from trajectory_index.verification import fold_claim_statuses
+    from trajectory_index.pass2_edges.claims import build_claim_edges
+    from trajectory_index.pass3_folds.claim_status import fold_claim_statuses
 
     try:
         result = await build_claim_edges(
@@ -459,7 +406,7 @@ async def _run_constraint_analysis(
     (findings + oracle transcript + prune log) lands in constraints.json.
     """
     from agentm.core.runtime import AgentSession
-    from trajectory_index.constraints import analyze_constraints
+    from trajectory_index.pass3_folds.constraints import analyze_constraints
 
     try:
         analysis = await analyze_constraints(
@@ -469,90 +416,6 @@ async def _run_constraint_analysis(
         exp.write_session_artifact(tid, "", "constraints.json", analysis.to_artifact())
     except Exception as exc:
         typer.echo(f"  {tid}: constraint analysis failed: {exc}", err=True)
-
-
-def _merge_constraint_context(
-    context: dict[str, Any], idx: Any, *,
-    rendering: str = "verdict",
-    artifact: dict[str, Any] | None = None,
-) -> None:
-    """Surface constraint findings to the auditor.
-
-    ``rendering="verdict"``: status labels + attention hints (legacy mode,
-    kept as the A arm of the rendering A/B).
-    ``rendering="facts"``: evidence-shaped fact blocks with the localization
-    fact set and a mandatory coverage statement — no designated error step,
-    no verdict labels for ungated (oracle-judged) kinds.
-    """
-    if rendering == "verdict":
-        context["attention_hints"] = [
-            *context.get("attention_hints", []),
-            *idx.constraint_attention(),
-        ]
-    context["constraint_rendering"] = rendering
-
-    transcript = (artifact or {}).get("transcript", [])
-    prune_log = (artifact or {}).get("prune_log", [])
-    entails_detail = {
-        t["key"]: str(t.get("detail", ""))
-        for t in transcript if t.get("relation") == "entails"
-    }
-    final_commit_step = next(
-        (t["key"] for t in transcript
-         if t.get("relation") == "commit" and t.get("verdict")),
-        None,
-    )
-
-    context["constraint_findings"] = [
-        {
-            "constraint_id": f.constraint_id,
-            "description": (
-                idx.constraints[f.constraint_id].description
-                if f.constraint_id in idx.constraints else f.constraint_id
-            ),
-            "machine_checkable": (
-                idx.constraints[f.constraint_id].normalized is not None
-                if f.constraint_id in idx.constraints else False
-            ),
-            "candidate": f.candidate,
-            "status": f.status,
-            "evidence_step_ids": list(f.evidence_step_ids),
-            # localization FACT SET — consumers must not treat any single
-            # entry as "the" error step (two anchor conventions failed gold
-            # validation)
-            "first_assertion_step_id": f.first_assertion_step_id or f.commit_step_id,
-            "final_commit_step_id": f.commit_step_id or final_commit_step,
-            "quote": entails_detail.get(f.constraint_id, ""),
-            "confidence": f.confidence,
-            "confidence_source": f.confidence_source,
-            "reason": f.reason,
-        }
-        for f in idx.constraint_findings
-    ]
-
-    # Coverage statement (P2 extended to the presentation layer): what ran,
-    # what abstained, what was pruned — so absence of a note is never read
-    # as absence of a problem.
-    status_counts: dict[str, int] = {}
-    for f in idx.constraint_findings:
-        status_counts[f.status] = status_counts.get(f.status, 0) + 1
-    abstentions = sorted({
-        f.reason for f in idx.constraint_findings
-        if f.status == "unknown" and f.reason
-    })
-    prune_counts: dict[str, int] = {}
-    for p in prune_log:
-        stage = str(p.get("stage", "?"))
-        prune_counts[stage] = prune_counts.get(stage, 0) + 1
-    n_grounded = sum(
-        1 for s in idx.steps.values() if s.role == "tool_result" and s.content
-    )
-    context["constraint_coverage"] = {
-        "status_counts": status_counts,
-        "abstention_reasons": abstentions[:6],
-        "prune_counts": prune_counts,
-        "n_grounded_steps": n_grounded,
-    }
 
 
 def _pass1_nodes_artifact(
@@ -636,32 +499,6 @@ def _provenance_view(messages: list[AgentMessage], idx: Any, run_id: str) -> lis
     return out
 
 
-async def _run_claim_analysis(
-    messages: list[AgentMessage], idx: Any, context: dict[str, Any], model: str,
-) -> dict[str, Any]:
-    """Run Level 2 claim analysis and merge result into context."""
-    from trajectory_index.atom import _agentmsg_to_extraction_dict
-
-    from agentm_eval.methods.claim_analysis import run_claim_analysis
-
-    trajectory = [d for i, m in enumerate(messages) if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))]
-    symbols = context.get("symbols", [])
-    references = context.get("references", [])
-
-    ledger = await run_claim_analysis(
-        trajectory, symbols=symbols, references=references,
-        context_index=context, model=model,
-    )
-    if ledger:
-        context["claim_structure"] = ledger.to_context()
-    return context
-
-
-# ---------------------------------------------------------------------------
-# Core pipeline — shared across all data sources
-# ---------------------------------------------------------------------------
-
-
 async def _process_one_item(
     i: int,
     total: int,
@@ -676,12 +513,12 @@ async def _process_one_item(
     auditor_prompt: str,
     exp: Experiment,
     rebuild_index: bool,
-    claim_analysis: bool = False,
     constraint_analysis: bool = False,
-    constraint_rendering: str = "verdict",
     source_checks: bool = False,
     build_edges: bool = False,
     run_audit: bool = True,
+    two_phase: bool = False,
+    critic: bool = False,
 ) -> dict[str, Any]:
     """Process a single trajectory: index extraction + (optional) claim analysis + auditor."""
     from agentm_eval.methods.auditor import run_auditor
@@ -692,7 +529,7 @@ async def _process_one_item(
         _run_one,
         resolve_index,
     )
-    from trajectory_index.index import TrajectoryIndex, normalize_name
+    from trajectory_index.ir.index import TrajectoryIndex, normalize_name
 
     typer.echo(f"\n[{i+1}/{total}] {tid} ({meta.get('source', '?')}, {len(messages)} msgs)")
     exp.register_session(tid, metadata={"n_messages": len(messages), **meta})
@@ -723,25 +560,18 @@ async def _process_one_item(
             await _run_edge_pass(idx, tid, index_model, exp)
             idx.dump(str(index_path))
 
-        # Context surfaces whatever analysis the cached index CARRIES,
-        # independent of which passes ran this invocation — so an
-        # audit-only re-run still shows the cached constraint and
-        # claim-status notes. Both merges self-guard on presence.
-        context = _index_to_context(idx)
-        _merge_constraint_context(
-            context, idx, rendering=constraint_rendering,
-            artifact=_load_constraint_artifact(exp, tid),
-        )
-        _merge_claim_status_context(idx, tid, context)
-        if claim_analysis:
-            context = await _run_claim_analysis(messages, idx, context, model)
+        # The auditor queries the persisted index through the
+        # trajectory_index_query atom (loaded from index_path); the cached
+        # index.json already carries the constraint / claim-status findings.
         audit_result = None
         if run_audit:
             try:
                 audit_result = await run_auditor(
                     _provenance_view(messages, idx, tid), model=model,
                     auditor_prompt=auditor_prompt,
-                    context_index=context,
+                    index_path=str(index_path),
+                    two_phase=two_phase,
+                    critic=critic,
                 )
                 _save_auditor_step(exp, tid, len(messages), audit_result, idx)
             except Exception as exc:
@@ -758,7 +588,7 @@ async def _process_one_item(
     else:
         raw_chunks = _chunk_messages(messages, chunk_size)
 
-    from trajectory_index.diagnostics import Diagnostics
+    from trajectory_index.ir.diagnostics import Diagnostics
 
     n_auditor_fires = 0
     last_audit_result = None
@@ -840,25 +670,19 @@ async def _process_one_item(
             # before the final audit so the statuses reach its context.
             await _run_edge_pass(idx, tid, index_model, exp)
             edges_ran = True
-        context = _index_to_context(idx)
-        if idx.constraint_findings:
-            _merge_constraint_context(
-                context, idx, rendering=constraint_rendering,
-                artifact=_load_constraint_artifact(exp, tid),
-            )
-        if source_checks:
-            _merge_claim_status_context(idx, tid, context)
-        if claim_analysis:
-            context = await _run_claim_analysis(trajectory_prefix, idx, context, model)
-
         if not run_audit:
             typer.echo(f"  {tid} chunk {ci+1}: msgs 0-{chunk_end}  {stats.symbol_count} syms  (audit skipped)")
             continue
+        # Persist the current index so the auditor's query atom loads THIS
+        # chunk's state (it reads index_path, not an in-memory dict).
+        idx.dump(str(index_path))
         try:
             audit_result = await run_auditor(
                 _provenance_view(trajectory_prefix, idx, tid), model=model,
                 auditor_prompt=auditor_prompt,
-                context_index=context,
+                index_path=str(index_path),
+                two_phase=two_phase,
+                critic=critic,
             )
             n_auditor_fires += 1
             last_audit_result = audit_result
@@ -934,12 +758,12 @@ async def _run_pipeline(
     exp: Experiment,
     rebuild_index: bool,
     concurrency: int = 1,
-    claim_analysis: bool = False,
     constraint_analysis: bool = False,
-    constraint_rendering: str = "verdict",
     source_checks: bool = False,
     build_edges: bool = False,
     run_audit: bool = True,
+    two_phase: bool = False,
+    critic: bool = False,
 ) -> None:
     total = len(items)
     sem = asyncio.Semaphore(concurrency)
@@ -954,12 +778,12 @@ async def _run_pipeline(
                 chunk_size=chunk_size, vocabulary=vocabulary,
                 auditor_prompt=auditor_prompt,
                 exp=exp, rebuild_index=rebuild_index,
-                claim_analysis=claim_analysis,
                 constraint_analysis=constraint_analysis,
-                constraint_rendering=constraint_rendering,
                 source_checks=source_checks,
                 build_edges=build_edges,
                 run_audit=run_audit,
+                two_phase=two_phase,
+                critic=critic,
             )
         async with lock:
             all_results.append(result_dict)

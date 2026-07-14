@@ -59,7 +59,7 @@ class ExtractionResult(BaseModel):
         offset verification. Malformed messages are skipped here (populate
         records them properly).
         """
-        from trajectory_index.markup import MarkupError, parse
+        from trajectory_index.pass1_nodes.markup import MarkupError, parse
 
         by_name: dict[str, ExtractedSymbol] = {}
         for am in self.annotated:

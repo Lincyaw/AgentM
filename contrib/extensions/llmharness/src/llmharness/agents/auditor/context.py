@@ -97,7 +97,7 @@ def build_auditor_system_prompt(
 
 class AuditorContextConfig(BaseModel):
     # Extra keys the parent may still pass (symbols / references /
-    # trajectory_snapshot / context_index) are for the auditor_index_tools
+    # trajectory_snapshot / index_path) are for the trajectory_index_query
     # atom, not this one, and are ignored here by pydantic.
     check_errors: dict[str, str] = {}
     continuation_notes: list[str] = []

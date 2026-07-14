@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .grounding import drives_defuse, grounded_from_kind
+from ..pass3_folds.grounding import drives_defuse, grounded_from_kind
 from .models import (
     _ENTITY_CLASS_VALUES,
     _FINDING_STATUS_VALUES,

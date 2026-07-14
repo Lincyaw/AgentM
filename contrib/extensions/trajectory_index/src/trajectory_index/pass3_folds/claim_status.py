@@ -27,12 +27,15 @@ shrinks those inputs, so failures under-alarm, never over-alarm.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from .edges import EdgePassResult
-from .index import ClaimFinding, TrajectoryIndex
+from ..ir.models import ClaimFinding
+from ..pass2_edges.claims import EdgePassResult
+
+if TYPE_CHECKING:
+    from ..ir.index import TrajectoryIndex
 
 _STATUS_ORDER = ("conflicted", "supported", "unsourced", "unknown")
 

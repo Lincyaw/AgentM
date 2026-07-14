@@ -45,6 +45,11 @@ class ProviderConfig(BaseModel):
 class LLMHarnessConfig(BaseModel):
     mode: Literal["async", "sync"] = "async"
     audit_interval_turns: int = 3
+    # When true, run the auditor once at the moment the agent tries to finish
+    # (the loop is about to Stop) instead of every ``audit_interval_turns``.
+    # A surfaced reminder overrides the Stop and the agent keeps working; a
+    # clean verdict lets the finish proceed. Gates submission on verification.
+    audit_on_finish: bool = False
     prompt_override_auditor: str | None = None
     auditor_prompt: str = "index"
     shutdown_timeout_s: float = 30.0
@@ -264,16 +269,15 @@ def build_auditor_config(
     auditor_prompt: str = "index",
     continuation_notes: list[str] | None = None,
     messages: list[AgentMessage] | None = None,
-    context_index: dict[str, Any] | None = None,
+    index_path: str = "",
     parent_session_id: str | None = None,
 ) -> AgentSessionConfig:
     """Build an ``AgentSessionConfig`` for a standalone auditor session.
 
     Accepts typed ``AgentMessage`` objects. Serialization happens here.
+    ``index_path`` points at a persisted ``index.json``; the mounted
+    ``trajectory_index_query`` atom loads it and exposes the query tools.
     """
-    trajectory = _serialize_trajectory(list(messages)) if messages else []
-
-    ci = context_index if isinstance(context_index, dict) else {}
     return AgentSessionConfig(
         cwd=cwd,
         model=model,
@@ -283,14 +287,10 @@ def build_auditor_config(
             "auditor_context": {
                 "continuation_notes": list(continuation_notes or []),
                 "prompt_name": auditor_prompt,
-                "context_index": context_index,
             },
             "auditor_tools": {},
-            "auditor_index_tools": {
-                "trajectory": trajectory,
-                "context_index": context_index,
-                "symbols": ci.get("symbols", []),
-                "references": ci.get("references", []),
+            "trajectory_index_query": {
+                "index_path": index_path,
             },
         },
         purpose="cognitive_audit_auditor_eval",
@@ -313,6 +313,7 @@ async def run_auditor_session(
     config: AgentSessionConfig,
     prompt: str,
     *,
+    followup_prompt: str | None = None,
     spawn: Any = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Run the auditor child, return ``(verdict_raw_dict, session_id)``.
@@ -320,11 +321,22 @@ async def run_auditor_session(
     ``spawn`` creates a session from a config. Defaults to
     ``AgentSession.create``; callers inside an atom pass
     ``api.spawn_child_session``.
-    """
-    from agentm.core.runtime import AgentSession
 
+    When ``followup_prompt`` is set the child is asked a second question in
+    the same session (its tool reads and reasoning from the first turn carry
+    over), and the verdict is taken from the follow-up turn. This drives
+    progressive questioning — e.g. first decide the error mode, then localize
+    conditioned on that decision.
+    """
     if spawn is None:
-        spawn = AgentSession.create
+        # ``spawn`` is required: atom callers pass ``api.spawn_child_session``;
+        # non-atom callers (e.g. eval method adapters, which may import the
+        # runtime) pass ``AgentSession.create``. This module must not import
+        # ``agentm.core.runtime`` itself (§11.4.5).
+        raise ValueError(
+            "run_auditor_session requires a 'spawn' factory "
+            "(api.spawn_child_session or AgentSession.create)"
+        )
 
     for attempt in range(_AUDITOR_MAX_RETRIES):
         try:
@@ -332,6 +344,8 @@ async def run_auditor_session(
             sid = child.session_id
             try:
                 child_msgs: list[AgentMessage] = await child.prompt(prompt)
+                if followup_prompt is not None:
+                    child_msgs = await child.prompt(followup_prompt)
                 verdict_raw = _terminal_tool_args(child_msgs, SUBMIT_VERDICT_TOOL_NAME)
                 if isinstance(verdict_raw, dict):
                     return verdict_raw.get("verdict", verdict_raw), sid
@@ -362,6 +376,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     shutdown_timeout = max(0.0, cfg.shutdown_timeout_s)
     enable_auditor = cfg.enable_auditor
     enable_reminders = cfg.enable_reminders
+    audit_on_finish = cfg.audit_on_finish
     finalize_tool = cfg.finalize_tool
 
     auditor_model = cfg.auditor_model
@@ -475,7 +490,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     # Async index extraction
     # ------------------------------------------------------------------
 
-    _latest_index: dict[str, Any] | None = None
+    _latest_index_path: str | None = None
 
     if cfg.enable_index:
         try:
@@ -486,21 +501,45 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                 "installed — index extraction disabled"
             )
 
-    async def _update_index(traj: list[dict[str, Any]]) -> None:
-        nonlocal _latest_index
+    async def _update_index(msgs: list[AgentMessage]) -> None:
+        nonlocal _latest_index_path
         try:
-            from trajectory_index.atom import run_extraction
+            import os
+            import tempfile
 
+            from trajectory_index.atom import run_extraction
+            from trajectory_index.ir.index import TrajectoryIndex
+
+            # run_extraction expects raw AgentMessage objects (it serializes
+            # them itself), not a pre-serialized trajectory snapshot.
             extraction = await run_extraction(
-                api, traj, vocabulary=cfg.index_vocabulary,
+                api, msgs, vocabulary=cfg.index_vocabulary,
                 model=cfg.index_model,
             )
             if extraction is not None:
-                symbols = [s.model_dump() for s in extraction.parsed_symbols()]
-                # Symbols only — the auditor's index tools query these on
-                # demand. No derived RCA-keyword context layer (retired).
-                _latest_index = {"symbols": symbols}
-                logger.info("llmharness: index updated — {} symbols", len(symbols))
+                # Build the full index (symbols + references + grounding), not
+                # just parsed symbols: populate references/claims, then
+                # build_dependencies (Pass 3, deterministic) to compute the
+                # grounding warnings the diagnostic relies on.
+                idx = TrajectoryIndex()
+                idx.populate_from_extraction(extraction, msgs, run_id=api.session_id)
+                idx.build_dependencies()
+                # Persist to disk. The auditor's index tools load and query it
+                # from there -- a durable artifact, not an in-memory dict
+                # shipped across the child-session config boundary.
+                base = os.path.join(tempfile.gettempdir(), "agentm-trajectory-index")
+                os.makedirs(base, exist_ok=True)
+                path = os.path.join(base, f"{api.session_id or 'index'}.json")
+                idx.dump(path)
+                _latest_index_path = path
+                stats = idx.stats(api.session_id)
+                logger.info(
+                    "llmharness: index built — {} symbols, {} refs, {} warnings -> {}",
+                    stats.symbol_count,
+                    stats.reference_count,
+                    len(idx.warnings()),
+                    path,
+                )
         except Exception:
             logger.exception("llmharness: async index extraction failed")
 
@@ -553,9 +592,9 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
         # --- Index extraction (when auditor is due) ---
         if auditor_due and cfg.enable_index and traj_snapshot is not None:
-            await _update_index(traj_snapshot)
+            await _update_index(messages)
 
-        context_index = _latest_index
+        index_path = _latest_index_path
 
         # --- Auditor ---
         if auditor_due:
@@ -565,9 +604,10 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             }
             if cached_methodology:
                 auditor_config["methodology"] = cached_methodology
-            if context_index is not None:
-                auditor_config["context_index"] = context_index
+            if traj_snapshot is not None:
                 auditor_config["trajectory_snapshot"] = traj_snapshot
+            if index_path is not None:
+                auditor_config["index_path"] = index_path
 
             goal_condition = api.get_service("goal.condition")
             if isinstance(goal_condition, str) and goal_condition:
@@ -591,9 +631,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                 atom_config_overrides={
                     "auditor_context": auditor_config,
                     "auditor_tools": {},
-                    "auditor_index_tools": {
-                        "trajectory": auditor_config.get("trajectory_snapshot", []),
-                        "context_index": auditor_config.get("context_index"),
+                    "trajectory_index_query": {
+                        "index_path": index_path or "",
                     },
                     **_sandbox_attach_overrides(),
                 },
@@ -637,10 +676,21 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     def _build_reminder_msg(text: str) -> UserMessage:
         return text_message(f"{REMINDER_OPEN}{text}{REMINDER_CLOSE}", timestamp=time.time())
 
-    def _on_decide(event: DecideTurnActionEvent) -> LoopAction | None:
+    async def _on_decide(event: DecideTurnActionEvent) -> LoopAction | None:
+        default = event.observation.default_action
+        # Audit-on-finish: the agent is about to stop (finish tool or a plain
+        # end-turn). Run the auditor once, synchronously, against the full
+        # index-grounded trajectory. If it surfaces a reminder, injecting it
+        # below overrides the Stop and the loop continues; a clean verdict
+        # leaves no reminder and the finish proceeds.
+        if (
+            audit_on_finish
+            and isinstance(default, Stop)
+            and not default.cause.final
+        ):
+            await _step(list(api.session.get_messages()), turn_count, force=True)
         if not pending_reminders:
             return None
-        default = event.observation.default_action
         if isinstance(default, Stop) and default.cause.final:
             return None
         injected: list[AgentMessage] = []
@@ -669,6 +719,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         async def _on_turn_end_sync(event: TurnEndEvent) -> None:
             nonlocal turn_count
             turn_count += 1
+            if audit_on_finish:
+                return  # audit fires on finish (_on_decide), not per turn
             if _has_successful_tool_result(list(event.messages), finalize_tool):
                 return
             await _step(list(event.messages), turn_count)
@@ -680,7 +732,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
         api.on(SessionShutdownEvent.CHANNEL, _on_shutdown_sync)
-        if enable_reminders:
+        if enable_reminders or audit_on_finish:
             api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
         return
 
@@ -711,6 +763,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count
         turn_count += 1
+        if audit_on_finish:
+            return  # audit fires on finish (_on_decide), not per turn
         if _has_successful_tool_result(list(event.messages), finalize_tool):
             return
         auditor_due = enable_auditor and (turn_count % auditor_k) == 0
@@ -736,6 +790,6 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             await _step(msgs, turn_count, force=True)
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
-    if enable_reminders:
+    if enable_reminders or audit_on_finish:
         api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)

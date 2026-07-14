@@ -1,64 +1,189 @@
-"""Model-judgment side of the pipeline — the semantic decisions code can't make.
+"""Pass 2a — identity: alias resolution + coreference.
 
-The rest of ``trajectory_index`` is deterministic (Pass 1 tagging, Pass 3 dataflow).
-This module is the one place a model earns its keep, and it only ever answers a
-*local* question — it never traverses the graph. Code does the traversal and
-propagation ("the model gives a point, code propagates it"; SCHEMA).
+One entity, many surfaces. The division of labor is code-blocks →
+model-judges-locally → code-folds:
 
-* ``resolve_aliases`` — **Pass 2a, name resolution.** "Are these two surface forms
-  the same entity?" Code blocks candidate pairs (``alias_candidates``), the model
-  judges each pair, code clusters into merge groups. Runs **before** the dataflow.
-* ``resolve_references`` — **Pass 2b, coreference.** "Which earlier entity does this
-  anaphor (``this`` / ``it`` / ``the previous result``) denote?" Code detects
-  anaphors + proposes recent in-scope candidates, the model picks the referent, code
-  adds a resolved reference so the dataflow links it.
-* ``compare_values`` — **Pass 3.5, value fidelity.** "Does the tool's grounded value
-  confirm or contradict the value the agent acted on?" Fires only on value-class
-  edges; flags ``contradicted``.
+    alias_candidates   →  resolve_aliases       →  apply_alias_merges
+    (block same-entity     (model: same entity?)     (union-find cluster +
+     pairs by name)                                   re-point refs/relations)
 
-Each pass is an *independent local judgment* that fires only where it is needed
-(the divide-and-conquer "B" shape): the model never traverses the graph — code does
-that. The model is swappable (~8B is enough); each call speaks plain JSON.
+    anaphor detection  →  resolve_references     →  add_reference
+    (regex closed-class    (model: which antecedent?)  (materialize the link
+     deictic surfaces)                                  so dataflow sees it)
+
+Code never decides identity and the model never traverses the graph. Runs
+before the Pass 3 dataflow so the def-use layer sees merged entities.
 """
+
 from __future__ import annotations
 
-import contextlib
 import json
 import re
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from loguru import logger
-
-from .data import extract_json
+from ..ir.models import AliasCandidate, normalize_name
+from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
+from ..pass3_folds.grounding import drives_defuse
 
 if TYPE_CHECKING:
-    from .index import AliasCandidate, Step, TrajectoryIndex
+    from ..ir.index import TrajectoryIndex
+    from ..ir.models import Step
 
-# Session factory: ``async (config) -> session`` where session has
-# ``.prompt(text)`` and ``.shutdown()``.  The atom passes
-# ``api.spawn_child_session``; offline callers pass ``AgentSession.create``.
-type SessionFactory = Callable[[Any], Coroutine[Any, Any, Any]]
+_MIN_BLOCK_SUBSTR = 3         # alias blocking: shortest name a substring match may involve
+_SNIPPET_CHARS = 120          # per-reference context snippet cap for the merge adjudicator
 
 
-def _index_by_id(raw: list[Any]) -> dict[int, dict[str, Any]]:
-    """Index a list of id-keyed dicts by their ``id`` field (missing → skipped)."""
-    by_id: dict[int, dict[str, Any]] = {}
-    for item in raw:
-        if not isinstance(item, dict):
+# ---------------------------------------------------------------------------
+# Blocking + merge mechanism (code)
+# ---------------------------------------------------------------------------
+
+
+def rebuild_symbol_name_index(index: TrajectoryIndex) -> None:
+    from collections import defaultdict
+
+    index._symbol_ids_by_norm = defaultdict(set)
+    for sid, sym in index.symbols.items():
+        ns = str(sym.metadata.get("namespace", ""))
+        for name in sym.all_names:
+            index._index_symbol_name(sid, name, ns)
+
+
+def rebuild_relation_index(index: TrajectoryIndex) -> None:
+    from collections import defaultdict
+
+    index._relation_ids_by_symbol = defaultdict(list)
+    for rid, rel in index.relations.items():
+        index._relation_ids_by_symbol[rel.from_symbol_id].append(rid)
+        index._relation_ids_by_symbol[rel.to_symbol_id].append(rid)
+
+
+def _choose_canonical(index: TrajectoryIndex, symbol_ids: list[str]) -> str:
+    """Representative of a merge group: most-referenced, tie broken by stable id.
+    Which id represents the merged entity is cosmetic; the choice is deterministic."""
+    return sorted(
+        symbol_ids, key=lambda sid: (-len(index._ref_ids_by_symbol.get(sid, [])), sid),
+    )[0]
+
+
+def _ref_snippets(index: TrajectoryIndex, symbol_id: str, limit: int = 3) -> tuple[str, ...]:
+    """A few reference texts for a symbol — context for the merge adjudicator."""
+    out: list[str] = []
+    for rid in index._ref_ids_by_symbol.get(symbol_id, [])[:limit]:
+        text = index.references[rid].text.strip()
+        if text:
+            out.append(text[:_SNIPPET_CHARS])
+    return tuple(out)
+
+
+def _tokenize_name(name: str) -> set[str]:
+    """Split a symbol name into tokens on common delimiters."""
+    return {
+        t for t in re.split(r"[-_./\s]+", normalize_name(name))
+        if len(t) >= 2
+    }
+
+
+def _token_jaccard(tokens_a: set[str], tokens_b: set[str]) -> float:
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+def alias_candidates(index: TrajectoryIndex, min_jaccard: float = 0.5) -> list[AliasCandidate]:
+    """Deterministically block structured-symbol pairs that MIGHT be one entity.
+
+    Uses token-level Jaccard similarity on names split by common
+    delimiters (``-_./``). This avoids false matches between names
+    that share long prefixes/suffixes but differ in the distinctive
+    token (e.g. ``ts-cancel-service`` vs ``ts-config-service``
+    shares only ``{ts, service}`` → jaccard 0.33, below threshold).
+
+    Substring containment is also checked. Pairs above threshold are
+    proposed for LLM judgment via :func:`resolve_aliases`.
+    """
+    items = [
+        (sid, sym, normalize_name(sym.canonical_name),
+         _tokenize_name(sym.canonical_name), _ref_snippets(index, sid))
+        for sid, sym in index.symbols.items()
+        if drives_defuse(sym.entity_class)
+    ]
+    out: list[AliasCandidate] = []
+    for i in range(len(items)):
+        aid, asym, anorm, atokens, asnip = items[i]
+        for j in range(i + 1, len(items)):
+            bid, bsym, bnorm, btokens, bsnip = items[j]
+            if anorm == bnorm:
+                continue
+            substring = (
+                (anorm in bnorm or bnorm in anorm)
+                and min(len(anorm), len(bnorm)) >= _MIN_BLOCK_SUBSTR
+            )
+            jaccard = _token_jaccard(atokens, btokens)
+            if not substring and jaccard < min_jaccard:
+                continue
+            out.append(AliasCandidate(
+                symbol_a_id=aid, symbol_b_id=bid,
+                name_a=asym.canonical_name, name_b=bsym.canonical_name,
+                kind_a=asym.kind, kind_b=bsym.kind,
+                signal="substring" if substring else "similar",
+                score=round(jaccard, 3),
+                context_a=asnip, context_b=bsnip,
+            ))
+    return sorted(out, key=lambda c: (-c.score, c.symbol_a_id, c.symbol_b_id))
+
+
+def apply_alias_merges(index: TrajectoryIndex, groups: list[list[str]]) -> None:
+    """Fold each decided group of symbol ids into one canonical symbol.
+
+    The mechanism (deterministic, idempotent); *which* symbols form a group is
+    decided upstream — a name-resolution judgment over :func:`alias_candidates`, not
+    a rule here. References and relations are re-pointed; folded names become
+    aliases.
+    """
+    from collections import defaultdict
+
+    merged = False
+    for sids in groups:
+        live = [s for s in dict.fromkeys(sids) if s in index.symbols]
+        if len(live) < 2:
             continue
-        with contextlib.suppress(TypeError, ValueError, KeyError):
-            by_id[int(item["id"])] = item
-    return by_id
+        canonical_id = _choose_canonical(index, live)
+        canon = index.symbols[canonical_id]
+        for other_id in live:
+            if other_id == canonical_id:
+                continue
+            other = index.symbols[other_id]
+            canon.aliases.update(other.all_names)
+            canon.aliases.discard(canon.canonical_name)
+            for rid in index._ref_ids_by_symbol.get(other_id, []):
+                index.references[rid] = replace(index.references[rid], symbol_id=canonical_id)
+                index._ref_ids_by_symbol[canonical_id].append(rid)
+            index._ref_ids_by_symbol.pop(other_id, None)
+            # only relations touching other_id need re-pointing (a folded symbol
+            # is never a canonical target, so this index entry is complete).
+            for rel_id in dict.fromkeys(index._relation_ids_by_symbol.get(other_id, [])):
+                rel = index.relations.get(rel_id)
+                if rel is None:
+                    continue
+                nf = canonical_id if rel.from_symbol_id == other_id else rel.from_symbol_id
+                nt = canonical_id if rel.to_symbol_id == other_id else rel.to_symbol_id
+                if nf == nt:  # self-loop after the merge — drop
+                    index.relations.pop(rel_id, None)
+                else:
+                    index.relations[rel_id] = replace(rel, from_symbol_id=nf, to_symbol_id=nt)
+            index.symbols.pop(other_id, None)
+            merged = True
 
-
-def _safe_float(item: dict[str, Any], key: str, default: float = 0.0) -> float:
-    """Coerce a model-returned field to float, defaulting on garbage."""
-    try:
-        return float(item.get(key, default))
-    except (TypeError, ValueError):
-        return default
+    if merged:
+        rebuild_symbol_name_index(index)
+        rebuild_relation_index(index)
+        # dependencies are derived from symbols; a merge invalidates them.
+        index.dependencies = {}
+        index._dep_ids_by_symbol = defaultdict(list)
+        # constraint findings name candidate symbols; a merge invalidates
+        # them wholesale (Pass E/J/L rebuild from facts + transcript).
+        index.constraint_findings = []
 
 
 # ---------------------------------------------------------------------------
@@ -144,62 +269,6 @@ def cluster_merges(
     return [g for g in groups.values() if len(g) > 1]
 
 
-async def _ask_model(
-    instructions: str,
-    payload: str,
-    model: str | None,
-    session_factory: SessionFactory,
-    purpose: str = "alias_resolution",
-    key: str = "verdicts",
-) -> list[Any] | None:
-    """One plain-JSON model call; returns the list under ``key`` or None.
-
-    ``session_factory`` creates a session from an ``AgentSessionConfig``.
-    The atom passes ``api.spawn_child_session``; offline callers pass
-    ``AgentSession.create`` (imported on their side, not here — §11).
-    """
-    from pathlib import Path
-
-    from agentm.core.abi import (
-        AgentSessionConfig,
-        AssistantMessage,
-        LoopConfig,
-        TextContent,
-    )
-
-    config = AgentSessionConfig(
-        cwd=str(Path.cwd()),
-        model=model,
-        scenario="minimal",
-        purpose=purpose,
-        loop_config=LoopConfig(max_turns=1),
-        log_trace_command=False,
-    )
-    session = await session_factory(config)
-    try:
-        messages = await session.prompt(f"{instructions}\n\n{payload}")
-    finally:
-        with contextlib.suppress(Exception):
-            await session.shutdown()
-
-    text = "".join(
-        block.text
-        for msg in messages
-        if isinstance(msg, AssistantMessage)
-        for block in msg.content
-        if isinstance(block, TextContent)
-    )
-    obj = extract_json(text)
-    if obj is None:
-        logger.warning("{}: model returned no parseable JSON", purpose)
-        return None
-    verdicts = obj.get(key)
-    if not isinstance(verdicts, list):
-        logger.warning("{}: JSON missing '{}' list", purpose, key)
-        return None
-    return verdicts
-
-
 def _align_verdicts(
     candidates: list[AliasCandidate], raw: list[Any]
 ) -> list[SameEntityVerdict]:
@@ -265,94 +334,7 @@ async def resolve_aliases(
 
 
 # ---------------------------------------------------------------------------
-# Value comparison (Pass 3.5): did the agent act on a value a tool contradicts?
-# ---------------------------------------------------------------------------
-
-_VALUE_COMPARE_INSTRUCTIONS = """\
-You check whether a value an agent acted on matches what a tool actually produced.
-Each item names an entity, the full text of the step where a tool provided
-information about it (grounded), and the full text of the step where the agent
-referenced it (used). Decide, per item independently:
-  - confirm:    the agent's usage is consistent with what the tool provided.
-  - contradict: the agent stated or used a different value than what the tool provided.
-  - unclear:    the texts don't contain comparable values for this entity.
-Judge the substance, not the wording. Return ONLY:
-{"verdicts": [{"id": 0, "outcome": "confirm|contradict|unclear", "confidence": 0.9, "reason": "..."}]}
-"""
-
-
-def _step_text(index: TrajectoryIndex, run_id: str, step_id: str) -> str:
-    st = index.steps.get((run_id, step_id))
-    return (st.content or "") if st else ""
-
-
-def _align_outcomes(n: int, raw: list[Any]) -> list[tuple[str, float, str]]:
-    """Map id-keyed {outcome,confidence,reason} back by position (missing -> unclear)."""
-    by_id = _index_by_id(raw)
-    out: list[tuple[str, float, str]] = []
-    for i in range(n):
-        item = by_id.get(i)
-        if item is None:
-            out.append(("unclear", 0.0, "no verdict"))
-            continue
-        oc = str(item.get("outcome", "unclear"))
-        oc = oc if oc in ("confirm", "contradict", "unclear") else "unclear"
-        out.append((oc, _safe_float(item, "confidence"), str(item.get("reason", ""))))
-    return out
-
-
-async def compare_values(
-    index: TrajectoryIndex, model: str | None = None, apply: bool = True,
-    session_factory: SessionFactory | None = None,
-) -> list[tuple[str, str]]:
-    """For dependency edges with a grounded binding, ask the model whether the
-    agent's usage is consistent with what the tool provided. Flags ``contradicted``.
-
-    Returns (dependency_id, outcome) for every edge judged.
-    """
-    targets: list[tuple[Any, str]] = []
-    for d in index.get_dependencies():
-        sym = index.symbols.get(d.symbol_id)
-        if not sym:
-            continue
-        grounded_step = (
-            d.def_step_id if d.risk == "grounded"
-            else d.grounded_by_step_id if d.risk == "premature" else None
-        )
-        if grounded_step:
-            targets.append((d, grounded_step))
-    if not targets:
-        return []
-    if session_factory is None:
-        raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
-
-    rows = [
-        {
-            "id": i,
-            "entity": index.symbols[d.symbol_id].canonical_name,
-            "grounded_text": _step_text(index, d.run_id, gs),
-            "used_text": _step_text(index, d.run_id, d.use_step_id),
-        }
-        for i, (d, gs) in enumerate(targets)
-    ]
-    raw = await _ask_model(
-        _VALUE_COMPARE_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
-        session_factory=session_factory,
-    )
-    if raw is None:
-        return []
-    outcomes = _align_outcomes(len(targets), raw)
-
-    result: list[tuple[str, str]] = []
-    for (d, _), (outcome, _conf, _why) in zip(targets, outcomes, strict=True):
-        result.append((d.id, outcome))
-        if apply and outcome == "contradict":
-            index.dependencies[d.id] = replace(d, risk="contradicted")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Coreference resolution (Pass 2b): bind an anaphor to its antecedent entity.
+# Coreference resolution: bind an anaphor to its antecedent entity.
 # ---------------------------------------------------------------------------
 
 # Closed-class deictic/anaphoric surfaces a small deterministic proposer can spot.
@@ -383,6 +365,8 @@ async def resolve_references(
     Divide-and-conquer: code detects anaphors + proposes recent in-scope candidates,
     the model picks the referent (local), code adds the reference and rebuilds Pass 3.
     """
+    import contextlib
+
     # steps in run/index order, with their entities-in-scope running set
     steps = sorted(index.steps.values(), key=lambda s: (s.run_id, s.index))
     # entity last-seen step index per run, for recency-ranked candidates

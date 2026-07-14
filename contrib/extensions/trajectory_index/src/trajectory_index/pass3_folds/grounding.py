@@ -16,14 +16,16 @@ the reference write path and the loaders.
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .models import Dependency, Reference, Risk, Step, stable_id
+from ..ir.models import Dependency, Reference, Risk, Step, stable_id
+from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
 
 if TYPE_CHECKING:
-    from .index import TrajectoryIndex
+    from ..ir.index import TrajectoryIndex
 
 # Reference kinds that produce/introduce a resource value (a "write"). The
 # extractor only emits tool_output (data.py); define/write/observe are inert for
@@ -291,3 +293,95 @@ def compute_warnings(index: TrajectoryIndex) -> list[Warning]:
 def warning_summary(index: TrajectoryIndex) -> dict[str, int]:
     """Count warnings by kind."""
     return dict(Counter(w.kind for w in compute_warnings(index)))
+
+
+# ---------------------------------------------------------------------------
+# Pass 3.5 — value fidelity: did the agent act on a value a tool contradicts?
+# ---------------------------------------------------------------------------
+#
+# The only model-judged part of the grounding layer. It rides on the dataflow:
+# for each dependency whose reaching binding is grounded, it asks whether the
+# value the agent used matches what the tool actually produced, and flags
+# ``contradicted``. Local per-edge judgment (the model never traverses).
+
+_VALUE_COMPARE_INSTRUCTIONS = """\
+You check whether a value an agent acted on matches what a tool actually produced.
+Each item names an entity, the full text of the step where a tool provided
+information about it (grounded), and the full text of the step where the agent
+referenced it (used). Decide, per item independently:
+  - confirm:    the agent's usage is consistent with what the tool provided.
+  - contradict: the agent stated or used a different value than what the tool provided.
+  - unclear:    the texts don't contain comparable values for this entity.
+Judge the substance, not the wording. Return ONLY:
+{"verdicts": [{"id": 0, "outcome": "confirm|contradict|unclear", "confidence": 0.9, "reason": "..."}]}
+"""
+
+
+def _step_text(index: TrajectoryIndex, run_id: str, step_id: str) -> str:
+    st = index.steps.get((run_id, step_id))
+    return (st.content or "") if st else ""
+
+
+def _align_outcomes(n: int, raw: list[Any]) -> list[tuple[str, float, str]]:
+    """Map id-keyed {outcome,confidence,reason} back by position (missing -> unclear)."""
+    by_id = _index_by_id(raw)
+    out: list[tuple[str, float, str]] = []
+    for i in range(n):
+        item = by_id.get(i)
+        if item is None:
+            out.append(("unclear", 0.0, "no verdict"))
+            continue
+        oc = str(item.get("outcome", "unclear"))
+        oc = oc if oc in ("confirm", "contradict", "unclear") else "unclear"
+        out.append((oc, _safe_float(item, "confidence"), str(item.get("reason", ""))))
+    return out
+
+
+async def compare_values(
+    index: TrajectoryIndex, model: str | None = None, apply: bool = True,
+    session_factory: SessionFactory | None = None,
+) -> list[tuple[str, str]]:
+    """For dependency edges with a grounded binding, ask the model whether the
+    agent's usage is consistent with what the tool provided. Flags ``contradicted``.
+
+    Returns (dependency_id, outcome) for every edge judged.
+    """
+    targets: list[tuple[Any, str]] = []
+    for d in index.get_dependencies():
+        sym = index.symbols.get(d.symbol_id)
+        if not sym:
+            continue
+        grounded_step = (
+            d.def_step_id if d.risk == "grounded"
+            else d.grounded_by_step_id if d.risk == "premature" else None
+        )
+        if grounded_step:
+            targets.append((d, grounded_step))
+    if not targets:
+        return []
+    if session_factory is None:
+        raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
+
+    rows = [
+        {
+            "id": i,
+            "entity": index.symbols[d.symbol_id].canonical_name,
+            "grounded_text": _step_text(index, d.run_id, gs),
+            "used_text": _step_text(index, d.run_id, d.use_step_id),
+        }
+        for i, (d, gs) in enumerate(targets)
+    ]
+    raw = await _ask_model(
+        _VALUE_COMPARE_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
+        session_factory=session_factory,
+    )
+    if raw is None:
+        return []
+    outcomes = _align_outcomes(len(targets), raw)
+
+    result: list[tuple[str, str]] = []
+    for (d, _), (outcome, _conf, _why) in zip(targets, outcomes, strict=True):
+        result.append((d.id, outcome))
+        if apply and outcome == "contradict":
+            index.dependencies[d.id] = replace(d, risk="contradicted")
+    return result
