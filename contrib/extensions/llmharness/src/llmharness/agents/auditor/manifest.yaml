@@ -25,7 +25,7 @@ extensions:
         - list_entities
         - search_entities
         - get_entity_timeline
-        - list_attention_hints
+        - list_claim_checks
         - submit_verdict
   # After tool_filter (registration order = handler order on
   # before_agent_start): injects the FILTERED catalog into the system

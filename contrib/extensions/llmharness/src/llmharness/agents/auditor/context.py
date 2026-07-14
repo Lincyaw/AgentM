@@ -43,7 +43,6 @@ def build_auditor_system_prompt(
     continuation_notes: list[str],
     base_prompt: str | None = None,
     methodology: list[str] | None = None,
-    context_index: dict[str, Any] | None = None,
     goal_condition: str | None = None,
 ) -> str:
     """Assemble the auditor system prompt for one firing."""
@@ -96,59 +95,6 @@ def build_auditor_system_prompt(
 
     return "\n".join(sections)
 
-
-def build_auditor_trajectory_prompt(
-    *,
-    trajectory: list[dict[str, Any]],
-    continuation_notes: list[str],
-    base_prompt: str | None = None,
-    methodology: list[str] | None = None,
-    context_index: dict[str, Any] | None = None,
-) -> str:
-    """Assemble the auditor system prompt for a trajectory-mode firing."""
-    framing = (
-        base_prompt
-        if base_prompt is not None
-        else load_auditor_prompt("trajectory")
-    )
-    sections: list[str] = [framing.rstrip(), ""]
-
-    if methodology:
-        sections.append("## METHODOLOGY (loaded by main agent)")
-        sections.append(
-            "The main agent loaded these domain-specific skills during its session. "
-            "Use them as background for domain terms, expected evidence shapes, "
-            "and causal reasoning patterns. Do not treat every checklist item in "
-            "these skills as an automatic reminder-worthy gap; concrete facts must "
-            "still come from the trajectory."
-        )
-        for i, skill_text in enumerate(methodology):
-            sections.append(f"### Skill {i + 1}")
-            sections.append(skill_text.strip())
-        sections.append("")
-
-    if context_index is not None:
-        sections.append("## CONTEXT_INDEX (primary navigation view)")
-        sections.append(json.dumps(context_index, ensure_ascii=False))
-        sections.append("")
-
-    sections.append("## TRAJECTORY")
-    sections.append(f"conversation turns ({len(trajectory)} total):")
-    sections.append(json.dumps(trajectory, ensure_ascii=False))
-    sections.append("")
-
-    sections.append("## CONTINUATION_NOTES (from your prior firing)")
-    sections.append(json.dumps(list(continuation_notes), ensure_ascii=False))
-    sections.append("")
-
-    return "\n".join(sections)
-
-
-# ---------------------------------------------------------------------------
-# Atom
-# ---------------------------------------------------------------------------
-
-
 class AuditorContextConfig(BaseModel):
     symbols: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
@@ -171,25 +117,14 @@ MANIFEST = ExtensionManifest(
 def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
     base_prompt = load_auditor_prompt(config.prompt_name)
     meth = config.methodology or None
-    context_index = config.context_index
 
-    if config.mode == "trajectory" and config.trajectory_snapshot is not None:
-        prompt_text = build_auditor_trajectory_prompt(
-            trajectory=config.trajectory_snapshot,
-            continuation_notes=config.continuation_notes,
-            base_prompt=base_prompt,
-            methodology=meth,
-            context_index=context_index,
-        )
-    else:
-        prompt_text = build_auditor_system_prompt(
-            check_errors=config.check_errors,
-            continuation_notes=config.continuation_notes,
-            base_prompt=base_prompt,
-            methodology=meth,
-            context_index=context_index,
-            goal_condition=config.goal_condition,
-        )
+    prompt_text = build_auditor_system_prompt(
+        check_errors=config.check_errors,
+        continuation_notes=config.continuation_notes,
+        base_prompt=base_prompt,
+        methodology=meth,
+        goal_condition=config.goal_condition,
+    )
 
     def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
         current = event.system or ""
@@ -202,7 +137,6 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
 __all__: Final = [
     "MANIFEST",
     "build_auditor_system_prompt",
-    "build_auditor_trajectory_prompt",
     "install",
     "load_auditor_prompt",
 ]

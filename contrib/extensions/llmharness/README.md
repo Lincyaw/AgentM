@@ -66,9 +66,7 @@ The pipeline is:
 | `src/llmharness/atom.py` | Online AgentM extension entrypoint. |
 | `src/llmharness/schema.py` | Public event, edge, verdict, and entry-type dataclasses. |
 | `src/llmharness/state.py` | Event-sourced cumulative audit state. |
-| `src/llmharness/context_index.py` | Derived auditor navigation surface. |
 | `src/llmharness/trajectory_utils.py` | Shared trajectory serialization helpers. |
-| `src/llmharness/offline.py` | Shared offline primitives (`run_phase_standalone`, `PhaseResult`). |
 | `src/llmharness/agents/auditor/` | Auditor child scenario, context atom, and `submit_verdict` tool. |
 | `src/llmharness/agents/analyst/` | Analyst child scenario and trace tools. |
 | `src/llmharness/agents/tel/` | TEL child scenario, tools, and workflow. |
