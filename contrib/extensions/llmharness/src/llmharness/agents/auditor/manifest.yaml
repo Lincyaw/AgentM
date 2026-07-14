@@ -13,13 +13,11 @@ extensions:
   # mutate the agent's sandbox.
   - module: agentm.extensions.builtin.tool_result_cap
     config:
-      max_tokens: 20000
-      preview_tokens: 20000
-  - module: agentm.extensions.builtin.file_tools
+      max_tokens: 2000
+      preview_tokens: 2000
   - module: agentm.extensions.builtin.tool_filter
     config:
       allow:
-        - read
         - search_symbols
         - get_symbol_context
         - get_insights

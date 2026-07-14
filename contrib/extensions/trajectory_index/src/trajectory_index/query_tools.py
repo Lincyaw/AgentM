@@ -12,7 +12,7 @@ mounting atom is responsible for having put a ``TrajectoryIndex`` there.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
 from agentm.core.abi import ExtensionAPI, FunctionTool, TextContent, ToolResult
 from pydantic import BaseModel, Field
@@ -148,41 +148,73 @@ def build_insights_tool(api: ExtensionAPI) -> FunctionTool:
         assert isinstance(index, TrajectoryIndex)
 
         out: list[str] = []
+        attn = index.constraint_attention()
 
-        # Pass 3 grounding warnings (already severity-sorted).
+        # --- 1. Contradictions: witnessed, highest signal (a code-verified
+        #        quote / value / verdict, not an absence). Lead with these. ---
+        edges_by_claim: dict[str, list[Any]] = {}
+        for e in index.edges.values():
+            edges_by_claim.setdefault(e.src, []).append(e)
+
+        contra: list[str] = []
+        for f in index.claim_findings:
+            if f.status != "conflicted":
+                continue
+            c = index.claims.get(f.claim_id)
+            if not c:
+                continue
+            confs = [e for e in edges_by_claim.get(f.claim_id, []) if e.kind == "conflicts"]
+            quote = confs[0].quote[:120] if confs else ""
+            dst = confs[0].dst if confs else "?"
+            contra.append(
+                f"- claim conflicted — step {f.step_id}: {c.text[:110]!r}\n"
+                f"    vs observation step {dst}: {quote!r}"
+            )
+        for d in index.get_dependencies():
+            if d.risk == "contradicted":
+                sym = index.symbols.get(d.symbol_id)
+                name = sym.canonical_name if sym else d.symbol_id
+                contra.append(
+                    f"- value contradicted — {name!r}: def step {d.def_step_id} → use step {d.use_step_id}"
+                )
+        for a in attn:
+            if a["kind"] == "constraint_violated":
+                step = f"  [step {a['step_id']}]" if a.get("step_id") else ""
+                contra.append(f"- constraint violated — {a['summary']}{step}")
+        if contra:
+            out.append("## Contradictions (witnessed — highest signal)")
+            out += contra
+
+        # --- 2. Grounding flags (named/used but not tool-backed) ---
         warns = index.warnings()
         if warns:
-            out.append("## Grounding flags (named/used but not tool-backed)")
+            out.append("\n## Grounding flags (named/used but not tool-backed)")
             for w in warns:
                 steps = f"  [steps: {', '.join(w.step_ids)}]" if w.step_ids else ""
                 out.append(f"- {w.kind} — {w.symbol_name!r}: {w.detail}{steps}")
 
-        # Pass 3.5 value contradictions (dependency risk).
-        contradicted = [d for d in index.get_dependencies() if d.risk == "contradicted"]
-        if contradicted:
-            out.append("\n## Value contradictions (used a value a tool contradicts)")
-            for d in contradicted:
-                sym = index.symbols.get(d.symbol_id)
-                name = sym.canonical_name if sym else d.symbol_id
-                out.append(f"- {name!r}: def step {d.def_step_id} → use step {d.use_step_id}")
+        # --- 3. Constraint gaps: committed without verifying (omitted) ---
+        omitted = [a for a in attn if a["kind"] == "constraint_omitted"]
+        if omitted:
+            out.append("\n## Constraint gaps (committed without verifying a requirement)")
+            for a in omitted:
+                step = f"  [step {a['step_id']}]" if a.get("step_id") else ""
+                out.append(f"- {a['summary']}{step}")
 
-        # Pass 3 claim status: conflicted dominates, then unsourced.
-        bad_claims = [f for f in index.claim_findings if f.status in ("conflicted", "unsourced")]
-        bad_claims.sort(key=lambda f: (f.status != "conflicted", f.step_id))
-        if bad_claims:
-            out.append("\n## Claims without support")
-            for f in bad_claims:
+        # --- 4. Unsupported claims: LOW signal, de-emphasized + capped. A claim
+        #        with no linked observation is mostly baseline — agent narration
+        #        or evidence the trajectory never recovered — not a finding. ---
+        unsourced = [f for f in index.claim_findings if f.status == "unsourced"]
+        if unsourced:
+            out.append(
+                f"\n## Unsupported claims ({len(unsourced)} — low signal: assertions "
+                "with no linked observation; often narration or unrecovered evidence)"
+            )
+            for f in unsourced[:6]:
                 c = index.claims.get(f.claim_id)
-                text = (c.text[:120] if c else f.claim_id)
-                out.append(f"- {f.status} — step {f.step_id}: {text!r}")
-
-        # Pass 3 constraint layer: violated / omitted (already filtered).
-        attn = index.constraint_attention()
-        if attn:
-            out.append("\n## Constraint gaps (answer fails or never verified a requirement)")
-            for a in attn:
-                step = f"  [step: {a['step_id']}]" if a.get("step_id") else ""
-                out.append(f"- {a['kind']} — {a['summary']}{step}")
+                out.append(f"- step {f.step_id}: {(c.text[:100] if c else f.claim_id)!r}")
+            if len(unsourced) > 6:
+                out.append(f"- … +{len(unsourced) - 6} more")
 
         if not out:
             text = (
@@ -191,8 +223,8 @@ def build_insights_tool(api: ExtensionAPI) -> FunctionTool:
             )
         else:
             text = (
-                "Possible issues the index derived (leads to inspect, not verdicts):\n\n"
-                + "\n".join(out)
+                "Possible issues the index derived (most actionable first; "
+                "leads to inspect, not verdicts):\n\n" + "\n".join(out)
             )
         return ToolResult(content=[TextContent(type="text", text=text)])
 

@@ -18,9 +18,17 @@ Exception: if the agent already commits in an earlier span (states "the answer i
 
 # Using the index
 
-If `list_claims` is available, call it FIRST — it tells you which spans are commitments vs exploration from a prior analysis pass. Only flag commitment spans as errors.
+The full trajectory is already visible to you — read the spans directly.
 
-Then use `list_attention_hints` and `get_entity_timeline` to check whether entities in the final answer are grounded by tool outputs. Focus on entities the answer depends on, not search terms or abandoned candidates.
+`get_insights` gives the index's findings as a ranked feed: witnessed
+contradictions (an agent claim vs a tool observation), grounding flags (names
+or values the agent used that no tool produced), constraint gaps (a requirement
+committed to without verifying), and unsupported claims. These are advisory
+leads computed by code — incomplete or wrong at times. Use them to decide which
+commitments to scrutinize, then confirm by reading the actual span. Focus on
+entities/claims the final answer depends on, not search terms or abandoned
+candidates. `search_symbols` and `get_symbol_context` let you check whether a
+specific entity in the answer is grounded by a tool output.
 
 # Output
 

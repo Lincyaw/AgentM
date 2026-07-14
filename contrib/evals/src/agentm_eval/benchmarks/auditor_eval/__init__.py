@@ -36,6 +36,25 @@ from agentm_eval.registry import register
 
 TrajectoryItem = tuple[str, list[AgentMessage], dict[str, Any]]
 
+# Default extraction vocabulary per dataset source. Research/QA trajectories
+# (TELBench: people, orgs, places, works, events) need the `research` kinds
+# (entity/event/source/tool); the ops/coding `default` mis-kinds them AND
+# suppresses extraction. An explicit --vocabulary overrides this.
+_SOURCE_VOCAB: dict[str, str] = {"telbench": "research"}
+
+
+def _vocab_for_source(source: str) -> str:
+    return _SOURCE_VOCAB.get(source, "default")
+
+
+# Default auditor prompt per dataset source — each dataset has its own
+# localization convention. An explicit --prompt overrides this.
+_SOURCE_PROMPT: dict[str, str] = {"telbench": "telbench", "aftraj": "aftraj"}
+
+
+def _prompt_for_source(source: str) -> str:
+    return _SOURCE_PROMPT.get(source, "index")
+
 
 async def _load_from_sessions(
     sids: list[str], *, max_messages: int | None,
@@ -279,8 +298,8 @@ class AuditorEvalAdapter:
             model: Annotated[str, typer.Option(help="Auditor model profile")] = "azure-gpt",
             index_model: Annotated[str, typer.Option("--index-model", help="Index extraction model")] = "azure-gpt",
             chunk_size: Annotated[str | None, typer.Option("--chunk-size")] = "8-12",
-            vocabulary: Annotated[str, typer.Option("--vocabulary", help="Index extraction vocabulary")] = "default",
-            auditor_prompt: Annotated[str, typer.Option("--prompt")] = "index",
+            vocabulary: Annotated[str, typer.Option("--vocabulary", help="Index extraction vocabulary; empty = auto-select by dataset (telbench -> research)")] = "",
+            auditor_prompt: Annotated[str, typer.Option("--prompt", help="Auditor prompt; empty = auto by dataset (telbench->telbench, aftraj->aftraj, else index)")] = "",
             exp_id: Annotated[str | None, typer.Option("--exp-id")] = None,
             rebuild_index: Annotated[bool, typer.Option("--rebuild-index")] = False,
             max_messages: Annotated[int | None, typer.Option("--max-messages", help="Truncate trajectory")] = None,
@@ -334,6 +353,13 @@ class AuditorEvalAdapter:
                 raise typer.Exit(1)
 
             source = items[0][2].get("source", "session")
+            # Auto-select the extraction vocabulary by dataset when not given
+            # explicitly: research trajectories (people/places/works/events)
+            # need the `research` kinds, not the ops/coding `default` — the
+            # wrong vocab both mis-kinds AND suppresses extraction (rejects the
+            # model's `entity` output). Explicit --vocabulary always wins.
+            vocabulary = vocabulary or _vocab_for_source(source)
+            auditor_prompt = auditor_prompt or _prompt_for_source(source)
             parsed_chunk = _parse_chunk_size(chunk_size)
             exp = Experiment.create(
                 "auditor-eval", model=model, exp_id=exp_id,
