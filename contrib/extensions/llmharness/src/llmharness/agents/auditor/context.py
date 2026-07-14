@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Final
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
@@ -96,14 +96,12 @@ def build_auditor_system_prompt(
     return "\n".join(sections)
 
 class AuditorContextConfig(BaseModel):
-    symbols: list[dict[str, Any]] = []
-    references: list[dict[str, Any]] = []
+    # Extra keys the parent may still pass (symbols / references /
+    # trajectory_snapshot / context_index) are for the auditor_index_tools
+    # atom, not this one, and are ignored here by pydantic.
     check_errors: dict[str, str] = {}
     continuation_notes: list[str] = []
     prompt_name: str = "index"
-    trajectory_snapshot: list[dict[str, Any]] | None = None
-    mode: Literal["index", "trajectory"] = "index"
-    context_index: dict[str, Any] | None = None
     methodology: list[str] = []  # kept for backward compat
     goal_condition: str | None = None
 

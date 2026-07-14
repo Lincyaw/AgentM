@@ -366,10 +366,10 @@ async def _map_about(
     evidence before any model saw it). Positive polarity per partition; a
     failed partition loses only its own steps, recorded.
     """
-    from .edges import _PARTITION_CHAR_BUDGET, partition_by_budget
+    from .edges import _PARTITION_CHAR_BUDGET, _step_chars, partition_by_budget
 
     about: list[Step] = []
-    for partition in partition_by_budget(grounded, _PARTITION_CHAR_BUDGET):
+    for partition in partition_by_budget(grounded, _PARTITION_CHAR_BUDGET, _step_chars):
         rows = [
             {"id": i, "target": commit.binding, "excerpt": s.observation_segment or ""}
             for i, s in enumerate(partition)

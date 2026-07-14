@@ -41,6 +41,7 @@ a code-side prune must not be able to strengthen a status (§2.6).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -176,23 +177,30 @@ def _self_quote(claim_text: str, quote: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def partition_by_budget(steps: list[Step], budget: int) -> list[list[Step]]:
-    """Greedy in-order partition into whole-step groups under ``budget`` chars.
+def _step_chars(s: Step) -> int:
+    return len(s.observation_segment or "")
 
-    A single step larger than the budget forms its own partition — the
-    step is sent whole, never cut. (Shared with the constraint layer's
-    sweep; the edge pass itself partitions region-level excerpts.)
+
+def partition_by_budget[T](
+    items: list[T], budget: int, size: Callable[[T], int],
+) -> list[list[T]]:
+    """Greedy in-order partition into whole-item groups under ``budget`` chars.
+
+    A single item larger than the budget forms its own partition — never
+    cut. ``size`` measures one item. Shared by the constraint sweep and
+    the edge-pass verify stage (which size whole steps via ``_step_chars``)
+    and the retrieval stage (which sizes region-level excerpts).
     """
-    partitions: list[list[Step]] = []
-    current: list[Step] = []
-    size = 0
-    for s in steps:
-        n = len(s.observation_segment or "")
-        if current and size + n > budget:
+    partitions: list[list[T]] = []
+    current: list[T] = []
+    total = 0
+    for it in items:
+        n = size(it)
+        if current and total + n > budget:
             partitions.append(current)
-            current, size = [], 0
-        current.append(s)
-        size += n
+            current, total = [], 0
+        current.append(it)
+        total += n
     if current:
         partitions.append(current)
     return partitions
@@ -218,21 +226,6 @@ def _excerpts_for(step: Step, budget: int) -> list[_Excerpt]:
         for region in step.observation_region_texts
         if region.strip()
     ]
-
-
-def _partition_excerpts(excerpts: list[_Excerpt], budget: int) -> list[list[_Excerpt]]:
-    partitions: list[list[_Excerpt]] = []
-    current: list[_Excerpt] = []
-    size = 0
-    for e in excerpts:
-        if current and size + len(e.text) > budget:
-            partitions.append(current)
-            current, size = [], 0
-        current.append(e)
-        size += len(e.text)
-    if current:
-        partitions.append(current)
-    return partitions
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +330,7 @@ async def build_claim_edges(
                     len(claims), len(observations))
         return result
 
-    claim_steps = {c.id: steps_by_id.get(c.step_id) for c in claims}
+    obs_ids = {s.step_id for s in observations}
     claim_rows = [
         {"claim": i, "made_at_step": c.step_id, "text": c.text}
         for i, c in enumerate(claims)
@@ -346,7 +339,7 @@ async def build_claim_edges(
     excerpts = [
         e for s in observations for e in _excerpts_for(s, _PARTITION_CHAR_BUDGET)
     ]
-    partitions = _partition_excerpts(excerpts, _PARTITION_CHAR_BUDGET)
+    partitions = partition_by_budget(excerpts, _PARTITION_CHAR_BUDGET, lambda e: len(e.text))
     result.coverage.n_partitions = len(partitions)
 
     # --- retrieval: nominations + per-partition attention attestation ---
@@ -388,7 +381,7 @@ async def build_claim_edges(
                 sids = item.get("steps")
                 for sid in sids if isinstance(sids, list) else []:
                     sid = str(sid)
-                    if sid in steps_by_id and steps_by_id[sid].observation_segment:
+                    if sid in obs_ids:
                         nominated.setdefault(ci, set()).add(sid)
                     else:
                         diag.prune("edges", claims[ci].id,
@@ -405,18 +398,14 @@ async def build_claim_edges(
     judged: dict[int, bool] = {}
     for ci, sids in sorted(nominated.items()):
         claim = claims[ci]
-        nominees = sorted(sids, key=lambda sid: steps_by_id[sid].index)
-        chunks = _partition_excerpts(
-            [_Excerpt(steps_by_id[sid], steps_by_id[sid].observation_segment or "", False)
-             for sid in nominees],
-            _PARTITION_CHAR_BUDGET,
-        )
+        nominees = [steps_by_id[sid] for sid in sorted(sids, key=lambda sid: steps_by_id[sid].index)]
+        chunks = partition_by_budget(nominees, _PARTITION_CHAR_BUDGET, _step_chars)
         decided: set[str] = set()
         for chunk in chunks:
-            shown = {e.step.step_id for e in chunk}
+            shown = {s.step_id for s in chunk}
             payload = json.dumps({
                 "claim": {"made_at_step": claim.step_id, "text": claim.text},
-                "excerpts": [{"step": e.step.step_id, "text": e.text} for e in chunk],
+                "excerpts": [{"step": s.step_id, "text": s.observation_segment} for s in chunk],
             }, ensure_ascii=False, indent=2)
             raw = None
             for _ in range(_VERIFY_ATTEMPTS):
@@ -451,7 +440,7 @@ async def build_claim_edges(
                         (claim, steps_by_id[sid], relation, str(item.get("quote", "")))
                     )
         judged[ci] = decided >= sids
-        result.nominations[claim.id] = nominees
+        result.nominations[claim.id] = [s.step_id for s in nominees]
 
     # --- gates (code): verbatim single-region non-self quote + dedup ---
     verified: dict[str, dict[tuple[str, str], Edge]] = {}
@@ -467,7 +456,7 @@ async def build_claim_edges(
         key = (dst.step_id, relation)
         if key in per_claim:
             continue
-        made_at = claim_steps.get(claim.id)
+        made_at = steps_by_id.get(claim.step_id)
         if made_at is None:
             position = ""
         elif dst.index < made_at.index:
