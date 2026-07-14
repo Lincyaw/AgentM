@@ -599,9 +599,6 @@ requirements:
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_manager.py
       - path: src/agentm/core/abi/session_config.py
-      - path: contrib/evals/src/agentm_eval/benchmarks/telbench/cli.py
-      - path: contrib/evals/src/agentm_eval/benchmarks/telbench/evolve.py
-      - path: contrib/evals/src/agentm_eval/benchmarks/telbench/iterate.py
       - path: contrib/evals/src/agentm_eval/benchmarks/rca_evolution/cli.py
       - path: contrib/evals/src/agentm_eval/benchmarks/rca_evolution/loop.py
       - path: contrib/scenarios/rca/pyproject.toml

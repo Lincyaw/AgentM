@@ -1,14 +1,9 @@
-"""TELBench span-level error localization evaluation."""
+"""TELBench span-level error localization evaluation.
+
+Data adapter (span → typed-message conversion) and pure scoring for
+TELBench, consumed by the ``auditor_eval`` benchmark. The standalone
+``telbench-eval`` CLI and the eval→reflect→evolve iteration tooling were
+removed; ``agentm-eval auditor run --telbench-data`` is the entry point.
+"""
 
 from __future__ import annotations
-
-from pathlib import Path
-
-
-def _tel_agent_dir() -> Path:
-    import llmharness.agents.tel as _tel
-
-    return Path(_tel.__file__).parent
-
-
-__all__ = ["_tel_agent_dir"]
