@@ -4,8 +4,9 @@ Trace message cleaning, JSON extraction, vocabulary validation, and
 programmatic reference generation — used by the trajectory-index atom
 during live agent sessions.
 
-The SFT pipeline, teacher extraction, and CLI commands have been moved
-to ``agentm_eval.benchmarks.trajectory_index_eval``.
+There is no CLI here: offline teacher extraction and evaluation live in
+the ``agentm_eval.benchmarks.index_eval`` benchmark (adapter name
+``index``), which drives this module's functions programmatically.
 """
 from __future__ import annotations
 
@@ -434,6 +435,47 @@ def _symbol_aliases(sym: dict[str, Any]) -> list[str]:
     return [alias for alias in aliases if isinstance(alias, str)]
 
 
+def _reference_segments(msg: dict[str, JsonValue]) -> list[tuple[str, int, str]]:
+    """``(segment_text, search_from, ref_kind)`` mirroring :func:`message_parts`.
+
+    Reference ``start`` offsets must land in the stored ``step.content``, which
+    :func:`_message_step_content` builds by ``"\\n".join`` over the SAME
+    ``message_parts`` segments. So this walk reproduces those segment texts
+    exactly — including the ``"[tool_call: name]\\n"`` header and one segment
+    per tool_result sub-block — rather than a per-block concatenation of its
+    own. ``search_from`` skips the tool_call header so a symbol is never
+    matched inside ``[tool_call: name]`` while the header still counts toward
+    offsets.
+    """
+    out: list[tuple[str, int, str]] = []
+    blocks = msg.get("content", [])
+    if not isinstance(blocks, list):
+        return out
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            out.append((str(block.get("text", "")), 0, "mention"))
+        elif btype == "tool_call":
+            name = block.get("name")
+            tool_name = str(name) if name is not None else None
+            args = block.get("arguments", block.get("input", {}))
+            arg_text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+            header = f"[tool_call: {tool_name}]\n"
+            out.append((header + arg_text, len(header), "tool_input"))
+        elif btype == "tool_result":
+            kind = "tool_output" if block.get("deterministic", True) else "mention"
+            sub = block.get("content", [])
+            if isinstance(sub, list):
+                for s in sub:
+                    if isinstance(s, dict):
+                        out.append((str(s.get("text", "")), 0, kind))
+            else:
+                out.append((str(sub), 0, kind))
+    return out
+
+
 def _build_references(
     symbols: list[dict[str, Any]],
     messages: list[dict[str, JsonValue]],
@@ -460,62 +502,38 @@ def _build_references(
 
     for msg in messages:
         mid = str(msg.get("id", ""))
-        blocks = msg.get("content", [])
-        if not isinstance(blocks, list):
-            continue
-
-        cum_offset = 0
-        for block in blocks:
-            if not isinstance(block, dict):
+        # Segments and their join mirror _message_step_content exactly, so
+        # ``seg_offset`` tracks the true offset into step.content.
+        seg_offset = 0
+        first = True
+        for seg_text, search_from, kind in _reference_segments(msg):
+            if not seg_text:
                 continue
-            btype = block.get("type", "")
-
-            if btype == "tool_call":
-                kind = "tool_input"
-                args = block.get("arguments", block.get("input", {}))
-                text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
-            elif btype == "tool_result":
-                kind = "tool_output" if block.get("deterministic", True) else "mention"
-                sub = block.get("content", [])
-                text = " ".join(
-                    str(s.get("text", "")) for s in sub if isinstance(s, dict)
-                ) if isinstance(sub, list) else str(sub)
-            elif btype == "text":
-                kind = "mention"
-                text = str(block.get("text", ""))
-            else:
-                continue
-
-            if not text:
-                continue
-            text_lower = text.lower()
+            if not first:
+                seg_offset += 1   # the "\n" that _message_step_content joins with
+            first = False
+            hay = seg_text.lower()
 
             for search_term, canonical in names:
-                pos = text_lower.find(search_term)
+                pos = hay.find(search_term, search_from)
                 if pos < 0:
                     continue
                 end = pos + len(search_term)
-                if not _ref_at_word_boundary(text, pos, end):
+                if not _ref_at_word_boundary(seg_text, pos, end):
                     continue
                 dedup_key = (canonical, mid, kind)
                 if dedup_key in seen:
                     continue
                 seen.add(dedup_key)
 
-                snippet_start = max(0, pos)
-                snippet_end = min(len(text), pos + len(search_term))
-                snippet = text[snippet_start:snippet_end]
-                if len(snippet) > 50:
-                    snippet = snippet[:50]
-
                 refs.append(GeneratedReference(
                     symbol_name=canonical,
                     turn_id=mid,
-                    text=snippet,
+                    text=seg_text[pos:end][:50],
                     kind=kind,
-                    start=pos + cum_offset,
+                    start=pos + seg_offset,
                 ))
 
-            cum_offset += len(text) + 1
+            seg_offset += len(seg_text)
 
     return refs

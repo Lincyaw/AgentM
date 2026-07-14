@@ -17,7 +17,6 @@ from agentm.core.abi import (
     ExtensionAPI,
     FunctionTool,
     LoopConfig,
-    SessionEntry,
     TextContent,
     ToolCallBlock,
     ToolResult,
@@ -30,24 +29,13 @@ from pydantic import BaseModel, Field
 from .agents import extractor_scenario
 from .agents.entity_extractor.schema import ExtractionResult
 from .data import JsonValue, ProviderSpec
-from .index import (
-    Step,
-    StepRole,
-    TrajectoryIndex,
-)
+from .index import TrajectoryIndex
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 INDEX_SERVICE_KEY: Final = "trajectory_index.index"
-
-_ROLE_MAP: Final = {
-    "user": StepRole.USER,
-    "assistant": StepRole.ASSISTANT,
-    "tool_result": StepRole.TOOL_RESULT,
-    "system": StepRole.SYSTEM,
-}
 
 
 class TrajectoryIndexConfig(BaseModel):
@@ -88,24 +76,8 @@ MANIFEST = ExtensionManifest(
 
 
 # ---------------------------------------------------------------------------
-# Session branch → clean messages (for extraction) + Steps (for index)
+# AgentMessage → extraction/serialization shapes
 # ---------------------------------------------------------------------------
-
-
-def _branch_to_clean_messages(branch: list[SessionEntry]) -> list[dict[str, JsonValue]]:
-    """Convert session branch entries to the clean message format for extraction."""
-    from .data import clean_trace_messages
-
-    raw: list[dict[str, JsonValue]] = []
-    for entry in branch:
-        if entry.type == "message":
-            raw.append(
-                {
-                    "id": entry.id,
-                    "payload": _agentmsg_to_payload(entry.payload),
-                }
-            )
-    return clean_trace_messages(raw)
 
 
 def _agentmsg_to_payload(msg: AgentMessage) -> dict[str, JsonValue]:
@@ -132,59 +104,6 @@ def _agentmsg_to_payload(msg: AgentMessage) -> dict[str, JsonValue]:
                 tr["deterministic"] = False
             blocks.append(tr)
     return {"role": msg.role, "content": blocks}
-
-
-def _clean_messages_to_steps(
-    messages: list[dict[str, JsonValue]],
-    run_id: str,
-    start_index: int = 0,
-) -> list[Step]:
-    """Convert clean messages to index Steps (for populating the in-memory index)."""
-    steps: list[Step] = []
-    for i, msg in enumerate(messages, start=start_index):
-        msg_role = msg.get("role", "")
-        role = _ROLE_MAP.get(str(msg_role), StepRole.USER)
-        parts: list[str] = []
-        tool_name: str | None = None
-
-        content_blocks = msg.get("content", [])
-        if not isinstance(content_blocks, list):
-            continue
-        for block in content_blocks:
-            if not isinstance(block, dict):
-                continue
-            btype = str(block.get("type", ""))
-            if btype == "text":
-                text = block.get("text", "")
-                parts.append(str(text))
-            elif btype == "tool_call":
-                name = block.get("name")
-                tool_name = str(name) if name is not None else None
-                parts.append(f"[tool_call: {tool_name}]")
-            elif btype == "tool_result":
-                sub_content = block.get("content", [])
-                if not isinstance(sub_content, list):
-                    continue
-                for sub in sub_content:
-                    if isinstance(sub, dict) and sub.get("type") == "text":
-                        parts.append(str(sub.get("text", "")))
-
-        content = "\n".join(parts)
-        if not content.strip():
-            continue
-
-        msg_id = msg.get("id")
-        steps.append(
-            Step(
-                run_id=run_id,
-                step_id=str(msg_id) if msg_id is not None else f"s{i}",
-                index=i,
-                role=role,
-                content=content,
-                tool_name=tool_name,
-            )
-        )
-    return steps
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +232,13 @@ async def run_extraction_session(
 ) -> ExtractionResult | None:
     """Run the extractor child and parse the result.
 
-    ``spawn`` creates a child session from a config. Defaults to
-    ``AgentSession.create``; callers inside an atom pass
-    ``api.spawn_child_session``.
+    ``spawn`` creates a child session from a config. Required (§11: this
+    module never imports ``agentm.core.runtime``). The atom passes
+    ``api.spawn_child_session``; offline callers pass ``AgentSession.create``
+    imported on their own side — same convention as ``adjudicate._ask_model``.
     """
-    from agentm.core.runtime import AgentSession
-
     if spawn is None:
-        spawn = AgentSession.create
+        raise ValueError("spawn is required (pass AgentSession.create for offline use)")
 
     for attempt in range(_MAX_RETRIES):
         try:
