@@ -18,6 +18,7 @@ Output per trajectory:
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 from pathlib import Path
 from typing import Annotated, Any
@@ -727,12 +728,19 @@ async def _process_one_item(
         # independent of which passes ran this invocation — so an
         # audit-only re-run still shows the cached constraint and
         # claim-status notes. Both merges self-guard on presence.
-        context = _index_to_context(idx)
-        _merge_constraint_context(
-            context, idx, rendering=constraint_rendering,
-            artifact=_load_constraint_artifact(exp, tid),
-        )
-        _merge_claim_status_context(idx, tid, context)
+        # AGENTM_STRIP_INDEX ablation: hand the auditor an EMPTY context —
+        # index tools return nothing and no notes are injected, leaving
+        # only list_turns/get_turn over the raw trajectory. Isolates the
+        # net contribution of the code index.
+        if os.environ.get("AGENTM_STRIP_INDEX"):
+            context = {}
+        else:
+            context = _index_to_context(idx)
+            _merge_constraint_context(
+                context, idx, rendering=constraint_rendering,
+                artifact=_load_constraint_artifact(exp, tid),
+            )
+            _merge_claim_status_context(idx, tid, context)
         if claim_analysis:
             context = await _run_claim_analysis(messages, idx, context, model)
         audit_result = None

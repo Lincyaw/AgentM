@@ -325,6 +325,49 @@ def _build_list_attention_hints_tool(state: _IndexState) -> FunctionTool:
     )
 
 
+def _build_list_claim_checks_tool(state: _IndexState) -> FunctionTool:
+    class Args(BaseModel):
+        status: str | None = Field(
+            default=None,
+            description="Optional filter: contradicted | supported | unsourced | unknown, or a constraint status (violated | omitted | verified).",
+        )
+
+    async def handler(args: dict[str, Any]) -> ToolResult:
+        parsed = Args.model_validate(args)
+        ci = state.context_index
+        out: dict[str, Any] = {}
+        notes = ci.get("source_claim_notes") or []
+        if parsed.status:
+            notes = [n for n in notes if n.get("status") == parsed.status]
+        if notes:
+            out["claim_evidence"] = notes
+            out["coverage"] = ci.get("source_claim_coverage") or {}
+        cons = ci.get("constraint_findings") or []
+        if parsed.status:
+            cons = [c for c in cons if c.get("status") == parsed.status]
+        if cons:
+            out["constraint_checks"] = cons
+        if not out:
+            return _text_result("No claim/constraint checks available"
+                                + (f" for status={parsed.status}" if parsed.status else ""))
+        return _text_result(json.dumps(out, ensure_ascii=False, indent=2))
+
+    return FunctionTool(
+        name="list_claim_checks",
+        description=(
+            "List the index's checks of the agent's committed claims and the "
+            "question's requirements against the evidence it gathered: each "
+            "claim marked supported / contradicted / unsourced (with the "
+            "evidence steps and verbatim quotes), and each requirement marked "
+            "verified / violated / omitted. A contradicted or violated "
+            "commitment is a strong lead to a real error; confirm the cited "
+            "turn with get_turn before relying on it."
+        ),
+        parameters=Args,
+        fn=handler,
+    )
+
+
 def _build_list_turns_tool(state: _IndexState) -> FunctionTool:
     class Args(BaseModel):
         start: int = Field(default=0, description="Start turn index (inclusive)")
@@ -458,6 +501,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(_build_search_entities_tool(state))
     api.register_tool(_build_get_entity_timeline_tool(state))
     api.register_tool(_build_list_entities_tool(state))
+    api.register_tool(_build_list_claim_checks_tool(state))
     claims_tool = _build_list_claims_tool(state)
     if claims_tool is not None:
         api.register_tool(claims_tool)

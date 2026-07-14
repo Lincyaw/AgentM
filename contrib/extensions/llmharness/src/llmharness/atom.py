@@ -491,23 +491,16 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         try:
             from trajectory_index.atom import run_extraction
 
-            from llmharness.context_index import build_context_index
-
             extraction = await run_extraction(
                 api, traj, vocabulary=cfg.index_vocabulary,
                 model=cfg.index_model,
             )
             if extraction is not None:
                 symbols = [s.model_dump() for s in extraction.parsed_symbols()]
-                ci = build_context_index(
-                    trajectory=traj,
-                    symbols=symbols,
-                )
-                _latest_index = ci.to_dict()
-                logger.info(
-                    "llmharness: index updated — {} entities, {} observations",
-                    len(ci.entities), len(ci.observations),
-                )
+                # Symbols only — the auditor's index tools query these on
+                # demand. No derived RCA-keyword context layer (retired).
+                _latest_index = {"symbols": symbols}
+                logger.info("llmharness: index updated — {} symbols", len(symbols))
         except Exception:
             logger.exception("llmharness: async index extraction failed")
 

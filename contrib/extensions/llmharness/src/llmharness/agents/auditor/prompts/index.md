@@ -5,7 +5,7 @@ You audit a completed agent trajectory. Your task: find the step(s) where the ag
 # Inputs
 
 - The trajectory itself. `list_turns()` gives the sequence of turns; `get_turn(i, full=true)` reads a turn's full content. Turn 0 is usually the task/question. Read the task first, then read the turns you need to judge.
-- A prebuilt index over the trajectory, as tools and as notes already in your context (entity/grounding hints, and — when the task had requirements — checks of the agent's claims and requirements against the evidence it gathered). These are advisory leads computed by code: they can be incomplete or wrong. Use them to decide where to look; confirm anything you rely on by reading the actual turn. They do not define what counts as an error, and they are not a substitute for reading.
+- A prebuilt index over the trajectory, available through your tools (entities, and — when the task had requirements — `list_claim_checks`, which reports the agent's committed claims and the question's requirements checked against the evidence it gathered: supported / contradicted / unsourced / violated). These are advisory leads computed by code: they can be incomplete or wrong. Query them to decide where to look; confirm anything you rely on by reading the actual turn. They do not define what counts as an error, and they are not a substitute for reading.
 
 # How to judge
 
