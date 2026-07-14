@@ -1769,18 +1769,20 @@ requirements:
       - REQ-213-lhtb-benchmark
 
   - id: REQ-215-completion-guard
-    title: Completion-guard atom mirrors terminus_2 double-confirm
+    title: Completion-guard finish tool mirrors terminus_2 double-confirm
     description: >
-      The Terminal-Bench baseline must not lose work when the model ends its
-      turn prematurely. The ``completion_guard`` atom hooks
-      ``decide_turn_action`` and, on a voluntary ``ModelEndTurn``, injects a
-      confirmation prompt and continues the loop, letting the run stop only
-      after ``confirmations`` consecutive finishes (resetting whenever the
-      model resumes work). This mirrors the reference agent (terminus_2)
-      double-confirm so benchmark comparisons isolate model ability from
-      scaffold. It is a self-contained eval aid, distinct from the heavier
-      ``goal`` oversight. Loaded by the ``terminal_bench:arl`` scenario, which
-      also carries the robustness trio ``tool_error_messages`` /
+      The Terminal-Bench baseline needs a deliberate submit signal with a
+      confirmation step, matching the reference agent (terminus_2), so
+      benchmark comparisons isolate model ability from scaffold. The
+      ``completion_guard`` atom registers a terminal ``finish`` tool the agent
+      calls to submit: the first call returns a confirmation prompt and keeps
+      the session alive; a repeat call returns ``ToolTerminate`` to end the
+      loop. This confirms a deliberate action rather than second-guessing the
+      implicit "stopped calling tools" end, and does not force a submit (an
+      agent that just stops still ends). Self-contained eval aid, distinct
+      from the heavier ``goal`` oversight. Loaded by ``terminal_bench:arl``,
+      whose system prompt directs the agent to call ``finish``; that scenario
+      family also carries the robustness trio ``tool_error_messages`` /
       ``retry_policy`` / ``thinking_retry`` across all its manifests.
     priority: P2
     status: implemented

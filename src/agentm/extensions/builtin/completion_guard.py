@@ -1,18 +1,17 @@
-"""Double-confirm before the model ends the task.
+"""Explicit ``finish`` tool with a submit confirmation.
 
-Terminal-Bench's reference agent (terminus_2) requires the model to assert
-completion twice: the first ``task_complete`` signal triggers a confirmation
-prompt ("Are you sure? This will trigger grading"), and only a second
-assertion ends the run. Our native tool-calling loop ends as soon as the
-model stops emitting tool calls (``ModelEndTurn``) with no such safety net,
-so a model that gives up early loses whatever it left unfinished.
+The reference agent (terminus_2) ends a task with a deliberate
+``task_complete`` signal and is asked to re-assert it once before its work is
+graded. Our native loop has no such deliberate signal -- it just stops
+emitting tool calls -- so there is nothing clean to confirm, and hooking the
+"stopped calling tools" moment second-guesses every natural pause.
 
-This atom restores that safety net for parity in benchmark comparisons: on
-``ModelEndTurn`` it injects a confirmation prompt and continues the loop,
-letting the run stop only after ``confirmations`` consecutive finishes. Any
-resumed work (the model calls a tool again, i.e. a ``Step``) resets the
-counter, so a later finish is confirmed afresh. It is a self-contained eval
-aid -- not the ``goal`` oversight machinery, which spawns checker sessions.
+This atom instead registers a ``finish`` tool the agent calls to submit. The
+first call returns a confirmation prompt and keeps the session alive; only a
+repeat call ends the loop (via :class:`ToolTerminate`). That gives the same
+"are you sure?" safety net on a deliberate action. An agent that simply stops
+without calling ``finish`` ends as before -- the tool only adds a confirmed
+submit path, it does not force one.
 """
 
 from __future__ import annotations
@@ -21,74 +20,86 @@ from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    DecideTurnActionEvent,
     ExtensionAPI,
-    Inject,
-    ModelEndTurn,
-    Stop,
-    text_message,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
 )
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
-_DEFAULT_PROMPT = (
-    "Are you sure the task is complete? Ending now submits your work for "
-    "grading and cannot be undone. If anything the task asked for is "
+_CONFIRM_TEXT = (
+    "Are you sure the task is complete? Calling finish again submits your "
+    "work for grading and cannot be undone. If anything the task asked for is "
     "unfinished, untested, or unverified, keep working and check it. If you "
-    "are certain everything is done and verified, end your turn again to "
-    "submit."
+    "are certain everything is done and verified, call finish again to submit."
 )
 
 
 class CompletionGuardConfig(BaseModel):
+    # Number of confirmation prompts before a finish call ends the loop.
     confirmations: int = 1
-    prompt: str = _DEFAULT_PROMPT
+
+
+class _FinishParams(BaseModel):
+    """The finish tool takes no arguments."""
 
 
 MANIFEST = ExtensionManifest(
     name="completion_guard",
     description=(
-        "Inject a confirmation prompt on ModelEndTurn and require the model "
-        "to re-assert completion before the loop stops (mirrors terminus_2's "
-        "double-confirm; prevents premature give-up in benchmarks)."
+        "Register a `finish` tool the agent calls to submit its work; the "
+        "first call asks for confirmation and keeps the session alive, a "
+        "repeat call ends the loop (mirrors terminus_2's submit double-confirm)."
     ),
-    registers=("event:decide_turn_action",),
+    registers=("tool:finish",),
     config_schema=CompletionGuardConfig,
     requires=(),
 )
 
-
-class _CompletionGuardRuntime:
+class _FinishRuntime:
     def __init__(self, api: ExtensionAPI, config: CompletionGuardConfig) -> None:
         self._api = api
         self._confirmations = max(0, config.confirmations)
-        self._prompt = config.prompt
-        self._used = 0
+        self._calls = 0
 
     def install(self) -> None:
-        self._api.on(DecideTurnActionEvent.CHANNEL, self.on_decide)
-
-    def on_decide(self, event: DecideTurnActionEvent) -> Inject | None:
-        default = event.observation.default_action
-
-        # Only guard a voluntary end-turn. A Step (still working) or an
-        # explicit terminal-tool Stop is left untouched, and resets the
-        # counter so the next voluntary finish is confirmed afresh.
-        if not (isinstance(default, Stop) and isinstance(default.cause, ModelEndTurn)):
-            self._used = 0
-            return None
-
-        if self._used >= self._confirmations:
-            self._used = 0
-            return None
-
-        self._used += 1
-        logger.info(
-            "completion_guard: confirming completion ({}/{})",
-            self._used,
-            self._confirmations,
+        self._api.register_tool(
+            FunctionTool(
+                name="finish",
+                description=(
+                    "Call this when you believe the task is fully complete and "
+                    "verified. It submits your work for grading. You are asked "
+                    "to confirm once; call finish again to submit."
+                ),
+                parameters=pydantic_to_tool_schema(_FinishParams),
+                fn=self._finish,
+            )
         )
-        return Inject(messages=[text_message(self._prompt)])
+
+    async def _finish(self, args: dict[str, object]) -> ToolResult | ToolTerminate:
+        self._calls += 1
+        if self._calls <= self._confirmations:
+            logger.info(
+                "completion_guard: finish called ({}), asking to confirm",
+                self._calls,
+            )
+            return ToolResult(
+                content=[TextContent(type="text", text=_CONFIRM_TEXT)],
+                is_error=False,
+            )
+        logger.info("completion_guard: finish confirmed; terminating loop")
+        return ToolTerminate(
+            result=ToolResult(
+                content=[
+                    TextContent(type="text", text="Task submitted for grading.")
+                ],
+                is_error=False,
+            ),
+            reason="terminal_bench:finish-confirmed",
+        )
 
 
 def install(api: ExtensionAPI, config: CompletionGuardConfig) -> None:
-    _CompletionGuardRuntime(api, config).install()
+    _FinishRuntime(api, config).install()

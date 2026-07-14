@@ -38,8 +38,8 @@ extensions:
     config:
       prompt: |
         You are solving a command-line task in a Linux environment. Work
-        autonomously until the task is fully done and verified before you
-        end your turn.
+        autonomously until the task is fully done and verified, then call the
+        finish tool to submit for grading.
 
         Your working directory is /app. Treat relative paths such as
         INSTRUCTION.md and task project directories as relative to /app.
