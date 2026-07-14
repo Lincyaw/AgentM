@@ -58,6 +58,15 @@ class TrajectoryIndexConfig(BaseModel):
         description="Model profile for the Pass 2 same-entity judgment. Empty "
         "reuses the extraction model.",
     )
+    analyze_claims: bool = Field(
+        default=False,
+        description="Run the claim/constraint adjudication passes after def-use: "
+        "claim↔observation edges + status fold (supported/unsourced/conflicted) "
+        "and task-constraint satisfaction (verified/violated/omitted). Off by "
+        "default because each is a per-claim oracle sweep (LLM cost scales with "
+        "claim count); enable for post-hoc audit indexing where the checks are "
+        "consumed. Best-effort: any failure leaves the deterministic layers intact.",
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -314,6 +323,20 @@ def _serialize_for_index(messages: list[AgentMessage]) -> list[dict[str, JsonVal
     ]
 
 
+def _first_user_text(messages: list[AgentMessage]) -> str:
+    """The first user message's text — the task question for constraint analysis.
+
+    Constraint nodes come from Pass 1's extraction of the task text; the
+    question only seeds commit detection, so a best-effort join is enough.
+    """
+    for m in messages:
+        if m.role == "user":
+            text = " ".join(b.text for b in m.content if isinstance(b, TextContent)).strip()
+            if text:
+                return text
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Tool builders
 # ---------------------------------------------------------------------------
@@ -392,6 +415,29 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
             await compare_values(index, model=model, apply=True, session_factory=sf)
         except Exception:
             logger.warning("Pass 3.5 (value fidelity) failed, skipping", exc_info=True)
+
+        # Pass 4 — claim/constraint adjudication (opt-in; per-claim oracle sweep).
+        # Wholesale-replaces this run's edges/claim_findings/constraint_findings,
+        # so it reasons over the full run each call, not just the new delta.
+        if cfg.analyze_claims:
+            from .constraints import analyze_constraints
+            from .edges import build_claim_edges
+            from .verification import fold_claim_statuses
+
+            try:
+                edge_result = await build_claim_edges(
+                    index, run_id=run_id, model=model, session_factory=sf,
+                )
+                fold_claim_statuses(index, edge_result, run_id=run_id)
+            except Exception:
+                logger.warning("Pass 4 (claim edges/status) failed, skipping", exc_info=True)
+            try:
+                await analyze_constraints(
+                    index, run_id=run_id, question=_first_user_text(all_messages),
+                    model=model, session_factory=sf,
+                )
+            except Exception:
+                logger.warning("Pass 4 (constraint analysis) failed, skipping", exc_info=True)
 
         stats = index.stats(run_id)
         deps = index.get_dependencies()

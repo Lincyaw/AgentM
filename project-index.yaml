@@ -1363,13 +1363,20 @@ requirements:
       is logged. Findings persist through dump/load; alias merges invalidate
       them wholesale. Surfaced to the auditor via constraint_attention() and
       a rendered prompt section; enabled in auditor-eval via --constraints
-      (TELBench only — AFTraj stays gated off).
+      (TELBench only — AFTraj stays gated off). The same claim/constraint
+      adjudication (claim↔observation edges + status fold and constraint
+      satisfaction) is also runnable inside the live runtime from the
+      index_trajectory tool via the atom's analyze_claims config flag
+      (off by default — each is a per-claim oracle sweep), so the checks
+      exist in production indexing and not only in auditor-eval.
     priority: P2
     status: implemented
     confidence: confirmed
     code:
       - path: contrib/extensions/trajectory_index/src/trajectory_index/constraints.py
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/index.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/edges.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/verification.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/atom.py
       - path: contrib/evals/src/agentm_eval/benchmarks/auditor_eval/__init__.py
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/context.py
     tests: []
