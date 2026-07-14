@@ -32,6 +32,8 @@ class IndexEvalAdapter:
             chunk_size: Annotated[str | None, typer.Option("--chunk-size", help="'3-6' or omit for full")] = "3-6",
             vocabulary: Annotated[str, typer.Option()] = "default",
             exp_id: Annotated[str | None, typer.Option("--exp-id")] = None,
+            chunk_concurrency: Annotated[int, typer.Option("--chunk-concurrency", help="Parallel Pass-1 chunk extractions per session")] = 8,
+            session_concurrency: Annotated[int, typer.Option("--session-concurrency", help="Parallel sessions")] = 4,
         ) -> None:
             """Run trajectory-index extraction on recorded sessions."""
             from agentm.env import autoload_dotenv
@@ -52,7 +54,10 @@ class IndexEvalAdapter:
             typer.echo(f"Experiment: {exp.exp_id} → {exp.output_dir}")
             typer.echo(f"Sessions: {len(sids)}, model={model}, chunk_size={chunk_size}")
 
-            asyncio.run(_run_sessions(sids, model=model, chunk_size=parsed_chunk, vocabulary=vocabulary, exp=exp))
+            asyncio.run(_run_sessions(
+                sids, model=model, chunk_size=parsed_chunk, vocabulary=vocabulary, exp=exp,
+                chunk_concurrency=chunk_concurrency, session_concurrency=session_concurrency,
+            ))
 
         return cli
 
@@ -77,136 +82,61 @@ async def _run_sessions(
     chunk_size: tuple[int, int] | None,
     vocabulary: str,
     exp: Experiment,
+    chunk_concurrency: int = 8,
+    session_concurrency: int = 4,
 ) -> None:
-    from agentm_eval.methods.index import (
-        _chunk_messages,
-        _prescan_structural,
-        _run_one,
-        resolve_index,
-    )
-    from trajectory_index.index import TrajectoryIndex, normalize_name
+    from agentm_eval.methods.index import build_index, extract_symbols
 
     total = len(sids)
-    all_results: list[dict[str, Any]] = []
+    sem = asyncio.Semaphore(max(1, session_concurrency))
 
-    for i, sid in enumerate(sids):
-        typer.echo(f"\n[{i+1}/{total}] {sid}")
-
-        try:
-            messages = await _load_messages(sid)
-        except FileNotFoundError:
-            typer.echo("  NOT FOUND", err=True)
-            continue
-
-        typer.echo(f"  loaded {len(messages)} messages")
-        exp.register_session(sid, metadata={"n_messages": len(messages)})
-
-        idx = TrajectoryIndex()
-        registry: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        n_chunks = 0
-
-        if chunk_size is None:
-            raw_chunks = [type("C", (), {"start": 0, "messages": messages})]
-        else:
-            raw_chunks = _chunk_messages(messages, chunk_size)
-
-        for ci, chunk in enumerate(raw_chunks):
-            chunk_registry, _structural = _prescan_structural(
-                chunk.messages, registry if registry else None, seen,
-            )
+    async def _one_session(i: int, sid: str) -> dict[str, Any] | None:
+        async with sem:
+            typer.echo(f"[{i+1}/{total}] {sid} — start")
             try:
-                result = await _run_one(
-                    chunk.messages, model=model, vocabulary=vocabulary,
-                    registry=chunk_registry if chunk_registry else None,
-                    message_id_start=chunk.start, cwd=None,
-                )
-            except Exception:
-                typer.echo(f"  chunk {ci+1} extraction failed", err=True)
-                continue
-            if result is None:
-                typer.echo(f"  chunk {ci+1} no parseable result", err=True)
-                continue
+                messages = await _load_messages(sid)
+            except FileNotFoundError:
+                typer.echo(f"  {sid}: NOT FOUND", err=True)
+                return None
+            exp.register_session(sid, metadata={"n_messages": len(messages)})
 
-            n_chunks += 1
-
-            idx.populate_from_extraction(
-                result, chunk.messages, run_id=sid,
-                message_id_start=chunk.start,
+            # Pass 1 (extraction) runs chunks in parallel; cross-chunk name
+            # unification is deferred to Pass 2 in build_index (resolve once).
+            chunks = await extract_symbols(
+                messages, model=model, vocabulary=vocabulary,
+                chunk_size=chunk_size, run_id=sid, concurrency=chunk_concurrency,
             )
+            idx = await build_index(chunks, model=model, resolve=True)
 
-            # Pass 2+3 after each chunk (matches online behavior)
-            await resolve_index(idx, model=model)
-
-            # Accumulate registry for next chunk; track truly new symbols
-            new_symbols = []
-            for sym in result.symbols:
-                norm = normalize_name(sym.name)
-                if norm not in seen:
-                    seen.add(norm)
-                    new_symbols.append(sym)
-                    entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
-                    if sym.aliases:
-                        entry["aliases"] = sym.aliases
-                    registry.append(entry)
-
-            n_new = len(new_symbols)
-            stats_snap = idx.stats(sid)
-            symbols_data = [
-                {"name": s.name, "kind": s.kind, "entity_class": s.entity_class}
-                for s in new_symbols
+            stats = idx.stats(sid)
+            warns = idx.warnings()
+            warn_summary = idx.warning_summary()
+            result_dict = {
+                "session_id": sid,
+                "n_messages": len(messages),
+                "n_chunks": len(chunks),
+                "n_symbols": stats.symbol_count,
+                "n_references": stats.reference_count,
+                "n_dependencies": stats.dependency_count,
+                "warnings": warn_summary,
+            }
+            exp.record_result(result_dict)
+            warnings_data = [
+                {"kind": w.kind, "symbol": w.symbol_name, "detail": w.detail, "steps": list(w.step_ids)}
+                for w in warns
             ]
-            exp.write_session_artifact(sid, "index", f"chunk_{n_chunks:03d}.json", {
-                "chunk": n_chunks,
-                "n_messages": len(chunk.messages),
-                "n_new_symbols": n_new,
-                "symbols": symbols_data,
-                "index_cumulative": {
-                    "symbols": stats_snap.symbol_count,
-                    "references": stats_snap.reference_count,
-                    "dependencies": stats_snap.dependency_count,
-                },
-            })
-
-            sym_preview = ", ".join(s.name for s in result.symbols[:3])
-            if n_new > 3:
-                sym_preview += f", ... (+{n_new - 3})"
+            exp.write_session_artifact(sid, "", "index_stats.json", result_dict)
+            exp.write_session_artifact(sid, "", "warnings.json", warnings_data)
+            idx.dump(str(exp.session_dir(sid) / "index.json"))
             typer.echo(
-                f"  chunk {n_chunks}: {len(chunk.messages)} msgs → {n_new} new symbols "
-                f"[{sym_preview}] (total: {stats_snap.symbol_count} syms, "
-                f"{stats_snap.reference_count} refs, {stats_snap.dependency_count} deps)"
+                f"[{i+1}/{total}] {sid}: {stats.symbol_count} syms, "
+                f"{stats.reference_count} refs, {stats.dependency_count} deps "
+                f"({len(chunks)} chunks)"
             )
+            return result_dict
 
-        stats = idx.stats(sid)
-        warns = idx.warnings()
-        warn_summary = idx.warning_summary()
-
-        result_dict = {
-            "session_id": sid,
-            "n_messages": len(messages),
-            "n_chunks": n_chunks,
-            "n_symbols": stats.symbol_count,
-            "n_references": stats.reference_count,
-            "n_dependencies": stats.dependency_count,
-            "warnings": warn_summary,
-        }
-        all_results.append(result_dict)
-        exp.record_result(result_dict)
-
-        warnings_data = [
-            {"kind": w.kind, "symbol": w.symbol_name, "detail": w.detail, "steps": list(w.step_ids)}
-            for w in warns
-        ]
-        exp.write_session_artifact(sid, "", "index_stats.json", result_dict)
-        exp.write_session_artifact(sid, "", "warnings.json", warnings_data)
-        idx.dump(str(exp.session_dir(sid) / "index.json"))
-
-        typer.echo(f"  total: {stats.symbol_count} symbols, {stats.reference_count} refs, {stats.dependency_count} deps")
-        if warn_summary:
-            parts = ", ".join(f"{v} {k}" for k, v in sorted(warn_summary.items()))
-            typer.echo(f"  warnings: {parts}")
-            for w in warns[:10]:
-                typer.echo(f"    [{w.kind}] {w.symbol_name}: {w.detail}")
+    gathered = await asyncio.gather(*(_one_session(i, sid) for i, sid in enumerate(sids)))
+    all_results = [r for r in gathered if r is not None]
 
     if all_results:
         avg_sym = sum(r["n_symbols"] for r in all_results) / len(all_results)
