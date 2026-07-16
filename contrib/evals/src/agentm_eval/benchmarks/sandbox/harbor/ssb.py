@@ -97,11 +97,13 @@ class SeniorSweAdapter(HarborAdapter):
             env["SSB_OVERRIDE_VA_MODEL"] = f"openai/{model_slug}"
         if not env.get("SSB_OVERRIDE_ALL_JUDGE_MODEL"):
             env["SSB_OVERRIDE_ALL_JUDGE_MODEL"] = f"openai/{model_slug}"
+        if not env.get("SSB_OVERRIDE_CLASSIFIER_MODEL"):
+            env["SSB_OVERRIDE_CLASSIFIER_MODEL"] = f"openai/{model_slug}"
         env["OPENAI_BASE_URL"] = base_url
         env["OPENAI_API_KEY"] = api_key
         return True
 
-    VERIFIER_PIP_DEPS = ("litellm[proxy]",)
+    VERIFIER_PIP_DEPS = ("fastapi",)
     _PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
     _NPM_MIRROR = "https://registry.npmmirror.com/"
     _PROXY_URL = "http://sing-box.arl1.svc:7890"
