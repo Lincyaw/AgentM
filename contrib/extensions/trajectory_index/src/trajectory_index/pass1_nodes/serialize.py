@@ -21,6 +21,7 @@ from ..agents.entity_extractor.schema import ExtractionResult
 # ---------------------------------------------------------------------------
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
+type ProviderSpec = tuple[str, dict[str, JsonValue]]
 
 # ---------------------------------------------------------------------------
 # Message walk — the single source for step content + extractor view

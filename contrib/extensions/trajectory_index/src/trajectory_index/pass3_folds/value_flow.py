@@ -110,6 +110,58 @@ def _final_values(index: TrajectoryIndex) -> dict[str, str]:
     return {name: val for name, (_, val) in latest.items()}
 
 
+def _build_trajectory_context(index: TrajectoryIndex) -> str:
+    """Build a compact trajectory context: task description + action log."""
+    import json as _json
+
+    from ..ir.models import StepRole
+
+    steps = sorted(index.steps.values(), key=lambda s: s.index)
+
+    # Task: first user step content (truncated)
+    task_text = ""
+    for s in steps:
+        if s.role == StepRole.USER and s.content.strip():
+            task_text = s.content[:3000]
+            break
+
+    # Action log: tool_call steps with purpose + outcome hint from next tool_result
+    result_by_call: dict[str, str] = {}
+    for s in steps:
+        if s.role == StepRole.TOOL_RESULT and s.call_id:
+            result_by_call[s.call_id] = s.content[:200]
+
+    action_lines: list[str] = []
+    for s in steps:
+        if s.tool_name is None:
+            continue
+        purpose = ""
+        content_start = s.content.find("\n")
+        if content_start >= 0:
+            try:
+                args = _json.loads(s.content[content_start + 1:])
+                if isinstance(args, dict):
+                    purpose = str(args.get("purpose", ""))
+            except (ValueError, TypeError):
+                pass
+        outcome = ""
+        if s.call_id and s.call_id in result_by_call:
+            outcome = result_by_call[s.call_id].replace("\n", " ")[:100]
+        parts = [f"step {s.step_id} [{s.tool_name}]"]
+        if purpose:
+            parts.append(purpose)
+        if outcome:
+            parts.append(f"→ {outcome}")
+        action_lines.append(": ".join(parts[:2]) + (f"  {parts[2]}" if len(parts) > 2 else ""))
+
+    sections: list[str] = []
+    if task_text:
+        sections.append(f"## Task\n{task_text}")
+    if action_lines:
+        sections.append("## Action log\n" + "\n".join(action_lines))
+    return "\n\n".join(sections)
+
+
 async def build_constraint_checks(
     index: TrajectoryIndex,
     *,
@@ -127,10 +179,12 @@ async def build_constraint_checks(
     if not finals:
         return []
 
+    context = _build_trajectory_context(index)
     con_lines = [f"[{i}] {c.description}" for i, c in enumerate(constraints)]
     val_lines = [f"  {name}: {val}" for name, val in sorted(finals.items())]
     payload = (
-        "## Constraints\n" + "\n".join(con_lines)
+        context
+        + "\n\n## Constraints\n" + "\n".join(con_lines)
         + "\n\n## Final observed values\n" + "\n".join(val_lines)
     )
 

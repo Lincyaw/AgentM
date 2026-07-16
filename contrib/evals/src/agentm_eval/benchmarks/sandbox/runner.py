@@ -461,6 +461,7 @@ def _run_and_eval_one_inner(
         client.close()
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": f"list sessions: {e}"}
     live = [s for s in agent_arl_sessions if getattr(s, "deleted_at", None) is None]
+    logger.info("{}: {} ARL sessions ({} live) under {}", name, len(agent_arl_sessions), len(live), agent_exp_id)
     if live:
         arl_session_id = live[0].id
     elif agent_arl_sessions:
@@ -474,10 +475,12 @@ def _run_and_eval_one_inner(
                         name, replay.stepsReplayed, source.id, new_session.id, replay.errors)
             arl_session_id = new_session.id
         except Exception as e:
+            logger.warning("{}: replay failed: {}", name, e)
             client.close()
             return {"task": name, "status": "eval_create_failed", "tools": tools_count,
                     "error": f"replay failed: {e}"}
     else:
+        logger.warning("{}: no session found under experiment {}", name, agent_exp_id)
         client.close()
         return {"task": name, "status": "eval_create_failed", "tools": tools_count,
                 "error": "no session found under experiment"}

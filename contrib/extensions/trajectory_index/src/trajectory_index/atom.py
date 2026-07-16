@@ -173,18 +173,15 @@ def build_extraction_config(
 
 
 def _agentmsg_to_extraction_dict(
-    msg: AgentMessage,
-    index: int,
+    msg: AgentMessage, index: int,
 ) -> dict[str, JsonValue]:
-    """Serialize one AgentMessage without lossy prompt-only truncation."""
+    """Serialize one AgentMessage to the extraction input format."""
     payload = _agentmsg_to_payload(msg)
     role = payload.get("role", "")
     content = payload.get("content", [])
     if not isinstance(content, list) or not content:
         return {}
-    blocks: list[JsonValue] = [
-        block for block in content if isinstance(block, dict)
-    ]
+    blocks: list[JsonValue] = [b for b in content if isinstance(b, dict)]
     return {"id": str(index), "role": role, "content": blocks}
 
 
@@ -463,6 +460,7 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
             # E1: commit detection — runs only when constraints exist;
             # the binding and step_id feed the merged evidence sweep so
             # the model knows the candidate answer.
+            _commit_obj = None
             commit_binding = ""
             commit_step_id_str = ""
             precomputed: dict[str, Any] | None = None
@@ -477,13 +475,13 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                     key=lambda s: s.index,
                 )
                 try:
-                    _commit = await _detect_commit(
+                    _commit_obj = await _detect_commit(
                         index, _all_steps, question=question,
                         model=model, session_factory=sf, diag=_diag,
                     )
-                    if _commit is not None:
-                        commit_binding = _commit.binding
-                        commit_step_id_str = _commit.step.step_id
+                    if _commit_obj is not None:
+                        commit_binding = _commit_obj.binding
+                        commit_step_id_str = _commit_obj.step.step_id
                 except Exception:
                     logger.warning("Pass 4 (commit detection) failed, skipping constraints", exc_info=True)
                     constraints = []
@@ -502,13 +500,14 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
             except Exception:
                 logger.warning("Pass 4 (evidence/status) failed, skipping", exc_info=True)
 
-            # Constraint findings — uses pre-computed evidence from the merged sweep
+            # Constraint findings — uses pre-computed commit + evidence
             if constraints:
                 try:
                     await analyze_constraints(
                         index, run_id=run_id, question=question,
                         model=model, session_factory=sf,
                         precomputed_evidence=precomputed,
+                        precomputed_commit=_commit_obj,
                     )
                 except Exception:
                     logger.warning("Pass 4 (constraint analysis) failed, skipping", exc_info=True)

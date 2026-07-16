@@ -33,6 +33,7 @@ class IndexEvalAdapter:
             vocabulary: Annotated[str, typer.Option()] = "default",
             exp_id: Annotated[str | None, typer.Option("--exp-id")] = None,
             session_concurrency: Annotated[int, typer.Option("--session-concurrency", help="Parallel sessions")] = 4,
+            max_messages: Annotated[int | None, typer.Option("--max-messages", help="Truncate session to first N messages")] = None,
         ) -> None:
             """Run trajectory-index extraction on recorded sessions."""
             from agentm.env import autoload_dotenv
@@ -56,6 +57,7 @@ class IndexEvalAdapter:
             asyncio.run(_run_sessions(
                 sids, model=model, chunk_size=parsed_chunk, vocabulary=vocabulary, exp=exp,
                 session_concurrency=session_concurrency,
+                max_messages=max_messages,
             ))
 
         return cli
@@ -83,6 +85,7 @@ async def _run_sessions(
     vocabulary: str,
     exp: Experiment,
     session_concurrency: int = 4,
+    max_messages: int | None = None,
 ) -> None:
     from agentm_eval.methods.index import build_index, extract_symbols
 
@@ -97,6 +100,8 @@ async def _run_sessions(
             except FileNotFoundError:
                 typer.echo(f"  {sid}: NOT FOUND", err=True)
                 return None
+            if max_messages is not None:
+                messages = messages[:max_messages]
             sdir = exp.register_session(sid, metadata={"n_messages": len(messages)})
             chunks_dir = sdir / "chunks"
             chunks_dir.mkdir(exist_ok=True)
@@ -122,7 +127,7 @@ async def _run_sessions(
                 chunk_size=chunk_size, run_id=sid,
                 on_chunk=_save_chunk,
             )
-            idx = await build_index(idx, model=model, resolve=True)
+            idx = await build_index(idx, model=model, resolve=True, run_id=sid)
 
             stats = idx.stats(sid)
             warns = idx.warnings()

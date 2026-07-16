@@ -1,31 +1,26 @@
-"""Constraint satisfaction analysis — Pass 0 / E / J / L.
+"""Constraint satisfaction analysis — Pass E1 / E / L.
 
 Extends the grounding analysis with constraint-level verification (see
-designs/constraint-satisfaction.md for the contracts P1-P7). Organized like
-a compiler pipeline: each pass is one function with an explicit
-input → output signature, all diagnostics flow into one sink, and the
-driver (:func:`analyze_constraints`) only chains passes.
+designs/constraint-satisfaction.md for the contracts P1-P7).
 
     (constraint nodes come from Pass 1 — the task text is part of the
     trajectory; there is no separate extraction pass here)
 
-    Pass E1  _detect_commit        index, steps         → Commit | None
-    Pass E2  _map_about            grounded steps       → evidence steps
-    Pass E3  _judge_entailment     constraints, window  → {cid: Verdict}
-    Pass J   _check_omitted        unsettled, trace     → {cid: Verdict}
-    Pass L   _emit_findings        verdicts             → [ConstraintFinding]
+    Pass E1  _detect_commit                 index, steps     → Commit | None
+    Pass E   _judge_constraint_evidence     constraints, obs → {cid: Verdict}
+             (or precomputed from merged evidence sweep in claims.py)
+    Pass L   _emit_findings                 verdicts         → [ConstraintFinding]
 
-Contracts honored here:
+When called from the atom, the evidence pass is merged with claim evidence
+into a single partition sweep (``build_claim_edges`` with constraints); the
+precomputed verdicts are passed via ``precomputed_evidence`` and the commit
+via ``precomputed_commit``, skipping both E1 and E here.
 
-* oracle judgments run over code-selected windows of WHOLE steps — selection
-  never cuts content mid-step, and every deselection is a logged prune; the
-  judgments assert only positive facts about the presented content (P4);
+Contracts honored:
+
 * a missing/unparseable verdict is unknown and never escalates (P5);
-* Omitted requires two independent absence checks — a lexical code-negative
-  over the whole trace AND an attested coverage sweep with citation-on-yes
-  and abstention on truncation (P4-iii);
-* every model influence flows through a recorded transcript row, so
-  Pass J/L output is a deterministic function of (facts, transcript) (P3);
+* constraints absent across ALL partitions are omitted (dual-check);
+* every model influence flows through a recorded transcript row (P3);
 * every code-side prune is recorded (P2: no silent false negatives).
 """
 from __future__ import annotations
@@ -447,6 +442,7 @@ async def analyze_constraints(
     model: str | None = None,
     session_factory: SessionFactory | None = None,
     precomputed_evidence: dict[str, dict[str, Any]] | None = None,
+    precomputed_commit: Commit | None = None,
 ) -> ConstraintAnalysis:
     """Chain E1 → E → L over Pass 1 constraint nodes.
 
@@ -456,7 +452,8 @@ async def analyze_constraints(
 
     When *precomputed_evidence* is provided (from a merged evidence sweep
     in ``build_claim_edges``), the per-partition evidence LLM calls are
-    skipped — only commit detection and findings emission run here.
+    skipped. When *precomputed_commit* is also provided, the commit
+    detection call is also skipped (already done by the caller).
     """
     if session_factory is None:
         raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
@@ -484,10 +481,14 @@ async def analyze_constraints(
     grounded = [s for s in steps if s.observation_segment]
 
     # Pass E1 — empty Commit: no violation can fire, omission has no anchor (v1: stop).
-    commit = await _detect_commit(
-        index, steps, question=question or "",
-        model=model, session_factory=session_factory, diag=diag,
-    )
+    commit: Commit | None
+    if precomputed_commit is not None:
+        commit = precomputed_commit
+    else:
+        commit = await _detect_commit(
+            index, steps, question=question or "",
+            model=model, session_factory=session_factory, diag=diag,
+        )
     if commit is None:
         logger.info("constraints: agent commits to no candidate; no findings emitted")
         return analysis

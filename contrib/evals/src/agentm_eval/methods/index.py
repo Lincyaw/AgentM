@@ -245,14 +245,24 @@ def _span_namespace(run_id: str, sym: dict[str, Any]) -> str:
 
 
 
+def _first_user_text_from_index(index: Any) -> str:
+    """Extract the first user step's text from an already-populated index."""
+    from trajectory_index.ir.models import StepRole
+    for step in sorted(index.steps.values(), key=lambda s: s.index):
+        if step.role == StepRole.USER and step.content.strip():
+            return step.content
+    return ""
+
+
 async def resolve_index(
     index: Any,
     *,
     model: str | None = None,
+    run_id: str = "",
 ) -> None:
-    """Run Pass 2 (alias resolution) and Pass 3 (dataflow).
+    """Run Pass 2 (alias resolution), Pass 3 (dataflow), and Pass 4 (claims/constraints).
 
-    Best-effort: Pass 2 LLM failure is skipped; Pass 3 is deterministic.
+    Best-effort: each pass failure is logged and skipped.
     """
     from agentm.core.runtime import AgentSession
     from trajectory_index.pass2_edges.identity import resolve_aliases
@@ -267,6 +277,72 @@ async def resolve_index(
 
     index.build_dependencies()
 
+    # Pass 4: claim/constraint adjudication.
+    from trajectory_index.pass2_edges.claims import build_claim_edges
+    from trajectory_index.pass2_edges.intent_alignment import build_intent_alignment_edges
+    from trajectory_index.pass3_folds.claim_status import fold_claim_statuses
+    from trajectory_index.pass3_folds.constraints import analyze_constraints
+
+    constraints = list(index.constraints.values())
+    question = _first_user_text_from_index(index)
+
+    _commit_obj = None
+    commit_binding = ""
+    commit_step_id_str = ""
+    precomputed: dict[str, Any] | None = None
+
+    if constraints:
+        from trajectory_index.ir.diagnostics import Diagnostics as _Diag
+        from trajectory_index.pass3_folds.constraints import _detect_commit
+
+        _all_steps = sorted(
+            (s for s in index.steps.values()
+             if not run_id or s.run_id == run_id),
+            key=lambda s: s.index,
+        )
+        try:
+            _commit_obj = await _detect_commit(
+                index, _all_steps, question=question,
+                model=model, session_factory=sf, diag=_Diag(),
+            )
+            if _commit_obj is not None:
+                commit_binding = _commit_obj.binding
+                commit_step_id_str = _commit_obj.step.step_id
+        except Exception:
+            logger.warning("Pass 4 (commit detection) failed, skipping constraints", exc_info=True)
+            constraints = []
+
+    try:
+        edge_result = await build_claim_edges(
+            index, run_id=run_id, model=model, session_factory=sf,
+            constraints=constraints if commit_binding else None,
+            commit_binding=commit_binding,
+            commit_step_id=commit_step_id_str,
+        )
+        fold_claim_statuses(index, edge_result, run_id=run_id)
+        if edge_result.constraint_results:
+            precomputed = edge_result.constraint_results
+    except Exception:
+        logger.warning("Pass 4 (evidence/status) failed, skipping", exc_info=True)
+
+    if constraints:
+        try:
+            await analyze_constraints(
+                index, run_id=run_id, question=question,
+                model=model, session_factory=sf,
+                precomputed_evidence=precomputed,
+                precomputed_commit=_commit_obj,
+            )
+        except Exception:
+            logger.warning("Pass 4 (constraint analysis) failed, skipping", exc_info=True)
+
+    try:
+        await build_intent_alignment_edges(
+            index, run_id=run_id, model=model, session_factory=sf,
+        )
+    except Exception:
+        logger.warning("Pass 4 (intent alignment) failed, skipping", exc_info=True)
+
 
 async def build_index(
     chunks_or_index: list[ExtractedChunk] | Any,
@@ -274,12 +350,14 @@ async def build_index(
     namespace_fn: Callable[[str, dict[str, Any]], str] | None = _span_namespace,
     model: str | None = None,
     resolve: bool = True,
+    run_id: str = "",
 ) -> Any:
     """Build or finalize a TrajectoryIndex.
 
     Accepts either an already-populated index (from ``extract_symbols``)
     or a list of chunks to populate from scratch. Then runs Pass 2
-    (alias resolution) and Pass 3 (def-use / grounding).
+    (alias resolution), Pass 3 (def-use / grounding), and Pass 4
+    (claims / constraints / intent alignment).
     """
     from trajectory_index.ir.index import TrajectoryIndex
 
@@ -297,7 +375,7 @@ async def build_index(
             )
 
     if resolve:
-        await resolve_index(index, model=model)
+        await resolve_index(index, model=model, run_id=run_id)
     else:
         index.build_dependencies()
 

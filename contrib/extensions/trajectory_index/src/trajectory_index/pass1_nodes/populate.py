@@ -243,6 +243,7 @@ def populate_from_extraction(
 
     # Constraints: head/tail anchors locate requirements.
     extracted_constraints = getattr(result, "constraints", None)
+    _con_spans: list[tuple[str, int, int, str, str]] = []  # (mid, start, end, conid, text)
     for con in (extracted_constraints or []):
         head = str(getattr(con, "head", getattr(con, "text", ""))).strip()
         if not head:
@@ -256,9 +257,31 @@ def populate_from_extraction(
         mid, start_c, end_c = loc
         full_text = steps_by_id[mid].content[start_c:end_c].strip()
         conid = stable_id("con", run_id, mid, start_c, full_text[:80])
-        index.constraints[conid] = Constraint(
-            id=conid, description=full_text,
-        )
+        _con_spans.append((mid, start_c, end_c, conid, full_text))
+
+    # Deduplicate overlapping constraints within the same step:
+    # if one constraint's span is fully contained in another's, drop the larger
+    # (it's a superset that swallowed sibling constraints).
+    _con_spans.sort(key=lambda t: (t[0], t[1], -(t[2] - t[1])))
+    _kept: list[tuple[str, int, int, str, str]] = []
+    for span in _con_spans:
+        mid, start, end, conid, text = span
+        subsumed = False
+        for k_mid, k_start, k_end, _, _ in _kept:
+            if mid == k_mid and start >= k_start and end <= k_end:
+                subsumed = True
+                break
+        if not subsumed:
+            # Also drop any previously kept span that this one subsumes.
+            _kept = [
+                k for k in _kept
+                if not (k[0] == mid and k[1] >= start and k[2] <= end)
+            ]
+            _kept.append(span)
+    if len(_kept) < len(_con_spans):
+        _prune("constraint", f"deduped {len(_con_spans) - len(_kept)} overlapping")
+    for _, _, _, conid, text in _kept:
+        index.constraints[conid] = Constraint(id=conid, description=text)
 
     # Values: symbol:value pairs from tool results (LLM-extracted).
     extracted_values = getattr(result, "values", None)
