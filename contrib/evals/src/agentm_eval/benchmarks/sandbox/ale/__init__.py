@@ -473,6 +473,9 @@ class AleAdapter:
             task: Annotated[Optional[list[str]], typer.Option(
                 "--task", "-t", help="Task ref domain/name (repeatable); omit for all",
             )] = None,
+            domain: Annotated[Optional[list[str]], typer.Option(
+                "--domain", "-d", help="Filter by domain (repeatable)",
+            )] = None,
             ale_repo: Annotated[Optional[Path], typer.Option(
                 help="agents-last-exam checkout ($ALE_REPO or auto-clone)",
             )] = None,
@@ -520,8 +523,10 @@ class AleAdapter:
             if ale_repo is None:
                 ale_repo = _default_ale_repo()
             if not task:
+                domains = set(domain) if domain else None
                 task = [f"{d}/{n}" for d, n in bridge.discover_tasks(ale_repo)
-                        if not d.startswith("demo")]
+                        if not d.startswith("demo")
+                        and (domains is None or d in domains)]
             if data_root is None and task_images is None:
                 data_root = _default_data_root()
 
