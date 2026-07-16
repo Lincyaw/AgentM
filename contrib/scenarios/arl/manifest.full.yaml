@@ -6,7 +6,6 @@ includes:
 
 extensions:
   - module: agentm.extensions.builtin.adapt
-  - module: agentm.extensions.builtin.tool_index
   - module: llmharness.atom
     config:
       mode: async

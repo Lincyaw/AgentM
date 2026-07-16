@@ -6,4 +6,3 @@ includes:
 
 extensions:
   - module: agentm.extensions.builtin.adapt
-  - module: agentm.extensions.builtin.tool_index
