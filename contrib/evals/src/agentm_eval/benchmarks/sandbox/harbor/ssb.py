@@ -103,7 +103,7 @@ class SeniorSweAdapter(HarborAdapter):
         env.setdefault("OPENAI_API_KEY", api_key)
         return True
 
-    VERIFIER_PIP_DEPS = ("fastapi",)
+    VERIFIER_PIP_DEPS = ("litellm[proxy]",)
     _PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
     _NPM_MIRROR = "https://registry.npmmirror.com/"
     _PROXY_URL = "http://sing-box.arl1.svc:7890"
@@ -139,12 +139,19 @@ class SeniorSweAdapter(HarborAdapter):
         if self.VERIFIER_PIP_DEPS:
             deps = " ".join(shlex.quote(d) for d in self.VERIFIER_PIP_DEPS)
             pip_idx = f"-i {mirror} --trusted-host pypi.tuna.tsinghua.edu.cn"
+            no_proxy = "localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12"
+            pip_env = (
+                f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
+                f"https_proxy={proxy} http_proxy={proxy} "
+                f"NO_PROXY={no_proxy} no_proxy={no_proxy} "
+            )
             session.execute([{  # type: ignore[attr-defined]
                 "name": "verifier-deps",
                 "command": ["bash", "-lc",
+                    f"{pip_env}"
                     f"python3 -m pip install --break-system-packages -q {pip_idx} {deps} "
-                    f"2>/dev/null || python3 -m pip install -q {pip_idx} {deps} "
-                    f"2>/dev/null || true"],
+                    f"|| python3 -m pip install -q {pip_idx} {deps} "
+                    f"|| true"],
                 "work_dir": "/app",
                 "timeoutSeconds": 600,
             }], recover_timeout=720)
