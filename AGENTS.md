@@ -275,7 +275,7 @@ Full text: `/autoharness:guide`.
 
 3. **Index integrity** — autoharness index validation reports 0 violations
    (currently: 0 violations on 2026-06-28).
-   Measure: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml`.
+   Measure: `uv run python scripts/validate_project_index.py project-index.yaml`.
    Mechanism: script.
 
 4. **Code health** — lint and type checks stay clean across the Python
@@ -290,12 +290,13 @@ serving five.
 
 | Stage | Command | Notes |
 |---|---|---|
-| Lint | `uv run ruff check src/ contrib/gateway-peers/feishu/src contrib/gateway-peers/weixin/src contrib/extensions/llmharness/src contrib/scenarios/rca/src` | Run after code changes in the touched scope; mirror CI for sweeping changes. |
+| Lint | `uv run ruff check src/ contrib/` | Run after code changes in the touched scope; mirror CI for sweeping changes. |
+| Code health | `uv run python -m agentm.code_health src contrib --strict` | Project-specific architecture, event-hook, and maintainability checks. |
 | Type check | `uv run mypy src/` | Root package check. |
-| Type check peers | `cd contrib/gateway-peers/feishu && uv run mypy src/agentm_feishu`; `cd contrib/gateway-peers/weixin && uv run mypy src/agentm_weixin`; `cd contrib/extensions/llmharness && uv run mypy src/llmharness`; `cd contrib/scenarios/rca && uv run mypy src/rca src/rca_eval` | Run from each workspace member root so package-local config applies. |
+| Type check peers | Run the workspace-specific mypy commands from `.github/workflows/test.yml`, including evals, extensions, Python gateway peers, RCA, verifier_v2, devloop, paper_review, and workgraph. | Run from each workspace member root where a package-local config exists. |
 | Python tests | `uv run pytest --tb=short` | Default excludes `ui`; slow/real-provider tests are opt-in. |
 | Terminal peer tests | `cd contrib/gateway-peers/terminal-go && go test ./...` | Go peer is separate from the Python workspace. |
-| Index validation | `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml` | Must stay clean; stale path references are regressions. |
+| Index validation | `uv run python scripts/validate_project_index.py project-index.yaml` | Must stay clean; stale path references are regressions. |
 
 ## Observation setup
 
@@ -329,7 +330,7 @@ requirements. Every code change must keep the index synchronized:
 4. **After refactoring**: update any affected `code`/`tests` paths if files were moved or renamed.
 5. **Never skip**: a code change without the corresponding index update is incomplete work.
 
-Validate with: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml`.
+Validate with: `uv run python scripts/validate_project_index.py project-index.yaml`.
 
 ## Active skills
 

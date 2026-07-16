@@ -230,7 +230,7 @@ def _multi_fault_context(
 
     # Show which services are affected by the other faults
     affected = set()
-    for node_id, node_meta in state.nodes.items():
+    for node_id in state.nodes:
         sources = state.node_sources.get(node_id, set())
         if sources & other_seeds:
             affected.add(node_id)

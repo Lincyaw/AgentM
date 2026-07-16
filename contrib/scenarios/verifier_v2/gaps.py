@@ -157,9 +157,9 @@ def _anomaly_explained(
     component: str,
 ) -> bool:
     """Check if any confirmed seed path reaches the anomaly's service/endpoint."""
-    # If the service is already a confirmed node in the graph, it's explained
-    if service in state.nodes:
-        return True
+    target = state.nodes.get(service)
+    if target is not None:
+        return _node_covers_component(target, component)
 
     for seed in state.confirmed_seeds:
         # For link seeds, also check reachability from endpoint services
@@ -173,11 +173,16 @@ def _anomaly_explained(
             if state.reaches(start, service, seed=seed):
                 if not component:
                     return True
-                for node_id, node_meta in state.nodes.items():
-                    endpoints = node_meta.get("affected_endpoints", [])
-                    if not endpoints:
-                        return True
-                    if any(component in ep for ep in endpoints):
-                        return True
-                return True
     return False
+
+
+def _node_covers_component(node: dict[str, object], component: str) -> bool:
+    """Return whether node evidence covers a service-wide or endpoint anomaly."""
+    if not component:
+        return True
+    endpoints = node.get("affected_endpoints", [])
+    if not isinstance(endpoints, list):
+        return False
+    if not endpoints:
+        return True
+    return any(isinstance(endpoint, str) and component in endpoint for endpoint in endpoints)

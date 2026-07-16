@@ -70,8 +70,9 @@ def _parse_chunk_size(value: str | None) -> tuple[int, int] | None:
 
 async def _load_messages(session_id: str) -> list[Any]:
     from agentm.core.runtime.session_bootstrap import make_default_session_store
+
     store = make_default_session_store(".")
-    return store.open(session_id).get_raw_messages()
+    return store.open(session_id).build_session_context().messages
 
 
 async def _run_sessions(

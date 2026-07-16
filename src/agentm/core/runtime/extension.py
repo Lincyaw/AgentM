@@ -61,7 +61,7 @@ from agentm.core.observability.otel_export import (
     SessionTelemetry,
     setup_session_telemetry,
 )
-from agentm.core.runtime.resource_writer import GitBackedResourceWriter
+from agentm.core.runtime.resource_writer import LocalResourceWriter
 from agentm.core.runtime.services import (
     default_catalog_service,
     default_project_layout,
@@ -329,11 +329,7 @@ def build_extension_api_scope(config: ExtensionAPIScopeConfig) -> ExtensionAPISc
         child_session_factory=config.child_session_factory or _NoopChildSessionFactory(),
         resource_writer=_ResourceWriterHolder(
             config.resource_writer
-            or GitBackedResourceWriter(
-                cwd=resolved_cwd,
-                session_id=config.session_id,
-                bus=config.bus,
-            )
+            or LocalResourceWriter(cwd=resolved_cwd)
         ),
         telemetry=_SessionTelemetryHolder(
             config.telemetry_factory

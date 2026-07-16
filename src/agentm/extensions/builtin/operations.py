@@ -6,8 +6,10 @@ Backend selected by ``config["backend"]``:
   and most scenarios.
 - ``"agent_env"`` — ARL sandbox-backed, for Kubernetes-isolated execution.
 
-Implementations live in ``bash/`` (BashOperations), ``writer/`` (ResourceWriter),
-and ``_agent_env.py`` (shared ARL helpers + agent-env install entry point).
+Implementations live in ``bash/`` (local BashOperations), ``writer/``
+(agent-env ResourceWriter), and ``_agent_env.py`` (shared ARL helpers +
+agent-env install entry point).  The bootstrap local ResourceWriter lives in
+``core.runtime`` because the extension loader needs it before atoms install.
 """
 
 from __future__ import annotations

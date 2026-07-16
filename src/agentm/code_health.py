@@ -54,6 +54,12 @@ Rules:
   ``path.resolve().parents[...]``. Resolve-before-parent hides intent and
   silently follows symlinks; split into ``real = path.resolve(); real.parent``
   only when symlink resolution is intentional.
+- **AM015** ``event-source-drift``: After any mutable event hook is emitted,
+  downstream code must read the event's final fields, not stale source locals
+  or values derived before dispatch. Mutable events must be bound to a local
+  event object rather than constructed inline at the emit call.
+- **AM016** ``hook-contract-integrity``: Event hook mutation contracts must
+  declare machine-readable ``mutable_fields`` that exist on the event class.
 
 Invocation::
 
@@ -67,7 +73,6 @@ Exit code 0 = clean, 1 = violations found.
 from __future__ import annotations
 
 import ast
-import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +80,8 @@ from typing import Final
 
 import typer
 from loguru import logger
+
+from agentm.core.abi.events import MUTABLE_EVENT_FIELDS_BY_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +99,29 @@ class Issue:
 # Rule implementations
 # ---------------------------------------------------------------------------
 
-_LOG_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"\blog(?:ger|ging)?\b|\bwarn(?:ing)?\b|\braise\b|\bprint\b", re.IGNORECASE
+_SURFACE_CALL_NAMES: Final[frozenset[str]] = frozenset(
+    {"print", "warn"}
+)
+_SURFACE_METHOD_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "critical",
+        "debug",
+        "echo",
+        "emit",
+        "error",
+        "exception",
+        "info",
+        "log",
+        "print_exc",
+        "print_exception",
+        "put",
+        "put_nowait",
+        "send",
+        "send_nowait",
+        "set_exception",
+        "warning",
+        "warn",
+    }
 )
 
 _ATOM_BUILTIN_PARTS: Final[tuple[str, str]] = ("extensions", "builtin")
@@ -121,43 +149,110 @@ def _is_atom_file(path: Path) -> bool:
     )
 
 
-def _check_silent_except(
-    tree: ast.Module, source_lines: list[str], path: str
-) -> list[Issue]:
-    """AM001: except Exception without logging."""
+def _exception_type_names(node: ast.expr | None) -> set[str]:
+    if node is None:
+        return {"<bare>"}
+    if isinstance(node, ast.Tuple):
+        names: set[str] = set()
+        for item in node.elts:
+            names.update(_exception_type_names(item))
+        return names
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    return set()
+
+
+class _ExceptionSurfaceVisitor(ast.NodeVisitor):
+    """Find exception surfacing without being fooled by nested scopes/handlers."""
+
+    def __init__(self, exception_name: str | None) -> None:
+        self.surfaced = False
+        self._exception_name = exception_name
+
+    def _references_exception(self, node: ast.AST | None) -> bool:
+        if node is None or self._exception_name is None:
+            return False
+        return any(
+            isinstance(child, ast.Name) and child.id == self._exception_name
+            for child in ast.walk(node)
+        )
+
+    def visit_Raise(self, node: ast.Raise) -> None:  # noqa: N802
+        self.surfaced = True
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _SURFACE_CALL_NAMES:
+            self.surfaced = True
+            return
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in _SURFACE_METHOD_NAMES
+        ):
+            self.surfaced = True
+            return
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "append"
+            and any(self._references_exception(arg) for arg in node.args)
+        ):
+            self.surfaced = True
+            return
+        self.generic_visit(node)
+
+    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+        if self._references_exception(node.value):
+            self.surfaced = True
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:  # noqa: N802
+        # A nested handler surfacing its own exception does not surface the
+        # outer exception currently being checked.
+        return
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self, node: ast.AsyncFunctionDef
+    ) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+
+def _handler_surfaces_exception(node: ast.ExceptHandler) -> bool:
+    visitor = _ExceptionSurfaceVisitor(node.name)
+    for statement in node.body:
+        visitor.visit(statement)
+        if visitor.surfaced:
+            return True
+    return False
+
+
+def _check_silent_except(tree: ast.Module, path: str) -> list[Issue]:
+    """AM001: broad exception handlers must log, report, or re-raise."""
     issues: list[Issue] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.ExceptHandler):
             continue
-        if node.type is None:
+        caught = _exception_type_names(node.type)
+        if not caught.intersection({"<bare>", "BaseException", "Exception"}):
             continue
-        type_name = ""
-        if isinstance(node.type, ast.Name):
-            type_name = node.type.id
-        elif isinstance(node.type, ast.Attribute):
-            type_name = node.type.attr
-        if type_name != "Exception":
-            continue
-
-        handler_lines = []
-        for child in ast.walk(node):
-            if hasattr(child, "lineno") and child is not node:
-                start = child.lineno - 1
-                end = getattr(child, "end_lineno", child.lineno)
-                handler_lines.extend(source_lines[start:end])
-
-        if not handler_lines:
-            body_start = node.lineno
-            body_end = min(node.lineno + 5, len(source_lines))
-            handler_lines = source_lines[body_start:body_end]
-
-        handler_text = "\n".join(handler_lines)
-        if not _LOG_PATTERN.search(handler_text):
+        if not _handler_surfaces_exception(node):
             issues.append(Issue(
                 path=path,
                 line=node.lineno,
                 rule="AM001",
-                message="except Exception without logging — add logger.debug/warning or re-raise",
+                message=(
+                    "broad exception handler without reporting — "
+                    "log, surface to the caller, or re-raise"
+                ),
             ))
     return issues
 
@@ -498,16 +593,24 @@ def _check_cross_layer_import(
                 lineno = node.lineno
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    module_str = alias.name
-                lineno = node.lineno
+                    target_dotted = forbidden_target.replace("/", ".").rstrip(".")
+                    if target_dotted not in alias.name:
+                        continue
+                    if _find_parent_if(tree, node) is not None:
+                        continue
+                    issues.append(Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM010",
+                        message=f"cross-layer import: {msg} ({alias.name})",
+                    ))
+                continue
             if module_str is None:
                 continue
-            target_dotted = forbidden_target.replace("/", ".")
-            if target_dotted.rstrip(".") in module_str:
-                if "TYPE_CHECKING" in ast.dump(tree):
-                    parent = _find_parent_if(tree, node)
-                    if parent is not None:
-                        continue
+            target_dotted = forbidden_target.replace("/", ".").rstrip(".")
+            if target_dotted in module_str:
+                if _find_parent_if(tree, node) is not None:
+                    continue
                 issues.append(Issue(
                     path=path,
                     line=lineno,
@@ -534,9 +637,13 @@ def _is_dict_with_type_object(node: ast.expr) -> bool:
     """True if *node* is a dict literal containing ``"type": "object"``."""
     if not isinstance(node, ast.Dict):
         return False
-    for key, value in zip(node.keys, node.values):
-        if (isinstance(key, ast.Constant) and key.value == "type"
-                and isinstance(value, ast.Constant) and value.value == "object"):
+    for key, value in zip(node.keys, node.values, strict=True):
+        if (
+            isinstance(key, ast.Constant)
+            and key.value == "type"
+            and isinstance(value, ast.Constant)
+            and value.value == "object"
+        ):
             return True
     return False
 
@@ -708,6 +815,343 @@ def _check_resolved_parent_chain(tree: ast.Module, path: str) -> list[Issue]:
     return issues
 
 
+def _assigned_name(node: ast.Assign | ast.AnnAssign) -> str | None:
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+        return None
+    return targets[0].id
+
+
+def _assigned_value(node: ast.Assign | ast.AnnAssign) -> ast.expr | None:
+    return node.value
+
+
+def _call_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _is_emit_of(node: ast.Call, event_name: str) -> bool:
+    if _call_name(node) not in {"emit", "emit_sync"}:
+        return False
+    return any(
+        isinstance(arg, ast.Name) and arg.id == event_name
+        for arg in node.args
+    ) or any(
+        isinstance(keyword.value, ast.Name)
+        and keyword.value.id == event_name
+        for keyword in node.keywords
+    )
+
+
+class _CurrentScopeCollector(ast.NodeVisitor):
+    """Collect nodes in one function without descending into nested scopes."""
+
+    def __init__(self) -> None:
+        self.nodes: list[ast.AST] = []
+
+    def generic_visit(self, node: ast.AST) -> None:
+        self.nodes.append(node)
+        super().generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self,
+        node: ast.AsyncFunctionDef,
+    ) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+
+def _scope_nodes(
+    scope: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[ast.AST]:
+    collector = _CurrentScopeCollector()
+    for statement in scope.body:
+        collector.visit(statement)
+    return collector.nodes
+
+
+def _loaded_names(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+    }
+
+
+def _mutable_constructor_in_emit(node: ast.Call) -> ast.Call | None:
+    if _call_name(node) not in {"emit", "emit_sync"}:
+        return None
+    values = [*node.args, *(keyword.value for keyword in node.keywords)]
+    for value in values:
+        if (
+            isinstance(value, ast.Call)
+            and _call_name(value) in MUTABLE_EVENT_FIELDS_BY_TYPE
+        ):
+            return value
+    return None
+
+
+def _check_event_source_drift(tree: ast.Module, path: str) -> list[Issue]:
+    """AM015: mutable event payloads are the post-dispatch source of truth."""
+    issues: list[Issue] = []
+    scopes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for scope in scopes:
+        nodes = _scope_nodes(scope)
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            inline = _mutable_constructor_in_emit(node)
+            if inline is None:
+                continue
+            issues.append(
+                Issue(
+                    path=path,
+                    line=inline.lineno,
+                    rule="AM015",
+                    message=(
+                        f"mutable {_call_name(inline)} must be assigned to a "
+                        "local before emit so downstream code can consume its "
+                        "final fields"
+                    ),
+                )
+            )
+
+        event_assignments: list[tuple[str, ast.Call, int, tuple[str, ...]]] = []
+        for node in nodes:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            event_name = _assigned_name(node)
+            value = _assigned_value(node)
+            constructor_name = (
+                _call_name(value) if isinstance(value, ast.Call) else None
+            )
+            if (
+                event_name is None
+                or not isinstance(value, ast.Call)
+                or constructor_name not in MUTABLE_EVENT_FIELDS_BY_TYPE
+            ):
+                continue
+            event_assignments.append(
+                (
+                    event_name,
+                    value,
+                    node.lineno,
+                    MUTABLE_EVENT_FIELDS_BY_TYPE[constructor_name],
+                )
+            )
+
+        for (
+            event_name,
+            constructor,
+            assignment_line,
+            mutable_fields,
+        ) in event_assignments:
+            emit_lines = sorted(
+                node.lineno
+                for node in nodes
+                if (
+                    isinstance(node, ast.Call)
+                    and node.lineno > assignment_line
+                    and _is_emit_of(node, event_name)
+                )
+            )
+            if not emit_lines:
+                continue
+            emit_line = emit_lines[0]
+            source_fields = {
+                keyword.value.id: keyword.arg
+                for keyword in constructor.keywords
+                if (
+                    keyword.arg in mutable_fields
+                    and isinstance(keyword.value, ast.Name)
+                )
+            }
+            tainted = dict(source_fields)
+            assignments = sorted(
+                (
+                    node
+                    for node in nodes
+                    if isinstance(node, (ast.Assign, ast.AnnAssign))
+                ),
+                key=lambda node: (node.lineno, node.col_offset),
+            )
+            for assignment in assignments:
+                if assignment.lineno >= emit_line:
+                    break
+                target_name = _assigned_name(assignment)
+                if target_name is None or target_name == event_name:
+                    continue
+                origins = [
+                    tainted[name]
+                    for name in _loaded_names(_assigned_value(assignment))
+                    if name in tainted
+                ]
+                if origins:
+                    tainted[target_name] = origins[0]
+
+            for source_name, field_name in tainted.items():
+                fresh_line: int | None = None
+                for assignment in assignments:
+                    if (
+                        assignment.lineno <= emit_line
+                        or _assigned_name(assignment) != source_name
+                    ):
+                        continue
+                    if not (
+                        _loaded_names(_assigned_value(assignment))
+                        & set(tainted)
+                    ):
+                        fresh_line = assignment.lineno
+                        break
+                stale_reads = sorted(
+                    node.lineno
+                    for node in nodes
+                    if (
+                        isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id == source_name
+                        and node.lineno > emit_line
+                        and (fresh_line is None or node.lineno < fresh_line)
+                    )
+                )
+                if not stale_reads:
+                    continue
+                issues.append(Issue(
+                    path=path,
+                    line=stale_reads[0],
+                    rule="AM015",
+                    message=(
+                        f"{source_name!r} is read after {event_name!r} was "
+                        f"emitted — use {event_name}.{field_name} or explicitly "
+                        "rebind the local from the final event payload"
+                    ),
+                ))
+    return issues
+
+
+def _hook_contract_call(node: ast.ClassDef) -> ast.Call | None:
+    for statement in node.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(statement, ast.AnnAssign):
+            target = statement.target
+            value = statement.value
+        elif isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target = statement.targets[0]
+            value = statement.value
+        if (
+            isinstance(target, ast.Name)
+            and target.id == "HOOK"
+            and isinstance(value, ast.Call)
+            and _call_name(value) == "HookContract"
+        ):
+            return value
+    return None
+
+
+def _constant_string_tuple(node: ast.expr | None) -> tuple[str, ...]:
+    if not isinstance(node, (ast.Tuple, ast.List)):
+        return ()
+    values: list[str] = []
+    for item in node.elts:
+        if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+            return ()
+        values.append(item.value)
+    return tuple(values)
+
+
+def _check_hook_contract_integrity(
+    tree: ast.Module,
+    path: str,
+) -> list[Issue]:
+    """AM016: mutation prose and machine-readable mutable fields stay paired."""
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        hook_call = _hook_contract_call(node)
+        if hook_call is None:
+            continue
+        keywords = {
+            keyword.arg: keyword.value
+            for keyword in hook_call.keywords
+            if keyword.arg is not None
+        }
+        mutable_fields = _constant_string_tuple(keywords.get("mutable_fields"))
+        mutation_node = keywords.get("mutation_contract")
+        has_mutation_contract = not (
+            mutation_node is None
+            or (
+                isinstance(mutation_node, ast.Constant)
+                and mutation_node.value is None
+            )
+        )
+        if has_mutation_contract and not mutable_fields:
+            issues.append(
+                Issue(
+                    path=path,
+                    line=hook_call.lineno,
+                    rule="AM016",
+                    message=(
+                        f"{node.name}.HOOK has mutation_contract but no "
+                        "mutable_fields"
+                    ),
+                )
+            )
+        if mutable_fields and not has_mutation_contract:
+            issues.append(
+                Issue(
+                    path=path,
+                    line=hook_call.lineno,
+                    rule="AM016",
+                    message=(
+                        f"{node.name}.HOOK declares mutable_fields without a "
+                        "mutation_contract"
+                    ),
+                )
+            )
+        event_fields = {
+            statement.target.id
+            for statement in node.body
+            if (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+            )
+        }
+        unknown = sorted(set(mutable_fields) - event_fields)
+        if unknown:
+            issues.append(
+                Issue(
+                    path=path,
+                    line=hook_call.lineno,
+                    rule="AM016",
+                    message=(
+                        f"{node.name}.HOOK mutable_fields are not event fields: "
+                        f"{unknown}"
+                    ),
+                )
+            )
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -715,6 +1159,7 @@ def _check_resolved_parent_chain(tree: ast.Module, path: str) -> list[Issue]:
 ALL_RULES: Final[tuple[str, ...]] = (
     "AM001", "AM002", "AM003", "AM004", "AM005", "AM006", "AM007",
     "AM008", "AM009", "AM010", "AM011", "AM012", "AM013", "AM014",
+    "AM015", "AM016",
 )
 
 
@@ -734,7 +1179,7 @@ def check_file(file_path: Path) -> list[Issue]:
         return []
 
     issues: list[Issue] = []
-    issues.extend(_check_silent_except(tree, source_lines, rel))
+    issues.extend(_check_silent_except(tree, rel))
     issues.extend(_check_missing_slots(tree, rel))
     issues.extend(_check_private_in_all(tree, rel))
     issues.extend(_check_atom_raw_io(tree, rel, file_path))
@@ -748,6 +1193,8 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_config_dict_splat(tree, rel))
     issues.extend(_check_legacy_asyncio_timeout_error(tree, rel))
     issues.extend(_check_resolved_parent_chain(tree, rel))
+    issues.extend(_check_event_source_drift(tree, rel))
+    issues.extend(_check_hook_contract_integrity(tree, rel))
     return issues
 
 

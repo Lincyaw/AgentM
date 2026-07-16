@@ -2,7 +2,7 @@
 
 Atoms (and the catalog freeze CLI) depend on this surface so they don't
 need to import from ``agentm.core.runtime.resource_writer`` directly. The
-concrete ``GitBackedResourceWriter`` lives in the runtime layer and
+concrete ``LocalResourceWriter`` lives in the runtime layer and
 implements ``ResourceWriter`` implicitly.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 WriterAuthor = Literal["agent", "human", "indexer"]
@@ -21,9 +20,6 @@ PathClass = Literal["managed", "unmanaged", "constitution"]
 class WriteResult:
     path: str
     path_class: PathClass
-    committed: bool
-    commit_sha_before: str | None
-    commit_sha_after: str | None
     error: str | None = None
 
     @classmethod
@@ -32,33 +28,22 @@ class WriteResult:
         path: str,
         path_class: PathClass,
         error: str,
-        *,
-        commit_sha_before: str | None = None,
     ) -> WriteResult:
         return cls(
             path=path,
             path_class=path_class,
-            committed=False,
-            commit_sha_before=commit_sha_before,
-            commit_sha_after=None,
             error=error,
         )
 
     @classmethod
-    def _uncommitted(
+    def _success(
         cls,
         path: str,
         path_class: PathClass,
-        *,
-        commit_sha_before: str | None = None,
-        commit_sha_after: str | None = None,
     ) -> WriteResult:
         return cls(
             path=path,
             path_class=path_class,
-            committed=False,
-            commit_sha_before=commit_sha_before,
-            commit_sha_after=commit_sha_after,
         )
 
 
@@ -113,14 +98,6 @@ class ResourceWriter(Protocol):
     ) -> WriteResult: ...
 
     def classify(self, path: str) -> PathClass: ...
-
-    def restore(self, path: Path, version: str) -> None:
-        """Restore a managed resource to a previously recorded version."""
-        ...
-
-    def current_version_for_path(self, path: str) -> str | None:
-        """Return the current version token for ``path`` if the writer tracks one."""
-        ...
 
     def batch(
         self,

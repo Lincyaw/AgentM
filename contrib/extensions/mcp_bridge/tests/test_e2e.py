@@ -95,6 +95,9 @@ class _StubSession:
 
 
 class _SessionView:
+    def get_session_id(self) -> str:
+        return "session"
+
     def get_messages(self) -> list[Any]:
         return []
 

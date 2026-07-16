@@ -24,13 +24,6 @@ from .stream import Model
 from .tool import Tool, ToolOutcome, ToolResult
 
 if TYPE_CHECKING:
-    from .bus import (
-        EventBus as EventBus,
-        EventBusObserver as EventBusObserver,
-        Handler as Handler,
-        ObserverCallback as ObserverCallback,
-        ObserverRegistration as ObserverRegistration,
-    )
     # ``AgentSessionConfig`` is imported only for type hints —
     # ``session_config`` itself imports from ``agentm.core.abi`` (this
     # package's ``__init__``), so a runtime import would close the cycle.
@@ -73,6 +66,8 @@ class HookContract:
     effects: tuple[str, ...] = ("observe",)
     return_contract: str | None = None
     mutation_contract: str | None = None
+    mutable_fields: tuple[str, ...] = ()
+    """Event fields handlers may mutate or replace before the emitter proceeds."""
     handler: Literal["sync_or_async", "sync_only"] = "sync_or_async"
     notes: tuple[str, ...] = ()
     """Additional caveats not already covered by the Event class docstring."""
@@ -371,6 +366,7 @@ class ToolCallEvent(Event):
             "\"kind\"?: \"user_rejected\"} | None"
         ),
         mutation_contract="event.args may be mutated in place before execution.",
+        mutable_fields=("args",),
     )
     tool_call_id: str
     tool_name: str
@@ -389,8 +385,13 @@ class ToolResultEvent(Event):
     CHANNEL: ClassVar[Literal["tool_result"]] = "tool_result"
     HOOK: ClassVar[HookContract] = HookContract(
         visibility="recommended",
-        effects=("observe", "replace_result"),
+        effects=("observe", "mutate_result", "replace_result"),
         return_contract="ToolResult | None",
+        mutation_contract=(
+            "event.result may be mutated or replaced; a returned ToolResult "
+            "takes precedence."
+        ),
+        mutable_fields=("result",),
     )
     tool_call_id: str
     tool_name: str
@@ -410,8 +411,8 @@ class ToolErrorEvent(Event):
 
     The ``result`` field is the same instance the loop will pass through
     :class:`ToolResultEvent` and into the message trajectory; handlers
-    mutate ``result.content`` in place. The dataclass itself is frozen
-    because the *kind* / *tool_name* / *reason* are facts the kernel has
+    mutate ``result.content`` in place. The *kind* / *tool_name* / *reason*
+    fields are runtime-checked as read-only because they are facts the kernel
     already decided; they describe the cause, not a recommendation.
 
     ``kind`` discriminates the kernel-imposed error paths:
@@ -434,6 +435,7 @@ class ToolErrorEvent(Event):
             "event.result.content may be mutated in place before it is "
             "surfaced to the model."
         ),
+        mutable_fields=("result",),
     )
     kind: Literal["execution_failed", "unknown_tool", "blocked", "user_rejected"]
     tool_name: str
@@ -461,11 +463,18 @@ class BeforeSendToLlmEvent(Event):
     CHANNEL: ClassVar[Literal["before_send_to_llm"]] = "before_send_to_llm"
     HOOK: ClassVar[HookContract] = HookContract(
         visibility="recommended",
-        effects=("observe", "mutate_messages", "mutate_system"),
-        mutation_contract=(
-            "event.messages and event.system may be mutated immediately before "
-            "the provider request."
+        effects=(
+            "observe",
+            "mutate_messages",
+            "replace_model",
+            "replace_tools",
+            "mutate_system",
         ),
+        mutation_contract=(
+            "event.messages, event.model, event.tools, and event.system are the "
+            "final provider request and may be replaced immediately before send."
+        ),
+        mutable_fields=("messages", "model", "tools", "system"),
     )
     messages: list[AgentMessage]
     model: Model
@@ -560,6 +569,7 @@ class ContextEvent(Event):
             "event.messages may be mutated in place; a returned list replaces "
             "the current context."
         ),
+        mutable_fields=("messages",),
     )
     messages: list[AgentMessage]
 
@@ -621,20 +631,13 @@ class BackgroundActivityEvent(Event):
 class BeforeAgentStartEvent(Event):
     """Fires at the top of ``AgentSession.prompt`` before the kernel loop runs.
 
-    **System prompt** — two equivalent paths (both work, mutation preferred):
-
-    1. **Mutate** ``event.system`` in place — handlers see each other's
-       mutations, so chained appends work naturally. The runtime reads the
-       final ``event.system`` after all handlers run.
-    2. **Return** ``{"system": "<text>"}`` — *deprecated*; kept for backward
-       compatibility. The last non-None return value takes precedence over
-       ``event.system`` mutation. New code should use mutation only.
+    **System prompt** — mutate ``event.system`` in place. Handlers see each
+    other's mutations, so chained appends work naturally. The runtime reads
+    the final ``event.system`` after all handlers run.
 
     **Veto** — set ``event.veto = <TerminationCause>`` to abort the prompt
     before the loop runs. The runtime checks after all handlers; first
     non-None ``veto`` wins (but all handlers still run for observability).
-    Returning ``{"block": True, "cause": ...}`` is *deprecated* and supported
-    for backward compatibility.
 
     ``messages`` is the live list that will be passed to the loop — handlers
     should generally not rewrite it here (use ``context`` /
@@ -644,9 +647,12 @@ class BeforeAgentStartEvent(Event):
     CHANNEL: ClassVar[Literal["before_agent_start"]] = "before_agent_start"
     HOOK: ClassVar[HookContract] = HookContract(
         visibility="recommended",
-        effects=("observe", "mutate_system", "veto_prompt"),
-        return_contract="{\"system\": str} | {\"block\": true, \"cause\": TerminationCause} | None",
-        mutation_contract="event.system may be mutated; event.veto may be set.",
+        effects=("observe", "mutate_messages", "mutate_system", "veto_prompt"),
+        mutation_contract=(
+            "event.messages and event.system may be mutated or replaced; "
+            "event.veto may be set."
+        ),
+        mutable_fields=("messages", "system", "veto"),
     )
     messages: list[AgentMessage]
     system: str | None
@@ -665,9 +671,6 @@ class InputEvent(Event):
     ``event.handled_messages = [...]`` to short-circuit the normal prompt
     flow. The runtime returns ``handled_messages`` directly to the
     ``prompt()`` caller without invoking the LLM.
-
-    Returning ``{"handled": True, "messages": ...}`` is *deprecated* and
-    supported for backward compatibility.
     """
 
     CHANNEL: ClassVar[Literal["input"]] = "input"
@@ -678,6 +681,7 @@ class InputEvent(Event):
             "event.text may be mutated; set handled and handled_messages to "
             "short-circuit normal prompt flow."
         ),
+        mutable_fields=("text", "handled", "handled_messages"),
     )
     text: str
     handled: bool = False
@@ -720,6 +724,7 @@ class BeforeCompactEvent(Event):
         mutation_contract=(
             "event.messages may be adjusted before compaction consumes them."
         ),
+        mutable_fields=("messages",),
     )
     messages: list[AgentMessage]
     reason: str  # e.g. "auto_overflow", "manual", "scenario_request"
@@ -1068,6 +1073,7 @@ class BeforeInstallAtomEvent(Event):
         effects=("observe", "mutate_config", "block_install"),
         return_contract="{\"block\": true, \"reason\": str} | None",
         mutation_contract="event.config may be mutated before atom install.",
+        mutable_fields=("config",),
     )
     name: str
     module_path: str
@@ -1204,24 +1210,26 @@ class ResourceWriteEvent(Event):
     author: Literal["agent", "human", "indexer"]
 
 
-# --- Bus re-exports (backward compat) --------------------------------------
-# The bus machinery moved to ``bus.py``; lazy re-export here so existing
-# ``from agentm.core.abi.events import EventBus`` keeps working at runtime.
-# TYPE_CHECKING imports above satisfy static analysers. ``__getattr__``
-# handles the runtime path without triggering a circular import (bus.py
-# eagerly imports ``BusPriority`` and ``Event`` from this module).
+def _collect_mutable_event_fields() -> dict[str, tuple[str, ...]]:
+    """Build the static-analysis registry from each event's hook contract."""
+    registry: dict[str, tuple[str, ...]] = {}
+    for candidate in tuple(globals().values()):
+        if (
+            not isinstance(candidate, type)
+            or candidate is Event
+            or not issubclass(candidate, Event)
+        ):
+            continue
+        hook = getattr(candidate, "HOOK", None)
+        mutable_fields = getattr(hook, "mutable_fields", ())
+        if mutable_fields:
+            registry[candidate.__name__] = tuple(mutable_fields)
+    return registry
 
-_BUS_NAMES = frozenset({
-    "EventBus", "EventBusObserver", "Handler",
-    "ObserverCallback", "ObserverRegistration",
-})
 
-
-def __getattr__(name: str) -> object:  # noqa: E302
-    if name in _BUS_NAMES:
-        from . import bus as _bus
-        return getattr(_bus, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+MUTABLE_EVENT_FIELDS_BY_TYPE: Final[dict[str, tuple[str, ...]]] = (
+    _collect_mutable_event_fields()
+)
 
 
 __all__ = [
@@ -1248,12 +1256,9 @@ __all__ = [
     "DiagnosticEvent",
     "EntryAppendedEvent",
     "Event",
-    "EventBus",
-    "EventBusObserver",
     "ExtensionInstallEvent",
     "ExtensionReloadEvent",
     "ExtensionUnloadEvent",
-    "Handler",
     "HookContract",
     "Inject",
     "InputEvent",
@@ -1264,9 +1269,8 @@ __all__ = [
     "MessageAppendedEvent",
     "MessagePersistedEvent",
     "ModelEndTurn",
+    "MUTABLE_EVENT_FIELDS_BY_TYPE",
     "NoPendingInput",
-    "ObserverCallback",
-    "ObserverRegistration",
     "PlanSubmittedEvent",
     "ProviderProtocolViolation",
     "ProviderTruncated",

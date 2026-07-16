@@ -12,13 +12,22 @@ Power-users override defaults by passing fields into `AgentSessionConfig`.
 
 The design doc `pluggable-architecture.md` says: *"substrate provides registration hooks and asserts at freeze time that the required services have been registered; it never instantiates a default."*
 
-Today the code violates this — `build_extension_api_scope` and `session_factory` auto-instantiate `GitBackedResourceWriter`, `default_project_layout`, `default_catalog_service`, `InMemorySessionManager`, `InMemoryResourceLoader`, and `LastRegisteredWins`. Closing this gap was scoped, planned (see the grilling-session record in chat history), and then deliberately deferred: the cleanup is large, the user-visible benefit is zero, and the partially-done Phase 1 explored on branch `worktree-agent-phase1-retry` showed the constitution-path machinery (`is_constitution_path` / `load_core_manifest`) blocks any atom-based `GitBackedResourceWriter` until those helpers move out of `_internal/`.
+Today the code still auto-instantiates `LocalResourceWriter`,
+`default_project_layout`, `default_catalog_service`, `InMemorySessionManager`,
+`InMemoryResourceLoader`, and `LastRegisteredWins`. `LocalResourceWriter` is a
+bootstrap exception: constitution-safe writes are needed before atoms install,
+so the runtime owns the default for atom source transactions. An environment
+atom may replace only the writer exposed to ordinary atom/file-tool consumers;
+the reloader retains the bootstrap writer so sandbox redirection cannot send
+host atom source writes into another filesystem. The remaining
+default-instantiation cleanup is deferred.
 
 If this work is revived, the load-bearing prerequisites are:
-1. Move constitution-path helpers from `core/_internal/catalog/manifest.py` to `core/lib/` or `core/abi/`.
-2. Decide JSONL vs in-memory as the floor `SessionManager` (CLI needs JSONL persistence; the in-memory default in `worktree-agent-phase1-retry` was a Phase 1 stub).
-3. Promote `SessionManager` / `ResourceLoader` / `ProjectLayout` from `core.runtime` concrete classes to `core.abi` Protocols so atoms can satisfy them structurally.
-4. Phase the substrate auto-instantiation removal so the CLI doesn't break mid-migration.
+1. Decide JSONL vs in-memory as the floor `SessionManager`.
+2. Promote `SessionManager` / `ResourceLoader` / `ProjectLayout` from
+   `core.runtime` concrete classes to `core.abi` Protocols.
+3. Phase the remaining substrate auto-instantiation removal so the CLI stays
+   usable throughout the migration.
 
 ## Substrate-only (kernel singletons)
 

@@ -210,7 +210,7 @@ def run_final_checks(
         paths = paths_to_targets(adj, seed, slo_targets)
         seed_reachability[seed] = paths
         if not paths:
-            has_outgoing = bool(seed_adj.get(seed))
+            has_outgoing = bool(adj.get(seed))
             if not has_outgoing:
                 # Confirmed but no outgoing edges: the seed's effect stopped
                 # at the injection target (e.g. MemoryStress with no latency

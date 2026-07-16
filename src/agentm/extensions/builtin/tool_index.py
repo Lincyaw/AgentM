@@ -39,10 +39,10 @@ class _ToolIndexRuntime:
     def install(self) -> None:
         self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
 
-    def inject(self, event: BeforeAgentStartEvent) -> dict[str, str] | None:
+    def inject(self, event: BeforeAgentStartEvent) -> None:
         tools = self._api.tools
         if not tools:
-            return None
+            return
         lines = [
             "# Tools",
             "",
@@ -64,7 +64,6 @@ class _ToolIndexRuntime:
         current = event.system or ""
         updated = f"{current}\n\n{block}" if current else block
         event.system = updated
-        return {"system": updated}
 
 
 def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:

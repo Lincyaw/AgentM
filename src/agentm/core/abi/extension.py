@@ -357,7 +357,7 @@ class ExtensionAPI(Protocol):
         ``edit`` writes to a non-default
         target (e.g. a sandbox-backed filesystem) call this at install
         time. If no atom calls it, ``get_resource_writer()`` returns the
-        default :class:`~agentm.core.runtime.resource_writer.GitBackedResourceWriter`
+        default :class:`~agentm.core.runtime.resource_writer.LocalResourceWriter`
         the substrate constructed from ``cwd``.
 
         Implementations must honour the constitution-path refusal contract
@@ -483,9 +483,10 @@ class ExtensionAPI(Protocol):
         ``name`` becomes the atom's ``MANIFEST.name`` (must agree); ``source``
         is the full module text. ``target_path`` is filesystem path (relative
         to ``cwd`` or absolute) where the source will be written through
-        ``ResourceWriter`` so it lands as a git commit. When omitted the
-        runtime writes to ``<cwd>/.agentm/atoms/<name>.py`` so agent-installed
-        atoms are isolated from the framework's builtin tree.
+        ``ResourceWriter`` and then frozen into the content-addressed catalog.
+        When omitted the runtime writes to ``<cwd>/.agentm/atoms/<name>.py``
+        so agent-installed atoms are isolated from the framework's builtin
+        tree.
 
         Hard rejections (return ``ok=False`` with an explanatory ``error``):
 

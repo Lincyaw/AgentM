@@ -102,11 +102,10 @@ class _CostBudgetRuntime:
 
     def before_agent_start(
         self, event: BeforeAgentStartEvent
-    ) -> dict[str, object] | None:
+    ) -> None:
         if not self._state.overflowed:
-            return None
+            return
         event.veto = BudgetExhausted(detail="cost")
-        return {"block": True, "cause": BudgetExhausted(detail="cost")}
 
     async def on_turn_end(self, event: TurnEndEvent) -> None:
         usage = event.message.usage

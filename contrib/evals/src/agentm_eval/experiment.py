@@ -19,6 +19,8 @@ from typing import Any, Iterator
 
 from loguru import logger
 
+type ArtifactData = dict[str, Any] | list[Any] | str
+
 
 def _default_output_root() -> Path:
     home = os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm"))
@@ -37,7 +39,7 @@ def generate_exp_id(benchmark: str, model: str | None = None) -> str:
     return "-".join(parts)
 
 
-@dataclass
+@dataclass(slots=True)
 class Experiment:
     exp_id: str
     benchmark: str
@@ -178,7 +180,7 @@ class Experiment:
         session_id: str,
         category: str,
         filename: str,
-        data: dict[str, Any] | str,
+        data: ArtifactData,
     ) -> Path:
         """Write a file into ``sessions/<session_id>/<category>/<filename>``."""
         if category:

@@ -158,7 +158,7 @@ def _detect_event_turns(
     if "first_tool_error" in events and error_turns:
         out[error_turns[0]] = "first_tool_error"
     if "repeated_tool_error" in events:
-        for prev, cur in zip(error_turns, error_turns[1:]):
+        for prev, cur in zip(error_turns, error_turns[1:], strict=False):
             if cur - prev == 1:
                 out[cur] = "repeated_tool_error"
                 break

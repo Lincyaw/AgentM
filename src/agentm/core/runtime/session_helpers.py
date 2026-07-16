@@ -10,7 +10,7 @@ from typing import Any
 
 from loguru import logger
 
-from agentm.core.abi import AgentMessage, EventBus, LoopConfig, TerminationCause
+from agentm.core.abi import AgentMessage, EventBus, LoopConfig
 from agentm.core.abi.events import DiagnosticEvent, EntryAppendedEvent
 from agentm.core.runtime.extension import ExtensionLoadError, ProviderConfig, ReadonlySession
 from agentm.core.runtime.session_manager import SessionEntry, SessionManager
@@ -109,45 +109,6 @@ ReadonlySessionView: type[ReadonlySession] = SessionView
 
 def now() -> float:
     return time.time()
-
-
-def collect_system_replacement(returns: list[Any]) -> str | None:
-    """Extract system prompt from return-dict pattern.
-
-    .. deprecated::
-        Backward-compatibility fallback only. Handlers should mutate
-        ``event.system`` in place instead of returning
-        ``{"system": "..."}``. The runtime checks ``event.system`` first
-        and falls back to this helper only when no handler has set it via
-        mutation. Will be removed once all handlers are migrated.
-    """
-    chosen: str | None = None
-    for value in returns:
-        if isinstance(value, dict) and value.get("system") is not None:
-            candidate = value["system"]
-            if isinstance(candidate, str):
-                chosen = candidate
-    return chosen
-
-
-def collect_start_veto(returns: list[Any]) -> TerminationCause | None:
-    """Extract veto cause from return-dict pattern.
-
-    .. deprecated::
-        Backward-compatibility fallback only. Handlers should set
-        ``event.veto = <TerminationCause>`` instead of returning
-        ``{"block": True, "cause": ...}``. The runtime checks
-        ``event.veto`` first and falls back to this helper only when no
-        handler has set it via the typed field. Will be removed once all
-        handlers are migrated.
-    """
-    for value in returns:
-        if not isinstance(value, dict) or value.get("block") is not True:
-            continue
-        cause = value.get("cause")
-        if isinstance(cause, TerminationCause):
-            return cause
-    return None
 
 
 async def collect_auto_discovered_atoms(

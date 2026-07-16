@@ -330,6 +330,7 @@ def _hook_payload(event_cls: type[Any], event_doc: str) -> dict[str, Any]:
             "effects": ["observe"],
             "return_contract": None,
             "mutation_contract": None,
+            "mutable_fields": [],
             "handler": "sync_or_async",
             "notes": event_notes,
             "extra_notes": [],
@@ -340,6 +341,7 @@ def _hook_payload(event_cls: type[Any], event_doc: str) -> dict[str, Any]:
         "effects": list(getattr(hook, "effects", ("observe",))),
         "return_contract": getattr(hook, "return_contract", None),
         "mutation_contract": getattr(hook, "mutation_contract", None),
+        "mutable_fields": list(getattr(hook, "mutable_fields", ())),
         "handler": getattr(hook, "handler", "sync_or_async"),
         "notes": [*event_notes, *extra_notes],
         "extra_notes": extra_notes,
@@ -707,7 +709,7 @@ class _AdaptRuntime:
             },
         )
 
-    def _inject(self, event: BeforeAgentStartEvent) -> dict[str, str]:
+    def _inject(self, event: BeforeAgentStartEvent) -> None:
         lines = [
             "# Adapt",
             "",
@@ -762,7 +764,6 @@ class _AdaptRuntime:
         block = "\n".join(lines)
         current = event.system or ""
         event.system = f"{current}\n\n{block}" if current else block
-        return {"system": event.system}
 
     async def _status(self, args: dict[str, Any]) -> ToolResult:
         params = _parse_params(_EmptyParams, args)

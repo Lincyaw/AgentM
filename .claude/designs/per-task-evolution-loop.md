@@ -47,7 +47,11 @@ autonomy        atoms + production scenarios
 discovery       fs scan + reload
 ```
 
-Eval set, tuner scenario, and the three new tool atoms are autonomy-layer additions. They reuse existing constitution mechanism — `reload_atom` for atom mutation, observability JSONL for inputs, ResourceWriter for git-backed write-with-rollback.
+Eval set, tuner scenario, and the three new tool atoms are autonomy-layer
+additions. They reuse existing constitution mechanisms: transactional
+`reload_atom` for live atom mutation, content-addressed catalog snapshots for
+identity, `ResourceWriter` for controlled file transport, and observability
+JSONL for evidence.
 
 ---
 
@@ -242,7 +246,13 @@ Three reasons:
 
 - **Mechanism reuse**: every primitive (tool registration, system prompt, sub-agent dispatch, observability) already works for scenarios.
 - **Per-task customization**: each task class has its own quality signal. A hardcoded mode would force a single fitness-function shape; a prompt is free-form.
-- **Tuner is itself versioned**: `scenarios/rca/tuner/` sits in the autonomy layer, so tuner improvements go through the same git-backed write path as everything else. The tuner can even tune its own prompt — meta-meta if you want it. ([GEPA](https://arxiv.org/abs/2507.19457) explicitly notes this path: "search-tree nodes can be extended to the code describing the *whole* AI system" — Phase 2 generalizes `target` from atom-only to any scenario file (§6 ChangeSpec, §11), making meta-tuning a special case of the general mechanism rather than a separate construct.)
+- **Tuner changes are explicit resources**: `scenarios/rca/tuner/` sits in
+  the autonomy layer. Atom-source changes gain content-addressed identity when
+  activated through `reload_atom`; prompt and scenario-file changes remain
+  ordinary reviewed resource mutations until a dedicated versioned contract
+  exists. ([GEPA](https://arxiv.org/abs/2507.19457) motivates whole-system
+  search, but that does not justify pretending arbitrary files are atom
+  versions.)
 
 ---
 
@@ -311,16 +321,16 @@ production atoms. `target_atom` resolution therefore takes one of two paths:
    rollback on install failure.
 2. **Cross-session** (the normal case): `tool_propose_change` walks
    `contrib/scenarios/<target_scenario>/` parsing each `.py` for a
-   `MANIFEST.name` match, then writes the file directly via `ResourceWriter`.
-   The next production session loads the new version on startup. "Activation
-   = git commit" per [git-backed-versioning.md](git-backed-versioning.md).
+   `MANIFEST.name` match, then writes the file through `ResourceWriter`. The
+   next production session validates, loads, and freezes that source under its
+   content hash.
 
-The two paths produce different identifiers — record both:
+The two paths record explicit activation shape:
 
-- `kind: "in_session_reload" | "file_commit"` distinguishes them.
-- `from_sha` / `to_sha` are the **file's** post-commit git SHAs for `file_commit`
-  (with `from_sha=null` for new files); for `in_session_reload` they are the
-  in-memory atom hashes.
+- `kind: "in_session_reload" | "file_write"` distinguishes them.
+- `from_hash` / `to_hash` are atom content hashes when known. A cross-session
+  write has no activated `to_hash` until a production session loads and
+  freezes it; the decision record must not invent one.
 - `atom_in_session: bool` is recorded so operators can see which path produced
   the activation without re-deriving it from `kind`.
 
@@ -349,9 +359,9 @@ Example `activations.jsonl` entry:
 
 ```jsonc
 {"at":"2026-05-10T...","kind":"activate","scenario":"rca","atom":"tool_read",
- "from_sha":"abc123","to_sha":"def456",
+ "from_hash":"abc123def456","to_hash":null,
  "atom_in_session":false,                          // §6.4: cross-session activation
- "reload_kind":"file_commit",                      // "file_commit" | "in_session_reload"
+ "reload_kind":"file_write",                       // "file_write" | "in_session_reload"
  "gate_bypass":[],                                 // [] | ["threshold"] | ["noise_floor"] | ["threshold","noise_floor"]
  "evidence":{"baseline_run":"er_001","proposed_run":"er_002",
              "primary_metric":"root_cause_hit_rate",
@@ -433,8 +443,8 @@ honor system). Defer until activations actually happen regularly.
 5. Tuner reads `contrib/scenarios/rca/tool_read.py` source via the `read` tool, designs new version using row-group boundaries.
 6. Tuner calls `tool_eval_run(eval_dir=..., atom_source_overrides={"tool_read": <new_source_text>})`. Result: `er_proposed`, `root_cause_hit_rate=0.78`, `stderr=0.04`, `holdout=0.58`.
 7. Tuner calls `tool_propose_change(target={"kind":"atom_source", "path":"tool_read.py", "new_content":<text>, "target_atom":"tool_read"}, rationale=..., eval_run_baseline="er_baseline", eval_run_proposed="er_proposed", decision="activate")`.
-8. `tool_propose_change` checks all four floors: threshold (delta=0.16, 0.16/0.62=26% ≥ 5% ✓), 2σ (0.16 > 2·√(0.04²+0.04²)=0.113 ✓), guard envelope (refusal_rate Δ within ±10% ✓), holdout (0.58 ≥ 0.60 − 0.10 = 0.50 ✓), tier (1 ✓). §6.4 cross-session path: writes `contrib/scenarios/rca/tool_read.py` via `ResourceWriter` (auto-commit). Decision record written with `kind:"file_commit", atom_in_session:false, gate_bypass:[]`.
-9. Next production RCA session loads new `tool_read`. Observability records both old and new fingerprint runs in JSONL — future tuning iterations have richer data.
+8. `tool_propose_change` checks all four floors: threshold (delta=0.16, 0.16/0.62=26% ≥ 5% ✓), 2σ (0.16 > 2·√(0.04²+0.04²)=0.113 ✓), guard envelope (refusal_rate Δ within ±10% ✓), holdout (0.58 ≥ 0.60 − 0.10 = 0.50 ✓), tier (1 ✓). §6.4 cross-session path writes `contrib/scenarios/rca/tool_read.py` via `ResourceWriter`. The decision records `kind:"file_write"`, `atom_in_session:false`, `to_hash:null`, and `gate_bypass:[]`.
+9. Next production RCA session validates, loads, and freezes the new `tool_read`; only then does the activated content hash appear in observability. Future tuning iterations now have evidence under both fingerprints.
 
 ---
 
@@ -513,7 +523,7 @@ greedy gets stuck in). Layered so each item is independently shippable:
 | [self-modifiable-architecture.md](self-modifiable-architecture.md) | Unchanged — `reload_atom` / `freeze_current` / tier system / transactional rollback are all reused. `tool_propose_change` is a thin policy wrapper over `reload_atom`. |
 | [observability.md](observability.md) | `task_class` becomes a populated field on `session.fingerprint`. No new event types. |
 | [extension-as-scenario.md](extension-as-scenario.md) | The tuner is a normal scenario (meta only by convention). `eval/` is a new directory adjacent to `manifest.yaml`. Three new tier-1 atoms register normally. |
-| [git-backed-versioning.md](git-backed-versioning.md) | Activation = `reload_atom` = ResourceWriter commit. `git log scenarios/rca/` IS the activation history; `decisions.jsonl` is the structured mirror. |
+| [evolution-substrate.md](evolution-substrate.md) | Activated atom source is identified by its validated content hash; arbitrary scenario files are not catalog versions. |
 
 ---
 

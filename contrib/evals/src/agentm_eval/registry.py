@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import typer
 
-_BENCHMARKS: dict[str, tuple[str, callable]] = {}
+type BenchmarkFactory = Callable[[], Any]
+
+_BENCHMARKS: dict[str, tuple[str, BenchmarkFactory]] = {}
 
 
-def register(name: str, description: str, factory: callable) -> None:
+def register(name: str, description: str, factory: BenchmarkFactory) -> None:
     _BENCHMARKS[name] = (description, factory)
 
 

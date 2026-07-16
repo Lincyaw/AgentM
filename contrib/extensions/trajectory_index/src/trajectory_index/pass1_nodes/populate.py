@@ -127,7 +127,7 @@ def populate_from_extraction(
 
         messages = [
             d for i, m in enumerate(messages, start=message_id_start)
-            if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
+            if (d := _agentmsg_to_extraction_dict(m, i))
         ]
 
     def _prune(what: str, why: str) -> None:

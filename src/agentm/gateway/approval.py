@@ -40,7 +40,7 @@ APPROVAL_TIMEOUT_S: float = 300.0
 OutboundSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingApproval:
     future: asyncio.Future[bool]
     requester_sender_id: str

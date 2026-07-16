@@ -22,7 +22,7 @@ See ``designs/`` and SCHEMA.md for the pass contracts.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -39,9 +39,6 @@ from ..pass3_folds.grounding import (
 from . import persistence
 from .models import (
     _ENTITY_CLASS_VALUES,
-    _FINDING_STATUS_VALUES,
-    _REF_FORM_VALUES,
-    _RISK_VALUES,
     AliasCandidate,
     Claim,
     ClaimFinding,
@@ -70,14 +67,10 @@ from .models import (
     normalize_name,
     stable_id,
 )
+from .query import TrajectoryQueryMixin
 
-# Names re-exported so existing ``from trajectory_index.index import X`` imports
-# keep resolving after the split. Keep in sync with the models import above.
+# Public IR facade. Validation constants remain private to ``models.py``.
 __all__ = [
-    "_ENTITY_CLASS_VALUES",
-    "_FINDING_STATUS_VALUES",
-    "_REF_FORM_VALUES",
-    "_RISK_VALUES",
     "AliasCandidate",
     "Claim",
     "ClaimFinding",
@@ -118,7 +111,7 @@ _MISSING_STEP_INDEX = 10**12  # sort sentinel for a reference whose step is abse
 # ---------------------------------------------------------------------------
 
 
-class TrajectoryIndex:
+class TrajectoryIndex(TrajectoryQueryMixin):
     """In-memory symbol-reference-relation index over trajectory steps."""
 
     DEFINITION_PREFERRED_KINDS: frozenset[str] = _PRODUCING_KINDS
@@ -431,204 +424,3 @@ class TrajectoryIndex:
     def load(cls, path: str | Path) -> TrajectoryIndex:
         """Load an index from a JSON file written by :meth:`dump`."""
         return persistence.load(cls, path)
-
-    # ---- read path ----
-
-    def search(
-        self,
-        query: str,
-        *,
-        kinds: set[str] | None = None,
-        limit: int = 20,
-        include_references: bool = True,
-        include_related: bool = False,
-    ) -> list[SearchResult]:
-        norm_query = normalize_name(query)
-        if not norm_query:
-            return []
-
-        scored: dict[str, tuple[float, set[str]]] = {}
-
-        for symbol_id, symbol in self.symbols.items():
-            if kinds and symbol.kind not in kinds:
-                continue
-
-            score = 0.0
-            matched: set[str] = set()
-            norm_names = {normalize_name(n) for n in symbol.all_names}
-
-            if norm_query in norm_names:
-                score = max(score, 1.0)
-                matched.add("name_exact")
-            for nn in norm_names:
-                if norm_query in nn or nn in norm_query:
-                    score = max(score, 0.75)
-                    matched.add("name_partial")
-            if symbol.summary and norm_query in normalize_name(symbol.summary):
-                score = max(score, 0.5)
-                matched.add("summary")
-            if score > 0:
-                scored[symbol_id] = (score, matched)
-
-        ranked = sorted(
-            scored.items(),
-            key=lambda item: (-item[1][0], self.symbols[item[0]].canonical_name),
-        )
-
-        results: list[SearchResult] = []
-        for symbol_id, (score, matched) in ranked[:limit]:
-            refs: tuple[Reference, ...] = ()
-            related: tuple[RelatedSymbol, ...] = ()
-            if include_references:
-                refs = tuple(self.get_references(symbol_id)[:5])
-            if include_related:
-                related = tuple(self.get_related(symbol_id, limit=5))
-            results.append(SearchResult(
-                symbol=self.symbols[symbol_id],
-                score=score,
-                matched_fields=tuple(sorted(matched)),
-                references=refs,
-                related=related,
-            ))
-        return results
-
-    def get_symbol(self, symbol_id: str) -> Symbol:
-        try:
-            return self.symbols[symbol_id]
-        except KeyError as exc:
-            raise KeyError(f"Symbol not found: {symbol_id}") from exc
-
-    def get_references(self, symbol_id: str) -> list[Reference]:
-        self.get_symbol(symbol_id)
-        ref_ids = self._ref_ids_by_symbol.get(symbol_id, [])
-        refs = [self.references[rid] for rid in ref_ids]
-        return sorted(refs, key=self._ref_sort_key)
-
-    def get_definition(self, symbol_id: str) -> Reference | None:
-        symbol = self.get_symbol(symbol_id)
-        if not symbol.definition_ref_id:
-            return None
-        return self.references.get(symbol.definition_ref_id)
-
-    def get_related(
-        self,
-        symbol_id: str,
-        *,
-        limit: int = 20,
-        max_depth: int = 1,
-        relation_types: set[str] | None = None,
-    ) -> list[RelatedSymbol]:
-        self.get_symbol(symbol_id)
-
-        scores: dict[str, float] = defaultdict(float)
-        rels_by_other: dict[str, list[Relation]] = defaultdict(list)
-
-        visited = {symbol_id}
-        queue: deque[tuple[str, int]] = deque([(symbol_id, 0)])
-
-        while queue:
-            current_id, depth = queue.popleft()
-            if depth >= max_depth:
-                continue
-            for rel_id in self._relation_ids_by_symbol.get(current_id, []):
-                rel = self.relations[rel_id]
-                if relation_types and rel.type not in relation_types:
-                    continue
-                other_id = (
-                    rel.to_symbol_id if rel.from_symbol_id == current_id
-                    else rel.from_symbol_id
-                )
-                if other_id == symbol_id:
-                    continue
-                decay = 1.0 / (depth + 1)
-                scores[other_id] += rel.weight * decay
-                rels_by_other[other_id].append(rel)
-                if other_id not in visited:
-                    visited.add(other_id)
-                    queue.append((other_id, depth + 1))
-
-        ranked = sorted(
-            scores.items(),
-            key=lambda item: (-item[1], self.symbols[item[0]].canonical_name),
-        )
-        return [
-            RelatedSymbol(
-                symbol=self.symbols[oid],
-                score=sc,
-                relations=tuple(rels_by_other[oid]),
-            )
-            for oid, sc in ranked[:limit]
-        ]
-
-    def get_timeline(self, symbol_id: str) -> list[TimelineItem]:
-        refs = self.get_references(symbol_id)
-        items: list[TimelineItem] = []
-        for ref in refs:
-            step = self.steps.get((ref.run_id, ref.step_id))
-            if step:
-                items.append(TimelineItem(step=step, reference=ref))
-        return sorted(
-            items,
-            key=lambda it: (it.step.run_id, it.step.index, it.reference.location.start),
-        )
-
-    def get_context(
-        self,
-        symbol_id: str,
-        *,
-        max_references: int = 20,
-        max_related: int = 10,
-        window: int = 1,
-    ) -> SymbolContext:
-        symbol = self.get_symbol(symbol_id)
-        refs = tuple(self.get_references(symbol_id)[:max_references])
-        definition = self.get_definition(symbol_id)
-        related = tuple(self.get_related(symbol_id, limit=max_related))
-        timeline = tuple(self.get_timeline(symbol_id))
-
-        steps_by_run: dict[str, list[Step]] = defaultdict(list)
-        for (rid, _), s in self.steps.items():
-            steps_by_run[rid].append(s)
-        for v in steps_by_run.values():
-            v.sort(key=lambda s: s.index)
-
-        snippets: list[ContextSnippet] = []
-        for ref in refs:
-            step = self.steps.get((ref.run_id, ref.step_id))
-            if not step:
-                continue
-            same_run = steps_by_run.get(ref.run_id, [])
-            before = tuple(
-                s for s in same_run
-                if step.index - window <= s.index < step.index
-            )
-            after = tuple(
-                s for s in same_run
-                if step.index < s.index <= step.index + window
-            )
-            snippets.append(ContextSnippet(
-                focus_step=step, focus_ref=ref,
-                before=before, after=after,
-            ))
-
-        return SymbolContext(
-            symbol=symbol, definition=definition,
-            references=refs, related=related,
-            timeline=timeline, snippets=tuple(snippets),
-        )
-
-    def reference_at(self, run_id: str, step_id: str, offset: int) -> Reference | None:
-        ref_ids = self._ref_ids_by_step.get((run_id, step_id), [])
-        candidates = [
-            self.references[rid]
-            for rid in ref_ids
-            if self.references[rid].location.contains(offset)
-        ]
-        if not candidates:
-            return None
-        return sorted(
-            candidates, key=lambda r: r.location.end - r.location.start,
-        )[0]
-
-    def _ref_sort_key(self, ref: Reference) -> tuple[str, int, int]:
-        return (ref.run_id, self._ref_step_index(ref), ref.location.start)

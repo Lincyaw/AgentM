@@ -36,6 +36,7 @@ from .lib.schema import (
     SeedCoverageStatus,
     SeedResult,
 )
+from .state_ledger import ExecutionLedgerMixin
 
 
 def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
@@ -178,7 +179,7 @@ class Case:
         }
 
 
-class GraphState:
+class GraphState(ExecutionLedgerMixin):
     """Mutable fpg graph + evidence ledger with pure graph operations."""
 
     def __init__(self, case: Case, log: Callable[[str], None]) -> None:
@@ -206,21 +207,6 @@ class GraphState:
         self.reachability_warnings: list[str] = []
         self.unreachable: list[str] = []
         self.final_checks: FinalCheckReport | None = None
-
-    # -- Execution-error ledger -------------------------------------------
-    def execution_key(self, stage: str, item: str) -> str:
-        return stage + ":" + item
-
-    def record_error(self, stage: str, item: str, reason: str) -> None:
-        self.execution_errors[self.execution_key(stage, item)] = {
-            "stage": stage,
-            "item": item,
-            "reason": reason,
-        }
-        self.log(f"⚠ {stage} {item}: {reason}")
-
-    def clear_error(self, stage: str, item: str) -> None:
-        self.execution_errors.pop(self.execution_key(stage, item), None)
 
     # -- Initialization ---------------------------------------------------
     def init_fresh(self) -> None:

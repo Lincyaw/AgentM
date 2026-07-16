@@ -168,7 +168,7 @@ class _PersonaRuntime:
 
     async def before_agent_start(
         self, event: BeforeAgentStartEvent
-    ) -> dict[str, str] | None:
+    ) -> None:
         if self._defaults and not self._seeded:
             self._seeded = True
             await _seed_defaults(
@@ -188,19 +188,10 @@ class _PersonaRuntime:
             model_name,
         )
         if not block:
-            return None
+            return
         current = str(event.system or "")
         updated = f"{block}\n\n{current}" if current else block
-        # Do BOTH, on purpose. The kernel's ``collect_system_replacement``
-        # reads handler *returns* (not ``event.system``), so returning is
-        # what guarantees this contribution survives when persona is the
-        # last returning handler. The in-place mutation is still needed so
-        # that any handler firing *after* persona sees it in their
-        # ``current`` and folds it into their own return — without it, a
-        # later returning handler would silently drop persona. Together
-        # they make the result order-independent.
         event.system = updated
-        return {"system": updated}
 
 
 def install(api: ExtensionAPI, config: PersonaConfig) -> None:

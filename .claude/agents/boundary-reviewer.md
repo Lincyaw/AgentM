@@ -102,7 +102,7 @@ When a finding cites a rule, cite by **rule ID** below, not vague prose.
    - For atoms (`extensions/builtin/*.py`, `contrib/extensions/**/*.py`): check **B2–B6, S3, E1–E2, C1–C4**.
    - For core (`src/agentm/core/**`): check **B1, S1, P1–P5, C1–C4**.
    - For harness (`src/agentm/harness/**`): check **B1, B7, P6, H1–H3, S1, S4, C1–C4**.
-   - For modes / CLI / TUI (`src/agentm/modes/**`, `src/agentm/cli.py`): check **B1, P7, H3, S1, C1–C4**.
+   - For modes / CLI / TUI (`src/agentm/modes/**`, `src/agentm/cli/**`): check **B1, P7, H3, S1, C1–C4**.
    - For contrib (`contrib/**`): check **S2, S3, B2 (flat-file form), C1–C4**.
 
 4. **Validate before flagging**: a finding that names a symbol must be verifiable. Grep the codebase to confirm it still exists at the line you cite. If a violation is conditional (e.g. only triggers when an atom is loaded with `--scenario X`), say so.

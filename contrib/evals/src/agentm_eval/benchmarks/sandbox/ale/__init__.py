@@ -48,7 +48,7 @@ _TRANSIENT_CREATE_MARKERS = (
 _MAX_CREATE_ATTEMPTS = 20
 
 
-@dataclass
+@dataclass(slots=True)
 class AleRunConfig:
     ale_repo: Path
     scenario: str
@@ -73,6 +73,21 @@ class AleRunConfig:
     @property
     def baked(self) -> bool:
         return self.task_images is not None
+
+    def require_data_root(self) -> Path:
+        if self.data_root is None:
+            raise ValueError("data_root is required when baked task images are not used")
+        return self.data_root
+
+    def require_task_images(self) -> str:
+        if self.task_images is None:
+            raise ValueError("task_images is required in baked mode")
+        return self.task_images
+
+    def require_outputs_dir(self) -> Path:
+        if self.outputs_dir is None:
+            raise ValueError("outputs_dir is required for deferred grading")
+        return self.outputs_dir
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +139,7 @@ async def _grade_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Ta
     domain, _, name = task_ref.partition("/")
     task = bridge.load_task(cfg.ale_repo, domain, name, remote_root=cfg.remote_root)
     out_dir = task.task_obj.metadata.get("remote_output_dir")
-    archive = cfg.outputs_dir / f"{domain}__{name}__{attempt}.output.tgz"
+    archive = cfg.require_outputs_dir() / f"{domain}__{name}__{attempt}.output.tgz"
     if not archive.is_file():
         return TaskResult(task_id=task_ref, status="error",
                           error=f"no saved output archive: {archive}")
@@ -140,8 +155,10 @@ async def _grade_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Ta
         if cfg.data_root is not None:
             await bridge.stage_task_input(grader, task, cfg.data_root, cfg.remote_root)
         ref_root = cfg.reference_root or cfg.data_root
-        ref_staged = await bridge.stage_task_reference(
-            grader, task, ref_root, cfg.remote_root,
+        ref_staged = (
+            await bridge.stage_task_reference(grader, task, ref_root, cfg.remote_root)
+            if ref_root is not None
+            else False
         )
         raw = await asyncio.wait_for(
             task.module.evaluate(task.task_obj, grader), timeout=cfg.eval_timeout,
@@ -159,8 +176,8 @@ async def _grade_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Ta
     finally:
         try:
             await asyncio.to_thread(sandbox.delete_sandbox)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[{}] sandbox cleanup failed: {}", task_ref, exc)
 
 
 async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> TaskResult:
@@ -175,7 +192,9 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
 
     if cfg.baked:
         from .images import DATA_CONTAINER_NAME, data_image_ref
-        data_image = data_image_ref(cfg.task_images, domain, name, cfg.images_tag)
+        data_image = data_image_ref(
+            cfg.require_task_images(), domain, name, cfg.images_tag,
+        )
         sandbox_image = cfg.image          # shared runtime image (pool-friendly)
         private_containers = [{
             "name": DATA_CONTAINER_NAME,
@@ -209,7 +228,9 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
         if cfg.baked:
             await bridge.stage_input_from_container(sandbox, task, cfg.remote_root)
         else:
-            await bridge.stage_task_input(grader, task, cfg.data_root, cfg.remote_root)
+            await bridge.stage_task_input(
+                grader, task, cfg.require_data_root(), cfg.remote_root,
+            )
         start_fn = getattr(task.module, "start", None)
         if callable(start_fn):
             try:
@@ -260,7 +281,7 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
                 sandbox, task, cfg.remote_root,
             )
         else:
-            ref_root = cfg.reference_root or cfg.data_root
+            ref_root = cfg.reference_root or cfg.require_data_root()
             ref_staged = await bridge.stage_task_reference(
                 grader, task, ref_root, cfg.remote_root,
             )
@@ -302,20 +323,22 @@ async def _run_agent(
         "work_dir": cfg.workspace,
         "delete_on_shutdown": False,
     }
-    session_kwargs: dict[str, Any] = dict(
+    loop_config = None
+    if cfg.max_turns is not None:
+        from agentm.core.abi.loop import LoopConfig
+
+        loop_config = LoopConfig(max_turns=cfg.max_turns)
+    session_config = AgentSessionConfig(
         cwd=os.getcwd(),
         scenario=cfg.scenario,
         model=cfg.model,
         atom_config_overrides={"operations": operations_config},
+        loop_config=loop_config,
         task_class="ale",
         eval_run_id=cfg.exp_id,
         eval_task_id=task_ref,
         experiment={"harness": "ale", "attempt": attempt},
     )
-    if cfg.max_turns is not None:
-        from agentm.core.abi.loop import LoopConfig
-        session_kwargs["loop_config"] = LoopConfig(max_turns=cfg.max_turns)
-    session_config = AgentSessionConfig(**session_kwargs)
 
     create_attempts = 0
     while True:
@@ -341,7 +364,7 @@ async def _run_agent(
         if agent_timeout > 0:
             try:
                 await asyncio.wait_for(coro, timeout=agent_timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 timed_out = True
                 logger.warning("[{}] agent wall clock ({}s) expired",
                                task_ref, agent_timeout)

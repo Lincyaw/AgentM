@@ -1,4 +1,4 @@
-"""Root ``agentm terminal`` command registration."""
+"""Registration for the root ``agentm terminal`` command."""
 
 from __future__ import annotations
 

@@ -85,7 +85,7 @@ async def seed_phase(ctx: WorkflowContext, case: Case, state: GraphState) -> Non
         discovery.verify_seed(ctx, case, state, inj) for inj in seed_injections
     ]
     seed_results = await parallel_limited(ctx, seed_coros, case.max_parallel_tasks)
-    for inj, result in zip(seed_injections, seed_results):
+    for inj, result in zip(seed_injections, seed_results, strict=True):
         if result is None:
             state.record_error(
                 "seed",
@@ -201,7 +201,7 @@ async def propagate(
         ]
         results = await parallel_limited(ctx, coros, case.max_parallel_tasks)
 
-        for candidate, result in zip(pending_hops, results):
+        for candidate, result in zip(pending_hops, results, strict=True):
             from_svc = candidate["from_service"]
             to_svc = candidate["to_service"]
             rel_type = candidate["rel_type"]
@@ -522,7 +522,7 @@ async def redispatch(
             ],
             case.max_parallel_tasks,
         )
-        for req, seed_pair in zip(seed_requests, seed_results):
+        for req, seed_pair in zip(seed_requests, seed_results, strict=True):
             if seed_pair is None:
                 state.record_error(
                     "seed",
@@ -608,7 +608,7 @@ async def redispatch(
             [_one_hop_rework(req) for req in hop_requests],
             case.max_parallel_tasks,
         )
-        for hop_req, pair in zip(hop_requests, hop_results):
+        for hop_req, pair in zip(hop_requests, hop_results, strict=True):
             if pair is None:
                 state.record_error(
                     "hop",

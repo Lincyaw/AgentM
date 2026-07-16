@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import bisect
 import inspect
-from loguru import logger
 import time
 import uuid
+from copy import deepcopy
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import (
+    dataclass,
+    field,
+    fields as dataclass_fields,
+    is_dataclass,
+)
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
+
+from loguru import logger
 
 from .events import BusPriority, Event
 
@@ -32,7 +40,6 @@ if TYPE_CHECKING:
         TurnEndEvent,
         TurnStartEvent,
     )
-
 
 
 # A handler may be sync or async; it returns anything (the bus collects).
@@ -61,9 +68,7 @@ class EventBusObserver(Protocol):
         owner: str | None,
     ) -> None: ...
 
-    def on_emit_end(
-        self, channel: str, event: Any, results: list[Any]
-    ) -> None: ...
+    def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None: ...
 
 
 ObserverRegistration = ObserverCallback | EventBusObserver
@@ -94,6 +99,146 @@ def _sub_key(sub: _Subscription) -> tuple[int, int]:
     return (sub.priority, sub.seq)
 
 
+def _mutable_fields(event: Event) -> frozenset[str]:
+    hook = getattr(type(event), "HOOK", None)
+    return frozenset(getattr(hook, "mutable_fields", ()))
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadonlyFieldSnapshot:
+    original: Any
+    frozen: Any
+    restore: Any
+
+
+def _freeze_value(value: Any, seen: set[int] | None = None) -> Any:
+    """Build an equality-safe structural fingerprint for event payloads.
+
+    Provider and client objects often use identity equality, so comparing them
+    with a deep copy creates false mutation reports. Containers and dataclasses
+    are traversed; opaque leaves retain their original identity.
+    """
+
+    if value is None or isinstance(value, (bool, int, str, bytes)):
+        return ("literal", type(value), value)
+    if isinstance(value, float):
+        return ("float", value.hex())
+    if isinstance(value, Enum):
+        return ("enum", type(value), value.name)
+
+    identity = id(value)
+    active = seen if seen is not None else set()
+    if identity in active:
+        return ("cycle", identity)
+    active.add(identity)
+    try:
+        if isinstance(value, list):
+            return ("list", tuple(_freeze_value(item, active) for item in value))
+        if isinstance(value, tuple):
+            return ("tuple", tuple(_freeze_value(item, active) for item in value))
+        if isinstance(value, dict):
+            return (
+                "dict",
+                tuple(
+                    (
+                        _freeze_value(key, active),
+                        _freeze_value(item, active),
+                    )
+                    for key, item in value.items()
+                ),
+            )
+        if isinstance(value, (set, frozenset)):
+            return (
+                type(value).__name__,
+                frozenset(_freeze_value(item, active) for item in value),
+            )
+        if is_dataclass(value) and not isinstance(value, type):
+            return (
+                "dataclass",
+                type(value),
+                tuple(
+                    (
+                        item.name,
+                        _freeze_value(getattr(value, item.name), active),
+                    )
+                    for item in dataclass_fields(value)
+                ),
+            )
+        return ("opaque", type(value), identity)
+    finally:
+        active.remove(identity)
+
+
+def _snapshot_readonly_fields(
+    event: Any,
+) -> dict[str, _ReadonlyFieldSnapshot] | None:
+    if not isinstance(event, Event):
+        return None
+    mutable = _mutable_fields(event)
+    event_fields = {item.name for item in dataclass_fields(event)}
+    unknown = mutable - event_fields
+    if unknown:
+        raise RuntimeError(
+            f"{type(event).__name__}.HOOK declares unknown mutable fields: "
+            f"{sorted(unknown)}"
+        )
+    snapshots: dict[str, _ReadonlyFieldSnapshot] = {}
+    for item in dataclass_fields(event):
+        if item.name == "dispatch_id" or item.name in mutable:
+            continue
+        original = getattr(event, item.name)
+        try:
+            restore = deepcopy(original)
+        except Exception as exc:
+            # Opaque leaves are identity-compared. If a handler replaces the
+            # field, retaining the original object is sufficient to restore it.
+            logger.debug(
+                "EventBus could not clone readonly field {}.{}; "
+                "falling back to identity restoration: {}",
+                type(event).__name__,
+                item.name,
+                exc,
+            )
+            restore = original
+        snapshots[item.name] = _ReadonlyFieldSnapshot(
+            original=original,
+            frozen=_freeze_value(original),
+            restore=restore,
+        )
+    return snapshots
+
+
+def _readonly_mutation_error(
+    event: Any,
+    before: dict[str, _ReadonlyFieldSnapshot] | None,
+) -> str | None:
+    if before is None:
+        return None
+    changed: list[str] = []
+    for name, snapshot in before.items():
+        try:
+            current = getattr(event, name)
+            is_changed = (
+                current is not snapshot.original
+                or _freeze_value(current) != snapshot.frozen
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"could not compare readonly field {type(event).__name__}.{name}"
+            ) from exc
+        if is_changed:
+            changed.append(name)
+    if not changed:
+        return None
+    for name in changed:
+        setattr(event, name, before[name].restore)
+    return (
+        f"handler mutated undeclared readonly fields on "
+        f"{type(event).__name__}: {changed}; the fields were restored. Declare them in "
+        "HookContract.mutable_fields or stop mutating them"
+    )
+
+
 @dataclass(slots=True)
 class EventBus:
     """Minimal channel-keyed pub/sub. See module docstring for the contract."""
@@ -109,6 +254,7 @@ class EventBus:
     _observer: EventBusObserver | None = None
     _observer_callbacks: list[ObserverRegistration] = field(default_factory=list)
     _strict_sync_handlers: bool = False
+    _strict_event_mutations: bool = True
     _next_seq: int = 0
 
     def set_observer(self, observer: EventBusObserver | None) -> None:
@@ -137,6 +283,17 @@ class EventBus:
         development to surface mistakes; off by default for production.
         """
         self._strict_sync_handlers = strict
+
+    def set_strict_event_mutations(self, strict: bool) -> None:
+        """Fail dispatch when a handler mutates an undeclared event field.
+
+        Typed events are checked by default. The bus deep-snapshots every
+        field not listed in ``HookContract.mutable_fields`` and restores it
+        before failing. For observation-only events, every payload field is
+        therefore read-only. Disable only for targeted profiling or
+        compatibility diagnostics.
+        """
+        self._strict_event_mutations = strict
 
     # Typed overloads for kernel-owned channels. Runtime-level channels
     # (``before_agent_start``, ``session_shutdown``, ``before_compact``,
@@ -279,7 +436,7 @@ class EventBus:
             if handlers is None:
                 return
             for idx, existing in enumerate(handlers):
-                if existing.handler is handler:
+                if existing is sub:
                     del handlers[idx]
                     self._handler_cache.pop(channel, None)
                     return
@@ -382,10 +539,10 @@ class EventBus:
         observe_handlers = observer is not None or any(
             not callable(callback) for callback in observer_callbacks
         )
-        if not handlers and observer is None and not observer_callbacks:
-            return []
         if isinstance(event, Event):
             event.dispatch_id = uuid.uuid4().hex
+        if not handlers and observer is None and not observer_callbacks:
+            return []
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
         for h, owner in handlers:
@@ -393,14 +550,22 @@ class EventBus:
             start_ns = time.perf_counter_ns() if observe_handlers else 0
             if observe_handlers:
                 self._safe_observe("on_handler_start", channel, h, event)
+            readonly_before = (
+                _snapshot_readonly_fields(event)
+                if self._strict_event_mutations
+                else None
+            )
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
                     value = await value
             except Exception as exc:
-                logger.exception(f"Event handler raised on channel {channel!r}; suppressing.")
+                logger.exception(
+                    f"Event handler raised on channel {channel!r}; suppressing."
+                )
                 err = exc
                 value = None
+            mutation_error = _readonly_mutation_error(event, readonly_before)
             if observe_handlers:
                 self._safe_observe(
                     "on_handler_done",
@@ -412,6 +577,8 @@ class EventBus:
                     time.perf_counter_ns() - start_ns,
                     owner,
                 )
+            if mutation_error is not None:
+                raise RuntimeError(mutation_error)
             results.append(value)
         self._safe_observe("on_emit_end", channel, event, results)
         return results
@@ -466,10 +633,10 @@ class EventBus:
         observe_handlers = observer is not None or any(
             not callable(callback) for callback in observer_callbacks
         )
-        if not handlers and observer is None and not observer_callbacks:
-            return []
         if isinstance(event, Event):
             event.dispatch_id = uuid.uuid4().hex
+        if not handlers and observer is None and not observer_callbacks:
+            return []
         async_violation: tuple[str, Any] | None = None
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
@@ -478,6 +645,11 @@ class EventBus:
             start_ns = time.perf_counter_ns() if observe_handlers else 0
             if observe_handlers:
                 self._safe_observe("on_handler_start", channel, h, event)
+            readonly_before = (
+                _snapshot_readonly_fields(event)
+                if self._strict_event_mutations
+                else None
+            )
             try:
                 value = h(event)
                 if inspect.isawaitable(value):
@@ -486,12 +658,17 @@ class EventBus:
                     if self._strict_sync_handlers and async_violation is None:
                         async_violation = (channel, h)
                     else:
-                        logger.warning(f"Async handler on channel {channel!r} skipped during emit_sync; use a sync handler or subscribe via an async-only channel.")
+                        logger.warning(
+                            f"Async handler on channel {channel!r} skipped during emit_sync; use a sync handler or subscribe via an async-only channel."
+                        )
                     value = None
             except Exception as exc:
-                logger.exception(f"Event handler raised on channel {channel!r}; suppressing.")
+                logger.exception(
+                    f"Event handler raised on channel {channel!r}; suppressing."
+                )
                 err = exc
                 value = None
+            mutation_error = _readonly_mutation_error(event, readonly_before)
             if observe_handlers:
                 self._safe_observe(
                     "on_handler_done",
@@ -503,6 +680,8 @@ class EventBus:
                     time.perf_counter_ns() - start_ns,
                     owner,
                 )
+            if mutation_error is not None:
+                raise RuntimeError(mutation_error)
             results.append(value)
         self._safe_observe("on_emit_end", channel, event, results)
         if async_violation is not None:
@@ -517,6 +696,7 @@ class EventBus:
         """Remove every subscription on every channel."""
 
         self._handlers.clear()
+        self._handler_cache.clear()
 
 
 __all__ = [

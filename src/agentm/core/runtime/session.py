@@ -38,10 +38,6 @@ from agentm.core.abi.session import ENTRY_TYPE_TURN_COMMITTED
 from agentm.core.abi.loop import resolve_loop_action
 from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, bind_read_state_session
 from agentm.core.runtime.resource_loader import ResourceLoader
-from agentm.core.runtime.session_helpers import (
-    collect_start_veto,
-    collect_system_replacement,
-)
 from agentm.core.runtime.session_inbox import (
     InboxItem,
     SessionInbox,
@@ -823,19 +819,15 @@ class AgentSession:
         try:
             self._session_events.last_round_turn = None
             messages = self._session_manager.build_session_context().messages
-            system_prompt = ""
+            system_prompt: str | None = ""
             before_event = BeforeAgentStartEvent(
                 messages=messages, system=system_prompt,
             )
-            before_returns = await self._bus.emit(
+            await self._bus.emit(
                 BeforeAgentStartEvent.CHANNEL, before_event,
             )
-            # --- Veto: prefer typed event field, fall back to return-dict ---
-            veto_cause = (
-                before_event.veto
-                if before_event.veto is not None
-                else collect_start_veto(before_returns)
-            )
+            messages = before_event.messages
+            veto_cause = before_event.veto
             if veto_cause is not None:
                 await self._bus.emit(
                     AgentEndEvent.CHANNEL,
@@ -845,13 +837,7 @@ class AgentSession:
                     f"before_agent_start veto: {type(veto_cause).__name__}"
                 )
                 return messages
-            # --- System prompt: prefer return-dict (back-compat), fall back
-            #     to event mutation ---
-            replacement_system = collect_system_replacement(before_returns)
-            if replacement_system is not None:
-                system_prompt = replacement_system
-            elif before_event.system:
-                system_prompt = before_event.system
+            system_prompt = before_event.system
 
             # NB: the kernel ``run`` itself emits ``agent_start`` at entry
             # (loop.py:412); we don't duplicate it here. The kernel also fires
@@ -905,18 +891,10 @@ class AgentSession:
         self, text: str
     ) -> tuple[str, list[AgentMessage] | None]:
         event = InputEvent(text=text)
-        returns = await self._bus.emit(InputEvent.CHANNEL, event)
-        # --- Typed event field path (preferred) ---
+        await self._bus.emit(InputEvent.CHANNEL, event)
         if event.handled and event.handled_messages is not None:
-            return text, event.handled_messages
-        # --- Return-dict fallback (deprecated) ---
-        for value in returns:
-            if isinstance(value, dict) and value.get("handled") is True:
-                messages = value.get("messages")
-                if isinstance(messages, list):
-                    return text, messages
-        # --- Text rewrite (mutation path, always via event field) ---
-        return (event.text if isinstance(event.text, str) else text), None
+            return event.text, event.handled_messages
+        return event.text, None
 
     def _require_model(self) -> Model:
         model = self.model

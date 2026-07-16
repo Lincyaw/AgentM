@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from loguru import logger
+
 from agentm.core.abi import AgentMessage
 from agentm.core.abi.session_store import SessionState, SessionStore
 
@@ -194,8 +196,12 @@ def load_corpus_from_session_ids(
                     purpose = header.config.get("purpose", "")
                     if isinstance(purpose, str) and ":" in purpose:
                         case_id = purpose.rsplit(":", 1)[-1]
-            except Exception:  # noqa: BLE001, S110 — best-effort metadata resolution
-                pass  # noqa: S110
+            except Exception as exc:
+                logger.debug(
+                    "could not resolve corpus metadata for session {}: {}",
+                    sid,
+                    exc,
+                )
         refs.append(
             TrajectoryRef(
                 trajectory_id=sid,

@@ -20,7 +20,7 @@ GapKind = Literal[
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Gap:
     """A structural invariant that the current graph does not satisfy."""
 
@@ -32,7 +32,7 @@ class Gap:
     context: str = ""
 
 
-@dataclass
+@dataclass(slots=True)
 class GapReport:
     """Result of evaluate_gaps: all unsatisfied invariants."""
 
@@ -45,7 +45,7 @@ class GapReport:
 
 # -- Verification tasks (output of plan_work) ---------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class VerificationTask:
     """A single unit of work: verify a seed or a hop."""
 
@@ -132,7 +132,7 @@ class EvidenceDossier(BaseModel):
 
 # -- Compiled dossier (compiler output, input to judge) ------------------------
 
-@dataclass
+@dataclass(slots=True)
 class SQLResult:
     """A re-executed SQL query with verified results."""
 
@@ -145,7 +145,7 @@ class SQLResult:
     error: str = ""
 
 
-@dataclass
+@dataclass(slots=True)
 class CoverageGap:
     """A specific deficiency in the evidence dossier."""
 
@@ -153,7 +153,7 @@ class CoverageGap:
     description: str
 
 
-@dataclass
+@dataclass(slots=True)
 class CompiledDossier:
     """System-verified evidence ready for the judge. All SQL re-executed."""
 
@@ -190,7 +190,7 @@ class CompiledDossier:
 SubAnswer = Literal["yes", "no", "insufficient_evidence"]
 
 
-@dataclass
+@dataclass(slots=True)
 class JudgeAnswer:
     """Answer to one sub-question."""
 
@@ -243,7 +243,7 @@ class JudgeVerdict(BaseModel):
 VerdictKind = Literal["confirmed", "rejected", "inconclusive"]
 
 
-@dataclass
+@dataclass(slots=True)
 class Verdict:
     """Final computed verdict from judge answers."""
 
@@ -284,7 +284,7 @@ class Verdict:
 
 # -- Task attempt history (for retry feedback) ---------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class TaskAttempt:
     """Record of one search-compile-judge cycle."""
 

@@ -34,6 +34,7 @@ def _detect_entry_services(data_dir: Path, graph: dict[str, list[list[str]]]) ->
     root_services: set[str] = set()
     normal_parquet = data_dir / "normal_traces.parquet"
     if normal_parquet.exists():
+        conn: Any | None = None
         try:
             import duckdb
 
@@ -54,9 +55,15 @@ def _detect_entry_services(data_dir: Path, graph: dict[str, list[list[str]]]) ->
                     continue
                 if root_cnt >= 100 or ratio > 0.2:
                     root_services.add(svc)
-            conn.close()
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not infer entry services from {}: {}",
+                normal_parquet,
+                exc,
+            )
+        finally:
+            if conn is not None:
+                conn.close()
 
     all_services = set(graph.keys())
     for neighbors in graph.values():
@@ -94,7 +101,6 @@ async def _run_workflow(
         cwd=str(out_dir),
         model=os.environ.get("AGENTM_MODEL"),
         extensions=[(m, dict(c)) for m, c in _WORKFLOW_EXTENSIONS],
-        auto_commit=False,
     )
     session = await AgentSession.create(config)
     logger.info("session:  {}", session.session_id)
@@ -118,8 +124,8 @@ async def _run_workflow(
     finally:
         try:
             await session.shutdown()
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Verifier session shutdown failed: {}", exc)
     out = result if isinstance(result, dict) else {}
     out["session_id"] = session.session_id
     out["trace_id"] = session.root_session_id

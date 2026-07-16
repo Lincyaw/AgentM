@@ -619,6 +619,16 @@ class _LlmCompactionRuntime:
         if provider is None or model is None:
             return None
 
+        before_compact = BeforeCompactEvent(
+            messages=session_messages,
+            reason=reason,
+        )
+        await self._api.events.emit(
+            BeforeCompactEvent.CHANNEL,
+            before_compact,
+        )
+        session_messages = before_compact.messages
+
         branch = self._api.session.get_branch()
         preparation = prepare_compaction(
             branch,
@@ -631,11 +641,6 @@ class _LlmCompactionRuntime:
             return None
 
         prompts, summarization_body = await _resolve_prompts(self._api)
-
-        await self._api.events.emit(
-            BeforeCompactEvent.CHANNEL,
-            BeforeCompactEvent(messages=session_messages, reason=reason),
-        )
 
         result = await compact(
             preparation,

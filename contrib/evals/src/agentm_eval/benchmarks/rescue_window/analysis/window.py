@@ -70,6 +70,6 @@ def _opportunity_area(points: list[tuple[float, float]]) -> float:
         return 0.0
     ordered = sorted(points, key=lambda item: item[0])
     area = 0.0
-    for (x0, y0), (x1, y1) in zip(ordered, ordered[1:]):
+    for (x0, y0), (x1, y1) in zip(ordered, ordered[1:], strict=False):
         area += (x1 - x0) * (max(y0, 0.0) + max(y1, 0.0)) / 2.0
     return area

@@ -108,6 +108,7 @@ class WeixinAdapter:
         self._scenario_sent: set[str] = set()
         self._typing_tickets: dict[str, str] = {}
         self._typing_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._active_turns: set[str] = set()
         self._stop_event = asyncio.Event()
         self._running = False
@@ -152,11 +153,14 @@ class WeixinAdapter:
         self._running = False
         self._stop_event.set()
 
-        # Cancel typing tasks
-        for task in self._typing_tasks.values():
+        tasks = [*self._typing_tasks.values(), *self._background_tasks]
+        for task in tasks:
             if not task.done():
                 task.cancel()
         self._typing_tasks.clear()
+        self._background_tasks.clear()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Notify server we're stopping
         try:
@@ -646,17 +650,25 @@ class WeixinAdapter:
             task.cancel()
         ticket = self._typing_tickets.get(user_id)
         if ticket:
-            asyncio.create_task(
-                api.send_typing(
-                    self._http,
-                    base_url=self._config.base_url,
-                    token=self._config.token,
-                    user_id=user_id,
-                    typing_ticket=ticket,
-                    status=TypingStatus.CANCEL,
-                ),
+            task = asyncio.create_task(
+                self._cancel_typing_indicator(user_id, ticket),
                 name=f"typing-cancel-{user_id}",
             )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+    async def _cancel_typing_indicator(self, user_id: str, ticket: str) -> None:
+        try:
+            await api.send_typing(
+                self._http,
+                base_url=self._config.base_url,
+                token=self._config.token,
+                user_id=user_id,
+                typing_ticket=ticket,
+                status=TypingStatus.CANCEL,
+            )
+        except Exception:
+            logger.warning("failed to cancel typing indicator for {}", user_id)
 
     async def _typing_loop(self, user_id: str, ticket: str) -> None:
         try:

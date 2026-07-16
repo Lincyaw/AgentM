@@ -273,7 +273,7 @@ async def load_journal_entries(
         *(_read_full_body(store, artifact_id) for _key, artifact_id, _ts in newest)
     )
     entries: list[JournalEntry] = []
-    for (key, _artifact_id, ts), body in zip(newest, bodies):
+    for (key, _artifact_id, ts), body in zip(newest, bodies, strict=True):
         if body is None:
             continue
         prompt, result = _decode_journal_body(body)

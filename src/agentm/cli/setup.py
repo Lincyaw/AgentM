@@ -1,4 +1,4 @@
-"""Root ``agentm setup`` and ``agentm onboard`` command registration."""
+"""Registration for the root ``setup`` and ``onboard`` commands."""
 
 from __future__ import annotations
 

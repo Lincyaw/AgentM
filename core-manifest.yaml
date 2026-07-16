@@ -15,15 +15,11 @@ constitution:
     - src/agentm/extensions/discover.py
     - src/agentm/extensions/validate.py
     # Presenter startup contract
-    - src/agentm/cli.py
-    # Catalog data — agent-spoof barrier. Source-of-truth atom blobs live in
-    # git (under src/agentm/extensions/**.py, listed below as managed); the
-    # catalog tree under .agentm/catalog/** is *derived* (metrics.jsonl, runs/
-    # symlinks, version dirs, migration markers). It is constitution-protected
-    # solely so the agent cannot rewrite its own evaluation evidence via
-    # tool_edit. Harness-internal writes (catalog migrate / indexer / freeze)
-    # are intentionally bypass paths: they live inside the constitution layer
-    # and ResourceWriter never sees them. See .claude/designs/self-modifiable-architecture.md.
+    - src/agentm/cli/**
+    # Catalog data — atom-identity and evidence-spoof barrier. Immutable
+    # source/manifest snapshots plus derived metrics and run links live here.
+    # Runtime catalog mechanism is the only writer; ResourceWriter rejects this
+    # namespace so atoms cannot rewrite their own identity or evaluation data.
     - .agentm/catalog/**
     # The manifest itself — self-referential lock
     - core-manifest.yaml

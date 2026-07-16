@@ -561,10 +561,6 @@ class AgentLoop:
                 self.cumulative_turns += 1
                 turn_id = self._next_turn_id
                 self._next_turn_id += 1
-                # Rebuild dispatch index per turn so atoms registered mid-prompt
-                # via ``api.install_atom`` (or any other ``register_tool`` path)
-                # become callable on the very next turn within the same prompt.
-                tool_index = {t.name: t for t in tools}
                 if signal is not None and signal.is_set():
                     return await self._terminate(
                         messages,
@@ -609,16 +605,28 @@ class AgentLoop:
                     system=system,
                 )
                 await self._bus.emit(BeforeSendToLlmEvent.CHANNEL, before_send_event)
+                # The emitted event is the single source of truth for this
+                # provider request.  Do not read the pre-event locals below:
+                # handlers are explicitly allowed to mutate messages/system.
+                # Keeping the request on the event also avoids carrying a
+                # per-turn system append into the next turn.
+                messages = before_send_event.messages
+                # Build dispatch from the final advertised tool list. A
+                # preflight hook may replace tools, and provider/executor views
+                # must stay identical.
+                tool_index = {
+                    tool.name: tool for tool in before_send_event.tools
+                }
                 prompt_dry_run = _env_enabled("AGENTM_LLM_PROMPT_DRY_RUN")
                 if prompt_dry_run or _env_enabled("AGENTM_LLM_PROMPT_DUMP"):
                     await _emit_llm_prompt_dump(
                         self._bus,
                         turn_index=turn_index,
                         turn_id=turn_id,
-                        messages=messages,
-                        model=model,
-                        tools=tools,
-                        system=system,
+                        messages=before_send_event.messages,
+                        model=before_send_event.model,
+                        tools=before_send_event.tools,
+                        system=before_send_event.system,
                         thinking=thinking,
                         dry_run=prompt_dry_run,
                     )
@@ -633,12 +641,16 @@ class AgentLoop:
                     LlmRequestStartEvent.CHANNEL,
                     LlmRequestStartEvent(
                         turn_index=turn_index,
-                        message_count=len(messages),
-                        tool_count=len(tools),
-                        system_chars=len(system or ""),
-                        model_id=getattr(model, "id", None),
+                        message_count=len(before_send_event.messages),
+                        tool_count=len(before_send_event.tools),
+                        system_chars=len(before_send_event.system or ""),
+                        model_id=getattr(before_send_event.model, "id", None),
                         turn_id=turn_id,
-                        system_text=None if _skip_system else (system or ""),
+                        system_text=(
+                            None
+                            if _skip_system
+                            else (before_send_event.system or "")
+                        ),
                     ),
                 )
                 stream_events: list[AssistantStreamEvent] = []
@@ -651,18 +663,18 @@ class AgentLoop:
                                 _dry_run_assistant_message(
                                     turn_index=turn_index,
                                     turn_id=turn_id,
-                                    model=model,
-                                    messages=messages,
-                                    tools=tools,
+                                    model=before_send_event.model,
+                                    messages=before_send_event.messages,
+                                    tools=before_send_event.tools,
                                 )
                             )
                         )
                     else:
                         async for ev in self._stream_fn(
-                            messages=messages,
-                            model=model,
-                            tools=tools,
-                            system=system,
+                            messages=before_send_event.messages,
+                            model=before_send_event.model,
+                            tools=before_send_event.tools,
+                            system=before_send_event.system,
                             signal=signal,
                             thinking=thinking,
                         ):
@@ -989,16 +1001,18 @@ class AgentLoop:
         # here is a defensive cast for the dataclass's frozen Literal field.
         narrowed: Any = kind
         result = ToolResult(content=[], is_error=True)
+        error_event = ToolErrorEvent(
+            kind=narrowed,
+            tool_name=tool_name,
+            reason=reason,
+            result=result,
+            exception=exception,
+        )
         await self._bus.emit(
             ToolErrorEvent.CHANNEL,
-            ToolErrorEvent(
-                kind=narrowed,
-                tool_name=tool_name,
-                reason=reason,
-                result=result,
-                exception=exception,
-            ),
+            error_event,
         )
+        result = error_event.result
         if not result.content:
             # Recovery floor: no atom subscribed (or all subscribers were
             # no-ops). Insert a minimal placeholder so observers and the

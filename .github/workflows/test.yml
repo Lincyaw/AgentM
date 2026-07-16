@@ -36,21 +36,36 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint (ruff)
-        run: uv run ruff check src/ contrib/gateway-peers/feishu/src contrib/gateway-peers/weixin/src contrib/extensions/llmharness/src contrib/scenarios/rca/src
+        run: uv run ruff check src/ contrib/
+
+      - name: Architecture and code health
+        run: uv run python -m agentm.code_health src contrib --strict
 
       - name: Type check (mypy)
-        # The gateway lives in src/ (channels v2 — single process). Chat-client
-        # peers ship their own mypy config; check each from its own root so
-        # per-package overrides apply.
         run: |
           uv run mypy src/
-          cd contrib/gateway-peers/feishu && uv run mypy src/agentm_feishu
-          cd ../weixin && uv run mypy src/agentm_weixin
-          cd ../../extensions/llmharness && uv run mypy src/llmharness
-          cd ../../scenarios/rca && uv run mypy src/rca src/rca_eval
+          (cd contrib/evals && uv run mypy src/agentm_eval)
+          (cd contrib/extensions/llmharness && uv run --extra index mypy src/llmharness)
+          (cd contrib/extensions/mcp_bridge && uv run mypy __init__.py manifest.py bridge.py client.py tool.py)
+          (cd contrib/extensions/trajectory_index && uv run mypy src/trajectory_index)
+          (cd contrib/gateway-peers/feishu && uv run mypy src/agentm_feishu)
+          (cd contrib/gateway-peers/weixin && uv run mypy src/agentm_weixin)
+          (cd contrib/scenarios/rca && uv run mypy src/rca)
+          uv run mypy contrib/scenarios/verifier_v2
+          uv run mypy contrib/scenarios/verifier
+          uv run mypy contrib/scenarios/devloop/agentm_devloop contrib/scenarios/devloop/agents/coder/devloop_context.py
+          uv run mypy contrib/scenarios/paper_review/agentm_paper_review contrib/scenarios/paper_review/agents/reviewer/paper_review_context.py
+          uv run mypy contrib/scenarios/workgraph/workflow contrib/scenarios/workgraph/agents/workgraph_context.py
 
       - name: Tests (pytest)
-        run: uv run pytest --tb=short
+        run: |
+          uv run pytest --tb=short
+          (cd contrib/extensions/mcp_bridge && uv run pytest --tb=short)
+          (cd contrib/extensions/trajectory_index && uv run pytest --tb=short)
+          (cd contrib/gateway-peers/feishu && uv run pytest --tb=short)
+
+      - name: Requirements index
+        run: uv run python scripts/validate_project_index.py project-index.yaml
 
       - name: Tests (terminal-go)
         working-directory: contrib/gateway-peers/terminal-go

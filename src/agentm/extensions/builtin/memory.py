@@ -144,19 +144,13 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
 
         async def _before_agent_start(
             event: BeforeAgentStartEvent,
-        ) -> dict[str, str] | None:
+        ) -> None:
             block = await _build_index_block(writer, base_path, max_index_lines)
             if not block:
-                return None
+                return
             current = str(event.system or "")
             updated = f"{block}\n\n{current}" if current else block
-            # Mutate AND return: the kernel's ``collect_system_replacement``
-            # reads handler returns, so a mutate-only handler is dropped when
-            # it fires last (no later handler folds its mutation into a
-            # return). Returning makes the index order-independent; the
-            # mutation keeps it visible to handlers firing after this one.
             event.system = updated
-            return {"system": updated}
 
         api.on(BeforeAgentStartEvent.CHANNEL, _before_agent_start)
 

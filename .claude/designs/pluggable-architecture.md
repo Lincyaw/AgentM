@@ -45,7 +45,7 @@ AgentM collapses to **three layers**. The historical four-layer split (`core` / 
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Dependency rule**: arrows point downward only. `agentm.core` must be importable in a Jupyter notebook **with zero side effects at import time**. That property is module-load-time, not subpackage-content: `agentm.core.abi` and `agentm.core.lib` are pure types + pure functions; `agentm.core.runtime` *contains* stateful classes (`AgentSession`, `GitBackedResourceWriter`, `JsonlSessionStore`) but its modules perform no I/O at `import agentm.core.runtime` time. Side effects only happen when a session is **constructed**.
+**Dependency rule**: arrows point downward only. `agentm.core` must be importable in a Jupyter notebook **with zero side effects at import time**. That property is module-load-time, not subpackage-content: `agentm.core.abi` and `agentm.core.lib` are pure types + pure functions; `agentm.core.runtime` *contains* stateful classes (`AgentSession`, `LocalResourceWriter`, `JsonlSessionStore`) but its modules perform no I/O at `import agentm.core.runtime` time. Side effects only happen when a session is **constructed**.
 
 | Layer | What it knows | What it does NOT know |
 |---|---|---|
@@ -69,7 +69,7 @@ Every axis below is a `typing.Protocol` in `agentm.core.abi`. **All five must be
 Concretely:
 
 - **Atom-registered** (post-install): `Operations` (read by every tool atom), `StreamFn` (read by AgentLoop). Defaults live in `extensions/builtin/operations_local.py`, `extensions/builtin/llm_<provider>.py`. The substrate has no fallback — if a scenario manifest omits them, freeze raises.
-- **Config-injected** (pre-install): `SessionManager` (CLI resumes/forks need it before session construction), `ResourceLoader` (atoms read its content but the substrate constructs it from `cwd`), `ResourceWriter` (`AtomReloader` consumes it during scope wiring). Defaults: `InMemorySessionManager`, `InMemoryResourceLoader`, `GitBackedResourceWriter`. SDK consumers swap by passing alternatives through `AgentSessionConfig`.
+- **Config-injected** (pre-install): `SessionManager` (CLI resumes/forks need it before session construction), `ResourceLoader` (atoms read its content but the substrate constructs it from `cwd`), `ResourceWriter` (`AtomReloader` consumes it during scope wiring). Defaults: `InMemorySessionManager`, `InMemoryResourceLoader`, `LocalResourceWriter`. SDK consumers swap by passing alternatives through `AgentSessionConfig`.
 - **Default-pluggable** (config-injected + atom-overridable): `ResourceWriter` additionally exposes `api.register_resource_writer(...)`. The substrate pre-populates the slot with the config-injected default so its own bookkeeping (catalog freeze, atom reload) is unblocked, but an atom — typically an environment atom like `operations` with `backend: agent_env` — may replace it once at install time to redirect writes (e.g. into a sandbox). Register-once is enforced via a `replaced` flag on the holder; the substrate distinguishes "atom replacing the bootstrap default" (allowed) from "second atom replacing an earlier atom's writer" (rejected). This is the only port that combines both replacement mechanisms; it exists because writes are both substrate-internal infrastructure *and* a policy axis tied to where compute physically lives.
 
 All three mechanisms preserve the axiom — the substrate never holds an unreplaceable concrete implementation. The split is mechanical (timing of first use + whether a sandbox-class atom needs to retarget the value), not philosophical.
@@ -204,15 +204,21 @@ class ResourceLoader(Protocol):
 
 ### 3.5 Extension Bus (the policy-replacement boundary)
 
-The mechanism by which "built-in features" become "default extensions". An EventBus + 25+ typed events with three semantics:
+The mechanism by which "built-in features" become "default extensions". An
+EventBus plus typed events with three explicit semantics:
 
 | Event family | Examples | Handler return semantics |
 |---|---|---|
 | Lifecycle (passive) | `session_start`, `agent_start`, `turn_end` | None — observers only |
-| Mutating (active) | `tool_call`, `context`, `input` | Mutate payload in place; later handlers see prior changes |
-| Replaceable (`before_*`) | `before_agent_start`, `session_before_compact`, `session_before_tree` | Return `{block?, cause?, cancel?, replacement?}` to override default flow |
+| Mutating (active) | `tool_call`, `context`, `input`, `before_send_to_llm` | Mutate only fields declared by `HookContract.mutable_fields`; later handlers see prior changes |
+| Decision/replacement | `decide_turn_action`, tool-result replacement, install veto | Use the event's explicit typed fields or declared `return_contract`; never duplicate mutable state through a return dict |
 
-**The killer property**: any built-in operation (compaction, fork, system-prompt assembly, tool execution) emits a `before_*` event whose handlers can `cancel: true` and supply a custom result. This is how plan-mode, sub-agent, permission gate, sandbox, sub-agent — all the things AgentM might want to add — become **default extensions** rather than core features.
+Every hook declares its effects, return contract, mutation contract, and
+machine-readable mutable fields. The bus dispatches handlers serially and,
+for mutable events, validates undeclared field changes by default. Emitters
+must consume the final event fields after dispatch. This is how plan mode,
+permission gates, compaction, provider preflight, and other policy remain
+replaceable extensions without creating multiple state channels.
 
 ```python
 class EventBus(Protocol):
@@ -357,7 +363,7 @@ Summary of what landed:
 1. **Default policies promoted to atoms.** `LocalFileOperations` /
    `LocalBashOperations` → `extensions/builtin/operations_local.py`; provider
    `StreamFn` defaults → `extensions/builtin/llm_<provider>.py`; the
-   `GitBackedResourceWriter` config seam → `AgentSessionConfig.resource_writer`.
+   `LocalResourceWriter` config seam → `AgentSessionConfig.resource_writer`.
 2. **`register_*` hooks** on `ExtensionAPI` enforce "register at most once
    before freeze"; the substrate fails loud if a required axis is unregistered.
 3. **Default scenario manifests** enumerate the atom set explicitly; the

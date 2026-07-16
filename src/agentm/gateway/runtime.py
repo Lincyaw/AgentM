@@ -16,13 +16,12 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any
 
 from loguru import logger
 
-from agentm.core.abi import GATEWAY_SCHEDULER_SERVICE, ToolContinue, ToolResult, ToolTerminate
-from agentm.core.abi.tool_executor import execute_tool_call
+from agentm.core.abi import GATEWAY_SCHEDULER_SERVICE
 from agentm.gateway.approval import ApprovalManager
 from agentm.gateway.chat_session_map import ChatSessionMap
 from agentm.gateway.child_registry import ChildSessionRegistry
@@ -36,6 +35,12 @@ from agentm.gateway.commands import (
 from agentm.gateway.outbox import SqliteOutbox
 from agentm.gateway.peer import PeerSession
 from agentm.gateway.router import RouterAction, dispatch
+from agentm.gateway.runtime_controls import (
+    GatewayControlMixin,
+    apply_thinking_level,
+    push_user_input,
+)
+from agentm.gateway.runtime_state import GatewaySessionState
 from agentm.gateway.scheduler import (
     GatewayScheduler,
     GatewayScheduleStore,
@@ -51,38 +56,6 @@ from agentm.gateway.wire import (
     Envelope,
     InboundBody,
 )
-
-
-SessionPhase = Literal[
-    "idle",
-    "running",
-    "waiting_interaction",
-    "interrupting",
-    "errored",
-    "unknown",
-]
-
-
-@dataclass(slots=True)
-class _SessionSnapshot:
-    phase: SessionPhase = "idle"
-    active_turn_id: str | None = None
-    tool_names: list[str] = field(default_factory=list)
-    command_names: list[str] = field(default_factory=list)
-    pending_interactions: list[str] = field(default_factory=list)
-    children: list[str] = field(default_factory=list)
-    last_error: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "phase": self.phase,
-            "active_turn_id": self.active_turn_id,
-            "tool_names": self.tool_names,
-            "command_names": self.command_names,
-            "pending_interactions": self.pending_interactions,
-            "children": self.children,
-            "last_error": self.last_error,
-        }
 
 
 def _scenario_payload(info: Any) -> dict[str, str]:
@@ -238,41 +211,6 @@ def _merge_gateway_commands(
             names.append(handler.name)
             seen.add(handler.name)
     meta["command_names"] = names
-
-
-def _push_user_input(inbox: Any, body: InboundBody, content: str) -> None:
-    from agentm.core.runtime.session_inbox import InboxItem
-
-    request_id = (
-        body.request_id
-        if body.request_id is not None
-        else (
-            body.raw.get("request_id")
-            if isinstance(body.raw, dict) and body.raw.get("request_id") is not None
-            else None
-        )
-    )
-    # Preserve existing behavior for old clients that send no request_id:
-    # no dedup hint is used.
-    if request_id is None:
-        inbox.push(InboxItem(source="user", payload=content))
-        return
-    inbox.push(
-        InboxItem(
-            source="user",
-            payload=content,
-            dedup_key=str(request_id),
-        )
-    )
-
-
-def _apply_thinking_level(session: Any, body: InboundBody) -> None:
-    thinking = body.thinking
-    if thinking is None:
-        return
-    setter = getattr(session, "set_thinking_level", None)
-    if callable(setter):
-        setter(thinking)
 
 
 async def _load_session_history(
@@ -435,7 +373,7 @@ class _GatewaySessionOverrides:
         name: str,
         *,
         sessions: SessionManager,
-        state: _GatewaySessionState,
+        state: GatewaySessionState,
     ) -> tuple[bool, str]:
         """Swap to ``name``'s model profile and start a fresh session."""
         from agentm.core.lib.user_config import load_user_config
@@ -459,7 +397,7 @@ class _GatewaySessionOverrides:
         name: str,
         *,
         sessions: SessionManager,
-        state: _GatewaySessionState,
+        state: GatewaySessionState,
     ) -> tuple[bool, str]:
         """Switch the active scenario and start a fresh session for this chat."""
         from agentm.extensions.loader import ScenarioLoadError, validate_scenario
@@ -478,284 +416,7 @@ class _GatewaySessionOverrides:
         return (True, key)
 
 
-class _GatewaySessionState:
-    """Gateway-owned read model for routes, snapshots, commands, and counts."""
-
-    def __init__(
-        self,
-        *,
-        chat_map: ChatSessionMap,
-        sessions: SessionManager,
-        approval: ApprovalManager,
-        child_registry: ChildSessionRegistry,
-        active_model_name: Callable[[str], str],
-        active_scenario_name: Callable[[str], str],
-        outbound_sink: Callable[[dict[str, Any]], Awaitable[None]],
-    ) -> None:
-        self._chat_map = chat_map
-        self._sessions = sessions
-        self._approval = approval
-        self._child_registry = child_registry
-        self._active_model_name = active_model_name
-        self._active_scenario_name = active_scenario_name
-        self._outbound_sink = outbound_sink
-        self._session_commands: dict[str, set[str]] = {}
-        self._session_routes: dict[str, tuple[str, str, str | None]] = {}
-        self._snapshots: dict[str, _SessionSnapshot] = {}
-        self._turn_counts: dict[str, int] = {}
-
-    def record_route(self, session_key: str, body: dict[str, Any]) -> None:
-        channel = str(body.get("channel") or "")
-        chat_id = str(body.get("chat_id") or "")
-        if not channel or not chat_id:
-            return
-        thread_id = body.get("thread_id")
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id)
-        self._session_routes[session_key] = (channel, chat_id, thread_id)
-
-    def snapshot_for(self, session_key: str) -> _SessionSnapshot:
-        return self._snapshots.setdefault(session_key, _SessionSnapshot())
-
-    def _set_children_snapshot(self, snapshot: _SessionSnapshot) -> None:
-        snapshot.children = sorted(self._child_registry.ids())
-
-    def _set_pending_interactions_snapshot(
-        self, session_key: str, snapshot: _SessionSnapshot
-    ) -> None:
-        snapshot.pending_interactions = sorted(
-            self._approval.pending_for_session(session_key)
-        )
-
-    def _derive_phase(self, snapshot: _SessionSnapshot) -> SessionPhase:
-        if snapshot.last_error:
-            return "errored"
-        if snapshot.pending_interactions:
-            return "waiting_interaction"
-        if snapshot.active_turn_id:
-            return "running"
-        if snapshot.phase in {"interrupting", "unknown"}:
-            return snapshot.phase
-        return "idle"
-
-    def update_snapshot(
-        self, session_key: str, kind: str, metadata: dict[str, Any]
-    ) -> bool:
-        snapshot = self.snapshot_for(session_key)
-        before = snapshot.as_dict()
-
-        if kind == "session_ready":
-            tools = metadata.get("tool_names")
-            if isinstance(tools, list):
-                snapshot.tool_names = sorted(
-                    {str(t) for t in tools if isinstance(t, str)}
-                )
-            commands = metadata.get("command_names")
-            if isinstance(commands, list):
-                snapshot.command_names = sorted(
-                    {str(c) for c in commands if isinstance(c, str)}
-                )
-        elif kind == "turn_start":
-            turn_id = metadata.get("turn_id")
-            if isinstance(turn_id, str):
-                snapshot.active_turn_id = turn_id
-            snapshot.phase = "running"
-            snapshot.last_error = None
-        elif kind == "turn_end":
-            snapshot.active_turn_id = None
-        elif kind == "agent_end":
-            cause = metadata.get("cause")
-            if isinstance(cause, str) and cause:
-                lowered = cause.lower()
-                if lowered in {
-                    "none",
-                    "normal",
-                    "end_turn",
-                    "modelendturn",
-                    "toolterminated",
-                    "cancel",
-                    "cancelled",
-                    "keyboardinterrupt",
-                }:
-                    snapshot.last_error = None
-                else:
-                    snapshot.last_error = cause
-            snapshot.active_turn_id = None
-        elif kind in {"child_start", "child_end"}:
-            self._set_children_snapshot(snapshot)
-        elif kind == "approval_request":
-            approval_id = metadata.get("approval_id")
-            if isinstance(approval_id, str) and approval_id:
-                pending = self._approval.pending_for_session(session_key)
-                if approval_id not in pending:
-                    pending.append(approval_id)
-                snapshot.pending_interactions = sorted(set(pending))
-            snapshot.phase = "waiting_interaction"
-        elif kind == "approval_resolved":
-            approval_id = metadata.get("approval_id")
-            if isinstance(approval_id, str) and approval_id:
-                snapshot.pending_interactions = sorted(
-                    [i for i in snapshot.pending_interactions if i != approval_id]
-                )
-            else:
-                self._set_pending_interactions_snapshot(session_key, snapshot)
-        else:
-            return False
-
-        if kind in {"child_start", "child_end", "approval_request", "approval_resolved"}:
-            self._set_children_snapshot(snapshot)
-            self._set_pending_interactions_snapshot(session_key, snapshot)
-
-        snapshot.phase = self._derive_phase(snapshot)
-
-        if kind == "approval_request" and not snapshot.pending_interactions:
-            self._set_pending_interactions_snapshot(session_key, snapshot)
-
-        return snapshot.as_dict() != before
-
-    async def emit_snapshot(self, session_key: str) -> None:
-        route = self._session_routes.get(session_key)
-        if route is None:
-            return
-        snapshot = self.snapshot_for(session_key)
-        self._set_children_snapshot(snapshot)
-        self._set_pending_interactions_snapshot(session_key, snapshot)
-        snapshot.phase = self._derive_phase(snapshot)
-
-        channel, chat_id, thread_id = route
-        await self._outbound_sink(
-            {
-                "channel": channel,
-                "chat_id": chat_id,
-                "content": "",
-                **({"thread_id": thread_id} if thread_id is not None else {}),
-                "metadata": {
-                    "kind": "session_snapshot",
-                    "session_id": self._sessions.session_id(session_key),
-                    **snapshot.as_dict(),
-                },
-                "_session_key": session_key,
-            }
-        )
-
-    def schedule_snapshot(self, session_key: str) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self.emit_snapshot(session_key))
-
-    def remember_commands(self, session_key: str, meta: dict[str, Any]) -> None:
-        names = meta.get("command_names")
-        if not isinstance(names, list):
-            return
-        self._session_commands[session_key] = {
-            n for n in names if isinstance(n, str)
-        }
-
-    def remember_live_commands(self, session_key: str, sess: Any) -> set[str] | None:
-        names = getattr(sess, "command_names", None)
-        if not isinstance(names, list):
-            return None
-        known = {name for name in names if isinstance(name, str)}
-        self._session_commands[session_key] = known
-        return known
-
-    def command_names(self, session_key: str) -> set[str] | None:
-        return self._session_commands.get(session_key)
-
-    def list_session_commands(self, session_key: str) -> list[str]:
-        return sorted(self._session_commands.get(session_key, set()))
-
-    def increment_turn_count(self, session_key: str) -> None:
-        self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
-
-    def reset_turn_count(self, session_key: str) -> None:
-        self._turn_counts.pop(session_key, None)
-
-    def clear_runtime_session(self, session_key: str) -> None:
-        self._turn_counts.pop(session_key, None)
-        self._snapshots.pop(session_key, None)
-        self._session_routes.pop(session_key, None)
-
-    def forget_session(self, session_key: str) -> None:
-        self._session_commands.pop(session_key, None)
-        self.clear_runtime_session(session_key)
-
-    def route_stats(self, session_key: str) -> dict[str, Any]:
-        return {
-            "session_id": self._sessions.session_id(session_key),
-            "turn_count": self._turn_counts.get(session_key, 0),
-            "pending_approvals": self._approval.pending_count,
-        }
-
-    def debug_state(
-        self,
-        session_key: str,
-        *,
-        inflight_count: int,
-        outbox_ready: bool,
-    ) -> dict[str, Any]:
-        current_session_route = self._session_routes.get(session_key)
-        child_ids = self._child_registry.ids()
-        chat_routes = self._chat_map.snapshot()
-        chat_metadata = self._chat_map.snapshot_metadata()
-
-        sessions_state: dict[str, Any] = {}
-        for key in sorted(
-            set(self._session_routes.keys()) | set(self._snapshots.keys()) | set(chat_routes)
-        ):
-            route = self._session_routes.get(key)
-            sessions_state[key] = {
-                "session_id": self._sessions.session_id(key),
-                "route": (
-                    {
-                        "channel": route[0],
-                        "chat_id": route[1],
-                        "thread_id": route[2],
-                    }
-                    if route is not None
-                    else None
-                ),
-                "snapshot": self.snapshot_for(key).as_dict(),
-                "model": self._active_model_name(key),
-                "scenario": self._active_scenario_name(key),
-                "chat_session_map": chat_routes.get(key),
-                "metadata": chat_metadata.get(key, {}),
-            }
-
-        return {
-            "session_key": session_key,
-            "session": {
-                "session_id": self._sessions.session_id(session_key),
-                "route": (
-                    {
-                        "channel": current_session_route[0],
-                        "chat_id": current_session_route[1],
-                        "thread_id": current_session_route[2],
-                    }
-                    if current_session_route is not None
-                    else None
-                ),
-                "snapshot": self.snapshot_for(session_key).as_dict(),
-                "model": self._active_model_name(session_key),
-                "scenario": self._active_scenario_name(session_key),
-                "command_names": self.list_session_commands(session_key),
-                "turn_count": self._turn_counts.get(session_key, 0),
-                "pending_approvals": self._approval.pending_for_session(session_key),
-                "child_sessions": child_ids,
-            },
-            "sessions": sessions_state,
-            "global": {
-                "inflight_tasks": inflight_count,
-                "tracked_sessions": len(self._session_routes),
-                "outbox_ready": outbox_ready,
-                "total_pending_approvals": self._approval.pending_count,
-            },
-        }
-
-
-class GatewayRuntime:
+class GatewayRuntime(GatewayControlMixin):
     """Glues WireServer <-> Router/SessionManager/Approval/Commands.
 
     One instance per ``agentm gateway`` process. Holds the outbound sink
@@ -820,7 +481,7 @@ class GatewayRuntime:
             approval_manager=self._approval,
             child_registry=self._child_registry,
         )
-        self._state = _GatewaySessionState(
+        self._state = GatewaySessionState(
             chat_map=chat_map,
             sessions=self._sessions,
             approval=self._approval,
@@ -1105,261 +766,6 @@ class GatewayRuntime:
             logger.exception(f"error handling inbound from {session_key}")
             await self._send_error(session_key, body, exc)
 
-    def _interrupt_session(self, session_key: str) -> None:
-        sess = self._sessions.get(session_key)
-        if sess is None:
-            return
-        status_fn = getattr(sess, "status", None)
-        if callable(status_fn):
-            try:
-                status = status_fn()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("interrupt: session status probe failed: {}", exc)
-                status = {}
-            if isinstance(status, dict) and status.get("phase") != "running":
-                return
-        sess.interrupt()
-        snapshot = self._state.snapshot_for(session_key)
-        if snapshot.phase != "interrupting":
-            snapshot.phase = "interrupting"
-        snapshot.active_turn_id = None
-        if not snapshot.pending_interactions:
-            self._state.schedule_snapshot(session_key)
-
-    def _steer_session(self, session_key: str, body: InboundBody) -> None:
-        """Inject a user message mid-turn without waiting for turn end."""
-        sess = self._sessions.get(session_key)
-        if sess is None:
-            return
-        content = body.content or ""
-        if not content.strip():
-            return
-        _apply_thinking_level(sess, body)
-        sess.send_user_message(content)
-
-    async def _cancel_background_task(
-        self, session_key: str, body: InboundBody
-    ) -> None:
-        """Cancel a background_exec task without creating a conversational turn."""
-        task_id = (body.task_id or "").strip()
-        if not task_id:
-            await self._send_error(
-                session_key, body, ValueError("cancel_background requires task_id")
-            )
-            return
-        sess = self._sessions.get(session_key)
-        if sess is None:
-            await self._send_error(
-                session_key, body, RuntimeError("no live session for background task")
-            )
-            return
-        cancel_tool = next(
-            (tool for tool in sess.tools if tool.name == "cancel_background"),
-            None,
-        )
-        if cancel_tool is None:
-            await self._send_error(
-                session_key,
-                body,
-                RuntimeError("cancel_background tool is unavailable"),
-            )
-            return
-        try:
-            result = await execute_tool_call(
-                cancel_tool,
-                {"task_id": task_id},
-                signal=None,
-            )
-        except Exception as exc:
-            logger.exception("cancel_background failed for {}", task_id)
-            await self._send_error(session_key, body, exc)
-            return
-        if isinstance(result, ToolContinue | ToolTerminate):
-            tool_result = result.result
-        elif isinstance(result, ToolResult):
-            tool_result = result
-        else:
-            tool_result = None
-        if tool_result is not None and tool_result.is_error:
-            await self._send_error(
-                session_key,
-                body,
-                RuntimeError(f"cancel_background rejected task {task_id}"),
-            )
-            return
-        await self._state.emit_snapshot(session_key)
-
-    async def _switch_model_control(
-        self, session_key: str, body: InboundBody
-    ) -> None:
-        """Switch models without rendering a slash-command turn."""
-        name = (body.content or "").strip()
-        if not name:
-            await self._send_error(
-                session_key, body, ValueError("switch_model requires content")
-            )
-            return
-        ok, message = await self._overrides.switch_model(
-            session_key,
-            name,
-            sessions=self._sessions,
-            state=self._state,
-        )
-        if not ok:
-            await self._send_error(
-                session_key,
-                body,
-                RuntimeError(f"could not switch model to '{name}': {message}"),
-            )
-            return
-
-        try:
-            from agentm.core.lib.user_config import load_user_config
-
-            models = list(load_user_config().models.keys())
-        except Exception:
-            logger.exception("switch_model: failed to read model profiles")
-            models = []
-        await self._emit_outbound(
-            {
-                "channel": body.channel,
-                "chat_id": body.chat_id,
-                "content": "",
-                "thread_id": body.thread_id,
-                "metadata": {
-                    "kind": "session_ready",
-                    "model": message,
-                    "models": models,
-                },
-                "_session_key": session_key,
-            }
-        )
-
-    async def _set_config_control(
-        self, session_key: str, scenario: str | None, body: InboundBody
-    ) -> None:
-        """Apply a non-conversational session config change."""
-
-        raw = body.raw or {}
-        key = str(raw.get("key") or "").strip()
-        if key == "permission_rule":
-            await self._set_permission_rule_control(session_key, body, raw)
-            return
-        if key != "auto_compact":
-            await self._send_error(
-                session_key, body, ValueError(f"unsupported config key {key!r}")
-            )
-            return
-        enabled = raw.get("enabled")
-        if not isinstance(enabled, bool):
-            await self._send_error(
-                session_key, body, ValueError("auto_compact requires boolean enabled")
-            )
-            return
-
-        sess = await self._get_or_create_session_for_input(session_key, scenario, body)
-        control = sess.get_service("llm_compaction.control")
-        setter = getattr(control, "set_enabled", None)
-        if control is None or not callable(setter):
-            await self._send_error(
-                session_key,
-                body,
-                RuntimeError("auto_compact is not available in this session"),
-            )
-            return
-
-        actual = bool(setter(enabled))
-        await self._emit_outbound(
-            {
-                "channel": body.channel,
-                "chat_id": body.chat_id,
-                "content": "",
-                "thread_id": body.thread_id,
-                "metadata": {
-                    "kind": "config_update",
-                    "key": key,
-                    "enabled": actual,
-                },
-                "_session_key": session_key,
-            }
-        )
-
-    async def _set_permission_rule_control(
-        self,
-        session_key: str,
-        body: InboundBody,
-        raw: dict[str, Any],
-    ) -> None:
-        """Apply a terminal /permissions rule to the live approval policy."""
-
-        kind = str(raw.get("kind") or "").strip().lower()
-        pattern = str(raw.get("pattern") or "").strip()
-        if kind not in {"allow", "ask", "deny"}:
-            await self._send_error(
-                session_key, body, ValueError("permission_rule kind must be allow, ask, or deny")
-            )
-            return
-        if not pattern:
-            await self._send_error(
-                session_key, body, ValueError("permission_rule requires pattern")
-            )
-            return
-        if not self._approval.add_session_rule(session_key, kind, pattern):
-            await self._send_error(
-                session_key, body, RuntimeError("failed to apply permission rule")
-            )
-            return
-
-        await self._emit_outbound(
-            {
-                "channel": body.channel,
-                "chat_id": body.chat_id,
-                "content": "",
-                "thread_id": body.thread_id,
-                "metadata": {
-                    "kind": "config_update",
-                    "key": "permission_rule",
-                    "rule_kind": kind,
-                    "pattern": pattern,
-                },
-                "_session_key": session_key,
-            }
-        )
-
-    def _interrupt_child(self, child_id: str) -> None:
-        child = self._child_registry.get(child_id)
-        if child is not None:
-            child.interrupt()
-
-    def _deliver_child_input(self, child_id: str, body: InboundBody) -> None:
-        """Push a human turn into a live child's inbox as ``source="user"``.
-
-        This is the inbound twin of ``child_wire_forwarder``: the child runs on
-        its own driver, so we never call ``prompt()`` (that would contend with
-        whatever already drives the child's loop — the parent's monitor while
-        the task is live, or the child's own idle driver afterward). A plain
-        inbox push is drained at the child's next turn boundary by whoever owns
-        the loop, which is exactly the caller-agnostic semantics the design
-        wants (the parent perceives it too, since the message lands in the
-        child's shared, parent-forwarded trajectory)."""
-
-        child = self._child_registry.get(child_id)
-        if child is None:
-            return
-        content = body.content or ""
-        if not content.strip():
-            return
-        _apply_thinking_level(child, body)
-        _push_user_input(child.inbox, body, content)
-
-    def _resolve_interaction(self, session_key: str, body: InboundBody) -> None:
-        if body.button_value:
-            self._approval.resolve(body.button_value, body.sender_id)
-            # Waits for approval_request/approval_resolved outbound to drive the
-            # definitive projection, but keep an immediate state write for
-            # clients that are sensitive to control latency.
-            self._state.schedule_snapshot(session_key)
-
     async def _run_command(
         self, session_key: str, scenario: str | None, body: InboundBody
     ) -> None:
@@ -1451,8 +857,8 @@ class GatewayRuntime:
         self._state.increment_turn_count(session_key)
         if body.content == "":
             return
-        _apply_thinking_level(sess, body)
-        _push_user_input(sess.inbox, body, body.content)
+        apply_thinking_level(sess, body)
+        push_user_input(sess.inbox, body, body.content)
         await self._state.emit_snapshot(session_key)
 
     async def _prompt_session(

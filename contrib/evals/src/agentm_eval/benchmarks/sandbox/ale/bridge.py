@@ -46,7 +46,7 @@ from loguru import logger
 
 try:  # long grader commands (uv sync + sims) outlive the execute HTTP window
     from arl import GatewayOperationTimeout
-except Exception:  # pragma: no cover - older SDKs
+except ImportError:  # pragma: no cover - optional/older SDKs
     GatewayOperationTimeout = ()  # type: ignore[assignment]
 
 # Remote root for staged task data inside the ARL pod. Lives under the
@@ -78,7 +78,7 @@ def install_cb_stub() -> None:
 
     mod = types.ModuleType("cua_bench")
 
-    @dataclass
+    @dataclass(slots=True)
     class Task:
         description: str
         task_id: Optional[str] = None
@@ -95,11 +95,11 @@ def install_cb_stub() -> None:
             return wrap
         return deco
 
-    mod.Task = Task
-    mod.DesktopSession = object  # annotation-only in task code
-    mod.tasks_config = _tag("tasks_config")
-    mod.setup_task = _tag("setup_task")
-    mod.evaluate_task = _tag("evaluate_task")
+    setattr(mod, "Task", Task)
+    setattr(mod, "DesktopSession", object)  # annotation-only in task code
+    setattr(mod, "tasks_config", _tag("tasks_config"))
+    setattr(mod, "setup_task", _tag("setup_task"))
+    setattr(mod, "evaluate_task", _tag("evaluate_task"))
     sys.modules["cua_bench"] = mod
 
 
@@ -107,7 +107,7 @@ def install_cb_stub() -> None:
 # Task loading
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class AleTask:
     """One loaded ALE task variant."""
 
@@ -351,7 +351,7 @@ class ArlGraderSession:
         return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
 
     async def _exec(self, command: str, *, timeout: float | None = None) -> CommandResult:
-        step = {
+        step: dict[str, Any] = {
             "name": "cmd",
             "command": ["bash", "-lc", command],
         }

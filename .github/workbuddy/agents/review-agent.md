@@ -129,7 +129,8 @@ uv run pytest --tb=short
 
 - [ ] If `project-index.yaml` exists: matching requirement updated
       (`code` paths, `tests` paths, `status` advanced appropriately).
-      `validate_index.py` reports 0 violations.
+      `uv run python scripts/validate_project_index.py project-index.yaml`
+      reports 0 violations.
 - [ ] If a design concept in `.claude/index.yaml` is touched: design
       doc updated, related concepts walked, `index.yaml` updated.
 

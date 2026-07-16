@@ -1,4 +1,4 @@
-"""``agentm daemon`` — local gateway daemon lifecycle commands."""
+"""Local gateway lifecycle commands for ``agentm daemon``."""
 
 from __future__ import annotations
 
