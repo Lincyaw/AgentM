@@ -289,11 +289,61 @@ async def build_constraint_checks(
     return checks
 
 
+def build_intent_coverage(index: TrajectoryIndex) -> list[dict[str, Any]]:
+    """Per-constraint intent coverage from ``addresses``/``fulfills`` edges."""
+    constraints = list(index.constraints.values())
+    if not constraints:
+        return []
+
+    addresses_by_constraint: dict[str, list[str]] = {}
+    fulfills_src_steps: set[str] = set()
+
+    for edge in index.edges.values():
+        if edge.kind == "addresses":
+            addresses_by_constraint.setdefault(edge.dst, []).append(edge.src)
+        elif edge.kind == "fulfills":
+            fulfills_src_steps.add(edge.src)
+
+    action_step_by_call: dict[str, str] = {
+        a.call_id: a.step_id for a in index.actions.values()
+    }
+
+    coverage: list[dict[str, Any]] = []
+    for constraint in constraints:
+        addressing_call_ids = addresses_by_constraint.get(constraint.id, [])
+        if not addressing_call_ids:
+            coverage.append({
+                "constraint_id": constraint.id,
+                "description": constraint.description,
+                "status": "unaddressed",
+                "action_step_ids": [],
+            })
+            continue
+
+        action_step_ids = [
+            action_step_by_call[cid]
+            for cid in addressing_call_ids
+            if cid in action_step_by_call
+        ]
+
+        has_fulfills = any(sid in fulfills_src_steps for sid in action_step_ids)
+        status = "verified_by_intent" if has_fulfills else "addressed"
+
+        coverage.append({
+            "constraint_id": constraint.id,
+            "description": constraint.description,
+            "status": status,
+            "action_step_ids": action_step_ids,
+        })
+
+    return coverage
+
+
 def build_value_flow_sync(index: TrajectoryIndex) -> dict[str, Any]:
     """Sync version for persistence.dump — timelines + iterations only, no LLM."""
     timelines = build_value_timelines(index)
     cycles = build_iteration_cycles(index)
-    return _format_value_flow(timelines, cycles, [])
+    return _format_value_flow(timelines, cycles, [], [])
 
 
 async def build_value_flow(
@@ -308,13 +358,15 @@ async def build_value_flow(
     checks = await build_constraint_checks(
         index, model=model, session_factory=session_factory,
     )
-    return _format_value_flow(timelines, cycles, checks)
+    intent_cov = build_intent_coverage(index)
+    return _format_value_flow(timelines, cycles, checks, intent_cov)
 
 
 def _format_value_flow(
     timelines: list[ValueTimeline],
     cycles: list[IterationCycle],
     checks: list[ConstraintCheck],
+    intent_coverage: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "value_timelines": [
@@ -350,4 +402,5 @@ def _format_value_flow(
             }
             for c in checks
         ],
+        "intent_coverage": intent_coverage or [],
     }

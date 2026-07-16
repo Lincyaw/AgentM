@@ -218,6 +218,7 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "operation": a.operation,
             "targets": list(a.targets),
             "diffs": [list(d) for d in a.diffs],
+            "purpose": a.purpose,
         }
         for a in index.actions.values()
     ]
@@ -242,6 +243,7 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "value_timelines": len(value_flow["value_timelines"]),
             "iterations": len(value_flow["iterations"]),
             "constraint_checks": len(value_flow["constraint_checks"]),
+            "intent_coverage": len(value_flow.get("intent_coverage", [])),
             "indexed_message_count": index.indexed_message_count,
         },
         "steps": steps,
@@ -551,6 +553,7 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             operation=op,
             targets=tuple(str(t) for t in a.get("targets", [])),
             diffs=diffs,
+            purpose=str(a.get("purpose", "")),
         )
 
     return index

@@ -109,6 +109,7 @@ class Action:
     operation: ActionOp
     targets: tuple[str, ...] = ()
     diffs: tuple[tuple[str, str, str], ...] = ()   # (param, old_value, new_value)
+    purpose: str = ""
 
 
 @dataclass(frozen=True, slots=True)
