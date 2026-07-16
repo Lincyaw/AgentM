@@ -1,0 +1,13 @@
+name: arl:harness
+description: Baseline + sync llmharness auditor every 5 turns.
+
+includes:
+  - overlays/base.yaml
+
+extensions:
+  - module: llmharness.atom
+    config:
+      mode: sync
+      audit_interval_turns: 5
+      auditor_prompt: swe
+      enable_reminders: true

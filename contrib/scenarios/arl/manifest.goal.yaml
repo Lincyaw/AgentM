@@ -1,0 +1,13 @@
+name: arl:goal
+description: Baseline + goal-driven oversight (auto-derive + checker).
+
+includes:
+  - overlays/base.yaml
+
+extensions:
+  - module: agentm.extensions.builtin.goal
+    config:
+      auto_init: true
+      auto_init_scenario: arl:goal_deriver
+      checker_scenario: arl:goal_checker
+      checker_max_turns: 15

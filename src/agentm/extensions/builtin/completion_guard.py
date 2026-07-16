@@ -97,11 +97,11 @@ class _FinishRuntime:
         return ToolTerminate(
             result=ToolResult(
                 content=[
-                    TextContent(type="text", text="Task submitted for grading.")
+                    TextContent(type="text", text="Task completed.")
                 ],
                 is_error=False,
             ),
-            reason="terminal_bench:finish-confirmed",
+            reason="finish-confirmed",
         )
 
 

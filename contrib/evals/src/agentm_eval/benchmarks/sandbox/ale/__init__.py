@@ -63,7 +63,7 @@ class AleRunConfig:
     agent_timeout: float = 0.0        # 0 → use the task card timeout
     eval_timeout: float = 7200.0
     max_turns: int | None = None
-    keep_sandbox: bool = False
+    keep_sandbox: bool = True
     remote_root: str = bridge.DEFAULT_REMOTE_ROOT
     workspace: str = bridge.DEFAULT_WORKSPACE
     defer_grading: bool = False        # run --no-eval: solve + save output, skip grade
@@ -256,10 +256,9 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
         # -- reference + grade (post-agent) --------------------------------
         ref_staged = False
         if cfg.baked:
-            await bridge.stage_reference_from_container(
+            ref_staged = await bridge.stage_reference_from_container(
                 sandbox, task, cfg.remote_root,
             )
-            ref_staged = True
         else:
             ref_root = cfg.reference_root or cfg.data_root
             ref_staged = await bridge.stage_task_reference(
@@ -287,14 +286,8 @@ async def _run_one_async(task_ref: str, cfg: AleRunConfig, attempt: int) -> Task
             },
         )
     finally:
-        if cfg.keep_sandbox:
-            logger.info("[{}] keeping sandbox {} (--keep-sandbox)",
-                        task_ref, arl_session_id)
-        else:
-            try:
-                await asyncio.to_thread(sandbox.delete_sandbox)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[{}] sandbox delete failed: {}", task_ref, e)
+        logger.info("[{}] keeping sandbox {} for external cleanup",
+                    task_ref, arl_session_id)
 
 
 async def _run_agent(
@@ -498,7 +491,7 @@ class AleAdapter:
                      "(shared across tasks; must carry the task's system deps)",
             )] = _DEFAULT_RUNTIME_IMAGE,
             model: Annotated[Optional[str], typer.Option(help="Model profile")] = None,
-            scenario: Annotated[str, typer.Option(help="AgentM scenario")] = "ale:arl",
+            scenario: Annotated[str, typer.Option(help="AgentM scenario")] = "arl",
             profile: Annotated[str, typer.Option(help="ARL warm-pool profile")] = "default",
             concurrency: Annotated[int, typer.Option("-j", help="Parallel tasks")] = 1,
             attempts: Annotated[int, typer.Option("-n", help="Attempts per task (pass@k)")] = 1,

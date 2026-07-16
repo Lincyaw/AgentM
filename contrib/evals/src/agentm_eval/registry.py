@@ -35,8 +35,8 @@ def discover() -> None:
     import importlib
 
     modules = [
-        "agentm_eval.benchmarks.ale",
         "agentm_eval.benchmarks.sandbox",
+        "agentm_eval.benchmarks.sandbox.ale",
         "agentm_eval.benchmarks.aftraj",
         "agentm_eval.benchmarks.tau2",
         "agentm_eval.benchmarks.rescue_window",

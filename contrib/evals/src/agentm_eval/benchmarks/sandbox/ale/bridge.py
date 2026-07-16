@@ -676,8 +676,12 @@ async def stage_reference_from_container(
     *,
     container: str = "ale-data",
     baked_root: str = "/ale",
-) -> None:
-    """Post-agent ONLY: copy reference/ (the answer key) into the workspace."""
+) -> bool:
+    """Post-agent ONLY: copy reference/ (the answer key) into the workspace.
+
+    Returns True if reference was staged, False if the baked image has no
+    reference/ (rubric-graded tasks that don't need an answer key).
+    """
     baked_ref = posixpath.join(
         baked_root, task.domain, task.name, task.variant_name, "reference",
     )
@@ -685,11 +689,24 @@ async def stage_reference_from_container(
         remote_root, task.domain, task.name, task.variant_name, "reference",
     )
     script = (
-        f"test -d {_q(baked_ref)} || "
-        f"{{ echo 'baked reference missing at {baked_ref}' >&2; exit 3; }}; "
+        f"test -d {_q(baked_ref)} || exit 0; "
         f"mkdir -p {_q(remote_ref)} && cp -a {_q(baked_ref)}/. {_q(remote_ref)}/"
     )
     await _exec_in_container(sandbox, container, "stage-ref", script, timeout=600)
+    check = (f"test -d {_q(remote_ref)} && echo yes || echo no")
+    resp = await asyncio.to_thread(
+        sandbox.execute_container, container,
+        [{"name": "check-ref", "command": ["sh", "-c", check],
+          "timeout_seconds": 30}],
+    )
+    _, stdout, _ = _decode_result(resp)
+    staged = stdout.strip() == "yes"
+    if not staged:
+        logger.info(
+            "[{}/{}] no baked reference/ — skipping (grader may not need it)",
+            task.domain, task.name,
+        )
+    return staged
 
 
 __all__ = [

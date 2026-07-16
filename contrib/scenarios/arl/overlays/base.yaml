@@ -1,0 +1,41 @@
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      idle_timeout_seconds: 7200
+      work_dir: /app
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 5000
+      preview_tokens: 5000
+  - module: agentm.extensions.builtin.file_tools
+    config:
+      verify_readback: true
+  - module: agentm.extensions.builtin.tool_bash
+    config:
+      default_timeout: 1200
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.tool_error_messages
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm.extensions.builtin.thinking_retry
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are completing a task in a Linux environment. Read the task
+        description carefully and work autonomously until done. Prefer
+        established libraries over hand-rolled implementations. Verify
+        your results before finishing.
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 16000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 2000
+      total_max_tokens: 5000
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120
+  - module: agentm.extensions.builtin.tool_purpose
+  - module: agentm.extensions.builtin.completion_guard
+    config:
+      confirmations: 1

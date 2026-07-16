@@ -1,0 +1,15 @@
+name: arl:harness_methgen
+description: Sync llmharness auditor + auto-generated methodology.
+
+includes:
+  - overlays/base.yaml
+
+extensions:
+  - module: llmharness.atom
+    config:
+      mode: sync
+      audit_interval_turns: 5
+      auditor_prompt: swe
+      enable_reminders: true
+      enable_methodology: true
+      methodology_model: litellm-dsv4flash
