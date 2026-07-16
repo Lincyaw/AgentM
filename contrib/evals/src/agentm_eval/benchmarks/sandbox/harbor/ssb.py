@@ -136,12 +136,13 @@ class SeniorSweAdapter(HarborAdapter):
         }], recover_timeout=30)
         if self.VERIFIER_PIP_DEPS:
             deps = " ".join(shlex.quote(d) for d in self.VERIFIER_PIP_DEPS)
+            pip_idx = f"-i {mirror} --trusted-host pypi.tuna.tsinghua.edu.cn"
             session.execute([{  # type: ignore[attr-defined]
                 "name": "verifier-deps",
                 "command": ["bash", "-lc",
-                    f"UV_DEFAULT_INDEX={mirror} "
-                    f"python3 -m pip install --break-system-packages -q {deps} "
-                    f"2>/dev/null || python3 -m pip install -q {deps} 2>/dev/null || true"],
+                    f"python3 -m pip install --break-system-packages -q {pip_idx} {deps} "
+                    f"2>/dev/null || python3 -m pip install -q {pip_idx} {deps} "
+                    f"2>/dev/null || true"],
                 "work_dir": "/app",
                 "timeoutSeconds": 600,
             }], recover_timeout=720)
