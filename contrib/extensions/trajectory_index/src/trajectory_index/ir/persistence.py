@@ -166,7 +166,8 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
         for d in index.dependencies.values()
     ]
     claims = [
-        {"id": c.id, "run_id": c.run_id, "step_id": c.step_id, "text": c.text, "role": c.role}
+        {"id": c.id, "run_id": c.run_id, "step_id": c.step_id, "text": c.text,
+         "role": c.role, "symbol_ids": list(c.symbol_ids)}
         for c in index.claims.values()
     ]
     edges = [
@@ -190,6 +191,7 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "id": c.id,
             "description": c.description,
             "normalized": dict(c.normalized) if c.normalized else None,
+            "symbol_ids": list(c.symbol_ids),
         }
         for c in index.constraints.values()
     ]
@@ -449,6 +451,7 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             step_id=str(c.get("step_id", "")),
             text=text,
             role=str(c.get("role", "")),
+            symbol_ids=tuple(str(s) for s in c.get("symbol_ids", [])),
         )
 
     for e in data.get("edges", []):
@@ -484,6 +487,7 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             id=cid,
             description=str(c.get("description", "")),
             normalized=normalized if isinstance(normalized, dict) else None,
+            symbol_ids=tuple(str(s) for s in c.get("symbol_ids", [])),
         )
 
     for f in data.get("constraint_findings", []):

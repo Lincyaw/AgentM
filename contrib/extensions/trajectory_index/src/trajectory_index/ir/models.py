@@ -10,7 +10,7 @@ every name below, so ``from trajectory_index.index import X`` keeps working.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from hashlib import sha1
 from typing import Literal
@@ -254,6 +254,7 @@ class Claim:
     step_id: str
     text: str
     role: str = ""          # "" = plain assertion; "commit" = the final answer
+    symbol_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +323,7 @@ class Constraint:
     id: str
     description: str
     normalized: Mapping[str, MetadataValue] | None = None
+    symbol_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +434,23 @@ def normalize_name(text: str) -> str:
     text = _NORM_WS.sub("_", text)
     text = _NORM_STRIP.sub("", text)
     return text
+
+
+def mentions_symbol(text: str, names: Iterable[str], min_len: int = 3) -> bool:
+    """Word-bounded check: does *text* mention any of *names*?
+
+    Shared blocking function for passes that need to group items by symbol
+    mention (self-contradiction, constraint aboutness, etc.). The identity
+    decision itself is upstream (Pass 1 extraction + Pass 2 alias merge);
+    this is deterministic string matching on known surfaces.
+    """
+    low = text.lower()
+    for n in names:
+        if len(n) < min_len:
+            continue
+        if re.search(rf"(?<!\w){re.escape(n.lower())}(?!\w)", low):
+            return True
+    return False
 
 
 def stable_id(prefix: str, *parts: object, length: int = 16) -> str:

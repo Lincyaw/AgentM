@@ -21,7 +21,6 @@ fabricated one).
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +38,6 @@ EDGE_KIND = "self_contradicts"
 # pair count quadratically. Cap the pairs actually judged; the cap is logged
 # (P2 — no silent truncation) by the caller via the result's ``capped`` count.
 _MAX_PAIRS = 60
-_MIN_NAME_LEN = 3
 
 @dataclass(slots=True)
 class SelfContradictionResult:
@@ -63,35 +61,17 @@ class SelfContradictionResult:
         }
 
 
-def _mentions(text: str, names: list[str]) -> bool:
-    low = text.lower()
-    for n in names:
-        if len(n) < _MIN_NAME_LEN:
-            continue
-        if re.search(rf"(?<!\w){re.escape(n.lower())}(?!\w)", low):
-            return True
-    return False
-
-
 def _claims_by_symbol(index: TrajectoryIndex, run_id: str) -> dict[str, list[Any]]:
-    """Group a run's claims by the symbols their text mentions (code-only).
-
-    A claim references a symbol when the symbol's canonical name or an alias
-    occurs (word-bounded) in the claim text. Cheap and deterministic — the
-    precise span-overlap grouping would need per-claim offsets the Claim node
-    does not carry.
-    """
+    """Group a run's claims by shared symbol_ids (populated in Pass 1)."""
     claims = sorted(
         (c for c in index.claims.values() if not run_id or c.run_id == run_id),
         key=lambda c: (c.step_id, c.id),
     )
     out: dict[str, list[Any]] = {}
-    for sym_id, sym in index.symbols.items():
-        names = [sym.canonical_name, *sym.aliases]
-        hits = [c for c in claims if _mentions(c.text, names)]
-        if len(hits) >= 2:
-            out[sym_id] = hits
-    return out
+    for claim in claims:
+        for sid in claim.symbol_ids:
+            out.setdefault(sid, []).append(claim)
+    return {sid: cs for sid, cs in out.items() if len(cs) >= 2}
 
 
 def _step_index(index: TrajectoryIndex, run_id: str, step_id: str) -> int:

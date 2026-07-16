@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from ..ir.models import AliasCandidate, normalize_name
+from ..ir.models import AliasCandidate, Claim, Constraint, normalize_name
 from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
 from ..pass3_folds.grounding import drives_defuse
 
@@ -32,6 +32,30 @@ _SNIPPET_CHARS = 120          # per-reference context snippet cap for the merge 
 # ---------------------------------------------------------------------------
 # Blocking + merge mechanism (code)
 # ---------------------------------------------------------------------------
+
+
+def _repoint_symbol_ids(index: TrajectoryIndex) -> None:
+    """After a merge, re-populate symbol_ids from the surviving symbol set."""
+    from ..ir.models import mentions_symbol
+
+    sym_names: list[tuple[str, list[str]]] = [
+        (sid, [sym.canonical_name, *sym.aliases])
+        for sid, sym in index.symbols.items()
+    ]
+    for cid, claim in index.claims.items():
+        hits = tuple(sid for sid, names in sym_names if mentions_symbol(claim.text, names))
+        if hits != claim.symbol_ids:
+            index.claims[cid] = Claim(
+                id=claim.id, run_id=claim.run_id, step_id=claim.step_id,
+                text=claim.text, role=claim.role, symbol_ids=hits,
+            )
+    for cid, con in index.constraints.items():
+        hits = tuple(sid for sid, names in sym_names if mentions_symbol(con.description, names))
+        if hits != con.symbol_ids:
+            index.constraints[cid] = Constraint(
+                id=con.id, description=con.description,
+                normalized=con.normalized, symbol_ids=hits,
+            )
 
 
 def rebuild_symbol_name_index(index: TrajectoryIndex) -> None:
@@ -179,6 +203,8 @@ def apply_alias_merges(index: TrajectoryIndex, groups: list[list[str]]) -> None:
         # constraint findings name candidate symbols; a merge invalidates
         # them wholesale (Pass E/J/L rebuild from facts + transcript).
         index.constraint_findings = []
+        # re-point symbol_ids on claims and constraints
+        _repoint_symbol_ids(index)
 
 
 # ---------------------------------------------------------------------------

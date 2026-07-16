@@ -18,6 +18,7 @@ from ..ir.models import (
     Constraint,
     Step,
     StepRole,
+    mentions_symbol,
     stable_id,
 )
 from ..locate import locate, strip_tags
@@ -49,6 +50,30 @@ def _locate_claim(text: str, steps: dict[str, Step], role_filter: str | None = "
         if hit:
             return mid, hit[0], hit[1]
     return None
+
+
+def _link_symbols(index: TrajectoryIndex, run_id: str) -> None:
+    """Attach symbol_ids to claims and constraints by word-bounded mention."""
+    sym_names: list[tuple[str, list[str]]] = [
+        (sid, [sym.canonical_name, *sym.aliases])
+        for sid, sym in index.symbols.items()
+    ]
+    for cid, claim in index.claims.items():
+        if claim.run_id and claim.run_id != run_id:
+            continue
+        hits = tuple(sid for sid, names in sym_names if mentions_symbol(claim.text, names))
+        if hits and hits != claim.symbol_ids:
+            index.claims[cid] = Claim(
+                id=claim.id, run_id=claim.run_id, step_id=claim.step_id,
+                text=claim.text, role=claim.role, symbol_ids=hits,
+            )
+    for cid, con in index.constraints.items():
+        hits = tuple(sid for sid, names in sym_names if mentions_symbol(con.description, names))
+        if hits and hits != con.symbol_ids:
+            index.constraints[cid] = Constraint(
+                id=con.id, description=con.description,
+                normalized=con.normalized, symbol_ids=hits,
+            )
 
 
 def populate_from_extraction(
@@ -248,3 +273,5 @@ def populate_from_extraction(
                 symbol=rsym, step=rstep, text=ref.text,
                 kind=ref.kind, start=ref.start,
             )
+
+    _link_symbols(index, run_id)

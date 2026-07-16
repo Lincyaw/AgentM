@@ -20,8 +20,6 @@ Contracts honored here:
 * oracle judgments run over code-selected windows of WHOLE steps — selection
   never cuts content mid-step, and every deselection is a logged prune; the
   judgments assert only positive facts about the presented content (P4);
-* machine-checkable constraints are decided by code — the oracle just
-  locates the value (P6);
 * a missing/unparseable verdict is unknown and never escalates (P5);
 * Omitted requires two independent absence checks — a lexical code-negative
   over the whole trace AND an attested coverage sweep with citation-on-yes
@@ -33,7 +31,6 @@ Contracts honored here:
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +43,7 @@ from ..ir.models import (
     FindingStatus,
     Step,
     Symbol,
+    mentions_symbol,
     normalize_name,
 )
 from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
@@ -63,10 +61,6 @@ if TYPE_CHECKING:
 # is a parameter to be calibrated on the dev slice (validation plan step 3).
 
 _SWEEP_CHAR_BUDGET = 20000    # default sweep abstention budget (chars)
-
-_YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
-_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
-
 
 
 # ---------------------------------------------------------------------------
@@ -145,62 +139,6 @@ class ConstraintAnalysis:
             "transcript": self.diagnostics.transcript,
             "prune_log": self.diagnostics.prune_log,
         }
-
-
-# ---------------------------------------------------------------------------
-# Code checkers (P6) — the decidable subproblem never goes to the model
-# ---------------------------------------------------------------------------
-
-
-_NUM_OPS: dict[str, Any] = {
-    "==": lambda a, b: a == b, "<=": lambda a, b: a <= b,
-    ">=": lambda a, b: a >= b, "<": lambda a, b: a < b, ">": lambda a, b: a > b,
-}
-
-
-def check_normalized(
-    normalized: dict[str, Any], quote: str,
-) -> tuple[FindingStatus, str] | None:
-    """Decide a machine-checkable constraint against a model-located quote.
-
-    Returns (status, detail), or None when code cannot decide — no comparable
-    value in the quote, or SEVERAL values that disagree (a sentence quote like
-    "active 1985-2007, born 1955" carries years on both sides of a range, and
-    code cannot tell which is decisive without semantics). Then the tuple
-    stays unknown: the oracle's opinion on arithmetic is not accepted (P6),
-    and ambiguity never escalates (P5).
-    """
-    if not quote:
-        return None
-    kind = normalized.get("kind")
-
-    if kind == "year_range":
-        years = [int(y) for y in _YEAR_RE.findall(quote)]
-        if not years:
-            return None
-        lo, hi = int(normalized.get("lo", 0)), int(normalized.get("hi", 9999))
-        inside = [lo <= y <= hi for y in years]
-        if all(inside):
-            return ("verified", f"years {years} all in [{lo}, {hi}]")
-        if not any(inside):
-            return ("violated", f"years {years} all outside [{lo}, {hi}]")
-        return None  # mixed — quote carries years on both sides of the range
-
-    if kind == "number":
-        vals = [float(m) for m in _NUMBER_RE.findall(quote)]
-        op_fn = _NUM_OPS.get(str(normalized.get("op", "==")))
-        if not vals or op_fn is None:
-            return None
-        target = float(normalized.get("value", 0))
-        checks = [bool(op_fn(v, target)) for v in vals]
-        op = str(normalized.get("op", "=="))
-        if all(checks):
-            return ("verified", f"values {vals} all satisfy {op} {target}")
-        if not any(checks):
-            return ("violated", f"values {vals} all fail {op} {target}")
-        return None  # mixed — several values disagree; which is decisive is semantics
-
-    return None
 
 
 
@@ -294,9 +232,6 @@ async def _detect_commit(
 # Pass E2 — About: map grounded steps to the committed candidate
 # ---------------------------------------------------------------------------
 
-def _mentions(text: str, names: set[str]) -> bool:
-    lowered = text.lower()
-    return any(n.lower() in lowered for n in names)
 
 
 async def _map_about(
@@ -371,7 +306,7 @@ async def _judge_entailment(
     payload = json.dumps({
         "candidate": commit.binding,
         "constraints": [
-            {"id": i, "desc": c.description, "machine_checkable": c.normalized is not None}
+            {"id": i, "desc": c.description}
             for i, c in enumerate(constraints)
         ],
         "evidence": [
@@ -402,18 +337,10 @@ async def _judge_entailment(
 
         if outcome not in ("establish", "refute"):
             continue  # "neither" → Omitted path (Pass J)
-        if c.normalized is not None:
-            decided = check_normalized(dict(c.normalized), quote)
-            verdicts[c.id] = (
-                Verdict(decided[0], conf or 1.0, "code", ev, decided[1])
-                if decided
-                else Verdict("unknown", 0.0, "code", ev, "no parseable value in quote")
-            )
-        else:
-            status: FindingStatus = "verified" if outcome == "establish" else "violated"
-            verdicts[c.id] = Verdict(
-                status, conf, "oracle:entails", ev, str(item.get("reason", "")),
-            )
+        status: FindingStatus = "verified" if outcome == "establish" else "violated"
+        verdicts[c.id] = Verdict(
+            status, conf, "oracle:entails", ev, str(item.get("reason", "")),
+        )
     return verdicts
 
 
@@ -526,7 +453,7 @@ def _first_assertion_step(steps: list[Step], commit: Commit) -> Step:
     """
     for s in steps:
         seg = s.action_segment
-        if seg and _mentions(seg, commit.names):
+        if seg and mentions_symbol(seg, commit.names):
             return s
     return commit.step
 
