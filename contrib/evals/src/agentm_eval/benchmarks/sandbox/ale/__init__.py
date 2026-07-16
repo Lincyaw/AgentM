@@ -701,8 +701,9 @@ class AleAdapter:
 def _fmt_line(r: TaskResult) -> str:
     reward = r.score.get("reward")
     reward_txt = f"{reward:.3f}" if isinstance(reward, (int, float)) else "-"
+    sid = r.session_ids[0][:12] if r.session_ids else "-"
     extra = f" ({r.error[:120]})" if r.error else ""
-    return f"[{r.status:>5}] {r.task_id}  reward={reward_txt}  {r.latency_ms/1000:.0f}s{extra}"
+    return f"[{r.status:>5}] {r.task_id}  reward={reward_txt}  session={sid}  {r.latency_ms/1000:.0f}s{extra}"
 
 
 def _summarize(results: list[TaskResult]) -> tuple[int, float]:

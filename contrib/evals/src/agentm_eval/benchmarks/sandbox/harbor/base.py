@@ -220,7 +220,8 @@ class HarborAdapter:
         status = r.get("status", "?").upper()
         reward = r.get("reward")
         reward_str = f"{reward:.2f}" if isinstance(reward, (int, float)) else "-"
-        return f"  [{status}] {name} tools={tools} reward={reward_str}"
+        sid = str(r.get("session_id", "-"))[:12]
+        return f"  [{status}] {name} tools={tools} reward={reward_str} session={sid}"
 
     def summary_header(self) -> str:
         return (
