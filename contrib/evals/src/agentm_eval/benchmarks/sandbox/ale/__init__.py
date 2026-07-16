@@ -390,6 +390,91 @@ def _default_data_root() -> Path | None:
     return data if data.is_dir() else None
 
 
+_HF_DATA_REPO = "agents-last-exam/agents-last-exam-data"
+_HF_REF_REPO = "agents-last-exam/agents-last-exam-reference"
+
+
+def _ensure_data_root(data_root: Path) -> None:
+    """Download ALE task data from HuggingFace if not already present."""
+    if (data_root / "_hf_done").is_file():
+        return
+    data_root.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import snapshot_download
+    logger.info("ale: downloading task data from {} → {}", _HF_DATA_REPO, data_root)
+    snapshot_download(
+        repo_id=_HF_DATA_REPO, repo_type="dataset",
+        local_dir=str(data_root / "_hf_data"),
+        allow_patterns="tasks/*",
+    )
+    logger.info("ale: downloading reference data from {} → {}", _HF_REF_REPO, data_root)
+    snapshot_download(
+        repo_id=_HF_REF_REPO, repo_type="dataset",
+        local_dir=str(data_root / "_hf_ref"),
+        allow_patterns="tasks/*",
+    )
+    import shutil
+    hf_data = data_root / "_hf_data" / "tasks"
+    hf_ref = data_root / "_hf_ref" / "tasks"
+    for domain_dir in sorted(hf_data.iterdir()):
+        if not domain_dir.is_dir():
+            continue
+        for task_dir in sorted(domain_dir.iterdir()):
+            if not task_dir.is_dir():
+                continue
+            dest = data_root / domain_dir.name / task_dir.name
+            if dest.exists():
+                continue
+            shutil.copytree(task_dir, dest)
+    for domain_dir in sorted(hf_ref.iterdir()):
+        if not domain_dir.is_dir():
+            continue
+        for task_dir in sorted(domain_dir.iterdir()):
+            if not task_dir.is_dir():
+                continue
+            for variant_dir in sorted(task_dir.iterdir()):
+                ref_src = variant_dir / "reference"
+                if not ref_src.is_dir():
+                    continue
+                dest = data_root / domain_dir.name / task_dir.name / variant_dir.name / "reference"
+                if dest.exists():
+                    continue
+                shutil.copytree(ref_src, dest)
+    (data_root / "_hf_done").touch()
+    logger.info("ale: task data ready at {}", data_root)
+
+
+def _ensure_baked_images(
+    tasks: list[str], data_root: Path, registry: str, tag: str,
+) -> None:
+    """Build and push data images for tasks that are missing from the registry."""
+    import subprocess as _sp
+    from .images import build_data_image, data_image_ref
+
+    missing: list[tuple[str, str]] = []
+    for ref in tasks:
+        domain, _, name = ref.partition("/")
+        image = data_image_ref(registry, domain, name, tag)
+        result = _sp.run(
+            ["docker", "manifest", "inspect", image],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            if (data_root / domain / name / "base" / "input").is_dir():
+                missing.append((domain, name))
+            else:
+                logger.warning("ale: no data for {}/{}, skipping image build", domain, name)
+
+    if not missing:
+        return
+    logger.info("ale: building {} missing data images", len(missing))
+    for domain, name in missing:
+        image = build_data_image(
+            data_root=data_root, domain=domain, name=name,
+            registry=registry, tag=tag, push=True,
+        )
+        logger.info("ale: built + pushed {}", image)
+
+
 class AleAdapter:
     name = "ale"
     description = "Agents' Last Exam — real professional tasks graded in ARL sandboxes"
@@ -532,6 +617,15 @@ class AleAdapter:
                         and (domains is None or d in domains)]
             if data_root is None and task_images is None:
                 data_root = _default_data_root()
+
+            if task_images is not None:
+                if data_root is None:
+                    from agentm.core.lib.user_config import agentm_home_dir
+                    data_root = agentm_home_dir() / "ale-data"
+                _ensure_data_root(data_root)
+                _ensure_baked_images(
+                    list(task), data_root, task_images, images_tag,
+                )
 
             # Gateway/auth resolve exactly like the `arl` CLI: env vars, then
             # the active context in ~/.config/arl/config.yaml. ARL_CONTEXT is
