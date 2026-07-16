@@ -52,24 +52,44 @@ def _locate_claim(text: str, steps: dict[str, Step], role_filter: str | None = "
     return None
 
 
-def _link_symbols(index: TrajectoryIndex, run_id: str) -> None:
-    """Attach symbol_ids to claims and constraints by word-bounded mention."""
+def _link_symbols(
+    index: TrajectoryIndex,
+    run_id: str,
+    new_symbol_ids: set[str] | None = None,
+) -> None:
+    """Attach symbol_ids to claims and constraints by word-bounded mention.
+
+    When *new_symbol_ids* is given (incremental populate), only re-link
+    nodes that either have no symbol_ids yet or mention a newly added
+    symbol. A full re-link (new_symbol_ids=None) runs after alias merges.
+    """
     sym_names: list[tuple[str, list[str]]] = [
         (sid, [sym.canonical_name, *sym.aliases])
         for sid, sym in index.symbols.items()
     ]
+    def _needs_relink(existing: tuple[str, ...], text: str) -> bool:
+        if new_symbol_ids is None or not existing:
+            return True
+        return bool(new_symbol_ids.intersection(
+            sid for sid, names in sym_names if mentions_symbol(text, names)
+        ))
+
     for cid, claim in index.claims.items():
         if claim.run_id and claim.run_id != run_id:
             continue
+        if not _needs_relink(claim.symbol_ids, claim.text):
+            continue
         hits = tuple(sid for sid, names in sym_names if mentions_symbol(claim.text, names))
-        if hits and hits != claim.symbol_ids:
+        if hits != claim.symbol_ids:
             index.claims[cid] = Claim(
                 id=claim.id, run_id=claim.run_id, step_id=claim.step_id,
                 text=claim.text, role=claim.role, symbol_ids=hits,
             )
     for cid, con in index.constraints.items():
+        if not _needs_relink(con.symbol_ids, con.description):
+            continue
         hits = tuple(sid for sid, names in sym_names if mentions_symbol(con.description, names))
-        if hits and hits != con.symbol_ids:
+        if hits != con.symbol_ids:
             index.constraints[cid] = Constraint(
                 id=con.id, description=con.description,
                 normalized=con.normalized, symbol_ids=hits,
@@ -128,8 +148,14 @@ def populate_from_extraction(
         blocks = msg.get("content", [])
         if isinstance(blocks, list):
             for block in blocks:
-                if isinstance(block, dict) and block.get("type") in ("tool_call", "tool_use"):
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype in ("tool_call", "tool_use"):
                     call_id = block.get("id")
+                    break
+                if btype == "tool_result" and block.get("tool_call_id"):
+                    call_id = block["tool_call_id"]
                     break
 
         step = Step(
@@ -145,6 +171,7 @@ def populate_from_extraction(
         steps_by_id[mid] = step
 
     # Symbols: directly from result.symbols (or legacy result.annotated).
+    pre_symbol_ids = set(index.symbols)
     extracted_syms = getattr(result, "symbols", None)
     for sym in (extracted_syms or []):
         canonical = strip_tags(sym.name).strip()
@@ -274,4 +301,5 @@ def populate_from_extraction(
                 kind=ref.kind, start=ref.start,
             )
 
-    _link_symbols(index, run_id)
+    new_symbol_ids = set(index.symbols) - pre_symbol_ids
+    _link_symbols(index, run_id, new_symbol_ids=new_symbol_ids or None)

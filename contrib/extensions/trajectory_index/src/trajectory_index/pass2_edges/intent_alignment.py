@@ -56,13 +56,19 @@ class IntentAlignmentResult:
 
 
 def _extract_purpose(step: Step) -> str:
-    """Read purpose from tool_call JSON args in step content."""
+    """Read purpose from tool_call JSON args in step content.
+
+    Step content for a tool_call is ``[tool_call: name]\\n<json_args>``
+    (produced by ``message_parts``). The JSON args line is always a single
+    ``json.dumps`` without indent, so splitting on the first newline is
+    safe. If the format doesn't match, returns empty (never crashes).
+    """
     content = step.content
-    lines = content.split("\n", 1)
-    if len(lines) < 2:
+    json_start = content.find("\n")
+    if json_start < 0:
         return ""
     try:
-        args = json.loads(lines[1])
+        args = json.loads(content[json_start + 1:])
         return str(args.get("purpose", ""))
     except (json.JSONDecodeError, TypeError, ValueError):
         return ""
@@ -99,9 +105,25 @@ async def _judge_addresses(
     if not steps_with_purpose or not constraints:
         return [], 0, 0, 0
 
+    n_constraints = len(constraints)
+    n_capped = 0
+    kept_steps = steps_with_purpose
+    if len(steps_with_purpose) * n_constraints > _MAX_ADDRESSES_PAIRS:
+        max_steps = max(1, _MAX_ADDRESSES_PAIRS // n_constraints)
+        n_capped = (len(steps_with_purpose) - max_steps) * n_constraints
+        stride = len(steps_with_purpose) / max_steps
+        kept_steps = [steps_with_purpose[int(i * stride)] for i in range(max_steps)]
+        logger.warning(
+            "intent_alignment addresses: {} steps x {} constraints = {} pairs, "
+            "sampled {} steps (stride {:.1f}, dropped {} pairs)",
+            len(steps_with_purpose), n_constraints,
+            len(steps_with_purpose) * n_constraints,
+            max_steps, stride, n_capped,
+        )
+
     pairs: list[dict[str, Any]] = []
     pair_keys: list[tuple[str, str]] = []
-    for step, purpose in steps_with_purpose:
+    for step, purpose in kept_steps:
         for constraint in constraints:
             pairs.append({
                 "id": len(pairs),
@@ -110,17 +132,6 @@ async def _judge_addresses(
                 "constraint": constraint.description,
             })
             pair_keys.append((step.step_id, constraint.id))
-
-    total_pairs = len(pairs)
-    n_capped = 0
-    if total_pairs > _MAX_ADDRESSES_PAIRS:
-        n_capped = total_pairs - _MAX_ADDRESSES_PAIRS
-        logger.warning(
-            "intent_alignment addresses: {} pairs capped to {} (dropped {})",
-            total_pairs, _MAX_ADDRESSES_PAIRS, n_capped,
-        )
-        pairs = pairs[:_MAX_ADDRESSES_PAIRS]
-        pair_keys = pair_keys[:_MAX_ADDRESSES_PAIRS]
 
     payload = json.dumps({"pairs": pairs}, ensure_ascii=False, indent=2)
     raw = await _ask_model(
@@ -139,8 +150,8 @@ async def _judge_addresses(
             n_judged += 1
             outcome = str(verdict.get("outcome", ""))
             if outcome == "yes":
-                step = index.steps.get((run_id, step_id))
-                r_id = step.run_id if step else run_id
+                looked_up = index.steps.get((run_id, step_id))
+                r_id = looked_up.run_id if looked_up else run_id
                 edge = Edge(
                     id=stable_id("edge", r_id, "addresses", step_id, constraint_id),
                     kind="addresses",
@@ -160,13 +171,12 @@ async def _judge_fulfills(
     session_factory: SessionFactory,
 ) -> tuple[list[Edge], int, int, int]:
     """LLM-judged: did each tool_call step achieve its declared purpose."""
-    steps_by_id: dict[str, Any] = {}
-    for (rid, sid), step in index.steps.items():
-        if not run_id or rid == run_id:
-            steps_by_id[sid] = step
-
-    sorted_steps = sorted(steps_by_id.values(), key=lambda s: s.index)
-    step_by_index: dict[int, Any] = {s.index: s for s in sorted_steps}
+    result_by_call_id: dict[str, Any] = {}
+    for (rid, _sid), step in index.steps.items():
+        if run_id and rid != run_id:
+            continue
+        if step.role == StepRole.TOOL_RESULT and step.call_id:
+            result_by_call_id[step.call_id] = step
 
     tc_steps = _tool_call_steps(index, run_id)
     steps_with_purpose = [
@@ -180,8 +190,8 @@ async def _judge_fulfills(
     pairs: list[dict[str, Any]] = []
     pair_keys: list[tuple[str, str]] = []
     for step, purpose in steps_with_purpose:
-        result_step = step_by_index.get(step.index + 1)
-        if not result_step or result_step.role != StepRole.TOOL_RESULT:
+        result_step = result_by_call_id.get(step.call_id or "")
+        if not result_step:
             continue
         result_content = result_step.content
         if not result_content.strip():
@@ -222,7 +232,7 @@ async def _judge_fulfills(
             n_judged += 1
             outcome = str(verdict.get("outcome", ""))
             if outcome == "yes":
-                action_step = steps_by_id.get(action_step_id)
+                action_step = index.steps.get((run_id, action_step_id))
                 r_id = action_step.run_id if action_step else run_id
                 edge = Edge(
                     id=stable_id("edge", r_id, "fulfills", action_step_id, result_step_id),

@@ -449,6 +449,7 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         # so it reasons over the full run each call, not just the new delta.
         if cfg.analyze_claims:
             from .pass2_edges.claims import build_claim_edges
+            from .pass2_edges.intent_alignment import build_intent_alignment_edges
             from .pass3_folds.claim_status import fold_claim_statuses
             from .pass3_folds.constraints import analyze_constraints
 
@@ -459,6 +460,12 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                 fold_claim_statuses(index, edge_result, run_id=run_id)
             except Exception:
                 logger.warning("Pass 4 (claim edges/status) failed, skipping", exc_info=True)
+            try:
+                await build_intent_alignment_edges(
+                    index, run_id=run_id, model=model, session_factory=sf,
+                )
+            except Exception:
+                logger.warning("Pass 4 (intent alignment) failed, skipping", exc_info=True)
             try:
                 await analyze_constraints(
                     index, run_id=run_id, question=_first_user_text(all_messages),
