@@ -8,6 +8,9 @@ symbol_kinds:
   event: A named event, conference, incident, or dated occurrence
   source: A URL, document, paper, or database consulted during research
   tool: An agent tool or function (web_search, code_interpreter, etc.)
+  value: A named quantity or figure the research turns on — a version,
+    count, measurement, coordinate, price, date-as-value, or score
+    (use class=value; the thing a tool could report differently)
   unknown: Cannot be classified into the above
 
 reference_kinds:

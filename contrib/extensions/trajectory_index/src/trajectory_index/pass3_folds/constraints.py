@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ..ir.diagnostics import Diagnostics, content_tokens
+from ..ir.diagnostics import Diagnostics
 from ..ir.models import (
     Constraint,
     ConstraintFinding,
@@ -67,8 +67,6 @@ _SWEEP_CHAR_BUDGET = 20000    # default sweep abstention budget (chars)
 _YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
-# Shared across passes; re-exported here for existing importers.
-_content_tokens = content_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +128,7 @@ class ConstraintAnalysis:
             "commit_step_id": self.commit_step_id,
             "constraints": [
                 {
-                    "id": c.id, "subject": c.subject, "description": c.description,
+                    "id": c.id, "description": c.description,
                     "normalized": dict(c.normalized) if c.normalized else None,
                 }
                 for c in self.constraints
@@ -204,32 +202,6 @@ def check_normalized(
 
     return None
 
-
-def lexical_evidence_exists(
-    constraint: Constraint, grounded_texts: list[str],
-) -> bool:
-    """Lexical half of the Omitted double-negative (pure code).
-
-    True means some grounded step shares the constraint's content tokens or
-    normalized values — evidence *may* exist, so Omitted is suppressed.
-    """
-    tokens = _content_tokens(constraint.description)
-    norm = dict(constraint.normalized) if constraint.normalized else {}
-    lo = int(norm.get("lo", 0) or 0)
-    hi = int(norm.get("hi", 0) or 0)
-    target = str(norm.get("value", "")) if norm.get("kind") == "number" else ""
-
-    for text in grounded_texts:
-        lowered = text.lower()
-        if any(t in lowered for t in tokens):
-            return True
-        if norm.get("kind") == "year_range" and lo and any(
-            lo <= int(y) <= hi for y in _YEAR_RE.findall(text)
-        ):
-            return True
-        if target and target in text:
-            return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -536,19 +508,7 @@ async def _check_omitted(
             )
         return verdicts
 
-    grounded_texts = [s.observation_segment or "" for s in grounded]
-
-    sweep_targets: list[Constraint] = []
-    for c in unsettled:
-        if lexical_evidence_exists(c, grounded_texts):
-            verdicts[c.id] = Verdict(
-                "unknown", 0.0, "code", (),
-                "lexical evidence exists in trace; not settled by window",
-            )
-        else:
-            sweep_targets.append(c)
-    if not sweep_targets:
-        return verdicts
+    sweep_targets = list(unsettled)
 
     # The abstain gate counts full length, and past it the sweep reads full
     # step texts: a "no evidence" verdict over any partial view is the

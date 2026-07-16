@@ -18,12 +18,10 @@ from typing import TYPE_CHECKING
 
 from ..pass3_folds.grounding import drives_defuse, grounded_from_kind
 from .models import (
-    _ACTION_OP_VALUES,
     _ENTITY_CLASS_VALUES,
     _FINDING_STATUS_VALUES,
     _REF_FORM_VALUES,
     _RISK_VALUES,
-    Action,
     Claim,
     ClaimFinding,
     Constraint,
@@ -209,19 +207,6 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
         }
         for f in index.constraint_findings
     ]
-    actions = [
-        {
-            "call_id": a.call_id,
-            "step_id": a.step_id,
-            "run_id": a.run_id,
-            "tool_name": a.tool_name,
-            "operation": a.operation,
-            "targets": list(a.targets),
-            "diffs": [list(d) for d in a.diffs],
-            "purpose": a.purpose,
-        }
-        for a in index.actions.values()
-    ]
     value_flow = getattr(index, "_value_flow", None)
     if value_flow is None:
         from ..pass3_folds.value_flow import build_value_flow_sync
@@ -239,9 +224,7 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "edges": len(index.edges),
             "constraints": len(index.constraints),
             "constraint_findings": len(index.constraint_findings),
-            "actions": len(index.actions),
             "value_timelines": len(value_flow["value_timelines"]),
-            "iterations": len(value_flow["iterations"]),
             "constraint_checks": len(value_flow["constraint_checks"]),
             "intent_coverage": len(value_flow.get("intent_coverage", [])),
             "indexed_message_count": index.indexed_message_count,
@@ -256,7 +239,6 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
         "claim_findings": claim_findings,
         "constraints": constraints,
         "constraint_findings": constraint_findings,
-        "actions": actions,
         "value_flow": value_flow,
     }
     out = Path(path)
@@ -532,28 +514,5 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             confidence_source=str(f.get("confidence_source", "")),
             reason=str(f.get("reason", "")),
         ))
-
-    for a in data.get("actions", []):
-        call_id = str(a.get("call_id", ""))
-        if not call_id:
-            continue
-        raw_op = a.get("operation", "other")
-        op = raw_op if raw_op in _ACTION_OP_VALUES else "other"
-        raw_diffs = a.get("diffs", [])
-        diffs = tuple(
-            (str(d[0]), str(d[1]), str(d[2]))
-            for d in raw_diffs
-            if isinstance(d, list) and len(d) == 3
-        )
-        index.actions[call_id] = Action(
-            call_id=call_id,
-            step_id=str(a.get("step_id", "")),
-            run_id=str(a.get("run_id", "")),
-            tool_name=str(a.get("tool_name", "")),
-            operation=op,
-            targets=tuple(str(t) for t in a.get("targets", [])),
-            diffs=diffs,
-            purpose=str(a.get("purpose", "")),
-        )
 
     return index

@@ -1,16 +1,15 @@
 """Pass 3 fold: value flow analysis.
 
-Pure-code fold over Pass 1 actions + valued references.  Produces three
-summaries an auditor actually reads:
+Pure-code fold over valued references.  Produces two summaries an auditor
+actually reads:
 
-1. **Value timelines** — per value-symbol, the sequence of distinct values
+1. **Value timelines** -- per value-symbol, the sequence of distinct values
    with the step where each appeared.  Deduplicates consecutive repeats.
-2. **Iteration cycles** — groups of write→execute→read, each showing what
-   config changed and what metrics resulted.
-3. **Constraint checks** — matches constraint target values against the
+2. **Constraint checks** -- matches constraint target values against the
    final observed value of the same symbol.
 
-No model calls.  All inputs come from the index.
+No model calls (except constraint checks which are LLM-judged).
+All inputs come from the index.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..ir.index import TrajectoryIndex
-    from ..ir.models import Action
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,16 +34,6 @@ class ValueTimeline:
     symbol_name: str
     symbol_id: str
     points: tuple[ValuePoint, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class IterationCycle:
-    index: int
-    write_step_ids: tuple[str, ...]
-    execute_step_id: str
-    read_step_ids: tuple[str, ...]
-    diffs: tuple[tuple[str, str, str], ...]   # (param, old, new)
-    metrics: tuple[tuple[str, str], ...]       # (metric_name, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +70,6 @@ def build_value_timelines(index: TrajectoryIndex) -> list[ValueTimeline]:
     for sym_id, entries in sorted(sym_refs.items()):
         sym = index.symbols[sym_id]
         entries.sort(key=lambda e: (e[0], e[3] == "tool_output"))
-        # Deduplicate consecutive equal values.
         points: list[ValuePoint] = []
         prev_val: str | None = None
         for si, sid, val, kind in entries:
@@ -100,84 +87,6 @@ def build_value_timelines(index: TrajectoryIndex) -> list[ValueTimeline]:
 
     timelines.sort(key=lambda t: -len(t.points))
     return timelines
-
-
-def build_iteration_cycles(index: TrajectoryIndex) -> list[IterationCycle]:
-    """Group actions into write→execute→read cycles."""
-    step_index_for_id: dict[str, int] = {}
-    for (_, sid), step in index.steps.items():
-        step_index_for_id[sid] = step.index
-
-    sorted_actions: list[tuple[int, Action]] = []
-    for action in index.actions.values():
-        si = step_index_for_id.get(action.step_id, 0)
-        sorted_actions.append((si, action))
-    sorted_actions.sort(key=lambda x: x[0])
-
-    # Find execute actions as cycle boundaries.
-    execute_indices: list[int] = []
-    for i, (_, action) in enumerate(sorted_actions):
-        if action.operation == "execute":
-            execute_indices.append(i)
-
-    if not execute_indices:
-        return []
-
-    # Collect valued refs by step for metric lookup.
-    valued_by_step: dict[str, list[tuple[str, str]]] = {}
-    for ref in index.references.values():
-        if not ref.value:
-            continue
-        sym = index.symbols.get(ref.symbol_id)
-        if not sym:
-            continue
-        if ref.step_id not in valued_by_step:
-            valued_by_step[ref.step_id] = []
-        valued_by_step[ref.step_id].append((sym.canonical_name, ref.value))
-
-    cycles: list[IterationCycle] = []
-    for ci, ei in enumerate(execute_indices):
-        _, exec_action = sorted_actions[ei]
-
-        # Look backward for writes before this execute (after previous execute).
-        prev_boundary = execute_indices[ci - 1] + 1 if ci > 0 else 0
-        writes: list[Action] = []
-        all_diffs: list[tuple[str, str, str]] = []
-        for j in range(prev_boundary, ei):
-            _, action = sorted_actions[j]
-            if action.operation == "write":
-                writes.append(action)
-                all_diffs.extend(action.diffs)
-
-        # Look forward for reads after this execute (before next execute).
-        next_boundary = execute_indices[ci + 1] if ci + 1 < len(execute_indices) else len(sorted_actions)
-        reads: list[Action] = []
-        for j in range(ei + 1, next_boundary):
-            _, action = sorted_actions[j]
-            if action.operation == "read":
-                reads.append(action)
-
-        # Collect metrics from read steps + the execute outcome's tool_result.
-        metrics: dict[str, str] = {}
-        # Check tool_result step right after execute.
-        exec_step_idx = step_index_for_id.get(exec_action.step_id, 0)
-        for sid, pairs in valued_by_step.items():
-            si = step_index_for_id.get(sid, 0)
-            if exec_step_idx < si <= (step_index_for_id.get(sorted_actions[next_boundary - 1][1].step_id, 0) if next_boundary > ei + 1 else exec_step_idx + 100):
-                for name, val in pairs:
-                    if name not in metrics:
-                        metrics[name] = val
-
-        cycles.append(IterationCycle(
-            index=ci,
-            write_step_ids=tuple(a.step_id for a in writes),
-            execute_step_id=exec_action.step_id,
-            read_step_ids=tuple(a.step_id for a in reads),
-            diffs=tuple(all_diffs),
-            metrics=tuple(sorted(metrics.items())),
-        ))
-
-    return cycles
 
 
 def _final_values(index: TrajectoryIndex) -> dict[str, str]:
@@ -242,7 +151,6 @@ async def build_constraint_checks(
     if not finals:
         return []
 
-    # Build payload.
     con_lines = [f"[{i}] {c.description}" for i, c in enumerate(constraints)]
     val_lines = [f"  {name}: {val}" for name, val in sorted(finals.items())]
     payload = (
@@ -290,7 +198,11 @@ async def build_constraint_checks(
 
 
 def build_intent_coverage(index: TrajectoryIndex) -> list[dict[str, Any]]:
-    """Per-constraint intent coverage from ``addresses``/``fulfills`` edges."""
+    """Per-constraint intent coverage from ``addresses``/``fulfills`` edges.
+
+    Edges now use step_id as src (not call_id), so we read edge.src
+    directly as a step_id.
+    """
     constraints = list(index.constraints.values())
     if not constraints:
         return []
@@ -304,14 +216,10 @@ def build_intent_coverage(index: TrajectoryIndex) -> list[dict[str, Any]]:
         elif edge.kind == "fulfills":
             fulfills_src_steps.add(edge.src)
 
-    action_step_by_call: dict[str, str] = {
-        a.call_id: a.step_id for a in index.actions.values()
-    }
-
     coverage: list[dict[str, Any]] = []
     for constraint in constraints:
-        addressing_call_ids = addresses_by_constraint.get(constraint.id, [])
-        if not addressing_call_ids:
+        addressing_step_ids = addresses_by_constraint.get(constraint.id, [])
+        if not addressing_step_ids:
             coverage.append({
                 "constraint_id": constraint.id,
                 "description": constraint.description,
@@ -320,30 +228,23 @@ def build_intent_coverage(index: TrajectoryIndex) -> list[dict[str, Any]]:
             })
             continue
 
-        action_step_ids = [
-            action_step_by_call[cid]
-            for cid in addressing_call_ids
-            if cid in action_step_by_call
-        ]
-
-        has_fulfills = any(sid in fulfills_src_steps for sid in action_step_ids)
+        has_fulfills = any(sid in fulfills_src_steps for sid in addressing_step_ids)
         status = "verified_by_intent" if has_fulfills else "addressed"
 
         coverage.append({
             "constraint_id": constraint.id,
             "description": constraint.description,
             "status": status,
-            "action_step_ids": action_step_ids,
+            "action_step_ids": addressing_step_ids,
         })
 
     return coverage
 
 
 def build_value_flow_sync(index: TrajectoryIndex) -> dict[str, Any]:
-    """Sync version for persistence.dump — timelines + iterations only, no LLM."""
+    """Sync version for persistence.dump -- timelines only, no LLM."""
     timelines = build_value_timelines(index)
-    cycles = build_iteration_cycles(index)
-    return _format_value_flow(timelines, cycles, [], [])
+    return _format_value_flow(timelines, [])
 
 
 async def build_value_flow(
@@ -354,17 +255,15 @@ async def build_value_flow(
 ) -> dict[str, Any]:
     """Run all value-flow folds and return a summary dict."""
     timelines = build_value_timelines(index)
-    cycles = build_iteration_cycles(index)
     checks = await build_constraint_checks(
         index, model=model, session_factory=session_factory,
     )
     intent_cov = build_intent_coverage(index)
-    return _format_value_flow(timelines, cycles, checks, intent_cov)
+    return _format_value_flow(timelines, checks, intent_cov)
 
 
 def _format_value_flow(
     timelines: list[ValueTimeline],
-    cycles: list[IterationCycle],
     checks: list[ConstraintCheck],
     intent_coverage: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -378,17 +277,6 @@ def _format_value_flow(
                 ],
             }
             for t in timelines
-        ],
-        "iterations": [
-            {
-                "index": c.index,
-                "writes": list(c.write_step_ids),
-                "execute": c.execute_step_id,
-                "reads": list(c.read_step_ids),
-                "diffs": [{"param": d[0], "old": d[1], "new": d[2]} for d in c.diffs],
-                "metrics": dict(c.metrics),
-            }
-            for c in cycles
         ],
         "constraint_checks": [
             {

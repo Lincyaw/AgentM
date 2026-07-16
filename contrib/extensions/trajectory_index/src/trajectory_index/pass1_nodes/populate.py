@@ -21,7 +21,6 @@ from ..ir.models import (
     stable_id,
 )
 from ..locate import locate, strip_tags
-from .actions import parse_action
 
 if TYPE_CHECKING:
     from ..ir.index import TrajectoryIndex
@@ -95,13 +94,11 @@ def populate_from_extraction(
     base_idx = len(index.steps)
     steps_by_id: dict[str, Step] = {}
 
-    # Build steps + actions from messages.
     for i, msg in enumerate(messages):
         mid = str(msg.get("id", f"s{base_idx + i}"))
         role = role_map.get(str(msg.get("role", "")), StepRole.USER)
         content, tool_name = _message_step_content(msg)
 
-        # Extract call_id from tool_call blocks.
         call_id: str | None = None
         blocks = msg.get("content", [])
         if isinstance(blocks, list):
@@ -121,30 +118,6 @@ def populate_from_extraction(
         )
         index.add_step(step)
         steps_by_id[mid] = step
-
-        # Parse action from tool_call blocks (structural, no LLM).
-        action = parse_action(msg, step_id=mid, run_id=run_id)
-        if action:
-            index.add_action(action)
-
-            # Write diffs → symbols with values (the "WRITE" side of def-use).
-            for param, old_val, new_val in action.diffs:
-                sym = index.upsert_symbol(
-                    name=param, kind="variable", entity_class="value",
-                )
-                # The edit step carries both old and new values.
-                if old_val:
-                    index.add_reference(
-                        symbol=sym, step=step,
-                        text=f"{param}={old_val}", kind="tool_input",
-                        value=old_val,
-                    )
-                if new_val:
-                    index.add_reference(
-                        symbol=sym, step=step,
-                        text=f"{param}={new_val}", kind="tool_output",
-                        value=new_val,
-                    )
 
     # Symbols: directly from result.symbols (or legacy result.annotated).
     extracted_syms = getattr(result, "symbols", None)

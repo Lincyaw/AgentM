@@ -1,12 +1,8 @@
 """Runtime data utilities for trajectory-index extraction.
 
-Trace message cleaning, JSON extraction, vocabulary validation, and
-programmatic reference generation — used by the trajectory-index atom
-during live agent sessions.
-
-There is no CLI here: offline teacher extraction and evaluation live in
-the ``agentm_eval.benchmarks.index_eval`` benchmark (adapter name
-``index``), which drives this module's functions programmatically.
+JSON extraction, vocabulary validation, programmatic reference generation,
+and the single message walk that both step content and the extractor view
+derive from.
 """
 from __future__ import annotations
 
@@ -25,56 +21,22 @@ from ..agents.entity_extractor.schema import ExtractionResult
 # ---------------------------------------------------------------------------
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
-type ProviderSpec = tuple[str, dict[str, JsonValue]]
 
 # ---------------------------------------------------------------------------
-# Trace message cleaning — keep native format, strip metadata
+# Message walk — the single source for step content + extractor view
 # ---------------------------------------------------------------------------
-
-_SKIP_ROLES: Final = frozenset({"system"})
-_MAX_TEXT_CHARS: Final = 2000
-_PAYLOAD_DROP_KEYS: Final = frozenset({
-    "usage", "timestamp", "stop_reason", "termination",
-})
-
-
-_BLOCK_DROP_KEYS: Final = frozenset({
-    "id", "tool_call_id", "signature",
-})
-
-
-def _truncate_block(block: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    """Truncate long text content and strip IDs that confuse small models."""
-    out = {k: v for k, v in block.items() if k not in _BLOCK_DROP_KEYS}
-    btype = out.get("type", "")
-    if btype == "text":
-        text = out.get("text", "")
-        if isinstance(text, str) and len(text) > _MAX_TEXT_CHARS:
-            return {**out, "text": text[:_MAX_TEXT_CHARS] + "..."}
-    elif btype == "tool_result":
-        sub = out.get("content", [])
-        if isinstance(sub, list):
-            truncated: list[JsonValue] = [_truncate_block(s) for s in sub if isinstance(s, dict)]
-            return {**out, "content": truncated}
-    return out
 
 
 def message_parts(msg: dict[str, JsonValue]) -> tuple[list[tuple[str, str]], str | None]:
     """THE single message walk: (content_part, view_part) pairs + tool name.
 
-    Both the step content (``index._message_step_content``) and the
-    extractor's view (:func:`view_body_with_map`) derive from these pairs
+    Both the step content and the extractor's view derive from these pairs
     — one walk, so the two representations that offset alignment depends
     on cannot drift apart.
 
     View parts differ from content parts in exactly one length-preserving
-    way: literal annotation delimiters (``⟦``/``⟧``, should they ever
-    occur in recorded content) are substituted with plain brackets so the
-    markup parser never meets an unbalanced literal — the substitution
-    preserves length, offsets map 1:1, and stored step content keeps the
-    original characters. The view is otherwise the FULL text: gap elision
-    keeps the model's output bounded, so the prompt window needs no
-    truncation and every character is annotatable.
+    way: literal annotation delimiters are substituted with plain brackets
+    so the markup parser never meets an unbalanced literal.
     """
     import json as _json
 
@@ -118,15 +80,7 @@ def message_parts(msg: dict[str, JsonValue]) -> tuple[list[tuple[str, str]], str
 
 
 def view_body_with_map(msg: dict[str, JsonValue]) -> tuple[str, list[int | None]]:
-    """The extractor's view of a message body + a view→content offset map.
-
-    Takes the UNTRUNCATED serialized message dict. The view is what the
-    extraction prompt shows; the map gives, for each view offset (plus one
-    end-of-string entry), the corresponding offset into the step content —
-    or None for synthesized characters (the truncation ellipsis). Both
-    sides come from :func:`message_parts`, non-empty parts joined with a
-    newline.
-    """
+    """The extractor's view of a message body + a view→content offset map."""
     pairs, _tool = message_parts(msg)
 
     view_parts: list[str] = []
@@ -138,53 +92,19 @@ def view_body_with_map(msg: dict[str, JsonValue]) -> tuple[str, list[int | None]
             continue
         if not first:
             view_parts.append("\n")
-            mapping.append(content_off)   # the join newline
+            mapping.append(content_off)
             content_off += 1
         first = False
         keep = (
             len(view_part) if len(view_part) == len(content_part)
-            else len(view_part) - 3       # truncated: trailing "..." is synthesized
+            else len(view_part) - 3
         )
         for k in range(len(view_part)):
             mapping.append(content_off + k if k < keep else None)
         view_parts.append(view_part)
         content_off += len(content_part)
-    mapping.append(content_off)          # end-of-string
+    mapping.append(content_off)
     return "".join(view_parts), mapping
-
-
-def clean_trace_messages(entries: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
-    """Clean trace entries to extraction input: keep id, role, content blocks.
-
-    Works with output from ``TraceReader.load_messages()`` and
-    ``clickhouse.session_entries()`` — both produce the same
-    ``{type, id, parent_id, timestamp, payload}`` shape.
-    """
-    out: list[dict[str, JsonValue]] = []
-    for entry in entries:
-        entry_id = entry.get("id", "")
-        payload = entry.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        role = payload.get("role", "")
-        if role in _SKIP_ROLES:
-            continue
-
-        content = payload.get("content", [])
-        if not isinstance(content, list) or not content:
-            continue
-
-        blocks: list[JsonValue] = [_truncate_block(b) for b in content if isinstance(b, dict)]
-        out.append({"id": entry_id, "role": role, "content": blocks})
-    return out
-
-
-def _reindex_messages(
-    msgs: list[dict[str, JsonValue]],
-    start: int = 0,
-) -> list[dict[str, JsonValue]]:
-    """Replace message IDs with absolute sequential integers for extraction."""
-    return [{**msg, "id": str(i)} for i, msg in enumerate(msgs, start=start)]
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +121,8 @@ def extract_json(text: str) -> dict[str, JsonValue] | None:
         obj = json.loads(text)
         if isinstance(obj, dict):
             return obj
-    except json.JSONDecodeError as exc:
-        logger.debug("extract_json: full-text parse failed: {}", exc)
+    except json.JSONDecodeError:
+        pass
 
     m = _JSON_BLOCK_RE.search(text)
     if m:
@@ -210,8 +130,8 @@ def extract_json(text: str) -> dict[str, JsonValue] | None:
             obj = json.loads(m.group(1))
             if isinstance(obj, dict):
                 return obj
-        except json.JSONDecodeError as exc:
-            logger.debug("extract_json: code-block parse failed: {}", exc)
+        except json.JSONDecodeError:
+            pass
 
     start = text.find("{")
     if start >= 0:
@@ -226,19 +146,18 @@ def extract_json(text: str) -> dict[str, JsonValue] | None:
                         obj = json.loads(text[start : i + 1])
                         if isinstance(obj, dict):
                             return obj
-                    except json.JSONDecodeError as exc:
-                        logger.debug("extract_json: brace-scan parse failed: {}", exc)
+                    except json.JSONDecodeError:
+                        pass
                     break
     return None
 
 
 # ---------------------------------------------------------------------------
-# Vocabulary validation
+# Extraction result parsing
 # ---------------------------------------------------------------------------
 
 
 def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[str], set[str]]:
-    """Load valid vocabulary values from the selected yaml file."""
     import yaml
 
     fname = "vocabulary.yaml" if vocab_name == "default" else f"vocabulary.{vocab_name}.yaml"
@@ -252,17 +171,9 @@ def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[
 
 
 def _validate_vocabulary(result: ExtractionResult, vocabulary: str = "default") -> str | None:
-    """Normalize extracted symbol kinds against the vocabulary.
-
-    Invalid kinds are downgraded to ``unknown`` rather than rejecting the
-    entire result (kind mis-classification is a precision loss, not worth
-    a retry). Returns an error string only for structural problems that
-    make the result unusable.
-    """
     from ..ir.models import _ENTITY_CLASS_VALUES
 
     symbol_values, _reference_values, _relation_values = _load_vocabulary_values(vocabulary)
-
     for sym in (result.symbols or []):
         kind = (sym.kind or "unknown").lower()
         if kind not in symbol_values:
@@ -274,12 +185,10 @@ def _validate_vocabulary(result: ExtractionResult, vocabulary: str = "default") 
 
 
 def _parse_tags_to_result(text: str) -> ExtractionResult | None:
-    """Parse annotation tags from extractor output into an ExtractionResult."""
     from .markup import OPEN, MarkupError, parse
 
     if OPEN not in text:
         return None
-
     try:
         _plain, annotations = parse(text)
     except MarkupError:
@@ -349,7 +258,6 @@ def _try_parse_response(
     messages: list[Any],
     vocabulary: str = "default",
 ) -> tuple[ExtractionResult | None, str | None]:
-    """Parse an ExtractionResult from the last message's text content."""
     from agentm.core.abi import TextContent
 
     if not messages:
@@ -382,12 +290,6 @@ def _try_parse_response(
 
 
 # ---------------------------------------------------------------------------
-# Structural symbol extraction (code, no LLM)
-# ---------------------------------------------------------------------------
-
-
-
-# ---------------------------------------------------------------------------
 # Programmatic reference generation
 # ---------------------------------------------------------------------------
 
@@ -397,132 +299,91 @@ class GeneratedReference:
     symbol_name: str
     turn_id: str
     text: str
-    kind: str  # tool_input | tool_output | mention
+    kind: str
     start: int
 
 
 _IDENT_CHAR_RE: Final = re.compile(r"[A-Za-z0-9_.\-/]")
 
 
-def _usable_reference_term(term: str) -> bool:
-    """Drop tiny aliases that create noisy substring matches."""
-    norm = re.sub(r"\W+", "", term, flags=re.UNICODE)
-    return len(norm) >= 2
-
-
-def _ref_at_word_boundary(text: str, start: int, end: int) -> bool:
-    """Check that the match is not inside a longer identifier."""
-    if start > 0 and _IDENT_CHAR_RE.match(text[start - 1]):
-        return False
-    return not (end < len(text) and _IDENT_CHAR_RE.match(text[end]))
-
-
-def _symbol_aliases(sym: dict[str, Any]) -> list[str]:
-    aliases = sym.get("aliases", [])
-    if not isinstance(aliases, list):
-        return []
-    return [alias for alias in aliases if isinstance(alias, str)]
-
-
-def _reference_segments(msg: dict[str, JsonValue]) -> list[tuple[str, int, str]]:
-    """``(segment_text, search_from, ref_kind)`` mirroring :func:`message_parts`.
-
-    Reference ``start`` offsets must land in the stored ``step.content``, which
-    :func:`_message_step_content` builds by ``"\\n".join`` over the SAME
-    ``message_parts`` segments. So this walk reproduces those segment texts
-    exactly — including the ``"[tool_call: name]\\n"`` header and one segment
-    per tool_result sub-block — rather than a per-block concatenation of its
-    own. ``search_from`` skips the tool_call header so a symbol is never
-    matched inside ``[tool_call: name]`` while the header still counts toward
-    offsets.
-    """
-    out: list[tuple[str, int, str]] = []
-    blocks = msg.get("content", [])
-    if not isinstance(blocks, list):
-        return out
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type", "")
-        if btype == "text":
-            out.append((str(block.get("text", "")), 0, "mention"))
-        elif btype == "tool_call":
-            name = block.get("name")
-            tool_name = str(name) if name is not None else None
-            args = block.get("arguments", block.get("input", {}))
-            arg_text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
-            header = f"[tool_call: {tool_name}]\n"
-            out.append((header + arg_text, len(header), "tool_input"))
-        elif btype == "tool_result":
-            kind = "tool_output" if block.get("deterministic", True) else "mention"
-            sub = block.get("content", [])
-            if isinstance(sub, list):
-                for s in sub:
-                    if isinstance(s, dict):
-                        out.append((str(s.get("text", "")), 0, kind))
-            else:
-                out.append((str(sub), 0, kind))
-    return out
+def _ref_kind_for_block(block: dict[str, Any]) -> str:
+    btype = block.get("type", "")
+    if btype == "tool_call":
+        return "tool_input"
+    if btype == "tool_result":
+        return "tool_output"
+    return "mention"
 
 
 def _build_references(
     symbols: list[dict[str, Any]],
     messages: list[dict[str, JsonValue]],
 ) -> list[GeneratedReference]:
-    """Grep symbol names + aliases in messages to produce references
-    (exact name/alias matching — deterministic given Pass 1 names)."""
-    names: list[tuple[str, str]] = []  # (search_term_lower, canonical_name)
+    """Grep symbol names in messages to produce references."""
+    terms: list[tuple[str, str]] = []
     seen_terms: set[tuple[str, str]] = set()
     for sym in symbols:
         canonical = str(sym["name"])
-        candidates = [canonical, *_symbol_aliases(sym)]
-        for candidate in candidates:
-            if not isinstance(candidate, str) or not _usable_reference_term(candidate):
+        aliases = sym.get("aliases", [])
+        if not isinstance(aliases, list):
+            aliases = []
+        for candidate in [canonical, *aliases]:
+            if not isinstance(candidate, str):
+                continue
+            norm = re.sub(r"\W+", "", candidate, flags=re.UNICODE)
+            if len(norm) < 2:
                 continue
             key = (candidate.lower(), canonical)
-            if key in seen_terms:
-                continue
-            seen_terms.add(key)
-            names.append(key)
-    names.sort(key=lambda x: -len(x[0]))
+            if key not in seen_terms:
+                seen_terms.add(key)
+                terms.append(key)
+    terms.sort(key=lambda x: -len(x[0]))
 
     refs: list[GeneratedReference] = []
     seen: set[tuple[str, str, str]] = set()
 
     for msg in messages:
         mid = str(msg.get("id", ""))
-        # Segments and their join mirror _message_step_content exactly, so
-        # ``seg_offset`` tracks the true offset into step.content.
+        parts, _ = message_parts(msg)
+        blocks = msg.get("content", [])
+        block_list = blocks if isinstance(blocks, list) else []
+        block_kinds = [_ref_kind_for_block(b) for b in block_list if isinstance(b, dict)]
+
         seg_offset = 0
         first = True
-        for seg_text, search_from, kind in _reference_segments(msg):
-            if not seg_text:
+        kind_idx = 0
+        for content_part, _view_part in parts:
+            if not content_part:
                 continue
             if not first:
-                seg_offset += 1   # the "\n" that _message_step_content joins with
+                seg_offset += 1
             first = False
-            hay = seg_text.lower()
 
-            for search_term, canonical in names:
-                pos = hay.find(search_term, search_from)
+            kind = block_kinds[kind_idx] if kind_idx < len(block_kinds) else "mention"
+            hay = content_part.lower()
+
+            for search_term, canonical in terms:
+                pos = hay.find(search_term)
                 if pos < 0:
                     continue
                 end = pos + len(search_term)
-                if not _ref_at_word_boundary(seg_text, pos, end):
+                if pos > 0 and _IDENT_CHAR_RE.match(content_part[pos - 1]):
+                    continue
+                if end < len(content_part) and _IDENT_CHAR_RE.match(content_part[end]):
                     continue
                 dedup_key = (canonical, mid, kind)
                 if dedup_key in seen:
                     continue
                 seen.add(dedup_key)
-
                 refs.append(GeneratedReference(
                     symbol_name=canonical,
                     turn_id=mid,
-                    text=seg_text[pos:end][:50],
+                    text=content_part[pos:end][:50],
                     kind=kind,
                     start=pos + seg_offset,
                 ))
 
-            seg_offset += len(seg_text)
+            seg_offset += len(content_part)
+            kind_idx += 1
 
     return refs

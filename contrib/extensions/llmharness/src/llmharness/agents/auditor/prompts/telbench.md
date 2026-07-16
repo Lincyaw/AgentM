@@ -20,15 +20,26 @@ Exception: if the agent already commits in an earlier span (states "the answer i
 
 The full trajectory is already visible to you — read the spans directly.
 
-`get_insights` gives the index's findings as a ranked feed: witnessed
-contradictions (an agent claim vs a tool observation), grounding flags (names
-or values the agent used that no tool produced), constraint gaps (a requirement
-committed to without verifying), and unsupported claims. These are advisory
-leads computed by code — incomplete or wrong at times. Use them to decide which
-commitments to scrutinize, then confirm by reading the actual span. Focus on
-entities/claims the final answer depends on, not search terms or abandoned
-candidates. `search_symbols` and `get_symbol_context` let you check whether a
-specific entity in the answer is grounded by a tool output.
+`get_insights` is the complete, ranked lead feed, and each lead is
+self-contained: witnessed contradictions (a claim against a tool observation),
+agent self-contradictions (the agent against its own earlier claim), grounding
+flags — each carrying the entity's id and its full occurrence timeline (every
+step it appears at and whether any occurrence was tool-backed) — constraint
+gaps, and unsupported claims. A lead already states where it occurs and its
+grounding status, so reading the feed once gives you what a per-entity lookup
+would.
+
+These leads are advisory: code-derived, and wrong at times. Treat each as a
+hypothesis and settle it against the actual span — a lead is an error only
+where the agent commits to it, and only when the span bears out that the
+evidence does not establish it. Weigh what the final answer depends on, not
+exploratory or abandoned candidates.
+
+`search_symbols` and `get_symbol_context` are for one job: answering a specific
+question the feed left open. They are not for exploring the graph. If a lead
+already gives the entity, its id, and its grounding, a lookup adds nothing; and
+searching for a concept the index never named returns nothing — the leads and
+the spans are your evidence, not repeated queries.
 
 # Output
 

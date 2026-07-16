@@ -409,6 +409,9 @@ async def _run_edge_pass(idx: Any, tid: str, model: str, exp: Experiment) -> Non
     """
     from agentm.core.runtime import AgentSession
     from trajectory_index.pass2_edges.claims import build_claim_edges
+    from trajectory_index.pass2_edges.self_contradiction import (
+        build_self_contradiction_edges,
+    )
     from trajectory_index.pass3_folds.claim_status import fold_claim_statuses
 
     try:
@@ -418,6 +421,12 @@ async def _run_edge_pass(idx: Any, tid: str, model: str, exp: Experiment) -> Non
         exp.write_session_artifact(tid, "", "pass2_edges.json", result.to_artifact())
         analysis = fold_claim_statuses(idx, result, run_id=tid)
         exp.write_session_artifact(tid, "", "claim_statuses.json", analysis.to_artifact())
+        # Agent-internal edges (claim↔claim self-contradiction, SCHEMA §2.8):
+        # the agent against itself — a lead no environment evidence can raise.
+        sc = await build_self_contradiction_edges(
+            idx, run_id=tid, model=model, session_factory=AgentSession.create,
+        )
+        exp.write_session_artifact(tid, "", "self_contradiction.json", sc.to_artifact())
     except Exception as exc:
         typer.echo(f"  {tid}: edge pass failed: {exc}", err=True)
 

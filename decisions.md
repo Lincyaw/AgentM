@@ -654,3 +654,80 @@ numbers — do not change prompts mid-run):
   projected) is stochastic variance at temperature=1, not a systematic atom bug.
   Confirmed: same user sim args, same agent model, same conversation lengths.
   Improving further requires multiple trials.
+
+## 2026-07-14 — trajectory_index auditor F1 investigation + fixes
+
+- **Added `value` kind to the research vocabulary** (L2: codebase convention).
+  Extraction hard-failed on `sym kind 'value' invalid` — research trajectories
+  have named quantities (versions/counts/coordinates) with no home among
+  {entity,event,source,tool}, so the model borrowed the class value. Vocab kinds
+  are the codebase's extension point (context.py auto-injects them into the
+  prompt), so added a `value` kind. Extraction hard-fails ~5→0 across 200.
+- **Authority tier: user/harness entities are grounded, not fabricated** (L3:
+  design review + SCHEMA §2.3). `_provenance_kind` maps user/system-step
+  mentions to `given` (∈ _PRODUCING_KINDS). Deterministic remeasure:
+  fabricated_name 2581→2089 (−19%), true fabrications preserved.
+- **Built agent-internal self-contradiction edges** (L3: three-reviewer design
+  panel; SCHEMA §2.8 propositional tier). pass2_edges/self_contradiction.py:
+  code groups same-symbol claim pairs, model judges contradiction, emits an
+  advisory `self_contradicts` edge. Verified on 0808. Value/retraction tiers
+  deferred — reviewers confirmed `Reference.value` is ⊥ corpus-wide (0/69732),
+  so the value world must be built first.
+- **claims_empty surfacing** (L2: SCHEMA P2 no-silent-gap). get_insights states
+  "claim analysis absent" when index.claims is empty (0802-type terse traj).
+- **get_insights self-sufficient + get_symbol_context name-tolerant** (L3:
+  measured auditor behavior via `agentm trace tools`). The auditor made ~30
+  tool-calls/session fighting the index (name-vs-id errors, 42% empty searches,
+  hitting the 30-turn cap). Inlined symbol id + occurrence timeline into
+  get_insights; get_symbol_context now resolves names. Errors 6%→0%.
+- **[flagged] Rewrote the auditor prompt (telbench.md) as index-usage
+  methodology** (L4: north-star = general, not case-hack). Interface fix alone
+  barely moved tool-calls (29.6→24.5); the prompt ("get_insights is complete;
+  adjudicate against spans; the lookup tools are not for exploring the graph")
+  did: 29.6→**15.2** (−49%), turn-cap exhaustion 6/15→1/13. Principles only, no
+  case-specific entities per the user's constraint. Flagged: prompt-design call.
+- **[flagged] Diagnosis: macro-F1 is flat (~0.384) across every index-signal
+  change** (L4: north-star reasoning). The index signal is fine; the bottleneck
+  was the auditor↔index interface + the auditor's compulsive tool use, not the
+  leads. New signals (self-contra, claims_empty) fire correctly but are
+  rare/indirect on research trajectories. Full-200 run with all fixes in flight
+  to confirm whether the freed auditor budget lifts F1 off 0.384.
+- **[CORRECTION] The interface/methodology fixes did NOT lift F1** (L4:
+  faithful reporting). Final full-1000 (all fixes) = macroF1 **0.422** vs
+  old-code baseline 0.427 — flat (test-split 0.393). Interim samples (0.461,
+  0.477) were a SAMPLING ARTIFACT: at c50 under rate-limiting, short/easy
+  trajectories complete first and skew early F1 high; the number regressed to
+  ~0.42 as long/hard cases finished. Do not trust completion-order interim F1.
+  What IS real and attributable (fixed case sets, behavioral metrics): tool
+  calls per auditor session cut ~a third by the methodology prompt (24.5→15.2
+  on the same 13 cases; ~29.6 baseline on other cases), turn-cap exhaustion
+  6/15→1/13, get_symbol_context errors 6%→0%, extraction hard-fails cut by the
+  `value` vocab. Conclusion: freeing the auditor's budget made it EFFICIENT,
+  not more ACCURATE — the F1 ceiling is bounded by the auditor's span-level
+  reasoning + the commit-vs-fork localization convention, not budget or tool
+  friction. The "budget-starved caps F1" half of the diagnosis was wrong.
+
+### 2026-07-15
+
+- **Extract real-agent session IDs from eval runs for trajectory-index** (L2:
+  codebase research). "Real trajectory" benchmarks that record live session IDs
+  in `results.jsonl → session_ids[]`: sandbox / tau2 / ale (aftraj records 0 —
+  it audits pre-recorded trajectories; telbench/auditor/index-eval use
+  pre-serialized data). Extracted + deduped to scratchpad (2066 unique across
+  all runs). User picked scope = latest full sweep per family: sandbox
+  `sandbox-azure-gpt-20260714-033310-0a20` (46) + tau2
+  `tau2-session-azure-gpt-20260711-130819-762e` (114) + ale `full-alefull2`
+  (46) = 206 sessions, all azure-gpt.
+- **[flagged] Corrected index vocabulary per trajectory family — NOT `default`**
+  (L2–L3: codebase convention + judgment). First launched all three on
+  `--vocabulary default`, but `vocabulary.yaml` is the ops/RCA vocab
+  (service/metric/config/table/api) — wrong for these trajectory types, and it
+  was silently rejecting model-emitted `entity` kinds. The repo ships
+  purpose-built vocabs: switched sandbox→`coding`
+  (function/file/type/macro/error/test/build_target/spec_requirement), and
+  tau2+ale→`multi_agent` (entity/table/api/tool/result/expression/metric/code).
+  Stopped ~2min in, relaunched with new `-coding`/`-ma` exp-ids. Verified fix:
+  sym-kind-invalid 1→0 on all three; tau2 now aliases customer entities to DB
+  IDs ('Mia Garcia' → 'mia_garcia_4516'), which `default` (no `entity` kind)
+  would have dropped. Reasoning: running 206 sessions on a mis-fit vocab forces
+  functions/entities into service/file/unknown and produces a low-value index.

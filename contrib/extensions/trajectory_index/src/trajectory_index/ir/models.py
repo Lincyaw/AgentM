@@ -70,13 +70,6 @@ class StepRole:
     TOOL_RESULT = "tool_result"
 
 
-# Action operations (SCHEMA.md §Designed extensions: "Action as a first-class node")
-type ActionOp = Literal["read", "write", "execute", "check", "other"]
-_ACTION_OP_VALUES: frozenset[str] = frozenset(
-    {"read", "write", "execute", "check", "other"}
-)
-
-
 # ---------------------------------------------------------------------------
 # Core data structures
 # ---------------------------------------------------------------------------
@@ -91,25 +84,6 @@ class Location:
 
     def contains(self, offset: int) -> bool:
         return self.start <= offset < self.end
-
-
-@dataclass(frozen=True, slots=True)
-class Action:
-    """A tool call parsed structurally from the record (SCHEMA.md §Designed).
-
-    ``operation`` classifies the call's effect on the external world;
-    ``targets`` names the objects accessed; ``diffs`` records parameter
-    changes for write operations (edit tool calls with old/new strings).
-    """
-
-    call_id: str
-    step_id: str
-    run_id: str
-    tool_name: str
-    operation: ActionOp
-    targets: tuple[str, ...] = ()
-    diffs: tuple[tuple[str, str, str], ...] = ()   # (param, old_value, new_value)
-    purpose: str = ""
 
 
 @dataclass(frozen=True, slots=True)

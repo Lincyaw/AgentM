@@ -1,4 +1,4 @@
-"""Pass 2a — identity: alias resolution + coreference.
+"""Pass 2a — identity: alias resolution.
 
 One entity, many surfaces. The division of labor is code-blocks →
 model-judges-locally → code-folds:
@@ -6,10 +6,6 @@ model-judges-locally → code-folds:
     alias_candidates   →  resolve_aliases       →  apply_alias_merges
     (block same-entity     (model: same entity?)     (union-find cluster +
      pairs by name)                                   re-point refs/relations)
-
-    anaphor detection  →  resolve_references     →  add_reference
-    (regex closed-class    (model: which antecedent?)  (materialize the link
-     deictic surfaces)                                  so dataflow sees it)
 
 Code never decides identity and the model never traverses the graph. Runs
 before the Pass 3 dataflow so the def-use layer sees merged entities.
@@ -28,7 +24,6 @@ from ..pass3_folds.grounding import drives_defuse
 
 if TYPE_CHECKING:
     from ..ir.index import TrajectoryIndex
-    from ..ir.models import Step
 
 _MIN_BLOCK_SUBSTR = 3         # alias blocking: shortest name a substring match may involve
 _SNIPPET_CHARS = 120          # per-reference context snippet cap for the merge adjudicator
@@ -332,114 +327,3 @@ async def resolve_aliases(
         index.build_dependencies()
     return groups
 
-
-# ---------------------------------------------------------------------------
-# Coreference resolution: bind an anaphor to its antecedent entity.
-# ---------------------------------------------------------------------------
-
-# Closed-class deictic/anaphoric surfaces a small deterministic proposer can spot.
-_ANAPHOR = re.compile(
-    r"\b(?:this|that|these|those|it|its|the (?:previous|above|prior|last|former|same)"
-    r"\s+\w+|the (?:result|output|value|answer|response))\b",
-    re.IGNORECASE,
-)
-
-_COREF_INSTRUCTIONS = """\
-An agent's text used an anaphor (a pronoun or back-reference like "this", "it",
-"the previous result"). Decide which earlier entity it refers to. You are given the
-anaphor in its sentence and a numbered list of candidate entities recently in scope.
-Pick the single entity the anaphor denotes, or -1 if none fits (it refers to
-something not listed, or to an idea/action rather than a tracked entity).
-Return ONLY: {"verdicts": [{"id": 0, "entity": <candidate-index or -1>, "confidence": 0.9}]}
-"""
-
-
-async def resolve_references(
-    index: TrajectoryIndex, model: str | None = None,
-    window: int = 8, max_candidates: int = 8, apply: bool = True,
-    session_factory: SessionFactory | None = None,
-) -> int:
-    """Detect anaphors in agent text, bind each to an antecedent entity (LLM), and add
-    a resolved reference so the def-use layer links it. Returns #anaphors resolved.
-
-    Divide-and-conquer: code detects anaphors + proposes recent in-scope candidates,
-    the model picks the referent (local), code adds the reference and rebuilds Pass 3.
-    """
-    import contextlib
-
-    # steps in run/index order, with their entities-in-scope running set
-    steps = sorted(index.steps.values(), key=lambda s: (s.run_id, s.index))
-    # entity last-seen step index per run, for recency-ranked candidates
-    seen: dict[str, list[tuple[int, str]]] = {}  # run_id -> [(step_index, symbol_id)]
-    for r in index.references.values():
-        st = index.steps.get((r.run_id, r.step_id))
-        sym = index.symbols.get(r.symbol_id)
-        if st and sym and sym.entity_class in ("identifier", "value"):
-            seen.setdefault(r.run_id, []).append((st.index, r.symbol_id))
-    for lst in seen.values():
-        lst.sort()
-
-    items: list[tuple[Step, str, list[str]]] = []  # (step, anaphor phrase, candidate sym_ids)
-    for st in steps:
-        if st.role not in ("assistant",) or not st.content:
-            continue
-        m = _ANAPHOR.search(st.content)
-        if not m:
-            continue
-        # candidates: distinct entities seen strictly earlier, most-recent first
-        cands: list[str] = []
-        for idx, sid in reversed(seen.get(st.run_id, [])):
-            if idx < st.index and sid not in cands:
-                cands.append(sid)
-            if len(cands) >= max_candidates:
-                break
-        if not cands:
-            continue
-        items.append((st, m.group(0), cands))
-
-    if not items:
-        return 0
-    if session_factory is None:
-        raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
-
-    rows = []
-    for i, (st, phrase, cands) in enumerate(items):
-        sentence = st.content[max(0, st.content.lower().find(phrase.lower()) - 80):][:200]
-        rows.append({
-            "id": i,
-            "anaphor": phrase,
-            "sentence": sentence,
-            "candidates": [
-                {"index": j, "name": index.symbols[sid].canonical_name,
-                 "kind": index.symbols[sid].kind}
-                for j, sid in enumerate(cands)
-            ],
-        })
-    raw = await _ask_model(
-        _COREF_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
-        session_factory=session_factory,
-    )
-    if raw is None:
-        return 0
-
-    by_id = _index_by_id(raw)
-    resolved = 0
-    for i, (st, phrase, cands) in enumerate(items):
-        v = by_id.get(i)
-        if not v:
-            continue
-        with contextlib.suppress(TypeError, ValueError):
-            pick = int(v.get("entity", -1))
-        if pick < 0 or pick >= len(cands):
-            continue
-        sym = index.symbols[cands[pick]]
-        pos = st.content.lower().find(phrase.lower())
-        index.add_reference(
-            symbol=sym, step=st, text=sym.canonical_name, kind="mention",
-            start=max(0, pos), form="anaphor", resolved_from=phrase,
-        )
-        resolved += 1
-
-    if apply and resolved:
-        index.build_dependencies()
-    return resolved

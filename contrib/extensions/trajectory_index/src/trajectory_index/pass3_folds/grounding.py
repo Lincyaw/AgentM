@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from ..ir.models import Dependency, Reference, Risk, Step, stable_id
+from ..ir.models import Dependency, Reference, Risk, Step, StepRole, stable_id
 from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
 
 if TYPE_CHECKING:
@@ -29,9 +29,14 @@ if TYPE_CHECKING:
 
 # Reference kinds that produce/introduce a resource value (a "write"). The
 # extractor only emits tool_output (data.py); define/write/observe are inert for
-# freshly-built indexes and only matter for loaded/external ones. This is the
-# file's single producing-kind vocabulary — DEFINITION_PREFERRED_KINDS aliases it.
-_PRODUCING_KINDS: frozenset[str] = frozenset({"tool_output", "define", "write", "observe"})
+# freshly-built indexes and only matter for loaded/external ones. ``given`` is
+# the authority tier (SCHEMA §1, §2.3): content the USER states in the task or
+# the SYSTEM/harness provides — a grounding source that is not the agent, hence
+# not fabrication. This is the file's single producing-kind vocabulary —
+# DEFINITION_PREFERRED_KINDS aliases it.
+_PRODUCING_KINDS: frozenset[str] = frozenset(
+    {"tool_output", "define", "write", "observe", "given"}
+)
 
 
 def drives_defuse(entity_class: str) -> bool:
@@ -57,7 +62,7 @@ def grounded_from_kind(kind: str) -> bool:
 
 
 def _provenance_kind(step: Step, kind: str, start: int, end: int) -> str:
-    """Upgrade a block-derived reference kind with Pass 1 provenance.
+    """Upgrade a block-derived reference kind with Pass 1 provenance and authority.
 
     On role-degraded records everything arrives as text blocks, so every
     occurrence is kind="mention" even inside a ``⟦obs⟧``-labeled region —
@@ -66,8 +71,20 @@ def _provenance_kind(step: Step, kind: str, start: int, end: int) -> str:
     observation spans IS tool output; the upgrade only ADDs observation
     status (attested roles keep their block-derived kind, including the
     deliberate non-deterministic downgrade).
+
+    Authority (SCHEMA §1, §2.3): a mention in a USER step (an entity named
+    in the task) or a SYSTEM step (harness-provided) is ``given`` — grounded
+    by that authority, not agent invention. This is the built tier of the
+    source generalization; grounding by an env observation stays the tool
+    tier. Only agent-authored mentions with no tool/user/harness backing
+    remain ungrounded. Both collapse to the binary agent/env model when the
+    record does not mark a finer authority.
     """
-    if kind != "mention" or not step.obs_regions:
+    if kind != "mention":
+        return kind
+    if step.role in (StepRole.USER, StepRole.SYSTEM):
+        return "given"
+    if not step.obs_regions:
         return kind
     for a, b in step.obs_regions:
         if start >= a and end <= b:
@@ -195,7 +212,6 @@ def _build_run_dependencies(
             grounded_by_step_id=grounded_by,
             def_value=reaching.value,
             use_value=ref.value,
-            confidence=min(reaching.confidence, ref.confidence),
         )
         index.dependencies[dep.id] = dep
         index._dep_ids_by_symbol[symbol_id].append(dep.id)

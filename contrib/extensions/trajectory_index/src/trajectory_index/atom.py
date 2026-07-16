@@ -96,19 +96,24 @@ def _agentmsg_to_payload(msg: AgentMessage) -> dict[str, JsonValue]:
         if isinstance(block, TextContent):
             blocks.append({"type": "text", "text": block.text})
         elif isinstance(block, ToolCallBlock):
-            blocks.append(
-                {
-                    "type": "tool_call",
-                    "name": block.name,
-                    "arguments": block.arguments,
-                }
-            )
+            tc: dict[str, JsonValue] = {
+                "type": "tool_call",
+                "name": block.name,
+                "arguments": block.arguments,
+            }
+            if block.id:
+                tc["id"] = block.id
+            blocks.append(tc)
         elif isinstance(block, ToolResultBlock):
             sub_blocks: list[JsonValue] = []
             for sub in block.content:
                 if isinstance(sub, TextContent):
                     sub_blocks.append({"type": "text", "text": sub.text})
             tr: dict[str, JsonValue] = {"type": "tool_result", "content": sub_blocks}
+            if block.tool_call_id:
+                tr["tool_call_id"] = block.tool_call_id
+            if getattr(block, "is_error", False):
+                tr["is_error"] = True
             if not block.deterministic:
                 tr["deterministic"] = False
             blocks.append(tr)
@@ -186,25 +191,52 @@ def _agentmsg_to_extraction_dict(
 
 def _format_message_compact(
     msg: dict[str, Any],
-    known_names: list[str] | None = None,
+    registry: list[dict[str, Any]] | None = None,
 ) -> str:
     """Format one serialized message as compact text for the extraction prompt.
 
-    The body is the same view string the populate-side verification
-    recomputes (``data.view_body_with_map``) — the two must agree exactly,
-    or every annotated message would fail the strip-and-compare check.
-    Known symbols are marked ``⟦known|name⟧`` on top of that body; the
-    marks strip away with all other annotations at verification time.
+    Previously-extracted symbols are marked inline with their original tag
+    (e.g. ``⟦sym kind=file|codec.py⟧``) so the model sees what was already
+    found, in context.
     """
-    from .pass1_nodes.markup import mark_known
     from .pass1_nodes.serialize import view_body_with_map
 
     mid = msg.get("id", "")
     role = msg.get("role", "")
     body, _ = view_body_with_map(msg)
-    if known_names:
-        body = mark_known(body, known_names)
+    if registry:
+        body = _mark_extracted(body, registry)
     return f"[{mid}|{role}]\n{body}"
+
+
+def _mark_extracted(text: str, registry: list[dict[str, Any]]) -> str:
+    """Wrap occurrences of previously-extracted symbols with their original tag.
+
+    ``⟦sym kind=file|codec.py⟧`` — not a generic ``⟦known|…⟧``.
+    """
+    import re
+
+    from .pass1_nodes.markup import CLOSE, OPEN
+
+    names: list[tuple[str, str]] = []
+    for entry in registry:
+        kind = str(entry.get("kind", "unknown"))
+        name = str(entry.get("name", ""))
+        if name:
+            names.append((name, kind))
+        for alias in entry.get("aliases", []):
+            alias = str(alias)
+            if alias:
+                names.append((alias, kind))
+    names.sort(key=lambda x: -len(x[0]))
+
+    for name, kind in names:
+        tag = f"{OPEN}sym kind={kind}|"
+        escaped = re.escape(name)
+        boundary = r"a-zA-Z0-9_.\-" + ("/" if "/" in name else "")
+        pattern = re.compile(rf"(?<!\|)(?<![{boundary}]){escaped}(?![{boundary}])", re.IGNORECASE)
+        text = pattern.sub(f"{tag}{name}{CLOSE}", text)
+    return text
 
 
 def build_extraction_prompt(
@@ -215,19 +247,16 @@ def build_extraction_prompt(
 ) -> str:
     """Build the extractor's input prompt from trajectory messages.
 
-    Known symbols from the registry are marked inline with ``⟦known|name⟧``
-    in the message text. Serialization is untruncated here — the view
-    builder applies its own prompt-window truncation, identically on the
-    prompt side and the verification side.
+    Previously-extracted symbols are marked inline with their original tag
+    (e.g. ``⟦sym kind=file|codec.py⟧``).
     """
     serialized = [
         d for i, m in enumerate(messages, start=message_id_start)
         if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
     ]
-    known_names = [str(e.get("name", "")) for e in registry] if registry else None
     formatted = "\n\n".join(
         text for msg in serialized
-        if (text := _format_message_compact(msg, known_names))
+        if (text := _format_message_compact(msg, registry))
     )
     return formatted
 
@@ -390,20 +419,19 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
 
         # Model-judgment passes (best-effort — any model failure leaves the
         # deterministic layer intact). Each is an independent local judgment.
-        merged = coref = 0
+        merged = 0
         model = cfg.resolve_model or cfg.model
         sf = api.spawn_child_session  # §11: atom passes its own factory
         if cfg.resolve_aliases:
-            from .pass2_edges.identity import resolve_aliases, resolve_references
+            from .pass2_edges.identity import resolve_aliases
 
             try:
                 groups = await resolve_aliases(index, model=model, apply=False, session_factory=sf)
                 if groups:
                     index.apply_alias_merges(groups)
                     merged = sum(len(g) for g in groups) - len(groups)
-                coref = await resolve_references(index, model=model, apply=False, session_factory=sf)
             except Exception:
-                logger.warning("Pass 2 (alias/coref) failed, degrading to Pass 1+3", exc_info=True)
+                logger.warning("Pass 2 (alias) failed, degrading to Pass 1+3", exc_info=True)
 
         # Pass 3 (dataflow): def-use + grounding over the full run (deterministic).
         index.build_dependencies()
@@ -444,7 +472,6 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         ungrounded = sum(1 for d in deps if d.risk == "ungrounded")
         contradicted = sum(1 for d in deps if d.risk == "contradicted")
         merged_note = f", merged {merged} aliases" if merged else ""
-        coref_note = f", resolved {coref} anaphors" if coref else ""
         flags = []
         if ungrounded:
             flags.append(f"{ungrounded} fabricated-name")
@@ -462,7 +489,7 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                         f"{stats.reference_count} references, "
                         f"{stats.relation_count} relations, "
                         f"{stats.dependency_count} dependencies"
-                        f"{merged_note}{coref_note}{flag_note}."
+                        f"{merged_note}{flag_note}."
                     ),
                 )
             ]

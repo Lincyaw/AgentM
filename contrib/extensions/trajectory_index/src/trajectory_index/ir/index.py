@@ -38,12 +38,10 @@ from ..pass3_folds.grounding import (
 )
 from . import persistence
 from .models import (
-    _ACTION_OP_VALUES,
     _ENTITY_CLASS_VALUES,
     _FINDING_STATUS_VALUES,
     _REF_FORM_VALUES,
     _RISK_VALUES,
-    Action,
     AliasCandidate,
     Claim,
     ClaimFinding,
@@ -76,12 +74,10 @@ from .models import (
 # Names re-exported so existing ``from trajectory_index.index import X`` imports
 # keep resolving after the split. Keep in sync with the models import above.
 __all__ = [
-    "_ACTION_OP_VALUES",
     "_ENTITY_CLASS_VALUES",
     "_FINDING_STATUS_VALUES",
     "_REF_FORM_VALUES",
     "_RISK_VALUES",
-    "Action",
     "AliasCandidate",
     "Claim",
     "ClaimFinding",
@@ -161,9 +157,6 @@ class TrajectoryIndex:
         self.constraints: dict[str, Constraint] = {}
         self.constraint_findings: list[ConstraintFinding] = []
 
-        # Actions (structural, Pass 1). Parsed from tool_call blocks.
-        self.actions: dict[str, Action] = {}
-
         self.indexed_message_count: int = 0
 
     # ---- write path ----
@@ -177,9 +170,6 @@ class TrajectoryIndex:
 
     def add_step(self, step: Step) -> None:
         self.steps[(step.run_id, step.step_id)] = step
-
-    def add_action(self, action: Action) -> None:
-        self.actions[action.call_id] = action
 
     def upsert_symbol(
         self,

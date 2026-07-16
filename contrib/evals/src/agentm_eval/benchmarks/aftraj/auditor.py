@@ -297,13 +297,13 @@ async def _build_index_for_trajectory(
     from agentm_eval.methods.index import build_index, extract_symbols
 
     try:
-        chunks = await extract_symbols(
+        chunks, idx = await extract_symbols(
             trajectory, model=index_model, run_id="",
             chunk_size=(4, 6), vocabulary=index_vocabulary,
         )
         if not chunks:
             return None
-        return await build_index(chunks, model=index_model, resolve=True)
+        return await build_index(idx, model=index_model, resolve=True)
     except Exception:
         logger.debug("index build failed", exc_info=True)
         return None
@@ -386,7 +386,7 @@ async def _incremental_index_step(
 ) -> None:
     from agentm_eval.methods.index import extract_symbols
 
-    chunks = await extract_symbols(
+    chunks, _ = await extract_symbols(
         [new_turn], model=index_model, vocabulary=index_vocabulary,
     )
     if not chunks:

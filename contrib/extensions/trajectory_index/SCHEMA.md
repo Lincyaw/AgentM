@@ -528,22 +528,19 @@ import Symbol` still resolves.
 | annotation grammar, strip-and-compare, alignment | `pass1_nodes/markup.py` |
 | Pass 1 populate + verification | `pass1_nodes.populate.populate_from_extraction` (method `ir.index.TrajectoryIndex.populate_from_extraction`) |
 | $O_i$, segments | `ir.models.Step.obs_regions`, `observation_segment` / `action_segment` |
-| action nodes (structural, from tool_call blocks) | `pass1_nodes.actions.parse_action`, `ir.models.Action` |
-| value extraction (`⟦val⟧` tag + edit diffs) | `pass1_nodes.populate` (edit diffs → valued refs), extractor prompt `⟦val sym=…\|value⟧` |
+| value extraction (`⟦val⟧` tag) | extractor prompt `⟦val sym=…\|value⟧` |
 | evidence edges, partitioned sweep, coverage | `pass2_edges.claims.build_claim_edges` |
 | identity edges (alias/coreference) | `pass2_edges.identity` |
 | claim status fold | `pass3_folds.claim_status.fold_claim_statuses` |
 | def-use grounding, risks | `pass3_folds.grounding.build_dependencies`, `pass1_nodes.serialize._build_references` |
 | value fidelity (confirm/contradict) | `pass3_folds.grounding.compare_values` |
 | constraint layer | `pass3_folds.constraints.analyze_constraints` |
-| value flow (timelines, iterations, constraint checks) | `pass3_folds.value_flow` |
+| value flow (timelines, constraint checks) | `pass3_folds.value_flow` |
 | index insights surfaced to the auditor (§4) | `query_tools.build_insights_tool` (via `atom.py` / `query_atom.py`) |
 | extractor prompt (annotation contract) | `agents/entity_extractor/prompts/default.md` |
 
 ```python
 Step:         run_id, step_id, index, role, content, call_id, obs_regions
-Action:       call_id, step_id, run_id, tool_name, operation,            # structural parse
-              targets, diffs                                             # (param, old, new) for edits
 Claim:        id, run_id, step_id, text                                 # verbatim content slice
 Symbol:       id, canonical_name, kind, aliases, entity_class
 Reference:    symbol_id, location, kind, grounded, form, value          # an occurrence
@@ -564,9 +561,8 @@ Each has a concrete mechanism in the model's own discipline
 sequenced, not deferred.
 
 **General value vs substrate (from adversarial review).** Judged on design
-merit for ANY agent — not one benchmark — the ranking is: **Action as a
-first-class node** and the **Authority chain** are the real prizes (they
-unlock the coding / computer-use and the multi-agent classes the current
+merit for ANY agent — not one benchmark — the ranking is: the **Authority
+chain** is the real prize (it unlocks the multi-agent class the current
 index is blind to); **agent-internal edges** give an ADVISORY
 self-contradiction capability — its propositional tier is BUILT
 (`self_contradicts`, no value world needed, §2.8); the **`claims_empty`
@@ -587,31 +583,24 @@ not a degraded dump), not *whether* they are worth building.
   contradiction and retraction (needs a Pass 1 `retract` stance).
   Value contradiction is now EXERCISABLE — `Reference.value` is populated
   (see below) — but the comparison fold is not yet built.
-- **Action as a first-class node** — *BUILT.*
-  `ir.models.Action` is parsed structurally from tool_call blocks
-  (`pass1_nodes.actions.parse_action`), no model call. Each action carries
-  an `operation` ∈ {read, write, execute, check, other}, `targets` (file
-  paths / object names), and for write operations, `diffs` — parameter-level
-  changes parsed from edit tool_call old/new strings. `Step.call_id`
-  preserves the tool_call id for action↔outcome pairing. Still designed:
-  the `intend ↔ act` edge (needs an `intend` stance in Pass 1) and the
-  `produces` edge (execute input→output tracking).
+- **Action as a first-class node** — *RETIRED.* The information Action
+  carried is now expressed through existing IR: Step (`tool_name`, `call_id`),
+  Symbol + Reference (targets, operation via reference kinds), step content
+  (purpose in tool_call JSON args), and Value timeline (diffs via `⟦val⟧`
+  extraction). Purpose is read directly from tool_call args in step content.
+  The regex-based command classification (`classify_bash`, `ActionOp`) added
+  noise without signal the other layers do not already provide.
 - **Value world** — *BUILT (first tier).* `Reference.value` is no longer ⊥.
-  Two sources populate it: (1) structural edit-diff parsing — for each
-  `export PARAM = val` changed in an edit, the old and new values are
-  extracted by code and stored as valued references with `kind=tool_input`
-  (old) / `kind=tool_output` (new); (2) LLM extraction — the `⟦val
-  sym=…|value⟧` tag lets the extractor mark concrete values read from tool
-  results (metrics, config parameters, measurements). Both feed into the
-  same `Reference.value` field and the existing def-use machinery.
-- **Value flow fold** (Pass 3) — *BUILT.* Three deterministic + one
-  model-judged summaries over the action and value layers
+  LLM extraction via the `⟦val sym=…|value⟧` tag lets the extractor mark
+  concrete values read from tool results (metrics, config parameters,
+  measurements). These feed into the `Reference.value` field and the
+  existing def-use machinery.
+- **Value flow fold** (Pass 3) — *BUILT.* Deterministic + one
+  model-judged summary over valued references
   (`pass3_folds.value_flow`):
   (1) **value timelines** — per value-symbol, deduplicated sequence of
   value transitions across steps;
-  (2) **iteration cycles** — groups of write→execute→read actions with
-  config diffs and resulting metrics;
-  (3) **constraint checks** — LLM-judged satisfaction of each constraint
+  (2) **constraint checks** — LLM-judged satisfaction of each constraint
   against the final observed value table (met / violated / irrelevant).
 - **Authority (source generalized)** — the source labeling widens from
   binary `{agent, env}` to an authority (principal: `agent:A`, `tool:X`,

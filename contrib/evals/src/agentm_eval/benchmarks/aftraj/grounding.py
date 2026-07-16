@@ -35,10 +35,10 @@ async def build_grounding_index(
 ) -> Any:
     from agentm_eval.methods.index import build_index, extract_symbols
 
-    chunks = await extract_symbols(
+    chunks, idx = await extract_symbols(
         msgs, model=model, run_id=run_id, chunk_size=(4, 6), vocabulary=vocab,
     )
-    return await build_index(chunks, model=model, resolve=full)
+    return await build_index(idx, model=model, resolve=full)
 
 
 def _load(data_dir: Path, domain: str | None, n: int) -> list[Any]:

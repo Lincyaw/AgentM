@@ -1,7 +1,6 @@
-"""Context atom: injects the extraction system prompt + JSON schema + vocabulary."""
+"""Context atom: injects the extraction system prompt + vocabulary."""
 from __future__ import annotations
 
-import json
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Final
@@ -10,8 +9,6 @@ import yaml
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
-
-from .schema import ExtractionResult
 
 _PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
 
@@ -59,16 +56,7 @@ def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
     base_prompt = prompt_path.read_text(encoding="utf-8")
 
     vocabulary = _build_vocabulary_section(config.vocabulary)
-    schema = json.dumps(
-        ExtractionResult.model_json_schema(),
-        indent=2,
-        ensure_ascii=False,
-    )
-    full_prompt = (
-        f"{base_prompt}\n\n"
-        f"{vocabulary}\n\n"
-        f"## JSON Schema\n\nYour output must conform to this schema:\n\n```json\n{schema}\n```"
-    )
+    full_prompt = f"{base_prompt}\n\n{vocabulary}"
 
     def _inject_system(event: BeforeAgentStartEvent) -> None:
         event.system = full_prompt
