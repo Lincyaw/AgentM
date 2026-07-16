@@ -340,19 +340,46 @@ async def build_claim_edges(
                         f"of {len(partition)} excerpts; coverage broken")
         attested.append(rows_seen)
 
-    # --- verify: focused per-claim adversarial judgment over nominations ---
-    proposals: list[tuple[Claim, Step, str, str]] = []
-    judged: dict[int, bool] = {}
+    # --- verify: batched adversarial judgment over all nominations ---
+    #
+    # All (claim, nominees) pairs go into one call (budget-bounded batches).
+    # Excerpts are deduplicated — shared observation steps are sent once.
+    all_excerpt_ids: dict[str, Step] = {}
+    verify_rows: list[dict[str, Any]] = []
+    row_claim_idx: list[int] = []
     for ci, sids in sorted(nominated.items()):
         claim = claims[ci]
-        nominees = [steps_by_id[sid] for sid in sorted(sids, key=lambda sid: steps_by_id[sid].index)]
-        chunks = partition_by_budget(nominees, _PARTITION_CHAR_BUDGET, _step_chars)
-        decided: set[str] = set()
-        for chunk in chunks:
-            shown = {s.step_id for s in chunk}
+        sorted_sids = sorted(sids, key=lambda sid: steps_by_id[sid].index)
+        for sid in sorted_sids:
+            all_excerpt_ids[sid] = steps_by_id[sid]
+        verify_rows.append({
+            "id": len(verify_rows),
+            "claim": {"made_at_step": claim.step_id, "text": claim.text},
+            "excerpt_steps": sorted_sids,
+        })
+        row_claim_idx.append(ci)
+        result.nominations[claim.id] = sorted_sids
+
+    proposals: list[tuple[Claim, Step, str, str]] = []
+    judged: dict[int, bool] = {}
+
+    if verify_rows:
+        excerpt_list = [
+            {"step": s.step_id, "text": s.observation_segment or ""}
+            for s in sorted(all_excerpt_ids.values(), key=lambda s: s.index)
+        ]
+
+        def _verify_size(row: dict[str, Any]) -> int:
+            sids = row.get("excerpt_steps", [])
+            return sum(len(all_excerpt_ids[s].observation_segment or "") for s in sids) + 200
+
+        batches = partition_by_budget(verify_rows, _PARTITION_CHAR_BUDGET, _verify_size)
+        for batch in batches:
+            batch_excerpt_ids = {s for row in batch for s in row["excerpt_steps"]}
+            batch_excerpts = [e for e in excerpt_list if e["step"] in batch_excerpt_ids]
             payload = json.dumps({
-                "claim": {"made_at_step": claim.step_id, "text": claim.text},
-                "excerpts": [{"step": s.step_id, "text": s.observation_segment} for s in chunk],
+                "claims": [row for row in batch],
+                "excerpts": batch_excerpts,
             }, ensure_ascii=False, indent=2)
             raw = None
             for _ in range(_VERIFY_ATTEMPTS):
@@ -363,31 +390,44 @@ async def build_claim_edges(
                 if raw is not None:
                     break
             if raw is None:
-                diag.record("edges", claim.id, None, 0.0,
-                            f"verification failed for {len(chunk)} excerpts; "
-                            "claim demoted to unknown, never unsourced")
+                for row in batch:
+                    ci = row_claim_idx[row["id"]]
+                    diag.record("edges", claims[ci].id, None, 0.0,
+                                "verification batch failed; claim demoted to unknown")
                 continue
-            for item in raw:
-                if not isinstance(item, dict):
+            from ..oracle import _index_by_id
+            by_id = _index_by_id(raw)
+            for row in batch:
+                ci = row_claim_idx[row["id"]]
+                claim = claims[ci]
+                shown = set(row["excerpt_steps"])
+                item = by_id.get(row["id"])
+                if not item:
                     continue
-                sid = str(item.get("step", ""))
-                if sid not in shown:
-                    diag.prune("edges", claim.id, f"verdict for unshown step {sid!r}")
-                    continue
-                relation = str(item.get("relation", ""))
-                if relation not in _VERDICTS:
-                    diag.prune("edges", claim.id, f"unknown relation {relation!r}")
-                    continue
-                decided.add(sid)
-                result.verdicts.append(
-                    {"claim": claim.id, "step": sid, "relation": relation}
-                )
-                if relation in _EDGE_KINDS:
-                    proposals.append(
-                        (claim, steps_by_id[sid], relation, str(item.get("quote", "")))
+                verdicts_list = item.get("verdicts", [])
+                if not isinstance(verdicts_list, list):
+                    verdicts_list = [item]
+                decided: set[str] = set()
+                for v in verdicts_list:
+                    if not isinstance(v, dict):
+                        continue
+                    sid = str(v.get("step", ""))
+                    if sid not in shown:
+                        diag.prune("edges", claim.id, f"verdict for unshown step {sid!r}")
+                        continue
+                    relation = str(v.get("relation", ""))
+                    if relation not in _VERDICTS:
+                        diag.prune("edges", claim.id, f"unknown relation {relation!r}")
+                        continue
+                    decided.add(sid)
+                    result.verdicts.append(
+                        {"claim": claim.id, "step": sid, "relation": relation}
                     )
-        judged[ci] = decided >= sids
-        result.nominations[claim.id] = [s.step_id for s in nominees]
+                    if relation in _EDGE_KINDS:
+                        proposals.append(
+                            (claim, steps_by_id[sid], relation, str(v.get("quote", "")))
+                        )
+                judged[ci] = decided >= nominated.get(ci, set())
 
     # --- gates (code): verbatim single-region non-self quote + dedup ---
     verified: dict[str, dict[tuple[str, str], Edge]] = {}

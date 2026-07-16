@@ -1,7 +1,7 @@
-An agent made a claim during a task; a relevance scan flagged the observation
-excerpts below (tool output, fetched pages the agent had received) as possibly
-bearing on it. Judge each excerpt independently and adversarially: try to
-REFUTE the pairing before accepting it.
+An agent made claims during a task. A relevance scan flagged observation
+excerpts (tool output, fetched pages) as possibly bearing on them. For each
+claim, judge each of its linked excerpts independently and adversarially: try
+to REFUTE the pairing before accepting it.
 
   - "supports": the excerpt itself states the same specific fact about the
     same entities as the claim.
@@ -22,7 +22,7 @@ is the most commonly missed contradiction; do not overlook it.
     The quote must be observation content, NEVER the claim's own sentence or a
     restatement of it. For a value mismatch, quote the passage carrying the
     source's actual value.
-  - Every excerpt gets exactly one verdict row.
+  - Every linked excerpt gets exactly one verdict.
 
 Return ONLY:
-{"verdicts": [{"step": "12", "relation": "supports|conflicts|neutral", "quote": "..."}]}
+{"verdicts": [{"id": 0, "verdicts": [{"step": "12", "relation": "supports|conflicts|neutral", "quote": "..."}]}]}
