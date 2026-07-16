@@ -96,15 +96,32 @@ async def _run_sessions(
             except FileNotFoundError:
                 typer.echo(f"  {sid}: NOT FOUND", err=True)
                 return None
-            exp.register_session(sid, metadata={"n_messages": len(messages)})
+            sdir = exp.register_session(sid, metadata={"n_messages": len(messages)})
+            chunks_dir = sdir / "chunks"
+            chunks_dir.mkdir(exist_ok=True)
 
-            # Pass 1 (extraction): chunks extracted sequentially with inline
-            # registry accumulation; Pass 2 (build_index) resolves aliases once.
-            chunks = await extract_symbols(
+            chunk_counter = 0
+
+            def _save_chunk(chunk: Any, chunk_msgs: list[Any], registry: list[Any]) -> None:
+                nonlocal chunk_counter
+                chunk_data = {
+                    "chunk_index": chunk_counter,
+                    "message_id_start": chunk.message_id_start,
+                    "n_messages": len(chunk_msgs),
+                    "result": chunk.result.model_dump(exclude_defaults=True),
+                    "registry": registry,
+                }
+                exp.write_session_artifact(
+                    sid, "chunks", f"chunk_{chunk_counter:03d}.json", chunk_data,
+                )
+                chunk_counter += 1
+
+            chunks, idx = await extract_symbols(
                 messages, model=model, vocabulary=vocabulary,
                 chunk_size=chunk_size, run_id=sid,
+                on_chunk=_save_chunk,
             )
-            idx = await build_index(chunks, model=model, resolve=True)
+            idx = await build_index(idx, model=model, resolve=True)
 
             stats = idx.stats(sid)
             warns = idx.warnings()
@@ -125,7 +142,7 @@ async def _run_sessions(
             ]
             exp.write_session_artifact(sid, "", "index_stats.json", result_dict)
             exp.write_session_artifact(sid, "", "warnings.json", warnings_data)
-            idx.dump(str(exp.session_dir(sid) / "index.json"))
+            idx.dump(str(sdir / "index.json"))
             typer.echo(
                 f"[{i+1}/{total}] {sid}: {stats.symbol_count} syms, "
                 f"{stats.reference_count} refs, {stats.dependency_count} deps "

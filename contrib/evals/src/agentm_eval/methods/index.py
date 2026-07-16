@@ -38,118 +38,6 @@ from trajectory_index.pass1_nodes.serialize import _symbol_aliases
 # ---------------------------------------------------------------------------
 
 
-def _match_known_symbol(
-    name: str,
-    registry: list[dict[str, Any]],
-    min_len: int = 3,
-    min_ratio: float = 0.6,
-) -> dict[str, Any] | None:
-    """Find an existing registry entry by exact normalized match or substring.
-
-    Conservative: only matches when one name contains the other (after
-    normalization) AND the shorter name is at least ``min_ratio`` of the
-    longer name's length. This prevents short substrings (e.g. ``abn``)
-    from absorbing unrelated longer names.
-    """
-    from trajectory_index.ir.index import normalize_name
-
-    norm = normalize_name(name)
-    if len(norm) < min_len:
-        return None
-
-    def _substr_ok(a: str, b: str) -> bool:
-        """Check substring containment at token boundaries with length guard."""
-        if a in b:
-            shorter, longer = a, b
-        elif b in a:
-            shorter, longer = b, a
-        else:
-            return False
-        if len(shorter) < min_len or len(shorter) / len(longer) < min_ratio:
-            return False
-        # Must match at a token boundary (start/end of string or after _./-)
-        idx = longer.find(shorter)
-        at_start = idx == 0 or longer[idx - 1] in "_.-/"
-        at_end = idx + len(shorter) == len(longer) or longer[idx + len(shorter)] in "_.-/"
-        return at_start and at_end
-
-    for entry in registry:
-        canonical = str(entry.get("name", ""))
-        entry_norm = normalize_name(canonical)
-        if not entry_norm or entry_norm == norm:
-            continue
-
-        if _substr_ok(norm, entry_norm):
-            return entry
-
-        for alias in entry.get("aliases", []):
-            alias_norm = normalize_name(str(alias))
-            if alias_norm == norm:
-                return entry
-            if _substr_ok(norm, alias_norm):
-                return entry
-
-    return None
-
-
-def _prescan_structural(
-    messages: list[AgentMessage],
-    registry: list[dict[str, Any]] | None,
-    seen: set[str] | None = None,
-) -> tuple[list[dict[str, Any]], list[Any]]:
-    """Code-level structural extraction + fuzzy alias expansion.
-
-    1. Extracts tool names and SQL table names from structured blocks.
-    2. Fuzzy-matches new names against existing registry to expand aliases
-       (increases recall without creating duplicate symbols).
-
-    Returns (updated_registry, structural_symbols).
-    """
-    from trajectory_index.atom import _agentmsg_to_extraction_dict
-    from trajectory_index.pass1_nodes.serialize import extract_structural_symbols
-    from trajectory_index.ir.index import normalize_name
-
-    serialized = [
-        d for i, m in enumerate(messages)
-        if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
-    ]
-    structural = extract_structural_symbols(serialized)
-
-    if seen is None:
-        seen = set()
-        if registry:
-            for entry in registry:
-                seen.add(normalize_name(str(entry.get("name", ""))))
-                for alias in entry.get("aliases", []):
-                    seen.add(normalize_name(str(alias)))
-
-    updated = list(registry) if registry else []
-    new_syms = []
-
-    for sym in structural:
-        norm = normalize_name(sym.name)
-        if norm in seen:
-            continue
-
-        # Try fuzzy match against existing symbols
-        match = _match_known_symbol(sym.name, updated)
-        if match:
-            # Add as alias to existing symbol
-            aliases = match.get("aliases", [])
-            if not isinstance(aliases, list):
-                aliases = []
-            if sym.name not in aliases:
-                aliases.append(sym.name)
-                match["aliases"] = aliases
-            seen.add(norm)
-            logger.debug("prescan: '{}' → alias of '{}'", sym.name, match.get("name"))
-        else:
-            # New symbol
-            seen.add(norm)
-            updated.append({"name": sym.name, "kind": sym.kind})
-            new_syms.append(sym)
-
-    return updated, new_syms
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +139,7 @@ class ExtractedChunk:
     message_id_start: int = 0
 
 
-type OnChunkCallback = Callable[[ExtractedChunk, list[AgentMessage]], None]
+type OnChunkCallback = Callable[[ExtractedChunk, list[AgentMessage], list[dict[str, Any]]], None]
 
 
 async def extract_symbols(
@@ -263,17 +151,22 @@ async def extract_symbols(
     on_chunk: OnChunkCallback | None = None,
     run_id: str = "",
     cwd: str | None = None,
-) -> list[ExtractedChunk]:
+    namespace_fn: Callable[[str, dict[str, Any]], str] | None = None,
+) -> tuple[list[ExtractedChunk], Any]:
     """Extract symbols from trajectory messages.
 
-    Accepts typed ``AgentMessage`` objects. When ``chunk_size`` is None,
-    runs a single extraction. When set (e.g. ``(2, 5)``), splits into
-    chunks extracted sequentially: each chunk sees the accumulated registry
-    of prior symbols (``⟦known|…⟧``) and inline fuzzy-dedup folds same-entity
-    surface forms as it goes, so cross-chunk unification happens during
-    extraction rather than being deferred.
+    Uses a ``TrajectoryIndex`` as the single registry: each chunk's
+    extraction result is populated into the index immediately, and the
+    next chunk gets ``index.registry_snapshot()`` as its known-symbol
+    context. This mirrors the atom's online flow.
+
+    Returns ``(chunks, index)``.
     """
-    from trajectory_index.ir.index import normalize_name
+    from trajectory_index.ir.index import TrajectoryIndex
+
+    if namespace_fn is None:
+        namespace_fn = _span_namespace
+    index = TrajectoryIndex()
 
     if chunk_size is None:
         outcome = await _run_one(
@@ -281,33 +174,26 @@ async def extract_symbols(
             registry=None, message_id_start=0, cwd=cwd,
         )
         if outcome.result is None:
-            return []
+            return [], index
+        index.populate_from_extraction(
+            outcome.result, messages,
+            run_id=run_id, namespace_fn=namespace_fn,
+        )
         extracted = ExtractedChunk(run_id=run_id, messages=messages, result=outcome.result)
         if on_chunk:
-            on_chunk(extracted, messages)
-        return [extracted]
+            on_chunk(extracted, messages, index.registry_snapshot())
+        return [extracted], index
 
     chunks = _chunk_messages(messages, chunk_size)
-
-    registry: list[dict[str, Any]] = []
-    seen: set[str] = set()
     results: list[ExtractedChunk] = []
 
     for i, chunk in enumerate(chunks):
-        # Code-level prescan: extract tool names, SQL tables, etc.
-        chunk_registry, structural = _prescan_structural(
-            chunk.messages, registry if registry else None, seen,
-        )
-        if structural:
-            logger.info(
-                "chunk {}/{}: prescan found {} structural symbols",
-                i + 1, len(chunks), len(structural),
-            )
+        registry = index.registry_snapshot() or None
 
         try:
             outcome = await _run_one(
                 chunk.messages, model=model, vocabulary=vocabulary,
-                registry=chunk_registry if chunk_registry else None,
+                registry=registry,
                 message_id_start=chunk.start, cwd=cwd,
             )
         except Exception:
@@ -318,6 +204,13 @@ async def extract_symbols(
             logger.warning("chunk {}/{} no parseable result", i + 1, len(chunks))
             continue
 
+        index.populate_from_extraction(
+            result, chunk.messages,
+            run_id=run_id,
+            namespace_fn=namespace_fn,
+            message_id_start=chunk.start,
+        )
+
         extracted = ExtractedChunk(
             run_id=run_id, messages=chunk.messages, result=result,
             message_id_start=chunk.start,
@@ -325,31 +218,9 @@ async def extract_symbols(
         results.append(extracted)
 
         if on_chunk:
-            on_chunk(extracted, chunk.messages)
+            on_chunk(extracted, chunk.messages, index.registry_snapshot())
 
-        for sym in result.parsed_symbols():
-            norm = normalize_name(sym.name)
-            if norm in seen:
-                continue
-            # Fuzzy match: absorb as alias if close to existing symbol
-            match = _match_known_symbol(sym.name, registry)
-            if match:
-                aliases = match.get("aliases", [])
-                if not isinstance(aliases, list):
-                    aliases = []
-                if sym.name not in aliases:
-                    aliases.append(sym.name)
-                    match["aliases"] = aliases
-                seen.add(norm)
-                logger.debug("extract: '{}' → alias of '{}'", sym.name, match.get("name"))
-            else:
-                seen.add(norm)
-                entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
-                if sym.aliases:
-                    entry["aliases"] = sym.aliases
-                registry.append(entry)
-
-    return results
+    return results, index
 
 
 # ---------------------------------------------------------------------------
@@ -366,15 +237,6 @@ def _span_namespace(run_id: str, sym: dict[str, Any]) -> str:
     names = [str(sym.get("name", "")), *_symbol_aliases(sym)]
     return run_id if any(_SPAN_SYMBOL_RE.match(str(name).strip()) for name in names) else ""
 
-
-def _to_index_dicts(messages: list[AgentMessage]) -> list[dict[str, Any]]:
-    """Serialize AgentMessage list to the dict format populate_from_extraction expects."""
-    from trajectory_index.atom import _agentmsg_to_extraction_dict
-
-    return [
-        d for i, m in enumerate(messages)
-        if (d := _agentmsg_to_extraction_dict(m, i, truncate=False))
-    ]
 
 
 async def resolve_index(
@@ -401,35 +263,54 @@ async def resolve_index(
 
 
 async def build_index(
-    chunks: list[ExtractedChunk],
+    chunks_or_index: list[ExtractedChunk] | Any,
     *,
     namespace_fn: Callable[[str, dict[str, Any]], str] | None = _span_namespace,
     model: str | None = None,
     resolve: bool = True,
 ) -> Any:
-    """Build a TrajectoryIndex from extraction chunks.
+    """Build or finalize a TrajectoryIndex.
 
-    Runs all three passes:
-      Pass 1: populate symbols + references from extraction results
-      Pass 2: alias resolution + coreference (LLM, best-effort)
-      Pass 3: def-use / grounding (deterministic)
-      Pass 3.5: value fidelity comparison (LLM, best-effort)
+    Accepts either an already-populated index (from ``extract_symbols``)
+    or a list of chunks to populate from scratch. Then runs Pass 2
+    (alias resolution) and Pass 3 (def-use / grounding).
     """
     from trajectory_index.ir.index import TrajectoryIndex
 
-    index = TrajectoryIndex()
-    for chunk in chunks:
-        index.populate_from_extraction(
-            chunk.result,
-            chunk.messages,
-            run_id=chunk.run_id,
-            namespace_fn=namespace_fn,
-            message_id_start=chunk.message_id_start,
-        )
+    if isinstance(chunks_or_index, TrajectoryIndex):
+        index = chunks_or_index
+    else:
+        index = TrajectoryIndex()
+        for chunk in chunks_or_index:
+            index.populate_from_extraction(
+                chunk.result,
+                chunk.messages,
+                run_id=chunk.run_id,
+                namespace_fn=namespace_fn,
+                message_id_start=chunk.message_id_start,
+            )
 
     if resolve:
         await resolve_index(index, model=model)
     else:
         index.build_dependencies()
+
+    # Pass 3: value flow (constraint checks need LLM).
+    try:
+        from agentm.core.runtime import AgentSession
+        from trajectory_index.pass3_folds.value_flow import build_value_flow
+
+        vf = await build_value_flow(
+            index, model=model, session_factory=AgentSession.create,
+        )
+        index._value_flow = vf  # type: ignore[attr-defined]
+        logger.info(
+            "value flow: {} timelines, {} iterations, {} constraint checks",
+            len(vf.get("value_timelines", [])),
+            len(vf.get("iterations", [])),
+            len(vf.get("constraint_checks", [])),
+        )
+    except Exception:
+        logger.warning("value flow pass failed, skipping", exc_info=True)
 
     return index

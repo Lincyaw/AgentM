@@ -18,10 +18,12 @@ from typing import TYPE_CHECKING
 
 from ..pass3_folds.grounding import drives_defuse, grounded_from_kind
 from .models import (
+    _ACTION_OP_VALUES,
     _ENTITY_CLASS_VALUES,
     _FINDING_STATUS_VALUES,
     _REF_FORM_VALUES,
     _RISK_VALUES,
+    Action,
     Claim,
     ClaimFinding,
     Constraint,
@@ -92,6 +94,7 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "role": s.role,
             "content": s.content,
             "tool_name": s.tool_name,
+            "call_id": s.call_id,
             "timestamp": s.timestamp,
             "obs_regions": [list(span) for span in s.obs_regions],
             "metadata": dict(s.metadata) if s.metadata else {},
@@ -123,7 +126,6 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "text": r.text,
             "role": r.role,
             "kind": r.kind,
-            "confidence": r.confidence,
             "grounded": r.grounded,
             "grounds_ref_id": r.grounds_ref_id,
             "structured": r.structured,
@@ -143,7 +145,6 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "run_id": r.run_id,
             "step_id": r.step_id,
             "weight": r.weight,
-            "confidence": r.confidence,
             "metadata": dict(r.metadata) if r.metadata else {},
         }
         for r in index.relations.values()
@@ -162,7 +163,6 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "grounded_by_step_id": d.grounded_by_step_id,
             "def_value": d.def_value,
             "use_value": d.use_value,
-            "confidence": d.confidence,
             "metadata": dict(d.metadata) if d.metadata else {},
         }
         for d in index.dependencies.values()
@@ -190,7 +190,6 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
     constraints = [
         {
             "id": c.id,
-            "subject": c.subject,
             "description": c.description,
             "normalized": dict(c.normalized) if c.normalized else None,
         }
@@ -210,6 +209,24 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
         }
         for f in index.constraint_findings
     ]
+    actions = [
+        {
+            "call_id": a.call_id,
+            "step_id": a.step_id,
+            "run_id": a.run_id,
+            "tool_name": a.tool_name,
+            "operation": a.operation,
+            "targets": list(a.targets),
+            "diffs": [list(d) for d in a.diffs],
+        }
+        for a in index.actions.values()
+    ]
+    value_flow = getattr(index, "_value_flow", None)
+    if value_flow is None:
+        from ..pass3_folds.value_flow import build_value_flow_sync
+
+        value_flow = build_value_flow_sync(index)
+
     data = {
         "stats": {
             "steps": len(index.steps),
@@ -221,6 +238,10 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
             "edges": len(index.edges),
             "constraints": len(index.constraints),
             "constraint_findings": len(index.constraint_findings),
+            "actions": len(index.actions),
+            "value_timelines": len(value_flow["value_timelines"]),
+            "iterations": len(value_flow["iterations"]),
+            "constraint_checks": len(value_flow["constraint_checks"]),
             "indexed_message_count": index.indexed_message_count,
         },
         "steps": steps,
@@ -233,6 +254,8 @@ def dump(index: TrajectoryIndex, path: str | Path) -> None:
         "claim_findings": claim_findings,
         "constraints": constraints,
         "constraint_findings": constraint_findings,
+        "actions": actions,
+        "value_flow": value_flow,
     }
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -273,6 +296,7 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             role=str(s.get("role", StepRole.USER)),
             content=content,
             tool_name=s.get("tool_name") if isinstance(s.get("tool_name"), str) else None,
+            call_id=s.get("call_id") if isinstance(s.get("call_id"), str) else None,
             timestamp=s.get("timestamp") if isinstance(s.get("timestamp"), int | float) else None,
             metadata=s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {},
             obs_regions=obs_regions,
@@ -347,7 +371,6 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             text=text,
             role=str(r.get("role", ref_step.role)),
             kind=ref_kind,
-            confidence=float(r.get("confidence", 1.0)),
             grounded=grounded,
             grounds_ref_id=grounds_ref_id,
             structured=structured,
@@ -387,7 +410,6 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             run_id=run_id,
             step_id=step_id,
             weight=float(r.get("weight", 1.0)),
-            confidence=float(r.get("confidence", 1.0)),
             metadata=r.get("metadata", {}) if isinstance(r.get("metadata"), dict) else {},
         )
         index.relations[relation.id] = relation
@@ -427,7 +449,6 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             ),
             def_value=d.get("def_value") if isinstance(d.get("def_value"), str) else None,
             use_value=d.get("use_value") if isinstance(d.get("use_value"), str) else None,
-            confidence=float(d.get("confidence", 1.0)),
             metadata=d.get("metadata", {}) if isinstance(d.get("metadata"), dict) else {},
         )
         index.dependencies[dep.id] = dep
@@ -477,7 +498,6 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
         normalized = c.get("normalized")
         index.constraints[cid] = Constraint(
             id=cid,
-            subject=str(c.get("subject", "answer")),
             description=str(c.get("description", "")),
             normalized=normalized if isinstance(normalized, dict) else None,
         )
@@ -510,5 +530,27 @@ def load(cls: type[TrajectoryIndex], path: str | Path) -> TrajectoryIndex:
             confidence_source=str(f.get("confidence_source", "")),
             reason=str(f.get("reason", "")),
         ))
+
+    for a in data.get("actions", []):
+        call_id = str(a.get("call_id", ""))
+        if not call_id:
+            continue
+        raw_op = a.get("operation", "other")
+        op = raw_op if raw_op in _ACTION_OP_VALUES else "other"
+        raw_diffs = a.get("diffs", [])
+        diffs = tuple(
+            (str(d[0]), str(d[1]), str(d[2]))
+            for d in raw_diffs
+            if isinstance(d, list) and len(d) == 3
+        )
+        index.actions[call_id] = Action(
+            call_id=call_id,
+            step_id=str(a.get("step_id", "")),
+            run_id=str(a.get("run_id", "")),
+            tool_name=str(a.get("tool_name", "")),
+            operation=op,
+            targets=tuple(str(t) for t in a.get("targets", [])),
+            diffs=diffs,
+        )
 
     return index

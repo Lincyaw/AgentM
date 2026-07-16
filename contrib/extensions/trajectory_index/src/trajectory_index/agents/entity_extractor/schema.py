@@ -1,15 +1,8 @@
 """Extraction result schema.
 
-Pass 1 output is the unified annotation markup (see ``markup.py``): the
-extractor re-emits each annotated message body verbatim with
-``⟦tag attrs|content⟧`` spans inserted. One output channel carries every
-node kind — symbols (``sym``), provenance segments (``obs``), claims
-(``claim``) — and code verifies the whole message by strip-and-compare,
-which makes every span offset exact. Messages without annotations are
-omitted (nothing to re-emit).
-
-``ExtractedSymbol`` remains as the shape of code-side structural prescan
-symbols and of symbols parsed back out of the markup.
+The extractor outputs a structured list of found symbols, claims,
+observation regions, and constraints — no full-text re-emission. Code
+locates each in the original messages by name/substring matching.
 """
 from __future__ import annotations
 
@@ -23,68 +16,77 @@ class ExtractedSymbol(BaseModel):
     entity_class: str = Field(
         default="identifier",
         description=(
-            "The name/value axis, independent of `kind`. "
-            "Could a tool report different content for this entity while it stays the same thing?\n"
-            "- 'identifier': NO — the string IS the entity (a service name, file path, tool name). Most symbols.\n"
-            "- 'value': YES — a tracked quantity the agent monitors across turns; the same measurement can have different values at different times.\n"
-            "- 'unknown': a vague or anaphoric surface with no clear referent on its own."
+            "identifier: the string IS the entity (file path, function name). "
+            "value: a tracked quantity the agent monitors across turns. "
+            "unknown: vague/anaphoric surface."
         ),
     )
 
 
-class AnnotatedMessage(BaseModel):
-    """One message body re-emitted verbatim with annotations inserted."""
-
-    message_id: str = Field(description="Message id from the [id|role] header")
-    text: str = Field(
-        description=(
-            "The message body, copied EXACTLY as given, with "
-            "⟦tag attrs|content⟧ annotations inserted. Stripping the "
-            "annotations must reproduce the original body character for "
-            "character."
-        ),
+class ExtractedClaim(BaseModel):
+    head: str = Field(description="Verbatim head anchor of the claim")
+    tail: str = Field(default="", description="Verbatim tail anchor")
+    role: str = Field(
+        default="",
+        description="Empty for ordinary claims; 'commit' for the agent's final answer",
     )
+
+
+class ExtractedObs(BaseModel):
+    head: str = Field(
+        description="Verbatim head anchor of the retrieved/environment region",
+    )
+    tail: str = Field(
+        default="",
+        description="Verbatim tail anchor (omit if head is the whole region)",
+    )
+
+
+class ExtractedConstraint(BaseModel):
+    head: str = Field(description="Verbatim head anchor of the requirement")
+    tail: str = Field(default="", description="Verbatim tail anchor")
+
+
+class ExtractedValue(BaseModel):
+    sym: str = Field(description="Symbol name this value belongs to")
+    value: str = Field(description="The concrete value text")
 
 
 class ExtractionResult(BaseModel):
-    annotated: list[AnnotatedMessage] = Field(
+    symbols: list[ExtractedSymbol] = Field(
         default_factory=list,
-        description="Messages that carry at least one annotation",
+        description="Named entities found in the trajectory chunk",
+    )
+    claims: list[ExtractedClaim] = Field(
+        default_factory=list,
+        description="Settled-fact assertions by the agent",
+    )
+    observations: list[ExtractedObs] = Field(
+        default_factory=list,
+        description="Retrieved/environment regions in assistant steps (not tool_result steps)",
+    )
+    constraints: list[ExtractedConstraint] = Field(
+        default_factory=list,
+        description="Task requirements from the user's question/instructions",
+    )
+    values: list[ExtractedValue] = Field(
+        default_factory=list,
+        description="Concrete values read from tool results or written in tool calls",
     )
 
     def parsed_symbols(self) -> list[ExtractedSymbol]:
-        """Symbols declared in the markup, deduplicated by canonical name.
-
-        Registry/bookkeeping view only — index population re-parses with
-        offset verification. Malformed messages are skipped here (populate
-        records them properly).
-        """
-        from trajectory_index.pass1_nodes.markup import MarkupError, parse
-
+        """Symbols from the result, deduplicated by canonical name."""
         by_name: dict[str, ExtractedSymbol] = {}
-        for am in self.annotated:
-            try:
-                plain, annotations = parse(am.text)
-            except MarkupError:
+        for s in self.symbols:
+            canonical = s.name.strip()
+            if not canonical:
                 continue
-            for a in annotations:
-                if a.tag != "sym":
-                    continue
-                surface = plain[a.start:a.end].strip()
-                canonical = (a.attrs.get("name") or surface).strip()
-                if not canonical:
-                    continue
-                alias = [surface] if surface and surface.lower() != canonical.lower() else []
-                prior = by_name.get(canonical.lower())
-                if prior is None:
-                    by_name[canonical.lower()] = ExtractedSymbol(
-                        name=canonical,
-                        kind=a.attrs.get("kind", "unknown"),
-                        aliases=alias,
-                        entity_class=a.attrs.get("class", "identifier"),
-                    )
-                else:
-                    for al in alias:
-                        if al not in prior.aliases:
-                            prior.aliases.append(al)
+            key = canonical.lower()
+            prior = by_name.get(key)
+            if prior is None:
+                by_name[key] = s
+            else:
+                for alias in s.aliases:
+                    if alias not in prior.aliases:
+                        prior.aliases.append(alias)
         return list(by_name.values())

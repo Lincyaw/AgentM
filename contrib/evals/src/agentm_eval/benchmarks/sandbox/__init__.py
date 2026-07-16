@@ -40,6 +40,22 @@ from .runner import (
 )
 
 
+def _resolve_defaults(
+    adapter: Any,
+    registry: str | None,
+    prefix: str | None,
+    tag: str | None,
+) -> tuple[str, str, str]:
+    """Fill unset CLI flags from adapter class defaults, then global defaults."""
+    if registry is None:
+        registry = getattr(adapter, "DEFAULT_REGISTRY", DEFAULT_IMAGE_REGISTRY)
+    if prefix is None:
+        prefix = getattr(adapter, "DEFAULT_PREFIX", "longcli")
+    if tag is None:
+        tag = getattr(adapter, "DEFAULT_TAG", "v0")
+    return registry, prefix, tag
+
+
 class SandboxAdapter:
     name = "sandbox"
     description = "Docker-sandbox benchmarks (TB1, Harbor, SWE-bench)"
@@ -55,9 +71,9 @@ class SandboxAdapter:
         def build(
             repo: Annotated[Path, typer.Option("--repo")],
             bench: Annotated[str, typer.Option("--bench")] = "tb1",
-            registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
-            prefix: Annotated[str, typer.Option()] = "longcli",
-            tag: Annotated[str, typer.Option()] = "v0",
+            registry: Annotated[Optional[str], typer.Option()] = None,
+            prefix: Annotated[Optional[str], typer.Option()] = None,
+            tag: Annotated[Optional[str], typer.Option()] = None,
             push: Annotated[bool, typer.Option("--push")] = False,
             base_dir: Annotated[Path | None, typer.Option("--base-dir")] = None,
             task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
@@ -73,6 +89,7 @@ class SandboxAdapter:
                 _yaml = None  # type: ignore[assignment]
 
             adapter = get_format_adapter(bench)
+            registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
             if not eval_only and not adapter.supports_build():
                 typer.echo(f"Error: {bench} uses pre-built images, nothing to build.", err=True)
                 raise typer.Exit(1)
@@ -120,9 +137,9 @@ class SandboxAdapter:
             repo: Annotated[Path | None, typer.Option("--repo")] = None,
             source: Annotated[str | None, typer.Option("--source")] = None,
             bench: Annotated[str, typer.Option("--bench")] = "harbor",
-            registry: Annotated[str, typer.Option()] = "opspai",
-            prefix: Annotated[str, typer.Option()] = "tb2",
-            tag: Annotated[str, typer.Option()] = "v0",
+            registry: Annotated[Optional[str], typer.Option()] = None,
+            prefix: Annotated[Optional[str], typer.Option()] = None,
+            tag: Annotated[Optional[str], typer.Option()] = None,
             concurrency: Annotated[int, typer.Option("-j")] = 4,
             task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
             dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
@@ -132,6 +149,7 @@ class SandboxAdapter:
 
             resolved_source = resolve_source(repo, source, bench)
             adapter = get_format_adapter(bench)
+            registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
             tasks = adapter.discover_tasks(resolved_source)
             if task:
                 tasks = [t for t in tasks if t.name in task]
@@ -175,15 +193,18 @@ class SandboxAdapter:
             repo: Annotated[Path | None, typer.Option("--repo")] = None,
             source: Annotated[str | None, typer.Option("--source")] = None,
             bench: Annotated[str, typer.Option("--bench")] = "tb1",
-            registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
-            prefix: Annotated[str, typer.Option()] = "longcli",
-            tag: Annotated[str, typer.Option()] = "v0",
+            registry: Annotated[Optional[str], typer.Option()] = None,
+            prefix: Annotated[Optional[str], typer.Option()] = None,
+            tag: Annotated[Optional[str], typer.Option()] = None,
             json_out: Annotated[bool, typer.Option("--json")] = False,
             source_images: Annotated[bool, typer.Option("--source-images")] = False,
         ) -> None:
             """List discovered tasks and their image names."""
             resolved_source = resolve_source(repo, source, bench)
             adapter = get_format_adapter(bench)
+            registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
+            if not source_images:
+                source_images = getattr(adapter, "DEFAULT_SOURCE_IMAGES", False)
             tasks = adapter.discover_tasks(resolved_source)
 
             if json_out:
@@ -220,9 +241,9 @@ class SandboxAdapter:
             source: Annotated[str | None, typer.Option("--source")] = None,
             bench: Annotated[str, typer.Option("--bench")] = "tb1",
             model: Annotated[str, typer.Option()] = "glm47",
-            registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
-            prefix: Annotated[str, typer.Option()] = "longcli",
-            tag: Annotated[str, typer.Option()] = "v0",
+            registry: Annotated[Optional[str], typer.Option()] = None,
+            prefix: Annotated[Optional[str], typer.Option()] = None,
+            tag: Annotated[Optional[str], typer.Option()] = None,
             concurrency: Annotated[int, typer.Option("-j")] = 5,
             eval_timeout: Annotated[int, typer.Option("--eval-timeout")] = 300,
             agent_timeout: Annotated[int, typer.Option("--agent-timeout")] = 0,
@@ -241,6 +262,9 @@ class SandboxAdapter:
 
             resolved_source = resolve_source(repo, source, bench)
             adapter = get_format_adapter(bench)
+            registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
+            if not source_images:
+                source_images = getattr(adapter, "DEFAULT_SOURCE_IMAGES", False)
             tasks = adapter.discover_tasks(resolved_source)
             if task:
                 tasks = [t for t in tasks if t.name in task]

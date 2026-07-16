@@ -67,8 +67,14 @@ class StepRole:
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
-    TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+
+
+# Action operations (SCHEMA.md §Designed extensions: "Action as a first-class node")
+type ActionOp = Literal["read", "write", "execute", "check", "other"]
+_ACTION_OP_VALUES: frozenset[str] = frozenset(
+    {"read", "write", "execute", "check", "other"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +94,24 @@ class Location:
 
 
 @dataclass(frozen=True, slots=True)
+class Action:
+    """A tool call parsed structurally from the record (SCHEMA.md §Designed).
+
+    ``operation`` classifies the call's effect on the external world;
+    ``targets`` names the objects accessed; ``diffs`` records parameter
+    changes for write operations (edit tool calls with old/new strings).
+    """
+
+    call_id: str
+    step_id: str
+    run_id: str
+    tool_name: str
+    operation: ActionOp
+    targets: tuple[str, ...] = ()
+    diffs: tuple[tuple[str, str, str], ...] = ()   # (param, old_value, new_value)
+
+
+@dataclass(frozen=True, slots=True)
 class Step:
     run_id: str
     step_id: str
@@ -95,14 +119,9 @@ class Step:
     role: str
     content: str
     tool_name: str | None = None
+    call_id: str | None = None
     timestamp: float | None = None
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
-    # Pass 1 provenance: (start, end) content regions the extractor marked
-    # as retrieved/environment material (``⟦obs|…⟧``), offset-exact via the
-    # markup strip-and-compare verification. Multiple regions express the
-    # query/content/summary sandwiches a single boundary cannot. Labels can
-    # only ADD observation status to an assistant step — an attested
-    # tool_result role always wins and needs no spans.
     obs_regions: tuple[tuple[int, int], ...] = ()
 
     @property
@@ -187,7 +206,6 @@ class Reference:
     text: str
     role: str
     kind: str = "unknown"
-    confidence: float = 1.0
     grounded: bool = False               # is this occurrence's value tool-backed?
     grounds_ref_id: str | None = None    # if grounded by copying a prior def, which
     structured: bool = True              # entity drives def-use? (entity_class != "unknown")
@@ -218,7 +236,6 @@ class Dependency:
     grounded_by_step_id: str | None = None   # if ungrounded at use, a later step that grounds it
     def_value: str | None = None             # value world: the two sides Pass 3.5 compares
     use_value: str | None = None
-    confidence: float = 1.0
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
@@ -231,7 +248,6 @@ class Relation:
     run_id: str
     step_id: str
     weight: float = 1.0
-    confidence: float = 1.0
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
@@ -329,7 +345,6 @@ class Constraint:
     """
 
     id: str
-    subject: str
     description: str
     normalized: Mapping[str, MetadataValue] | None = None
 

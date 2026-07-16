@@ -252,150 +252,139 @@ def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[
 
 
 def _validate_vocabulary(result: ExtractionResult, vocabulary: str = "default") -> str | None:
-    """Validate annotated-message markup: well-formedness + sym attributes.
+    """Normalize extracted symbol kinds against the vocabulary.
 
-    Runs at parse time so a malformed response triggers the retry loop.
-    Content fidelity (strip == original body) is checked later at populate
-    time, where the originals are available.
+    Invalid kinds are downgraded to ``unknown`` rather than rejecting the
+    entire result (kind mis-classification is a precision loss, not worth
+    a retry). Returns an error string only for structural problems that
+    make the result unusable.
     """
     from ..ir.models import _ENTITY_CLASS_VALUES
-    from .markup import MarkupError, parse
 
     symbol_values, _reference_values, _relation_values = _load_vocabulary_values(vocabulary)
 
-    errors: list[str] = []
-    for am in result.annotated:
-        try:
-            _plain, annotations = parse(am.text)
-        except MarkupError as exc:
-            errors.append(f"message {am.message_id}: {exc}")
-            continue
-        for a in annotations:
-            if a.tag != "sym":
-                continue
-            kind = a.attrs.get("kind", "unknown")
-            if kind not in symbol_values:
-                errors.append(f"message {am.message_id}: sym kind '{kind}' invalid")
-            klass = a.attrs.get("class", "identifier")
-            if klass not in _ENTITY_CLASS_VALUES:
-                errors.append(f"message {am.message_id}: sym class '{klass}' invalid")
-    if errors:
-        valid_kinds = ", ".join(v for v in symbol_values if v != "unknown")
-        return (
-            f"Markup errors: {'; '.join(errors[:8])}. "
-            f"Valid sym kinds: {valid_kinds}. Valid sym class: identifier, value, unknown."
-        )
+    for sym in (result.symbols or []):
+        kind = (sym.kind or "unknown").lower()
+        if kind not in symbol_values:
+            sym.kind = "unknown"
+        entity_class = getattr(sym, "entity_class", "identifier")
+        if entity_class not in _ENTITY_CLASS_VALUES:
+            sym.entity_class = "identifier"
     return None
+
+
+def _parse_tags_to_result(text: str) -> ExtractionResult | None:
+    """Parse annotation tags from extractor output into an ExtractionResult."""
+    from .markup import OPEN, MarkupError, parse
+
+    if OPEN not in text:
+        return None
+
+    try:
+        _plain, annotations = parse(text)
+    except MarkupError:
+        return None
+
+    from ..agents.entity_extractor.schema import (
+        ExtractedClaim,
+        ExtractedConstraint,
+        ExtractedObs,
+        ExtractedSymbol,
+        ExtractedValue,
+    )
+
+    symbols: list[ExtractedSymbol] = []
+    claims: list[ExtractedClaim] = []
+    observations: list[ExtractedObs] = []
+    constraints: list[ExtractedConstraint] = []
+    values: list[ExtractedValue] = []
+
+    for ann in annotations:
+        if ann.depth > 0:
+            continue
+        content = _plain[ann.start:ann.end]
+        if ann.tag == "sym":
+            kind = ann.attrs.get("kind", "unknown")
+            name_attr = ann.attrs.get("name", "")
+            entity_class = ann.attrs.get("class", "identifier")
+            canonical = name_attr if name_attr else content
+            aliases = [content] if name_attr and content != name_attr else []
+            symbols.append(ExtractedSymbol(
+                name=canonical, kind=kind, aliases=aliases, entity_class=entity_class,
+            ))
+        elif ann.tag == "claim":
+            role = ann.attrs.get("role", "")
+            parts = content.split("…", 1)
+            head = parts[0].strip()
+            tail = parts[1].strip() if len(parts) > 1 else ""
+            if head:
+                claims.append(ExtractedClaim(head=head, tail=tail, role=role))
+        elif ann.tag == "val":
+            sym_name = ann.attrs.get("sym", "")
+            val_text = content.strip()
+            if sym_name and val_text:
+                values.append(ExtractedValue(sym=sym_name, value=val_text))
+        elif ann.tag == "obs":
+            parts = content.split("…", 1)
+            head = parts[0].strip()
+            tail = parts[1].strip() if len(parts) > 1 else ""
+            if head:
+                observations.append(ExtractedObs(head=head, tail=tail))
+        elif ann.tag == "constraint":
+            parts = content.split("…", 1)
+            head = parts[0].strip()
+            tail = parts[1].strip() if len(parts) > 1 else ""
+            if head:
+                constraints.append(ExtractedConstraint(head=head, tail=tail))
+
+    if not symbols and not claims and not observations and not constraints and not values:
+        return None
+    return ExtractionResult(
+        symbols=symbols, claims=claims, observations=observations,
+        constraints=constraints, values=values,
+    )
 
 
 def _try_parse_response(
     messages: list[Any],
     vocabulary: str = "default",
 ) -> tuple[ExtractionResult | None, str | None]:
-    """Try to parse an ExtractionResult from assistant messages.
+    """Parse an ExtractionResult from the last message's text content."""
+    from agentm.core.abi import TextContent
 
-    Returns (result, error_text). If parsing succeeds error_text is None;
-    if it fails, error_text describes the failure for retry.
-    """
-    from agentm.core.abi import AssistantMessage, TextContent
-
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
+    if not messages:
+        return None, "No messages"
+    msg = messages[-1]
+    content = getattr(msg, "content", None)
+    if not content:
+        return None, "Last message has no content"
+    blocks = content if isinstance(content, list) else [content]
+    for block in blocks:
+        if not isinstance(block, TextContent):
             continue
-        for block in reversed(msg.content):
-            if not isinstance(block, TextContent):
-                continue
-            obj = extract_json(block.text)
+        text = block.text
+        result = _parse_tags_to_result(text)
+        if result is None:
+            obj = extract_json(text)
             if obj:
                 try:
                     result = ExtractionResult.model_validate(obj)
                 except Exception as exc:
                     logger.debug("data: caught exception: {}", exc)
-                    return None, f"JSON keys={list(obj.keys())}; validation error: {exc}"
-                vocab_error = _validate_vocabulary(result, vocabulary)
-                if vocab_error:
-                    return None, vocab_error
-                return result, None
-            return None, f"Could not extract JSON from response ({len(block.text)} chars)"
-    return None, "No assistant text in response"
+                    return None, f"JSON validation error: {exc}"
+        if result is None:
+            return None, f"No tags or JSON found in response ({len(text)} chars)"
+        vocab_error = _validate_vocabulary(result, vocabulary)
+        if vocab_error:
+            return None, vocab_error
+        return result, None
+    return None, "Last message has no text content"
 
 
 # ---------------------------------------------------------------------------
 # Structural symbol extraction (code, no LLM)
 # ---------------------------------------------------------------------------
 
-_SQL_TABLE_RE: Final = re.compile(
-    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([A-Za-z_][A-Za-z0-9_.]*)",
-    re.IGNORECASE,
-)
-
-
-@dataclass(frozen=True, slots=True)
-class StructuralSymbol:
-    name: str
-    kind: str
-
-
-def extract_structural_symbols(
-    messages: list[dict[str, JsonValue]],
-) -> list[StructuralSymbol]:
-    """Extract symbols from structured message positions — no LLM needed.
-
-    Two sources, both decidable, neither semantic recognition:
-
-    * tool names — structural-position lookup (the ``name`` field of
-      ``tool_call`` blocks);
-    * SQL table names — formal-grammar parsing: the token after
-      FROM/JOIN/INTO/UPDATE/TABLE is a table reference by the grammar of
-      SQL itself, not by guessing what the text means. Registry-priming
-      only (recall hint for the extractor's ⟦known⟧ marks); the model
-      remains the authority on what gets declared a symbol.
-    """
-    seen: set[str] = set()
-    out: list[StructuralSymbol] = []
-
-    def _add(name: str, kind: str) -> None:
-        key = name.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(StructuralSymbol(name=name, kind=kind))
-
-    def _scan_sql(text: str) -> None:
-        for m in _SQL_TABLE_RE.finditer(text):
-            table = m.group(1)
-            if len(table) >= 2 and not table.startswith("("):
-                _add(table, "table")
-
-    for msg in messages:
-        blocks = msg.get("content", [])
-        if not isinstance(blocks, list):
-            continue
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type", "")
-
-            if btype == "tool_call":
-                name = block.get("name")
-                if isinstance(name, str) and name:
-                    _add(name, "tool")
-                args = block.get("arguments", block.get("input", {}))
-                if isinstance(args, dict):
-                    args_text = json.dumps(args, ensure_ascii=False)
-                else:
-                    args_text = str(args)
-                _scan_sql(args_text)
-
-            elif btype == "tool_result":
-                sub = block.get("content", [])
-                if isinstance(sub, list):
-                    for s in sub:
-                        if isinstance(s, dict):
-                            _scan_sql(str(s.get("text", "")))
-                else:
-                    _scan_sql(str(sub))
-
-    return out
 
 
 # ---------------------------------------------------------------------------

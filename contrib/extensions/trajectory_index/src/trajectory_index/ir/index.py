@@ -38,10 +38,12 @@ from ..pass3_folds.grounding import (
 )
 from . import persistence
 from .models import (
+    _ACTION_OP_VALUES,
     _ENTITY_CLASS_VALUES,
     _FINDING_STATUS_VALUES,
     _REF_FORM_VALUES,
     _RISK_VALUES,
+    Action,
     AliasCandidate,
     Claim,
     ClaimFinding,
@@ -74,10 +76,12 @@ from .models import (
 # Names re-exported so existing ``from trajectory_index.index import X`` imports
 # keep resolving after the split. Keep in sync with the models import above.
 __all__ = [
+    "_ACTION_OP_VALUES",
     "_ENTITY_CLASS_VALUES",
     "_FINDING_STATUS_VALUES",
     "_REF_FORM_VALUES",
     "_RISK_VALUES",
+    "Action",
     "AliasCandidate",
     "Claim",
     "ClaimFinding",
@@ -157,6 +161,9 @@ class TrajectoryIndex:
         self.constraints: dict[str, Constraint] = {}
         self.constraint_findings: list[ConstraintFinding] = []
 
+        # Actions (structural, Pass 1). Parsed from tool_call blocks.
+        self.actions: dict[str, Action] = {}
+
         self.indexed_message_count: int = 0
 
     # ---- write path ----
@@ -170,6 +177,9 @@ class TrajectoryIndex:
 
     def add_step(self, step: Step) -> None:
         self.steps[(step.run_id, step.step_id)] = step
+
+    def add_action(self, action: Action) -> None:
+        self.actions[action.call_id] = action
 
     def upsert_symbol(
         self,
@@ -227,7 +237,6 @@ class TrajectoryIndex:
         kind: str = "unknown",
         start: int = 0,
         end: int | None = None,
-        confidence: float = 1.0,
         form: RefForm = "direct",
         value: str | None = None,
         resolved_from: str | None = None,
@@ -251,7 +260,6 @@ class TrajectoryIndex:
             text=text,
             role=step.role,
             kind=kind,
-            confidence=confidence,
             grounded=grounded_from_kind(kind),
             structured=drives_defuse(symbol.entity_class),
             form=form,
@@ -278,7 +286,6 @@ class TrajectoryIndex:
         rel_type: str,
         step: Step,
         weight: float = 1.0,
-        confidence: float = 1.0,
     ) -> Relation:
         relation_id = stable_id(
             "rel", from_symbol.id, to_symbol.id, rel_type,
@@ -294,7 +301,6 @@ class TrajectoryIndex:
             run_id=step.run_id,
             step_id=step.step_id,
             weight=weight,
-            confidence=confidence,
         )
         self.relations[relation_id] = relation
         self._relation_ids_by_symbol[from_symbol.id].append(relation_id)
@@ -350,7 +356,6 @@ class TrajectoryIndex:
         *,
         run_id: str = "",
         namespace_fn: Any | None = None,
-        reference_confidence: float = 0.8,
         message_id_start: int = 0,
         diagnostics: Any | None = None,
     ) -> None:
@@ -358,7 +363,6 @@ class TrajectoryIndex:
         populate.populate_from_extraction(
             self, result, messages,
             run_id=run_id, namespace_fn=namespace_fn,
-            reference_confidence=reference_confidence,
             message_id_start=message_id_start, diagnostics=diagnostics,
         )
 
@@ -547,7 +551,7 @@ class TrajectoryIndex:
                 if other_id == symbol_id:
                     continue
                 decay = 1.0 / (depth + 1)
-                scores[other_id] += rel.weight * rel.confidence * decay
+                scores[other_id] += rel.weight * decay
                 rels_by_other[other_id].append(rel)
                 if other_id not in visited:
                     visited.add(other_id)
@@ -633,7 +637,7 @@ class TrajectoryIndex:
         if not candidates:
             return None
         return sorted(
-            candidates, key=lambda r: (r.location.end - r.location.start, -r.confidence),
+            candidates, key=lambda r: r.location.end - r.location.start,
         )[0]
 
     def _ref_sort_key(self, ref: Reference) -> tuple[str, int, int]:
