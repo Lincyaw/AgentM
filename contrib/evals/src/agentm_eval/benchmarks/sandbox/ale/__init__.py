@@ -500,7 +500,7 @@ class AleAdapter:
             )] = 0.0,
             eval_timeout: Annotated[float, typer.Option(help="Grader timeout seconds")] = 7200.0,
             max_turns: Annotated[Optional[int], typer.Option(help="Agent max turns")] = None,
-            keep_sandbox: Annotated[bool, typer.Option(help="Keep sandboxes for debugging")] = False,
+            keep_sandbox: Annotated[bool, typer.Option(help="Keep sandboxes after run")] = True,
             exp_id: Annotated[Optional[str], typer.Option(help="Override experiment ID")] = None,
             arl_context: Annotated[Optional[str], typer.Option(
                 help="ARL config context from ~/.config/arl/config.yaml "
