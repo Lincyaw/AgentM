@@ -103,7 +103,7 @@ class SeniorSweAdapter(HarborAdapter):
         env.setdefault("OPENAI_API_KEY", api_key)
         return True
 
-    VERIFIER_PIP_DEPS = ("fastapi", "orjson")
+    VERIFIER_PIP_DEPS = ("litellm[proxy]",)
     _PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
     _NPM_MIRROR = "https://registry.npmmirror.com/"
     _PROXY_URL = "http://sing-box.arl1.svc:7890"
@@ -114,32 +114,35 @@ class SeniorSweAdapter(HarborAdapter):
         mirror = self._PIP_MIRROR
         npm_mirror = self._NPM_MIRROR
         proxy = self._PROXY_URL
+        no_proxy = "localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12"
         session.execute([{  # type: ignore[attr-defined]
             "name": "setup-mirrors",
             "command": ["bash", "-lc",
+                # build tools for C extensions (uvloop etc.)
+                "apt-get update -qq && "
+                "apt-get install -y -qq gcc python3-dev 2>/dev/null || true; "
                 # pip mirror
                 f"mkdir -p ~/.config/pip && "
                 f"printf '[global]\\nindex-url = {mirror}\\n"
                 f"trusted-host = pypi.tuna.tsinghua.edu.cn\\n' > ~/.config/pip/pip.conf && "
                 # npm / pnpm mirror
                 f"npm config set registry {npm_mirror} 2>/dev/null; "
-                # persist env vars for all subprocesses (uv, git, curl, pnpm)
+                # persist env vars for all subprocesses
                 f"printf '"
                 f"UV_DEFAULT_INDEX={mirror}\\n"
                 f"HTTPS_PROXY={proxy}\\n"
                 f"HTTP_PROXY={proxy}\\n"
                 f"https_proxy={proxy}\\n"
                 f"http_proxy={proxy}\\n"
-                f"no_proxy=localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12\\n"
-                f"NO_PROXY=localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12\\n"
+                f"no_proxy={no_proxy}\\n"
+                f"NO_PROXY={no_proxy}\\n"
                 f"' >> /etc/environment "
                 "|| true"],
             "work_dir": "/app",
-        }], recover_timeout=30)
+        }], recover_timeout=120)
         if self.VERIFIER_PIP_DEPS:
             deps = " ".join(shlex.quote(d) for d in self.VERIFIER_PIP_DEPS)
             pip_idx = f"-i {mirror} --trusted-host pypi.tuna.tsinghua.edu.cn"
-            no_proxy = "localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12"
             pip_env = (
                 f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
                 f"https_proxy={proxy} http_proxy={proxy} "
