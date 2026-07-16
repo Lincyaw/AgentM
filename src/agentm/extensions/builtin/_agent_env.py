@@ -275,16 +275,15 @@ async def _replay_resume_environment(
     if not priors:
         return  # fresh start -- no earlier sandbox to restore
 
-    if len(priors) > 1 and experiment_id != api.session_id:
+    source = max(priors, key=lambda s: str(getattr(s, "created_at", "") or ""))
+    if len(priors) > 1:
         logger.info(
-            "agent_env: resume -- {} candidate prior sandboxes under shared "
-            "experiment {}; skipping ambiguous restore",
+            "agent_env: resume -- {} candidate priors under experiment {}, "
+            "picking latest {}",
             len(priors),
             experiment_id,
+            source.id,
         )
-        return
-
-    source = max(priors, key=lambda s: str(getattr(s, "created_at", "") or ""))
     logger.info(
         "agent_env: resume -- replaying prior sandbox {} into {}",
         source.id,

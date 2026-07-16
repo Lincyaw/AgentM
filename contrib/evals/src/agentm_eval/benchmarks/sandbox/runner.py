@@ -460,18 +460,27 @@ def _run_and_eval_one_inner(
     except Exception as e:
         client.close()
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": f"list sessions: {e}"}
-    # The gateway also lists deleted sessions (e.g. left over from an earlier
-    # run that reused this experiment id); attaching to one 410s at eval time.
-    agent_arl_sessions = [
-        s for s in agent_arl_sessions if getattr(s, "deleted_at", None) is None
-    ]
-    if not agent_arl_sessions:
+    live = [s for s in agent_arl_sessions if getattr(s, "deleted_at", None) is None]
+    if live:
+        arl_session_id = live[0].id
+    elif agent_arl_sessions:
+        source = max(agent_arl_sessions, key=lambda s: str(getattr(s, "created_at", "") or ""))
+        try:
+            new_session = client.create_session(
+                img, idle_timeout_seconds=7200, allocation_timeout_seconds=600,
+            )
+            replay = client.replay_from(new_session.id, source.id)
+            logger.info("replay {}: {} steps from {} into {}, {} errors",
+                        name, replay.stepsReplayed, source.id, new_session.id, replay.errors)
+            arl_session_id = new_session.id
+        except Exception as e:
+            client.close()
+            return {"task": name, "status": "eval_create_failed", "tools": tools_count,
+                    "error": f"replay failed: {e}"}
+    else:
         client.close()
-        return {
-            "task": name, "status": "eval_create_failed", "tools": tools_count,
-            "error": "original sandbox gone and no live session found",
-        }
-    arl_session_id = agent_arl_sessions[0].id
+        return {"task": name, "status": "eval_create_failed", "tools": tools_count,
+                "error": "no session found under experiment"}
 
     # Long verifiers (LLM-judge pipelines, compile-and-test suites) run as a
     # single execute call; the HTTP timeout must cover the adapter's effective
@@ -529,8 +538,6 @@ def _run_and_eval_one_inner(
         {"task": name, "session_id": session_id, "tools": tools_count, **scores},
         ensure_ascii=False,
     ))
-    state_file.unlink(missing_ok=True)
-
     return {"task": name, "status": "done", "tools": tools_count, "session_id": session_id, **scores}
 
 
