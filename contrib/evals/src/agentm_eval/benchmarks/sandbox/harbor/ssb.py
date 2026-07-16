@@ -99,8 +99,8 @@ class SeniorSweAdapter(HarborAdapter):
             env["SSB_OVERRIDE_ALL_JUDGE_MODEL"] = f"openai/{model_slug}"
         if not env.get("SSB_OVERRIDE_CLASSIFIER_MODEL"):
             env["SSB_OVERRIDE_CLASSIFIER_MODEL"] = f"openai/{model_slug}"
-        env["OPENAI_BASE_URL"] = base_url
-        env["OPENAI_API_KEY"] = api_key
+        env.setdefault("OPENAI_BASE_URL", base_url)
+        env.setdefault("OPENAI_API_KEY", api_key)
         return True
 
     VERIFIER_PIP_DEPS = ("fastapi",)
