@@ -332,6 +332,9 @@ async def _run_agent(
                         task_ref, create_attempts, _MAX_CREATE_ATTEMPTS, msg[:160])
             await asyncio.sleep(30)
 
+    logger.info("[{}] agentm trace messages --session {} --format text",
+                task_ref, session.session_id)
+
     timed_out = False
     try:
         coro = session.prompt(prompt)

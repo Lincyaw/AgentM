@@ -348,6 +348,9 @@ def run_agent_session(
                 )
                 await asyncio.sleep(30)
 
+        logger.info("{}: agentm trace messages --session {} --format text",
+                    job.task.name, session.session_id)
+
         interrupt = asyncio.Event()
         loop = asyncio.get_running_loop()
         with _active_agent_lock:
