@@ -14,7 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
-from agentm.core.abi import AgentMessage
+from agentm.core.abi import AgentMessage, UserMessage
 from agentm.core.abi.events import (
     MessageAppendedEvent,
     SessionHeaderEmittedEvent,
@@ -867,6 +867,18 @@ class _SessionManagerQueryMixin(_SessionManagerMutationMixin):
 
         if first_kept_index is None:
             first_kept_index = compaction_index
+
+        # Preserve user messages from the compacted region verbatim.
+        # User inputs are authoritative (task specs, corrections,
+        # constraints) and must not be lossy-compressed through an LLM
+        # summary. They are replayed after the summary so the model
+        # sees: [summary] + [user messages] + [kept tail] + [post-compaction].
+        for entry in path[:first_kept_index]:
+            if (
+                entry.type == ENTRY_TYPE_MESSAGE
+                and isinstance(entry.payload, UserMessage)
+            ):
+                append_materialized(entry)
 
         for entry in path[first_kept_index:compaction_index]:
             append_materialized(entry)

@@ -48,6 +48,8 @@ from ..ir.models import (
 )
 from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
 
+_VALID_STATUSES: set[FindingStatus] = {"verified", "violated", "omitted", "unknown"}
+
 if TYPE_CHECKING:
     from ..ir.index import TrajectoryIndex
 
@@ -386,6 +388,39 @@ def _emit_findings(
     return findings
 
 
+def _convert_precomputed(
+    raw: dict[str, dict[str, Any]],
+    constraints: list[Constraint],
+    commit: Commit,
+    diag: Diagnostics,
+) -> dict[str, Verdict]:
+    """Convert raw constraint results from the merged evidence sweep."""
+    verdicts: dict[str, Verdict] = {}
+    for c in constraints:
+        rv = raw.get(c.id)
+        if not rv:
+            verdicts[c.id] = Verdict("unknown", 0.0, "code", (), "not in evidence sweep")
+            continue
+        status_raw = str(rv.get("status", "unknown"))
+        status: FindingStatus = status_raw if status_raw in _VALID_STATUSES else "unknown"  # type: ignore[assignment]
+        if status == "omitted":
+            conf = min(commit.confidence, float(rv.get("confidence", 0.8)))
+        else:
+            conf = float(rv.get("confidence", 0.0))
+        ev = rv.get("evidence_step_ids", ())
+        if isinstance(ev, list):
+            ev = tuple(str(s) for s in ev)
+        verdicts[c.id] = Verdict(
+            status=status,
+            confidence=conf,
+            source=str(rv.get("source", "oracle:evidence")),
+            evidence_step_ids=ev,
+            reason=str(rv.get("reason", "")),
+        )
+        diag.record("evidence", c.id, status, conf, f"precomputed: {rv.get('reason', '')[:120]}")
+    return verdicts
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -399,12 +434,17 @@ async def analyze_constraints(
     constraints: list[Constraint] | None = None,
     model: str | None = None,
     session_factory: SessionFactory | None = None,
+    precomputed_evidence: dict[str, dict[str, Any]] | None = None,
 ) -> ConstraintAnalysis:
     """Chain E1 → E → L over Pass 1 constraint nodes.
 
     E1 detects the committed answer; E partitions all evidence and judges
-    each constraint's status per partition (merged E2+E3+J); L emits
-    findings. Best-effort: any oracle failure degrades to unknown (P5).
+    each constraint's status per partition; L emits findings.
+    Best-effort: any oracle failure degrades to unknown (P5).
+
+    When *precomputed_evidence* is provided (from a merged evidence sweep
+    in ``build_claim_edges``), the per-partition evidence LLM calls are
+    skipped — only commit detection and findings emission run here.
     """
     if session_factory is None:
         raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
@@ -456,10 +496,13 @@ async def analyze_constraints(
                     "commit step excluded from constraint evidence (no self-verification)")
 
     # Pass E — partition-swept evidence: find + judge for all constraints
-    verdicts = await _judge_constraint_evidence(
-        constraints, commit, evidence,
-        model=model, session_factory=session_factory, diag=diag,
-    )
+    if precomputed_evidence is not None:
+        verdicts = _convert_precomputed(precomputed_evidence, constraints, commit, diag)
+    else:
+        verdicts = await _judge_constraint_evidence(
+            constraints, commit, evidence,
+            model=model, session_factory=session_factory, diag=diag,
+        )
 
     # Pass L
     analysis.findings = _emit_findings(constraints, verdicts, commit, steps)

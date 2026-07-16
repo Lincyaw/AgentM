@@ -97,12 +97,12 @@ the goal statement and verification method verbatim — the successor \
 agent needs these to know what to work toward and how to verify it.
 
 ## Task Specification
-If the agent read a task specification file early in the session \
-(README, project spec, or similar), reproduce the key requirements \
-verbatim or near-verbatim here. The successor agent will not re-read \
-the file — this section is its only reference to what the task asks \
-for. Include: what to implement, what files to modify, how to test, \
-what output is expected, and any constraints stated in the spec.
+All user messages from the compacted region are preserved verbatim \
+alongside this summary — the successor agent will see them as separate \
+messages. Do NOT reproduce or paraphrase user message content here. \
+Instead, note only which user messages contained task specs and any \
+key constraints the assistant derived from them that are not obvious \
+from the user text alone.
 
 ## Constraints & Preferences
 - Any constraints, preferences, or requirements the user stated
@@ -191,6 +191,8 @@ prefer the newer source and note the change.
 update it — do not stack conflicting versions.
 
 Rules for updating:
+- All user messages are preserved verbatim alongside this summary — do \
+NOT reproduce or paraphrase user message content
 - PRESERVE all information from the previous summary that is still relevant
 - ADD new progress, decisions, context, files, errors, tool results from \
 the new messages

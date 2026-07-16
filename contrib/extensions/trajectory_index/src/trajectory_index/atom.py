@@ -57,6 +57,13 @@ class TrajectoryIndexConfig(BaseModel):
         description="Model profile for the Pass 2 same-entity judgment. Empty "
         "reuses the extraction model.",
     )
+    value_fidelity: bool = Field(
+        default=True,
+        description="Run Pass 3.5 value fidelity check: for each def-use edge "
+        "with a grounded binding, ask the model whether the agent's usage "
+        "matches what the tool provided. Flags 'contradicted' risk. One LLM "
+        "call over all targets.",
+    )
     analyze_claims: bool = Field(
         default=False,
         description="Run the claim/constraint adjudication passes after def-use: "
@@ -437,42 +444,89 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         index.build_dependencies()
 
         # Pass 3.5 — value fidelity (independent of alias resolution).
-        try:
-            from .pass3_folds.grounding import compare_values
+        if cfg.value_fidelity:
+            try:
+                from .pass3_folds.grounding import compare_values
 
-            await compare_values(index, model=model, apply=True, session_factory=sf)
-        except Exception:
-            logger.warning("Pass 3.5 (value fidelity) failed, skipping", exc_info=True)
+                await compare_values(index, model=model, apply=True, session_factory=sf)
+            except Exception:
+                logger.warning("Pass 3.5 (value fidelity) failed, skipping", exc_info=True)
 
         # Pass 4 — claim/constraint adjudication (opt-in; per-claim oracle sweep).
         # Wholesale-replaces this run's edges/claim_findings/constraint_findings,
         # so it reasons over the full run each call, not just the new delta.
+        #
+        # Pipeline: commit(1 LLM) → unified evidence(P LLM) → fold(code) → intent(1 LLM)
+        # The unified evidence sweep merges claim and constraint evidence into
+        # one call per partition (was 2P before the merge).
         if cfg.analyze_claims:
             from .pass2_edges.claims import build_claim_edges
             from .pass2_edges.intent_alignment import build_intent_alignment_edges
             from .pass3_folds.claim_status import fold_claim_statuses
             from .pass3_folds.constraints import analyze_constraints
 
+            constraints = list(index.constraints.values())
+            question = _first_user_text(all_messages)
+
+            # E1: commit detection — runs only when constraints exist;
+            # the binding and step_id feed the merged evidence sweep so
+            # the model knows the candidate answer.
+            commit_binding = ""
+            commit_step_id_str = ""
+            precomputed: dict[str, Any] | None = None
+            if constraints:
+                from .ir.diagnostics import Diagnostics as _Diag
+                from .pass3_folds.constraints import _detect_commit
+
+                _diag = _Diag()
+                _all_steps = sorted(
+                    (s for s in index.steps.values()
+                     if not run_id or s.run_id == run_id),
+                    key=lambda s: s.index,
+                )
+                try:
+                    _commit = await _detect_commit(
+                        index, _all_steps, question=question,
+                        model=model, session_factory=sf, diag=_diag,
+                    )
+                    if _commit is not None:
+                        commit_binding = _commit.binding
+                        commit_step_id_str = _commit.step.step_id
+                except Exception:
+                    logger.warning("Pass 4 (commit detection) failed, skipping constraints", exc_info=True)
+                    constraints = []
+
+            # Unified evidence sweep — claims + constraints in one partition sweep
             try:
                 edge_result = await build_claim_edges(
                     index, run_id=run_id, model=model, session_factory=sf,
+                    constraints=constraints if commit_binding else None,
+                    commit_binding=commit_binding,
+                    commit_step_id=commit_step_id_str,
                 )
                 fold_claim_statuses(index, edge_result, run_id=run_id)
+                if edge_result.constraint_results:
+                    precomputed = edge_result.constraint_results
             except Exception:
-                logger.warning("Pass 4 (claim edges/status) failed, skipping", exc_info=True)
+                logger.warning("Pass 4 (evidence/status) failed, skipping", exc_info=True)
+
+            # Constraint findings — uses pre-computed evidence from the merged sweep
+            if constraints:
+                try:
+                    await analyze_constraints(
+                        index, run_id=run_id, question=question,
+                        model=model, session_factory=sf,
+                        precomputed_evidence=precomputed,
+                    )
+                except Exception:
+                    logger.warning("Pass 4 (constraint analysis) failed, skipping", exc_info=True)
+
             try:
                 await build_intent_alignment_edges(
                     index, run_id=run_id, model=model, session_factory=sf,
                 )
             except Exception:
                 logger.warning("Pass 4 (intent alignment) failed, skipping", exc_info=True)
-            try:
-                await analyze_constraints(
-                    index, run_id=run_id, question=_first_user_text(all_messages),
-                    model=model, session_factory=sf,
-                )
-            except Exception:
-                logger.warning("Pass 4 (constraint analysis) failed, skipping", exc_info=True)
 
         stats = index.stats(run_id)
         deps = index.get_dependencies()

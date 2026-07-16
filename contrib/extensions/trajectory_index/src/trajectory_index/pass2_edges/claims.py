@@ -48,16 +48,16 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from ..ir.diagnostics import Diagnostics
-from ..ir.models import Claim, Edge, Step, stable_id
-from ..oracle import SessionFactory, _ask_model
+from ..ir.models import Claim, Constraint, Edge, Step, stable_id
+from ..oracle import SessionFactory, _ask_model, _index_by_id, _safe_float
 
 if TYPE_CHECKING:
     from ..ir.index import TrajectoryIndex
 
 _PARTITION_CHAR_BUDGET = 60_000   # max excerpt chars per oracle call (whole excerpts)
 _MAX_SUPPORT_EDGES_PER_CLAIM = 6  # supports capped in trajectory order; conflicts never
-_N_RETRIEVAL_SAMPLES = 2          # retrieval samples per partition, unioned
-_VERIFY_ATTEMPTS = 2              # attempts per verification call before giving up
+_N_RETRIEVAL_SAMPLES = 2          # retrieval samples per partition, unioned (unused after evidence merge)
+_VERIFY_ATTEMPTS = 2              # attempts per verification call before giving up (unused after evidence merge)
 
 _EDGE_KINDS = ("supports", "conflicts")
 _VERDICTS = ("supports", "conflicts", "neutral")
@@ -118,6 +118,10 @@ class EdgePassResult:
     nominations: dict[str, list[str]] = field(default_factory=dict)
     verdicts: list[dict[str, str]] = field(default_factory=list)
     diagnostics: Diagnostics = field(default_factory=Diagnostics)
+    # constraint evidence from the merged sweep (populated only when
+    # constraints are passed to build_claim_edges); maps constraint_id →
+    # {status, confidence, source, evidence_step_ids, reason}
+    constraint_results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_artifact(self) -> dict[str, Any]:
         return {
@@ -241,12 +245,20 @@ async def build_claim_edges(
     run_id: str = "",
     model: str | None = None,
     session_factory: SessionFactory | None = None,
+    constraints: list[Constraint] | None = None,
+    commit_binding: str = "",
+    commit_step_id: str = "",
 ) -> EdgePassResult:
     """Build ``supports``/``conflicts`` edges (claim ↔ observation evidence).
 
     Single-pass per partition: the model finds relevant excerpts for each
     claim AND judges polarity with verbatim quotes in one call. Idempotent
     per run: existing edges of these kinds are replaced wholesale.
+
+    When *constraints* and *commit_binding* are provided, the same partition
+    sweep also judges constraint satisfaction (establish/refute/absent) —
+    results are stored in ``EdgePassResult.constraint_results`` so the
+    caller can emit constraint findings without a second sweep.
     """
     if session_factory is None:
         raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
@@ -274,11 +286,19 @@ async def build_claim_edges(
                     len(claims), len(observations))
         return result
 
+    if commit_step_id:
+        observations = [s for s in observations if s.step_id != commit_step_id]
     obs_ids = {s.step_id for s in observations}
     claim_rows = [
-        {"claim": i, "made_at_step": c.step_id, "text": c.text}
+        {"id": i, "made_at_step": c.step_id, "text": c.text}
         for i, c in enumerate(claims)
     ]
+    constraint_rows: list[dict[str, Any]] | None = None
+    if constraints and commit_binding:
+        constraint_rows = [
+            {"id": i, "desc": c.description}
+            for i, c in enumerate(constraints)
+        ]
 
     excerpts = [
         e for s in observations for e in _excerpts_for(s, _PARTITION_CHAR_BUDGET)
@@ -298,15 +318,21 @@ async def build_claim_edges(
             diag.record("edges", f"partition:{pi}", None, 0.0,
                         "coverage-degraded: an observation region exceeds the "
                         "call budget; negatives are not entitled by this sweep")
-        payload = json.dumps({
+        payload_dict: dict[str, Any] = {
             "claims": claim_rows,
             "excerpts": [{"step": e.step.step_id, "text": e.text} for e in partition],
-        }, ensure_ascii=False, indent=2)
+        }
+        if constraint_rows:
+            payload_dict["candidate"] = commit_binding
+            payload_dict["constraints"] = constraint_rows
+        payload = json.dumps(payload_dict, ensure_ascii=False, indent=2)
 
         shown_ids = {e.step.step_id for e in partition}
+        prompt_name = "evidence" if constraint_rows else "claim_evidence"
         raw = await _ask_model(
-            "claim_evidence", payload, model,
-            session_factory=session_factory, purpose="claim_evidence",
+            prompt_name, payload, model,
+            session_factory=session_factory, purpose="evidence",
+            key="",
         )
         rows_seen: set[int] = set()
         if raw is None:
@@ -316,8 +342,20 @@ async def build_claim_edges(
             attested.append(rows_seen)
             continue
 
-        from ..oracle import _index_by_id
-        by_id = _index_by_id(raw)
+        claim_list: list[Any]
+        constraint_list: list[Any]
+        if isinstance(raw, dict):
+            cl = raw.get("claims", raw.get("verdicts", []))
+            claim_list = cl if isinstance(cl, list) else []
+            co = raw.get("constraints", [])
+            constraint_list = co if isinstance(co, list) else []
+        elif isinstance(raw, list):
+            claim_list = raw
+            constraint_list = []
+        else:
+            claim_list, constraint_list = [], []
+
+        by_id = _index_by_id(claim_list)
         for ci_raw in range(len(claims)):
             item = by_id.get(ci_raw)
             if not item:
@@ -350,6 +388,31 @@ async def build_claim_edges(
                     proposals.append(
                         (claim, steps_by_id[sid], relation, str(m.get("quote", "")))
                     )
+        if constraints and constraint_list:
+            c_by_id = _index_by_id(constraint_list)
+            for i, c in enumerate(constraints):
+                if c.id in result.constraint_results:
+                    continue
+                item = c_by_id.get(i)
+                if not item:
+                    continue
+                outcome = str(item.get("outcome", "absent"))
+                if outcome not in ("establish", "refute"):
+                    continue
+                ev = tuple(
+                    str(s) for s in item.get("steps", [])
+                    if isinstance(s, str | int) and str(s) in shown_ids
+                )
+                status = "verified" if outcome == "establish" else "violated"
+                result.constraint_results[c.id] = {
+                    "status": status,
+                    "confidence": _safe_float(item, "confidence"),
+                    "source": "oracle:evidence",
+                    "evidence_step_ids": ev,
+                    "reason": str(item.get("reason", "")),
+                }
+                diag.record("evidence", c.id, outcome, _safe_float(item, "confidence"),
+                            f"partition:{pi} quote={str(item.get('quote', ''))[:120]}")
         attested.append(rows_seen)
 
     for ci, sids in nominated.items():
@@ -428,12 +491,38 @@ async def build_claim_edges(
         )
 
     result.edges = kept
+
+    # --- unsettled constraints: omitted or unknown ---
+    if constraints:
+        all_ok = result.coverage.n_failed_partitions == 0 and result.coverage.n_partitions > 0
+        for c in constraints:
+            if c.id in result.constraint_results:
+                continue
+            if all_ok:
+                result.constraint_results[c.id] = {
+                    "status": "omitted",
+                    "confidence": 0.8,
+                    "source": "oracle:evidence",
+                    "evidence_step_ids": (),
+                    "reason": "absent across all evidence partitions",
+                }
+                diag.record("evidence", c.id, "omitted", 0.0,
+                            "absent in all partitions -> omitted")
+            else:
+                result.constraint_results[c.id] = {
+                    "status": "unknown",
+                    "confidence": 0.0,
+                    "source": "code",
+                    "evidence_step_ids": (),
+                    "reason": f"{result.coverage.n_failed_partitions} partition(s) failed",
+                }
+
     by_kind: dict[str, int] = {}
     for e in kept:
         by_kind[e.kind] = by_kind.get(e.kind, 0) + 1
     n_attended = sum(1 for cc in result.claim_coverage.values() if cc.attended)
     logger.info(
-        "claim edges: {} claims → {} nominated, {} edges {} "
+        "claim edges: {} claims -> {} nominated, {} edges {} "
         "(content {}/{} partitions ok, {} degraded; attended {}/{})",
         result.n_claims, len(nominated), len(kept), by_kind,
         result.coverage.n_partitions - result.coverage.n_failed_partitions,
