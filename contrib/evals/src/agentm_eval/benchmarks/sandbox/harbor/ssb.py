@@ -119,7 +119,11 @@ class SeniorSweAdapter(HarborAdapter):
             "name": "setup-mirrors",
             "command": ["bash", "-lc",
                 # build tools for C extensions (uvloop etc.)
+                f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
+                f"https_proxy={proxy} http_proxy={proxy} "
                 "apt-get update -qq && "
+                f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
+                f"https_proxy={proxy} http_proxy={proxy} "
                 "apt-get install -y -qq gcc python3-dev 2>/dev/null || true; "
                 # pip mirror
                 f"mkdir -p ~/.config/pip && "
