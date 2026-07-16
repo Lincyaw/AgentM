@@ -40,10 +40,10 @@ from agentm_eval.result import TaskResult
 from . import bridge
 
 _TRANSIENT_CREATE_MARKERS = (
-    "pool at maximum capacity",
-    "429",
-    "503",
-    "no ready sandbox",
+    "pool at maximum capacity", "queued for", "context deadline exceeded",
+    "Gateway error (429)", "Gateway error (500)", "Gateway error (503)",
+    "Server disconnected", "Connection reset", "Connection refused",
+    "ReadTimeout", "timed out",
 )
 _MAX_CREATE_ATTEMPTS = 20
 
