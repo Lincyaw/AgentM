@@ -103,7 +103,7 @@ class SeniorSweAdapter(HarborAdapter):
         env.setdefault("OPENAI_API_KEY", api_key)
         return True
 
-    VERIFIER_PIP_DEPS = ("litellm[proxy]",)
+    VERIFIER_PIP_DEPS = ("fastapi", "orjson")
     _PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
     _NPM_MIRROR = "https://registry.npmmirror.com/"
     _PROXY_URL = "http://sing-box.arl1.svc:7890"
