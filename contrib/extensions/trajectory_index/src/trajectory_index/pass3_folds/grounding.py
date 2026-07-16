@@ -320,19 +320,6 @@ def warning_summary(index: TrajectoryIndex) -> dict[str, int]:
 # value the agent used matches what the tool actually produced, and flags
 # ``contradicted``. Local per-edge judgment (the model never traverses).
 
-_VALUE_COMPARE_INSTRUCTIONS = """\
-You check whether a value an agent acted on matches what a tool actually produced.
-Each item names an entity, the full text of the step where a tool provided
-information about it (grounded), and the full text of the step where the agent
-referenced it (used). Decide, per item independently:
-  - confirm:    the agent's usage is consistent with what the tool provided.
-  - contradict: the agent stated or used a different value than what the tool provided.
-  - unclear:    the texts don't contain comparable values for this entity.
-Judge the substance, not the wording. Return ONLY:
-{"verdicts": [{"id": 0, "outcome": "confirm|contradict|unclear", "confidence": 0.9, "reason": "..."}]}
-"""
-
-
 def _step_text(index: TrajectoryIndex, run_id: str, step_id: str) -> str:
     st = index.steps.get((run_id, step_id))
     return (st.content or "") if st else ""
@@ -388,7 +375,7 @@ async def compare_values(
         for i, (d, gs) in enumerate(targets)
     ]
     raw = await _ask_model(
-        _VALUE_COMPARE_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
+        "value_compare", json.dumps(rows, ensure_ascii=False, indent=2), model,
         session_factory=session_factory,
     )
     if raw is None:

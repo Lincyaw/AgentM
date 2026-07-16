@@ -22,6 +22,12 @@ from loguru import logger
 type SessionFactory = Callable[[Any], Coroutine[Any, Any, Any]]
 
 
+def load_prompt(name: str) -> str:
+    from importlib.resources import files
+    text = files("trajectory_index.prompts").joinpath(f"{name}.md").read_text(encoding="utf-8")
+    return text.strip()
+
+
 def _index_by_id(raw: list[Any]) -> dict[int, dict[str, Any]]:
     """Index a list of id-keyed dicts by their ``id`` field (missing → skipped)."""
     by_id: dict[int, dict[str, Any]] = {}
@@ -42,7 +48,7 @@ def _safe_float(item: dict[str, Any], key: str, default: float = 0.0) -> float:
 
 
 async def _ask_model(
-    instructions: str,
+    prompt_name: str,
     payload: str,
     model: str | None,
     session_factory: SessionFactory,
@@ -65,6 +71,8 @@ async def _ask_model(
     )
 
     from .pass1_nodes.serialize import extract_json
+
+    instructions = load_prompt(prompt_name)
 
     config = AgentSessionConfig(
         cwd=str(Path.cwd()),

@@ -235,62 +235,6 @@ def _excerpts_for(step: Step, budget: int) -> list[_Excerpt]:
 # retrieval (oracle): nominate candidate evidence, one row per claim
 # ---------------------------------------------------------------------------
 
-_RETRIEVAL_INSTRUCTIONS = """\
-An agent made claims during a task. Below are the claims and a set of
-observation excerpts (tool output, fetched pages, command results the agent
-had received). This is a RELEVANCE listing, not a judgment: a later focused
-check decides what each excerpt actually says about each claim.
-
-For EVERY claim, list the steps whose excerpt could bear on it — material
-about the same entities, quantities, dates, or facts. Be generous: a wrongly
-listed step costs one extra check; a missed step is never examined again.
-
-  - Output exactly one row per claim, covering every claim in order.
-  - A claim with no related excerpts gets an empty list. The empty row is
-    required — it records that the claim was checked against this set.
-  - Do not judge support or contradiction here; do not copy quotes.
-
-Return ONLY:
-{"rows": [{"claim": 0, "steps": ["12", "47"]}, {"claim": 1, "steps": []}]}
-"""
-
-
-# ---------------------------------------------------------------------------
-# verify (oracle): focused adversarial judgment per claim
-# ---------------------------------------------------------------------------
-
-_VERIFY_INSTRUCTIONS = """\
-An agent made a claim during a task; a relevance scan flagged the observation
-excerpts below (tool output, fetched pages the agent had received) as possibly
-bearing on it. Judge each excerpt independently and adversarially: try to
-REFUTE the pairing before accepting it.
-
-  - "supports": the excerpt itself states the same specific fact about the
-    same entities as the claim.
-  - "conflicts": the excerpt states something incompatible with the claim.
-  - "neutral": on the same topic, but it does not settle the claim either way
-    (no specific value, status, or fact in common to compare).
-
-When the claim asserts a specific value — a date, number, status, name, or
-count — find that same attribute in the excerpt and COMPARE the values. A
-different value is a "conflicts", even when a matching-looking value also
-appears nearby: an excerpt may hold both a requested date and the actual date,
-or an asked-for figure and the returned one. Anchor on what the source
-actually reports, not on the value that echoes the claim. This value mismatch
-is the most commonly missed contradiction; do not overlook it.
-
-  - For supports/conflicts, copy the decisive passage VERBATIM into "quote".
-    It is checked mechanically against the excerpt; a paraphrase is discarded.
-    The quote must be observation content, NEVER the claim's own sentence or a
-    restatement of it. For a value mismatch, quote the passage carrying the
-    source's actual value.
-  - Every excerpt gets exactly one verdict row.
-
-Return ONLY:
-{"verdicts": [{"step": "12", "relation": "supports|conflicts|neutral", "quote": "..."}]}
-"""
-
-
 async def build_claim_edges(
     index: TrajectoryIndex,
     *,
@@ -362,7 +306,7 @@ async def build_claim_edges(
         ok = 0
         for _ in range(max(1, samples)):
             raw = await _ask_model(
-                _RETRIEVAL_INSTRUCTIONS, payload, model,
+                "claim_retrieval", payload, model,
                 session_factory=session_factory, purpose="edge_retrieval",
                 key="rows",
             )
@@ -413,7 +357,7 @@ async def build_claim_edges(
             raw = None
             for _ in range(_VERIFY_ATTEMPTS):
                 raw = await _ask_model(
-                    _VERIFY_INSTRUCTIONS, payload, model,
+                    "claim_verify", payload, model,
                     session_factory=session_factory, purpose="edge_verification",
                 )
                 if raw is not None:

@@ -82,28 +82,6 @@ def _tool_call_steps(
     return sorted(steps, key=lambda s: s.index)
 
 
-_ADDRESSES_INSTRUCTIONS = """\
-An agent performed actions during a task. Each action has a declared purpose.
-Below are (action, constraint) pairs. For each pair, judge whether the action's
-purpose directly relates to satisfying the constraint. Be strict: a tangential
-or incidental connection is not enough; the purpose must target the constraint's
-requirement.
-
-Return ONLY:
-{"verdicts": [{"id": 0, "outcome": "yes|no|unclear"}]}
-"""
-
-_FULFILLS_INSTRUCTIONS = """\
-An agent performed actions during a task. Each action has a declared purpose
-and a tool result showing what actually happened. For each pair, judge whether
-the action achieved its declared purpose based on the tool result. Be strict:
-partial achievement or ambiguous output counts as "no".
-
-Return ONLY:
-{"verdicts": [{"id": 0, "outcome": "yes|no|unclear"}]}
-"""
-
-
 async def _judge_addresses(
     index: TrajectoryIndex,
     run_id: str,
@@ -146,7 +124,7 @@ async def _judge_addresses(
 
     payload = json.dumps({"pairs": pairs}, ensure_ascii=False, indent=2)
     raw = await _ask_model(
-        _ADDRESSES_INSTRUCTIONS, payload, model,
+        "intent_addresses", payload, model,
         session_factory=session_factory, purpose="intent_addresses",
     )
 
@@ -229,7 +207,7 @@ async def _judge_fulfills(
 
     payload = json.dumps({"pairs": pairs}, ensure_ascii=False, indent=2)
     raw = await _ask_model(
-        _FULFILLS_INSTRUCTIONS, payload, model,
+        "intent_fulfills", payload, model,
         session_factory=session_factory, purpose="intent_fulfills",
     )
 

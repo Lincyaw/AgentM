@@ -41,21 +41,6 @@ EDGE_KIND = "self_contradicts"
 _MAX_PAIRS = 60
 _MIN_NAME_LEN = 3
 
-_INSTRUCTIONS = """\
-You decide whether two assertions an agent made about the SAME entity
-CONTRADICT — assert things that cannot both be true of that entity at once.
-This is the agent contradicting ITSELF, judged on the two texts alone (no
-outside knowledge, no tools). Per item, independently:
-  - contradict: the two assertions are mutually incompatible about the entity.
-  - consistent: they can both hold (agreement, refinement, or unrelated facets).
-  - unclear:    the texts do not pin comparable content about the entity.
-A later assertion that merely UPDATES or RETRACTS an earlier one still counts
-as contradict (the earlier belief was abandoned). Judge substance, not wording.
-Return ONLY:
-{"verdicts": [{"id": 0, "outcome": "contradict|consistent|unclear"}]}
-"""
-
-
 @dataclass(slots=True)
 class SelfContradictionResult:
     edges: list[Edge] = field(default_factory=list)
@@ -170,7 +155,7 @@ async def build_self_contradiction_edges(
     result.n_judged = len(rows)
 
     raw = await _ask_model(
-        _INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2), model,
+        "self_contradiction", json.dumps(rows, ensure_ascii=False, indent=2), model,
         session_factory=session_factory, purpose="self_contradiction",
     )
     if raw is None:

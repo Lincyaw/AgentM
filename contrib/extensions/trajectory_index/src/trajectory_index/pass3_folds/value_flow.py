@@ -110,30 +110,6 @@ def _final_values(index: TrajectoryIndex) -> dict[str, str]:
     return {name: val for name, (_, val) in latest.items()}
 
 
-_CONSTRAINT_CHECK_INSTRUCTIONS = """\
-You are checking whether task constraints were satisfied by the agent's trajectory.
-
-You will receive:
-1. A list of constraints (id + description).
-2. A table of final observed values for tracked symbols.
-
-For each constraint, judge whether the final values satisfy it.
-
-Reply with a JSON object:
-```json
-{"checks": [
-  {"id": 0, "status": "met|violated|irrelevant", "symbol": "matched_symbol_or_empty", "target": "target_from_constraint", "actual": "observed_value", "reason": "one sentence"}
-]}
-```
-
-- "met": the constraint is satisfied by the observed values.
-- "violated": the constraint is clearly not satisfied.
-- "irrelevant": the constraint is not checkable against numeric/string values (workflow instruction, structural rule, etc.).
-
-Only output the JSON. No commentary.
-"""
-
-
 async def build_constraint_checks(
     index: TrajectoryIndex,
     *,
@@ -165,7 +141,7 @@ async def build_constraint_checks(
     from ..oracle import _ask_model
 
     raw = await _ask_model(
-        _CONSTRAINT_CHECK_INSTRUCTIONS, payload,
+        "constraint_check", payload,
         model=model, session_factory=session_factory,
         purpose="constraint_check", key="checks",
     )

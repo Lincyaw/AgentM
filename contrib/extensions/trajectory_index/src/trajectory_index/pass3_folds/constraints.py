@@ -208,20 +208,6 @@ def check_normalized(
 # Pass E1 — Commit detection (code proposes, oracle picks)
 # ---------------------------------------------------------------------------
 
-_COMMIT_INSTRUCTIONS = """\
-You are shown the task/question an agent worked on and its final message.
-Extract the answer the agent COMMITS to — the entity/value it presents as
-its conclusion. Committing means presenting it as the answer, not
-mentioning it as a rejected or considered option.
-
-- "answer": the committed answer as a SHORT verbatim phrase copied from the
-  final message (a name, a title, a value — not a sentence). Empty string
-  if the agent commits to nothing (aborts, reports failure, gives no answer).
-
-Return ONLY: {"verdicts": [{"id": 0, "answer": "...", "confidence": 0.9}]}
-"""
-
-
 def _resolve_binding(index: TrajectoryIndex, phrase: str) -> Symbol | None:
     """Resolve an extracted answer phrase to an indexed symbol (pure code).
 
@@ -285,7 +271,7 @@ async def _detect_commit(
         "final_message": commit_text,
     }, ensure_ascii=False, indent=2)
     raw = await _ask_model(
-        _COMMIT_INSTRUCTIONS, payload, model,
+        "constraint_commit", payload, model,
         session_factory=session_factory, purpose="constraint_commit",
     )
     item = _index_by_id(raw or []).get(0)
@@ -307,17 +293,6 @@ async def _detect_commit(
 # ---------------------------------------------------------------------------
 # Pass E2 — About: map grounded steps to the committed candidate
 # ---------------------------------------------------------------------------
-
-_ABOUT_INSTRUCTIONS = """\
-Each numbered item is an excerpt from a tool/search result in an agent
-trajectory, plus a target entity. Decide, per item independently, whether the
-excerpt carries evidence ABOUT the target entity — directly, or via a closely
-related party (their parent, their work, an event in their life). Judge only
-what the excerpt shows.
-
-Return ONLY: {"verdicts": [{"id": 0, "about": true, "confidence": 0.9}]}
-"""
-
 
 def _mentions(text: str, names: set[str]) -> bool:
     lowered = text.lower()
@@ -349,7 +324,7 @@ async def _map_about(
             for i, s in enumerate(partition)
         ]
         raw = await _ask_model(
-            _ABOUT_INSTRUCTIONS, json.dumps(rows, ensure_ascii=False, indent=2),
+            "constraint_about", json.dumps(rows, ensure_ascii=False, indent=2),
             model, session_factory=session_factory, purpose="constraint_about",
         )
         if raw is None:
@@ -370,29 +345,6 @@ async def _map_about(
 # ---------------------------------------------------------------------------
 # Pass E3 — Entails/Contradicts per (constraint, candidate) over the step set
 # ---------------------------------------------------------------------------
-
-_ENTAILS_INSTRUCTIONS = """\
-An agent answered a question with the candidate named below. You are given
-the question's constraints and excerpts from the tool/search results the
-agent gathered (its evidence). For each constraint, judge what THESE EXCERPTS
-establish about the candidate — judge only the presented content:
-
-  - "establish": the excerpts contain facts showing the candidate satisfies
-    the constraint. Quote the decisive fact verbatim in "quote".
-  - "refute": the excerpts contain facts showing the candidate does NOT
-    satisfy it. Quote the decisive fact verbatim in "quote".
-  - "neither": these excerpts do not settle this constraint either way.
-    (This says nothing about evidence elsewhere — only about these excerpts.)
-
-For constraints involving dates or numbers, "quote" must be the MINIMAL
-phrase containing only the decisive value (e.g. "born 1965", not the whole
-sentence) — and never do the comparison arithmetic yourself.
-List the excerpt ids you relied on in "steps".
-
-Return ONLY:
-{"verdicts": [{"id": 0, "outcome": "establish|refute|neither", "quote": "...", "steps": ["3"], "confidence": 0.9, "reason": "..."}]}
-"""
-
 
 async def _judge_entailment(
     constraints: list[Constraint],
@@ -428,7 +380,7 @@ async def _judge_entailment(
         ],
     }, ensure_ascii=False, indent=2)
     raw = await _ask_model(
-        _ENTAILS_INSTRUCTIONS, payload, model,
+        "constraint_entails", payload, model,
         session_factory=session_factory, purpose="constraint_entails",
     )
     by_id = _index_by_id(raw or [])
@@ -468,17 +420,6 @@ async def _judge_entailment(
 # ---------------------------------------------------------------------------
 # Pass J — Omitted double-negative for unsettled constraints
 # ---------------------------------------------------------------------------
-
-_SWEEP_INSTRUCTIONS = """\
-You are shown ALL tool/search result excerpts an agent gathered, and a list
-of constraints from the question it was answering. For each constraint,
-decide whether ANY excerpt carries evidence bearing on it (about any entity).
-If yes, cite one excerpt id in "step" — a yes without a citation is invalid.
-Recall matters more than precision here: when in doubt, answer yes.
-
-Return ONLY: {"verdicts": [{"id": 0, "evidence_exists": true, "step": "12", "confidence": 0.9}]}
-"""
-
 
 async def _check_omitted(
     unsettled: list[Constraint],
@@ -533,7 +474,7 @@ async def _check_omitted(
         "excerpts": snippets,
     }, ensure_ascii=False, indent=2)
     raw = await _ask_model(
-        _SWEEP_INSTRUCTIONS, payload, model,
+        "constraint_sweep", payload, model,
         session_factory=session_factory, purpose="constraint_sweep",
     )
     by_id = _index_by_id(raw or [])
