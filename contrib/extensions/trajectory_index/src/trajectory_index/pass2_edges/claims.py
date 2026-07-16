@@ -328,9 +328,8 @@ async def build_claim_edges(
         payload = json.dumps(payload_dict, ensure_ascii=False, indent=2)
 
         shown_ids = {e.step.step_id for e in partition}
-        prompt_name = "evidence" if constraint_rows else "claim_evidence"
         raw = await _ask_model(
-            prompt_name, payload, model,
+            "evidence", payload, model,
             session_factory=session_factory, purpose="evidence",
             key="",
         )
