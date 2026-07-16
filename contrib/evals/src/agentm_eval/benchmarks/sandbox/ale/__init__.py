@@ -470,9 +470,9 @@ class AleAdapter:
 
         @cli.command()
         def run(
-            task: Annotated[list[str], typer.Option(
-                "--task", "-t", help="Task ref domain/name (repeatable)",
-            )],
+            task: Annotated[Optional[list[str]], typer.Option(
+                "--task", "-t", help="Task ref domain/name (repeatable); omit for all",
+            )] = None,
             ale_repo: Annotated[Optional[Path], typer.Option(
                 help="agents-last-exam checkout ($ALE_REPO or auto-clone)",
             )] = None,
@@ -517,11 +517,11 @@ class AleAdapter:
             )] = None,
         ) -> None:
             """Run one or more ALE tasks end to end (or agent-only with --no-eval)."""
-            if not task:
-                typer.echo("no tasks given (-t domain/name)", err=True)
-                raise typer.Exit(2)
             if ale_repo is None:
                 ale_repo = _default_ale_repo()
+            if not task:
+                task = [f"{d}/{n}" for d, n in bridge.discover_tasks(ale_repo)
+                        if not d.startswith("demo")]
             if data_root is None and task_images is None:
                 data_root = _default_data_root()
 
