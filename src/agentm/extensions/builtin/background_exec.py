@@ -88,8 +88,8 @@ _COMPANION_TOOLS = frozenset(
 )
 
 _DEFAULT_TIMEOUT = 60.0
-_DEFAULT_HEARTBEAT = 120.0
-_DEFAULT_SILENCE_WARNING = 300.0
+_DEFAULT_HEARTBEAT = 480.0
+_DEFAULT_SILENCE_WARNING = 900.0
 _MAX_ACTIVITY_LABEL_CHARS = 96
 # Inbox completion notes bypass tool_result_cap — keep only a tail preview
 # there; the full output stays reachable via check_background.

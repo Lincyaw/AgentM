@@ -224,6 +224,92 @@ async def _replay_fork_environment(
         logger.warning("agent_env: ARL replay failed: {}", exc)
 
 
+async def _replay_resume_environment(
+    api: ExtensionAPI,
+    session: "ArlSandboxSession",
+    experiment_id: str | None,
+) -> None:
+    """Restore the mutable sandbox on ``--resume`` of an ARL-backed session.
+
+    A resumed session gets a fresh, empty sandbox; without restoration the
+    agent continues its conversation against a blank filesystem. Each run of a
+    given AgentM session creates its ARL sandbox under ``experiment_id ==
+    session_id`` (the default), so a prior ARL session under this session's
+    experiment id is exactly this session's own earlier sandbox. Replay its
+    recorded steps into the fresh sandbox to reconstruct state.
+
+    Ambiguity guard: eval experiment ids are per-task, so a resumed eval task
+    finds exactly one prior (its own earlier run) -- safe to replay. A single
+    prior is always unambiguous. Only when several priors exist do we require a
+    session-scoped experiment id (== the AgentM ``session_id``), so a genuinely
+    shared experiment (many sibling tasks) is skipped rather than replaying an
+    arbitrary sibling's sandbox. Forks are handled by
+    :func:`_replay_fork_environment` via lineage and never reach here with a
+    prior (a fork's experiment id is its own new session id).
+    """
+    if not experiment_id:
+        return
+
+    import arl  # type: ignore[import-not-found]
+
+    client = _gateway_client_class(arl)()
+    try:
+        sessions = await _call_maybe_async(
+            client.list_experiment_sessions, experiment_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "agent_env: resume env lookup failed for {}: {}", experiment_id, exc
+        )
+        return
+    finally:
+        await _close_client(client)
+
+    # A prior ARL session is a valid replay source even after its sandbox was
+    # torn down -- replay_from re-executes recorded steps from the gateway's
+    # store, not a live container. So do NOT filter on deleted_at here; only
+    # exclude the freshly created current sandbox.
+    priors = [
+        s for s in sessions if getattr(s, "id", None) not in (None, session.session_id)
+    ]
+    if not priors:
+        return  # fresh start -- no earlier sandbox to restore
+
+    if len(priors) > 1 and experiment_id != api.session_id:
+        logger.info(
+            "agent_env: resume -- {} candidate prior sandboxes under shared "
+            "experiment {}; skipping ambiguous restore",
+            len(priors),
+            experiment_id,
+        )
+        return
+
+    source = max(priors, key=lambda s: str(getattr(s, "created_at", "") or ""))
+    logger.info(
+        "agent_env: resume -- replaying prior sandbox {} into {}",
+        source.id,
+        session.session_id,
+    )
+    try:
+        result = await _call_maybe_async(
+            session.replay_from, source_session_id=source.id
+        )
+        if result.errors:
+            logger.warning(
+                "agent_env: resume replay completed with {} errors out of {} steps",
+                result.errors,
+                result.steps_replayed,
+            )
+        else:
+            logger.info(
+                "agent_env: resume replay complete -- {} steps", result.steps_replayed
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "agent_env: resume replay failed (prior sandbox may be gone): {}", exc
+        )
+
+
 def _build_resources(config: AgentEnvConfig) -> Any:
     reqs = {
         k: v
@@ -321,6 +407,9 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
 
     if owned:
         await _replay_fork_environment(api, session)
+        await _replay_resume_environment(
+            api, session, config.experiment_id or api.session_id
+        )
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
         if not owned:

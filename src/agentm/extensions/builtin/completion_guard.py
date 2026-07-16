@@ -40,6 +40,9 @@ _CONFIRM_TEXT = (
 class CompletionGuardConfig(BaseModel):
     # Number of confirmation prompts before a finish call ends the loop.
     confirmations: int = 1
+    # Text returned on the confirmation call(s). Override to inject a stronger
+    # audit reminder (e.g. "did you verify with tool output before finishing?").
+    prompt: str = _CONFIRM_TEXT
 
 
 class _FinishParams(BaseModel):
@@ -62,6 +65,7 @@ class _FinishRuntime:
     def __init__(self, api: ExtensionAPI, config: CompletionGuardConfig) -> None:
         self._api = api
         self._confirmations = max(0, config.confirmations)
+        self._prompt = config.prompt
         self._calls = 0
 
     def install(self) -> None:
@@ -86,7 +90,7 @@ class _FinishRuntime:
                 self._calls,
             )
             return ToolResult(
-                content=[TextContent(type="text", text=_CONFIRM_TEXT)],
+                content=[TextContent(type="text", text=self._prompt)],
                 is_error=False,
             )
         logger.info("completion_guard: finish confirmed; terminating loop")
