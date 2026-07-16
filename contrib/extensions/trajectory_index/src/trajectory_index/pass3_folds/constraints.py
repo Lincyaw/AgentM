@@ -267,20 +267,30 @@ async def _judge_constraint_evidence(
     for pi, partition in enumerate(partitions):
         valid_ids = {s.step_id for s in partition}
         payload = json.dumps({
+            "claims": [],
             "candidate": commit.binding,
             "constraints": [
                 {"id": i, "desc": c.description}
                 for i, c in enumerate(constraints)
             ],
-            "evidence": [
-                {"id": s.step_id, "excerpt": s.observation_segment or ""}
+            "excerpts": [
+                {"step": s.step_id, "text": s.observation_segment or ""}
                 for s in partition
             ],
         }, ensure_ascii=False, indent=2)
-        raw = await _ask_model(
-            "constraint_evidence", payload, model,
-            session_factory=session_factory, purpose="constraint_evidence",
+        raw_resp = await _ask_model(
+            "evidence", payload, model,
+            session_factory=session_factory, purpose="evidence",
+            key="",
         )
+        raw: list[Any] | None
+        if isinstance(raw_resp, dict):
+            co = raw_resp.get("constraints", [])
+            raw = co if isinstance(co, list) else None
+        elif isinstance(raw_resp, list):
+            raw = raw_resp
+        else:
+            raw = None
         if raw is None:
             diag.record("evidence", f"partition:{pi}", None, 0.0,
                         f"partition of {len(partition)} steps failed")
