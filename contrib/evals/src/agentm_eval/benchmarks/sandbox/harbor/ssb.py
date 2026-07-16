@@ -118,12 +118,15 @@ class SeniorSweAdapter(HarborAdapter):
         session.execute([{  # type: ignore[attr-defined]
             "name": "setup-mirrors",
             "command": ["bash", "-lc",
-                # build tools for C extensions (uvloop etc.)
+                # apt mirror + build tools for C extensions (uvloop etc.)
+                "sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; "
+                "s|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; "
+                "s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; "
+                "s|http://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' "
+                "/etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true; "
                 f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
-                f"https_proxy={proxy} http_proxy={proxy} "
                 "apt-get update -qq && "
                 f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
-                f"https_proxy={proxy} http_proxy={proxy} "
                 "apt-get install -y -qq gcc python3-dev 2>/dev/null || true; "
                 # pip mirror
                 f"mkdir -p ~/.config/pip && "
