@@ -1,63 +1,57 @@
-"""Read-only git-backed catalog browsing tools for the agent."""
+"""Read-only tools for the content-addressed atom catalog."""
 
 from __future__ import annotations
-from loguru import logger
 
 import json
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
-from agentm.core.abi import (
-    ExtensionAPI,
-    FunctionTool,
-    TextContent,
-    ToolResult,
-)
+from agentm.core.abi import ExtensionAPI, FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 
-from ._git_log import list_history
-from ._paths import catalog_root, resolve_catalog_path
+from ._root import resolve_root
+
 
 class ToolCatalogBrowseConfig(BaseModel):
     root: str | None = None
 
+
 MANIFEST = ExtensionManifest(
     name="tool_catalog_browse",
-    description="Browse git-backed resource history and loaded atom metadata.",
+    description="Browse immutable atom snapshots and their attributed runs.",
     registers=(
         "tool:catalog_list_versions",
         "tool:catalog_get_manifest",
         "tool:catalog_runs_for",
-        "tool:get_source_at",
-        "tool:list_history",
+        "tool:catalog_get_source",
         "tool:list_atoms",
     ),
     config_schema=ToolCatalogBrowseConfig,
     api_version=1,
-    affects=(),
     tier=1,
 )
 
-_LIST_VERSIONS_PARAMS: Final = {
+_ATOM_PARAMS: Final = {
     "type": "object",
     "properties": {
         "atom": {
             "type": "string",
-            "description": "Atom name or repo-relative path.",
+            "description": "Atom name.",
         }
     },
     "required": ["atom"],
     "additionalProperties": False,
 }
 
-_GET_MANIFEST_PARAMS: Final = {
+_VERSION_PARAMS: Final = {
     "type": "object",
     "properties": {
-        "atom": {"type": "string"},
+        "atom": {"type": "string", "description": "Atom name."},
         "version": {
             "type": "string",
-            "description": "Git commit SHA.",
+            "description": "12-character content hash.",
         },
     },
     "required": ["atom", "version"],
@@ -68,7 +62,7 @@ _RUNS_FOR_PARAMS: Final = {
     "type": "object",
     "properties": {
         "fingerprint": {
-            "description": "Exact atom-set fingerprint mapping or 'atom@version' string.",
+            "description": "Exact atom-set fingerprint mapping or 'atom@version'.",
             "oneOf": [{"type": "object"}, {"type": "string"}],
         }
     },
@@ -76,156 +70,105 @@ _RUNS_FOR_PARAMS: Final = {
     "additionalProperties": False,
 }
 
-_GET_SOURCE_AT_PARAMS: Final = {
-    "type": "object",
-    "properties": {
-        "path": {
-            "type": "string",
-            "description": "Atom name, repo-relative path, or absolute path inside the repo.",
-        },
-        "sha": {
-            "type": "string",
-            "description": "Git commit SHA to read from.",
-        },
-    },
-    "required": ["path", "sha"],
-    "additionalProperties": False,
-}
-
-_LIST_HISTORY_PARAMS: Final = {
-    "type": "object",
-    "properties": {
-        "path": {
-            "type": "string",
-            "description": "Atom name, repo-relative path, or absolute path inside the repo.",
-        },
-        "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 20,
-            "description": "Maximum number of commits to return, newest first.",
-        },
-    },
-    "required": ["path"],
-    "additionalProperties": False,
-}
-
-_LIST_ATOMS_PARAMS: Final = {
+_EMPTY_PARAMS: Final = {
     "type": "object",
     "properties": {},
     "additionalProperties": False,
 }
 
+
 def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
-    root = catalog_root(api, config.root)
+    root = resolve_root(api, config.root)
 
-    async def _list_versions_tool(args: dict[str, Any]) -> ToolResult:
-        versions = api.catalog.list_versions(str(args["atom"]), root)
-        return _json_result(versions)
+    async def _list_versions(args: dict[str, Any]) -> ToolResult:
+        atom = str(args["atom"])
+        try:
+            return _json_result(api.catalog.list_versions(atom, root))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("catalog list_versions failed: {}", exc)
+            return _error(f"Failed to list versions for {atom}: {exc}")
 
-    async def _get_manifest_tool(args: dict[str, Any]) -> ToolResult:
+    async def _get_manifest(args: dict[str, Any]) -> ToolResult:
         atom = str(args["atom"])
         version = str(args["version"])
         try:
             return _json_result(api.catalog.get_manifest_at(atom, version, root))
-        except Exception as exc:
-            logger.debug("browse: caught exception: {}", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("catalog get_manifest failed: {}", exc)
             return _error(f"Failed to load manifest for {atom}@{version}: {exc}")
 
-    async def _runs_for_tool(args: dict[str, Any]) -> ToolResult:
+    async def _runs_for(args: dict[str, Any]) -> ToolResult:
         try:
-            trace_ids = api.catalog.runs_for(args["fingerprint"], root)
-            return _json_result(trace_ids)
-        except Exception as exc:
-            logger.debug("browse: caught exception: {}", exc)
+            return _json_result(api.catalog.runs_for(args["fingerprint"], root))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("catalog runs_for failed: {}", exc)
             return _error(f"Failed to resolve catalog runs: {exc}")
 
-    async def _get_source_at_tool(args: dict[str, Any]) -> ToolResult:
-        resolved = resolve_catalog_path(api, str(args["path"]), root)
-        sha = str(args["sha"])
+    async def _get_source(args: dict[str, Any]) -> ToolResult:
+        atom = str(args["atom"])
+        version = str(args["version"])
         try:
-            source = api.catalog.get_source_at(resolved.git_path, sha, root)
+            source = api.catalog.get_source_at(atom, version, root)
             return _json_result(source.decode("utf-8"))
-        except Exception as exc:
-            logger.debug("browse: caught exception: {}", exc)
-            return _error(f"Failed to load source for {resolved.git_path}@{sha}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("catalog get_source failed: {}", exc)
+            return _error(f"Failed to load source for {atom}@{version}: {exc}")
 
-    async def _list_history_tool(args: dict[str, Any]) -> ToolResult:
-        resolved = resolve_catalog_path(api, str(args["path"]), root)
-        limit = int(args.get("limit", 20))
-        try:
-            history = list_history(resolved.git_path, limit=limit, root=root)
-            return _json_result(history)
-        except Exception as exc:
-            logger.debug("browse: caught exception: {}", exc)
-            return _error(f"Failed to list history for {resolved.git_path}: {exc}")
-
-    async def _list_atoms_tool(args: dict[str, Any]) -> ToolResult:
-        atoms = api.list_atoms()
-        payload = [
-            {
-                "name": a.name,
-                "tier": a.tier,
-                "api_version": a.api_version,
-                "current_hash": a.current_hash,
-                "source_path": a.source_path,
-            }
-            for a in atoms
-        ]
-        return _json_result(payload)
+    async def _list_atoms(_args: dict[str, Any]) -> ToolResult:
+        return _json_result(
+            [
+                {
+                    "name": atom.name,
+                    "tier": atom.tier,
+                    "api_version": atom.api_version,
+                    "current_hash": atom.current_hash,
+                    "source_path": atom.source_path,
+                }
+                for atom in api.list_atoms()
+            ]
+        )
 
     api.register_tool(
         FunctionTool(
             name="catalog_list_versions",
-            description="List known git versions for one managed atom or path.",
-            parameters=_LIST_VERSIONS_PARAMS,
-            fn=_list_versions_tool,
+            description="List validated content hashes for one atom.",
+            parameters=_ATOM_PARAMS,
+            fn=_list_versions,
         )
     )
     api.register_tool(
         FunctionTool(
             name="catalog_get_manifest",
-            description="AST-parse the historical MANIFEST payload for one atom at a commit.",
-            parameters=_GET_MANIFEST_PARAMS,
-            fn=_get_manifest_tool,
+            description="Return the frozen manifest for one atom version.",
+            parameters=_VERSION_PARAMS,
+            fn=_get_manifest,
         )
     )
     api.register_tool(
         FunctionTool(
             name="catalog_runs_for",
-            description="List trace ids recorded for an exact atom-set fingerprint.",
+            description="List trace ids attributed to an exact atom fingerprint.",
             parameters=_RUNS_FOR_PARAMS,
-            fn=_runs_for_tool,
+            fn=_runs_for,
         )
     )
     api.register_tool(
         FunctionTool(
-            name="get_source_at",
-            description="Return UTF-8 source text for a managed path at an arbitrary git SHA.",
-            parameters=_GET_SOURCE_AT_PARAMS,
-            fn=_get_source_at_tool,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="list_history",
-            description="Return recent git history entries {sha, author, timestamp, message} for one managed path.",
-            parameters=_LIST_HISTORY_PARAMS,
-            fn=_list_history_tool,
+            name="catalog_get_source",
+            description="Return UTF-8 source for one immutable atom version.",
+            parameters=_VERSION_PARAMS,
+            fn=_get_source,
         )
     )
     api.register_tool(
         FunctionTool(
             name="list_atoms",
-            description=(
-                "List every atom currently loaded in this running session "
-                "with its name, tier, api_version, current git hash (when "
-                "managed), and on-disk source path."
-            ),
-            parameters=_LIST_ATOMS_PARAMS,
-            fn=_list_atoms_tool,
+            description="List atoms loaded in the current session.",
+            parameters=_EMPTY_PARAMS,
+            fn=_list_atoms,
         )
     )
+
 
 def _json_result(payload: Any) -> ToolResult:
     return ToolResult(
@@ -237,6 +180,7 @@ def _json_result(payload: Any) -> ToolResult:
         ],
         extras=payload,
     )
+
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

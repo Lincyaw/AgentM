@@ -7,7 +7,6 @@ import importlib
 import importlib.util
 import inspect
 from loguru import logger
-import os
 import sys
 import tempfile
 import threading
@@ -19,9 +18,9 @@ from typing import Any, Callable, Literal
 
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core._internal.catalog.manifest import is_constitution_path
-from agentm.core.runtime.catalog import _layout
 from agentm.core.abi import BusPriority, EventBus, Tool
 from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.resource import ResourceWriter, WriteResult, WriterAuthor
 from agentm.core.abi.events import (
     ApiRegisterEvent,
     BeforeInstallAtomEvent,
@@ -42,7 +41,6 @@ from agentm.core.runtime.extension import (
     _ExtensionAPIImpl,
     load_extension,
 )
-from agentm.core.runtime.resource_writer import ResourceWriter
 
 _SCENARIO_MODULE_PREFIX = "agentm._scenarios."
 
@@ -186,7 +184,7 @@ def _validate_install_source(
         module_path,
         new_source,
         tag="install",
-        require_manifest=False,
+        require_manifest=True,
         known_extension_names=loaded_names | {name},
     )
 
@@ -236,40 +234,63 @@ def _import_synthetic_module(module_path: str, file_path: Path) -> ModuleType:
     return module
 
 
-def _cleanup_failed_install(
-    resource_writer: ResourceWriter,
+async def _write_and_verify(
+    writer: ResourceWriter,
     target_file: Path,
-    file_existed: bool,
-    write_result: Any,
-) -> None:
-    # Best-effort: if we wrote a brand-new file but the install raised,
-    # roll the file back so the on-disk state matches the running session.
-    # For pre-existing files we restore via git when possible, else leave
-    # alone so the human can inspect.
-    if not file_existed:
-        try:
-            target_file.unlink()
-        except OSError as exc:
-            # Rollback failure: a newly-written atom file is left on disk
-            # after a failed install, so on-disk state may diverge from the
-            # running session. Surface loudly so an operator can clean up.
-            logger.warning(
-                "atom_reloader: failed to roll back new atom file {} after "
-                "install error; on-disk state may be inconsistent: {}",
-                target_file,
-                exc,
-            )
-        if write_result.committed and write_result.commit_sha_before is not None:
-            try:
-                resource_writer.restore(target_file, write_result.commit_sha_before)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "atom_reloader: failed to git-restore {} to {} after "
-                    "install error; on-disk state may be inconsistent: {}",
-                    target_file,
-                    write_result.commit_sha_before,
-                    exc,
-                )
+    content: bytes,
+    *,
+    rationale: str,
+    author: WriterAuthor,
+) -> WriteResult:
+    result = await writer.write(
+        str(target_file),
+        content,
+        rationale=rationale,
+        author=author,
+    )
+    if result.error is not None:
+        return result
+    try:
+        actual = target_file.read_bytes()
+    except OSError as exc:
+        return WriteResult._error(
+            result.path,
+            result.path_class,
+            f"write succeeded but target is unreadable: {exc}",
+        )
+    if actual != content:
+        return WriteResult._error(
+            result.path,
+            result.path_class,
+            "write backend reported success but target bytes do not match",
+        )
+    return result
+
+
+async def _restore_install_target(
+    writer: ResourceWriter,
+    target_file: Path,
+    previous_content: bytes | None,
+) -> str | None:
+    if previous_content is None:
+        result = await writer.delete(
+            str(target_file),
+            rationale="rollback failed atom install",
+            author="indexer",
+        )
+        if result.error is not None:
+            return result.error
+        if target_file.exists():
+            return "delete backend reported success but target still exists"
+        return None
+    result = await _write_and_verify(
+        writer,
+        target_file,
+        previous_content,
+        rationale="rollback failed atom install",
+        author="indexer",
+    )
+    return result.error
 
 
 def _collect_block_veto(bus: EventBus, channel: str, event: Any) -> str | None:
@@ -281,14 +302,7 @@ def _collect_block_veto(bus: EventBus, channel: str, event: Any) -> str | None:
 
 
 def _advisory_hash(source: str) -> str:
-    # Legacy fallback for git-less/advisory environments only.
     return compute_atom_hash(source)
-
-
-def _restore_git_path(
-    resource_writer: ResourceWriter, atom: LoadedAtom, pre_sha: str
-) -> None:
-    resource_writer.restore(atom.file_path, pre_sha)
 
 
 class _ApiBoundaryRunner:
@@ -742,41 +756,69 @@ class AtomReloader:
                 new_hash=None,
                 error=str(exc),
             )
-        write_result = await self._resource_writer.write(
-            str(atom.file_path),
+        old_hash = _advisory_hash(current_source)
+        new_hash = _advisory_hash(new_source)
+        try:
+            from agentm.core.runtime.catalog.freeze import freeze_current
+
+            freeze_current(
+                name,
+                current_source,
+                atom.manifest or _default_manifest(name),
+                root=self._cwd,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ReloadResult(
+                ok=False,
+                name=name,
+                old_hash=old_hash,
+                new_hash=new_hash,
+                error=f"failed to freeze current atom before reload: {exc}",
+            )
+
+        write_result = await _write_and_verify(
+            self._resource_writer,
+            atom.file_path,
             new_source.encode("utf-8"),
             rationale=rationale or f"reload {name}",
             author="agent" if agent_initiated else "human",
         )
         if write_result.error is not None:
+            rollback_result = await _write_and_verify(
+                self._resource_writer,
+                atom.file_path,
+                current_source.encode("utf-8"),
+                rationale=f"restore {name} after failed write verification",
+                author="indexer",
+            )
+            error = write_result.error
+            if rollback_result.error is not None:
+                error += f"; source restoration failed: {rollback_result.error}"
             return ReloadResult(
                 ok=False,
                 name=name,
-                old_hash=write_result.commit_sha_before,
-                new_hash=write_result.commit_sha_after,
-                error=write_result.error,
+                old_hash=old_hash,
+                new_hash=new_hash,
+                error=error,
             )
 
-        advisory_mode = (
-            write_result.path_class == "managed" and not write_result.committed
-        ) or write_result.path_class == "unmanaged"
-        old_hash = write_result.commit_sha_before
-        new_hash = write_result.commit_sha_after
-        if advisory_mode:
-            old_hash = _advisory_hash(current_source)
-            new_hash = _advisory_hash(new_source)
-        event_new_hash = new_hash or _advisory_hash(new_source)
         # Transactional snapshot for rollback.
         snapshot = self._capture_snapshot(atom.module_path)
 
         try:
             await self._activate_atom_install(atom)
+            freeze_current(
+                name,
+                new_source,
+                effective_manifest,
+                root=self._cwd,
+            )
             self._bus.emit_sync(
                 ExtensionReloadEvent.CHANNEL,
                 ExtensionReloadEvent(
                     name=name,
                     old_hash=old_hash,
-                    new_hash=event_new_hash,
+                    new_hash=new_hash,
                     trigger="agent" if agent_initiated else "human",
                     tier=effective_manifest.tier,
                     is_self_modify=agent_initiated,
@@ -791,22 +833,22 @@ class AtomReloader:
         except Exception as exc:  # noqa: BLE001
             logger.warning("atom_reloader: reload apply failed for {}, rolling back: {}", name, exc)
             try:
-                if advisory_mode:
-                    rollback_fd, rollback_tmp_name = tempfile.mkstemp(
-                        prefix=f".rollback-{name}-",
-                        suffix=atom.file_path.suffix,
-                        dir=str(atom.file_path.parent),
-                    )
-                    with os.fdopen(
-                        rollback_fd, "w", encoding="utf-8"
-                    ) as rollback_handle:
-                        rollback_handle.write(current_source)
-                    os.replace(rollback_tmp_name, atom.file_path)
-                elif write_result.commit_sha_before is not None:
-                    _restore_git_path(
-                        self._resource_writer, atom, write_result.commit_sha_before
-                    )
+                rollback_result = await _write_and_verify(
+                    self._resource_writer,
+                    atom.file_path,
+                    current_source.encode("utf-8"),
+                    rationale=f"rollback failed reload of {name}",
+                    author="indexer",
+                )
+                if rollback_result.error is not None:
+                    raise RuntimeError(rollback_result.error)
                 await self._activate_atom_install(atom)
+                freeze_current(
+                    name,
+                    current_source,
+                    atom.manifest or _default_manifest(name),
+                    root=self._cwd,
+                )
             except Exception as rollback_exc:  # noqa: BLE001
                 # Rollback also failed; restore from immutable snapshot.
                 # rather than something half-new / half-old.
@@ -819,7 +861,7 @@ class AtomReloader:
                     ExtensionReloadEvent(
                         name=name,
                         old_hash=old_hash,
-                        new_hash=event_new_hash,
+                        new_hash=new_hash,
                         trigger="agent" if agent_initiated else "human",
                         tier=effective_manifest.tier,
                         error="rollback_failure_state_preserved",
@@ -852,31 +894,23 @@ class AtomReloader:
     async def freeze_current_async(self, name: str) -> str:
         atom = self._loaded_by_name[name]
         source = atom.file_path.read_text(encoding="utf-8")
-        result = await self._resource_writer.write(
-            str(atom.file_path),
-            source.encode("utf-8"),
-            rationale="freeze_current snapshot",
-            author="indexer",
+        from agentm.core.runtime.catalog.freeze import freeze_current
+
+        return freeze_current(
+            name,
+            source,
+            atom.manifest or _default_manifest(name),
+            root=self._cwd,
         )
-        if result.error is not None:
-            raise RuntimeError(result.error)
-        version_key = (
-            result.commit_sha_after
-            or result.commit_sha_before
-            or _advisory_hash(source)
-        )
-        _layout.atom_runs_dir(name, version_key, root=Path(self._cwd)).mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        return version_key
 
     def list_atoms(self) -> list[AtomInfo]:
         out: list[AtomInfo] = []
         for atom in sorted(self._loaded_by_name.values(), key=lambda item: item.name):
-            current_hash = self.current_version_for_path(str(atom.file_path))
-            if current_hash is None and atom.file_path.is_file():
-                current_hash = _advisory_hash(atom.file_path.read_text(encoding="utf-8"))
+            current_hash = (
+                _advisory_hash(atom.file_path.read_text(encoding="utf-8"))
+                if atom.file_path.is_file()
+                else None
+            )
             manifest = atom.manifest or _default_manifest(atom.name)
             out.append(
                 AtomInfo(
@@ -1004,7 +1038,18 @@ class AtomReloader:
                 error=str(exc),
             )
 
-        if manifest is not None and manifest.tier >= 2:
+        if manifest is None:
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=None,
+                file_created=False,
+                error="atom source must define MANIFEST: ExtensionManifest",
+            )
+
+        if manifest.tier >= 2:
             return InstallAtomResult(
                 ok=False,
                 name=name,
@@ -1018,21 +1063,23 @@ class AtomReloader:
                 ),
             )
 
-        effective_tier = manifest.tier if manifest is not None else 1
+        effective_tier = manifest.tier
         trigger: Any = "agent" if agent_initiated else "human"
+        before_install = BeforeInstallAtomEvent(
+            name=name,
+            module_path=module_path,
+            target_path=str(target_file),
+            source=source,
+            config=ext_cfg,
+            tier=effective_tier,
+            trigger=trigger,
+        )
         veto_reason = _collect_block_veto(
             self._bus,
             BeforeInstallAtomEvent.CHANNEL,
-            BeforeInstallAtomEvent(
-                name=name,
-                module_path=module_path,
-                target_path=str(target_file),
-                source=source,
-                config=ext_cfg,
-                tier=effective_tier,
-                trigger=trigger,
-            ),
+            before_install,
         )
+        ext_cfg = before_install.config
         if veto_reason is not None:
             return InstallAtomResult(
                 ok=False,
@@ -1044,27 +1091,51 @@ class AtomReloader:
                 error=f"vetoed by policy: {veto_reason}",
             )
 
-        file_existed = target_file.exists()
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        write_result = await self._resource_writer.write(
-            str(target_file),
-            source.encode("utf-8"),
-            rationale=rationale or f"install atom {name}",
-            author="agent" if agent_initiated else "human",
-        )
-        if write_result.error is not None:
+        try:
+            previous_content = target_file.read_bytes()
+        except FileNotFoundError:
+            previous_content = None
+        except OSError as exc:
             return InstallAtomResult(
                 ok=False,
                 name=name,
                 module_path=module_path,
                 target_path=str(target_file),
-                new_hash=write_result.commit_sha_after,
+                new_hash=None,
                 file_created=False,
-                error=write_result.error,
+                error=f"cannot snapshot install target before mutation: {exc}",
+            )
+        file_existed = previous_content is not None
+        runtime_snapshot = self._capture_snapshot(module_path)
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        write_result = await _write_and_verify(
+            self._resource_writer,
+            target_file,
+            source.encode("utf-8"),
+            rationale=rationale or f"install atom {name}",
+            author="agent" if agent_initiated else "human",
+        )
+        if write_result.error is not None:
+            rollback_error = await _restore_install_target(
+                self._resource_writer,
+                target_file,
+                previous_content,
+            )
+            error = write_result.error
+            if rollback_error is not None:
+                error += f"; source restoration failed: {rollback_error}"
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=_advisory_hash(source),
+                file_created=False,
+                error=error,
             )
 
-        new_hash = write_result.commit_sha_after or _advisory_hash(source)
-        effective_manifest = manifest or _default_manifest(name)
+        new_hash = _advisory_hash(source)
+        effective_manifest = manifest
 
         # Register the module bytes synthetically so load_extension's
         # importlib.import_module call returns it.
@@ -1072,9 +1143,15 @@ class AtomReloader:
             _import_synthetic_module(module_path, target_file)
         except Exception as exc:  # noqa: BLE001
             logger.warning("atom_reloader: synthetic import failed for {}: {}", module_path, exc)
-            _cleanup_failed_install(
-                self._resource_writer, target_file, file_existed, write_result
+            self._restore_from_snapshot(runtime_snapshot)
+            rollback_error = await _restore_install_target(
+                self._resource_writer,
+                target_file,
+                previous_content,
             )
+            error = f"import failed: {exc}"
+            if rollback_error is not None:
+                error += f"; file rollback failed: {rollback_error}"
             return InstallAtomResult(
                 ok=False,
                 name=name,
@@ -1082,7 +1159,7 @@ class AtomReloader:
                 target_path=str(target_file),
                 new_hash=new_hash,
                 file_created=not file_existed,
-                error=f"import failed: {exc}",
+                error=error,
             )
 
         self._bus.emit_sync(
@@ -1100,10 +1177,11 @@ class AtomReloader:
             await _finish_install(module_path, api, ext_cfg)
         except Exception as exc:  # noqa: BLE001
             logger.warning("atom_reloader: install() failed for {}: {}", module_path, exc)
-            self._registrations.remove_owner(module_path)
-            sys.modules.pop(module_path, None)
-            _cleanup_failed_install(
-                self._resource_writer, target_file, file_existed, write_result
+            self._restore_from_snapshot(runtime_snapshot)
+            rollback_error = await _restore_install_target(
+                self._resource_writer,
+                target_file,
+                previous_content,
             )
             self._bus.emit_sync(
                 ExtensionInstallEvent.CHANNEL,
@@ -1122,7 +1200,14 @@ class AtomReloader:
                 target_path=str(target_file),
                 new_hash=new_hash,
                 file_created=not file_existed,
-                error=f"install({module_path}) failed: {exc}",
+                error=(
+                    f"install({module_path}) failed: {exc}"
+                    + (
+                        ""
+                        if rollback_error is None
+                        else f"; file rollback failed: {rollback_error}"
+                    )
+                ),
             )
 
         # Bookkeeping: register as a loaded atom so reload_atom / unload_atom
@@ -1130,6 +1215,40 @@ class AtomReloader:
         # but since it's already in sys.modules the import is a fast hit.
         self.record_loaded_atom(module_path, ext_cfg, is_provider=False)
         self._apis[module_path]._owner_name = module_path
+
+        try:
+            from agentm.core.runtime.catalog.freeze import freeze_current
+
+            freeze_current(
+                name,
+                source,
+                effective_manifest,
+                root=self._cwd,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "atom_reloader: catalog freeze failed after installing {}: {}",
+                name,
+                exc,
+            )
+            self._restore_from_snapshot(runtime_snapshot)
+            rollback_error = await _restore_install_target(
+                self._resource_writer,
+                target_file,
+                previous_content,
+            )
+            error = f"catalog freeze failed after install: {exc}"
+            if rollback_error is not None:
+                error += f"; file rollback failed: {rollback_error}"
+            return InstallAtomResult(
+                ok=False,
+                name=name,
+                module_path=module_path,
+                target_path=str(target_file),
+                new_hash=new_hash,
+                file_created=not file_existed,
+                error=error,
+            )
 
         self._bus.emit_sync(
             ExtensionInstallEvent.CHANNEL,
@@ -1236,9 +1355,5 @@ class AtomReloader:
             name=name,
             module_path=atom.module_path,
         )
-
-    def current_version_for_path(self, path: str) -> str | None:
-        return self._resource_writer.current_version_for_path(path)
-
 
 __all__ = ["AtomReloader", "LoadedAtom"]

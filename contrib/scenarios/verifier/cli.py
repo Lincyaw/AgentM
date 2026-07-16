@@ -55,7 +55,6 @@ async def _run_workflow(
         cwd=str(out_dir),
         model=os.environ.get("AGENTM_MODEL"),
         extensions=[(m, dict(c)) for m, c in _WORKFLOW_EXTENSIONS],
-        auto_commit=False,
     )
     session = await AgentSession.create(config)
     sid = session.session_id

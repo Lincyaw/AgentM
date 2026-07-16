@@ -101,7 +101,7 @@ async def run_intervention_rollout(
                         session_manager=cast(Any, forked),
                         scenario=scenario,
                         provider=provider,
-                        atom_config_overrides=atom_overrides or None,
+                        atom_config_overrides=atom_overrides,
                         loop_config=LoopConfig(
                             max_turns=config.max_turns,
                             max_tool_calls=config.max_tool_calls,

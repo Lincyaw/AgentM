@@ -43,7 +43,9 @@ LLM output, use the provider's built-in support through `ProviderConfig`.
 
 ## CLI conventions (typer)
 
-The CLI uses `typer` with a single `app` instance in `cli.py`.
+The CLI uses `typer` with a single root `app` in `agentm/cli/main.py`; command
+groups live under `agentm/cli/`, with trace internals grouped under
+`agentm/cli/trace/`.
 
 ```python
 @app.command()

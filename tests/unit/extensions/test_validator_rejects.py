@@ -8,6 +8,7 @@ from textwrap import dedent
 from agentm.extensions.validate import (
     _check_ast_rules,
     _check_imports,
+    _validate_builtin_support_modules,
 )
 
 
@@ -81,6 +82,31 @@ def test_accepts_allowed_import(tmp_path: Path) -> None:
     issues = _check_imports("test_module", src)
 
     assert len(issues) == 0
+
+
+def test_builtin_support_module_cannot_hide_runtime_import(tmp_path: Path) -> None:
+    root_init = tmp_path / "__init__.py"
+    root_init.write_text("", encoding="utf-8")
+    entry = tmp_path / "atom.py"
+    entry.write_text("", encoding="utf-8")
+    support_dir = tmp_path / "_support"
+    support_dir.mkdir()
+    (support_dir / "__init__.py").write_text("", encoding="utf-8")
+    (support_dir / "backend.py").write_text(
+        "from agentm.core.runtime import session\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_builtin_support_modules(
+        tmp_path,
+        entry_files={entry.resolve()},
+    )
+
+    assert any(
+        issue.module_path.endswith("._support.backend")
+        and issue.rule == "11.4.5-import"
+        for issue in issues
+    )
 
 
 # ---------------------------------------------------------------------------

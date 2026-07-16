@@ -10,9 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 
 CATALOG_ROOT = Path(".agentm/catalog")
-LEGACY_PREFIX = ".legacy-"
+CURRENT_FILENAME = "current"
+MANIFEST_FILENAME = "manifest.json"
 METRICS_FILENAME = "metrics.jsonl"
 RUNS_DIRNAME = "runs"
+SOURCE_FILENAME = "source.py"
 
 
 def catalog_root(*, root: Path | None = None) -> Path:
@@ -38,6 +40,22 @@ def atom_runs_dir(
     name: str, version_key: str, *, root: Path | None = None
 ) -> Path:
     return atom_version_dir(name, version_key, root=root) / RUNS_DIRNAME
+
+
+def atom_source_path(
+    name: str, version_key: str, *, root: Path | None = None
+) -> Path:
+    return atom_version_dir(name, version_key, root=root) / SOURCE_FILENAME
+
+
+def atom_manifest_path(
+    name: str, version_key: str, *, root: Path | None = None
+) -> Path:
+    return atom_version_dir(name, version_key, root=root) / MANIFEST_FILENAME
+
+
+def atom_current_path(name: str, *, root: Path | None = None) -> Path:
+    return atoms_dir(name, root=root) / CURRENT_FILENAME
 
 
 def atom_metrics_path(
@@ -67,5 +85,4 @@ def atoms_root(root: Path) -> Path:
     """Return the atoms directory under a catalog root (not a cwd)."""
 
     return Path(root) / "atoms"
-
 

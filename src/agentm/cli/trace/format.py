@@ -1,4 +1,4 @@
-"""Formatting and output helpers for ``agentm trace``."""
+"""Output formatting helpers for ``agentm trace``."""
 
 from __future__ import annotations
 

@@ -64,11 +64,10 @@ class _RuntimeContextRuntime:
     def install(self) -> None:
         self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
 
-    def before_agent_start(self, event: BeforeAgentStartEvent) -> dict[str, str]:
+    def before_agent_start(self, event: BeforeAgentStartEvent) -> None:
         current = str(event.system or "")
         updated = f"{self._block}\n\n{current}" if current else self._block
         event.system = updated
-        return {"system": updated}
 
 
 def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:

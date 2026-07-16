@@ -102,7 +102,7 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
 _FORBIDDEN_SERVICE_ISINSTANCE_NAMES: frozenset[str] = frozenset(
     {
         "BashOperations",
-        "GitBackedResourceWriter",
+        "LocalResourceWriter",
     }
 )
 
@@ -129,6 +129,41 @@ def _builtin_dir() -> Path:
     return Path(pkg.__file__).parent
 
 
+def _validate_builtin_support_modules(
+    builtin_dir: Path,
+    *,
+    entry_files: set[Path],
+) -> list[ValidationIssue]:
+    """Validate builtin implementation code hidden behind atom entry files.
+
+    Discovery intentionally exposes only manifest-bearing atom modules.  Their
+    private top-level helpers and implementation packages are still executable
+    atom code, so excluding them from §11 would let a forbidden dependency move
+    one import away from ``install()`` and disappear from validation.
+    """
+
+    issues: list[ValidationIssue] = []
+    resolved_root = builtin_dir.resolve()
+    root_init = resolved_root / "__init__.py"
+    for src_file in sorted(resolved_root.rglob("*.py")):
+        resolved_file = src_file.resolve()
+        if resolved_file == root_init or resolved_file in entry_files:
+            continue
+
+        relative = resolved_file.relative_to(resolved_root).with_suffix("")
+        parts = list(relative.parts)
+        if parts and parts[-1] == "__init__":
+            parts.pop()
+        suffix = ".".join(parts)
+        module_path = "agentm.extensions.builtin"
+        if suffix:
+            module_path = f"{module_path}.{suffix}"
+
+        issues.extend(_check_imports(module_path, resolved_file))
+        issues.extend(_check_ast_rules(module_path, resolved_file))
+    return issues
+
+
 def validate_builtin() -> list[ValidationIssue]:
     """Validate every module under ``builtin/``.
 
@@ -147,6 +182,11 @@ def validate_builtin() -> list[ValidationIssue]:
 
     discovered = discover_builtin()
     discovered_names = set(discovered)
+    entry_files = {
+        Path(source_file).resolve()
+        for entry in discovered.values()
+        if (source_file := inspect.getsourcefile(entry.module)) is not None
+    }
 
     # §11.4.9 / §11.4.10 read constants from the core manifest. Resolve
     # through the module namespace so test fixtures that monkeypatch
@@ -168,7 +208,7 @@ def validate_builtin() -> list[ValidationIssue]:
                 )
             )
 
-    for name, entry in discovered.items():
+    for entry in discovered.values():
         module_path = entry.module_path
         module = entry.module
 
@@ -227,6 +267,12 @@ def validate_builtin() -> list[ValidationIssue]:
             )
         )
 
+    issues.extend(
+        _validate_builtin_support_modules(
+            builtin_dir,
+            entry_files=entry_files,
+        )
+    )
     return issues
 
 

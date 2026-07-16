@@ -731,3 +731,34 @@ numbers — do not change prompts mid-run):
   IDs ('Mia Garcia' → 'mia_garcia_4516'), which `default` (no `entity` kind)
   would have dropped. Reasoning: running 206 sessions on a mis-fit vocab forces
   functions/entities into service/file/unknown and produces a low-value index.
+
+## 2026-07-16 — repository-wide architecture and code-health refactor
+
+- **[flagged] Event mutation has one checked state channel** (L4: ABI
+  integrity). Every mutable event now declares `HookContract.mutable_fields`;
+  emitters consume the final event payload instead of stale locals, legacy
+  return-dict state channels are removed, and EventBus restores/fails on any
+  undeclared change. Observation events are fully read-only. Structural
+  snapshots traverse containers/dataclasses while treating opaque provider
+  objects by identity, avoiding both hidden mutation and deepcopy false
+  positives. AM015/AM016 enforce the emitter and contract sides statically.
+- **[flagged] Atom identity is source-content addressed, not Git-shaped**
+  (L4: evolution substrate). Removed pseudo-commit fields, path history,
+  arbitrary resource rollback, and catalog migration compatibility. Immutable
+  `source.py`/`manifest.json` snapshots use the deterministic 12-character
+  source hash across activation, browsing, attribution, and rollback; reads
+  validate hashes and symlink boundaries before exposing data.
+- **[flagged] CLI presenter is a package boundary** (L4: presenter
+  architecture). Replaced root-level `cli_*.py` scattering with
+  `agentm.cli` and `agentm.cli.trace`, using lazy package exports so importing
+  a helper does not assemble the command tree. Optional eval commands load only
+  when invoked and report explicit installation instructions when absent.
+- **Verifier v2 remains the current implementation** (L2: user correction).
+  Preserved and hardened the convergence-loop verifier, fixed service-local
+  anomaly attribution, DuckDB failure visibility, and positive-count judge
+  voting, then added a fail-stop regression for cross-service anomaly leakage.
+- **CI mirrors actual workspace boundaries** (L2: verification design).
+  Expanded lint/code-health to `src` plus Python contrib, runs mypy from each
+  package root with the required llmharness index extra, separates scenario
+  checks to avoid duplicate top-level modules, validates the requirements
+  index and §11 extension contract, and leaves terminal-go unchanged.

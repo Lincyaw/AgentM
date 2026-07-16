@@ -15,9 +15,9 @@ wires that mapping into the runtime:
   ``agentm.handler.mutated`` records come from observer hooks (``on_emit_*``
   / ``on_handler_done``), not from individual Event classes — those records
   describe bus-level activity, not per-event semantics.
-* It owns the fingerprint / atom-hash bookkeeping for
+* It owns the fingerprint / atom-snapshot bookkeeping for
   ``agentm.session.fingerprint`` and ``agentm.atom.reload`` — those depend
-  on catalog + resource-writer state that does not belong on the per-session
+  on catalog state that does not belong on the per-session
   telemetry handle.
 * It emits the ``agentm.session.start`` install-time record and stamps
   ``obs_session_start_ns`` so :class:`SessionShutdownEvent` can compute the
@@ -30,7 +30,6 @@ in ``tests/unit/extensions/test_observability_semconv.py`` lock it down.
 from __future__ import annotations
 
 import hashlib
-import inspect
 from loguru import logger
 import time
 import traceback
@@ -42,9 +41,7 @@ from agentm.core.abi import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     BeforeAgentStartEvent,
-    BeforeCompactEvent,
     BeforeSendToLlmEvent,
-    ContextEvent,
     DiagnosticEvent,
     Event,
     EventBusObserver,
@@ -71,7 +68,6 @@ from pydantic import BaseModel
 
 from agentm.core.lib import redact_messages, to_jsonable
 from agentm.extensions import ExtensionManifest
-from agentm.extensions.discover import discover_builtin
 from opentelemetry._logs import SeverityNumber
 
 
@@ -94,19 +90,6 @@ _REDACTED_CHANNELS: frozenset[str] = frozenset(
     }
 )
 
-# Mutable channels we diff for handler.invoke "what changed" attribute. Same
-# set the old writer tracked; restricting the diff to these avoids O(N·M)
-# double-serialization on every handler invocation.
-_MUTABLE_CHANNELS = frozenset(
-    {
-        BeforeAgentStartEvent.CHANNEL,
-        ContextEvent.CHANNEL,
-        ToolCallEvent.CHANNEL,
-        ToolResultEvent.CHANNEL,
-        BeforeCompactEvent.CHANNEL,
-    }
-)
-
 _ATTRIBUTE_STRING_LIMIT = 512
 
 
@@ -117,6 +100,12 @@ def _nested_get(data: dict[str, Any], path: str) -> Any:
             return None
         current = current.get(part)
     return current
+
+
+def _event_mutable_fields(event: Any) -> tuple[str, ...]:
+    hook = getattr(type(event), "HOOK", None)
+    fields = getattr(hook, "mutable_fields", ())
+    return tuple(fields) if isinstance(fields, tuple) else ()
 
 
 def _add_metadata_attribute(attrs: dict[str, Any], key: str, value: Any) -> None:
@@ -325,7 +314,7 @@ class _ObservabilityObserver(EventBusObserver):
         del channel, event
 
     def on_handler_start(self, channel: str, handler: Handler, event: Any) -> None:
-        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+        if not self._include_diff or not _event_mutable_fields(event):
             return
         try:
             before = to_jsonable(event)
@@ -425,7 +414,7 @@ class _ObservabilityObserver(EventBusObserver):
         event: Any,
         error: BaseException | None,
     ) -> None:
-        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+        if not self._include_diff or not _event_mutable_fields(event):
             return
         before, snapshot_event = self._pop_diff_snapshot(channel, handler)
         if before is None:
@@ -474,11 +463,6 @@ class _ObservabilityRuntime:
         self._exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
             frozenset(user_excludes) if user_excludes else frozenset()
         )
-        discovered_builtin = discover_builtin()
-        self._builtin_by_module_path = {
-            entry.module_path: entry for entry in discovered_builtin.values()
-        }
-        self._loaded_builtin_module_paths: set[str] = set()
         self._active_atom_hashes: dict[str, str] = {}
         self._current_fingerprint: ActiveSetFingerprint | None = None
 
@@ -555,19 +539,14 @@ class _ObservabilityRuntime:
         self, *, scenario: str | None = None
     ) -> ActiveSetFingerprint:
         self._active_atom_hashes = {}
-        writer = self._api.get_resource_writer()
-        for module_path in sorted(self._loaded_builtin_module_paths):
-            entry = self._builtin_by_module_path.get(module_path)
-            if entry is None:
-                continue
-            source_path = inspect.getsourcefile(entry.module)
-            if source_path is None:
-                continue
-            version_hash = writer.current_version_for_path(source_path)
-            if version_hash is None:
-                source = inspect.getsource(entry.module)
-                version_hash = self._api.catalog.compute_atom_hash(source)
-            self._active_atom_hashes[entry.name] = version_hash
+        for atom in self._api.list_atoms():
+            version_hash = self._api.freeze_current(atom.name)
+            if atom.current_hash is not None and atom.current_hash != version_hash:
+                raise RuntimeError(
+                    f"atom identity mismatch for {atom.name!r}: "
+                    f"list_atoms={atom.current_hash}, freeze={version_hash}"
+                )
+            self._active_atom_hashes[atom.name] = version_hash
         return self._api.catalog.compute_active_set_fingerprint(
             loaded=self._active_atom_hashes,
             scenario=scenario,
@@ -602,8 +581,6 @@ class _ObservabilityRuntime:
         )
 
     def _on_extension_install(self, event: ExtensionInstallEvent) -> None:
-        if event.phase == "end" and event.module_path in self._builtin_by_module_path:
-            self._loaded_builtin_module_paths.add(event.module_path)
         self._telemetry.emit_log(
             "agentm.extension.install",
             body={"config": to_jsonable(event.config)},

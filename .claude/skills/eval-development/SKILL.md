@@ -297,7 +297,7 @@ agentm eval export <exp_id>         # export ClickHouse trajectories
 
 `contrib/evals/pyproject.toml` defines the `agentm-eval` workspace member.
 It's registered in the root `pyproject.toml` workspace and wired into
-`agentm eval` via a lazy import in `src/agentm/cli.py`.
+`agentm eval` via a lazy import in `src/agentm/cli/main.py`.
 
 For the full adapter reference, read the existing adapters — they're
 the authoritative examples:

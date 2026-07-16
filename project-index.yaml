@@ -130,11 +130,12 @@ requirements:
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/core/runtime/session.py
-      - path: src/agentm/cli_validate.py
+      - path: src/agentm/cli/validate.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/builtin/inherit_provider.py
     tests:
       - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/unit/extensions/test_validator_rejects.py
     docs:
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/self-modifiable-architecture.md
@@ -357,8 +358,8 @@ requirements:
       through a standalone eval package rather than RCA scenario internals or
       llmharness-specific code. The package validates explicit branch specs,
       runs SDK-backed `SessionStore.fork` + `AgentSession.create`
-      continuations, supports pluggable intervention policies, exposes
-      llmharness as one optional policy, and dispatches scenario-owned
+      continuations, supports pluggable intervention policies through the
+      eval-owned treatment registry, and dispatches scenario-owned
       export/scoring through adapters.
     priority: P1
     status: implemented
@@ -372,7 +373,6 @@ requirements:
       - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/cli.py
       - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/provider_profiles.py
       - path: contrib/evals/src/agentm_eval/benchmarks/rescue_window/harness/corpus.py
-      - path: contrib/extensions/llmharness/src/llmharness/offline.py
     tests: []
     docs:
       - path: CONTEXT.md
@@ -399,9 +399,9 @@ requirements:
       suppressed after two deliveries. Optional methodology generation
       extracts task-spec text from user and tool-result messages while
       staying type clean under the llmharness workspace checks. Auditor
-      index-query tools that clip content previews must mark every truncation
-      explicitly and offer a full-content mode (get_turn full=true), so the
-      auditor never loops re-reading the same clipped payload.
+      index-query tools come from the persisted trajectory-index query atom, so
+      index inspection stays on one typed read-only surface instead of a
+      parallel llmharness-specific implementation.
     priority: P2
     status: implemented
     confidence: confirmed
@@ -410,9 +410,10 @@ requirements:
       - path: contrib/extensions/llmharness/src/llmharness/atom.py
       - path: contrib/extensions/llmharness/src/llmharness/schema.py
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/tools.py
-      - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/index_tools.py
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/manifest.yaml
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/prompts/swe.md
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/query_atom.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/query_tools.py
     tests: []
     docs: []
     depends_on:
@@ -434,12 +435,12 @@ requirements:
     code:
       - path: src/agentm/core/abi/operations.py
       - path: src/agentm/core/abi/resource.py
-      - path: src/agentm/extensions/builtin/writer/local.py
       - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/extensions/builtin/file_tools.py
       - path: src/agentm/core/lib/read_state.py
     tests:
       - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/unit/core/test_resource_writer_boundary.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
       - path: .claude/designs/extension-as-scenario.md
@@ -450,23 +451,24 @@ requirements:
   - id: REQ-101-tool-catalog-split
     title: Tool catalog browse/mutate atom split
     description: >
-      The contrib tool catalog must expose read-only history browsing separately
-      from mutating self-modification tools so plan-mode scenarios can mount
-      catalog introspection without enabling rollback, install, unload, or reload
-      mutation. The browse and mutate atoms must declare accurate registers lists.
+      The contrib tool catalog must expose validated, read-only atom snapshot
+      browsing separately from mutating self-modification tools so scenarios
+      can mount catalog introspection without enabling rollback, install,
+      unload, or reload. Rollback is atom-only and content-hash addressed;
+      arbitrary path history and Git-shaped compatibility tools do not exist.
+      Both atoms must declare accurate register lists.
     priority: P0
     status: implemented
     confidence: confirmed
     code:
       - path: contrib/extensions/tool_catalog/__init__.py
-      - path: contrib/extensions/tool_catalog/_paths.py
-      - path: contrib/extensions/tool_catalog/_git_log.py
+      - path: contrib/extensions/tool_catalog/_root.py
       - path: contrib/extensions/tool_catalog/browse.py
       - path: contrib/extensions/tool_catalog/mutate.py
       - path: pyproject.toml
     tests: []
     docs:
-      - path: .claude/designs/git-backed-versioning.md
+      - path: .claude/designs/evolution-substrate.md
       - path: README.md
     depends_on:
       - REQ-086-atom-rework-infra
@@ -560,12 +562,16 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: src/agentm/cli.py
-      - path: src/agentm/cli_setup.py
-      - path: src/agentm/cli_terminal.py
+      - path: src/agentm/cli/main.py
+      - path: src/agentm/cli/eval.py
+      - path: src/agentm/cli/setup.py
+      - path: src/agentm/cli/terminal.py
       - path: src/agentm/onboard.py
-      - path: src/agentm/cli_trace.py
-      - path: src/agentm/cli_trace_format.py
+      - path: src/agentm/cli/trace/commands.py
+      - path: src/agentm/cli/trace/backend.py
+      - path: src/agentm/cli/trace/dataset.py
+      - path: src/agentm/cli/trace/format.py
+      - path: src/agentm/cli/trace/index.py
       - path: src/agentm/extensions/builtin/trace_query.py
       - path: src/agentm/contrib_sync.py
       - path: src/agentm/env.py
@@ -577,10 +583,12 @@ requirements:
       - path: src/agentm/scenarios/local/manifest.yaml
       - path: src/agentm/scenarios/minimal/manifest.yaml
       - path: src/agentm/skills
-      - path: src/agentm/cli_workflow.py
+      - path: src/agentm/cli/workflow.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/runtime.py
+      - path: src/agentm/gateway/runtime_controls.py
+      - path: src/agentm/gateway/runtime_state.py
       - path: src/agentm/gateway/commands/protocol.py
       - path: src/agentm/gateway/commands/registry.py
       - path: src/agentm/gateway/commands/router.py
@@ -663,7 +671,7 @@ requirements:
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/runtime/session_factory.py
-      - path: src/agentm/cli.py
+      - path: src/agentm/cli/main.py
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
       - path: src/agentm/extensions/builtin/cost_budget.py
       - path: src/agentm/extensions/builtin/file_tools.py
@@ -685,7 +693,7 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: src/agentm/cli.py
+      - path: src/agentm/cli/main.py
       - path: contrib/gateway-peers/terminal-go/internal/adapter/adapter.go
       - path: contrib/gateway-peers/terminal-go/internal/adapter/controller.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/app/app.go
@@ -963,9 +971,9 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/adapter/controller.go
       - path: contrib/gateway-peers/terminal-go/internal/wire/client.go
       - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
-      - path: src/agentm/cli_daemon.py
-      - path: src/agentm/cli.py
-      - path: src/agentm/cli_terminal.py
+      - path: src/agentm/cli/daemon.py
+      - path: src/agentm/cli/main.py
+      - path: src/agentm/cli/terminal.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/server.py
@@ -1198,13 +1206,13 @@ requirements:
       - path: src/agentm/core/lib/observability_dir.py
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/env.py
-      - path: src/agentm/cli.py
-      - path: src/agentm/cli_setup.py
-      - path: src/agentm/cli_terminal.py
+      - path: src/agentm/cli/main.py
+      - path: src/agentm/cli/setup.py
+      - path: src/agentm/cli/terminal.py
       - path: src/agentm/contrib_sync.py
-      - path: src/agentm/cli_trace.py
-      - path: src/agentm/cli_trace_format.py
-      - path: src/agentm/cli_daemon.py
+      - path: src/agentm/cli/trace/commands.py
+      - path: src/agentm/cli/trace/format.py
+      - path: src/agentm/cli/daemon.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway_daemon.py
       - path: src/agentm/gateway_supervisor.py
@@ -1219,7 +1227,6 @@ requirements:
       - path: src/agentm/core/runtime/atom_sandbox.py
       - path: src/agentm/core/runtime/catalog/__init__.py
       - path: src/agentm/core/runtime/catalog/freeze.py
-      - path: src/agentm/core/runtime/catalog/migrate.py
       - path: src/agentm/core/runtime/catalog/indexer.py
       - path: src/agentm/core/runtime/resource_loader.py
       - path: src/agentm/extensions/discover.py
@@ -1241,7 +1248,7 @@ requirements:
       - path: contrib/extensions/cc/agents.py
       - path: contrib/extensions/cc/commands.py
       - path: contrib/extensions/cc/plugins.py
-      - path: contrib/extensions/tool_catalog/_paths.py
+      - path: contrib/extensions/tool_catalog/_root.py
       - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/onboard.py
       - path: contrib/gateway-peers/terminal-go/main.go
@@ -1287,10 +1294,9 @@ requirements:
       legacy case roots containing nested ``.agentm/observability/*.jsonl``,
       without treating cwd-local ``.agentm`` as the only local trace layout.
     priority: P2
-    status: implemented
+    status: deprecated
     confidence: confirmed
-    code:
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/data.py
+    code: []
     tests: []
     docs:
       - path: contrib/extensions/trajectory_index/README.md
@@ -1328,11 +1334,14 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/index.py
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/adjudicate.py
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/data.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/ir/index.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/ir/query.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/ir/persistence.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass2_edges/identity.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass3_folds/grounding.py
       - path: contrib/extensions/trajectory_index/src/trajectory_index/atom.py
-    tests: []
+    tests:
+      - path: contrib/extensions/trajectory_index/tests/test_atom_import.py
     docs:
       - path: contrib/extensions/trajectory_index/SCHEMA.md
     depends_on:
@@ -1370,15 +1379,15 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/constraints.py
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/edges.py
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/verification.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass2_edges/claims.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass3_folds/claim_status.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass3_folds/constraints.py
       - path: contrib/extensions/trajectory_index/src/trajectory_index/atom.py
       - path: contrib/evals/src/agentm_eval/benchmarks/auditor_eval/__init__.py
       - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/context.py
     tests: []
     docs:
-      - path: contrib/extensions/trajectory_index/designs/constraint-satisfaction.md
+      - path: contrib/extensions/trajectory_index/SCHEMA.md
     depends_on:
       - REQ-208-trajectory-index-readwrite-layer
 
@@ -1407,14 +1416,16 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/markup.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass1_nodes/markup.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass1_nodes/populate.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/pass1_nodes/serialize.py
       - path: contrib/extensions/trajectory_index/src/trajectory_index/agents/entity_extractor/schema.py
       - path: contrib/extensions/trajectory_index/src/trajectory_index/agents/entity_extractor/prompts/default.md
-      - path: contrib/extensions/trajectory_index/src/trajectory_index/index.py
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/ir/index.py
       - path: contrib/evals/src/agentm_eval/benchmarks/telbench/adapter.py
     tests: []
     docs:
-      - path: contrib/extensions/trajectory_index/designs/trajectory-analysis-architecture.md
+      - path: contrib/extensions/trajectory_index/SCHEMA.md
     depends_on:
       - REQ-208-trajectory-index-readwrite-layer
 
@@ -1528,7 +1539,7 @@ requirements:
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/lib/shutdown.py
-      - path: src/agentm/cli.py
+      - path: src/agentm/cli/main.py
     tests: []
     docs:
       - path: .claude/designs/session-inbox.md
@@ -1588,6 +1599,7 @@ requirements:
       - path: src/agentm/extensions/builtin/bash/local.py
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/builtin/background_exec.py
+    tests: []
     docs:
       - path: .claude/designs/session-inbox.md
     depends_on:
@@ -1694,9 +1706,10 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/scenarios/terminal_bench/manifest.arl_task.yaml
+      - path: contrib/scenarios/arl/manifest.yaml
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/bench.py
-      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/swebench.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor/base.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/agent.py
     tests: []
     docs:
@@ -1731,7 +1744,8 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor/base.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor/lhtb.py
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/formats.py
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/runner.py
     tests: []
@@ -1764,7 +1778,8 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor/base.py
+      - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/harbor/ssb.py
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/formats.py
     tests: []
     docs:
@@ -1793,8 +1808,10 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/completion_guard.py
-      - path: contrib/scenarios/terminal_bench/manifest.arl.yaml
+      - path: contrib/scenarios/arl/overlays/base.yaml
     tests: []
+    docs: []
+    depends_on: []
 
   - id: REQ-194-terminal-bench-adapt-scenario
     title: Terminal Bench ARL adapt scenario with online atom self-modification
@@ -1816,7 +1833,7 @@ requirements:
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/extensions/builtin/adapt.py
-      - path: contrib/scenarios/terminal_bench/manifest.arl_adapt.yaml
+      - path: contrib/scenarios/arl/manifest.adapt.yaml
     tests:
       - path: tests/integration/test_adapt_real_agent.py
     docs:
@@ -1969,7 +1986,7 @@ requirements:
       - path: src/agentm/extensions/builtin/structured_output.py
       - path: src/agentm/extensions/builtin/_workflow/sdk.py
       - path: src/agentm/extensions/builtin/_workflow/runner.py
-      - path: src/agentm/cli_workflow.py
+      - path: src/agentm/cli/workflow.py
     tests: []
     docs:
       - path: .claude/designs/dynamic-workflow.md
@@ -1989,11 +2006,12 @@ requirements:
       workflow/sub-agent prompt assembly can be inspected without spending a
       model call.
     priority: P1
-    status: implemented
+    status: tested
     confidence: confirmed
     code:
       - path: src/agentm/core/abi/loop.py
-    tests: []
+    tests:
+      - path: tests/unit/core/test_llm_preflight.py
     docs:
       - path: .claude/designs/agent-loop.md
       - path: .claude/index.yaml
@@ -2119,23 +2137,33 @@ requirements:
       - REQ-087-builtin-atoms-extension-api
 
   - id: REQ-201-project-code-health-lint
-    title: Project-specific code health linting
+    title: Repository-wide Python code health gates
     description: >
       The ``agentm lint`` code-health checker must provide fast AST-only
       project rules for architectural conventions that general-purpose lint and
       type tools cannot express. Rule targeting must use precise path
       classification so checks such as atom raw-I/O detection only apply to
-      actual builtin atom files, and Python-version compatibility aliases do
-      not drift away from the project's Python 3.12+ baseline. The documented
-      ``python -m agentm.code_health`` entrypoint must execute the same Typer
-      app as ``agentm lint``.
-    priority: P2
-    status: implemented
+      actual builtin atom files. Broad exception handlers must surface their
+      failure, dataclasses should be slotted, zip truncation policy must be
+      explicit, and created asyncio tasks must retain ownership. CI must run
+      Ruff, mypy, the project-specific strict health checker, nested package
+      tests, and a repository-owned requirements-index validator across both
+      ``src`` and Python ``contrib`` code.
+    priority: P0
+    status: tested
     confidence: confirmed
     code:
       - path: src/agentm/code_health.py
-    tests: []
-    docs: []
+      - path: src
+      - path: contrib
+      - path: pyproject.toml
+      - path: uv.lock
+      - path: .github/workflows/test.yml
+      - path: scripts/validate_project_index.py
+    tests:
+      - path: tests/unit/test_code_health.py
+    docs:
+      - path: AGENTS.md
     depends_on:
       - REQ-087-builtin-atoms-extension-api
 
@@ -2158,7 +2186,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/observability/clickhouse.py
-      - path: src/agentm/cli_trace.py
+      - path: src/agentm/cli/trace/commands.py
       - path: contrib/evals/src/agentm_eval/benchmarks/sandbox/runner.py
     tests: []
     docs:
@@ -2183,7 +2211,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/observability/clickhouse.py
-      - path: src/agentm/cli_trace.py
+      - path: src/agentm/cli/trace/commands.py
     tests: []
     docs:
       - path: .claude/skills/trace-analysis/SKILL.md
@@ -2299,3 +2327,171 @@ requirements:
       - path: .claude/designs/reliability-substrate.md
     depends_on:
       - REQ-209-workflow-journal-invalidation
+
+  - id: REQ-216-verifier-final-invariants
+    title: Verifier final checks are deterministic and total
+    description: >
+      The verifier finalization path must evaluate confirmed-seed reachability
+      and frontend anomaly coverage using only its explicit graph inputs.
+      Confirmed seeds with no outgoing accepted edge are valid local-only
+      effects and must not crash or be reported as unexplained propagation.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/scenarios/verifier/lib/final_checks.py
+    tests:
+      - path: tests/unit/contrib/test_verifier_final_checks.py
+    docs:
+      - path: contrib/scenarios/verifier/README.md
+    depends_on: []
+
+  - id: REQ-217-event-hook-state-integrity
+    title: Mutable event hooks have one checked state channel
+    description: >
+      Every mutable event must declare machine-readable writable fields in
+      ``HookContract.mutable_fields``. EventBus dispatch validates every typed
+      event by default: observation events are fully read-only, mutable events
+      expose only their declared fields, undeclared changes are restored, and
+      dispatch fails before a later handler can observe corrupted state.
+      Emitters must bind mutable events before dispatch and consume every final
+      value from the event afterwards; static checks reject inline
+      construction, stale source locals, and inconsistent hook contracts.
+      Observability and adaptation metadata derive mutation behavior from the
+      same contract. The legacy before_agent_start and input return-dict state
+      channels are removed.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/bus.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/runtime/atom_reloader.py
+      - path: src/agentm/extensions/builtin/llm_compaction.py
+      - path: src/agentm/extensions/builtin/observability.py
+      - path: src/agentm/extensions/builtin/adapt.py
+      - path: src/agentm/code_health.py
+    tests:
+      - path: tests/unit/core/test_event_bus.py
+      - path: tests/unit/core/test_llm_preflight.py
+      - path: tests/test_before_agent_start_system_prompt.py
+      - path: tests/unit/test_code_health.py
+    docs:
+      - path: .claude/designs/event-handler-convention.md
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/index.yaml
+    depends_on:
+      - REQ-207-declared-handler-effects
+
+  - id: REQ-218-verifier-v2-convergence
+    title: Verifier v2 converges through deterministic gaps and checked evidence
+    description: >
+      Verifier v2 is the current convergence-loop implementation, not a legacy
+      compatibility path. It repeatedly evaluates structural gaps, plans
+      verification work, compiles re-executable evidence, and applies judged
+      verdicts until convergence. Component-level anomaly coverage must be
+      attributed to the actual target service rather than unrelated graph
+      nodes, DuckDB setup failures must be visible, and multi-judge voting must
+      remain type-safe for any positive vote count.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/scenarios/verifier_v2/cli.py
+      - path: contrib/scenarios/verifier_v2/compiler.py
+      - path: contrib/scenarios/verifier_v2/gaps.py
+      - path: contrib/scenarios/verifier_v2/judge.py
+      - path: contrib/scenarios/verifier_v2/planner.py
+      - path: contrib/scenarios/verifier_v2/schema.py
+      - path: contrib/scenarios/verifier_v2/searcher.py
+      - path: contrib/scenarios/verifier_v2/state.py
+      - path: contrib/scenarios/verifier_v2/workflow.py
+    tests:
+      - path: tests/unit/contrib/test_verifier_v2_gaps.py
+    docs: []
+    depends_on: []
+
+  - id: REQ-219-content-addressed-catalog-integrity
+    title: Atom versions have one content-addressed identity
+    description: >
+      Atom version identity must be the deterministic 12-character source
+      content hash everywhere: live atom metadata, session fingerprints,
+      immutable catalog directories, browsing, run attribution, and rollback.
+      Freezing writes source.py and manifest.json once, verifies repeated
+      freezes byte-for-byte, and atomically moves a current pointer. Catalog
+      reads recompute source hashes and validate manifest name/content_hash
+      before returning data. Reload and install verify that ResourceWriter
+      success changed the actual target bytes, restore source and runtime state
+      on any failure, and freeze the activated version before reporting
+      success. Git-shaped writer state, migration, path history, and arbitrary
+      resource rollback are removed.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/catalog.py
+      - path: src/agentm/core/abi/resource.py
+      - path: src/agentm/core/_internal/catalog/browse.py
+      - path: src/agentm/core/_internal/catalog/hashing.py
+      - path: src/agentm/core/runtime/atom_reloader.py
+      - path: src/agentm/core/runtime/catalog/_layout.py
+      - path: src/agentm/core/runtime/catalog/freeze.py
+      - path: src/agentm/core/runtime/catalog/indexer.py
+      - path: src/agentm/core/runtime/resource_writer.py
+      - path: src/agentm/core/runtime/session_factory.py
+      - path: src/agentm/extensions/builtin/observability.py
+      - path: contrib/extensions/tool_catalog/browse.py
+      - path: contrib/extensions/tool_catalog/mutate.py
+    tests:
+      - path: tests/unit/core/catalog/test_hashing.py
+      - path: tests/unit/core/catalog/test_snapshots.py
+      - path: tests/unit/core/test_resource_writer_boundary.py
+      - path: tests/unit/harness/test_transactional_reload.py
+    docs:
+      - path: .claude/designs/evolution-substrate.md
+      - path: .claude/designs/self-modifiable-architecture.md
+      - path: .claude/index.yaml
+    depends_on:
+      - REQ-101-tool-catalog-split
+
+  - id: REQ-220-cli-package-boundary
+    title: CLI presenter is grouped by command domain
+    description: >
+      The Python CLI presenter must live under ``agentm.cli`` rather than
+      scattering ``cli_*.py`` modules across the package root. The root app,
+      first-level command registrations, and trace-specific backend/format/
+      dataset/index helpers must have explicit package boundaries while the
+      console contract remains ``agentm`` and ``agentm.cli.main``. Optional
+      eval benchmark discovery must be lazy so root help has no optional
+      dependency imports, warnings, or startup cost. ``python -m agentm.cli``
+      and ``python -m agentm.cli.trace`` remain direct development entry
+      points.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/cli/__init__.py
+      - path: src/agentm/cli/__main__.py
+      - path: src/agentm/cli/main.py
+      - path: src/agentm/cli/daemon.py
+      - path: src/agentm/cli/eval.py
+      - path: src/agentm/cli/setup.py
+      - path: src/agentm/cli/terminal.py
+      - path: src/agentm/cli/validate.py
+      - path: src/agentm/cli/workflow.py
+      - path: src/agentm/cli/trace/__init__.py
+      - path: src/agentm/cli/trace/__main__.py
+      - path: src/agentm/cli/trace/backend.py
+      - path: src/agentm/cli/trace/commands.py
+      - path: src/agentm/cli/trace/dataset.py
+      - path: src/agentm/cli/trace/format.py
+      - path: src/agentm/cli/trace/index.py
+      - path: pyproject.toml
+      - path: core-manifest.yaml
+    tests: []
+    docs:
+      - path: .claude/skills/agentm-sdk/references/provider-and-cli.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams

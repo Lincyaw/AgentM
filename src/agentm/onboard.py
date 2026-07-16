@@ -555,7 +555,6 @@ async def _test_model_request(
             resource_loader=DefaultResourceLoader(cwd=workspace),
             loop_config=LoopConfig(max_turns=1),
             bus=EventBus(),
-            auto_commit=False,
         )
     )
     try:

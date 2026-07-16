@@ -41,7 +41,7 @@ The invariant is enforced structurally (no `extensions` import in `core/abi/` or
 │                     → atom may import (stdlib-style)                 │
 │    core/runtime/    stateful substrate — AgentSession, EventBus,     │
 │                     SessionManager, catalog/, extension loader,      │
-│                     GitBackedResourceWriter, AtomReloader.           │
+│                     LocalResourceWriter, AtomReloader.               │
 │                     → atom may NOT import; reach via ExtensionAPI    │
 │    core/_internal/  reload-time helpers (atoms never touch)          │
 │                                                                      │
@@ -134,7 +134,7 @@ constitution:
     - src/agentm/extensions/discover.py
     - src/agentm/extensions/validate.py
     # Presenter startup contract
-    - src/agentm/cli.py
+    - src/agentm/cli/**
     # Catalog data — write-protected against agent edits
     - .agentm/catalog/**
     # The manifest itself — self-referential lock
@@ -248,15 +248,22 @@ Key properties:
 
 ### 5.2 What `freeze_current` does
 
-Writes the current source + manifest to `.agentm/catalog/atoms/<name>/<content_hash>/` (constitution-owned path). See sister doc §3 for catalog schema. Idempotent: if hash already exists, no rewrite.
-
-> **Implementation note**: as of [git-backed-versioning.md](git-backed-versioning.md), this snapshot mechanism is provided by git plumbing through the harness `ResourceWriter` service. The catalog directory still exists for `metrics.jsonl` and `runs/`; source/manifest content moves into the git object store. The transactional reload flow simplifies to `writer.write(...) → on install failure: writer.restore(path, pre_sha)`.
+Writes the current `source.py` + canonical `manifest.json` to
+`.agentm/catalog/atoms/<name>/<content_hash>/` (constitution-owned path), then
+atomically updates the atom's `current` pointer. Version directories are
+immutable: re-freezing identical bytes is idempotent, while any mismatch at an
+existing hash is catalog corruption and fails immediately. Reads independently
+recompute the source hash and validate `manifest.name` and
+`manifest.content_hash`.
 
 ### 5.3 What `restore_from_snapshot` does
 
-Atomically replaces the file at `extensions/builtin/<name>.py` with the snapshot bytes. Then re-runs `load_extension(name)` against the restored source — in the rare case this also fails, the system enters degraded mode (atom marked unavailable, error reported, session continues without it).
-
-> Per [git-backed-versioning.md](git-backed-versioning.md), this is `git restore --source=<pre_sha> -- <path>` followed by `git reset --hard <pre_sha>` on the auto-commit produced by the writer.
+Writes the snapshot bytes through the bootstrap `ResourceWriter`, verifies the
+actual target bytes, and re-runs `load_extension(name)`. The reloader also
+holds an immutable in-memory registry/module snapshot; if source restoration or
+rollback activation fails, it restores that snapshot so the live session never
+collapses into a half-old/half-new registry. The failure remains visible because
+the on-disk source may still require operator repair.
 
 ---
 

@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 import shlex
 
+from loguru import logger
+
 from ..bench import TaskSpec
 from .base import HarborAdapter
 
@@ -82,7 +84,8 @@ class SeniorSweAdapter(HarborAdapter):
                 return False
             with open(cfg_path, "rb") as fh:
                 cfg = tomllib.load(fh)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:
+            logger.debug("could not load senior-swe model overrides: {}", exc)
             return False
         default_name = cfg.get("default_model", "")
         profile = cfg.get("models", {}).get(default_name, {})

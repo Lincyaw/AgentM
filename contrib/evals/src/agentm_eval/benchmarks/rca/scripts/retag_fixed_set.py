@@ -113,9 +113,9 @@ def main() -> int:
             if changed:
                 add.append((rid, new_json))
         else:
-            new_json, changed = _remove_tag(tags, args.tag)
+            removed_json, changed = _remove_tag(tags, args.tag)
             if changed:
-                drop.append((rid, new_json))
+                drop.append((rid, removed_json))
 
     print(f"will tag {len(add)} rows with {args.tag!r}; will untag {len(drop)} rows")
     if args.dry_run:

@@ -23,18 +23,18 @@ class _DefaultCatalogService:
         return _impl(name, root)
 
     def current_version(
-        self, path: str, root: Path | None = None
+        self, name: str, root: Path | None = None
     ) -> str:
         from agentm.core._internal.catalog import current_version as _impl
 
-        return _impl(path, root)
+        return _impl(name, root)
 
     def get_source_at(
-        self, path: str, version: str, root: Path | None = None
+        self, name: str, version: str, root: Path | None = None
     ) -> bytes:
         from agentm.core._internal.catalog import get_source_at as _impl
 
-        return _impl(path, version, root)
+        return _impl(name, version, root)
 
     def get_manifest_at(
         self, name: str, version: str, root: Path | None = None

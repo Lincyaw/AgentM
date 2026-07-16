@@ -84,11 +84,10 @@ class _SystemPromptRuntime:
             return
         self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
 
-    def before_agent_start(self, event: BeforeAgentStartEvent) -> dict[str, str]:
+    def before_agent_start(self, event: BeforeAgentStartEvent) -> None:
         current = str(event.system or "")
         updated = f"{self._prompt}\n\n{current}" if current else self._prompt
         event.system = updated
-        return {"system": updated}
 
 
 def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:

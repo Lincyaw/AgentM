@@ -124,11 +124,10 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
         goal_condition=config.goal_condition,
     )
 
-    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+    def _before_start(event: BeforeAgentStartEvent) -> None:
         current = event.system or ""
         merged = f"{prompt_text}\n\n{current}" if current else prompt_text
         event.system = merged
-        return {"system": merged}
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
 

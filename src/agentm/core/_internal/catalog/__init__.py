@@ -1,6 +1,6 @@
 """Constitution-layer catalog: pure kernel functions only.
 
-Filesystem-shaped helpers (freeze, migrate, indexer, project layout) live
+Filesystem mutation helpers (freeze, indexer, project layout) live
 in :mod:`agentm.core.runtime.catalog`. This package is import-safe in any cwd:
 no filesystem reads happen at import time, no path-walking heuristics,
 no implicit reach into :mod:`agentm.extensions`.
@@ -9,8 +9,7 @@ no implicit reach into :mod:`agentm.extensions`.
 from __future__ import annotations
 
 from agentm.core._internal.catalog.browse import (
-    CatalogAtom,
-    UnparseableManifestError,
+    CatalogCorruptionError,
     current_version,
     get_manifest_at,
     get_source_at,
@@ -24,8 +23,7 @@ from agentm.core._internal.catalog.hashing import (
 from agentm.core._internal.catalog.manifest import is_constitution_path
 
 __all__ = [
-    "CatalogAtom",
-    "UnparseableManifestError",
+    "CatalogCorruptionError",
     "compute_active_set_fingerprint",
     "compute_atom_hash",
     "current_version",

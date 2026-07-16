@@ -362,7 +362,7 @@ def run_agent_session(
             if config.agent_timeout > 0:
                 try:
                     messages = await asyncio.wait_for(coro, timeout=config.agent_timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     timed_out = True
             else:
                 messages = await coro

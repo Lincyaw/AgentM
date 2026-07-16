@@ -22,19 +22,19 @@ import typer
 from loguru import logger
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
-from agentm.cli_daemon import app as _daemon_app
-from agentm.cli_setup import register_setup_commands
-from agentm.cli_trace import app as _trace_app
-from agentm.cli_terminal import register_terminal_command
-from agentm.cli_validate import app as _validate_app
-from agentm.cli_workflow import app as _workflow_app
+from agentm.cli.daemon import app as _daemon_app
+from agentm.cli.eval import register_eval_command
+from agentm.cli.setup import register_setup_commands
+from agentm.cli.terminal import register_terminal_command
+from agentm.cli.trace import app as _trace_app
+from agentm.cli.validate import app as _validate_app
+from agentm.cli.workflow import app as _workflow_app
 from agentm.code_health import app as _lint_app
 from agentm.contrib_sync import app as _contrib_app
 from agentm.env import autoload_dotenv, resolve_cli_cwd
-from agentm.core.abi import LoopConfig
+from agentm.core.abi import EventBus, LoopConfig
 from agentm.core.abi.events import (
     DiagnosticEvent,
-    EventBus,
     ExtensionInstallEvent,
     MessagePersistedEvent,
 )
@@ -70,7 +70,7 @@ app = typer.Typer(
 
 # -- Shared Typer option aliases ------------------------------------------------
 # Used by both ``run_cmd`` and ``fork_cmd`` so each option is defined once.
-# Pattern follows ``cli_trace.py`` (``SessionOpt``, ``FileOpt``, etc.).
+# Trace commands use the same alias pattern in ``agentm.cli.trace``.
 
 ScenarioOpt = Annotated[
     str | None,
@@ -1388,6 +1388,7 @@ def _compact_text(value: str, limit: int) -> str:
 
 register_terminal_command(app, default_scenario=DEFAULT_SCENARIO)
 register_setup_commands(app)
+register_eval_command(app)
 app.add_typer(_trace_app, name="trace")
 app.add_typer(_workflow_app, name="workflow")
 app.add_typer(_validate_app, name="validate")
@@ -1395,14 +1396,9 @@ app.add_typer(_daemon_app, name="daemon")
 app.add_typer(_gateway_app, name="gateway")
 app.add_typer(_contrib_app, name="contrib")
 app.add_typer(_lint_app, name="lint")
-try:
-    from agentm_eval.cli import app as _eval_app
-
-    app.add_typer(_eval_app, name="eval")
-except ImportError:
-    pass
 
 
 def main() -> None:
     """Entry point for the ``agentm`` console script."""
+    os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
     app()

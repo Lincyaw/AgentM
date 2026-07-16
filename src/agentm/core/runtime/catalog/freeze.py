@@ -1,20 +1,17 @@
-"""Freeze the currently loaded atom into the on-disk catalog."""
+"""Materialize immutable, content-addressed atom snapshots."""
 
 from __future__ import annotations
 
-import contextvars
-import inspect
-import threading
+import json
+import os
+import tempfile
 from pathlib import Path
 
+from agentm.core._internal.catalog.browse import CatalogCorruptionError
 from agentm.core._internal.catalog.hashing import compute_atom_hash
-from agentm.core.abi import EventBus
 from agentm.core.abi.manifest import ExtensionManifest
-from agentm.core.abi.resource import ResourceWriter, WriteResult
 from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.catalog import _layout
-
-_INDEXER_SESSION_ID = "catalog-freeze"
 
 
 def freeze_current(
@@ -23,101 +20,155 @@ def freeze_current(
     manifest: ExtensionManifest,
     *,
     root: str | Path | None = None,
-    writer: ResourceWriter | None = None,
 ) -> str:
+    """Freeze one atom and move its ``current`` pointer to that snapshot.
+
+    Version directories are immutable. Re-freezing identical source is
+    idempotent; any byte mismatch at an existing content hash is treated as
+    catalog corruption and fails loudly.
+    """
+
     if manifest.name != name:
         raise ValueError(
             f"manifest.name {manifest.name!r} does not match atom name {name!r}"
         )
-
+    _validate_atom_name(name)
     cwd_root = expand_path(root).resolve() if root is not None else Path.cwd().resolve()
-    atom_path = _resolve_atom_source_path(name, root=cwd_root)
-    relative_path = atom_path.relative_to(cwd_root)
+    version = compute_atom_hash(source)
+    snapshot = _manifest_snapshot(manifest, content_hash=version)
 
-    if writer is None:
-        # Default-impl escape hatch for the catalog freeze CLI / unit tests:
-        # the runtime owns the concrete ``GitBackedResourceWriter``. This
-        # local import keeps the dependency edge inside the runtime layer.
-        from agentm.core.runtime.resource_writer import GitBackedResourceWriter
-
-        writer = GitBackedResourceWriter(
-            cwd=str(cwd_root),
-            session_id=_INDEXER_SESSION_ID,
-            bus=EventBus(),
-        )
-
-    result = _write_via_writer(writer, relative_path, source)
-    version_key = (
-        result.commit_sha_after
-        or result.commit_sha_before
-        or compute_atom_hash(source)
+    atom_dir = _layout.atoms_dir(name, root=cwd_root)
+    version_dir = _layout.atom_version_dir(name, version, root=cwd_root)
+    _reject_symlink_components(atom_dir, root=cwd_root)
+    _reject_symlink_components(version_dir, root=cwd_root)
+    version_dir.mkdir(parents=True, exist_ok=True)
+    _write_immutable(
+        _layout.atom_source_path(name, version, root=cwd_root),
+        source.encode("utf-8"),
     )
-    _layout.atom_runs_dir(name, version_key, root=cwd_root).mkdir(
+    _write_immutable(
+        _layout.atom_manifest_path(name, version, root=cwd_root),
+        _canonical_json(snapshot),
+    )
+    runs_dir = _layout.atom_runs_dir(name, version, root=cwd_root)
+    _reject_symlink_components(runs_dir, root=cwd_root)
+    runs_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
-    return version_key
+    _write_atomic(
+        _layout.atom_current_path(name, root=cwd_root),
+        f"{version}\n".encode(),
+    )
+    return version
 
 
-def _resolve_atom_source_path(name: str, *, root: Path) -> Path:
-    candidate = root / "src" / "agentm" / "extensions" / "builtin" / f"{name}.py"
-    if candidate.is_file():
-        return candidate.resolve()
+def _manifest_snapshot(
+    manifest: ExtensionManifest,
+    *,
+    content_hash: str,
+) -> dict[str, object]:
+    schema = manifest.config_schema
+    schema_name = None if schema is None else schema.__qualname__
+    effects = {
+        channel: effect.model_dump(mode="json")
+        for channel, effect in sorted(manifest.effects.items())
+    }
+    return {
+        "name": manifest.name,
+        "description": manifest.description,
+        "registers": list(manifest.registers),
+        "config_schema": schema_name,
+        "requires": list(manifest.requires),
+        "conflicts": list(manifest.conflicts),
+        "api_version": manifest.api_version,
+        "affects": list(manifest.affects),
+        "tier": manifest.tier,
+        "mountable_via_command": manifest.mountable_via_command,
+        "provides_role": list(manifest.provides_role),
+        "effects": effects,
+        "content_hash": content_hash,
+    }
 
-    from agentm.extensions.discover import discover_builtin
 
-    entry = discover_builtin().get(name)
-    if entry is not None:
-        source_path = inspect.getsourcefile(entry.module)
-        if source_path is not None:
-            resolved = Path(source_path).resolve()
-            try:
-                resolved.relative_to(root)
-            except ValueError as exc:
-                raise ValueError(
-                    f"cannot freeze {name!r} under root {root}: source path {resolved} is outside the repo root"
-                ) from exc
-            return resolved
-
-    raise ValueError(f"cannot resolve source path for atom {name!r} under {root}")
-
-
-def _write_via_writer(
-    writer: ResourceWriter,
-    relative_path: Path,
-    source: str,
-) -> WriteResult:
-    import asyncio
-
-    async def _write() -> WriteResult:
-        return await writer.write(
-            str(relative_path),
-            source.encode("utf-8"),
-            rationale="freeze_current snapshot",
-            author="indexer",
+def _canonical_json(payload: dict[str, object]) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
         )
+        + "\n"
+    ).encode("utf-8")
 
-    result: list[WriteResult] = []
-    error: list[BaseException] = []
 
-    def _runner() -> None:
+def _write_immutable(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise CatalogCorruptionError(
+            f"catalog snapshot file must not be a symlink: {path}"
+        )
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         try:
-            result.append(asyncio.run(_write()))
-        except BaseException as exc:  # pragma: no cover - exercised by caller
-            error.append(exc)
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink():
+                raise CatalogCorruptionError(
+                    f"catalog snapshot file must not be a symlink: {path}"
+                )
+            existing = path.read_bytes()
+            if existing != content:
+                raise CatalogCorruptionError(
+                    f"immutable catalog snapshot mismatch at {path}"
+                )
+    finally:
+        temporary.unlink(missing_ok=True)
 
-    # The async writer reads the manifest-path ContextVar to decide
-    # constitution boundary; copy the current context into the worker
-    # thread so the binding propagates (``threading.Thread`` does not
-    # inherit ContextVars by default).
-    ctx = contextvars.copy_context()
-    thread = threading.Thread(target=ctx.run, args=(_runner,), name="agentm-freeze-current")
-    thread.start()
-    thread.join()
-    if error:
-        raise error[0]
-    assert result
-    write_result = result[0]
-    if write_result.error is not None:
-        raise RuntimeError(write_result.error)
-    return write_result
+
+def _write_atomic(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _validate_atom_name(name: str) -> None:
+    if not name.isidentifier():
+        raise ValueError(f"invalid atom name {name!r}")
+
+
+def _reject_symlink_components(path: Path, *, root: Path) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"catalog path {path} is outside root {root}") from exc
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise CatalogCorruptionError(
+                f"catalog path component must not be a symlink: {current}"
+            )
+
+
+__all__ = ["CatalogCorruptionError", "freeze_current"]

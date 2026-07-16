@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -279,7 +281,7 @@ def _load_data(
         unsafe_rows = unsafe_rows[:limit - half]
 
     all_rows: list[dict[str, Any]] = []
-    for s, u in zip(safe_rows, unsafe_rows):
+    for s, u in zip(safe_rows, unsafe_rows, strict=False):
         all_rows.extend([s, u])
     leftover = safe_rows[len(unsafe_rows):] + unsafe_rows[len(safe_rows):]
     all_rows.extend(leftover)
@@ -317,25 +319,30 @@ async def _build_index_for_trajectory(
 async def _auditor_call(
     trajectory: list[AgentMessage], *,
     model: str | None, index_model: str | None, index_vocabulary: str,
-    cwd: str, prompt_name: str, pre_built_index: Any | None = None,
+    cwd: str, prompt_name: str, index: Any | None = None,
 ) -> dict[str, Any]:
-    from agentm_eval.methods.auditor import AuditResult, index_to_context, run_auditor
+    from agentm_eval.methods.auditor import AuditResult, run_auditor
 
-    context_index: dict[str, Any] | None = None
-
-    if pre_built_index is not None:
-        context_index = index_to_context(pre_built_index)
-    elif index_model is not None:
-        idx = await _build_index_for_trajectory(
+    if index is None and index_model is not None:
+        index = await _build_index_for_trajectory(
             trajectory, index_model=index_model, index_vocabulary=index_vocabulary,
         )
-        if idx is not None:
-            context_index = index_to_context(idx)
 
-    audit_result: AuditResult = await run_auditor(
-        trajectory, model=model, cwd=cwd,
-        auditor_prompt=prompt_name, context_index=context_index,
-    )
+    if index is None:
+        audit_result: AuditResult = await run_auditor(
+            trajectory, model=model, cwd=cwd, auditor_prompt=prompt_name,
+        )
+    else:
+        with tempfile.TemporaryDirectory(prefix="agentm-aftraj-index-") as tmp:
+            index_path = Path(tmp) / "index.json"
+            index.dump(str(index_path))
+            audit_result = await run_auditor(
+                trajectory,
+                model=model,
+                cwd=cwd,
+                auditor_prompt=prompt_name,
+                index_path=str(index_path),
+            )
 
     verdict = audit_result.verdicts[0] if audit_result.verdicts else None
     return {
@@ -382,16 +389,24 @@ async def _eval_safe(
 
 async def _incremental_index_step(
     idx: Any, new_turn: AgentMessage, *,
-    index_model: str, index_vocabulary: str,
+    index_model: str, index_vocabulary: str, message_id_start: int,
 ) -> None:
-    from agentm_eval.methods.index import extract_symbols
+    from agentm_eval.methods.index import run_extraction
 
-    chunks, _ = await extract_symbols(
-        [new_turn], model=index_model, vocabulary=index_vocabulary,
+    registry = [dict(entry) for entry in idx.registry_snapshot()] or None
+    outcome = await run_extraction(
+        [new_turn],
+        model=index_model,
+        vocabulary=index_vocabulary,
+        registry=registry,
+        message_id_start=message_id_start,
+        cwd=None,
     )
-    if not chunks:
+    if outcome.result is None:
         return
-    idx.populate_from_extraction(chunks[0].result, [new_turn])
+    idx.populate_from_extraction(
+        outcome.result, [new_turn], message_id_start=message_id_start,
+    )
     idx.build_dependencies()
 
 
@@ -429,6 +444,7 @@ async def _eval_unsafe_incremental(
                 await _incremental_index_step(
                     idx, new_turn,
                     index_model=index_model, index_vocabulary=index_vocabulary,
+                    message_id_start=k,
                 )
             except Exception:
                 logger.debug(f"incremental index step {k} failed", exc_info=True)
@@ -436,7 +452,7 @@ async def _eval_unsafe_incremental(
         result = await _auditor_call(
             prefix, model=model, index_model=None,
             index_vocabulary=index_vocabulary, cwd=cwd, prompt_name=prompt_name,
-            pre_built_index=idx,
+            index=idx,
         )
         n_calls += 1
         last_grounding = result.get("grounding_summary")
@@ -491,7 +507,7 @@ async def _eval_one(
 async def _run_eval(
     data_dir: Path, *, model: str | None, index_model: str | None,
     index_vocabulary: str, cwd: str, limit: int | None,
-    record_fn: callable | None, test_split_only: bool,
+    record_fn: Callable[[dict[str, Any]], None] | None, test_split_only: bool,
     prompt_name: str, concurrency: int, domain: str | None = None,
 ) -> list[dict[str, Any]]:
     import pandas as pd

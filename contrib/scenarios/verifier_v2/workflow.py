@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+from collections.abc import Awaitable
 from typing import Any
 
 from agentm.extensions.builtin.workflow import WorkflowContext
@@ -328,13 +329,21 @@ async def _judge_with_voting(
     n_votes: int = 3,
 ) -> Verdict:
     """Run multiple independent judges and take majority vote."""
+    if n_votes < 1:
+        raise ValueError("n_votes must be at least 1")
     state.agent_calls += n_votes - 1  # already counted 1
 
-    verdicts = await ctx.parallel([
-        _call_judge(ctx, case, state, compiled, with_global_context=True),
-        _call_judge(ctx, case, state, compiled, with_global_context=False),
-        _call_judge(ctx, case, state, compiled, with_global_context=True),
-    ][:n_votes])
+    calls: list[Awaitable[Verdict]] = [
+        _call_judge(
+            ctx,
+            case,
+            state,
+            compiled,
+            with_global_context=index % 2 == 0,
+        )
+        for index in range(n_votes)
+    ]
+    verdicts = await ctx.parallel(calls)
 
     valid = [v for v in verdicts if isinstance(v, Verdict)]
     return majority_vote(valid) if valid else Verdict(

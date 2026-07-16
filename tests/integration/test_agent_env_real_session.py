@@ -142,7 +142,6 @@ async def test_agent_env_backend_real_session_through_agent_session(
                     ("agentm.extensions.builtin.tool_bash", {"default_timeout": 30.0}),
                 ],
                 resource_loader=InMemoryResourceLoader(),
-                auto_commit=False,
                 no_skills=True,
                 no_prompt_templates=True,
             )
@@ -208,7 +207,6 @@ async def test_agent_env_backend_real_session_through_agent_session(
             rationale="agent-env writer binary test",
         )
         assert write.error is None
-        assert write.committed is True
         assert await writer.read("nested/writer.bin") == b"\x00writer-bytes\n"
 
         refused = await writer.write(
@@ -216,7 +214,6 @@ async def test_agent_env_backend_real_session_through_agent_session(
             b"nope",
             rationale="agent-env outside refusal test",
         )
-        assert refused.committed is False
         assert refused.path_class == "constitution"
         assert refused.error is not None
         assert "outside" in refused.error

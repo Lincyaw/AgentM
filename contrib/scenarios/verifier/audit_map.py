@@ -205,7 +205,7 @@ async def audit_pass_reachability(
     coverage: dict[str, SeedCoverageStatus] = {}
     requests: list[ReworkRequest] = []
     reports: list[dict[str, Any]] = []
-    for seed, report in zip(seeds, results):
+    for seed, report in zip(seeds, results, strict=True):
         if not isinstance(report, SeedReachabilityReport):
             state.record_error(
                 "audit",
@@ -263,7 +263,7 @@ async def audit_pass_coverage(
     unexplained: list[str] = []
     requests: list[ReworkRequest] = []
     reports: list[dict[str, Any]] = []
-    for scope, report in zip(scopes, results):
+    for scope, report in zip(scopes, results, strict=True):
         if not isinstance(report, AnomalyCoverageReport):
             state.record_error(
                 "audit",

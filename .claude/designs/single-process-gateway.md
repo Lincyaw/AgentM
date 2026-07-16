@@ -582,7 +582,7 @@ clients with token auth enabled unless `--bind-allow-anonymous` is explicit.
 * `src/agentm/gateway/wire/types.py` — typed `InboundBody`, `OutboundBody` dataclasses (from the deleted `bus.py`).
 * `src/agentm/extensions/builtin/wire_driver.py` — §4. (`peer_send` removed, not ported — see §4.)
 * `src/agentm/cli/gateway.py` — `agentm gateway` subcommand glue.
-* `src/agentm/gateway_daemon.py` / `src/agentm/cli_daemon.py` — shared local
+* `src/agentm/gateway_daemon.py` / `src/agentm/cli/daemon.py` — shared local
   daemon paths, authenticated ws/unix status, start/stop/restart/socket CLI.
 * `src/agentm/gateway_supervisor.py` — local-development process supervisor
   used by `agentm daemon`: keeps a stable endpoint, starts the ordinary

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.lib import cap_duckdb_threads
+from loguru import logger
 
 from .schema import (
     CompiledDossier,
@@ -79,8 +80,8 @@ def _connect(data_dir: str) -> Any:
     for name, quantile in [("p50", "0.5"), ("p90", "0.9"), ("p95", "0.95"), ("p99", "0.99")]:
         try:
             conn.execute(f"CREATE OR REPLACE MACRO {name}(x) AS quantile_cont(x, {quantile})")
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not register DuckDB macro {}: {}", name, exc)
 
     # Register parquet files as views
     data_path = Path(data_dir)
@@ -93,8 +94,8 @@ def _connect(data_dir: str) -> Any:
                         f"CREATE OR REPLACE VIEW {f.stem} AS "
                         f"SELECT * FROM read_parquet('{path_str}')"
                     )
-                except Exception:  # noqa: BLE001, S110
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not expose parquet view {}: {}", f, exc)
 
     return conn
 
@@ -235,7 +236,7 @@ def _execute_items(
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
             sample = [
-                dict(zip(columns, row))
+                dict(zip(columns, row, strict=True))
                 for row in rows[:5]
             ]
             results.append(SQLResult(

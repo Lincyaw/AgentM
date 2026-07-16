@@ -38,7 +38,7 @@ from agentm.core.runtime.resource_loader import (
     ResourceLoader,
 )
 from agentm.core.runtime.resource_writer import (
-    GitBackedResourceWriter,
+    LocalResourceWriter,
     ResourceWriter,
     WriteResult,
 )
@@ -93,7 +93,7 @@ __all__ = [
     "UnknownCommandError",
     "create_agent_session",
     "events",
-    "GitBackedResourceWriter",
+    "LocalResourceWriter",
     "load_extension",
     "make_default_session_store",
     "resolve_session_state",

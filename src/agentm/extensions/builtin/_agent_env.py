@@ -397,10 +397,7 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         default_work_dir=work_dir,
         default_timeout=config.timeout,
     )
-    writer = AgentEnvResourceWriter(
-        session, work_dir=work_dir,
-        session_id=session_id,
-    )
+    writer = AgentEnvResourceWriter(session, work_dir=work_dir)
     api.register_operations(bash=bash_ops)
     api.register_resource_writer(writer)
 

@@ -31,11 +31,11 @@ class CatalogService(Protocol):
     ) -> list[str]: ...
 
     def current_version(
-        self, path: str, root: Path | None = None
+        self, name: str, root: Path | None = None
     ) -> str: ...
 
     def get_source_at(
-        self, path: str, version: str, root: Path | None = None
+        self, name: str, version: str, root: Path | None = None
     ) -> bytes: ...
 
     def get_manifest_at(

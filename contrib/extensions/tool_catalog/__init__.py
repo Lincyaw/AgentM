@@ -2,7 +2,7 @@
 
 Mount ``contrib.extensions.tool_catalog.browse`` for read-only introspection,
 ``contrib.extensions.tool_catalog.mutate`` for self-modification, or this
-package module as a compatibility shim that installs both.
+package module to install both surfaces.
 """
 
 from __future__ import annotations

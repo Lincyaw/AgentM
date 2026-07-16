@@ -49,7 +49,7 @@ from agentm.core.runtime.extension import (
 )
 from agentm.core.runtime.provider_resolver import LastRegisteredWins
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader, ResourceLoader
-from agentm.core.runtime.resource_writer import GitBackedResourceWriter
+from agentm.core.runtime.resource_writer import LocalResourceWriter
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.session_helpers import (
@@ -384,22 +384,10 @@ async def create_agent_session(
         loop_config_getter=lambda: loop_config_ref.value,
         bus=bus,
     )
-    from agentm.core.runtime.resource_writer import DEFAULT_PROTECTED_BRANCHES
-
-    resource_writer = config.resource_writer or GitBackedResourceWriter(
-        cwd=config.cwd,
-        session_id=session_id,
-        bus=bus,
-        auto_commit=config.auto_commit,
-        protected_branches=(
-            config.protected_branches
-            if config.protected_branches is not None
-            else DEFAULT_PROTECTED_BRANCHES
-        ),
-    )
+    atom_source_writer = LocalResourceWriter(cwd=config.cwd)
+    resource_writer = config.resource_writer or atom_source_writer
 
     _configure_manifest(config.cwd)
-    _migrate_catalog(config.cwd)
 
     # Resolve extensions (and scenario_dir) before building the scope so
     # the frozen scope carries the final scenario_dir value.
@@ -408,7 +396,7 @@ async def create_agent_session(
 
     reloader = AtomReloader(
         cwd=config.cwd,
-        resource_writer=resource_writer,
+        resource_writer=atom_source_writer,
         bus=bus,
         tools=tools,
         commands=commands,
@@ -589,7 +577,7 @@ async def create_agent_session(
     eval_sandbox = await apply_atom_source_overrides(
         reloader=reloader,
         bus=bus,
-        resource_writer=resource_writer,
+        resource_writer=atom_source_writer,
         cwd=config.cwd,
         session_id=session_id,
         overrides=config.atom_source_overrides or {},
@@ -700,15 +688,6 @@ def _find_core_manifest(cwd: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
-
-
-def _migrate_catalog(cwd: str) -> None:
-    try:
-        from agentm.core.runtime.catalog.migrate import migrate_catalog_v2
-
-        migrate_catalog_v2(root=_session_cwd_path(cwd))
-    except Exception as exc:
-        logger.warning(f"agentm catalog migration failed during startup: {exc!r}")
 
 
 async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) -> None:

@@ -686,7 +686,12 @@ Discovery is **memoized per process** so production loads pay the directory walk
 
 ### 11.4 Validator
 
-`agentm.extensions.validate.validate_builtin() -> list[ValidationIssue]` runs the following checks against every discovered module:
+`agentm.extensions.validate.validate_builtin() -> list[ValidationIssue]` runs
+the following checks against every discovered module and every private builtin
+support module reachable behind those entry points. Support files do not become
+independent atoms, but they are not a validation escape hatch: forbidden imports
+and AST hygiene apply equally to top-level `_helpers.py` and implementation
+packages such as `_workflow/`, `bash/`, and `writer/`.
 
 1. Module is a single file under `builtin/`, not a package directory.
 2. Defines a callable `install` with signature `(api, config)`.

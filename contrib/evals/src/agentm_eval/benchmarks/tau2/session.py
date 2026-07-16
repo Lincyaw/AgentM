@@ -65,7 +65,6 @@ async def _run_one_task(
         model=model,
         scenario=str(Path(__file__).parent),
         no_skills=True,
-        auto_commit=False,
         log_trace_command=True,
         loop_config=LoopConfig(max_turns=max_steps),
         purpose=f"tau2-eval:{model}:{domain}:{task_id}",

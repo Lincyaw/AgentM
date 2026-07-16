@@ -1,4 +1,4 @@
-"""``agentm validate`` subcommand -- check S11 atom contract compliance.
+"""``agentm validate`` commands for S11 atom contract compliance.
 
 ``agentm validate all``
   Discover and validate builtin + contrib atoms.

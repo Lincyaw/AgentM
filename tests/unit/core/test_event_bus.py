@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 import pytest
 
 from agentm.core.abi.bus import EventBus
-from agentm.core.abi.events import BusPriority, Event
+from agentm.core.abi.events import BusPriority, Event, HookContract
+
+
+@dataclass(slots=True)
+class _MutableEvent(Event):
+    CHANNEL: ClassVar[str] = "mutable"
+    HOOK: ClassVar[HookContract] = HookContract(
+        mutation_contract="event.items may be mutated",
+        mutable_fields=("items",),
+    )
+    items: list[str]
+    label: str
+
+
+@dataclass(slots=True)
+class _ReadonlyEvent(Event):
+    CHANNEL: ClassVar[str] = "readonly"
+    HOOK: ClassVar[HookContract] = HookContract()
+    items: list[str]
+
+
+@dataclass(slots=True)
+class _OpaquePayload:
+    value: object
+
+
+@dataclass(slots=True)
+class _OpaqueEvent(Event):
+    CHANNEL: ClassVar[str] = "opaque"
+    HOOK: ClassVar[HookContract] = HookContract()
+    payload: _OpaquePayload
 
 
 @pytest.mark.asyncio
@@ -140,11 +171,52 @@ async def test_unsubscribe_is_idempotent() -> None:
     unsub()  # second call must not raise
 
 
+def test_unsubscribe_removes_the_exact_duplicate_registration() -> None:
+    bus = EventBus()
+
+    def handler(event: Any) -> None:
+        pass
+
+    first_unsubscribe = bus.on("ch", handler)
+    first = bus.subscriptions_for("ch")[0]
+    second_unsubscribe = bus.on("ch", handler)
+    second = bus.subscriptions_for("ch")[1]
+
+    second_unsubscribe()
+
+    assert bus.subscriptions_for("ch") == [first]
+    assert first is not second
+    first_unsubscribe()
+    assert bus.subscriptions_for("ch") == []
+
+
 @pytest.mark.asyncio
 async def test_emit_on_empty_channel() -> None:
     bus = EventBus()
-    results = await bus.emit("nonexistent", Event())
+    event = Event()
+    original_id = event.dispatch_id
+
+    results = await bus.emit("nonexistent", event)
+
     assert results == []
+    assert event.dispatch_id != original_id
+
+
+@pytest.mark.asyncio
+async def test_clear_invalidates_cached_handlers() -> None:
+    bus = EventBus()
+    calls = 0
+
+    def handler(event: Any) -> None:
+        nonlocal calls
+        calls += 1
+
+    bus.on("ch", handler)
+    await bus.emit("ch", Event())
+    bus.clear()
+    await bus.emit("ch", Event())
+
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -153,8 +225,6 @@ async def test_dispatch_id_assigned_on_emit() -> None:
     event = Event()
     original_id = event.dispatch_id
 
-    # At least one handler must exist so emit reaches the dispatch_id
-    # assignment (the bus short-circuits on empty channels).
     bus.on("ch", lambda e: None)
     await bus.emit("ch", event)
 
@@ -163,3 +233,63 @@ async def test_dispatch_id_assigned_on_emit() -> None:
     assert len(event.dispatch_id) == 32  # uuid4 hex length
     # emit overwrites the construction-time default
     assert event.dispatch_id != original_id
+
+
+@pytest.mark.asyncio
+async def test_strict_event_mutations_allow_declared_fields() -> None:
+    bus = EventBus()
+    event = _MutableEvent(items=[], label="stable")
+    bus.on(event.CHANNEL, lambda current: current.items.append("ok"))
+
+    await bus.emit(event.CHANNEL, event)
+
+    assert event.items == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_strict_event_mutations_reject_undeclared_fields() -> None:
+    bus = EventBus()
+    event = _MutableEvent(items=[], label="stable")
+
+    def mutate_readonly(current: _MutableEvent) -> None:
+        current.label = "changed"
+
+    bus.on(event.CHANNEL, mutate_readonly)
+
+    with pytest.raises(RuntimeError, match="undeclared readonly fields"):
+        await bus.emit(event.CHANNEL, event)
+    assert event.label == "stable"
+
+
+@pytest.mark.asyncio
+async def test_strict_event_mutations_reject_observation_event_changes() -> None:
+    bus = EventBus()
+    event = _ReadonlyEvent(items=["stable"])
+    bus.on(event.CHANNEL, lambda current: current.items.append("changed"))
+
+    with pytest.raises(RuntimeError, match="undeclared readonly fields"):
+        await bus.emit(event.CHANNEL, event)
+    assert event.items == ["stable"]
+
+
+@pytest.mark.asyncio
+async def test_readonly_snapshot_does_not_compare_opaque_deepcopy_identity() -> None:
+    bus = EventBus()
+    event = _OpaqueEvent(payload=_OpaquePayload(value=object()))
+    bus.on(event.CHANNEL, lambda _current: None)
+
+    await bus.emit(event.CHANNEL, event)
+
+
+def test_strict_event_mutations_apply_to_sync_dispatch() -> None:
+    bus = EventBus()
+    event = _MutableEvent(items=[], label="stable")
+
+    def mutate_readonly(current: _MutableEvent) -> None:
+        current.label = "changed"
+
+    bus.on(event.CHANNEL, mutate_readonly)
+
+    with pytest.raises(RuntimeError, match="undeclared readonly fields"):
+        bus.emit_sync(event.CHANNEL, event)
+    assert event.label == "stable"

@@ -14,6 +14,8 @@ from typing import Annotated, Any, Optional
 
 import typer
 
+from agentm.core.abi import AgentMessage
+
 from agentm_eval.experiment import experiment_context
 from agentm_eval.registry import register
 from agentm_eval.result import TaskResult
@@ -31,7 +33,7 @@ _DEFAULT_VOCAB = "multi_agent"
 
 
 async def build_grounding_index(
-    msgs: list[dict[str, Any]], *, model: str, vocab: str, full: bool, run_id: str,
+    msgs: list[AgentMessage], *, model: str, vocab: str, full: bool, run_id: str,
 ) -> Any:
     from agentm_eval.methods.index import build_index, extract_symbols
 
@@ -128,7 +130,9 @@ class AftrajGroundingAdapter:
             doms = [domain] if domain else ["agentic", "coding", "math"]
             rows = [r for d in doms for r in _load(data_dir, d, n)]
 
-            async def one(msgs: list[dict[str, Any]], rid: str) -> dict[str, tuple[str, str]]:
+            async def one(
+                msgs: list[AgentMessage], rid: str,
+            ) -> dict[str, tuple[str, str]]:
                 idx = await build_grounding_index(msgs, model=model, vocab=vocab, full=False, run_id=rid)
                 return {s.canonical_name: (s.kind, s.entity_class) for s in idx.symbols.values()}
 

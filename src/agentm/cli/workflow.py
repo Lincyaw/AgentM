@@ -1,4 +1,4 @@
-"""``agentm workflow`` subcommand — run or validate workflow scripts.
+"""``agentm workflow`` commands for running and validating workflow scripts.
 
 ``agentm workflow run <script> [--args JSON] [--model M] [--mock-agents]``
   Create a minimal workflow session (operations + observability +
@@ -104,7 +104,7 @@ async def _run_async(
     mock_agents: bool,
 ) -> int:
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.abi.events import EventBus
+    from agentm.core.abi import EventBus
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.lib.user_config import (
         ModelBuildConfig,
@@ -145,7 +145,6 @@ async def _run_async(
         cwd=resolved_cwd,
         provider=provider_spec,
         extensions=extensions,
-        auto_commit=False,
         bus=bus,
         lineage={
             "kind": "root",

@@ -37,6 +37,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
@@ -604,10 +605,14 @@ def _emit_loguru_record_to_otel(message: Any) -> None:
             event_name="agentm.operational.log",
             attributes=attributes,
         )
-    except Exception:  # noqa: S110 — logging here would recurse through the sink
-        # Operational logging must never break the app, and we cannot route
-        # this failure back through loguru (it would re-enter this sink).
-        pass
+    except Exception as exc:
+        # Operational logging must never break the app, and routing this
+        # failure through loguru would re-enter the failing sink. stderr is
+        # deliberately independent of loguru and keeps the failure visible.
+        try:
+            print(f"[agentm] OTLP log sink failed: {exc!r}", file=sys.stderr)
+        except OSError:
+            pass
     finally:
         _loguru_otel_reentry.active = False
 

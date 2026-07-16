@@ -30,7 +30,6 @@ from agentm.core.abi import AgentMessage
 from loguru import logger
 
 from trajectory_index.agents.entity_extractor.schema import ExtractionResult
-from trajectory_index.pass1_nodes.serialize import _symbol_aliases
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +45,7 @@ class ExtractionOutcome:
     session_id: str | None = None
 
 
-async def _run_one(
+async def run_extraction(
     messages: list[AgentMessage],
     *,
     model: str | None,
@@ -94,34 +93,34 @@ async def _run_one(
 
 
 @dataclass(frozen=True, slots=True)
-class _MessageChunk:
+class MessageChunk:
     start: int
     messages: list[AgentMessage]
 
 
-def _chunk_messages(
+def chunk_messages(
     messages: list[AgentMessage],
     size_range: tuple[int, int],
-) -> list[_MessageChunk]:
+) -> list[MessageChunk]:
     import random
 
     from agentm.core.abi import ToolResultMessage
 
     lo, hi = size_range
     if len(messages) <= lo:
-        return [_MessageChunk(start=0, messages=messages)]
+        return [MessageChunk(start=0, messages=messages)]
 
-    chunks: list[_MessageChunk] = []
+    chunks: list[MessageChunk] = []
     start = 0
     while start < len(messages):
         chunk_size = random.randint(lo, hi)
         end = start + chunk_size
         if end >= len(messages):
-            chunks.append(_MessageChunk(start=start, messages=messages[start:]))
+            chunks.append(MessageChunk(start=start, messages=messages[start:]))
             break
         while end < len(messages) and isinstance(messages[end], ToolResultMessage):
             end += 1
-        chunks.append(_MessageChunk(start=start, messages=messages[start:end]))
+        chunks.append(MessageChunk(start=start, messages=messages[start:end]))
         start = end
     return chunks
 
@@ -169,7 +168,7 @@ async def extract_symbols(
     index = TrajectoryIndex()
 
     if chunk_size is None:
-        outcome = await _run_one(
+        outcome = await run_extraction(
             messages, model=model, vocabulary=vocabulary,
             registry=None, message_id_start=0, cwd=cwd,
         )
@@ -184,14 +183,14 @@ async def extract_symbols(
             on_chunk(extracted, messages, index.registry_snapshot())
         return [extracted], index
 
-    chunks = _chunk_messages(messages, chunk_size)
+    chunks = chunk_messages(messages, chunk_size)
     results: list[ExtractedChunk] = []
 
     for i, chunk in enumerate(chunks):
         registry = index.registry_snapshot() or None
 
         try:
-            outcome = await _run_one(
+            outcome = await run_extraction(
                 chunk.messages, model=model, vocabulary=vocabulary,
                 registry=registry,
                 message_id_start=chunk.start, cwd=cwd,
@@ -228,6 +227,13 @@ async def extract_symbols(
 # ---------------------------------------------------------------------------
 
 _SPAN_SYMBOL_RE: Final = re.compile(r"^(?:span\s+)?s\d+$", re.IGNORECASE)
+
+
+def _symbol_aliases(symbol: dict[str, Any]) -> list[str]:
+    aliases = symbol.get("aliases", [])
+    if not isinstance(aliases, list):
+        return []
+    return [str(alias) for alias in aliases]
 
 
 def _span_namespace(run_id: str, sym: dict[str, Any]) -> str:

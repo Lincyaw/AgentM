@@ -1,140 +1,124 @@
-# Event Handler Convention — Typed Fields, Not Return Dicts
+# Event Handler Convention — One Typed State Channel
 
-All bidirectional communication between event handlers and the runtime
-goes through **typed fields on the event object**. Handlers mutate the
-event; the runtime reads it after `emit()` returns. Handler return
-values are a deprecated backward-compat path — new code never
-introduces new return-dict keys.
+Every event hook has one authoritative state channel: typed fields on the
+event object. A handler mutates only fields declared by the event's
+`HookContract.mutable_fields`; the emitter reads those final fields after
+`emit()` returns.
 
-Related: [handler-priority](handler-priority.md) (dispatch order),
-[pluggable-architecture](pluggable-architecture.md) §3.5 (event bus),
-[agent-loop](agent-loop.md) (decide_turn_action resolution).
+Related: [handler-priority](handler-priority.md), [pluggable-architecture](pluggable-architecture.md)
+§3.5, and [agent-loop](agent-loop.md).
 
-## Motivation
+## Why one state channel
 
-The original design used handler return values (`{"system": "..."}`,
-`{"block": True, "cause": ...}`) as the runtime's data source. This
-caused a class of silent bugs: handlers that mutated `event.system`
-without returning the dict had their system prompts silently dropped.
-Five handlers across builtin and contrib had this bug.
+The old `before_agent_start` contract accepted both event mutation and
+return dictionaries. Multiple handlers could therefore update different
+copies of the same logical value: later handlers saw `event.system`, while
+the runtime could choose a returned `{"system": ...}` value. The result
+depended on handler order and could silently discard prompt fragments.
 
-Return dicts are also untyped — handler authors can't discover available
-keys without reading runtime source. Typed event fields are
-IDE-discoverable, documented, and self-describing.
+The current contract removes that compatibility path. State that later
+handlers or the emitter consume always lives on the event instance.
 
-Mature frameworks (Gin, Express, Koa) uniformly use the
-context/event object as the single communication channel. We adopt
-the same pattern.
+## Hook contract
 
-## The Rule
-
-> **Handler reads/writes event fields. Runtime reads event after emit.
-> Return values are ignored for new channels.**
-
-## Field Design Patterns
-
-Every event field falls into one of three categories:
-
-### 1. Last-Wins (replacement)
-
-Handler sets the field; if multiple handlers set it, the last one's
-value is what the runtime sees. Used for singular values where only
-one answer makes sense.
+Mutable event classes declare their writable fields mechanically:
 
 ```python
 @dataclass(slots=True)
-class BeforeAgentStartEvent(Event):
-    system: str | None = None     # last mutation wins
-    veto: TerminationCause | None = None  # first non-None wins (runtime checks)
+class BeforeSendToLlmEvent(Event):
+    HOOK: ClassVar[HookContract] = HookContract(
+        effects=("observe", "mutate_messages", "replace_model"),
+        mutation_contract="The final provider request may be adjusted.",
+        mutable_fields=("messages", "model", "tools", "system"),
+    )
+
+    messages: list[AgentMessage]
+    model: Model
+    tools: list[Tool]
+    system: str | None
 ```
 
-Handler:
+`mutation_contract` documents the semantics for people.
+`mutable_fields` is the machine-readable source of truth used by runtime
+validation, observability, adaptation metadata, and static analysis.
+
+An explicit `return_contract` is separate. It is allowed only where a hook
+returns a control decision or replacement value rather than mutating event
+state, such as tool-call blocking or a `ToolResult` replacement. It must not
+duplicate a mutable field channel.
+
+## Runtime enforcement
+
+`EventBus` validates every typed event by default:
+
+1. Before each handler, deep-copy every event field not listed in
+   `mutable_fields`.
+2. Run the handler serially.
+3. Compare the read-only fields.
+4. If an undeclared field changed, restore it and raise immediately.
+
+For observation-only events, `mutable_fields` is empty, so every payload field
+is read-only and any handler-side change fails. This keeps “observe” a runtime
+contract rather than a documentation convention.
+
+Serial dispatch is load-bearing: each handler sees the final mutations made
+by every earlier handler on that channel.
+
+## Emitter rule
+
+The emitter binds a mutable event to a local variable, emits it, and consumes
+only the event's final fields:
+
 ```python
-def handler(event: BeforeAgentStartEvent) -> None:
-    event.system = f"{event.system or ''}\n\n{my_block}"
+before_send = BeforeSendToLlmEvent(
+    messages=messages,
+    model=model,
+    tools=tools,
+    system=system,
+)
+await bus.emit(BeforeSendToLlmEvent.CHANNEL, before_send)
+tool_index = {tool.name: tool for tool in before_send.tools}
+stream_fn(
+    before_send.messages,
+    before_send.model,
+    before_send.tools,
+    before_send.system,
+)
 ```
 
-For **append-style** handlers (system prompt injection), the handler
-reads the current value, appends, and writes back. This naturally
-chains because all handlers share the same event object in
-registration order.
+Using `messages`, `model`, `tools`, or a value derived from them before the
+emit is state drift. It can make the provider request, executor view,
+telemetry, and prompt dump disagree.
 
-### 2. Accumulator (multi-handler contribution)
+## Field patterns
 
-Multiple handlers each contribute items. The runtime reads the
-accumulated list after all handlers run.
+- Last wins: singular values such as `system`, `model`, or `veto`.
+- Accumulator: mutable lists where handlers append contributions.
+- First claim: a handler checks an unset field before claiming it, such as
+  `InputEvent.handled`.
 
-```python
-@dataclass(slots=True)
-class DecideTurnActionEvent(Event):
-    observation: Observation
-    injections: list[list[AgentMessage]] = field(default_factory=list)
-    stop: Stop | None = None
-    step: bool = False
-```
+The event class documents which pattern applies. No separate return
+dictionary mirrors these fields.
 
-Handler:
-```python
-def handler(event: DecideTurnActionEvent) -> None:
-    event.injections.append(reminder_messages)
-```
+## Mechanical gates
 
-Runtime resolves the accumulated fields with the same lattice as
-today: injections > stop > step > default.
+The repository enforces this convention at three layers:
 
-### 3. First-Match (short-circuit)
+- `AM015 event-source-drift` rejects inline mutable event construction and
+  stale source values used after dispatch.
+- `AM016 hook-contract-integrity` rejects missing, unknown, or inconsistent
+  `mutable_fields`.
+- `EventBus` catches handler-side writes to undeclared fields at runtime and
+  restores the event before failing.
 
-The first handler to set the field "claims" the event. Downstream
-handlers can check whether it's already claimed.
+CI runs these checks over both `src/` and `contrib/`.
 
-```python
-@dataclass(slots=True)
-class InputEvent(Event):
-    text: str
-    handled: bool = False
-    messages: list[AgentMessage] | None = None
-```
+## Checklist for a new mutable hook
 
-Handler:
-```python
-def handler(event: InputEvent) -> None:
-    if event.handled:
-        return  # another handler already claimed this
-    if event.text.startswith("/"):
-        event.handled = True
-        event.messages = process_slash(event.text)
-```
-
-## Backward Compatibility
-
-The runtime reads event fields as the primary path. If no handler
-mutated the relevant field, the runtime falls back to reading
-return values via `collect_system_replacement` / `collect_start_veto`.
-This preserves backward compat for existing handlers during
-migration.
-
-Once all handlers are migrated, the `collect_*` helpers can be
-removed.
-
-## Checklist for New Events
-
-When adding a new event channel:
-
-1. Define a `@dataclass(slots=True)` event class with typed fields
-   for every piece of data the runtime will read back.
-2. Use `None` defaults for optional/unset fields.
-3. Use `field(default_factory=list)` for accumulator fields.
-4. Document each field's semantics: last-wins, accumulator, or
-   first-match.
-5. Runtime reads event fields after `await bus.emit()` — never
-   reads return values.
-6. Export the event class from `agentm.core.abi`.
-
-## Migration Status
-
-| Channel | Event Class | Return-dict keys | Status |
-|---------|-----------|-----------------|--------|
-| `before_agent_start` | `BeforeAgentStartEvent` | `system`, `block`+`cause` | migrating |
-| `decide_turn_action` | `DecideTurnActionEvent` | `LoopAction` (typed) | planned |
-| `input` | raw `dict` (no class) | `handled`, `messages` | planned |
-| all others | typed Event subclasses | (notification-only, no return consumed) | done |
+1. Define a slotted typed event class.
+2. Declare every writable field in `HookContract.mutable_fields`.
+3. Keep `mutation_contract` and `effects` consistent with those fields.
+4. Bind the event to a local before dispatch.
+5. Read every downstream value from the event after dispatch.
+6. Do not add a return contract that duplicates mutable event state.
+7. Add or update a fail-stop test only when the invariant is load-bearing.

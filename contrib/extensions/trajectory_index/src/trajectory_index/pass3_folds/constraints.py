@@ -412,7 +412,9 @@ def _convert_precomputed(
             verdicts[c.id] = Verdict("unknown", 0.0, "code", (), "not in evidence sweep")
             continue
         status_raw = str(rv.get("status", "unknown"))
-        status: FindingStatus = status_raw if status_raw in _VALID_STATUSES else "unknown"  # type: ignore[assignment]
+        status: FindingStatus = (
+            status_raw if status_raw in _VALID_STATUSES else "unknown"
+        )
         if status == "omitted":
             conf = min(commit.confidence, float(rv.get("confidence", 0.8)))
         else:

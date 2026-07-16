@@ -21,8 +21,6 @@ from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.catalog import _layout
 from agentm.core.lib.trace_reader import TraceReader
 
-_LEGACY_FINGERPRINT_WARNED = False
-
 
 @dataclass(slots=True)
 class IndexerResult:
@@ -160,32 +158,21 @@ def _ensure_version_dir(
     expected_hash: str,
     *,
     cwd_root: Path,
-    warnings: list[str],
-) -> str | None:
-    if not _is_git_sha(expected_hash):
-        _warn_legacy_fingerprint(atom_name, expected_hash)
-        warnings.append(
-            f"atom {atom_name!r} uses pre-migration fingerprint {expected_hash}; skipping"
-        )
-        return None
+) -> str:
+    from agentm.core._internal.catalog import get_source_at
 
-    _layout.atom_runs_dir(atom_name, expected_hash, root=cwd_root).mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    if not _is_content_hash(expected_hash):
+        raise ValueError(
+            f"atom {atom_name!r} has invalid content hash {expected_hash!r}"
+        )
+    # Reading the snapshot verifies source bytes, manifest identity, and the
+    # directory hash before any derived attribution state is written.
+    get_source_at(atom_name, expected_hash, cwd_root)
     return expected_hash
 
 
-def _warn_legacy_fingerprint(atom_name: str, expected_hash: str) -> None:
-    global _LEGACY_FINGERPRINT_WARNED
-    if _LEGACY_FINGERPRINT_WARNED:
-        return
-    logger.warning(f"agentm catalog indexer skipping pre-migration fingerprint {atom_name}@{expected_hash}")
-    _LEGACY_FINGERPRINT_WARNED = True
-
-
-def _is_git_sha(value: str) -> bool:
-    return len(value) == 40 and all(ch in "0123456789abcdef" for ch in value.lower())
+def _is_content_hash(value: str) -> bool:
+    return len(value) == 12 and all(ch in "0123456789abcdef" for ch in value)
 
 
 def _build_metrics_row(
@@ -297,10 +284,7 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
             atom_name,
             expected_hash,
             cwd_root=cwd_root,
-            warnings=result.warnings,
         )
-        if resolved_hash is None:
-            continue
         row = _build_metrics_row(
             trace_id=trace_id,
             scenario=state.scenario,

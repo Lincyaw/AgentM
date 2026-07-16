@@ -145,7 +145,7 @@ For mypy issues on dynamic / duck-typed args, prefer targeted
   `status: implemented`.
 - After tests: update `tests` paths, `status: tested`.
 - After moves/renames: update affected `code`/`tests` paths.
-- Validate: `python /home/ddq/.claude/plugins/cache/autoharness/autoharness/1.1.3/scripts/validate_index.py project-index.yaml`
+- Validate: `uv run python scripts/validate_project_index.py project-index.yaml`
 
 For design-concept changes: update the design doc, walk
 `related_concepts` in `.claude/index.yaml`, update affected docs and

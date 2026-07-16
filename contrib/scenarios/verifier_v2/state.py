@@ -16,7 +16,7 @@ from .schema import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class Case:
     """Immutable per-case inputs."""
 
@@ -83,7 +83,7 @@ def _infer_entry_services(graph: dict[str, list[list[str]]]) -> set[str]:
     return explicit or (callers - callees)
 
 
-@dataclass
+@dataclass(slots=True)
 class GraphState:
     """Mutable FPG graph under construction."""
 

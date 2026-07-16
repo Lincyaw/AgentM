@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -64,7 +65,7 @@ async def _load_from_sessions(
     items: list[TrajectoryItem] = []
     for sid in sids:
         try:
-            msgs = store.open(sid).get_raw_messages()
+            msgs = store.open(sid).build_session_context().messages
         except FileNotFoundError:
             typer.echo(f"  {sid} NOT FOUND", err=True)
             continue
@@ -103,7 +104,7 @@ def _load_from_aftraj(
             safe_rows = [r for r in safe_rows if str(r["conv_id"]) in test_ids]
             unsafe_rows = [r for r in unsafe_rows if str(r["conv_id"]) in test_ids]
 
-    for s, u in zip(safe_rows, unsafe_rows):
+    for s, u in zip(safe_rows, unsafe_rows, strict=False):
         all_rows.extend([s, u])
     leftover = safe_rows[len(unsafe_rows):] + unsafe_rows[len(safe_rows):]
     all_rows.extend(leftover)
@@ -376,8 +377,7 @@ class AuditorEvalAdapter:
                 exp=exp, rebuild_index=rebuild_index,
                 concurrency=concurrency,
                 constraint_analysis=enable_constraints or "constraints" in pass_set,
-                # source (context injection) depends on edges (the sweep)
-                source_checks=enable_source_checks or "source" in pass_set,
+                # Source checks use the edge sweep; there is no separate pass.
                 build_edges=("edges" in pass_set or "source" in pass_set
                              or enable_source_checks),
                 run_audit="audit" in pass_set,
@@ -534,6 +534,22 @@ def _provenance_view(messages: list[AgentMessage], idx: Any, run_id: str) -> lis
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class _ProcessOptions:
+    model: str
+    index_model: str
+    chunk_size: tuple[int, int] | None
+    vocabulary: str
+    auditor_prompt: str
+    exp: Experiment
+    rebuild_index: bool
+    constraint_analysis: bool
+    build_edges: bool
+    run_audit: bool
+    two_phase: bool
+    critic: bool
+
+
 async def _process_one_item(
     i: int,
     total: int,
@@ -541,30 +557,30 @@ async def _process_one_item(
     messages: list[AgentMessage],
     meta: dict[str, Any],
     *,
-    model: str,
-    index_model: str,
-    chunk_size: tuple[int, int] | None,
-    vocabulary: str,
-    auditor_prompt: str,
-    exp: Experiment,
-    rebuild_index: bool,
-    constraint_analysis: bool = False,
-    source_checks: bool = False,
-    build_edges: bool = False,
-    run_audit: bool = True,
-    two_phase: bool = False,
-    critic: bool = False,
+    options: _ProcessOptions,
 ) -> dict[str, Any]:
     """Process a single trajectory: index extraction + (optional) claim analysis + auditor."""
     from agentm_eval.methods.auditor import run_auditor
     from agentm_eval.methods.index import (
-        _chunk_messages,
-        _match_known_symbol,
-        _prescan_structural,
-        _run_one,
+        MessageChunk,
+        chunk_messages,
         resolve_index,
+        run_extraction,
     )
-    from trajectory_index.ir.index import TrajectoryIndex, normalize_name
+    from trajectory_index.ir.index import TrajectoryIndex
+
+    model = options.model
+    index_model = options.index_model
+    chunk_size = options.chunk_size
+    vocabulary = options.vocabulary
+    auditor_prompt = options.auditor_prompt
+    exp = options.exp
+    rebuild_index = options.rebuild_index
+    constraint_analysis = options.constraint_analysis
+    build_edges = options.build_edges
+    run_audit = options.run_audit
+    two_phase = options.two_phase
+    critic = options.critic
 
     typer.echo(f"\n[{i+1}/{total}] {tid} ({meta.get('source', '?')}, {len(messages)} msgs)")
     exp.register_session(tid, metadata={"n_messages": len(messages), **meta})
@@ -615,13 +631,11 @@ async def _process_one_item(
         return _build_result(tid, messages, meta, idx, audit_result, cached=True)
 
     idx = TrajectoryIndex()
-    registry: list[dict[str, Any]] = []
-    seen: set[str] = set()
 
     if chunk_size is None:
-        raw_chunks = [type("C", (), {"start": 0, "messages": messages})]
+        raw_chunks = [MessageChunk(start=0, messages=messages)]
     else:
-        raw_chunks = _chunk_messages(messages, chunk_size)
+        raw_chunks = chunk_messages(messages, chunk_size)
 
     from trajectory_index.ir.diagnostics import Diagnostics
 
@@ -636,13 +650,11 @@ async def _process_one_item(
     for ci, chunk in enumerate(raw_chunks):
         chunk_end = chunk.start + len(chunk.messages)
 
-        chunk_registry, _structural = _prescan_structural(
-            chunk.messages, registry if registry else None, seen,
-        )
+        registry = [dict(entry) for entry in idx.registry_snapshot()] or None
         try:
-            outcome = await _run_one(
+            outcome = await run_extraction(
                 chunk.messages, model=index_model, vocabulary=vocabulary,
-                registry=chunk_registry if chunk_registry else None,
+                registry=registry,
                 message_id_start=chunk.start, cwd=None,
             )
         except Exception:
@@ -671,25 +683,6 @@ async def _process_one_item(
         # resolution there is enough, saving a model call per chunk.
         if run_audit or ci == len(raw_chunks) - 1:
             await resolve_index(idx, model=index_model)
-
-        for sym in result.parsed_symbols():
-            norm = normalize_name(sym.name)
-            if norm not in seen:
-                match = _match_known_symbol(sym.name, registry)
-                if match:
-                    aliases = match.get("aliases", [])
-                    if not isinstance(aliases, list):
-                        aliases = []
-                    if sym.name not in aliases:
-                        aliases.append(sym.name)
-                        match["aliases"] = aliases
-                    seen.add(norm)
-                else:
-                    seen.add(norm)
-                    entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
-                    if sym.aliases:
-                        entry["aliases"] = sym.aliases
-                    registry.append(entry)
 
         stats = idx.stats(tid)
 
@@ -794,7 +787,6 @@ async def _run_pipeline(
     rebuild_index: bool,
     concurrency: int = 1,
     constraint_analysis: bool = False,
-    source_checks: bool = False,
     build_edges: bool = False,
     run_audit: bool = True,
     two_phase: bool = False,
@@ -804,21 +796,26 @@ async def _run_pipeline(
     sem = asyncio.Semaphore(concurrency)
     all_results: list[dict[str, Any]] = []
     lock = asyncio.Lock()
+    options = _ProcessOptions(
+        model=model,
+        index_model=index_model,
+        chunk_size=chunk_size,
+        vocabulary=vocabulary,
+        auditor_prompt=auditor_prompt,
+        exp=exp,
+        rebuild_index=rebuild_index,
+        constraint_analysis=constraint_analysis,
+        build_edges=build_edges,
+        run_audit=run_audit,
+        two_phase=two_phase,
+        critic=critic,
+    )
 
     async def _guarded(i: int, tid: str, messages: list[AgentMessage], meta: dict[str, Any]) -> None:
         async with sem:
             result_dict = await _process_one_item(
                 i, total, tid, messages, meta,
-                model=model, index_model=index_model,
-                chunk_size=chunk_size, vocabulary=vocabulary,
-                auditor_prompt=auditor_prompt,
-                exp=exp, rebuild_index=rebuild_index,
-                constraint_analysis=constraint_analysis,
-                source_checks=source_checks,
-                build_edges=build_edges,
-                run_audit=run_audit,
-                two_phase=two_phase,
-                critic=critic,
+                options=options,
             )
         async with lock:
             all_results.append(result_dict)

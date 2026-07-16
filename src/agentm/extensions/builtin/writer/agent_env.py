@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import shlex
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -43,28 +42,6 @@ def _is_enoent(message: str) -> bool:
     return "no such file or directory" in lowered or "code = notfound" in lowered
 
 
-# Versioning-token script. Emits ``<mtime_ns>-<sha16>`` for files up to
-# ``_MTIME_TOKEN_SIZE_CAP`` bytes, ``<mtime_ns>-size<size>`` for larger
-# files. The mtime component uses GNU stat's ``%.Y`` format (fractional
-# seconds) so we get nanosecond resolution; we strip the decimal point so
-# the token is a plain ``<digits>-<rest>`` string. Invoked as
-# ``bash -lc <script> bash <path>`` -- the trailing ``bash`` sets ``$0``
-# so ``$1`` is the path argument.
-_MTIME_TOKEN_SIZE_CAP = 16 * 1024 * 1024
-_MTIME_TOKEN_SCRIPT = (
-    "set -e; "
-    'P="$1"; '
-    'MNS=$(stat -c %.Y -- "$P" | tr -d .); '
-    'SZ=$(stat -c %s -- "$P"); '
-    f'if [ "$SZ" -le {_MTIME_TOKEN_SIZE_CAP} ]; then '
-    '  H=$(sha256sum -- "$P" | cut -c1-16); '
-    '  printf "%s-%s" "$MNS" "$H"; '
-    "else "
-    '  printf "%s-size%s" "$MNS" "$SZ"; '
-    "fi"
-)
-
-
 class AgentEnvResourceWriter:
     """``ResourceWriter`` impl whose writes land inside the ARL sandbox.
 
@@ -84,11 +61,9 @@ class AgentEnvResourceWriter:
         session: "ArlSandboxSession",
         *,
         work_dir: str,
-        session_id: str,
     ) -> None:
         self._session = session
         self._work_dir = _normalize_work_dir(work_dir)
-        self._session_id = session_id
 
     # --- path classification ---------------------------------------------
 
@@ -121,22 +96,10 @@ class AgentEnvResourceWriter:
         out = response.results[0].output
         return out.stdout.encode("utf-8"), out.stderr.encode("utf-8"), out.exit_code
 
-    async def _mtime_token(self, path: str) -> str | None:
-        stdout, _stderr, code = await self._run(
-            ["bash", "-lc", _MTIME_TOKEN_SCRIPT, "bash", path]
-        )
-        if code != 0:
-            return None
-        text = stdout.decode("utf-8", "replace").strip()
-        return text or None
-
     def _refuse(self, path: str) -> WriteResult:
         return WriteResult(
             path=path,
             path_class="constitution",
-            committed=False,
-            commit_sha_before=None,
-            commit_sha_after=None,
             error=(
                 f"Refusing to write {path!r}: agent-env sandbox can only "
                 f"modify paths inside {self._work_dir!r}. Constitution / "
@@ -212,25 +175,16 @@ class AgentEnvResourceWriter:
         rel_path = self._relative(path)
         if rel_path is None:
             return self._refuse(path)
-        abs_path = self._resolve(path)
-        before = await self._mtime_token(abs_path)
         ok, err = await self._write_bytes(rel_path, content)
         if not ok:
             return WriteResult(
                 path=path,
                 path_class="managed",
-                committed=False,
-                commit_sha_before=before,
-                commit_sha_after=None,
                 error=err or "sandbox write failed",
             )
-        after = await self._mtime_token(abs_path)
         return WriteResult(
             path=path,
             path_class="managed",
-            committed=True,
-            commit_sha_before=before,
-            commit_sha_after=after,
         )
 
     async def replace(
@@ -251,18 +205,12 @@ class AgentEnvResourceWriter:
             return WriteResult(
                 path=path,
                 path_class="managed",
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
                 error=str(exc),
             )
         if current != old:
             return WriteResult(
                 path=path,
                 path_class="managed",
-                committed=False,
-                commit_sha_before=await self._mtime_token(self._resolve(path)),
-                commit_sha_after=None,
                 error=(
                     f"replace precondition failed for {path!r}: file content "
                     f"differs from the supplied 'old' value"
@@ -281,64 +229,17 @@ class AgentEnvResourceWriter:
         if self._relative(path) is None:
             return self._refuse(path)
         abs_path = self._resolve(path)
-        before = await self._mtime_token(abs_path)
         _stdout, stderr, code = await self._run(["rm", "-f", "--", abs_path])
         if code != 0:
             return WriteResult(
                 path=path,
                 path_class="managed",
-                committed=False,
-                commit_sha_before=before,
-                commit_sha_after=None,
                 error=stderr.decode("utf-8", "replace") or "sandbox delete failed",
             )
         return WriteResult(
             path=path,
             path_class="managed",
-            committed=True,
-            commit_sha_before=before,
-            commit_sha_after=None,
         )
-
-    def restore(self, path: "Path", version: str) -> None:  # noqa: ARG002
-        raise NotImplementedError(
-            "agent-env writer does not support per-file restore; use "
-            "SandboxSession.restore(snapshot_id) for whole-step rollback."
-        )
-
-    def current_version_for_path(self, path: str) -> str | None:
-        from arl import GatewayClient  # type: ignore[import-not-found]
-
-        client = GatewayClient()
-        try:
-            response = client.execute(
-                self._session_id,
-                [
-                    {
-                        "name": "agentm_stat",
-                        "command": [
-                            "bash",
-                            "-lc",
-                            _MTIME_TOKEN_SCRIPT,
-                            "bash",
-                            self._resolve(path),
-                        ],
-                        "work_dir": self._work_dir,
-                    }
-                ],
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("agent-env mtime token fetch failed: {}", exc)
-            return None
-        finally:
-            client.close()
-        if not response.results:
-            return None
-        out = response.results[0].output
-        if out.exit_code != 0:
-            return None
-        token = out.stdout.strip()
-        return token or None
 
     def batch(
         self,
@@ -392,7 +293,9 @@ class AgentEnvResourceWriter:
             handle = _Batch()
             try:
                 yield handle
-            finally:
+            except BaseException:
+                raise
+            else:
                 await handle.flush()
 
         return _ctx()
