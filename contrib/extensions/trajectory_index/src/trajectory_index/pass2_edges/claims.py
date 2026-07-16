@@ -241,15 +241,12 @@ async def build_claim_edges(
     run_id: str = "",
     model: str | None = None,
     session_factory: SessionFactory | None = None,
-    samples: int = _N_RETRIEVAL_SAMPLES,
 ) -> EdgePassResult:
     """Build ``supports``/``conflicts`` edges (claim ↔ observation evidence).
 
-    Two oracle stages (SCHEMA §2.2): partition-swept retrieval nominates
-    candidates for every claim; a focused per-claim verification judges
-    polarity and produces the witness quote. Idempotent per run: existing
-    edges of these kinds for this run are replaced wholesale. Best-effort:
-    every failure weakens coverage for exactly what it touched, never more.
+    Single-pass per partition: the model finds relevant excerpts for each
+    claim AND judges polarity with verbatim quotes in one call. Idempotent
+    per run: existing edges of these kinds are replaced wholesale.
     """
     if session_factory is None:
         raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
@@ -289,9 +286,12 @@ async def build_claim_edges(
     partitions = partition_by_budget(excerpts, _PARTITION_CHAR_BUDGET, lambda e: len(e.text))
     result.coverage.n_partitions = len(partitions)
 
-    # --- retrieval: nominations + per-partition attention attestation ---
-    nominated: dict[int, set[str]] = {}
+    # --- single-pass per partition: find + judge in one call ---
+    proposals: list[tuple[Claim, Step, str, str]] = []
     attested: list[set[int]] = []
+    judged: dict[int, bool] = {}
+    nominated: dict[int, set[str]] = {}
+
     for pi, partition in enumerate(partitions):
         if any(e.oversized for e in partition):
             result.coverage.n_degraded_partitions += 1
@@ -302,132 +302,60 @@ async def build_claim_edges(
             "claims": claim_rows,
             "excerpts": [{"step": e.step.step_id, "text": e.text} for e in partition],
         }, ensure_ascii=False, indent=2)
+
+        shown_ids = {e.step.step_id for e in partition}
+        raw = await _ask_model(
+            "claim_evidence", payload, model,
+            session_factory=session_factory, purpose="claim_evidence",
+        )
         rows_seen: set[int] = set()
-        ok = 0
-        for _ in range(max(1, samples)):
-            raw = await _ask_model(
-                "claim_retrieval", payload, model,
-                session_factory=session_factory, purpose="edge_retrieval",
-                key="rows",
-            )
-            if raw is None:
-                continue
-            ok += 1
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    ci = int(item.get("claim", -1))
-                except (TypeError, ValueError):
-                    diag.prune("edges", str(item.get("claim")), "unparseable claim id in retrieval row")
-                    continue
-                if not 0 <= ci < len(claims):
-                    diag.prune("edges", str(item.get("claim")), "unknown claim id in retrieval row")
-                    continue
-                rows_seen.add(ci)
-                sids = item.get("steps")
-                for sid in sids if isinstance(sids, list) else []:
-                    sid = str(sid)
-                    if sid in obs_ids:
-                        nominated.setdefault(ci, set()).add(sid)
-                    else:
-                        diag.prune("edges", claims[ci].id,
-                                   f"nominated step {sid!r} is not an observation step")
-        if ok == 0:
+        if raw is None:
             result.coverage.n_failed_partitions += 1
             diag.record("edges", f"partition:{pi}", None, 0.0,
-                        f"all {samples} retrieval samples failed for partition "
-                        f"of {len(partition)} excerpts; coverage broken")
+                        f"evidence call failed for partition of {len(partition)} excerpts")
+            attested.append(rows_seen)
+            continue
+
+        from ..oracle import _index_by_id
+        by_id = _index_by_id(raw)
+        for ci_raw in range(len(claims)):
+            item = by_id.get(ci_raw)
+            if not item:
+                continue
+            rows_seen.add(ci_raw)
+            matches = item.get("matches", [])
+            if not isinstance(matches, list):
+                continue
+            claim = claims[ci_raw]
+            for m in matches:
+                if not isinstance(m, dict):
+                    continue
+                sid = str(m.get("step", ""))
+                if sid not in shown_ids:
+                    diag.prune("edges", claim.id, f"verdict for unshown step {sid!r}")
+                    continue
+                if sid not in obs_ids:
+                    diag.prune("edges", claim.id, f"step {sid!r} is not an observation step")
+                    continue
+                relation = str(m.get("relation", ""))
+                if relation not in _VERDICTS:
+                    diag.prune("edges", claim.id, f"unknown relation {relation!r}")
+                    continue
+                nominated.setdefault(ci_raw, set()).add(sid)
+                judged[ci_raw] = True
+                result.verdicts.append(
+                    {"claim": claim.id, "step": sid, "relation": relation}
+                )
+                if relation in _EDGE_KINDS:
+                    proposals.append(
+                        (claim, steps_by_id[sid], relation, str(m.get("quote", "")))
+                    )
         attested.append(rows_seen)
 
-    # --- verify: batched adversarial judgment over all nominations ---
-    #
-    # All (claim, nominees) pairs go into one call (budget-bounded batches).
-    # Excerpts are deduplicated — shared observation steps are sent once.
-    all_excerpt_ids: dict[str, Step] = {}
-    verify_rows: list[dict[str, Any]] = []
-    row_claim_idx: list[int] = []
-    for ci, sids in sorted(nominated.items()):
-        claim = claims[ci]
-        sorted_sids = sorted(sids, key=lambda sid: steps_by_id[sid].index)
-        for sid in sorted_sids:
-            all_excerpt_ids[sid] = steps_by_id[sid]
-        verify_rows.append({
-            "id": len(verify_rows),
-            "claim": {"made_at_step": claim.step_id, "text": claim.text},
-            "excerpt_steps": sorted_sids,
-        })
-        row_claim_idx.append(ci)
-        result.nominations[claim.id] = sorted_sids
-
-    proposals: list[tuple[Claim, Step, str, str]] = []
-    judged: dict[int, bool] = {}
-
-    if verify_rows:
-        excerpt_list = [
-            {"step": s.step_id, "text": s.observation_segment or ""}
-            for s in sorted(all_excerpt_ids.values(), key=lambda s: s.index)
-        ]
-
-        def _verify_size(row: dict[str, Any]) -> int:
-            sids = row.get("excerpt_steps", [])
-            return sum(len(all_excerpt_ids[s].observation_segment or "") for s in sids) + 200
-
-        batches = partition_by_budget(verify_rows, _PARTITION_CHAR_BUDGET, _verify_size)
-        for batch in batches:
-            batch_excerpt_ids = {s for row in batch for s in row["excerpt_steps"]}
-            batch_excerpts = [e for e in excerpt_list if e["step"] in batch_excerpt_ids]
-            payload = json.dumps({
-                "claims": [row for row in batch],
-                "excerpts": batch_excerpts,
-            }, ensure_ascii=False, indent=2)
-            raw = None
-            for _ in range(_VERIFY_ATTEMPTS):
-                raw = await _ask_model(
-                    "claim_verify", payload, model,
-                    session_factory=session_factory, purpose="edge_verification",
-                )
-                if raw is not None:
-                    break
-            if raw is None:
-                for row in batch:
-                    ci = row_claim_idx[row["id"]]
-                    diag.record("edges", claims[ci].id, None, 0.0,
-                                "verification batch failed; claim demoted to unknown")
-                continue
-            from ..oracle import _index_by_id
-            by_id = _index_by_id(raw)
-            for row in batch:
-                ci = row_claim_idx[row["id"]]
-                claim = claims[ci]
-                shown = set(row["excerpt_steps"])
-                item = by_id.get(row["id"])
-                if not item:
-                    continue
-                verdicts_list = item.get("verdicts", [])
-                if not isinstance(verdicts_list, list):
-                    verdicts_list = [item]
-                decided: set[str] = set()
-                for v in verdicts_list:
-                    if not isinstance(v, dict):
-                        continue
-                    sid = str(v.get("step", ""))
-                    if sid not in shown:
-                        diag.prune("edges", claim.id, f"verdict for unshown step {sid!r}")
-                        continue
-                    relation = str(v.get("relation", ""))
-                    if relation not in _VERDICTS:
-                        diag.prune("edges", claim.id, f"unknown relation {relation!r}")
-                        continue
-                    decided.add(sid)
-                    result.verdicts.append(
-                        {"claim": claim.id, "step": sid, "relation": relation}
-                    )
-                    if relation in _EDGE_KINDS:
-                        proposals.append(
-                            (claim, steps_by_id[sid], relation, str(v.get("quote", "")))
-                        )
-                judged[ci] = decided >= nominated.get(ci, set())
+    for ci, sids in nominated.items():
+        result.nominations[claims[ci].id] = sorted(
+            sids, key=lambda sid: steps_by_id[sid].index,
+        )
 
     # --- gates (code): verbatim single-region non-self quote + dedup ---
     verified: dict[str, dict[tuple[str, str], Edge]] = {}

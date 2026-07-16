@@ -60,7 +60,6 @@ if TYPE_CHECKING:
 # the known small-model weak spot), fails safe (over budget → unknown), and
 # is a parameter to be calibrated on the dev slice (validation plan step 3).
 
-_SWEEP_CHAR_BUDGET = 20000    # default sweep abstention budget (chars)
 
 
 # ---------------------------------------------------------------------------
@@ -229,210 +228,106 @@ async def _detect_commit(
 
 
 # ---------------------------------------------------------------------------
-# Pass E2 — About: map grounded steps to the committed candidate
+# Pass E — Evidence: partition-swept find + judge for all constraints
 # ---------------------------------------------------------------------------
 
 
-
-async def _map_about(
-    grounded: list[Step],
+async def _judge_constraint_evidence(
+    constraints: list[Constraint],
     commit: Commit,
+    evidence: list[Step],
     *,
     model: str | None,
     session_factory: SessionFactory,
     diag: Diagnostics,
-) -> list[Step]:
-    """Pass E2: grounded steps carrying evidence about the committed candidate.
+) -> dict[str, Verdict]:
+    """Merged E2+E3+J: partition all evidence steps, ask the model to find
+    and judge constraint-relevant evidence in one pass per partition.
 
-    Sweeps the WHOLE grounded evidence space in deterministic char-budget
-    partitions — code does not pre-filter relevance (the earlier lexical
-    blocking was code recognizing "aboutness" and pruned anaphoric
-    evidence before any model saw it). Positive polarity per partition; a
-    failed partition loses only its own steps, recorded.
+    For each constraint the model returns establish/refute/absent.
+    Results are unioned across partitions (any partition can settle a
+    constraint). Constraints that remain absent across ALL partitions
+    are marked omitted.
     """
     from ..pass2_edges.claims import _PARTITION_CHAR_BUDGET, _step_chars, partition_by_budget
 
-    about: list[Step] = []
-    for partition in partition_by_budget(grounded, _PARTITION_CHAR_BUDGET, _step_chars):
-        rows = [
-            {"id": i, "target": commit.binding, "excerpt": s.observation_segment or ""}
-            for i, s in enumerate(partition)
-        ]
+    if not evidence:
+        diag.record("evidence", "-", "abstain", 0.0, "no evidence steps")
+        return {
+            c.id: Verdict("unknown", 0.0, "code", (), "no evidence steps in trajectory")
+            for c in constraints
+        }
+
+    partitions = partition_by_budget(evidence, _PARTITION_CHAR_BUDGET, _step_chars)
+    verdicts: dict[str, Verdict] = {}
+    partitions_seen = 0
+
+    for pi, partition in enumerate(partitions):
+        valid_ids = {s.step_id for s in partition}
+        payload = json.dumps({
+            "candidate": commit.binding,
+            "constraints": [
+                {"id": i, "desc": c.description}
+                for i, c in enumerate(constraints)
+            ],
+            "evidence": [
+                {"id": s.step_id, "excerpt": s.observation_segment or ""}
+                for s in partition
+            ],
+        }, ensure_ascii=False, indent=2)
         raw = await _ask_model(
-            "constraint_about", json.dumps(rows, ensure_ascii=False, indent=2),
-            model, session_factory=session_factory, purpose="constraint_about",
+            "constraint_evidence", payload, model,
+            session_factory=session_factory, purpose="constraint_evidence",
         )
         if raw is None:
-            diag.record("about", "-", None, 0.0,
-                        f"partition of {len(partition)} steps failed; its steps unmapped")
+            diag.record("evidence", f"partition:{pi}", None, 0.0,
+                        f"partition of {len(partition)} steps failed")
             continue
+        partitions_seen += 1
         by_id = _index_by_id(raw)
-        for i, s in enumerate(partition):
+        for i, c in enumerate(constraints):
+            if c.id in verdicts:
+                continue
             item = by_id.get(i)
-            is_about = bool(item.get("about", False)) if item else False
-            conf = _safe_float(item, "confidence") if item else 0.0
-            diag.record("about", s.step_id, is_about, conf)
-            if is_about:
-                about.append(s)
-    return about
+            if not item:
+                diag.record("evidence", c.id, None, 0.0, f"partition:{pi} no verdict")
+                continue
+            outcome = str(item.get("outcome", "absent"))
+            quote = str(item.get("quote", ""))
+            conf = _safe_float(item, "confidence")
+            ev = tuple(
+                str(s) for s in item.get("steps", [])
+                if isinstance(s, str | int) and str(s) in valid_ids
+            )
+            diag.record("evidence", c.id, outcome, conf,
+                        f"partition:{pi} quote={quote[:120]}")
+            if outcome == "establish":
+                verdicts[c.id] = Verdict(
+                    "verified", conf, "oracle:evidence", ev,
+                    str(item.get("reason", "")),
+                )
+            elif outcome == "refute":
+                verdicts[c.id] = Verdict(
+                    "violated", conf, "oracle:evidence", ev,
+                    str(item.get("reason", "")),
+                )
 
-
-# ---------------------------------------------------------------------------
-# Pass E3 — Entails/Contradicts per (constraint, candidate) over the step set
-# ---------------------------------------------------------------------------
-
-async def _judge_entailment(
-    constraints: list[Constraint],
-    commit: Commit,
-    about_steps: list[Step],
-    *,
-    model: str | None,
-    session_factory: SessionFactory,
-    diag: Diagnostics,
-) -> dict[str, Verdict]:
-    """Pass E3: settle each constraint against the candidate's evidence set.
-
-    The window is ALL About-true steps in reading order, content in full —
-    the selection already happened in Pass E2's blocking (logged), and no
-    content is ever cut. Machine-checkable constraints are decided by code
-    from the oracle's quoted value (P6). "neither" leaves no verdict — the
-    constraint flows to Pass J's Omitted path.
-    """
-    if not about_steps:
-        return {}
-    window = sorted(about_steps, key=lambda s: s.index)
-    window_ids = {s.step_id for s in window}
-
-    payload = json.dumps({
-        "candidate": commit.binding,
-        "constraints": [
-            {"id": i, "desc": c.description}
-            for i, c in enumerate(constraints)
-        ],
-        "evidence": [
-            {"id": s.step_id, "excerpt": s.observation_segment or ""}
-            for s in window
-        ],
-    }, ensure_ascii=False, indent=2)
-    raw = await _ask_model(
-        "constraint_entails", payload, model,
-        session_factory=session_factory, purpose="constraint_entails",
-    )
-    by_id = _index_by_id(raw or [])
-
-    verdicts: dict[str, Verdict] = {}
-    for i, c in enumerate(constraints):
-        item = by_id.get(i)
-        if not item:
-            diag.record("entails", c.id, None, 0.0, "no verdict")
-            continue
-        outcome = str(item.get("outcome", "neither"))
-        quote = str(item.get("quote", ""))
-        conf = _safe_float(item, "confidence")
-        ev = tuple(
-            str(s) for s in item.get("steps", [])
-            if isinstance(s, str | int) and str(s) in window_ids
-        )
-        diag.record("entails", c.id, outcome, conf, f"quote={quote[:120]}")
-
-        if outcome not in ("establish", "refute"):
-            continue  # "neither" → Omitted path (Pass J)
-        status: FindingStatus = "verified" if outcome == "establish" else "violated"
-        verdicts[c.id] = Verdict(
-            status, conf, "oracle:entails", ev, str(item.get("reason", "")),
-        )
-    return verdicts
-
-
-# ---------------------------------------------------------------------------
-# Pass J — Omitted double-negative for unsettled constraints
-# ---------------------------------------------------------------------------
-
-async def _check_omitted(
-    unsettled: list[Constraint],
-    grounded: list[Step],
-    commit: Commit,
-    *,
-    model: str | None,
-    session_factory: SessionFactory,
-    diag: Diagnostics,
-    sweep_char_budget: int = _SWEEP_CHAR_BUDGET,
-) -> dict[str, Verdict]:
-    """Pass J: Omitted only when the lexical negative AND the attested
-    coverage sweep both say absent; anything else stays unknown (P5)."""
-    verdicts: dict[str, Verdict] = {}
-
-    if not grounded:
-        # Empty evidence space: with zero tool-output steps we cannot
-        # tell "the agent never verified anything" from "ingestion lost
-        # provenance" (e.g. spans arriving as raw text with no roles). A
-        # negative over an empty evidence space is vacuous — abstain. The
-        # grounding warnings already flag the no-tool-output condition.
-        diag.record("sweep", "-", "abstain", 0.0, "no grounded tool-output steps")
+    unsettled = [c for c in constraints if c.id not in verdicts]
+    if unsettled and partitions_seen == len(partitions) and partitions_seen > 0:
+        for c in unsettled:
+            verdicts[c.id] = Verdict(
+                "omitted",
+                min(commit.confidence, 0.8),
+                "oracle:evidence", (),
+                "absent across all evidence partitions",
+            )
+            diag.record("evidence", c.id, "omitted", 0.0,
+                        "absent in all partitions → omitted")
+    else:
         for c in unsettled:
             verdicts[c.id] = Verdict(
                 "unknown", 0.0, "code", (),
-                "no grounded tool-output steps in trajectory; cannot judge omission",
-            )
-        return verdicts
-
-    sweep_targets = list(unsettled)
-
-    # The abstain gate counts full length, and past it the sweep reads full
-    # step texts: a "no evidence" verdict over any partial view is the
-    # vacuous-closed-world bug in miniature, so the sweep either sees
-    # everything or asserts nothing.
-    total_chars = sum(len(s.observation_segment or "") for s in grounded)
-    if total_chars > sweep_char_budget:
-        diag.record("sweep", "-", "abstain", 0.0,
-                    f"{total_chars} chars > budget {sweep_char_budget}")
-        for c in sweep_targets:
-            verdicts[c.id] = Verdict(
-                "unknown", 0.0, "code", (),
-                f"sweep abstained: grounded text {total_chars} chars over cap",
-            )
-        return verdicts
-    snippets = [{"id": s.step_id, "excerpt": s.observation_segment or ""} for s in grounded]
-
-    payload = json.dumps({
-        "constraints": [
-            {"id": i, "desc": c.description} for i, c in enumerate(sweep_targets)
-        ],
-        "excerpts": snippets,
-    }, ensure_ascii=False, indent=2)
-    raw = await _ask_model(
-        "constraint_sweep", payload, model,
-        session_factory=session_factory, purpose="constraint_sweep",
-    )
-    by_id = _index_by_id(raw or [])
-    valid_ids = {s.step_id for s in grounded}
-
-    for i, c in enumerate(sweep_targets):
-        item = by_id.get(i)
-        if not item:
-            diag.record("sweep", c.id, None, 0.0, "no verdict")
-            verdicts[c.id] = Verdict("unknown", 0.0, "code", (), "sweep returned no verdict")
-            continue
-        exists = bool(item.get("evidence_exists", True))
-        cited = str(item.get("step", ""))
-        conf = _safe_float(item, "confidence")
-        diag.record("sweep", c.id, exists, conf, f"step={cited}")
-
-        if exists and cited in valid_ids:
-            verdicts[c.id] = Verdict(
-                "unknown", conf, "oracle:sweep", (cited,),
-                "sweep found evidence not settled by the window",
-            )
-        elif exists:
-            verdicts[c.id] = Verdict(
-                "unknown", 0.0, "code", (), "sweep said yes without a valid citation",
-            )
-        else:
-            verdicts[c.id] = Verdict(
-                "omitted",
-                min(conf, commit.confidence) if commit.confidence else conf,
-                "oracle:sweep", (),
-                "no lexical match and coverage sweep found no evidence",
+                f"not settled; {len(partitions) - partitions_seen} partition(s) failed",
             )
     return verdicts
 
@@ -504,21 +399,12 @@ async def analyze_constraints(
     constraints: list[Constraint] | None = None,
     model: str | None = None,
     session_factory: SessionFactory | None = None,
-    sweep_char_budget: int = _SWEEP_CHAR_BUDGET,
 ) -> ConstraintAnalysis:
-    """Chain E1 → E2 → E3 → J → L over Pass 1 constraint nodes.
+    """Chain E1 → E → L over Pass 1 constraint nodes.
 
-    Constraints come from the index (extracted by Pass 1 from the task
-    text — the question is part of the trajectory, so there is no
-    separate extraction call). Best-effort like the other adjudication
-    passes: any oracle failure degrades the affected tuples to unknown,
-    which never escalates (P5). Idempotent: reruns replace
-    ``constraint_findings`` wholesale (constraint nodes are Pass 1's).
-
-    ``sweep_char_budget`` is the abstention threshold for the Omitted
-    coverage sweep — the one numeric knob in this module. It guards a
-    negative claim and fails safe (over budget → unknown, never a finding);
-    calibrate it per oracle model on the dev slice.
+    E1 detects the committed answer; E partitions all evidence and judges
+    each constraint's status per partition (merged E2+E3+J); L emits
+    findings. Best-effort: any oracle failure degrades to unknown (P5).
     """
     if session_factory is None:
         raise ValueError("session_factory is required (pass AgentSession.create for offline use)")
@@ -569,22 +455,11 @@ async def analyze_constraints(
         diag.record("evidence", commit.step.step_id, None, 0.0,
                     "commit step excluded from constraint evidence (no self-verification)")
 
-    # Pass E2 / E3
-    about_steps = await _map_about(
-        evidence, commit, model=model, session_factory=session_factory, diag=diag,
-    )
-    verdicts = await _judge_entailment(
-        constraints, commit, about_steps,
+    # Pass E — partition-swept evidence: find + judge for all constraints
+    verdicts = await _judge_constraint_evidence(
+        constraints, commit, evidence,
         model=model, session_factory=session_factory, diag=diag,
     )
-
-    # Pass J — same independent-evidence set (self-verification excluded)
-    unsettled = [c for c in constraints if c.id not in verdicts]
-    verdicts.update(await _check_omitted(
-        unsettled, evidence, commit,
-        model=model, session_factory=session_factory, diag=diag,
-        sweep_char_budget=sweep_char_budget,
-    ))
 
     # Pass L
     analysis.findings = _emit_findings(constraints, verdicts, commit, steps)
