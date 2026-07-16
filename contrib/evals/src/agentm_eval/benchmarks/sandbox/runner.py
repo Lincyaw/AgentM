@@ -30,9 +30,38 @@ except ImportError:  # noqa: S110
 
 
 DEFAULT_IMAGE_REGISTRY = os.environ.get(
-    "AGENTM_EVAL_IMAGE_REGISTRY", "pair-diag-cn-guangzhou.cr.volces.com/pair"
+    "AGENTM_EVAL_IMAGE_REGISTRY", "pair-cn-guangzhou.cr.volces.com"
 )
 DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "terminal_bench:arl"
+
+
+def _resolve_adapter_repo(adapter: Any, bench: str) -> str:
+    """Auto-resolve task repo from adapter defaults: $ENV > $AGENTM_HOME/bench-repos > clone."""
+    env_var = getattr(adapter, "DEFAULT_REPO_ENV", None)
+    if env_var:
+        from_env = os.environ.get(env_var)
+        if from_env:
+            p = Path(from_env).expanduser().resolve()
+            subdir = getattr(adapter, "DEFAULT_REPO_SUBDIR", "")
+            return str(p / subdir) if subdir else str(p)
+
+    repo_url = getattr(adapter, "DEFAULT_REPO_URL", None)
+    if not repo_url:
+        typer.echo(f"Error: --repo required for bench {bench!r}.", err=True)
+        raise typer.Exit(1)
+
+    from agentm.core.lib.user_config import agentm_home_dir
+    slug = bench.replace("_", "-").replace(":", "-")
+    repo_dir = agentm_home_dir() / "bench-repos" / slug
+    if not repo_dir.is_dir():
+        logger.info("bench: cloning {} → {}", repo_url, repo_dir)
+        repo_dir.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, str(repo_dir)],
+            check=True,
+        )
+    subdir = getattr(adapter, "DEFAULT_REPO_SUBDIR", "")
+    return str(repo_dir / subdir) if subdir else str(repo_dir)
 
 
 def _filter_supported_kwargs(
@@ -173,7 +202,12 @@ def build_eval_images(
             raise typer.Exit(1) from e
 
 
-def resolve_source(repo: Path | None, source: str | None, bench: str) -> str:
+def resolve_source(
+    repo: Path | None,
+    source: str | None,
+    bench: str,
+    adapter: Any = None,
+) -> str:
     if bench.startswith("swebench"):
         if source:
             return source
@@ -186,8 +220,75 @@ def resolve_source(repo: Path | None, source: str | None, bench: str) -> str:
         return str(repo.expanduser().resolve())
     if source:
         return str(Path(source).expanduser().resolve())
+    if adapter is not None and hasattr(adapter, "DEFAULT_REPO_URL"):
+        return _resolve_adapter_repo(adapter, bench)
     typer.echo("Error: --repo required for this bench format.", err=True)
     raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Replay helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_arl_session_id(out_dir: Path, task_name: str) -> str | None:
+    """Extract the ARL sandbox session ID from the agent log."""
+    import re
+    log_file = out_dir / f"{task_name}.log"
+    if not log_file.is_file():
+        return None
+    m = re.search(r"keeping sandbox (\S+) for external cleanup", log_file.read_text())
+    return m.group(1) if m else None
+
+
+def _replay_from_clickhouse(
+    target_session: Any, source_arl_id: str,
+) -> tuple[int, int]:
+    """Replay agent steps from ClickHouse trajectory table into a live session."""
+    import subprocess
+    result = subprocess.run(
+        ["kubectl", "-n", "arl1", "exec", "agent-env-clickhouse-0", "--",
+         "clickhouse-client", "--format", "JSONEachRow", "--query",
+         f"SELECT step, name, action FROM arl.trajectory "
+         f"WHERE session_id = '{source_arl_id}' "
+         f"AND name NOT IN ('agentm_stat', 'agentm_resource_writer') "
+         f"ORDER BY step"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ClickHouse query failed: {result.stderr.strip()}")
+
+    replayed = 0
+    errors = 0
+    for line in result.stdout.strip().splitlines():
+        row = json.loads(line)
+        try:
+            action = json.loads(row["action"])
+        except (json.JSONDecodeError, TypeError):
+            errors += 1
+            continue
+        cmd = action.get("command")
+        if not cmd:
+            errors += 1
+            continue
+        work_dir = action.get("workDir", action.get("work_dir", "/app"))
+        env = action.get("env")
+        step_req: dict[str, Any] = {
+            "name": row["name"],
+            "command": cmd,
+            "work_dir": work_dir,
+        }
+        if env:
+            step_req["env"] = env
+        timeout_sec = action.get("timeoutSeconds", action.get("timeout_seconds"))
+        if timeout_sec:
+            step_req["timeoutSeconds"] = timeout_sec
+        try:
+            target_session.execute([step_req], recover_timeout=1200)
+            replayed += 1
+        except Exception:  # noqa: BLE001
+            errors += 1
+    return replayed, errors
 
 
 # ---------------------------------------------------------------------------
@@ -421,13 +522,41 @@ def _run_and_eval_one_inner(
         s for s in agent_arl_sessions if getattr(s, "deleted_at", None) is None
     ]
     if not agent_arl_sessions:
-        client.close()
-        state_file.unlink(missing_ok=True)
-        return {
-            "task": name, "status": "eval_create_failed", "tools": tools_count,
-            "error": "agent sandbox no longer exists; re-run to redo this task",
-        }
-    arl_session_id = agent_arl_sessions[0].id
+        # Original sandbox deleted — try replay_from (Redis history),
+        # then fall back to ClickHouse-based replay.
+        try:
+            new_session = client.create_session(
+                img,
+                idle_timeout_seconds=7200,
+                allocation_timeout_seconds=600,
+            )
+            new_sid = new_session.id
+            # Extract the ARL session ID from the agent log.
+            arl_source_id = _extract_arl_session_id(job.out, name)
+            if not arl_source_id:
+                raise ValueError("cannot find ARL session ID in agent log")
+            logger.info("replay {}: created {}, source={}", name, new_sid, arl_source_id)
+            try:
+                replay = client.replay_from(new_sid, arl_source_id)
+                logger.info("replay {}: gateway replay {} steps, {} errors",
+                            name, replay.stepsReplayed, replay.errors)
+            except Exception:
+                logger.info("replay {}: gateway replay failed, trying ClickHouse", name)
+                replayed, errors = _replay_from_clickhouse(
+                    arl.SandboxSession.attach(new_sid, timeout=7200),
+                    arl_source_id,
+                )
+                logger.info("replay {}: ClickHouse replay {} steps, {} errors",
+                            name, replayed, errors)
+            arl_session_id = new_sid
+        except Exception as e:
+            client.close()
+            return {
+                "task": name, "status": "eval_create_failed", "tools": tools_count,
+                "error": f"replay failed: {e}",
+            }
+    else:
+        arl_session_id = agent_arl_sessions[0].id
 
     # Long verifiers (LLM-judge pipelines, compile-and-test suites) run as a
     # single execute call; the HTTP timeout must cover the adapter's effective

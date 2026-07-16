@@ -8,12 +8,10 @@ taste, and validation-agent judges).
 
 How to run::
 
-    uv run agentm-eval sandbox batch \\
-      --bench senior-swe \\
-      --repo <repo>/tasks \\
-      --model azure-gpt \\
-      -j 5 -n 1
+    uv run agentm-eval sandbox batch --bench senior-swe --model azure-gpt -j 5
 
+Repo auto-clones to ``$AGENTM_HOME/bench-repos/senior-swe`` on first run.
+Override with ``--repo <path>`` or ``$SSB_REPO``.
 Images: ``pair-cn-guangzhou.cr.volces.com/opspai/ssb-{task}:v1``.
 """
 
@@ -32,6 +30,9 @@ class SeniorSweAdapter(HarborAdapter):
     DEFAULT_REGISTRY = "pair-cn-guangzhou.cr.volces.com/opspai"
     DEFAULT_PREFIX = "ssb"
     DEFAULT_TAG = "v1"
+    DEFAULT_REPO_URL = "https://github.com/snorkel-ai/senior-swe-bench-v2026.06.git"
+    DEFAULT_REPO_SUBDIR = "tasks"
+    DEFAULT_REPO_ENV = "SSB_REPO"
 
     EXTRA_VERIFIER_ENV = (
         "DEEPSEEK_API_KEY",
@@ -59,6 +60,15 @@ class SeniorSweAdapter(HarborAdapter):
                 env.get(k) for k in self._JUDGE_CREDENTIAL_VARS
             ):
                 env["OPENAI_API_KEY"] = env["DEEPSEEK_API_KEY"]
+        env.setdefault("UV_DEFAULT_INDEX", self._PIP_MIRROR)
+        env.setdefault("NPM_CONFIG_REGISTRY", self._NPM_MIRROR)
+        no_proxy = "localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12"
+        env.setdefault("HTTPS_PROXY", self._PROXY_URL)
+        env.setdefault("HTTP_PROXY", self._PROXY_URL)
+        env.setdefault("https_proxy", self._PROXY_URL)
+        env.setdefault("http_proxy", self._PROXY_URL)
+        env.setdefault("NO_PROXY", no_proxy)
+        env.setdefault("no_proxy", no_proxy)
         return env
 
     @staticmethod
@@ -93,26 +103,43 @@ class SeniorSweAdapter(HarborAdapter):
 
     VERIFIER_PIP_DEPS = ("litellm[proxy]",)
     _PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    _NPM_MIRROR = "https://registry.npmmirror.com/"
+    _PROXY_URL = "http://sing-box.arl1.svc:7890"
 
     def evaluate(
         self, session: object, task: TaskSpec, *, timeout: int = 300
     ) -> dict:
+        mirror = self._PIP_MIRROR
+        npm_mirror = self._NPM_MIRROR
+        proxy = self._PROXY_URL
+        session.execute([{  # type: ignore[attr-defined]
+            "name": "setup-mirrors",
+            "command": ["bash", "-lc",
+                # pip mirror
+                f"mkdir -p ~/.config/pip && "
+                f"printf '[global]\\nindex-url = {mirror}\\n"
+                f"trusted-host = pypi.tuna.tsinghua.edu.cn\\n' > ~/.config/pip/pip.conf && "
+                # npm / pnpm mirror
+                f"npm config set registry {npm_mirror} 2>/dev/null; "
+                # persist env vars for all subprocesses (uv, git, curl, pnpm)
+                f"printf '"
+                f"UV_DEFAULT_INDEX={mirror}\\n"
+                f"HTTPS_PROXY={proxy}\\n"
+                f"HTTP_PROXY={proxy}\\n"
+                f"https_proxy={proxy}\\n"
+                f"http_proxy={proxy}\\n"
+                f"no_proxy=localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12\\n"
+                f"NO_PROXY=localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12\\n"
+                f"' >> /etc/environment "
+                "|| true"],
+            "work_dir": "/app",
+        }], recover_timeout=30)
         if self.VERIFIER_PIP_DEPS:
             deps = " ".join(shlex.quote(d) for d in self.VERIFIER_PIP_DEPS)
-            mirror = self._PIP_MIRROR
-            session.execute([{  # type: ignore[attr-defined]
-                "name": "pip-mirror",
-                "command": ["bash", "-lc",
-                    f"python3 -m pip config set global.index-url {mirror} 2>/dev/null "
-                    f"|| mkdir -p ~/.config/pip "
-                    f"&& printf '[global]\\nindex-url = {mirror}\\n"
-                    f"trusted-host = pypi.tuna.tsinghua.edu.cn\\n' > ~/.config/pip/pip.conf "
-                    f"|| true"],
-                "work_dir": "/app",
-            }], recover_timeout=30)
             session.execute([{  # type: ignore[attr-defined]
                 "name": "verifier-deps",
                 "command": ["bash", "-lc",
+                    f"UV_DEFAULT_INDEX={mirror} "
                     f"python3 -m pip install --break-system-packages -q {deps} "
                     f"2>/dev/null || python3 -m pip install -q {deps} 2>/dev/null || true"],
                 "work_dir": "/app",

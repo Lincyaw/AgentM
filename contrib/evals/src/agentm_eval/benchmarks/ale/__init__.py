@@ -360,6 +360,40 @@ async def _run_agent(
 # CLI
 # ---------------------------------------------------------------------------
 
+_ALE_REPO_URL = "https://github.com/rdi-berkeley/agents-last-exam"
+_MIRROR_REGISTRY = "pair-cn-guangzhou.cr.volces.com"
+_DEFAULT_TASK_IMAGES = f"{_MIRROR_REGISTRY}/opspai"
+_DEFAULT_RUNTIME_IMAGE = f"{_MIRROR_REGISTRY}/library/python:3.12"
+
+
+def _default_ale_repo() -> Path:
+    """Resolve ALE checkout: ``$ALE_REPO`` > ``$AGENTM_HOME/ale-repo`` > auto-clone."""
+    from_env = os.environ.get("ALE_REPO")
+    if from_env:
+        return Path(from_env).expanduser()
+    from agentm.core.lib.user_config import agentm_home_dir
+    repo = agentm_home_dir() / "ale-repo"
+    if repo.is_dir():
+        return repo
+    import subprocess
+    logger.info("ale: cloning {} → {}", _ALE_REPO_URL, repo)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", _ALE_REPO_URL, str(repo)],
+        check=True,
+    )
+    return repo
+
+
+def _default_data_root() -> Path | None:
+    """Resolve ALE data root: ``$ALE_DATA_ROOT`` > ``$AGENTM_HOME/ale-data`` > None."""
+    from_env = os.environ.get("ALE_DATA_ROOT")
+    if from_env:
+        return Path(from_env).expanduser()
+    from agentm.core.lib.user_config import agentm_home_dir
+    data = agentm_home_dir() / "ale-data"
+    return data if data.is_dir() else None
+
+
 class AleAdapter:
     name = "ale"
     description = "Agents' Last Exam — real professional tasks graded in ARL sandboxes"
@@ -373,12 +407,16 @@ class AleAdapter:
 
         @cli.command("list-tasks")
         def list_tasks(
-            ale_repo: Annotated[Path, typer.Option(help="agents-last-exam checkout")],
+            ale_repo: Annotated[Optional[Path], typer.Option(
+                help="agents-last-exam checkout ($ALE_REPO or auto-clone)",
+            )] = None,
             data_root: Annotated[Optional[Path], typer.Option(
                 help="Task data root; when set, only tasks with local input/ data are shown",
             )] = None,
         ) -> None:
             """List available tasks (domain/task)."""
+            if ale_repo is None:
+                ale_repo = _default_ale_repo()
             for domain, name in bridge.discover_tasks(ale_repo):
                 if data_root is not None:
                     if not (data_root / domain / name).is_dir():
@@ -390,12 +428,12 @@ class AleAdapter:
             task: Annotated[list[str], typer.Option(
                 "--task", "-t", help="Task ref domain/name (repeatable)",
             )],
-            data_root: Annotated[Path, typer.Option(
-                help="Task data root (needed once, at build time)",
-            )],
+            data_root: Annotated[Optional[Path], typer.Option(
+                help="Task data root ($ALE_DATA_ROOT, needed once at build time)",
+            )] = None,
             registry: Annotated[str, typer.Option(
                 help="Target registry prefix, e.g. docker.io namespace",
-            )],
+            )] = "opspai",
             tag: Annotated[str, typer.Option(help="Image tag")] = "latest",
             base_image: Annotated[str, typer.Option(
                 help="Base image for the data image (needs sh+cp+find)",
@@ -414,6 +452,12 @@ class AleAdapter:
             if not task:
                 typer.echo("no tasks given (-t domain/name)", err=True)
                 raise typer.Exit(2)
+            if data_root is None:
+                resolved = _default_data_root()
+                if resolved is None:
+                    typer.echo("no --data-root and $ALE_DATA_ROOT not set", err=True)
+                    raise typer.Exit(2)
+                data_root = resolved
             failed: list[str] = []
             for ref in task:
                 domain, _, name = ref.partition("/")
@@ -436,21 +480,23 @@ class AleAdapter:
             task: Annotated[list[str], typer.Option(
                 "--task", "-t", help="Task ref domain/name (repeatable)",
             )],
-            ale_repo: Annotated[Path, typer.Option(help="agents-last-exam checkout")],
+            ale_repo: Annotated[Optional[Path], typer.Option(
+                help="agents-last-exam checkout ($ALE_REPO or auto-clone)",
+            )] = None,
             task_images: Annotated[Optional[str], typer.Option(
                 help="Baked mode: registry prefix of the per-task data images "
                      "built by `build-images` (zero upload; data mounts as a "
                      "hidden private container)",
-            )] = None,
+            )] = _DEFAULT_TASK_IMAGES,
             images_tag: Annotated[str, typer.Option(help="Baked mode: image tag")] = "latest",
             data_root: Annotated[Optional[Path], typer.Option(
-                help="Upload mode: host task-data root "
+                help="Upload mode: host task-data root ($ALE_DATA_ROOT) "
                      "<root>/<domain>/<task>/<variant>/{input,software,reference}",
             )] = None,
             image: Annotated[Optional[str], typer.Option(
                 help="Sandbox runtime image the agent lives in "
                      "(shared across tasks; must carry the task's system deps)",
-            )] = None,
+            )] = _DEFAULT_RUNTIME_IMAGE,
             model: Annotated[Optional[str], typer.Option(help="Model profile")] = None,
             scenario: Annotated[str, typer.Option(help="AgentM scenario")] = "ale:arl",
             profile: Annotated[str, typer.Option(help="ARL warm-pool profile")] = "default",
@@ -481,13 +527,10 @@ class AleAdapter:
             if not task:
                 typer.echo("no tasks given (-t domain/name)", err=True)
                 raise typer.Exit(2)
-            if image is None or (task_images is None and data_root is None):
-                typer.echo(
-                    "need --image <runtime> plus a data mode: "
-                    "--task-images <registry-prefix> (baked data images) "
-                    "or --data-root <dir> (upload)", err=True,
-                )
-                raise typer.Exit(2)
+            if ale_repo is None:
+                ale_repo = _default_ale_repo()
+            if data_root is None and task_images is None:
+                data_root = _default_data_root()
 
             # Gateway/auth resolve exactly like the `arl` CLI: env vars, then
             # the active context in ~/.config/arl/config.yaml. ARL_CONTEXT is
@@ -590,17 +633,19 @@ class AleAdapter:
             task: Annotated[list[str], typer.Option(
                 "--task", "-t", help="Task ref domain/name (repeatable)",
             )],
-            ale_repo: Annotated[Path, typer.Option(help="agents-last-exam checkout")],
+            ale_repo: Annotated[Optional[Path], typer.Option(
+                help="agents-last-exam checkout ($ALE_REPO or auto-clone)",
+            )] = None,
             outputs_dir: Annotated[Path, typer.Option(
                 help="Dir of saved agent output archives (from `run --no-eval`)",
-            )],
-            reference_root: Annotated[Path, typer.Option(
-                help="Host task-data root holding reference/ "
+            )] = Path("."),
+            reference_root: Annotated[Optional[Path], typer.Option(
+                help="Host task-data root holding reference/ ($ALE_DATA_ROOT) "
                      "<root>/<domain>/<task>/<variant>/reference",
-            )],
+            )] = None,
             image: Annotated[str, typer.Option(
                 help="Runtime image for the grading sandbox (match the task's deps)",
-            )],
+            )] = _DEFAULT_RUNTIME_IMAGE,
             data_root: Annotated[Optional[Path], typer.Option(
                 help="Optional: also restage input/ (for graders that read input)",
             )] = None,
@@ -614,6 +659,10 @@ class AleAdapter:
             if not task:
                 typer.echo("no tasks given (-t domain/name)", err=True)
                 raise typer.Exit(2)
+            if ale_repo is None:
+                ale_repo = _default_ale_repo()
+            if reference_root is None:
+                reference_root = _default_data_root() or Path(".")
             if arl_context:
                 os.environ["ARL_CONTEXT"] = arl_context
                 os.environ.pop("ARL_GATEWAY_URL", None)

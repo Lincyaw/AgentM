@@ -50,7 +50,7 @@ def _resolve_defaults(
     if registry is None:
         registry = getattr(adapter, "DEFAULT_REGISTRY", DEFAULT_IMAGE_REGISTRY)
     if prefix is None:
-        prefix = getattr(adapter, "DEFAULT_PREFIX", "longcli")
+        prefix = getattr(adapter, "DEFAULT_PREFIX", "")
     if tag is None:
         tag = getattr(adapter, "DEFAULT_TAG", "v0")
     return registry, prefix, tag
@@ -147,8 +147,8 @@ class SandboxAdapter:
             """Mirror upstream images to our registry."""
             import subprocess
 
-            resolved_source = resolve_source(repo, source, bench)
             adapter = get_format_adapter(bench)
+            resolved_source = resolve_source(repo, source, bench, adapter)
             registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
             tasks = adapter.discover_tasks(resolved_source)
             if task:
@@ -200,8 +200,8 @@ class SandboxAdapter:
             source_images: Annotated[bool, typer.Option("--source-images")] = False,
         ) -> None:
             """List discovered tasks and their image names."""
-            resolved_source = resolve_source(repo, source, bench)
             adapter = get_format_adapter(bench)
+            resolved_source = resolve_source(repo, source, bench, adapter)
             registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
             if not source_images:
                 source_images = getattr(adapter, "DEFAULT_SOURCE_IMAGES", False)
@@ -260,8 +260,8 @@ class SandboxAdapter:
 
             autoload_dotenv(Path.cwd())
 
-            resolved_source = resolve_source(repo, source, bench)
             adapter = get_format_adapter(bench)
+            resolved_source = resolve_source(repo, source, bench, adapter)
             registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
             if not source_images:
                 source_images = getattr(adapter, "DEFAULT_SOURCE_IMAGES", False)

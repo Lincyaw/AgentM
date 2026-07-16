@@ -3,21 +3,15 @@
 Standard Harbor task layout with two bench-specific conventions:
 solved means reward >= 0.95 (not 1.0), and each task.toml declares a
 ``[verifier] timeout_sec`` that can exceed the CLI default (some
-verifiers replay hundreds of authenticated moves). Point ``--repo``
-at the checkout's ``tasks/`` directory — all 46 tasks ship prebuilt
-docker.io/opspai images pulled via the Guangzhou mirror.
+verifiers replay hundreds of authenticated moves).
 
 How to run::
 
-    uv run agentm-eval sandbox batch \\
-      --bench lhtb \\
-      --repo /home/ddq/AoyangSpace/LHTB/tasks \\
-      --model azure-gpt \\
-      -j 5 -n 1
+    uv run agentm-eval sandbox batch --bench lhtb --model azure-gpt -j 5
 
-DEFAULT_REGISTRY and DEFAULT_SOURCE_IMAGES are set so ``--source-images``
-and ``--registry pair-cn-guangzhou.cr.volces.com`` are not needed on the
-CLI. Images resolve to ``pair-cn-guangzhou.cr.volces.com/opspai/lhtb-{task}:{tag}``.
+Repo auto-clones to ``$AGENTM_HOME/bench-repos/lhtb`` on first run.
+Override with ``--repo <path>`` or ``$LHTB_REPO``.
+Images: ``pair-cn-guangzhou.cr.volces.com/opspai/lhtb-{task}:{tag}``.
 """
 
 from __future__ import annotations
@@ -113,6 +107,9 @@ class LhtbAdapter(HarborAdapter):
 
     DEFAULT_REGISTRY = "pair-cn-guangzhou.cr.volces.com"
     DEFAULT_SOURCE_IMAGES = True
+    DEFAULT_REPO_URL = "https://github.com/zli12321/LHTB.git"
+    DEFAULT_REPO_SUBDIR = "tasks"
+    DEFAULT_REPO_ENV = "LHTB_REPO"
 
     SOLVED_THRESHOLD = 0.95
 
