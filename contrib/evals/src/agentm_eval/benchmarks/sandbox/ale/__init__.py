@@ -417,83 +417,114 @@ _HF_DATA_REPO = "agents-last-exam/agents-last-exam-data"
 _HF_REF_REPO = "agents-last-exam/agents-last-exam-reference"
 
 
-def _ensure_data_root(data_root: Path) -> None:
-    """Download ALE task data from HuggingFace if not already present."""
-    if (data_root / "_hf_done").is_file():
-        return
-    data_root.mkdir(parents=True, exist_ok=True)
-    from huggingface_hub import snapshot_download
-    logger.info("ale: downloading task data from {} → {}", _HF_DATA_REPO, data_root)
-    snapshot_download(
-        repo_id=_HF_DATA_REPO, repo_type="dataset",
-        local_dir=str(data_root / "_hf_data"),
-        allow_patterns="tasks/*",
-    )
-    logger.info("ale: downloading reference data from {} → {}", _HF_REF_REPO, data_root)
-    snapshot_download(
-        repo_id=_HF_REF_REPO, repo_type="dataset",
-        local_dir=str(data_root / "_hf_ref"),
-        allow_patterns="tasks/*",
-    )
-    import shutil
-    hf_data = data_root / "_hf_data" / "tasks"
-    hf_ref = data_root / "_hf_ref" / "tasks"
-    for domain_dir in sorted(hf_data.iterdir()):
-        if not domain_dir.is_dir():
-            continue
-        for task_dir in sorted(domain_dir.iterdir()):
-            if not task_dir.is_dir():
-                continue
-            dest = data_root / domain_dir.name / task_dir.name
-            if dest.exists():
-                continue
-            shutil.copytree(task_dir, dest)
-    for domain_dir in sorted(hf_ref.iterdir()):
-        if not domain_dir.is_dir():
-            continue
-        for task_dir in sorted(domain_dir.iterdir()):
-            if not task_dir.is_dir():
-                continue
-            for variant_dir in sorted(task_dir.iterdir()):
-                ref_src = variant_dir / "reference"
-                if not ref_src.is_dir():
-                    continue
-                dest = data_root / domain_dir.name / task_dir.name / variant_dir.name / "reference"
-                if dest.exists():
-                    continue
-                shutil.copytree(ref_src, dest)
-    (data_root / "_hf_done").touch()
-    logger.info("ale: task data ready at {}", data_root)
+def _hf_download(repo: str, task: str, dest: Path) -> None:
+    """Download one task's tree from a HF dataset repo via the ``hf`` CLI.
 
-
-def _ensure_baked_images(
-    tasks: list[str], data_root: Path, registry: str, tag: str,
-) -> None:
-    """Build and push data images for tasks that are missing from the registry."""
+    The CLI path avoids a brotli-decoder bug that intermittently corrupts
+    ``snapshot_download``; per-task ``--include`` keeps the repo scan tiny.
+    """
     import subprocess as _sp
-    from .images import build_data_image, data_image_ref
+    _sp.run(
+        ["hf", "download", repo, "--repo-type", "dataset",
+         "--include", f"tasks/{task}/**", "--local-dir", str(dest)],
+        check=True, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=1800,
+        env={**os.environ, "HF_HUB_ENABLE_HF_TRANSFER": "0"},
+    )
 
-    missing: list[tuple[str, str]] = []
+
+def _ensure_task_data(data_root: Path, tasks: list[str]) -> None:
+    """Fetch + assemble data for ``tasks`` only (idempotent, per-task).
+
+    For each task, pull input/software (+ hidden reference) from HF into
+    ``data_root/<domain>/<task>/<variant>/…``, skipping ones already assembled.
+    Only called for tasks whose baked image is missing from the registry — when
+    every image already exists, no data is fetched at all (self-contained run).
+    """
+    import shutil
+    data_root.mkdir(parents=True, exist_ok=True)
+    for task in tasks:
+        domain, _, name = task.partition("/")
+        td = data_root / domain / name
+        if td.is_dir() and any((v / "input").is_dir() for v in td.iterdir() if v.is_dir()):
+            continue  # already assembled
+        _hf_download(_HF_DATA_REPO, task, data_root / "_hf_data")
+        try:
+            _hf_download(_HF_REF_REPO, task, data_root / "_hf_ref")
+        except Exception:
+            pass  # rubric-graded tasks ship no reference
+        src = data_root / "_hf_data" / "tasks" / domain / name
+        if not src.is_dir():
+            continue
+        for vdir in sorted(src.iterdir()):
+            if not (vdir / "input").is_dir():
+                continue
+            dest = td / vdir.name
+            for sub in ("input", "software"):
+                s = vdir / sub
+                if s.is_dir():
+                    dd = dest / sub
+                    if dd.exists():
+                        shutil.rmtree(dd)
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(s, dd)
+            ref_src = data_root / "_hf_ref" / "tasks" / domain / name / vdir.name / "reference"
+            if ref_src.is_dir():
+                dr = dest / "reference"
+                if dr.exists():
+                    shutil.rmtree(dr)
+                shutil.copytree(ref_src, dr)
+
+
+def _variant_of(ale_repo: Path, domain: str, name: str, data_root: Path) -> str:
+    """Variant the run stages from: load_task's, else the single assembled dir
+    / base. The HF layout can store the instance under a name (e.g. tsla_fy2023)
+    that differs from load_task's (e.g. base), so bake under load_task's name."""
+    td = data_root / domain / name
+    dirs = [p.name for p in td.iterdir() if p.is_dir() and (p / "input").is_dir()] \
+        if td.is_dir() else []
+    try:
+        v = bridge.load_task(ale_repo, domain, name).variant_name
+        if v in dirs:
+            return v
+    except Exception:
+        pass
+    if "base" in dirs:
+        return "base"
+    return dirs[0] if dirs else "base"
+
+
+def _missing_baked_images(tasks: list[str], registry: str, tag: str) -> list[str]:
+    """Tasks whose baked data image is NOT already in the registry."""
+    import subprocess as _sp
+    from .images import data_image_ref
+    missing: list[str] = []
     for ref in tasks:
         domain, _, name = ref.partition("/")
-        image = data_image_ref(registry, domain, name, tag)
         result = _sp.run(
-            ["docker", "manifest", "inspect", image],
+            ["docker", "manifest", "inspect", data_image_ref(registry, domain, name, tag)],
             capture_output=True, timeout=30,
         )
         if result.returncode != 0:
-            if (data_root / domain / name / "base" / "input").is_dir():
-                missing.append((domain, name))
-            else:
-                logger.warning("ale: no data for {}/{}, skipping image build", domain, name)
+            missing.append(ref)
+    return missing
 
-    if not missing:
-        return
-    logger.info("ale: building {} missing data images", len(missing))
-    for domain, name in missing:
+
+def _ensure_baked_images(
+    tasks: list[str], data_root: Path, registry: str, tag: str, ale_repo: Path,
+) -> None:
+    """Build + push data images for ``tasks`` (already known missing), each with
+    its real variant so non-``base`` tasks bake correctly."""
+    from .images import build_data_image
+    logger.info("ale: building {} missing data images", len(tasks))
+    for ref in tasks:
+        domain, _, name = ref.partition("/")
+        variant = _variant_of(ale_repo, domain, name, data_root)
+        if not (data_root / domain / name / variant / "input").is_dir():
+            logger.warning("ale: no data for {}, skipping image build", ref)
+            continue
         image = build_data_image(
             data_root=data_root, domain=domain, name=name,
-            registry=registry, tag=tag, push=True,
+            registry=registry, tag=tag, variant=variant, push=True,
         )
         logger.info("ale: built + pushed {}", image)
 
@@ -642,13 +673,21 @@ class AleAdapter:
                 data_root = _default_data_root()
 
             if task_images is not None:
-                if data_root is None:
-                    from agentm.core.lib.user_config import agentm_home_dir
-                    data_root = agentm_home_dir() / "ale-data"
-                _ensure_data_root(data_root)
-                _ensure_baked_images(
-                    list(task), data_root, task_images, images_tag,
-                )
+                # Self-contained: pull pre-built data images straight from the
+                # registry. Only fetch data + build for tasks whose image is
+                # missing — when every image exists (the common case), no local
+                # data root is needed or touched.
+                missing = _missing_baked_images(list(task), task_images, images_tag)
+                if missing:
+                    if data_root is None:
+                        from agentm.core.lib.user_config import agentm_home_dir
+                        data_root = agentm_home_dir() / "ale-data"
+                    logger.info("ale: {} image(s) missing → fetching data + building",
+                                len(missing))
+                    _ensure_task_data(data_root, missing)
+                    _ensure_baked_images(
+                        missing, data_root, task_images, images_tag, ale_repo,
+                    )
 
             # Gateway/auth resolve exactly like the `arl` CLI: env vars, then
             # the active context in ~/.config/arl/config.yaml. ARL_CONTEXT is
