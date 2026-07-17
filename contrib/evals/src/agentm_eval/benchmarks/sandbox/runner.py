@@ -472,7 +472,7 @@ def _run_and_eval_one_inner(
             )
             replay = client.replay_from(new_session.id, source.id)
             logger.info("replay {}: {} steps from {} into {}, {} errors",
-                        name, replay.stepsReplayed, source.id, new_session.id, replay.errors)
+                        name, replay.steps_replayed, source.id, new_session.id, replay.errors)
             arl_session_id = new_session.id
         except Exception as e:
             logger.warning("{}: replay failed: {}", name, e)

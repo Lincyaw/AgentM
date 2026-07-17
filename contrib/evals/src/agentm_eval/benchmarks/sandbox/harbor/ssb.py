@@ -64,13 +64,6 @@ class SeniorSweAdapter(HarborAdapter):
                 env["OPENAI_API_KEY"] = env["DEEPSEEK_API_KEY"]
         env.setdefault("UV_DEFAULT_INDEX", self._PIP_MIRROR)
         env.setdefault("NPM_CONFIG_REGISTRY", self._NPM_MIRROR)
-        no_proxy = "localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12"
-        env.setdefault("HTTPS_PROXY", self._PROXY_URL)
-        env.setdefault("HTTP_PROXY", self._PROXY_URL)
-        env.setdefault("https_proxy", self._PROXY_URL)
-        env.setdefault("http_proxy", self._PROXY_URL)
-        env.setdefault("NO_PROXY", no_proxy)
-        env.setdefault("no_proxy", no_proxy)
         return env
 
     @staticmethod
@@ -109,27 +102,22 @@ class SeniorSweAdapter(HarborAdapter):
     VERIFIER_PIP_DEPS = ("litellm[proxy]",)
     _PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
     _NPM_MIRROR = "https://registry.npmmirror.com/"
-    _PROXY_URL = "http://sing-box.arl1.svc:7890"
 
     def evaluate(
         self, session: object, task: TaskSpec, *, timeout: int = 300
     ) -> dict:
         mirror = self._PIP_MIRROR
         npm_mirror = self._NPM_MIRROR
-        proxy = self._PROXY_URL
-        no_proxy = "localhost,127.0.0.1,.svc,.svc.cluster.local,10.0.0.0/8,172.16.0.0/12"
         session.execute([{  # type: ignore[attr-defined]
             "name": "setup-mirrors",
             "command": ["bash", "-lc",
-                # apt mirror + build tools for C extensions (uvloop etc.)
+                # apt mirror + build tools for C extensions
                 "sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; "
                 "s|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; "
                 "s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; "
                 "s|http://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' "
                 "/etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true; "
-                f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
                 "apt-get update -qq && "
-                f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
                 "apt-get install -y -qq gcc python3-dev 2>/dev/null || true; "
                 # pip mirror
                 f"mkdir -p ~/.config/pip && "
@@ -137,31 +125,22 @@ class SeniorSweAdapter(HarborAdapter):
                 f"trusted-host = pypi.tuna.tsinghua.edu.cn\\n' > ~/.config/pip/pip.conf && "
                 # npm / pnpm mirror
                 f"npm config set registry {npm_mirror} 2>/dev/null; "
-                # persist env vars for all subprocesses
+                # persist for all subprocesses (`bash -l` sources /etc/profile.d/)
                 f"printf '"
-                f"UV_DEFAULT_INDEX={mirror}\\n"
-                f"HTTPS_PROXY={proxy}\\n"
-                f"HTTP_PROXY={proxy}\\n"
-                f"https_proxy={proxy}\\n"
-                f"http_proxy={proxy}\\n"
-                f"no_proxy={no_proxy}\\n"
-                f"NO_PROXY={no_proxy}\\n"
-                f"' >> /etc/environment "
+                f"export PIP_INDEX_URL={mirror}\\n"
+                f"export PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn\\n"
+                f"export UV_DEFAULT_INDEX={mirror}\\n"
+                f"export NPM_CONFIG_REGISTRY={npm_mirror}\\n"
+                f"' > /etc/profile.d/mirrors.sh "
                 "|| true"],
             "work_dir": "/app",
         }], recover_timeout=120)
         if self.VERIFIER_PIP_DEPS:
             deps = " ".join(shlex.quote(d) for d in self.VERIFIER_PIP_DEPS)
             pip_idx = f"-i {mirror} --trusted-host pypi.tuna.tsinghua.edu.cn"
-            pip_env = (
-                f"HTTPS_PROXY={proxy} HTTP_PROXY={proxy} "
-                f"https_proxy={proxy} http_proxy={proxy} "
-                f"NO_PROXY={no_proxy} no_proxy={no_proxy} "
-            )
             session.execute([{  # type: ignore[attr-defined]
                 "name": "verifier-deps",
                 "command": ["bash", "-lc",
-                    f"{pip_env}"
                     f"python3 -m pip install --break-system-packages -q {pip_idx} {deps} "
                     f"|| python3 -m pip install -q {pip_idx} {deps} "
                     f"|| true"],

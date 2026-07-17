@@ -1,7 +1,7 @@
 """ARL agent-env ``ResourceWriter`` implementation.
 
-Writes land inside the ARL sandbox. Only paths inside ``work_dir`` are
-writable; everything else is treated as constitution and refused.
+Writes land inside the ARL sandbox.  All paths are writable — the
+container itself is the isolation boundary.
 """
 
 from __future__ import annotations
@@ -21,10 +21,8 @@ from agentm.core.abi import (
 from agentm.extensions.builtin._agent_env import (
     _async_execute,
     _call_maybe_async,
-    _is_in_work_dir,
     _normalize_work_dir,
     _sandbox_abs,
-    _workspace_relative_path,
 )
 
 if TYPE_CHECKING:
@@ -45,15 +43,9 @@ def _is_enoent(message: str) -> bool:
 class AgentEnvResourceWriter:
     """``ResourceWriter`` impl whose writes land inside the ARL sandbox.
 
-    Boundary contract: only paths *inside* ``work_dir`` (after resolving
-    relative paths against it) are writable; everything else -- including
-    every host path under the AgentM tree -- is treated as constitution
-    and refused. The sandbox cannot see the host filesystem, so this is
-    fail-safe by construction: the agent literally cannot mutate its own
-    code from a sandbox session.
-
-    Read and write use the ARL SDK file API to bypass the ~8KB stdout limit
-    on ``session.execute``.
+    The sandbox container is the isolation boundary — all paths inside
+    the container are writable.  Reads and writes use the ARL SDK file
+    API to bypass the ~8 KB stdout limit on ``session.execute``.
     """
 
     def __init__(
@@ -65,21 +57,15 @@ class AgentEnvResourceWriter:
         self._session = session
         self._work_dir = _normalize_work_dir(work_dir)
 
-    # --- path classification ---------------------------------------------
+    # --- path helpers --------------------------------------------------------
 
     def _resolve(self, path: str) -> str:
         return _sandbox_abs(self._work_dir, path)
 
-    def _relative(self, path: str) -> str | None:
-        return _workspace_relative_path(self._work_dir, path)
-
-    def _in_sandbox(self, path: str) -> bool:
-        return _is_in_work_dir(self._work_dir, path)
-
     def classify(self, path: str) -> PathClass:
-        return "managed" if self._in_sandbox(path) else "constitution"
+        return "managed"
 
-    # --- ARL plumbing -----------------------------------------------------
+    # --- ARL plumbing --------------------------------------------------------
 
     async def _run(self, command: list[str]) -> tuple[bytes, bytes, int]:
         step = {
@@ -96,55 +82,24 @@ class AgentEnvResourceWriter:
         out = response.results[0].output
         return out.stdout.encode("utf-8"), out.stderr.encode("utf-8"), out.exit_code
 
-    def _refuse(self, path: str) -> WriteResult:
-        return WriteResult(
-            path=path,
-            path_class="constitution",
-            error=(
-                f"Refusing to write {path!r}: agent-env sandbox can only "
-                f"modify paths inside {self._work_dir!r}. Constitution / "
-                f"host paths are off-limits from inside the sandbox."
-            ),
-        )
-
-    async def _write_bytes(self, rel_path: str, content: bytes) -> tuple[bool, str]:
+    async def _write_bytes(self, path: str, content: bytes) -> tuple[bool, str]:
         try:
-            await _call_maybe_async(self._session.upload_file, rel_path, content)
+            await _call_maybe_async(self._session.upload_file, path, content)
         except Exception as exc:
             logger.warning("agent-env file upload failed: {}", exc)
             return False, str(exc)
         return True, ""
 
-    # --- ResourceWriter API ----------------------------------------------
+    # --- ResourceWriter API --------------------------------------------------
 
     async def read(self, path: str) -> bytes:
-        import base64 as b64
-
-        rel_path = self._relative(path)
-        if rel_path is not None:
-            try:
-                return await _call_maybe_async(self._session.download_file, rel_path)
-            except Exception as exc:
-                # Classify at the boundary that owns the transport: only a
-                # genuine missing-file error becomes FileNotFoundError;
-                # gateway/transport failures propagate as themselves so
-                # callers never mistake an outage for file absence.
-                if _is_enoent(str(exc)):
-                    raise FileNotFoundError(str(exc)) from exc
-                raise
         abs_path = self._resolve(path)
-        stdout, stderr, code = await self._run(
-            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
-        )
-        if code != 0:
-            message = stderr.decode("utf-8", "replace") or path
-            if _is_enoent(message):
-                raise FileNotFoundError(message)
-            raise RuntimeError(f"read {path!r} failed: {message}")
-        encoded = stdout.strip()
-        if not encoded:
-            return b""
-        return b64.b64decode(encoded)
+        try:
+            return await _call_maybe_async(self._session.download_file, abs_path)
+        except Exception as exc:
+            if _is_enoent(str(exc)):
+                raise FileNotFoundError(str(exc)) from exc
+            raise
 
     async def exists(self, path: str) -> bool:
         _stdout, _stderr, code = await self._run(
@@ -172,10 +127,8 @@ class AgentEnvResourceWriter:
         author: WriterAuthor = "agent",
     ) -> WriteResult:
         del rationale, author
-        rel_path = self._relative(path)
-        if rel_path is None:
-            return self._refuse(path)
-        ok, err = await self._write_bytes(rel_path, content)
+        abs_path = self._resolve(path)
+        ok, err = await self._write_bytes(abs_path, content)
         if not ok:
             return WriteResult(
                 path=path,
@@ -197,8 +150,6 @@ class AgentEnvResourceWriter:
         author: WriterAuthor = "agent",
     ) -> WriteResult:
         del rationale
-        if self._relative(path) is None:
-            return self._refuse(path)
         try:
             current = await self.read(path)
         except FileNotFoundError as exc:
@@ -226,8 +177,6 @@ class AgentEnvResourceWriter:
         author: WriterAuthor = "agent",
     ) -> WriteResult:
         del rationale, author
-        if self._relative(path) is None:
-            return self._refuse(path)
         abs_path = self._resolve(path)
         _stdout, stderr, code = await self._run(["rm", "-f", "--", abs_path])
         if code != 0:

@@ -1160,6 +1160,7 @@ class ApiRegisterEvent(Event):
         visibility="recommended",
         effects=("observe",),
         handler="sync_only",
+        mutable_fields=("payload",),
     )
     kind: Literal["tool", "command", "provider", "renderer"]
     name: str
