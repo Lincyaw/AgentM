@@ -1,51 +1,50 @@
 """Grouped file-I/O tool atom: ``read``, ``write``, ``edit``.
 
-Merges the former single-tool atoms into one §11-compliant module. The
-LLM-facing tool names are unchanged.
+Thin wrapper around :mod:`agentm_toolbox`.  In local sessions the toolbox
+runs in-process (native Python call); in sandbox sessions it is uploaded
+to the container and invoked via ``exec``.
 
-Read — aligned with Claude Code's FileReadTool behavior: no hardcoded
-line cap, max-file-size gate (default 256 KB), partial-view tracking for
-downstream edit/write safety.
-
-Write — enforces Claude-Code-style safety gates: read-before-write for
-existing files, file-modified-since-read detection, post-write read_state
-update.
-
-Edit — enforces read-before-edit, supports string replacement and
-line-range replacement modes, file-modified-since-read detection,
-post-edit read_state update.
+The LLM-facing tool interface (names, schemas, output format) is identical
+in both modes.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
-from pathlib import Path, PurePath
+import shlex
+import uuid
+from pathlib import Path
 from typing import Any, Final
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agentm.core.abi import (
+    BashOperations,
     ExtensionAPI,
     FunctionTool,
+    ResourceWriter,
     TOOL_RESULT_FORMAT_METADATA_KEY,
     TextContent,
     ToolResult,
 )
-from agentm.core.lib import (
-    content_hash_for,
-    file_modified_since_read,
-    get_read_state,
-    record_read,
-)
+from agentm.core.lib import record_read
 from agentm.extensions import ExtensionManifest
+
+from agentm_toolbox import FileToolbox
+from agentm_toolbox._file_ops import Result as ToolboxResult
 
 # ---------------------------------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------------------------------
 
 _ALL_TOOLS: Final[frozenset[str]] = frozenset({"read", "write", "edit"})
+
+_SANDBOX_WORK_DIR_SERVICE: Final[str] = "agent_env.work_dir"
+_TOOLBOX_CONTAINER_DIR: Final[str] = "/opt/agentm-toolbox"
+_TOOLBOX_PKG: Final[str] = "agentm_toolbox"
 
 
 class FileToolsConfig(BaseModel):
@@ -57,10 +56,6 @@ class FileToolsConfig(BaseModel):
     max_size_bytes: int = 262_144
     require_read: bool = True
     default_limit: int = 250
-    # Read the file back after every successful write/edit and fail loudly
-    # if the content on disk differs from what was written. Guards against
-    # silent write loss in remote-sandbox writer backends (observed once in
-    # the wild, unreproduced under stress); costs one read per mutation.
     verify_readback: bool = False
 
     @field_validator("tools")
@@ -100,6 +95,10 @@ def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 
 
+def _toolbox_to_tool_result(r: ToolboxResult) -> ToolResult:
+    return _error(r.text) if r.is_error else _ok(r.text)
+
+
 _PATH_ALIASES: Final[tuple[str, ...]] = ("file_path",)
 
 
@@ -112,7 +111,6 @@ def _required_string_arg(
     allow_empty: bool = False,
     hint: str,
 ) -> tuple[str | None, ToolResult | None]:
-    """Return a required string argument or a model-facing tool error."""
     supplied_name = next((name for name in (key, *aliases) if name in args), None)
     if supplied_name is None:
         alias_text = ""
@@ -146,95 +144,7 @@ def _required_string_arg(
     return value, None
 
 
-def _read_state_path(path: str, cwd: str) -> str:
-    """Return the stable key used for read-before-write/edit state."""
-    if os.path.isabs(path):
-        return os.path.normpath(path)
-    return os.path.normpath(os.path.join(cwd, path))
-
-
-# ---------------------------------------------------------------------------
-# Read helpers
-# ---------------------------------------------------------------------------
-
-# 256 KB — matches Claude Code's MAX_OUTPUT_SIZE (0.25 * 1024 * 1024).
-_DEFAULT_MAX_SIZE_BYTES: Final[int] = 262_144
-
-_BINARY_EXTENSIONS: Final[frozenset[str]] = frozenset(
-    {
-        # Video
-        ".mp4",
-        ".avi",
-        ".mov",
-        ".mkv",
-        ".webm",
-        ".flv",
-        ".wmv",
-        # Audio
-        ".mp3",
-        ".wav",
-        ".flac",
-        ".aac",
-        ".ogg",
-        ".wma",
-        ".m4a",
-        # Image
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".bmp",
-        ".tiff",
-        ".webp",
-        ".ico",
-        ".svg",
-        # Archive
-        ".zip",
-        ".tar",
-        ".gz",
-        ".bz2",
-        ".xz",
-        ".7z",
-        ".rar",
-        # Binary / native
-        ".bin",
-        ".exe",
-        ".dll",
-        ".so",
-        ".dylib",
-        ".o",
-        ".a",
-        ".pyc",
-        ".class",
-        # Documents
-        ".pdf",
-        ".doc",
-        ".docx",
-        ".xls",
-        ".xlsx",
-        ".ppt",
-        ".pptx",
-        # Database
-        ".sqlite",
-        ".db",
-    }
-)
-
-
-def _check_binary(path: str) -> str | None:
-    """Return an error string if *path* looks like a binary file, else None."""
-    ext = PurePath(path).suffix.lower()
-    if ext in _BINARY_EXTENSIONS:
-        return (
-            f"Cannot read binary file {path!r} ({ext} format). "
-            "Use bash to inspect metadata (e.g. `file <path>`, `ls -la <path>`) "
-            "or process it with appropriate tools."
-        )
-    return None
-
-
 def _coerce_globs(value: Any, cwd: str) -> tuple[str, ...]:
-    """Anchor relative glob patterns against the session ``cwd``."""
     if not isinstance(value, list):
         return ()
     out: list[str] = []
@@ -249,7 +159,6 @@ def _coerce_globs(value: Any, cwd: str) -> tuple[str, ...]:
 
 
 def _resolved(path: str) -> str:
-    """Resolve to absolute, symlink-collapsed path for matching."""
     try:
         return str(Path(path).expanduser().resolve(strict=False))
     except (OSError, RuntimeError):
@@ -277,6 +186,11 @@ def _check_path_allowed(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Pydantic arg schemas
+# ---------------------------------------------------------------------------
+
+
 class _ReadArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str = Field(
@@ -298,9 +212,11 @@ class _ReadArgs(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
-# Edit helpers
-# ---------------------------------------------------------------------------
+class _WriteArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(description="File path to write.")
+    content: str = Field(description="The full content to write.")
+    rationale: str = Field(default="agent write via file_tools")
 
 
 class _EditArgs(BaseModel):
@@ -329,140 +245,40 @@ class _EditArgs(BaseModel):
     rationale: str = Field(default="agent edit via file_tools")
 
 
-_CONTEXT_LINES = 4
-_MAX_UNINTENDED_SHRINK_LINES = 5
+# ---------------------------------------------------------------------------
+# Sandbox toolbox uploader
+# ---------------------------------------------------------------------------
 
 
-def _check_shrinkage(
-    original: str, updated: str, old_len: int, new_len: int
-) -> str | None:
-    """Reject edits that delete far more content than the replacement explains."""
-    expected_delta = new_len - old_len
-    actual_delta = len(updated) - len(original)
-    unintended = expected_delta - actual_delta
-    if unintended <= 0:
-        return None
-    lost_lines = original.count("\n") - updated.count("\n")
-    if lost_lines > _MAX_UNINTENDED_SHRINK_LINES:
-        return (
-            f"Edit rejected: this replacement would delete {lost_lines} lines "
-            f"beyond the matched region. This usually means old_string matched "
-            f"more content than intended. Re-read the file and use a more precise "
-            f"old_string, or use start_line/end_line for the exact range."
-        )
-    return None
+def _collect_toolbox_sources() -> dict[str, bytes]:
+    """Collect the agentm_toolbox package source files for container upload."""
+    import agentm_toolbox as _pkg
+
+    pkg_dir = Path(_pkg.__file__).parent
+    sources: dict[str, bytes] = {}
+    for py_file in sorted(pkg_dir.glob("*.py")):
+        rel = f"{_TOOLBOX_PKG}/{py_file.name}"
+        sources[rel] = py_file.read_bytes()
+    return sources
 
 
-_QUOTE_MAP: Final[dict[str, str]] = {
-    "‘": "'",  # left single curly
-    "’": "'",  # right single curly
-    "“": '"',  # left double curly
-    "”": '"',  # right double curly
-}
-
-
-def _normalize_quotes(s: str) -> str:
-    for curly, straight in _QUOTE_MAP.items():
-        s = s.replace(curly, straight)
-    return s
-
-
-def _snippet_around(content: str, start_line: int, end_line: int) -> str:
-    """Return a snippet of *content* showing +-CONTEXT_LINES around [start, end] with line numbers."""
-    lines = content.splitlines()
-    total = len(lines)
-    snippet_start = max(0, start_line - 1 - _CONTEXT_LINES)
-    snippet_end = min(total, end_line + _CONTEXT_LINES)
-    numbered = [
-        f"{snippet_start + i + 1}\t{line}"
-        for i, line in enumerate(lines[snippet_start:snippet_end])
-    ]
-    return "\n".join(numbered)
-
-
-async def _update_read_state_after_edit(
-    path: str,
-    state_key: str,
-    writer: Any,
+async def _upload_toolbox(
+    writer: ResourceWriter, bash_ops: BashOperations, work_dir: str
 ) -> None:
-    """Refresh read_state after a successful edit.
-
-    ``path`` is the path the agent used (the writer backend resolves it
-    against its own working directory, e.g. the sandbox workspace);
-    ``state_key`` is the host-side bookkeeping key. Reading back with the
-    state key would send a host path to a remote backend — wrong file space.
-    """
-    old = get_read_state(state_key)
-    total_lines = old.total_lines if old else 0
-    is_partial = old.is_partial if old else False
-    chash = old.content_hash if old else ""
-    try:
-        raw = await writer.read(path)
-        chash = content_hash_for(raw)
-        total_lines = raw.decode("utf-8", errors="replace").count("\n") + 1
-    except (OSError, FileNotFoundError) as exc:
-        logger.warning(
-            "file_tools: post-edit read({}) failed: {}", path, exc
-        )
-    record_read(
-        state_key,
-        total_lines=total_lines,
-        is_partial=is_partial,
-        content_hash=chash,
+    """Upload the agentm_toolbox package into the sandbox container."""
+    sources = _collect_toolbox_sources()
+    pkg_target = f"{_TOOLBOX_CONTAINER_DIR}/{_TOOLBOX_PKG}"
+    await bash_ops.exec(
+        f"mkdir -p {shlex.quote(pkg_target)}",
+        cwd=work_dir,
+        timeout=10,
     )
-
-
-def _strip_line_whitespace(s: str) -> str:
-    """Strip leading/trailing whitespace from each line, preserving newlines."""
-    return "\n".join(line.strip() for line in s.split("\n"))
-
-
-def _find_actual_string(file_content: str, search: str) -> str | None:
-    """Find *search* in *file_content* with progressive fallbacks.
-
-    Aligned with Claude Code's ``findActualString``:
-    1. Exact match
-    2. Quote-normalized match (curly -> straight)
-    3. Whitespace-trimmed per-line match
-
-    Always returns the ACTUAL string from the file, not the search string.
-    """
-    # 1. Exact match
-    if search in file_content:
-        return search
-
-    # 2. Quote-normalized match
-    norm_search = _normalize_quotes(search)
-    norm_file = _normalize_quotes(file_content)
-    idx = norm_file.find(norm_search)
-    if idx != -1:
-        return file_content[idx : idx + len(norm_search)]
-
-    # 3. Whitespace-trimmed per-line match
-    stripped_search = _strip_line_whitespace(search)
-    stripped_file = _strip_line_whitespace(file_content)
-    idx = stripped_file.find(stripped_search)
-    if idx != -1:
-        orig_lines = file_content.split("\n")
-        prefix = stripped_file[:idx]
-        start_line = prefix.count("\n")
-        search_line_count = stripped_search.count("\n") + 1
-        matched_lines = orig_lines[start_line : start_line + search_line_count]
-        return "\n".join(matched_lines)
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Write helpers
-# ---------------------------------------------------------------------------
-
-
-class _WriteArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    path: str = Field(description="File path to write.")
-    content: str = Field(description="The full content to write.")
-    rationale: str = Field(default="agent write via file_tools")
+    for rel_path, content in sources.items():
+        target = f"{_TOOLBOX_CONTAINER_DIR}/{rel_path}"
+        await writer.write(target, content, rationale="toolbox upload")
+    logger.debug(
+        "file_tools: uploaded {} toolbox files to container", len(sources)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -493,13 +309,29 @@ class _FileToolsRuntime:
 
     def __init__(self, *, api: ExtensionAPI, config: FileToolsConfig) -> None:
         self._api = api
-        self._writer_cache: list[Any] = []
+        self._config = config
         self._enabled_tools = _enabled_tools(config.tools)
         self._allow_globs = _coerce_globs(config.allow_globs, api.cwd)
         self._deny_globs = _coerce_globs(config.deny_globs, api.cwd)
         self._max_size_bytes = config.max_size_bytes
-        self._require_read = config.require_read
-        self._verify_readback = config.verify_readback
+
+        # Detect sandbox vs local mode
+        sandbox_work_dir = api.get_service(_SANDBOX_WORK_DIR_SERVICE)
+        if sandbox_work_dir is not None:
+            self._sandbox = True
+            self._sandbox_work_dir = str(sandbox_work_dir)
+            self._bash_ops = api.get_operations().bash
+            self._writer = api.get_resource_writer()
+            self._toolbox = None
+            self._toolbox_uploaded = False
+        else:
+            self._sandbox = False
+            self._toolbox = FileToolbox(
+                cwd=api.cwd,
+                max_size=config.max_size_bytes,
+                require_read=config.require_read,
+                default_limit=config.default_limit,
+            )
 
     def install(self) -> None:
         if "read" in self._enabled_tools:
@@ -509,41 +341,94 @@ class _FileToolsRuntime:
         if "edit" in self._enabled_tools:
             self._register_edit()
 
-    def _get_writer(self) -> Any:
-        if not self._writer_cache:
-            self._writer_cache.append(self._api.get_resource_writer())
-        return self._writer_cache[0]
+    # -- sandbox exec dispatch ----------------------------------------------
 
-    async def _verify_persisted(self, path: str, expected: bytes) -> str | None:
-        """Confirm a just-written file actually holds ``expected``.
+    async def _ensure_toolbox_uploaded(self) -> None:
+        if not self._sandbox or self._toolbox_uploaded:
+            return
+        assert self._writer is not None
+        assert self._bash_ops is not None
+        await _upload_toolbox(
+            self._writer, self._bash_ops, self._sandbox_work_dir
+        )
+        self._toolbox_uploaded = True
 
-        Returns an agent-facing error message on mismatch, ``None`` when
-        verified. A transient readback failure must not turn a good write
-        into an error, so it only logs.
-        """
-        if not self._verify_readback:
-            return None
-        try:
-            current = await self._get_writer().read(path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "file_tools: readback of {!r} failed, verification skipped: {}",
-                path, exc,
+    async def _exec_toolbox(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> ToolboxResult:
+        await self._ensure_toolbox_uploaded()
+        assert self._bash_ops is not None
+
+        exec_args: dict[str, Any] = {
+            **args,
+            "_cwd": self._sandbox_work_dir,
+            "_max_size": self._max_size_bytes,
+            "_require_read": self._config.require_read,
+        }
+
+        if tool_name == "write" and "content" in exec_args:
+            content_str: str = exec_args.pop("content")
+            tmp = f"/tmp/.agentm-tb-{uuid.uuid4().hex}"
+            assert self._writer is not None
+            await self._writer.write(
+                tmp, content_str.encode("utf-8"), rationale="write content"
             )
-            return None
-        if current == expected:
-            return None
-        logger.error(
-            "file_tools: silent write loss at {!r} — wrote {} bytes, "
-            "file holds {} bytes",
-            path, len(expected), len(current),
+            exec_args["content_file"] = tmp
+
+        json_args = json.dumps(exec_args, ensure_ascii=False)
+        cmd = (
+            f"PYTHONPATH={shlex.quote(_TOOLBOX_CONTAINER_DIR)} "
+            f"python3 -m {_TOOLBOX_PKG} {tool_name} {shlex.quote(json_args)}"
         )
-        return (
-            f"The write to {path!r} reported success, but reading the file "
-            "back shows different content — the change did NOT persist on "
-            "disk. Write the full intended content again, then read the "
-            "file to confirm it before building on it."
+        result = await self._bash_ops.exec(
+            cmd, cwd=self._sandbox_work_dir, timeout=30
         )
+        if result.exit_code != 0 and not result.stdout:
+            stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
+            return ToolboxResult(
+                text=f"toolbox exec failed (exit {result.exit_code}): {stderr_text}",
+                is_error=True,
+            )
+        try:
+            data = json.loads(result.stdout.decode("utf-8", errors="replace"))
+            return ToolboxResult(**data)
+        except (json.JSONDecodeError, TypeError) as exc:
+            stdout_text = result.stdout.decode("utf-8", errors="replace").strip()
+            return ToolboxResult(
+                text=f"toolbox output parse error: {exc}\nraw: {stdout_text[:500]}",
+                is_error=True,
+            )
+
+    # -- dispatch helper ----------------------------------------------------
+
+    async def _dispatch(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> ToolboxResult:
+        if self._sandbox:
+            return await self._exec_toolbox(tool_name, args)
+        assert self._toolbox is not None
+        fn = getattr(self._toolbox, tool_name)
+        return fn(**args)
+
+    # -- sync bridge --------------------------------------------------------
+
+    def _sync_read_state(self, path: str, result: ToolboxResult) -> None:
+        if result.is_error:
+            return
+        state_key = self._read_state_path(path)
+        record_read(
+            state_key,
+            total_lines=result.total_lines,
+            is_partial=result.is_partial,
+            content_hash=result.content_hash,
+        )
+
+    def _read_state_path(self, path: str) -> str:
+        if os.path.isabs(path):
+            return os.path.normpath(path)
+        return os.path.normpath(os.path.join(self._api.cwd, path))
+
+    # -- read ---------------------------------------------------------------
 
     def _register_read(self) -> None:
         self._api.register_tool(
@@ -569,78 +454,28 @@ class _FileToolsRuntime:
 
     async def _read_execute(self, args: dict[str, Any]) -> ToolResult:
         path, arg_error = _required_string_arg(
-            args,
-            "path",
-            "read",
-            aliases=_PATH_ALIASES,
-            hint='{"path": "..."}',
+            args, "path", "read",
+            aliases=_PATH_ALIASES, hint='{"path": "..."}',
         )
         if arg_error is not None:
             return arg_error
         assert path is not None
 
-        gate_error = _check_path_allowed(path, self._allow_globs, self._deny_globs)
+        gate_error = _check_path_allowed(
+            path, self._allow_globs, self._deny_globs
+        )
         if gate_error is not None:
             return _error(gate_error)
 
-        binary_error = _check_binary(path)
-        if binary_error is not None:
-            return _error(binary_error)
+        result = await self._dispatch("read", {
+            "path": path,
+            "offset": args.get("offset"),
+            "limit": args.get("limit"),
+        })
+        self._sync_read_state(path, result)
+        return _toolbox_to_tool_result(result)
 
-        try:
-            data = await self._get_writer().read(path)
-        except Exception as exc:
-            logger.debug("file_tools: read failed for {}: {}", path, exc)
-            return _error(f"Failed to read {path!r}: {exc}")
-
-        raw_offset = args.get("offset")
-        raw_limit = args.get("limit")
-        file_size = len(data)
-        caller_wants_range = raw_offset is not None or raw_limit is not None
-        if file_size > self._max_size_bytes and not caller_wants_range:
-            return _error(
-                f"File content ({file_size} bytes) exceeds maximum "
-                f"allowed size ({self._max_size_bytes} bytes). "
-                "Use offset and limit parameters to read specific "
-                "portions of the file."
-            )
-
-        try:
-            all_lines = data.decode("utf-8", errors="replace").splitlines()
-            total = len(all_lines)
-
-            # Offset: 1-based when provided, 0 means "from beginning".
-            offset = max(0, int(raw_offset) - 1) if raw_offset is not None else 0
-            limit = int(raw_limit) if raw_limit is not None else None
-
-            if limit is not None and limit > 0:
-                sliced = all_lines[offset : offset + limit]
-            else:
-                sliced = all_lines[offset:]
-
-            is_partial = offset > 0 or (
-                limit is not None and limit > 0 and offset + limit < total
-            )
-
-            record_read(
-                _read_state_path(path, self._api.cwd),
-                total_lines=total,
-                is_partial=is_partial,
-                content_hash=content_hash_for(data),
-            )
-
-            numbered = [f"{offset + i + 1}\t{line}" for i, line in enumerate(sliced)]
-
-            if is_partial:
-                end_line = offset + len(sliced)
-                header = f"(showing lines {offset + 1}-{end_line} of {total})"
-            else:
-                header = f"({total} lines total)"
-
-            return _ok(header + "\n" + "\n".join(numbered))
-        except Exception as exc:
-            logger.debug("file_tools: read decode failed for {}: {}", path, exc)
-            return _error(f"Failed to read {path!r}: {exc}")
+    # -- write --------------------------------------------------------------
 
     def _register_write(self) -> None:
         self._api.register_tool(
@@ -660,9 +495,7 @@ class _FileToolsRuntime:
 
     async def _write_execute(self, args: dict[str, Any]) -> ToolResult:
         path, arg_error = _required_string_arg(
-            args,
-            "path",
-            "write",
+            args, "path", "write",
             aliases=_PATH_ALIASES,
             hint='{"path": "...", "content": "..."}',
         )
@@ -671,83 +504,21 @@ class _FileToolsRuntime:
         assert path is not None
 
         content, arg_error = _required_string_arg(
-            args,
-            "content",
-            "write",
+            args, "content", "write",
             allow_empty=True,
             hint='{"path": "...", "content": "..."}',
         )
         if arg_error is not None:
             return arg_error
         assert content is not None
-        rationale = str(args.get("rationale", "agent write via file_tools"))
 
-        read_state_path = _read_state_path(path, self._api.cwd)
-        writer = self._get_writer()
-        try:
-            file_exists = await writer.exists(path)
-        except Exception as exc:
-            # Unknown probe failure (gateway hiccup, transport error): do
-            # NOT assume the file is absent — that would silently disable
-            # the read-before-overwrite guard and allow a blind overwrite
-            # of an existing file. Fail the write instead, in plain words
-            # the agent can act on.
-            logger.warning("file_tools: exists({!r}) probe failed: {}", path, exc)
-            return _error(
-                f"Could not check whether {path!r} already exists "
-                f"(temporary file-system error: {exc}). Nothing was "
-                "written. Retry the write; if it keeps failing, read the "
-                "file first to confirm its state."
-            )
+        result = await self._dispatch("write", {
+            "path": path, "content": content,
+        })
+        self._sync_read_state(path, result)
+        return _toolbox_to_tool_result(result)
 
-        if file_exists and self._require_read:
-            rs = get_read_state(read_state_path)
-            if rs is None:
-                return _error(
-                    f"File {path!r} already exists. Read it first before "
-                    "overwriting so you can see its current content. "
-                    "Use the read tool, then write."
-                )
-            if rs.is_partial:
-                return _error(
-                    f"You read {path!r} with offset/limit (partial view). "
-                    "Read the full file before overwriting."
-                )
-            if rs.content_hash:
-                try:
-                    current_data = await writer.read(path)
-                    current_hash = content_hash_for(current_data)
-                except (OSError, FileNotFoundError):
-                    current_hash = None
-                if current_hash is not None and current_hash != rs.content_hash:
-                    return _error(
-                        "File has been modified since you read it. "
-                        "Read it again before writing."
-                    )
-
-        try:
-            content_bytes = content.encode("utf-8")
-            result = await writer.write(path, content_bytes, rationale=rationale)
-            if result.error is not None:
-                return _error(result.error)
-            loss = await self._verify_persisted(path, content_bytes)
-            if loss is not None:
-                return _error(loss)
-
-            total_lines = content.count("\n") + (1 if content else 0)
-            record_read(
-                read_state_path,
-                total_lines=total_lines,
-                is_partial=False,
-                content_hash=content_hash_for(content_bytes),
-            )
-
-            action = "Updated" if file_exists else "Created"
-            byte_count = len(content.encode("utf-8"))
-            return _ok(f"{action} {path!r} ({byte_count} bytes)")
-        except Exception as exc:
-            logger.debug("file_tools: write failed for {}: {}", path, exc)
-            return _error(f"Failed to write {path!r}: {exc}")
+    # -- edit ---------------------------------------------------------------
 
     def _register_edit(self) -> None:
         self._api.register_tool(
@@ -773,95 +544,9 @@ class _FileToolsRuntime:
             )
         )
 
-    async def _string_replace(
-        self,
-        path: str,
-        original: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool,
-        rationale: str,
-    ) -> ToolResult:
-        actual = _find_actual_string(original, old_string)
-        if actual is None:
-            return _error(f"String not found in {path!r}: {old_string!r}")
-        occurrences = original.count(actual)
-        if not replace_all and occurrences != 1:
-            return _error(
-                f"String is not unique in {path!r}: found {occurrences} matches"
-            )
-        updated = (
-            original.replace(actual, new_string)
-            if replace_all
-            else original.replace(actual, new_string, 1)
-        )
-        shrinkage = _check_shrinkage(original, updated, len(actual), len(new_string))
-        if shrinkage:
-            return _error(shrinkage)
-        result = await self._get_writer().replace(
-            path,
-            original.encode("utf-8"),
-            updated.encode("utf-8"),
-            rationale=rationale,
-        )
-        if result.error is not None:
-            return _error(result.error)
-        loss = await self._verify_persisted(path, updated.encode("utf-8"))
-        if loss is not None:
-            return _error(loss)
-        before_lines = original[: original.index(actual)].count("\n")
-        new_lines_count = new_string.count("\n") + 1
-        snippet = _snippet_around(
-            updated, before_lines + 1, before_lines + new_lines_count
-        )
-        return _ok(f"Updated {path!r}:\n{snippet}")
-
-    async def _line_range_replace(
-        self,
-        path: str,
-        original: str,
-        start: int,
-        end: int,
-        new_string: str,
-        rationale: str,
-    ) -> ToolResult:
-        lines = original.splitlines(keepends=True)
-        total = len(lines)
-        if start < 1 or end < start or start > total:
-            return _error(
-                f"Invalid line range [{start}, {end}] for {path!r} ({total} lines). "
-                "Lines are 1-based."
-            )
-        end = min(end, total)
-        before = lines[: start - 1]
-        after = lines[end:]
-        if new_string and not new_string.endswith("\n"):
-            new_string += "\n"
-        updated = "".join(before) + new_string + "".join(after)
-        replaced_len = sum(len(ln) for ln in lines[start - 1 : end])
-        shrinkage = _check_shrinkage(original, updated, replaced_len, len(new_string))
-        if shrinkage:
-            return _error(shrinkage)
-        result = await self._get_writer().replace(
-            path,
-            original.encode("utf-8"),
-            updated.encode("utf-8"),
-            rationale=rationale,
-        )
-        if result.error is not None:
-            return _error(result.error)
-        loss = await self._verify_persisted(path, updated.encode("utf-8"))
-        if loss is not None:
-            return _error(loss)
-        new_line_count = new_string.count("\n") + 1
-        snippet = _snippet_around(updated, start, start + new_line_count - 1)
-        return _ok(f"Replaced lines {start}-{end} in {path!r}:\n{snippet}")
-
     async def _edit_execute(self, args: dict[str, Any]) -> ToolResult:
         path, arg_error = _required_string_arg(
-            args,
-            "path",
-            "edit",
+            args, "path", "edit",
             aliases=_PATH_ALIASES,
             hint='{"path": "...", "old_string": "...", "new_string": "..."}',
         )
@@ -870,9 +555,7 @@ class _FileToolsRuntime:
         assert path is not None
 
         new_string, arg_error = _required_string_arg(
-            args,
-            "new_string",
-            "edit",
+            args, "new_string", "edit",
             allow_empty=True,
             hint='{"path": "...", "old_string": "...", "new_string": "..."}',
         )
@@ -880,64 +563,13 @@ class _FileToolsRuntime:
             return arg_error
         assert new_string is not None
 
-        old_string = args.get("old_string")
-        start_line = args.get("start_line")
-        end_line = args.get("end_line")
-        replace_all = bool(args.get("replace_all", False))
-        rationale = str(args.get("rationale", "agent edit via file_tools"))
-
-        read_state_path = _read_state_path(path, self._api.cwd)
-        state = get_read_state(read_state_path)
-        if self._require_read and state is None:
-            return _error(
-                f"You must read {path!r} before editing it. "
-                "Use the read tool first so you can see the exact content and line numbers."
-            )
-
-        if state is not None and file_modified_since_read(read_state_path):
-            return _error(
-                f"File has been modified since you last read it. "
-                f"Read {path!r} again before editing."
-            )
-
-        has_old = old_string is not None and old_string != ""
-        has_lines = start_line is not None and end_line is not None
-
-        if has_old and has_lines:
-            return _error("Provide either old_string OR start_line/end_line, not both.")
-        if not has_old and not has_lines:
-            return _error("Provide old_string or start_line + end_line.")
-
-        try:
-            original = (await self._get_writer().read(path)).decode(
-                "utf-8", errors="replace"
-            )
-
-            if start_line is not None and end_line is not None:
-                result = await self._line_range_replace(
-                    path,
-                    original,
-                    int(start_line),
-                    int(end_line),
-                    new_string,
-                    rationale,
-                )
-            else:
-                result = await self._string_replace(
-                    path,
-                    original,
-                    str(old_string),
-                    new_string,
-                    replace_all,
-                    rationale,
-                )
-
-            if not result.is_error:
-                await _update_read_state_after_edit(
-                    path, read_state_path, self._get_writer()
-                )
-
-            return result
-        except Exception as exc:
-            logger.opt(exception=True).warning("edit tool failed for {}: {}", path, exc)
-            return _error(f"Failed to edit {path!r}: {exc}")
+        result = await self._dispatch("edit", {
+            "path": path,
+            "old_string": args.get("old_string"),
+            "new_string": new_string,
+            "start_line": args.get("start_line"),
+            "end_line": args.get("end_line"),
+            "replace_all": bool(args.get("replace_all", False)),
+        })
+        self._sync_read_state(path, result)
+        return _toolbox_to_tool_result(result)
