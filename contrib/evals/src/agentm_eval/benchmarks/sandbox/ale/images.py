@@ -60,6 +60,7 @@ def build_data_image(
     variant: str = "base",
     base_image: str = "busybox:latest",
     venv_base_image: str = "python:3.12",
+    runtime_image: str = "pair-cn-guangzhou.cr.volces.com/opspai/py312-uv:latest",
     pip_index: str | None = "https://pypi.tuna.tsinghua.edu.cn/simple",
     push: bool = False,
 ) -> str:
@@ -89,21 +90,27 @@ def build_data_image(
     ).is_file()
 
     baked = f"{BAKED_DATA_ROOT}/{domain}/{name}/{variant}"
-    lines = [f"FROM {venv_base_image if bake_venv else base_image}"]
     if bake_venv:
         idx = f" UV_DEFAULT_INDEX={pip_index}" if pip_index else ""
-        pip_i = f" -i {pip_index}" if pip_index else ""
-        lines += [
-            f"RUN pip install --no-cache-dir{pip_i} uv",
+        # Multi-stage: build the venv IN the same runtime image the agent runs
+        # in (py312-uv), then copy it into the tiny final image. uv resolves a
+        # task's python (e.g. 3.10) to its managed interpreter under
+        # /root/.local/share/uv/python/…; that exact path only exists in
+        # py312-uv, so a venv baked from a plain python:3.12 base points at an
+        # interpreter absent at run time and `uv sync --frozen` re-downloads
+        # everything. Building from the runtime image makes the baked venv's
+        # interpreter path resolve at run time → runtime sync is a no-op.
+        lines = [
+            f"FROM {runtime_image} AS venvbuild",
             f"COPY {variant}/input {baked}/input",
-            # Build the venv IN PLACE at the baked path; the wrapper skips uv
-            # sync when .venv/bin/python already exists.
             f"RUN cd {baked}/input/runtime_env &&{idx} "
             f"UV_LINK_MODE=copy uv sync --frozen "
             f"|| ({idx} UV_LINK_MODE=copy uv sync)",
+            f"FROM {base_image}",
+            f"COPY --from=venvbuild {baked}/input {baked}/input",
         ]
     else:
-        lines += [f"COPY {variant}/input {baked}/input"]
+        lines = [f"FROM {base_image}", f"COPY {variant}/input {baked}/input"]
     if has_reference:
         lines += [f"COPY {variant}/reference {baked}/reference"]
     if has_software:
