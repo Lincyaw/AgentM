@@ -1,0 +1,482 @@
+"""Serialization codec for trajectory data.
+
+Every field on Turn must be serializable to a JSON-safe dict so that
+TrajectoryStore implementations can write to JSONL, ClickHouse, SQLite,
+or any other backend.
+
+The main challenge is Trigger: it's an open Protocol, so atoms can
+define custom trigger types.  The codec uses a registry of
+TriggerCodec instances keyed by ``source`` string.  Built-in triggers
+have default codecs.  Unknown triggers on deserialization produce a
+``RawTrigger`` that carries the original dict.
+
+Usage::
+
+    registry = CodecRegistry()
+    registry.register_trigger_codec("my_source", MyCodec())
+
+    data = registry.serialize_turn(turn)     # -> JSON-safe dict
+    turn = registry.deserialize_turn(data)   # -> Turn
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from dataclasses import asdict
+from typing import Any, Protocol, runtime_checkable
+
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantMessage,
+    ImageContent,
+    TextContent,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
+)
+from agentm.core.v2.abi.trajectory import (
+    Outcome,
+    Round,
+    ToolRecord,
+    Turn,
+    TurnMeta,
+)
+from agentm.core.v2.abi.trigger import (
+    BackgroundCompletion,
+    ContinueTrigger,
+    Injection,
+    MonitorFire,
+    SubagentResult,
+    Trigger,
+    UserInput,
+)
+
+
+@runtime_checkable
+class TriggerCodec(Protocol):
+    """Serialize/deserialize a custom Trigger type."""
+
+    def serialize(self, trigger: Any) -> dict[str, Any]: ...
+    def deserialize(self, data: dict[str, Any]) -> Trigger: ...
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RawTrigger:
+    """Fallback for triggers whose codec is not registered at load time."""
+
+    source: str = "unknown"
+    data: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+# --- Message serialization --------------------------------------------------
+
+def _serialize_content_block(block: Any) -> dict[str, Any]:
+    if isinstance(block, TextContent):
+        return {"type": "text", "text": block.text}
+    if isinstance(block, ImageContent):
+        return {
+            "type": "image",
+            "data": block.data.hex(),
+            "mime_type": block.mime_type,
+        }
+    if isinstance(block, ThinkingBlock):
+        d: dict[str, Any] = {"type": "thinking", "text": block.text}
+        if block.signature is not None:
+            d["signature"] = block.signature
+        return d
+    if isinstance(block, ToolCallBlock):
+        return {
+            "type": "tool_call",
+            "id": block.id,
+            "name": block.name,
+            "arguments": block.arguments,
+        }
+    if isinstance(block, ToolResultBlock):
+        return {
+            "type": "tool_result",
+            "tool_call_id": block.tool_call_id,
+            "content": [_serialize_content_block(c) for c in block.content],
+            "is_error": block.is_error,
+        }
+    if dataclasses.is_dataclass(block) and not isinstance(block, type):
+        return asdict(block)
+    return {"type": "unknown", "repr": repr(block)[:500]}
+
+
+def _deserialize_content_block(data: dict[str, Any]) -> Any:
+    t = data.get("type")
+    if t == "text":
+        return TextContent(type="text", text=data["text"])
+    if t == "image":
+        return ImageContent(
+            type="image",
+            data=bytes.fromhex(data["data"]),
+            mime_type=data["mime_type"],
+        )
+    if t == "thinking":
+        return ThinkingBlock(
+            type="thinking",
+            text=data["text"],
+            signature=data.get("signature"),
+        )
+    if t == "tool_call":
+        return ToolCallBlock(
+            type="tool_call",
+            id=data["id"],
+            name=data["name"],
+            arguments=data["arguments"],
+        )
+    if t == "tool_result":
+        return ToolResultBlock(
+            type="tool_result",
+            tool_call_id=data["tool_call_id"],
+            content=[_deserialize_content_block(c) for c in data.get("content", [])],
+            is_error=data.get("is_error", False),
+        )
+    return TextContent(type="text", text=repr(data)[:200])
+
+
+def serialize_message(msg: AgentMessage) -> dict[str, Any]:
+    """Convert an AgentMessage to a JSON-safe dict."""
+    if isinstance(msg, UserMessage):
+        return {
+            "role": "user",
+            "content": [_serialize_content_block(b) for b in msg.content],
+            "timestamp": msg.timestamp,
+        }
+    if isinstance(msg, AssistantMessage):
+        d: dict[str, Any] = {
+            "role": "assistant",
+            "content": [_serialize_content_block(b) for b in msg.content],
+            "timestamp": msg.timestamp,
+        }
+        if msg.stop_reason is not None:
+            d["stop_reason"] = msg.stop_reason
+        if msg.usage is not None:
+            d["usage"] = asdict(msg.usage)
+        return d
+    if isinstance(msg, ToolResultMessage):
+        return {
+            "role": "tool_result",
+            "content": [_serialize_content_block(b) for b in msg.content],
+            "timestamp": msg.timestamp,
+        }
+    return {"role": "unknown", "repr": repr(msg)[:500]}
+
+
+def deserialize_message(data: dict[str, Any]) -> AgentMessage:
+    """Reconstruct an AgentMessage from a dict."""
+    role = data.get("role")
+    ts = data.get("timestamp", 0.0)
+    if role == "user":
+        return UserMessage(
+            role="user",
+            content=[_deserialize_content_block(b) for b in data.get("content", [])],
+            timestamp=ts,
+        )
+    if role == "assistant":
+        usage = None
+        if "usage" in data and data["usage"] is not None:
+            u = data["usage"]
+            usage = Usage(
+                input_tokens=u.get("input_tokens", 0),
+                output_tokens=u.get("output_tokens", 0),
+                cache_read=u.get("cache_read", 0),
+                cache_write=u.get("cache_write", 0),
+            )
+        return AssistantMessage(
+            role="assistant",
+            content=[_deserialize_content_block(b) for b in data.get("content", [])],
+            timestamp=ts,
+            stop_reason=data.get("stop_reason"),
+            usage=usage,
+        )
+    if role == "tool_result":
+        return ToolResultMessage(
+            role="tool_result",
+            content=[_deserialize_content_block(b) for b in data.get("content", [])],
+            timestamp=ts,
+        )
+    return UserMessage(
+        role="user",
+        content=[TextContent(type="text", text=repr(data)[:200])],
+        timestamp=ts,
+    )
+
+
+# --- Built-in trigger codecs -----------------------------------------------
+
+class _DataclassTriggerCodec:
+    """Generic codec for frozen dataclass triggers."""
+
+    def __init__(self, cls: type) -> None:
+        self._cls = cls
+
+    def serialize(self, trigger: Any) -> dict[str, Any]:
+        d = asdict(trigger)
+        d["__source__"] = trigger.source
+        return d
+
+    def deserialize(self, data: dict[str, Any]) -> Any:
+        data = dict(data)
+        data.pop("__source__", None)
+        fields = {f.name for f in dataclasses.fields(self._cls)}
+        filtered = {k: v for k, v in data.items() if k in fields}
+        return self._cls(**filtered)
+
+
+class _UserInputCodec:
+    def serialize(self, trigger: UserInput) -> dict[str, Any]:
+        return {
+            "__source__": "user",
+            "content": [_serialize_content_block(b) for b in trigger.content],
+        }
+
+    def deserialize(self, data: dict[str, Any]) -> UserInput:
+        content = tuple(
+            _deserialize_content_block(b) for b in data.get("content", [])
+        )
+        return UserInput(content=content)
+
+
+class _InjectionCodec:
+    def serialize(self, trigger: Injection) -> dict[str, Any]:
+        return {
+            "__source__": "injection",
+            "messages": [serialize_message(m) for m in trigger.messages],
+        }
+
+    def deserialize(self, data: dict[str, Any]) -> Injection:
+        messages = tuple(
+            deserialize_message(m) for m in data.get("messages", [])
+        )
+        return Injection(messages=messages)
+
+
+_BUILTIN_CODECS: dict[str, TriggerCodec] = {
+    "user": _UserInputCodec(),
+    "background": _DataclassTriggerCodec(BackgroundCompletion),
+    "monitor": _DataclassTriggerCodec(MonitorFire),
+    "subagent": _DataclassTriggerCodec(SubagentResult),
+    "continue": _DataclassTriggerCodec(ContinueTrigger),
+    "injection": _InjectionCodec(),
+}
+
+
+# --- CodecRegistry ----------------------------------------------------------
+
+
+_BUILTIN_CAUSES: dict[str, type] = {}
+
+
+def _register_builtin_causes() -> None:
+    from agentm.core.v2.abi.events import (
+        BudgetExhausted,
+        MaxTurnsExhausted,
+        ModelEndTurn,
+        NoPendingInput,
+        ProviderTruncated,
+        SignalAborted,
+        ToolTerminated,
+    )
+    for cls in (
+        ModelEndTurn, ToolTerminated, MaxTurnsExhausted, SignalAborted,
+        ProviderTruncated, BudgetExhausted, NoPendingInput,
+    ):
+        _BUILTIN_CAUSES[cls.__qualname__] = cls
+
+
+class CodecRegistry:
+    """Central registry for trigger codecs + Turn serialization."""
+
+    def __init__(self) -> None:
+        self._trigger_codecs: dict[str, TriggerCodec] = dict(_BUILTIN_CODECS)
+        self._cause_types: dict[str, type] = {}
+        if not _BUILTIN_CAUSES:
+            _register_builtin_causes()
+        self._cause_types.update(_BUILTIN_CAUSES)
+
+    def register_trigger_codec(self, source: str, codec: TriggerCodec) -> None:
+        """Register a codec for a custom trigger source."""
+        self._trigger_codecs[source] = codec
+
+    def register_cause_type(self, cls: type) -> None:
+        """Register a custom TerminationCause subclass for deserialization."""
+        self._cause_types[cls.__qualname__] = cls
+
+    # --- Trigger ---
+
+    def serialize_trigger(self, trigger: Any) -> dict[str, Any]:
+        source = getattr(trigger, "source", "unknown")
+        codec = self._trigger_codecs.get(source)
+        if codec is not None:
+            return codec.serialize(trigger)
+        if dataclasses.is_dataclass(trigger) and not isinstance(trigger, type):
+            d = asdict(trigger)
+            d["__source__"] = source
+            return d
+        return {"__source__": source, "repr": repr(trigger)[:500]}
+
+    def deserialize_trigger(self, data: dict[str, Any]) -> Any:
+        source = data.get("__source__", data.get("source", "unknown"))
+        codec = self._trigger_codecs.get(source)
+        if codec is not None:
+            return codec.deserialize(data)
+        return RawTrigger(source=source, data=data)
+
+    # --- ToolRecord ---
+
+    def _serialize_tool_record(self, tr: ToolRecord) -> dict[str, Any]:
+        return {
+            "call": _serialize_content_block(tr.call),
+            "result": _serialize_content_block(tr.result),
+            "backgrounded": tr.backgrounded,
+        }
+
+    def _deserialize_tool_record(self, data: dict[str, Any]) -> ToolRecord:
+        call = _deserialize_content_block(data["call"])
+        result = _deserialize_content_block(data["result"])
+        return ToolRecord(
+            call=call,
+            result=result,
+            backgrounded=data.get("backgrounded", False),
+        )
+
+    # --- Round ---
+
+    def _serialize_round(self, rnd: Round) -> dict[str, Any]:
+        return {
+            "response": serialize_message(rnd.response),
+            "tool_results": [self._serialize_tool_record(tr) for tr in rnd.tool_results],
+        }
+
+    def _deserialize_round(self, data: dict[str, Any]) -> Round:
+        response = deserialize_message(data["response"])
+        if not isinstance(response, AssistantMessage):
+            response = AssistantMessage(
+                role="assistant", content=[], timestamp=0.0,
+            )
+        tool_results = tuple(
+            self._deserialize_tool_record(tr)
+            for tr in data.get("tool_results", [])
+        )
+        return Round(response=response, tool_results=tool_results)
+
+    # --- Outcome ---
+
+    def _serialize_outcome(self, outcome: Outcome) -> dict[str, Any]:
+        d: dict[str, Any] = {"action": outcome.action}
+        if outcome.cause is not None:
+            if dataclasses.is_dataclass(outcome.cause) and not isinstance(outcome.cause, type):
+                d["cause"] = {
+                    "__type__": type(outcome.cause).__qualname__,
+                    **asdict(outcome.cause),
+                }
+            else:
+                d["cause"] = {"repr": repr(outcome.cause)[:500]}
+        if outcome.injected:
+            d["injected"] = [serialize_message(m) for m in outcome.injected]
+        return d
+
+    def _deserialize_outcome(self, data: dict[str, Any]) -> Outcome:
+        injected = tuple(
+            deserialize_message(m) for m in data.get("injected", [])
+        )
+        raw_cause = data.get("cause")
+        cause: Any = raw_cause
+        if isinstance(raw_cause, dict):
+            type_name = raw_cause.get("__type__")
+            cls = self._cause_types.get(type_name) if type_name else None
+            if cls is not None:
+                fields = {f.name for f in dataclasses.fields(cls)} if dataclasses.is_dataclass(cls) else set()
+                filtered = {k: v for k, v in raw_cause.items() if k in fields}
+                try:
+                    cause = cls(**filtered)
+                except (TypeError, ValueError):
+                    cause = raw_cause
+        return Outcome(
+            action=data.get("action", "stop"),
+            cause=cause,
+            injected=injected,
+        )
+
+    # --- TurnMeta ---
+
+    @staticmethod
+    def _serialize_meta(meta: TurnMeta) -> dict[str, Any]:
+        return asdict(meta)
+
+    @staticmethod
+    def _deserialize_meta(data: dict[str, Any]) -> TurnMeta:
+        return TurnMeta(
+            total_input_tokens=data.get("total_input_tokens", 0),
+            total_output_tokens=data.get("total_output_tokens", 0),
+            cache_read_tokens=data.get("cache_read_tokens", 0),
+            cache_write_tokens=data.get("cache_write_tokens", 0),
+            duration_ns=data.get("duration_ns", 0),
+            model_id=data.get("model_id"),
+        )
+
+    # --- Turn ---
+
+    def serialize_turn(self, turn: Turn) -> dict[str, Any]:
+        """Convert a Turn to a JSON-safe dict for storage."""
+        return {
+            "index": turn.index,
+            "id": turn.id,
+            "trigger": self.serialize_trigger(turn.trigger),
+            "rounds": [self._serialize_round(r) for r in turn.rounds],
+            "outcome": self._serialize_outcome(turn.outcome),
+            "timestamp": turn.timestamp,
+            "meta": self._serialize_meta(turn.meta),
+        }
+
+    def deserialize_turn(self, data: dict[str, Any]) -> Turn:
+        """Reconstruct a Turn from a dict."""
+        return Turn(
+            index=data["index"],
+            id=data["id"],
+            trigger=self.deserialize_trigger(data.get("trigger", {})),
+            rounds=tuple(
+                self._deserialize_round(r) for r in data.get("rounds", [])
+            ),
+            outcome=self._deserialize_outcome(data.get("outcome", {})),
+            timestamp=data.get("timestamp", 0.0),
+            meta=self._deserialize_meta(data.get("meta", {})),
+        )
+
+    # --- SessionMeta ---
+
+    @staticmethod
+    def serialize_session_meta(meta: Any) -> dict[str, Any]:
+        return asdict(meta)
+
+    @staticmethod
+    def deserialize_session_meta(data: dict[str, Any]) -> Any:
+        from agentm.core.v2.abi.store import SessionMeta
+        return SessionMeta(
+            id=data["id"],
+            parent_id=data.get("parent_id"),
+            fork_point=data.get("fork_point"),
+            purpose=data.get("purpose", "root"),
+            cwd=data.get("cwd", ""),
+            created_at=data.get("created_at", 0.0),
+            config=data.get("config", {}),
+        )
+
+
+# Module-level default registry
+DEFAULT_CODEC = CodecRegistry()
+
+
+__all__ = [
+    "CodecRegistry",
+    "DEFAULT_CODEC",
+    "RawTrigger",
+    "TriggerCodec",
+    "deserialize_message",
+    "serialize_message",
+]
