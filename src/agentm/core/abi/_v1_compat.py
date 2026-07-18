@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from agentm.core.abi.bus import Event
+from agentm.core.runtime.extension import ExtensionLoadError as ExtensionLoadError  # noqa: F401
 
 
 # --- ExtensionAPI (v1 atom-facing API) ------------------------------------
@@ -121,13 +122,6 @@ class ExtensionAPI(Protocol):
     def session(self) -> Any: ...
 
     async def wait_inbox_nonempty(self, sources: frozenset[str] | None = None) -> bool: ...
-
-
-class ExtensionLoadError(Exception):
-    def __init__(self, module_path: str, cause: BaseException | None = None) -> None:
-        self.module_path = module_path
-        self.cause = cause
-        super().__init__(f"failed to load extension {module_path!r}: {cause}")
 
 
 class ExtensionStaleError(RuntimeError):

@@ -1,11 +1,10 @@
-"""Session factory — create a v2 Session from a scenario manifest.
+"""Session factory -- create a v2 Session from a scenario manifest.
 
 The factory reads the scenario's manifest.yaml, resolves extensions,
 creates a v2 Session, then installs each atom by calling
-module.install(adapter, config).
+module.install(session, config).
 
-The adapter bridges v1 ExtensionAPI calls to the v2 Session so atoms
-written against v1 work without modification.
+Atoms receive the Session directly (no adapter).
 """
 
 from __future__ import annotations
@@ -95,202 +94,6 @@ def _load_scenario_extensions(
     return extensions, str(sdir)
 
 
-# --- v1 ExtensionAPI adapter -----------------------------------------------
-
-class _ExtensionAPIAdapter:
-    """Bridges v1 ExtensionAPI calls to a v2 Session.
-
-    Atoms call api.on(), api.register_tool(), api.set_service(), etc.
-    This adapter routes those to the Session's v2 equivalents.
-    """
-
-    def __init__(self, session: Session, *, owner: str = "") -> None:
-        self._session = session
-        self._owner = owner
-        self._providers: dict[str, Any] = {}
-
-    # --- Identity ---
-    @property
-    def session_id(self) -> str:
-        return self._session.id
-
-    @property
-    def root_session_id(self) -> str:
-        return self._session.ctx.root_session_id
-
-    @property
-    def parent_session_id(self) -> str | None:
-        return self._session.ctx.parent_session_id
-
-    @property
-    def cwd(self) -> str:
-        return self._session.ctx.cwd
-
-    @property
-    def scenario_dir(self) -> str | None:
-        return self._session.ctx.scenario_dir
-
-    @property
-    def purpose(self) -> str:
-        return self._session.ctx.purpose
-
-    @property
-    def scenario(self) -> str | None:
-        return self._session.ctx.scenario
-
-    @property
-    def lineage(self) -> dict[str, Any] | None:
-        return None
-
-    @property
-    def experiment(self) -> dict[str, Any] | None:
-        return None
-
-    # --- Bus ---
-    def on(self, channel: str, handler: Any, *, priority: int = 500) -> Any:
-        return self._session.bus.on(channel, handler, priority=priority, owner=self._owner)
-
-    @property
-    def events(self) -> Any:
-        return self._session.bus
-
-    # --- Registration ---
-    def register_tool(self, tool: Any) -> None:
-        self._session.register_tool(tool)
-
-    def register_command(self, name: str, spec: Any) -> None:
-        logger.debug("v1 compat: register_command({!r}) is a no-op in v2", name)
-
-    def register_provider(self, name: str, config: Any) -> None:
-        self._providers[name] = config
-
-    def has_provider(self, name: str) -> bool:
-        return name in self._providers
-
-    def register_operations(self, *, bash: Any) -> None:
-        self._session.services.register("_operations_bash", bash)
-
-    def register_message_renderer(self, custom_type: str, renderer: Any) -> None:
-        logger.debug("v1 compat: register_message_renderer({!r}) no-op in v2", custom_type)
-
-    def register_tool_renderer(self, tool_name: str, renderer: Any) -> None:
-        logger.debug("v1 compat: register_tool_renderer({!r}) no-op in v2", tool_name)
-
-    def register_resource_writer(self, writer: Any) -> None:
-        self._session.services.register("_resource_writer", writer)
-
-    # --- Input ---
-    def post_inbox(
-        self,
-        *,
-        source: str,
-        payload: Any,
-        dedup_key: str | None = None,
-        terminal: bool = False,
-    ) -> None:
-        from agentm.core.abi.trigger import BackgroundCompletion, SubagentResult
-        text = str(payload) if payload is not None else ""
-        if source == "subagent":
-            self._session.push_trigger(SubagentResult(
-                child_session_id=dedup_key or "",
-                payload=text,
-                terminal=terminal,
-            ))
-        else:
-            self._session.push_trigger(BackgroundCompletion(
-                task_id=dedup_key or source,
-                payload=text,
-                terminal=terminal,
-            ))
-
-    def track_background(self) -> Any:
-        return self._session.track_background()
-
-    def send_user_message(self, content: str | list[Any]) -> None:
-        from agentm.core.abi.trigger import UserInput
-        from agentm.core.abi.messages import TextContent
-        text = content if isinstance(content, str) else str(content)
-        self._session.push_trigger(UserInput(
-            content=(TextContent(type="text", text=text),),
-        ))
-
-    async def wait_inbox_nonempty(self, sources: frozenset[str] | None = None) -> bool:
-        return await self._session.triggers.wait_quiescent(timeout=None)
-
-    # --- Services ---
-    def set_service(self, name: str, obj: Any) -> None:
-        self._session.services.register(name, obj)
-
-    def get_service(self, name: str) -> Any:
-        return self._session.services.get(name)
-
-    # --- Query ---
-    @property
-    def tools(self) -> list[Any]:
-        return self._session.tools
-
-    @property
-    def model(self) -> Any:
-        return self._session.model
-
-    @property
-    def provider(self) -> Any:
-        return None
-
-    @property
-    def session(self) -> Any:
-        return self._session
-
-    def get_operations(self) -> Any:
-        bash = self._session.services.get("_operations_bash")
-        if bash is None:
-            raise RuntimeError(
-                "no atom registered Operations; the active scenario manifest "
-                "must list an atom that calls api.register_operations(...)"
-            )
-        from agentm.core.abi.operations import Operations
-        return Operations(bash=bash)
-
-    def get_project_layout(self) -> Any:
-        return None
-
-    def get_resource_writer(self) -> Any:
-        return self._session.services.get("_resource_writer")
-
-    def get_session_telemetry(self) -> Any:
-        return None
-
-    # --- Gateway (stubs) ---
-    async def spawn_child_session(self, config: Any) -> Any:
-        raise RuntimeError("spawn_child_session not available via v1 compat adapter")
-
-    def reload_atom(self, name: str, new_source: str, *, agent_initiated: bool = True, rationale: str | None = None) -> Any:
-        raise RuntimeError("reload_atom not available via v1 compat adapter")
-
-    def install_atom(self, *, name: str, source: str, target_path: str | None = None, config: dict[str, Any] | None = None, rationale: str | None = None, agent_initiated: bool = True) -> Any:
-        raise RuntimeError("install_atom not available via v1 compat adapter")
-
-    def unload_atom(self, name: str, *, agent_initiated: bool = True) -> Any:
-        raise RuntimeError("unload_atom not available via v1 compat adapter")
-
-    def list_atoms(self) -> list[Any]:
-        return []
-
-    def freeze_current(self, name: str) -> str:
-        raise RuntimeError("freeze_current not available via v1 compat adapter")
-
-    def is_constitution_path(self, path: str) -> bool:
-        return False
-
-    @property
-    def catalog(self) -> Any:
-        return None
-
-    def add_observer(self, callback: Any) -> Any:
-        logger.debug("v1 compat: add_observer is a no-op in v2")
-        return lambda: None
-
-
 # --- Factory ----------------------------------------------------------------
 
 
@@ -312,7 +115,7 @@ async def create_session(
     """Create a v2 Session from a scenario manifest.
 
     Loads extensions from the scenario, creates the Session, then installs
-    each atom through the v1 compat adapter so existing atoms work unchanged.
+    each atom by passing the Session directly.
     """
 
     extensions, resolved_scenario_dir = _load_scenario_extensions(
@@ -351,13 +154,12 @@ async def create_session(
         purpose=purpose,
     )
 
-    # Install atoms via compat adapter
-    adapter = _ExtensionAPIAdapter(session, owner="factory")
+    # Install atoms -- pass Session directly
     for module_path, config in extensions:
         if not module_path:
             continue
         try:
-            result = load_extension(module_path, adapter, config)
+            result = load_extension(module_path, session, config)
             if inspect.isawaitable(result):
                 await result
             logger.debug("installed atom: {}", module_path)

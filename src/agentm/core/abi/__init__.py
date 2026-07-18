@@ -275,7 +275,13 @@ from .roles import (
     WIRE_OUTBOUND_SERVICE,
 )
 
-# -- v1 backward compat (atoms still import these) -----------------------
+# -- extension errors --------------------------------------------------------
+from agentm.core.runtime.extension import ExtensionLoadError  # noqa: F401
+
+# -- v1 types still referenced by atoms (event channels, domain types) ------
+# These are NOT v1 API types -- they are event types with CHANNEL class vars
+# and domain types that atoms still use at runtime. They remain until the
+# atoms are migrated to v2 equivalents.
 from ._v1_compat import (  # noqa: F401
     AgentEndEvent,
     AgentLoop,
@@ -310,7 +316,6 @@ from ._v1_compat import (  # noqa: F401
     EventBusObserver,
     ExtensionAPI,
     ExtensionInstallEvent,
-    ExtensionLoadError,
     ExtensionReloadEvent,
     ExtensionStaleError,
     ExtensionUnloadEvent,
