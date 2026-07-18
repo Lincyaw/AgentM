@@ -4,7 +4,7 @@ Serialize: dataclass → JSON-compatible dict (``serialize_payload``).
 Deserialize: JSON dict → typed ``UserMessage``/``AssistantMessage``/
 ``ToolResultMessage`` (``deserialize_payload``).
 
-Used by ``SessionManager`` for on-disk persistence. The bytes encoding
+Used by trajectory stores for on-disk persistence. The bytes encoding
 (``{"__bytes__": [...]}``\\ ) is the established on-disk format; do not
 change without a migration.
 """

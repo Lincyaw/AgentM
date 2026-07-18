@@ -1,8 +1,6 @@
 """Extension loader — import an atom module and call its install().
 
-Stripped to the essential load_extension() function for v2.  The v1
-_ExtensionAPIImpl and its mixin hierarchy are removed; atoms now receive
-the v2 Session (or a compat adapter) directly.
+Atoms receive the Session object directly.
 """
 
 from __future__ import annotations

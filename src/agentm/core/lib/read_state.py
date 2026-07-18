@@ -6,7 +6,7 @@ whether the file was fully or only partially read.
 
 State is keyed by ``(session_id, normalized_path)``.  The active session is
 bound on the :data:`_CURRENT_SESSION` ContextVar by the session driver
-(:meth:`AgentSession._driver`) via :func:`bind_session`; asyncio tasks copy
+via :func:`bind_session`; asyncio tasks copy
 the context at creation, so when many sessions run concurrently in one
 process (batch evaluation) each session's read-before-edit state is isolated
 and one session's read/edit of a path cannot clobber another's.  Calls made

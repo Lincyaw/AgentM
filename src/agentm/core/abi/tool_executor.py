@@ -218,7 +218,7 @@ async def _execute_in_process(
 
     The implementation is spawn-backed. Process-domain tools must therefore be
     pickleable/importable and pure with respect to the parent runtime: child
-    writes to the event bus, session manager, or ExtensionAPI state do not
+    writes to the event bus or session state do not
     mutate the parent process.
     """
 

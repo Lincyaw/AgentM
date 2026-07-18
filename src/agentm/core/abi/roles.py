@@ -83,17 +83,15 @@ look it up via ``api.get_service(SESSION_STORE_SERVICE)``."""
 
 LOOP_BUDGET_SERVICE: Final = "loop_budget"
 """``service_registry`` key under which the ``loop_budget`` atom publishes a
-:class:`~agentm.core.abi.loop.LoopConfig`. The session factory reads it just
-before constructing the :class:`AgentLoop` to set the scenario's turn / tool
-budget. Absent ⇒ the substrate falls back to ``LoopConfig()`` (no cap). An
-explicit caller override (CLI ``--max-turns`` / SDK ``loop_config=``) takes
-precedence over whatever the atom registered."""
+loop config. The session factory reads it to set the scenario's turn / tool
+budget. Absent means no cap. An explicit caller override (CLI ``--max-turns``)
+takes precedence over whatever the atom registered."""
 
 MODEL_RESOLVER_SERVICE: Final = "model_resolver"
 """``service_registry`` key under which the session factory publishes a
 callable ``(model_name: str) -> tuple[str, dict[str, Any]] | None`` that
 resolves a ``config.toml`` profile name to a provider tuple suitable for
-``AgentSessionConfig.provider``.  Atoms that need model resolution (e.g.
+the session config.  Atoms that need model resolution (e.g.
 ``workflow`` for its ``model=`` parameter) use this service instead of
 importing presenter-layer modules directly."""
 

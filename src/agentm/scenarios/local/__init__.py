@@ -1,1 +1,0 @@
-"""Packaged local scenario resource."""

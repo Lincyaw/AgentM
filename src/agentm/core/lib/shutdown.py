@@ -3,7 +3,7 @@
 Single source of truth for the grace window every atom/session bus drain
 gives still-running asyncio tasks before forcing cancellation. Lives in
 ``core.lib`` so atoms (``background_exec``, ``sub_agent``, ``monitor``) and
-the substrate (``AgentSession.shutdown``) import the same number — drifting
+the substrate (``Session.shutdown``) import the same number — drifting
 copies of ``5.0`` was a recurring boundary-review finding.
 """
 
