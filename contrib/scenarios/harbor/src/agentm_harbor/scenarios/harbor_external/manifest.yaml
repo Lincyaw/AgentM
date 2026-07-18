@@ -1,0 +1,35 @@
+name: harbor_external
+description: |
+  AgentM as Harbor external agent.
+  Agent runs locally; bash and file operations execute in Harbor's
+  sandbox container via BaseEnvironment.
+
+extensions:
+  - module: agentm_harbor.harbor_ops
+    config:
+      work_dir: /
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+    config:
+      default_timeout: 1200
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
+  - module: agentm.extensions.builtin.tool_error_messages
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm.extensions.builtin.thinking_retry
+  - module: agentm.extensions.builtin.completion_guard
+    config:
+      confirmations: 1

@@ -1,18 +1,15 @@
-"""Harbor agent adapter for AgentM.
+"""Harbor external agent adapter for AgentM.
 
-Usage::
+AgentM runs on the host; tool calls (bash, file I/O) route through
+Harbor's ``BaseEnvironment`` into the sandbox container.  Trajectory
+is managed locally by AgentM's own trace layer.
+
+::
 
     harbor trial start -p <task> \\
-        --agent-import-path agentm_harbor:AgentMAgent \\
-        -m doubao \\
-        --ae AGENTM_API_KEY=... \\
-        --ae AGENTM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-
-Install into Harbor's tool environment::
-
-    uv tool install harbor --with agentm-harbor
+        --agent-import-path agentm_harbor:ExternalAgentMAgent ...
 """
 
-from agentm_harbor.agent import AgentMAgent
+from agentm_harbor.external_agent import ExternalAgentMAgent
 
-__all__ = ["AgentMAgent"]
+__all__ = ["ExternalAgentMAgent"]
