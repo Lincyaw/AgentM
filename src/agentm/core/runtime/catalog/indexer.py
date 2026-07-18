@@ -204,7 +204,7 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
     """Index a single observability trace into the catalog.
 
     ``root`` is interpreted as the **cwd** (parent of ``.agentm/``); pass the
-    same value the runtime uses for ``AgentSessionConfig.cwd``. ``None``
+    same value the runtime uses for the session cwd. ``None``
     derives the cwd from the trace path layout.
     """
 

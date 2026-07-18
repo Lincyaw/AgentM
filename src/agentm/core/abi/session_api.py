@@ -1,7 +1,6 @@
 """AtomAPI — the complete surface atoms interact with.
 
-This is the v2 equivalent of v1's ``ExtensionAPI``.  14 methods instead
-of 37, with clear type contracts and no ``Any`` leaks.
+15 methods with clear type contracts and no ``Any`` leaks.
 
 SessionContext propagates through the session graph like Go's
 context.Context — every child session inherits the parent's context

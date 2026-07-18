@@ -326,7 +326,7 @@ def otlp_export_reachable() -> bool:
 # :class:`LocalFileSink`. Selection happens in :func:`setup_process_telemetry`
 # / :func:`setup_session_telemetry` and nowhere else — a single attach site is
 # what rules out double export by construction. Explicit ``file_path``
-# (SessionManager persistence) and the ``AGENTM_OBSERVABILITY_DIR`` opt-in
+# (trajectory store persistence) and the ``AGENTM_OBSERVABILITY_DIR`` opt-in
 # additionally force a file sink regardless of collector reachability.
 
 
@@ -756,7 +756,7 @@ class SessionTelemetry:
     # --- Observability-atom-populated context ------------------------------
     # The observability atom stamps these in its install() so each
     # per-event translator has session-scoped metadata without re-reaching
-    # for ``ExtensionAPI``. Empty defaults keep the substrate's construction
+    # for the session object. Empty defaults keep the substrate's construction
     # path side-effect-free.
     obs_root_session_id: str = ""
     obs_parent_session_id: str = ""
@@ -870,7 +870,7 @@ class SessionTelemetry:
 
         The PR-A ``FileLogExporter`` writes one OTLP ``ResourceLogs``
         element per line. The ``event_name`` plays the role of the OTel
-        "event name" — consumers (session_manager, indexer,
+        "event name" — consumers (trajectory store, indexer,
         query_traces, llmharness CLI) filter on it instead of on a
         legacy ``kind`` field.
 
@@ -922,7 +922,7 @@ def setup_session_telemetry(
     exporter, so concurrent sessions never cross-contaminate.
 
     The output path defaults to ``$AGENTM_HOME/observability/<session_id>.jsonl``.
-    Callers that already know the absolute path (e.g. :class:`SessionManager`
+    Callers that already know the absolute path (e.g. the trajectory store
     direct-write callers) may override via ``file_path``; the ``cwd``
     argument is then only used as a hint for resolving the default.
 
@@ -943,7 +943,7 @@ def setup_session_telemetry(
 
     tracer_provider, logger_provider = setup_process_telemetry()
 
-    # File export: explicit path (SessionManager persistence), user opt-in
+    # File export: explicit path (trajectory store persistence), user opt-in
     # via AGENTM_OBSERVABILITY_DIR, or automatic fallback when no OTLP
     # sink is attached (so traces are never silently lost).
     write_files = file_path is not None or file_export_requested() or not otlp_is_active()
