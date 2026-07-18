@@ -8,6 +8,7 @@ entry point.
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
 from contextlib import contextmanager
 from typing import Iterator
@@ -23,7 +24,11 @@ from agentm.core.v2.abi.context import (
     PolicyContext,
     build_context_sync,
 )
-from agentm.core.v2.abi.events import SessionShutdownEvent
+from agentm.core.v2.abi.events import (
+    ChildSessionStartEvent,
+    SessionReadyEvent,
+    SessionShutdownEvent,
+)
 from agentm.core.v2.abi.services import ServiceRegistry
 from agentm.core.v2.abi.session_api import SessionContext
 from agentm.core.v2.abi.store import SessionMeta, TrajectoryStore
@@ -115,6 +120,8 @@ class Session:
             parent_session_id=self.ctx.parent_session_id,
             services={n: self.services.get(n) for n in self.services.names()},
             store=self.store,
+            model=self._model,
+            stream_fn=self._stream_fn,
         )
         for policy in self.context_policies:
             if hasattr(policy, "bind"):
@@ -127,6 +134,10 @@ class Session:
             self._run_driver(),
             name=f"v2-driver-{self.id}",
         )
+        self.bus.emit_sync(SessionReadyEvent.CHANNEL, SessionReadyEvent(
+            session_id=self.id,
+            tool_names=tuple(t.name for t in self.tools),
+        ))
 
     async def _run_driver(self) -> None:
         try:
@@ -247,6 +258,10 @@ class Session:
     def register_trigger_renderer(self, source: str, renderer: TriggerRenderer) -> None:
         self.trigger_renderers[source] = renderer
 
+    def register_trigger_codec(self, source: str, codec: object) -> None:
+        from agentm.core.v2.abi.codec import DEFAULT_CODEC
+        DEFAULT_CODEC.register_trigger_codec(source, codec)  # type: ignore[arg-type]
+
     def register_lifecycle_hook(self, hook: LifecycleHook) -> None:
         self.lifecycle.register(hook)
 
@@ -291,7 +306,7 @@ class Session:
             model=model or self._model,
             tools=tools if tools is not None else list(self.tools),
             system=system if system is not None else self.system,
-            context_policies=list(self.context_policies),
+            context_policies=[copy.copy(p) for p in self.context_policies],
             trigger_renderers=dict(self.trigger_renderers),
             max_turns=max_turns or self._max_turns,
             thinking=self._thinking,
@@ -313,6 +328,16 @@ class Session:
                 purpose=purpose,
                 edge_kind="spawned",
             )
+
+        await self.bus.emit(ChildSessionStartEvent.CHANNEL, ChildSessionStartEvent(
+            child_session_id=child.id,
+            parent_session_id=self.id,
+            purpose=purpose,
+        ))
+
+        # TODO: ChildSessionEndEvent requires a parent-bus reference on the
+        # child so shutdown() can notify the parent. Deferred until the
+        # session graph carries bus references.
 
         return child
 
@@ -338,7 +363,7 @@ class Session:
             stream_fn=source._stream_fn,
             model=source._model,
             system=source.system,
-            context_policies=list(source.context_policies),
+            context_policies=[copy.copy(p) for p in source.context_policies],
             trigger_renderers=dict(source.trigger_renderers),
             max_turns=source._max_turns,
             thinking=source._thinking,

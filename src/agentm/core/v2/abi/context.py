@@ -27,7 +27,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from agentm.core.abi.stream import Model, StreamFn
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -57,6 +60,8 @@ class PolicyContext:
     parent_session_id: str | None = None
     services: dict[str, Any] | None = None
     store: Any | None = None
+    model: "Model | None" = None
+    stream_fn: "StreamFn | None" = None
 
 
 @runtime_checkable

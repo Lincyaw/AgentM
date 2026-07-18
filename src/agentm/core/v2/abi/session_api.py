@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.stream import Model
@@ -23,10 +23,8 @@ from agentm.core.v2.abi.context import ContextPolicy
 from agentm.core.v2.abi.lifecycle import LifecycleHook
 from agentm.core.v2.abi.services import ServiceRegistry
 from agentm.core.v2.abi.trajectory import Turn
+from agentm.core.v2.abi.codec import TriggerCodec
 from agentm.core.v2.abi.trigger import Trigger, TriggerRenderer
-
-if TYPE_CHECKING:
-    pass
 
 Unsubscribe = Callable[[], None]
 
@@ -114,6 +112,10 @@ class AtomAPI(Protocol):
         self, source: str, renderer: TriggerRenderer
     ) -> None: ...
 
+    def register_trigger_codec(self, source: str, codec: TriggerCodec) -> None:
+        """Register a codec for custom trigger persistence."""
+        ...
+
     def register_lifecycle_hook(self, hook: LifecycleHook) -> None:
         """Register a hook for fork/resume/replay/abandon events."""
         ...
@@ -155,7 +157,7 @@ class AtomAPI(Protocol):
         scenario: str | None = None,
         cwd: str | None = None,
         max_turns: int | None = None,
-        extra_services: dict[str, object] | None = None,
+        extra_services: ServiceRegistry | None = None,
     ) -> "SpawnedSession":
         """Spawn a child session inheriting parent's config.
 
