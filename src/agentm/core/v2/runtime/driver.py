@@ -130,7 +130,7 @@ def _assemble_assistant_message(
         content.append(TextContent(type="text", text="".join(text_buf)))
     return AssistantMessage(
         role="assistant", content=content, timestamp=time.time(),
-        stop_reason="end_turn",
+        stop_reason="incomplete_stream",
     )
 
 
@@ -187,9 +187,11 @@ def _trigger_carries_terminal(trigger: Trigger) -> TerminationCause | None:
     return None
 
 
-def _meta(inp: int, out: int, start_ns: int, model: Any = None) -> TurnMeta:
+def _meta(inp: int, out: int, start_ns: int, model: Any = None,
+          cache_read: int = 0, cache_write: int = 0) -> TurnMeta:
     return TurnMeta(
         total_input_tokens=inp, total_output_tokens=out,
+        cache_read_tokens=cache_read, cache_write_tokens=cache_write,
         duration_ns=time.perf_counter_ns() - start_ns,
         model_id=getattr(model, "id", None),
     )
@@ -294,7 +296,10 @@ async def drive(
                 except Exception:
                     logger.exception("store.append failed; turn committed to trajectory but not persisted")
 
-            await bus.emit(TurnCommittedEvent.CHANNEL, TurnCommittedEvent(turn=turn))
+            try:
+                await bus.emit(TurnCommittedEvent.CHANNEL, TurnCommittedEvent(turn=turn))
+            except asyncio.CancelledError:
+                logger.debug("TurnCommittedEvent emit interrupted by cancellation")
             turns_run += 1
 
             if outcome.action == "stop":
@@ -343,6 +348,8 @@ async def _react_loop(
 
     total_input = 0
     total_output = 0
+    total_cache_read = 0
+    total_cache_write = 0
     start_ns = time.perf_counter_ns()
     trigger_messages = render_trigger(trigger, trigger_renderers)
 
@@ -355,7 +362,7 @@ async def _react_loop(
     ))
     veto = _last_key(before_returns, "veto")
     if veto is not None:
-        return Outcome(action="stop", cause=veto), _meta(0, 0, start_ns)
+        return Outcome(action="stop", cause=veto), _meta(0, 0, start_ns, cache_read=0, cache_write=0)
     replacement_msgs = _last_key(before_returns, "messages")
     if isinstance(replacement_msgs, list):
         messages = replacement_msgs
@@ -366,7 +373,7 @@ async def _react_loop(
     round_index = 0
     while True:
         if signal is not None and signal.is_set():
-            return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns)
+            return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns, cache_read=total_cache_read, cache_write=total_cache_write)
 
         # Multi-round: rebuild context so policies re-run with fresh state
         if round_index > 0:
@@ -424,6 +431,8 @@ async def _react_loop(
         if response.usage is not None:
             total_input += response.usage.input_tokens
             total_output += response.usage.output_tokens
+            total_cache_read += response.usage.cache_read
+            total_cache_write += response.usage.cache_write
 
         messages.append(response)
 
@@ -437,7 +446,7 @@ async def _react_loop(
             for tc in tool_calls:
                 if signal is not None and signal.is_set():
                     execution.add_round(response, tool_records)
-                    return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns)
+                    return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns, cache_read=total_cache_read, cache_write=total_cache_write)
 
                 tc_returns = await bus.emit(ToolCallEvent.CHANNEL, ToolCallEvent(
                     tool_call_id=tc.id, tool_name=tc.name, args=dict(tc.arguments),
@@ -529,7 +538,7 @@ async def _react_loop(
 
         if isinstance(action, Stop):
             cause = action.cause if action.cause is not None else ModelEndTurn()
-            return Outcome(action="stop", cause=cause), _meta(total_input, total_output, start_ns, effective_model)
+            return Outcome(action="stop", cause=cause), _meta(total_input, total_output, start_ns, effective_model, cache_read=total_cache_read, cache_write=total_cache_write)
 
         if isinstance(action, Inject):
             # B2 fix: Inject continues inline — store on Execution so

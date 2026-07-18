@@ -196,6 +196,9 @@ class BeforeRunEvent(Event):
 
     Handlers return ``{"veto": TerminationCause}`` to abort, or
     ``{"messages": [...]}`` / ``{"system": "..."}`` to override.
+    ``system`` override persists across all rounds; ``messages``
+    override applies to round 0 only (subsequent rounds rebuild
+    context from trajectory + policies).
     """
     CHANNEL: ClassVar[str] = "before_run"
     messages: tuple[AgentMessage, ...] = ()
