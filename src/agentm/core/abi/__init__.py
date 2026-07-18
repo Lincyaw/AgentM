@@ -176,17 +176,6 @@ from .lifecycle import (
 from .manifest import ChannelEffects as ChannelEffects
 from .manifest import ExtensionManifest as ExtensionManifest
 
-# -- presenter ---------------------------------------------------------------
-from .presenter import PHASE_GLYPHS, Phase
-
-# -- provider ----------------------------------------------------------------
-from .provider import ProviderConfig, ProviderManifest, ProviderResolver
-
-# -- retry -------------------------------------------------------------------
-from .retry import RetryPolicy
-
-# -- telemetry ---------------------------------------------------------------
-from .telemetry import SessionTelemetry
 
 # -- messages ----------------------------------------------------------------
 from .messages import (
@@ -307,6 +296,18 @@ from .roles import (
     WIRE_CHILD_FORWARDER_SERVICE,
     WIRE_OUTBOUND_SERVICE,
 )
+
+# -- presenter ---------------------------------------------------------------
+from .presenter import PHASE_GLYPHS, Phase  # noqa: F401
+
+# -- provider ----------------------------------------------------------------
+from .provider import ProviderConfig, ProviderManifest, ProviderResolver  # noqa: F401
+
+# -- retry -------------------------------------------------------------------
+from .retry import RetryPolicy  # noqa: F401
+
+# -- telemetry ---------------------------------------------------------------
+from .telemetry import SessionTelemetry  # noqa: F401
 
 # -- extension errors --------------------------------------------------------
 from agentm.core.runtime.extension import ExtensionLoadError  # noqa: F401
