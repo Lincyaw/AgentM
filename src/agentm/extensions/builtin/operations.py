@@ -18,7 +18,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 
@@ -61,8 +60,8 @@ MANIFEST = ExtensionManifest(
 class _OperationsRuntime:
     """Install-time backend dispatcher for the unified operations atom."""
 
-    def __init__(self, api: ExtensionAPI, config: OperationsConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: OperationsConfig) -> None:
+        self._session = session
         self._config = config
 
     async def install(self) -> None:
@@ -78,7 +77,7 @@ class _OperationsRuntime:
         # Sub-installers expect a plain dict; forward the full model dump.
         from agentm.extensions.builtin.bash.local import install_local
 
-        install_local(self._api, self._config.model_dump())
+        install_local(self._session, self._config.model_dump())
 
     async def _install_agent_env(self) -> None:
         from agentm.extensions.builtin._agent_env import (
@@ -87,13 +86,13 @@ class _OperationsRuntime:
         )
 
         await install_agent_env(
-            self._api,
+            self._session,
             AgentEnvConfig.model_validate(self._config.model_dump(exclude={"backend"})),
         )
 
 
-async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
-    await _OperationsRuntime(api, config).install()
+async def install(session: Any, config: OperationsConfig) -> None:
+    await _OperationsRuntime(session, config).install()
 
 
 __all__ = (

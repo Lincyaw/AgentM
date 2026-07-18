@@ -20,10 +20,11 @@ substrate default (``LoopConfig()`` — no cap) applies.
 """
 
 from __future__ import annotations
+from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import CommandSpec, ExtensionAPI, LOOP_BUDGET_SERVICE, LoopConfig
+from agentm.core.abi import CommandSpec, LOOP_BUDGET_SERVICE, LoopConfig
 from agentm.extensions import ExtensionManifest
 
 
@@ -44,8 +45,8 @@ MANIFEST = ExtensionManifest(
 
 
 class _LoopBudgetRuntime:
-    def __init__(self, api: ExtensionAPI, config: LoopBudgetConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: LoopBudgetConfig) -> None:
+        self._session = session
         self._loop_config = LoopConfig(
             max_turns=_positive_int_or_none_from_model(config.max_turns, "max_turns"),
             max_tool_calls=_positive_int_or_none_from_model(
@@ -54,8 +55,8 @@ class _LoopBudgetRuntime:
         )
 
     def install(self) -> None:
-        self._api.set_service(LOOP_BUDGET_SERVICE, self._loop_config)
-        self._api.register_command(
+        self._session.services.register(LOOP_BUDGET_SERVICE, self._loop_config)
+        self._session_stub_register_command(
             "loop",
             CommandSpec(
                 description="Show this session's agent-loop turn/tool budget.",
@@ -63,9 +64,9 @@ class _LoopBudgetRuntime:
             ),
         )
 
-    async def loop_command(self, _args: str, cmd_api: ExtensionAPI) -> None:
+    async def loop_command(self, _args: str, cmd_api: Any) -> None:
         cfg = cmd_api.session.get_loop_config()
-        cmd_api.send_user_message(
+        cmd_api._v2_send_user_stub(
             "Loop budget: "
             f"max_turns={_render_limit(cfg.max_turns)}, "
             f"max_tool_calls={_render_limit(cfg.max_tool_calls)}, "
@@ -73,8 +74,8 @@ class _LoopBudgetRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
-    _LoopBudgetRuntime(api, config).install()
+def install(session: Any, config: LoopBudgetConfig) -> None:
+    _LoopBudgetRuntime(session, config).install()
 
 
 def _render_limit(value: int | None) -> str:

@@ -2,7 +2,7 @@
 
 The ``llm_compaction`` atom replaces old turns with a structured summary that
 cites them as ``[Turn N]``. The raw turns are never deleted from the session
-tree, so this tool reads ``api.session.get_branch()`` and returns the verbatim
+tree, so this tool reads ``None  # v2: readonly session pending.get_branch()`` and returns the verbatim
 messages for a turn (or turn range) on demand. Turn numbering is shared with
 the compaction engine via :func:`agentm.core.lib.enumerate_turns`, so the
 ``[Turn N]`` markers in a summary line up with what this tool accepts.
@@ -21,7 +21,6 @@ from typing import Any
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ThinkingBlock,
@@ -72,13 +71,13 @@ class _ReadHistoryArgs(BaseModel):
 
 
 class _ReadHistoryRuntime:
-    def __init__(self, api: ExtensionAPI, config: ReadHistoryConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: ReadHistoryConfig) -> None:
+        self._session = session
         self._tool_result_max_tokens = config.tool_result_max_tokens
         self._total_max_tokens = config.total_max_tokens
 
     def install(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="read_history",
                 description=(
@@ -96,14 +95,14 @@ class _ReadHistoryRuntime:
         )
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
-        model_name = self._api.model.id if self._api.model is not None else None
+        model_name = self._session.model.id if self._session.model is not None else None
         start = int(args["start"])
         end_raw = args.get("end")
         end = int(end_raw) if end_raw is not None else start
         if end < start:
             start, end = end, start
 
-        turns = enumerate_turns(self._api.session.get_branch())
+        turns = enumerate_turns(self._session.session.get_branch())
         if not turns:
             return _error("No turns recorded yet.")
         last = turns[-1].index
@@ -131,8 +130,8 @@ class _ReadHistoryRuntime:
         return _ok(rendered)
 
 
-def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
-    _ReadHistoryRuntime(api, config).install()
+def install(session: Any, config: ReadHistoryConfig) -> None:
+    _ReadHistoryRuntime(session, config).install()
 
 
 def _render_turn(turn: Turn, tool_result_cap: int, model_name: str | None) -> str:

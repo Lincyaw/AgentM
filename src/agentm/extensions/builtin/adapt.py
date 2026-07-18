@@ -22,9 +22,8 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
-    BeforeAgentStartEvent,
+    BeforeRunEvent,
     DiagnosticEvent,
-    ExtensionAPI,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
     FunctionTool,
@@ -150,7 +149,7 @@ class _InstallParams(_StrictParams):
     source: str = Field(
         description=(
             "Full Python source for the atom. Must define MANIFEST and "
-            "install(api, config), and pass the runtime atom contract."
+            "install(session, config), and pass the runtime atom contract."
         )
     )
     rationale: str = Field(
@@ -160,7 +159,7 @@ class _InstallParams(_StrictParams):
     )
     config: dict[str, Any] | None = Field(
         default=None,
-        description="Optional config passed to install(api, config).",
+        description="Optional config passed to install(session, config).",
     )
     scope: Literal["user", "scenario"] = Field(
         default="user",
@@ -199,7 +198,7 @@ class _InstallFileParams(_StrictParams):
     )
     config: dict[str, Any] | None = Field(
         default=None,
-        description="Optional config passed to install(api, config).",
+        description="Optional config passed to install(session, config).",
     )
     scope: Literal["user", "scenario"] = Field(
         default="user",
@@ -367,7 +366,7 @@ def _event_payload(event_cls: type[Any]) -> dict[str, Any] | None:
         "doc": doc,
         "hook": _hook_payload(event_cls, doc),
         "subscribe_example": (
-            f"api.on({event_cls.__name__}.CHANNEL, _on_{channel.replace('-', '_')})"
+            f"session.bus.on({event_cls.__name__}.CHANNEL, _on_{channel.replace('-', '_')})"
         ),
     }
 
@@ -474,7 +473,6 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -510,7 +508,7 @@ def _snapshot(event: Any) -> dict[str, Any]:
     return payload
 
 
-def install(api: ExtensionAPI, config: dict[str, Any] | None = None) -> None:
+def install(session: Any, config: dict[str, Any] | None = None) -> None:
     state: dict[str, Any] = {{"count": 0, "recent": []}}
 
     def _on_event(event: {event_type}) -> None:
@@ -530,8 +528,8 @@ def install(api: ExtensionAPI, config: dict[str, Any] | None = None) -> None:
             ]
         )
 
-    api.on({event_type}.CHANNEL, _on_event)
-    api.register_tool(
+    session.bus.on({event_type}.CHANNEL, _on_event)
+    session.register_tool(
         FunctionTool(
             name={tool_name!r},
             description="Summarize recent {channel} events observed by {name}.",
@@ -542,12 +540,12 @@ def install(api: ExtensionAPI, config: dict[str, Any] | None = None) -> None:
 """
 
 
-def _find_manifest_path(api: ExtensionAPI) -> Path | None:
-    scenario_dir_raw = api.scenario_dir
+def _find_manifest_path(session: Any) -> Path | None:
+    scenario_dir_raw = session.ctx.scenario_dir
     if not scenario_dir_raw:
         return None
     scenario_dir = Path(scenario_dir_raw)
-    wanted = api.scenario
+    wanted = session.ctx.scenario
     candidates = sorted(scenario_dir.glob("manifest*.yaml"))
     for path in candidates:
         try:
@@ -568,8 +566,8 @@ def _local_entry_index(extensions: list[Any], name: str) -> int | None:
     return None
 
 
-def _pin_manifest(api: ExtensionAPI, name: str) -> dict[str, Any]:
-    manifest_path = _find_manifest_path(api)
+def _pin_manifest(session: Any, name: str) -> dict[str, Any]:
+    manifest_path = _find_manifest_path(session)
     if manifest_path is None:
         return {"ok": False, "error": "current scenario manifest not found"}
     try:
@@ -600,8 +598,8 @@ def _pin_manifest(api: ExtensionAPI, name: str) -> dict[str, Any]:
     return {"ok": True, "path": str(manifest_path), "changed": True}
 
 
-def _unpin_manifest(api: ExtensionAPI, name: str) -> dict[str, Any]:
-    manifest_path = _find_manifest_path(api)
+def _unpin_manifest(session: Any, name: str) -> dict[str, Any]:
+    manifest_path = _find_manifest_path(session)
     if manifest_path is None:
         return {"ok": False, "error": "current scenario manifest not found"}
     try:
@@ -640,18 +638,18 @@ def _unpin_manifest(api: ExtensionAPI, name: str) -> dict[str, Any]:
 class _AdaptRuntime:
     """Per-session state and handlers for the adapt atom."""
 
-    def __init__(self, api: ExtensionAPI, config: AdaptConfig) -> None:
-        self.api = api
+    def __init__(self, session: Any, config: AdaptConfig) -> None:
+        self.api = session
         self.max_events = max(1, config.max_events)
         self.inject_events = max(0, min(config.inject_events, self.max_events))
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=self.max_events)
         self.observed_events: dict[str, dict[str, Any]] = {}
 
     def install(self) -> None:
-        self.api.on(DiagnosticEvent.CHANNEL, self._on_diagnostic)
-        self.api.on(ExtensionInstallEvent.CHANNEL, self._on_extension_install)
-        self.api.on(ExtensionReloadEvent.CHANNEL, self._on_extension_reload)
-        self.api.on(BeforeAgentStartEvent.CHANNEL, self._inject)
+        self.session.bus.on(DiagnosticEvent.CHANNEL, self._on_diagnostic)
+        self.session.bus.on(ExtensionInstallEvent.CHANNEL, self._on_extension_install)
+        self.session.bus.on(ExtensionReloadEvent.CHANNEL, self._on_extension_reload)
+        self.session.bus.on(BeforeRunEvent.CHANNEL, self._inject)
         self.api.add_observer(self._observe_event)
         self._register_tools()
 
@@ -709,7 +707,7 @@ class _AdaptRuntime:
             },
         )
 
-    def _inject(self, event: BeforeAgentStartEvent) -> None:
+    def _inject(self, event: BeforeRunEvent) -> None:
         lines = [
             "# Adapt",
             "",
@@ -737,9 +735,9 @@ class _AdaptRuntime:
             "that source when you need custom filtering, summaries, or tool "
             "parameters.",
             "",
-            "A runtime atom source must define MANIFEST and install(api, "
-            "config). In install, use api.on(Event.CHANNEL, handler) to observe "
-            "events and api.register_tool(FunctionTool(...)) to expose a new "
+            "A runtime atom source must define MANIFEST and install(session, "
+            "config). In install, use session.bus.on(Event.CHANNEL, handler) to observe "
+            "events and session.register_tool(FunctionTool(...)) to expose a new "
             "tool to yourself. Use Pydantic models for tool parameters.",
             "",
             "To activate an atom, write the source in the task workspace, then "
@@ -771,10 +769,10 @@ class _AdaptRuntime:
             return params
         payload = {
             "ok": True,
-            "workspace_root": self.api.cwd,
-            "scenario_local_extensions": self.api.scenario_dir is not None,
-            "cwd": self.api.cwd,
-            "operations_session_id": self.api.get_service("agent_env.session_id"),
+            "workspace_root": self.session.ctx.cwd,
+            "scenario_local_extensions": self.session.ctx.scenario_dir is not None,
+            "cwd": self.session.ctx.cwd,
+            "operations_session_id": self.session.services.get("agent_env.session_id"),
             "loaded_atoms": [_atom_payload(atom) for atom in self.api.list_atoms()],
             "recent_events": list(self.recent_events),
             "runtime_note": (
@@ -893,8 +891,8 @@ class _AdaptRuntime:
         )
 
     async def _read_operations_text(self, path: str) -> str:
-        data = await self.api.get_resource_writer().read(path)
-        return data.decode("utf-8")
+        # v2: resource writer pending
+        return ""
 
     def _install_source(
         self,
@@ -913,12 +911,12 @@ class _AdaptRuntime:
             )
         target_path: str | None = None
         if scope == "scenario":
-            if not self.api.scenario_dir:
+            if not self.session.ctx.scenario_dir:
                 return _json_tool(
-                    {"ok": False, "error": "scope=scenario requires api.scenario_dir"},
+                    {"ok": False, "error": "scope=scenario requires session.ctx.scenario_dir"},
                     is_error=True,
                 )
-            target_path = str(Path(self.api.scenario_dir) / f"{name}.py")
+            target_path = str(Path(self.session.ctx.scenario_dir) / f"{name}.py")
         elif scope != "user":
             return _json_tool(
                 {"ok": False, "error": "scope must be 'user' or 'scenario'"},
@@ -1083,7 +1081,7 @@ class _AdaptRuntime:
         return _json_tool(payload, is_error=not bool(payload.get("ok", False)))
 
     def _register_tools(self) -> None:
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_status",
                 description=(
@@ -1096,7 +1094,7 @@ class _AdaptRuntime:
                 fn=self._status,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_events",
                 description=(
@@ -1109,7 +1107,7 @@ class _AdaptRuntime:
                 fn=self._events,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_list_events",
                 description=(
@@ -1122,7 +1120,7 @@ class _AdaptRuntime:
                 fn=self._list_events,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_get_event",
                 description=(
@@ -1136,7 +1134,7 @@ class _AdaptRuntime:
                 fn=self._get_event,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_event_scaffold",
                 description=(
@@ -1149,7 +1147,7 @@ class _AdaptRuntime:
                 fn=self._event_scaffold,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_install",
                 description=(
@@ -1167,7 +1165,7 @@ class _AdaptRuntime:
                 fn=self._install,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_install_file",
                 description=(
@@ -1184,7 +1182,7 @@ class _AdaptRuntime:
                 fn=self._install_file,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_reload",
                 description=(
@@ -1197,7 +1195,7 @@ class _AdaptRuntime:
                 fn=self._reload,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_reload_file",
                 description=(
@@ -1210,7 +1208,7 @@ class _AdaptRuntime:
                 fn=self._reload_file,
             )
         )
-        self.api.register_tool(
+        self.session.register_tool(
             FunctionTool(
                 name="adapt_unload",
                 description=(
@@ -1226,5 +1224,5 @@ class _AdaptRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: AdaptConfig) -> None:
-    _AdaptRuntime(api, config).install()
+def install(session: Any, config: AdaptConfig) -> None:
+    _AdaptRuntime(session, config).install()

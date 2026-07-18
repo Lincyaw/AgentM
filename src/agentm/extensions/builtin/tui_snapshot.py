@@ -26,7 +26,6 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -98,12 +97,12 @@ def _resolve_path(configured: str | None, arg: Any) -> Path:
 
 
 class _TuiSnapshotRuntime:
-    def __init__(self, api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: TuiSnapshotConfig) -> None:
+        self._session = session
         self._configured_path = config.dump_path
 
     def install(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="tui_snapshot",
                 description=(
@@ -150,8 +149,8 @@ class _TuiSnapshotRuntime:
         return _ok(header + text)
 
 
-def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
-    _TuiSnapshotRuntime(api, config).install()
+def install(session: Any, config: TuiSnapshotConfig) -> None:
+    _TuiSnapshotRuntime(session, config).install()
 
 
 def _ok(text: str) -> ToolResult:

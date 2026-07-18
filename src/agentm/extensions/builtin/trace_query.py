@@ -9,7 +9,7 @@ parameter needed, and no access to other sessions.
 Typical consumer: the ``goal`` atom's checker agent, which needs to
 verify whether the parent agent's work satisfies a completion condition.
 
-§11: single file; ``MANIFEST`` + ``install(api, config)``; no atom-to-atom
+§11: single file; ``MANIFEST`` + ``install(session, config)``; no atom-to-atom
 imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 """
 
@@ -23,7 +23,6 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -181,35 +180,35 @@ def _get_backend(parent_sid: str, cwd: str) -> _TraceBackend | None:
     ) or _get_local_backend(local_path)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(session: Any, config: dict[str, Any]) -> None:
     del config
-    runtime = _TraceQueryRuntime.from_api(api)
+    runtime = _TraceQueryRuntime.from_api(session)
     if runtime is not None:
         runtime.install()
 
 
 class _TraceQueryRuntime:
-    def __init__(self, api: ExtensionAPI, *, backend: _TraceBackend) -> None:
-        self._api = api
+    def __init__(self, session: Any, *, backend: _TraceBackend) -> None:
+        self._session = session
         self._backend = backend
 
     @classmethod
-    def from_api(cls, api: ExtensionAPI) -> _TraceQueryRuntime | None:
-        parent_sid = api.parent_session_id
+    def from_api(cls, session: Any) -> _TraceQueryRuntime | None:
+        parent_sid = session.ctx.parent_session_id
         if parent_sid is None:
             logger.debug(
                 "trace_query: no parent session — tools will return empty results"
             )
             return None
 
-        backend = _get_backend(parent_sid, api.cwd)
+        backend = _get_backend(parent_sid, session.ctx.cwd)
         if backend is None:
             logger.warning(
                 "trace_query: no ClickHouse or local parent trace — tools disabled"
             )
             return None
 
-        return cls(api, backend=backend)
+        return cls(session, backend=backend)
 
     def install(self) -> None:
         self._register_list_turns()
@@ -219,7 +218,7 @@ class _TraceQueryRuntime:
     # -- list_turns --------------------------------------------------------
 
     def _register_list_turns(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="list_turns",
                 description=(
@@ -258,7 +257,7 @@ class _TraceQueryRuntime:
     # -- read_turn ---------------------------------------------------------
 
     def _register_read_turn(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="read_turn",
                 description=(
@@ -341,7 +340,7 @@ class _TraceQueryRuntime:
     # -- get_tool_calls ----------------------------------------------------
 
     def _register_get_tool_calls(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="get_tool_calls",
                 description=(

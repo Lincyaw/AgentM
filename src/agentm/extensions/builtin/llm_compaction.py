@@ -14,7 +14,7 @@ agent can recover exact detail for any turn via the ``read_history`` tool.
 Turn numbering is shared with that tool through ``core.lib.enumerate_turns``.
 
 Per issue #76 the compaction kernel owns no English prompt text; this atom
-resolves the active bodies via ``api.get_service("prompt_templates").get_prompt``
+resolves the active bodies via ``session.services.get("prompt_templates").get_prompt``
 (populated by the ``compaction_prompts`` atom) and threads them into the
 engine. Prompt name constants live in ``core.abi.compaction`` so both atoms
 share a single source of truth. When the prompts atom is not installed, this
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Final
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,7 +35,7 @@ from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     BeforeCompactEvent,
-    BeforeSendToLlmEvent,
+    BeforeSendEvent,
     CommandSpec,
     CompactionDetails,
     CompactionPrompts,
@@ -44,7 +44,6 @@ from agentm.core.abi import (
     ContextUsageSnapshot,
     DiagnosticEvent,
     ENTRY_TYPE_COMPACTION,
-    ExtensionAPI,
     FILE_OP_EDIT,
     FILE_OP_METADATA_KEY,
     FILE_OP_READ,
@@ -569,8 +568,8 @@ async def compact(
 class _LlmCompactionRuntime:
     """Install-time wiring and event handlers for LLM compaction."""
 
-    def __init__(self, api: ExtensionAPI, config: LlmCompactionConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: LlmCompactionConfig) -> None:
+        self._session = session
         self._settings = CompactionSettings(
             enabled=config.enabled,
             reserve_tokens=config.reserve_tokens,
@@ -579,20 +578,20 @@ class _LlmCompactionRuntime:
         self._custom_instructions = config.custom_instructions
 
     def install(self) -> None:
-        self._api.set_service(COMPACTION_CONTROL_SERVICE, _CompactionControl(self))
-        self._api.on(BeforeSendToLlmEvent.CHANNEL, self.before_send_to_llm)
-        self._api.register_command(
+        self._session.services.register(COMPACTION_CONTROL_SERVICE, _CompactionControl(self))
+        self._session.bus.on(BeforeSendEvent.CHANNEL, self.before_send_to_llm)
+        self._session_stub_register_command(
             "compact",
             CommandSpec(
                 description="Compact this session's history now to free up context.",
                 handler=self.compact_command,
             ),
         )
-        self._api.set_service(COMPACTION_REQUEST_SERVICE, self._request_compaction)
+        self._session.services.register(COMPACTION_REQUEST_SERVICE, self._request_compaction)
 
     async def _request_compaction(self, reason: str = "requested") -> bool:
         """Programmatic compaction entry point for peer atoms."""
-        session_messages = self._api.session.get_messages()
+        session_messages = self._session.session.get_messages()
         rebuilt = await self._run_compaction(reason, session_messages)
         return rebuilt is not None
 
@@ -614,8 +613,8 @@ class _LlmCompactionRuntime:
         is nothing to compact / no provider. Shared by the automatic overflow
         path and the on-demand ``/compact`` command.
         """
-        provider = self._api.provider
-        model = self._api.model
+        provider = None  # v2: provider access pending
+        model = self._session.model
         if provider is None or model is None:
             return None
 
@@ -623,24 +622,24 @@ class _LlmCompactionRuntime:
             messages=session_messages,
             reason=reason,
         )
-        await self._api.events.emit(
+        await self._session.bus.emit(
             BeforeCompactEvent.CHANNEL,
             before_compact,
         )
         session_messages = before_compact.messages
 
-        branch = self._api.session.get_branch()
+        branch = self._session.session.get_branch()
         preparation = prepare_compaction(
             branch,
             self._settings,
             current_messages=session_messages,
-            tools=list(self._api.tools),
+            tools=list(self._session.tools),
             model_name=model.id,
         )
         if preparation is None:
             return None
 
-        prompts, summarization_body = await _resolve_prompts(self._api)
+        prompts, summarization_body = await _resolve_prompts(self._session)
 
         result = await compact(
             preparation,
@@ -652,11 +651,11 @@ class _LlmCompactionRuntime:
 
         session_meta_lines = [
             "<!-- session-metadata",
-            f"session_id: {self._api.session_id}",
-            f"trace_id: {self._api.root_session_id}",
+            f"session_id: {self._session.id}",
+            f"trace_id: {self._session.ctx.root_session_id}",
         ]
-        if self._api.scenario:
-            session_meta_lines.append(f"scenario: {self._api.scenario}")
+        if self._session.ctx.scenario:
+            session_meta_lines.append(f"scenario: {self._session.ctx.scenario}")
         session_meta_lines.append(
             f"covered_through_turn: {result.covered_through_turn}"
         )
@@ -676,11 +675,11 @@ class _LlmCompactionRuntime:
             "read_files": result.details.read_files,
             "modified_files": result.details.modified_files,
         }
-        entry_id = self._api.session.append_entry("compaction", details)
+        entry_id = self._session.session.append_entry("compaction", details)
         details["entry_id"] = entry_id
 
-        rebuilt_messages = self._api.session.get_messages()
-        await self._api.events.emit(
+        rebuilt_messages = self._session.session.get_messages()
+        await self._session.bus.emit(
             AfterCompactEvent.CHANNEL,
             AfterCompactEvent(
                 summary=final_summary,
@@ -693,11 +692,11 @@ class _LlmCompactionRuntime:
         )
         return rebuilt_messages
 
-    async def before_send_to_llm(self, event: BeforeSendToLlmEvent) -> None:
-        model = self._api.model
+    async def before_send_to_llm(self, event: BeforeSendEvent) -> None:
+        model = self._session.model
         if model is None:
             return
-        session_messages = self._api.session.get_messages()
+        session_messages = self._session.session.get_messages()
         usage_snapshot = capture_context_usage(
             session_messages,
             model_name=model.id,
@@ -715,14 +714,14 @@ class _LlmCompactionRuntime:
         if rebuilt is not None:
             event.messages[:] = rebuilt
 
-    async def compact_command(self, _args: str, _api: ExtensionAPI) -> None:
+    async def compact_command(self, _args: str, _api: Any) -> None:
         # On-demand compaction. Skips the overflow gate (the user asked for it)
         # but still no-ops when there is nothing summarisable. Feedback reaches
         # the user via the AfterCompactEvent the shared path emits.
-        session_messages = self._api.session.get_messages()
+        session_messages = self._session.session.get_messages()
         rebuilt = await self._run_compaction("manual", session_messages)
         if rebuilt is None:
-            await self._api.events.emit(
+            await self._session.bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
                     level="warning",
@@ -744,11 +743,11 @@ class _CompactionControl:
         return self._runtime.auto_compaction_enabled
 
 
-def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
-    _LlmCompactionRuntime(api, config).install()
+def install(session: Any, config: LlmCompactionConfig) -> None:
+    _LlmCompactionRuntime(session, config).install()
 
 
-async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
+async def _resolve_prompts(session: Any) -> tuple[CompactionPrompts, str]:
     """Pull prompt bodies from the registry; emit a diagnostic if missing.
 
     Returns a 2-tuple ``(prompts, summarization_body)`` where ``prompts`` is
@@ -763,7 +762,7 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
     """
 
     from agentm.core.abi import PROMPT_TEMPLATES_SERVICE
-    registry = api.get_service(PROMPT_TEMPLATES_SERVICE)
+    registry = session.services.get(PROMPT_TEMPLATES_SERVICE)
     if registry is None:
         system = summarization = update = None
     else:
@@ -781,7 +780,7 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
         if not body
     ]
     if missing:
-        await api.events.emit(
+        await session.bus.emit(
             DiagnosticEvent.CHANNEL,
             DiagnosticEvent(
                 level="warning",

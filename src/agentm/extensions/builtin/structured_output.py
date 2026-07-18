@@ -24,7 +24,6 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -88,13 +87,13 @@ class _SchemaValidator:
 
 
 class _StructuredOutputRuntime:
-    def __init__(self, api: ExtensionAPI, schema: dict[str, Any]) -> None:
-        self._api = api
+    def __init__(self, session: Any, schema: dict[str, Any]) -> None:
+        self._session = session
         self._schema = schema
         self._validator = _SchemaValidator()
 
     def install(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="submit_result",
                 description=(
@@ -186,5 +185,5 @@ def _terminate_result(payload: Any, *, is_error: bool = False) -> ToolTerminate:
     )
 
 
-def install(api: ExtensionAPI, config: StructuredOutputConfig) -> None:
-    _StructuredOutputRuntime(api, config.result_schema).install()
+def install(session: Any, config: StructuredOutputConfig) -> None:
+    _StructuredOutputRuntime(session, config.result_schema).install()

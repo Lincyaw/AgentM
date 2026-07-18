@@ -15,19 +15,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     COST_QUERY_SERVICE,
-    BeforeAgentStartEvent,
+    BeforeRunEvent,
     BudgetExhausted,
     CostBudgetExceededEvent,
     DiagnosticEvent,
-    ExtensionAPI,
-    TurnEndEvent,
+    TurnCommittedEvent,
 )
 from agentm.extensions import ExtensionManifest
 
 # ---------------------------------------------------------------------------
 # Cost-query service contract — inlined from the former
 # agentm.core.abi.services. cost_budget is the sole consumer; the CLI and
-# textual_app fetch the service via api.get_service("cost_query") string
+# textual_app fetch the service via session.services.get("cost_query") string
 # lookup, not via Protocol import, so this stays scoped to the atom.
 # ---------------------------------------------------------------------------
 
@@ -82,8 +81,8 @@ class _RuntimeCostQueryService:
 
 
 class _CostBudgetRuntime:
-    def __init__(self, api: ExtensionAPI, config: CostBudgetConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: CostBudgetConfig) -> None:
+        self._session = session
         self._limit = config.limit
         self._currency = config.currency
         self._pricing = dict(config.pricing or {})
@@ -91,9 +90,9 @@ class _CostBudgetRuntime:
         self._state = _CostBudgetState()
 
     def install(self) -> None:
-        self._api.set_service(COST_QUERY_SERVICE, _RuntimeCostQueryService(self))
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
-        self._api.on(TurnEndEvent.CHANNEL, self.on_turn_end)
+        self._session.services.register(COST_QUERY_SERVICE, _RuntimeCostQueryService(self))
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.before_agent_start)
+        self._session.bus.on(TurnCommittedEvent.CHANNEL, self.on_turn_end)
 
     def estimate(self, usage: Any, *, provider: str | None = None) -> CostBreakdown:
         selected = provider or self._current_provider()
@@ -101,13 +100,13 @@ class _CostBudgetRuntime:
         return CostBreakdown(amount=amount, currency=self._currency)
 
     def before_agent_start(
-        self, event: BeforeAgentStartEvent
+        self, event: BeforeRunEvent
     ) -> None:
         if not self._state.overflowed:
             return
         event.veto = BudgetExhausted(detail="cost")
 
-    async def on_turn_end(self, event: TurnEndEvent) -> None:
+    async def on_turn_end(self, event: TurnCommittedEvent) -> None:
         usage = event.message.usage
         if usage is None:
             return
@@ -116,7 +115,7 @@ class _CostBudgetRuntime:
         await self._emit_if_needed()
 
     def _current_provider(self) -> str:
-        return self._api.model.provider if self._api.model is not None else ""
+        return self._session.model.provider if self._session.model is not None else ""
 
     async def _pricing_for(self, provider: str) -> tuple[float, float]:
         configured = self._pricing.get(provider)
@@ -124,7 +123,7 @@ class _CostBudgetRuntime:
             return configured
         if provider not in self._warned_unpriced:
             self._warned_unpriced.add(provider)
-            await self._api.events.emit(
+            await self._session.bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
                     level="warning",
@@ -141,7 +140,7 @@ class _CostBudgetRuntime:
         if self._state.overflowed or self._state.used <= self._limit:
             return
         self._state.overflowed = True
-        await self._api.events.emit(
+        await self._session.bus.emit(
             CostBudgetExceededEvent.CHANNEL,
             CostBudgetExceededEvent(
                 used=self._state.used,
@@ -160,5 +159,5 @@ def _usage_amount(usage: Any, pricing: tuple[float, float]) -> float:
     ) * output_price
 
 
-def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
-    _CostBudgetRuntime(api, config).install()
+def install(session: Any, config: CostBudgetConfig) -> None:
+    _CostBudgetRuntime(session, config).install()

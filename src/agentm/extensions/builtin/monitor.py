@@ -43,7 +43,7 @@ state (the registry of live monitors, the asyncio tasks, the channel
 unsubscribe callables) so ``install`` stays a thin wire-up, mirroring
 ``background_exec``.
 
-§11: single file; module-level ``MANIFEST`` + ``install(api, config)``; no
+§11: single file; module-level ``MANIFEST`` + ``install(session, config)``; no
 atom→atom imports; ``core.lib`` / ``core.abi`` only; no ``core.runtime.*`` /
 ``core._internal``. Non-cron state is per-session and in-memory only; cron
 state is optional host state accessed only through the injected scheduler
@@ -63,7 +63,6 @@ from loguru import logger
 
 from agentm.core.abi import (
     BackgroundActivityEvent,
-    ExtensionAPI,
     ExtensionStaleError,
     FunctionTool,
     GATEWAY_SCHEDULER_SERVICE,
@@ -343,12 +342,11 @@ class _MonitorManager:
     def __init__(
         self,
         *,
-        api: ExtensionAPI,
-        shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        session: Any, shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
         event_summary_max_tokens: int,
         condition_poll_min_seconds: float = _DEFAULT_CONDITION_POLL_MIN,
     ) -> None:
-        self._api = api
+        self._session = session
         self._monitors: dict[str, _Monitor] = {}
         self._shutdown_grace_seconds = shutdown_grace_seconds
         self._event_summary_max_tokens = event_summary_max_tokens
@@ -364,7 +362,7 @@ class _MonitorManager:
         note: str | None = None,
         terminal: bool = False,
     ) -> None:
-        events = getattr(self._api, "events", None)
+        events = getattr(self._session, "events", None)
         if events is None:
             return
         try:
@@ -375,7 +373,7 @@ class _MonitorManager:
                     activity_id=_activity_id(state.monitor_id),
                     label=_monitor_label(state),
                     status=state.status,
-                    session_id=self._api.session_id,
+                    session_id=self._session.id,
                     note=note if note is not None else _monitor_note(state),
                     terminal=terminal,
                 ),
@@ -385,7 +383,7 @@ class _MonitorManager:
 
     def _gateway_scheduler(self) -> Any | None:
         try:
-            return self._api.get_service(GATEWAY_SCHEDULER_SERVICE)
+            return self._session.services.get(GATEWAY_SCHEDULER_SERVICE)
         except ExtensionStaleError:
             return None
 
@@ -591,7 +589,7 @@ class _MonitorManager:
         }
         self._emit_activity(state, terminal=True)
         try:
-            self._api.post_inbox(
+            self._v2_push_trigger_stub(
                 source="monitor",
                 payload=payload,
                 dedup_key=f"monitor-wake-{state.monitor_id}",
@@ -687,7 +685,7 @@ class _MonitorManager:
                     "poll_interval": interval,
                 }
                 self._emit_activity(state)
-                self._api.post_inbox(
+                self._v2_push_trigger_stub(
                     source="monitor",
                     payload=payload,
                     dedup_key=f"monitor-cond-{state.monitor_id}",
@@ -793,7 +791,7 @@ class _MonitorManager:
                 event,
                 max_tokens=self._event_summary_max_tokens,
                 model_name=(
-                    self._api.model.id if self._api.model is not None else None
+                    self._session.model.id if self._session.model is not None else None
                 ),
             )
             payload = {
@@ -804,7 +802,7 @@ class _MonitorManager:
                 "event_summary": event_summary,
             }
             try:
-                self._api.post_inbox(
+                self._v2_push_trigger_stub(
                     source="monitor",
                     payload=payload,
                     dedup_key=f"monitor-chan-{state.monitor_id}",
@@ -813,7 +811,7 @@ class _MonitorManager:
             except ExtensionStaleError:
                 return
 
-        state.unsubscribe = self._api.on(watch, _handler)
+        state.unsubscribe = self._session.bus.on(watch, _handler)
         self._monitors[monitor_id] = state
         self._emit_activity(state)
         return _tool_result(
@@ -981,21 +979,21 @@ class _CancelMonitorParams(BaseModel):
 
 
 class _MonitorRuntime:
-    def __init__(self, api: ExtensionAPI, config: MonitorConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: MonitorConfig) -> None:
+        self._session = session
         self._manager = _MonitorManager(
-            api=api,
+            api=session,
             shutdown_grace_seconds=config.shutdown_grace_seconds,
             event_summary_max_tokens=config.event_summary_max_tokens,
             condition_poll_min_seconds=config.condition_poll_min_seconds,
         )
 
     def install(self) -> None:
-        self._api.on(SessionShutdownEvent.CHANNEL, self._manager.on_session_shutdown)
+        self._session.bus.on(SessionShutdownEvent.CHANNEL, self._manager.on_session_shutdown)
         self._register_tools()
 
     def _register_tools(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="schedule_wakeup",
                 description=(
@@ -1006,7 +1004,7 @@ class _MonitorRuntime:
                 fn=self._manager.schedule_wakeup,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="create_monitor",
                 description=(
@@ -1021,7 +1019,7 @@ class _MonitorRuntime:
                 fn=self._manager.create_monitor,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="list_monitors",
                 description=(
@@ -1035,7 +1033,7 @@ class _MonitorRuntime:
                 fn=self._manager.list_monitors,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="cancel_monitor",
                 description=(
@@ -1051,8 +1049,8 @@ class _MonitorRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: MonitorConfig) -> None:
-    _MonitorRuntime(api, config).install()
+def install(session: Any, config: MonitorConfig) -> None:
+    _MonitorRuntime(session, config).install()
 
 
 __all__ = (

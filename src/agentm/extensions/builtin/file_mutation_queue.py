@@ -9,8 +9,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    AgentStartEvent,
-    ExtensionAPI,
+    BeforeRunEvent,
     ExtensionLoadError,
     Tool,
     ToolOutcome,
@@ -66,18 +65,18 @@ def _normalize_path(args: dict[str, Any]) -> str:
 
 
 class _FileMutationQueueRuntime:
-    def __init__(self, api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: FileMutationQueueConfig) -> None:
+        self._session = session
         self._target_names = tuple(config.tools)
         self._locks: dict[str, asyncio.Lock] = {}
         self._wrapped_names: set[str] = set()
 
     def install(self) -> None:
-        self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.on_agent_start)
 
-    def on_agent_start(self, _: AgentStartEvent) -> ExtensionLoadError | None:
+    def on_agent_start(self, _: BeforeRunEvent) -> ExtensionLoadError | None:
         tools_by_name = {
-            tool.name: (index, tool) for index, tool in enumerate(self._api.tools)
+            tool.name: (index, tool) for index, tool in enumerate(self._session.tools)
         }
         missing = [name for name in self._target_names if name not in tools_by_name]
         if missing:
@@ -95,10 +94,10 @@ class _FileMutationQueueRuntime:
             if isinstance(tool, _QueuedTool):
                 self._wrapped_names.add(name)
                 continue
-            self._api.tools[index] = _QueuedTool(tool, self._locks)
+            self._session.tools[index] = _QueuedTool(tool, self._locks)
             self._wrapped_names.add(name)
         return None
 
 
-def install(api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
-    _FileMutationQueueRuntime(api, config).install()
+def install(session: Any, config: FileMutationQueueConfig) -> None:
+    _FileMutationQueueRuntime(session, config).install()

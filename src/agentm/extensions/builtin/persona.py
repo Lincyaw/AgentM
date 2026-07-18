@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.lib import expand_path, expand_path_from_cwd, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import BeforeRunEvent
 
 _DEFAULT_FILES: Final = ("SOUL.md", "IDENTITY.md", "USER.md")
 
@@ -53,7 +53,7 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("event:before_agent_start",),
     config_schema=PersonaConfig,
-    # Leaf atom: reads and seeds via api.get_resource_writer().
+    # Leaf atom: reads and seeds via None  # v2: resource writer pending.
     requires=(),
 )
 
@@ -152,34 +152,34 @@ async def _seed_defaults(
 
 
 class _PersonaRuntime:
-    def __init__(self, api: ExtensionAPI, config: PersonaConfig) -> None:
-        self._api = api
-        self._base = _resolve_dir(api.cwd, config.dir or ".")
+    def __init__(self, session: Any, config: PersonaConfig) -> None:
+        self._session = session
+        self._base = _resolve_dir(session.ctx.cwd, config.dir or ".")
         self._files = (
             tuple(config.files) if config.files is not None else _DEFAULT_FILES
         )
         self._max_tokens = config.max_tokens
         self._defaults = dict(config.defaults) if config.defaults is not None else {}
-        self._writer = api.get_resource_writer()
+        self._writer = None  # v2: resource writer pending
         self._seeded = False
 
     def install(self) -> None:
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.before_agent_start)
 
     async def before_agent_start(
-        self, event: BeforeAgentStartEvent
+        self, event: BeforeRunEvent
     ) -> None:
         if self._defaults and not self._seeded:
             self._seeded = True
             await _seed_defaults(
                 self._writer,
                 self._base,
-                self._api.cwd,
+                self._session.ctx.cwd,
                 self._files,
                 self._defaults,
             )
 
-        model_name = self._api.model.id if self._api.model is not None else None
+        model_name = self._session.model.id if self._session.model is not None else None
         block = await _build_block(
             self._writer,
             self._base,
@@ -194,5 +194,5 @@ class _PersonaRuntime:
         event.system = updated
 
 
-def install(api: ExtensionAPI, config: PersonaConfig) -> None:
-    _PersonaRuntime(api, config).install()
+def install(session: Any, config: PersonaConfig) -> None:
+    _PersonaRuntime(session, config).install()

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi import ExtensionAPI, TextContent, ToolErrorEvent
+from agentm.core.abi import TextContent, ToolErrorEvent
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -50,11 +50,11 @@ def _extract_exception_summary(reason: str) -> str:
 
 
 class _ToolErrorMessagesRuntime:
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
+    def __init__(self, session: Any) -> None:
+        self._session = session
 
     def install(self) -> None:
-        self._api.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
+        self._session.bus.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
 
     def on_tool_error(self, event: ToolErrorEvent) -> None:
         if event.result.content:
@@ -88,6 +88,6 @@ class _ToolErrorMessagesRuntime:
         return f"tool_error: {event.kind} ({event.tool_name})"  # pragma: no cover
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(session: Any, config: dict[str, Any]) -> None:
     del config
-    _ToolErrorMessagesRuntime(api).install()
+    _ToolErrorMessagesRuntime(session).install()

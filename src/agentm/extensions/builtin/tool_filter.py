@@ -7,10 +7,11 @@ early lets prompt-building atoms registered after this one (e.g.
 """
 
 from __future__ import annotations
+from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import AgentStartEvent, BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import BeforeRunEvent
 from agentm.extensions import ChannelEffects, ExtensionManifest
 
 
@@ -36,8 +37,8 @@ MANIFEST = ExtensionManifest(
 
 
 class _ToolFilterRuntime:
-    def __init__(self, api: ExtensionAPI, config: ToolFilterConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: ToolFilterConfig) -> None:
+        self._session = session
         self._allow = {str(name) for name in config.allow}
         self._deny = {str(name) for name in config.deny}
         self._filtered = False
@@ -50,13 +51,13 @@ class _ToolFilterRuntime:
         # after this one (e.g. tool_index) see the final catalog; keep the
         # agent_start hook as a safety net for sessions that skip the
         # before event. Filtering is idempotent.
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.on_agent_start)
-        self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.on_agent_start)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.on_agent_start)
 
-    def on_agent_start(self, _: AgentStartEvent | BeforeAgentStartEvent) -> None:
+    def on_agent_start(self, _: BeforeRunEvent | BeforeRunEvent) -> None:
         if self._filtered:
             return
-        tools = self._api.tools
+        tools = self._session.tools
         tool_names = {tool.name for tool in tools}
         missing_allowed = sorted(self._allow - tool_names)
         if missing_allowed:
@@ -73,8 +74,8 @@ class _ToolFilterRuntime:
         self._filtered = True
 
 
-def install(api: ExtensionAPI, config: ToolFilterConfig) -> None:
-    runtime = _ToolFilterRuntime(api, config)
+def install(session: Any, config: ToolFilterConfig) -> None:
+    runtime = _ToolFilterRuntime(session, config)
     if not runtime.active():
         return
     runtime.install()

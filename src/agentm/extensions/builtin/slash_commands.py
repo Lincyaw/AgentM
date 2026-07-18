@@ -1,6 +1,7 @@
 """Builtin slash-command input handler."""
 
 from __future__ import annotations
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -9,7 +10,6 @@ from agentm.core.abi import (
     COMMAND_PARSER,
     CommandDispatchedEvent,
     CommandDispatcher,
-    ExtensionAPI,
     InputEvent,
     SLASH_COMMAND_DISPATCHER_SERVICE,
 )
@@ -33,13 +33,13 @@ MANIFEST = ExtensionManifest(
 
 
 class _SlashCommandsRuntime:
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
-        service = api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)
+    def __init__(self, session: Any) -> None:
+        self._session = session
+        service = session.services.get(SLASH_COMMAND_DISPATCHER_SERVICE)
         self._dispatcher = service if isinstance(service, CommandDispatcher) else None
 
     def install(self) -> None:
-        self._api.on(InputEvent.CHANNEL, self.on_input, priority=BusPriority.PRE)
+        self._session.bus.on(InputEvent.CHANNEL, self.on_input, priority=BusPriority.PRE)
 
     async def on_input(self, event: InputEvent) -> None:
         text = event.text
@@ -58,7 +58,7 @@ class _SlashCommandsRuntime:
         result = await self._dispatcher.dispatch(head, args)
         if not result.handled:
             return
-        await self._api.events.emit(
+        await self._session.bus.emit(
             CommandDispatchedEvent.CHANNEL,
             CommandDispatchedEvent(
                 name=head,
@@ -70,6 +70,6 @@ class _SlashCommandsRuntime:
         event.handled_messages = result.messages
 
 
-def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
+def install(session: Any, config: SlashCommandsConfig) -> None:
     del config
-    _SlashCommandsRuntime(api).install()
+    _SlashCommandsRuntime(session).install()

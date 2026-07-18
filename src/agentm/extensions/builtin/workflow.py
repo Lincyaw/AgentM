@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from typing import Any
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     MODEL_RESOLVER_SERVICE,
     TextContent,
@@ -99,15 +98,15 @@ MANIFEST = ExtensionManifest(
 
 
 class _WorkflowRuntime:
-    def __init__(self, api: ExtensionAPI, config: WorkflowConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: WorkflowConfig) -> None:
+        self._session = session
         self._wall_clock_timeout = self._positive_float_or_none(
             config.wall_clock_timeout_s
         )
         self._agent_mock = config.agent_mock
-        self._model_resolver = api.get_service(MODEL_RESOLVER_SERVICE)
+        self._model_resolver = session.services.get(MODEL_RESOLVER_SERVICE)
         self._runner = WorkflowRunner(
-            api,
+            session,
             concurrency=self._positive_int_or_default(
                 config.max_concurrency,
                 _default_concurrency(),
@@ -127,9 +126,9 @@ class _WorkflowRuntime:
         )
 
     def install(self) -> None:
-        self._api.set_service(_WORKFLOW_RUNNER_SERVICE, self._runner)
-        journal_tools = JournalTools(self._api)
-        self._api.register_tool(
+        self._session.services.register(_WORKFLOW_RUNNER_SERVICE, self._runner)
+        journal_tools = JournalTools(self._session)
+        self._session.register_tool(
             FunctionTool(
                 name="workflow_lineage",
                 description=(
@@ -148,7 +147,7 @@ class _WorkflowRuntime:
                 fn=journal_tools.lineage,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="workflow_invalidate",
                 description=(
@@ -163,7 +162,7 @@ class _WorkflowRuntime:
                 fn=journal_tools.invalidate,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="workflow",
                 description=(
@@ -287,10 +286,10 @@ class _WorkflowRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
-    if api.purpose == _WORKER_PURPOSE:
+def install(session: Any, config: WorkflowConfig) -> None:
+    if session.ctx.purpose == _WORKER_PURPOSE:
         return
-    _WorkflowRuntime(api, config).install()
+    _WorkflowRuntime(session, config).install()
 
 
 __all__ = (

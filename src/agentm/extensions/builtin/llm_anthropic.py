@@ -621,15 +621,15 @@ async def _translate_event(
 class _AnthropicProviderRuntime:
     """Install-time provider registration runtime for Anthropic-compatible models."""
 
-    def __init__(self, api: Any, config: LlmAnthropicConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: LlmAnthropicConfig) -> None:
+        self._session = session
         self._config = config
 
     def install(self) -> None:
         model_id = self._model_id()
         stream_fn = self._build_stream_fn()
         model = _build_model(model_id, **self._model_kwargs())
-        self._api.register_provider(
+        self._session_stub_register_provider(
             "anthropic",
             ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
         )
@@ -659,7 +659,7 @@ class _AnthropicProviderRuntime:
             thinking_budgets=self._config.thinking_budgets,
             reasoning_effort=extra.get("reasoning_effort"),
             extra_body=extra.get("extra_body"),
-            retry_policy=self._api.get_service(RETRY_POLICY_SERVICE),
+            retry_policy=self._session.services.get(RETRY_POLICY_SERVICE),
         )
 
     def _model_kwargs(self) -> dict[str, int]:
@@ -672,7 +672,7 @@ class _AnthropicProviderRuntime:
         return model_kwargs
 
 
-def install(api: Any, config: LlmAnthropicConfig) -> None:
+def install(session: Any, config: LlmAnthropicConfig) -> None:
     """Provider extension entrypoint.
 
     Reads ``config.model`` (required), optional ``config.api_key`` and
@@ -681,6 +681,6 @@ def install(api: Any, config: LlmAnthropicConfig) -> None:
 
     """
 
-    _AnthropicProviderRuntime(api, config).install()
+    _AnthropicProviderRuntime(session, config).install()
 
 __all__ = ("AnthropicStreamFn", "MANIFEST", "install")

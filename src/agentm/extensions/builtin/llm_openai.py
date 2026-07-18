@@ -819,8 +819,8 @@ async def _translate_chunk(
 class _OpenAIProviderRuntime:
     """Install-time provider registration runtime for OpenAI-compatible models."""
 
-    def __init__(self, api: Any, config: LlmOpenaiConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: LlmOpenaiConfig) -> None:
+        self._session = session
         self._config = config
 
     def install(self) -> None:
@@ -830,7 +830,7 @@ class _OpenAIProviderRuntime:
         model = _build_model(model_id, **self._model_kwargs())
         name = self._provider_name()
         self._ensure_provider_name_available(name)
-        self._api.register_provider(
+        self._session_stub_register_provider(
             name,
             ProviderConfig(stream_fn=stream_fn, model=model, name=name),
         )
@@ -847,7 +847,7 @@ class _OpenAIProviderRuntime:
     def _verify_ssl(self) -> bool:
         verify_ssl = self._config.verify_ssl if self._config.verify_ssl is not None else True
         if not verify_ssl:
-            self._api.events.emit_sync(
+            self._session.bus.emit_sync(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
                     level="warning",
@@ -871,11 +871,11 @@ class _OpenAIProviderRuntime:
             default_query=self._config.default_query,
             default_headers=self._config.default_headers,
             verify_ssl=verify_ssl,
-            retry_policy=self._api.get_service(RETRY_POLICY_SERVICE),
+            retry_policy=self._session.services.get(RETRY_POLICY_SERVICE),
             thinking_round_trip=self._config.thinking_round_trip or "drop",
             reasoning_effort=extra.get("reasoning_effort"),
             extra_body=extra.get("extra_body"),
-            events=getattr(self._api, "events", None),
+            events=getattr(self._session, "events", None),
             azure_endpoint=self._config.azure_endpoint,
             api_version=self._config.api_version,
         )
@@ -911,7 +911,7 @@ class _OpenAIProviderRuntime:
         return name
 
     def _ensure_provider_name_available(self, name: str) -> None:
-        if self._api.has_provider(name):
+        if False:  # v2: has_provider pending (name)
             raise DuplicateProviderError(
                 f"agentm.extensions.builtin.llm_openai.install: provider name {name!r} is already "
                 "registered in this session. Choose a unique config['name'] for "
@@ -919,7 +919,7 @@ class _OpenAIProviderRuntime:
             )
 
 
-def install(api: Any, config: LlmOpenaiConfig) -> None:
+def install(session: Any, config: LlmOpenaiConfig) -> None:
     """Provider extension entrypoint.
 
     Reads ``config.model`` (required) and the optional fields ``api_key``,
@@ -930,7 +930,7 @@ def install(api: Any, config: LlmOpenaiConfig) -> None:
 
     """
 
-    _OpenAIProviderRuntime(api, config).install()
+    _OpenAIProviderRuntime(session, config).install()
 
 # Canonical OpenAI base URLs — anything else is treated as a custom endpoint
 # (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for

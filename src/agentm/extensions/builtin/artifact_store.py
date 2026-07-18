@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 
 from agentm.core.abi import (
     ARTIFACT_STORE_SERVICE,
-    ExtensionAPI,
     FunctionTool,
     SessionReadyEvent,
     TextContent,
@@ -86,10 +85,10 @@ class _StoreContext:
 
 
 class ArtifactStore:
-    def __init__(self, api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: ArtifactStoreConfig) -> None:
+        self._session = session
         self._id_lock = asyncio.Lock()
-        root_session_id = str(config.root_session_id or api.session_id)
+        root_session_id = str(config.root_session_id or session.id)
         # inline_max_bytes takes priority when explicitly set (non-default);
         # otherwise fall back to max_inline_bytes for backward compat.
         max_inline = (
@@ -98,8 +97,8 @@ class ArtifactStore:
             else config.max_inline_bytes
         )
         self._ctx = _StoreContext(
-            layout=api.get_project_layout(),
-            session_id=api.session_id,
+            layout=None,  # v2: project_layout pending
+            session_id=session.id,
             root_session_id=root_session_id,
             task_id=_maybe_str(config.task_id),
             persona=_maybe_str(config.persona),
@@ -408,17 +407,17 @@ class _ArtifactGrepParams(BaseModel):
 
 
 class _ArtifactStoreRuntime:
-    def __init__(self, api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
-        self._api = api
-        self._store = ArtifactStore(api, config)
+    def __init__(self, session: Any, config: ArtifactStoreConfig) -> None:
+        self._session = session
+        self._store = ArtifactStore(session, config)
 
     def install(self) -> None:
-        self._api.set_service(ARTIFACT_STORE_SERVICE, self._store)
-        self._api.on(SessionReadyEvent.CHANNEL, self._store.on_session_ready)
+        self._session.services.register(ARTIFACT_STORE_SERVICE, self._store)
+        self._session.bus.on(SessionReadyEvent.CHANNEL, self._store.on_session_ready)
         self._register_tools()
 
     def _registered_store(self) -> ArtifactStore:
-        registered = self._api.get_service(ARTIFACT_STORE_SERVICE)
+        registered = self._session.services.get(ARTIFACT_STORE_SERVICE)
         if not isinstance(registered, ArtifactStore):
             raise RuntimeError("artifact_store service is not registered")
         return registered
@@ -436,7 +435,7 @@ class _ArtifactStoreRuntime:
         return await self._registered_store().grep(args)
 
     def _register_tools(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="artifact_write",
                 description=(
@@ -451,7 +450,7 @@ class _ArtifactStoreRuntime:
                 fn=self.write,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="artifact_read",
                 description=(
@@ -464,7 +463,7 @@ class _ArtifactStoreRuntime:
                 fn=self.read,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="artifact_list",
                 description=(
@@ -477,7 +476,7 @@ class _ArtifactStoreRuntime:
                 fn=self.list_artifacts,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="artifact_grep",
                 description=(
@@ -491,8 +490,8 @@ class _ArtifactStoreRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
-    _ArtifactStoreRuntime(api, config).install()
+def install(session: Any, config: ArtifactStoreConfig) -> None:
+    _ArtifactStoreRuntime(session, config).install()
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

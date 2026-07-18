@@ -3,7 +3,9 @@ from __future__ import annotations
 from loguru import logger
 from pydantic import BaseModel
 
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI, SYSTEM_PROMPT_PROVIDER
+from typing import Any
+
+from agentm.core.abi import BeforeRunEvent, SYSTEM_PROMPT_PROVIDER
 from agentm.core.lib import expand_path, expand_path_from_cwd
 from agentm.extensions import ChannelEffects, ExtensionManifest
 
@@ -75,21 +77,21 @@ def _resolve_prompt(
 
 
 class _SystemPromptRuntime:
-    def __init__(self, api: ExtensionAPI, prompt: str) -> None:
-        self._api = api
+    def __init__(self, session: Any, prompt: str) -> None:
+        self._session = session
         self._prompt = prompt
 
     def install(self) -> None:
         if not self._prompt:
             return
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.before_agent_start)
 
-    def before_agent_start(self, event: BeforeAgentStartEvent) -> None:
+    def before_agent_start(self, event: BeforeRunEvent) -> None:
         current = str(event.system or "")
         updated = f"{self._prompt}\n\n{current}" if current else self._prompt
         event.system = updated
 
 
-def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:
-    prompt = _resolve_prompt(config, cwd=api.cwd, scenario_dir=api.scenario_dir)
-    _SystemPromptRuntime(api, prompt).install()
+def install(session: Any, config: SystemPromptConfig) -> None:
+    prompt = _resolve_prompt(config, cwd=session.ctx.cwd, scenario_dir=session.ctx.scenario_dir)
+    _SystemPromptRuntime(session, prompt).install()

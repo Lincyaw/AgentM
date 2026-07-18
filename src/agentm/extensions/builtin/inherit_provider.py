@@ -14,7 +14,6 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
-    ExtensionAPI,
     ExtensionLoadError,
     PARENT_PROVIDER_CONFIG_KEY,
     PROVIDER_INHERITOR,
@@ -42,7 +41,7 @@ MANIFEST = ExtensionManifest(
     provides_role=(PROVIDER_INHERITOR,),
 )
 
-def install(api: ExtensionAPI, config: InheritProviderConfig) -> None:
+def install(session: Any, config: InheritProviderConfig) -> None:
     provider = config.provider
     if not isinstance(provider, ProviderConfig):
         raise ExtensionLoadError(
@@ -55,6 +54,6 @@ def install(api: ExtensionAPI, config: InheritProviderConfig) -> None:
                 "AgentSessionConfig(provider=None) and let the factory wire it."
             ),
         )
-    api.register_provider(provider.name, provider)
+    session._v2_stub_register_provider(provider.name, provider)
 
 __all__: Final = ["MANIFEST", "install"]

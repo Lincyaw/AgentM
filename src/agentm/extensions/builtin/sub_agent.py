@@ -27,7 +27,6 @@ from loguru import logger
 from agentm.core.abi import (
     AgentSessionConfig,
     ChildSessionEndEvent,
-    ExtensionAPI,
     ExtensionLoadError,
     ExtensionStaleError,
     FunctionTool,
@@ -372,8 +371,8 @@ def _resolve_child_loop_config(
         applied_budget,
     )
 
-def _get_active_provider(api: ExtensionAPI) -> ProviderConfig:
-    provider = api.provider
+def _get_active_provider(session: Any) -> ProviderConfig:
+    provider = session.provider
     if provider is None:
         raise RuntimeError("sub_agent requires an active provider")
     return provider
@@ -405,15 +404,14 @@ class _ChildTaskManager:
     def __init__(
         self,
         *,
-        api: ExtensionAPI,
-        inherit_extensions: list[str],
+        session: Any, inherit_extensions: list[str],
         available_inherited: dict[str, Any],
         max_workers: int,
         system_prompt_module: str,
         child_registry: Any | None = None,
         shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
-        self._api = api
+        self._session = session
         self._inherit_extensions = inherit_extensions
         self._available_inherited = available_inherited
         self._system_prompt_module = system_prompt_module
@@ -430,7 +428,7 @@ class _ChildTaskManager:
         self._root_session_id = "unknown"
 
     async def _resolve_subagent(self, name: str) -> dict[str, Any] | None:
-        responses = await self._api.events.emit(
+        responses = await self._session.bus.emit(
             ResolveSubagentEvent.CHANNEL, ResolveSubagentEvent(name=name)
         )
         for response in responses:
@@ -458,7 +456,7 @@ class _ChildTaskManager:
         state.final_messages = final_messages
         state.summary = _final_assistant_text(final_messages)
         refs = list_artifacts_for_task(
-            layout=self._api.get_project_layout(),
+            layout=None,  # v2: project_layout pending
             root_session_id=self._root_session_id,
             task_id=state.task_id,
         )
@@ -478,7 +476,7 @@ class _ChildTaskManager:
         # completions land. The parent session may park while the child runs;
         # this push is the wakeup and the delivery path.
         try:
-            self._api.post_inbox(
+            self._v2_push_trigger_stub(
                 source="subagent",
                 payload=_format_subagent_result(state),
                 dedup_key=f"subagent-finding-{state.task_id}",
@@ -504,7 +502,7 @@ class _ChildTaskManager:
         else:
             await _shutdown_child_with_error(
                 state.session,
-                parent_bus=self._api.events,
+                parent_bus=self._session.bus,
                 parent_session_id=self._parent_session_id,
                 error=error,
             )
@@ -519,7 +517,7 @@ class _ChildTaskManager:
         # dropping the child's result. The bracket ALWAYS exits (every branch
         # below finalizes), so the count cannot leak.
         try:
-            bracket = self._api.track_background()
+            bracket = self._session.track_background()
         except ExtensionStaleError:
             bracket = contextlib.nullcontext()
         with bracket:
@@ -608,7 +606,7 @@ class _ChildTaskManager:
             self._available_inherited,
             {
                 atom.name: dict(getattr(atom, "config", None) or {})
-                for atom in self._api.list_atoms()
+                for atom in self._session.list_atoms()
             },
         )
         persona_extensions: list[tuple[str, dict[str, Any]]] = []
@@ -638,9 +636,9 @@ class _ChildTaskManager:
         # passes provider=None and lets spawn_child_session auto-wire the
         # inherit_provider builtin. We still pre-check here so the error
         # surfaces before the slot-reservation bookkeeping below.
-        _get_active_provider(self._api)
+        _get_active_provider(self._session)
         task_id = uuid.uuid4().hex
-        parent_loop_config = self._api.session.get_loop_config()
+        parent_loop_config = self._session.session.get_loop_config()
         child_loop_config, applied_budget = _resolve_child_loop_config(
             parent=parent_loop_config,
             persona_budget=persona_budget,
@@ -693,9 +691,9 @@ class _ChildTaskManager:
             persona_extensions + child_extensions + inherited_extensions
         )
         child_config = AgentSessionConfig(
-            cwd=self._api.cwd,
+            cwd=self._session.ctx.cwd,
             extensions=child_extensions_combined,
-            scenario=self._api.scenario,
+            scenario=self._session.ctx.scenario,
             provider=None,
             loop_config=child_loop_config,
             task_id=task_id,
@@ -704,16 +702,16 @@ class _ChildTaskManager:
             tool_allowlist=persona_tool_allowlist,
             lineage={
                 "kind": "subagent",
-                "parent_session_id": self._api.session_id,
-                "root_session_id": self._api.root_session_id,
+                "parent_session_id": self._session.id,
+                "root_session_id": self._session.ctx.root_session_id,
                 "task_id": task_id,
                 "persona": persona_name,
                 "purpose": purpose,
             },
-            experiment=self._api.experiment,
+            experiment=None,
         )
         try:
-            child = await self._api.spawn_child_session(child_config)
+            child = await self._session.spawn(child_config)
         except Exception as exc:  # noqa: BLE001
             logger.warning("sub_agent spawn_child_session failed: {}", exc)
             await self._registry.release_slot()
@@ -730,7 +728,7 @@ class _ChildTaskManager:
         # parent's wire, stamped with the child's session id, so a chat peer
         # sees the sub-agent working live. No-op outside the gateway (the
         # wire_driver atom is the only thing that registers this service).
-        _forward_child_to_wire(self._api, child)
+        _forward_child_to_wire(self._session, child)
         # Make the child interactively addressable by id (the human can chat
         # with it). No-op outside the interactive gateway. When present, this
         # also keeps the child alive after its task (see _finalize_state).
@@ -959,8 +957,8 @@ def _format_config_validation_error(
 class _SubAgentRuntime:
     """Install-time wiring for the sub-agent atom."""
 
-    def __init__(self, api: ExtensionAPI, config: SubAgentConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: SubAgentConfig) -> None:
+        self._session = session
         self._config = config
 
     async def install(self) -> None:
@@ -968,7 +966,7 @@ class _SubAgentRuntime:
         available_inherited = dict(self._config.available_inherited_extensions)
         self._validate_inheritance_config(inherit_extensions, available_inherited)
         manager = _ChildTaskManager(
-            api=self._api,
+            api=self._session,
             inherit_extensions=inherit_extensions,
             available_inherited=available_inherited,
             max_workers=self._config.max_workers,
@@ -1013,16 +1011,16 @@ class _SubAgentRuntime:
         # Present only inside the interactive gateway: makes spawned children
         # human-addressable and keeps them alive after their task. ``getattr``
         # guards minimal stub APIs that omit the service registry.
-        return getattr(self._api, "get_service", lambda _name: None)(
+        return getattr(self._session, "get_service", lambda _name: None)(
             _CHILD_SESSION_REGISTRY_SERVICE
         )
 
     def _register_events(self, manager: _ChildTaskManager) -> None:
-        self._api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)
-        self._api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
+        self._session.bus.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)
+        self._session.bus.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
 
     def _register_tools(self, manager: _ChildTaskManager) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="dispatch_agent",
                 description=(
@@ -1046,7 +1044,7 @@ class _SubAgentRuntime:
                 fn=manager.dispatch,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="inject_instruction",
                 description=(
@@ -1058,7 +1056,7 @@ class _SubAgentRuntime:
                 fn=manager.inject_instruction,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="abort_task",
                 description=(
@@ -1072,8 +1070,8 @@ class _SubAgentRuntime:
         )
 
 
-async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
-    await _SubAgentRuntime(api, config).install()
+async def install(session: Any, config: SubAgentConfig) -> None:
+    await _SubAgentRuntime(session, config).install()
 
 
 __all__ = (

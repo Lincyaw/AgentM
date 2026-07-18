@@ -51,7 +51,7 @@ from pydantic import BaseModel
 
 from agentm.core.abi import (
     AfterCompactEvent,
-    AgentEndEvent,
+    RunEndEvent,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     BackgroundActivityEvent,
@@ -61,7 +61,6 @@ from agentm.core.abi import (
     CommandDispatchedEvent,
     CostBudgetExceededEvent,
     DiagnosticEvent,
-    ExtensionAPI,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
     ExtensionUnloadEvent,
@@ -75,8 +74,8 @@ from agentm.core.abi import (
     ThinkingDelta,
     ToolCallEvent,
     ToolResultEvent,
-    TurnEndEvent,
-    TurnStartEvent,
+    TurnCommittedEvent,
+    TurnBeginEvent,
 )
 from agentm.core.abi import (
     APPROVAL_MANAGER_SERVICE,
@@ -166,7 +165,7 @@ def _content_text(blocks: Any, limit: int = _PREVIEW_LIMIT) -> str:
 
 # --- projectors (pure: event -> JSON-safe body) ----------------------------
 
-def _p_turn_start(ev: TurnStartEvent) -> ProjectorResult:
+def _p_turn_start(ev: TurnBeginEvent) -> ProjectorResult:
     return {"kind": "turn_start", "turn_id": ev.turn_id, "turn_index": ev.turn_index}
 
 def _p_llm_request_start(ev: LlmRequestStartEvent) -> ProjectorResult:
@@ -216,7 +215,7 @@ def _p_tool_result(ev: ToolResultEvent) -> ProjectorResult:
         "content": _content_text(ev.result.content),
     }
 
-def _p_turn_end(ev: TurnEndEvent) -> ProjectorResult:
+def _p_turn_end(ev: TurnCommittedEvent) -> ProjectorResult:
     bodies: list[dict[str, Any]] = []
     text = _assistant_text(ev.message)
     if text.strip():
@@ -257,7 +256,7 @@ def _p_diagnostic(ev: DiagnosticEvent) -> ProjectorResult:
         return {"kind": "diagnostic_error", "content": ev.message, "source": ev.source}
     return None  # info is not surfaced
 
-def _p_agent_end(ev: AgentEndEvent) -> ProjectorResult:
+def _p_agent_end(ev: RunEndEvent) -> ProjectorResult:
     cause = type(ev.cause).__name__
     if cause == "ModelEndTurn":
         cause = "normal"
@@ -378,15 +377,15 @@ def _p_command_dispatched(ev: CommandDispatchedEvent) -> ProjectorResult:
 # Channels dispatched via async ``bus.emit`` — async handlers preserve order
 # and backpressure on the streaming hot path.
 _ASYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
-    (TurnStartEvent.CHANNEL, _p_turn_start),
+    (TurnBeginEvent.CHANNEL, _p_turn_start),
     (LlmRequestStartEvent.CHANNEL, _p_llm_request_start),
     (StreamDeltaEvent.CHANNEL, _p_stream_delta),
     (ToolCallEvent.CHANNEL, _p_tool_call),
     (ToolResultEvent.CHANNEL, _p_tool_result),
-    (TurnEndEvent.CHANNEL, _p_turn_end),
+    (TurnCommittedEvent.CHANNEL, _p_turn_end),
     (ChildSessionStartEvent.CHANNEL, _p_child_start),
     (ChildSessionEndEvent.CHANNEL, _p_child_end),
-    (AgentEndEvent.CHANNEL, _p_agent_end),
+    (RunEndEvent.CHANNEL, _p_agent_end),
 )
 
 # child_session_* are emitted on the PARENT bus (the parent's own wire_driver
@@ -541,13 +540,12 @@ class _WireDriverRuntime:
     def __init__(
         self,
         *,
-        api: ExtensionAPI,
-        outbound_sink: Callable[[dict[str, Any]], Any],
+        session: Any, outbound_sink: Callable[[dict[str, Any]], Any],
         session_key: str,
         turn_context: dict[str, Any] | None,
         approval_mgr: Any | None,
     ) -> None:
-        self._api = api
+        self._session = session
         self._outbound_sink = outbound_sink
         self._session_key = session_key
         self._turn_context = turn_context
@@ -561,9 +559,9 @@ class _WireDriverRuntime:
         )
 
     @classmethod
-    def from_api(cls, api: ExtensionAPI) -> _WireDriverRuntime:
-        outbound_sink = api.get_service(WIRE_OUTBOUND_SERVICE)
-        session_key = api.get_service("session_key")
+    def from_api(cls, session: Any) -> _WireDriverRuntime:
+        outbound_sink = session.services.get(WIRE_OUTBOUND_SERVICE)
+        session_key = session.services.get("session_key")
         if outbound_sink is None or session_key is None:
             # Mounting wire_driver outside the gateway has no effect; fail at
             # install so the misconfiguration surfaces immediately rather than
@@ -573,31 +571,31 @@ class _WireDriverRuntime:
                 "this atom only works inside the agentm gateway process."
             )
         return cls(
-            api=api,
+            api=session,
             outbound_sink=outbound_sink,
             session_key=session_key,
-            turn_context=api.get_service("turn_context"),
-            approval_mgr=api.get_service(APPROVAL_MANAGER_SERVICE),
+            turn_context=session.services.get("turn_context"),
+            approval_mgr=session.services.get(APPROVAL_MANAGER_SERVICE),
         )
 
     def install(self) -> None:
         for channel, projector in _ASYNC_PROJECTORS:
-            self._api.on(channel, self._make_async(projector))
+            self._session.bus.on(channel, self._make_async(projector))
         for channel, projector in _SYNC_PROJECTORS:
-            self._api.on(channel, self._make_sync(projector))
+            self._session.bus.on(channel, self._make_sync(projector))
         # session_ready advertises the available model-profile names so a chat
         # client can populate a model switcher. The gateway seeds them via the
         # optional ``model_names`` service (absent -> empty list); the atom must not
         # read user config itself (§11.4.6).
-        model_names = self._api.get_service("model_names") or []
-        self._api.on(
+        model_names = self._session.services.get("model_names") or []
+        self._session.bus.on(
             SessionReadyEvent.CHANNEL,
             self._make_sync(_make_session_ready_projector(list(model_names))),
         )
         # Approval gate runs alongside the tool_call projector; it returns a block
         # decision the loop acts on, independent of the outbound forwarding.
-        self._api.on(ToolCallEvent.CHANNEL, self._approval_gate)
-        self._api.set_service(WIRE_CHILD_FORWARDER_SERVICE, self._forward_child)
+        self._session.bus.on(ToolCallEvent.CHANNEL, self._approval_gate)
+        self._session.services.register(WIRE_CHILD_FORWARDER_SERVICE, self._forward_child)
 
     def _make_async(self, projector: Projector) -> Callable[[Any], Any]:
         async def handler(ev: Any) -> None:
@@ -657,7 +655,7 @@ class _WireDriverRuntime:
         Registered as the ``child_wire_forwarder`` service so child-spawning
         atoms (``sub_agent`` / ``workflow``) can fan a child's trajectory onto
         the parent wire WITHOUT importing this atom (§11) — they reach it by
-        name via ``api.get_service("child_wire_forwarder")``. A child object
+        name via ``session.services.get("child_wire_forwarder")``. A child object
         that does not expose ``bus`` / ``session_id`` is silently skipped: the
         markers (child_start/child_end) still flow on the parent bus, the
         trajectory just stays local."""
@@ -674,9 +672,9 @@ class _WireDriverRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: WireDriverConfig) -> None:
+def install(session: Any, config: WireDriverConfig) -> None:
     del config
-    _WireDriverRuntime.from_api(api).install()
+    _WireDriverRuntime.from_api(session).install()
 
 
 __all__ = (

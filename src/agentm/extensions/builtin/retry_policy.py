@@ -15,7 +15,6 @@ from agentm.core.abi import (
     ApiRegisterEvent,
     AssistantStreamEvent,
     DiagnosticEvent,
-    ExtensionAPI,
     Model,
     ProviderConfig,
     RetryPolicy,
@@ -182,8 +181,8 @@ def _wrap_provider(
 
 
 class _RetryPolicyRuntime:
-    def __init__(self, api: ExtensionAPI, config: RetryPolicyConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: RetryPolicyConfig) -> None:
+        self._session = session
         self._policy = ExponentialBackoffRetry(
             max_retries=max(0, config.max_retries),
             base_delay=max(0.0, config.base_delay),
@@ -195,11 +194,11 @@ class _RetryPolicyRuntime:
         self._wrapped: set[str] = set()
 
     def install(self) -> None:
-        self._api.set_service(RETRY_POLICY_SERVICE, self._policy)
+        self._session.services.register(RETRY_POLICY_SERVICE, self._policy)
         if not self._wrap_providers:
             return
         self._wrap_current_provider()
-        self._api.on(ApiRegisterEvent.CHANNEL, self.on_api_register)
+        self._session.bus.on(ApiRegisterEvent.CHANNEL, self.on_api_register)
 
     def on_api_register(self, event: ApiRegisterEvent) -> None:
         if event.kind != "provider":
@@ -214,7 +213,7 @@ class _RetryPolicyRuntime:
         )
 
     def _wrap_current_provider(self) -> None:
-        current = self._api.provider
+        current = None  # v2: provider access pending
         if current is None:
             return
         self._wrap_provider_by_name(
@@ -240,12 +239,12 @@ class _RetryPolicyRuntime:
         if wrapped_provider is provider:
             return
         self._wrapped.add(name)
-        self._api.register_provider(name, wrapped_provider)
+        self._session_stub_register_provider(name, wrapped_provider)
         if emit_diagnostic:
             self._emit_wrapped_diagnostic(name)
 
     def _emit_wrapped_diagnostic(self, name: str) -> None:
-        self._api.events.emit_sync(
+        self._session.bus.emit_sync(
             DiagnosticEvent.CHANNEL,
             DiagnosticEvent(
                 level="info",
@@ -255,8 +254,8 @@ class _RetryPolicyRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: RetryPolicyConfig) -> None:
-    _RetryPolicyRuntime(api, config).install()
+def install(session: Any, config: RetryPolicyConfig) -> None:
+    _RetryPolicyRuntime(session, config).install()
 
 
 __all__: Final = ["ExponentialBackoffRetry", "MANIFEST", "install"]

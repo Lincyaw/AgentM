@@ -13,7 +13,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import ExtensionAPI, ToolCallEvent
+from agentm.core.abi import ToolCallEvent
 from agentm.extensions import ExtensionManifest
 
 
@@ -48,11 +48,11 @@ _BLOCKED: Final[list[tuple[re.Pattern[str], str]]] = [
 
 
 class _ToolBashGuardRuntime:
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
+    def __init__(self, session: Any) -> None:
+        self._session = session
 
     def install(self) -> None:
-        self._api.on(ToolCallEvent.CHANNEL, self.on_tool_call)
+        self._session.bus.on(ToolCallEvent.CHANNEL, self.on_tool_call)
 
     def on_tool_call(self, event: ToolCallEvent) -> dict[str, Any] | None:
         if event.tool_name != "bash":
@@ -66,6 +66,6 @@ class _ToolBashGuardRuntime:
         return None
 
 
-def install(api: ExtensionAPI, config: ToolBashGuardConfig) -> None:
+def install(session: Any, config: ToolBashGuardConfig) -> None:
     del config
-    _ToolBashGuardRuntime(api).install()
+    _ToolBashGuardRuntime(session).install()

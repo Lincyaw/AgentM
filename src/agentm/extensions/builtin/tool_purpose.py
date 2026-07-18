@@ -15,7 +15,7 @@ from typing import Any, Final
 from loguru import logger
 from pydantic import BaseModel
 
-from agentm.core.abi import AgentStartEvent, ExtensionAPI, ToolCallEvent
+from agentm.core.abi import BeforeRunEvent, ToolCallEvent
 from agentm.extensions import ChannelEffects, ExtensionManifest
 
 _FIELD_NAME: Final = "purpose"
@@ -47,17 +47,17 @@ MANIFEST = ExtensionManifest(
 class _ToolPurposeRuntime:
     __slots__ = ("_api", "_exclude", "_injected")
 
-    def __init__(self, api: ExtensionAPI, config: ToolPurposeConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: ToolPurposeConfig) -> None:
+        self._session = session
         self._exclude = set(config.exclude)
         self._injected: set[str] = set()
 
     def install(self) -> None:
-        self._api.on(AgentStartEvent.CHANNEL, self._on_agent_start)
-        self._api.on(ToolCallEvent.CHANNEL, self._on_tool_call)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self._on_agent_start)
+        self._session.bus.on(ToolCallEvent.CHANNEL, self._on_tool_call)
 
-    def _on_agent_start(self, _event: AgentStartEvent) -> None:
-        for tool in self._api.tools:
+    def _on_agent_start(self, _event: BeforeRunEvent) -> None:
+        for tool in self._session.tools:
             if tool.name in self._exclude:
                 continue
             props = tool.parameters.get("properties")
@@ -77,5 +77,5 @@ class _ToolPurposeRuntime:
         event.args.pop(_FIELD_NAME, None)
 
 
-def install(api: ExtensionAPI, config: ToolPurposeConfig) -> None:
-    _ToolPurposeRuntime(api, config).install()
+def install(session: Any, config: ToolPurposeConfig) -> None:
+    _ToolPurposeRuntime(session, config).install()

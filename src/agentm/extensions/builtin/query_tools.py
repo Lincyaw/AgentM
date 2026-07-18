@@ -25,7 +25,6 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -317,24 +316,24 @@ def _load_run(
 # ---------------------------------------------------------------------------
 
 
-def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
-    _QueryToolsRuntime(api=api, config=config).install()
+def install(session: Any, config: QueryToolsConfig) -> None:
+    _QueryToolsRuntime(session=session, config=config).install()
 
 
 class _QueryToolsRuntime:
     """Owns query tool registration and session-scoped path defaults."""
 
-    def __init__(self, *, api: ExtensionAPI, config: QueryToolsConfig) -> None:
-        self._api = api
+    def __init__(self, *, session: Any, config: QueryToolsConfig) -> None:
+        self._session = session
         self._default_scenario = config.default_scenario
-        self._cwd = expand_path(api.cwd).resolve()
+        self._cwd = expand_path(session.ctx.cwd).resolve()
 
         from agentm.core.lib import resolve_observability_dir
 
         self._obs_dir = resolve_observability_dir(self._cwd)
 
     def install(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="query_traces",
                 description=(
@@ -350,7 +349,7 @@ class _QueryToolsRuntime:
                 fn=self._traces_execute,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="query_candidates",
                 description=(
@@ -365,7 +364,7 @@ class _QueryToolsRuntime:
                 fn=self._candidates_execute,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="query_module_feedback",
                 description=(

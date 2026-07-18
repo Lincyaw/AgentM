@@ -30,7 +30,7 @@ context trick — keep only relevance hints in prompt, let the agent decide
 what to expand.
 
 The atom is self-contained and §11-compliant: file reads go through
-``api.get_resource_writer()``.
+``None  # v2: resource writer pending``.
 Access bookkeeping is intentionally write-through to disk so it survives
 restarts and can be mined by future evolution/query atoms.
 """
@@ -47,8 +47,7 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    BeforeAgentStartEvent,
-    ExtensionAPI,
+    BeforeRunEvent,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -133,17 +132,17 @@ class _DeleteArgs(BaseModel):
         description="Memory name to delete; also removes its MEMORY.md entry.",
     )
 
-def install(api: ExtensionAPI, config: MemoryConfig) -> None:
-    base_path = _resolve_base(api.cwd, config.path)
+def install(session: Any, config: MemoryConfig) -> None:
+    base_path = _resolve_base(session.ctx.cwd, config.path)
     index_in_prompt = config.index_in_system_prompt
     max_index_lines = config.max_index_lines
 
-    writer = api.get_resource_writer()
+    writer = None  # v2: resource writer pending
 
     if index_in_prompt:
 
         async def _before_agent_start(
-            event: BeforeAgentStartEvent,
+            event: BeforeRunEvent,
         ) -> None:
             block = await _build_index_block(writer, base_path, max_index_lines)
             if not block:
@@ -152,7 +151,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             updated = f"{block}\n\n{current}" if current else block
             event.system = updated
 
-        api.on(BeforeAgentStartEvent.CHANNEL, _before_agent_start)
+        session.bus.on(BeforeRunEvent.CHANNEL, _before_agent_start)
 
     async def _save(args: dict[str, Any]) -> ToolResult:
         mem_type = str(args["type"])
@@ -169,7 +168,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         if "\n" in description:
             return _error("description must be single-line (no newlines)")
 
-        rel_md = _memory_relpath(base_path, mem_type, name, api.cwd)
+        rel_md = _memory_relpath(base_path, mem_type, name, session.ctx.cwd)
         body = _serialize_memory(mem_type, name, description, content)
 
         try:
@@ -180,7 +179,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             logger.warning("memory save write failed: {}", exc)
             return _error(f"write failed: {exc}")
 
-        index_error = await _rewrite_index(writer, base_path, api.cwd)
+        index_error = await _rewrite_index(writer, base_path, session.ctx.cwd)
         if index_error is not None:
             return _error(index_error)
         return _ok(f"saved memory {mem_type}/{name}")
@@ -196,7 +195,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             logger.warning("memory read failed for {}: {}", name, exc)
             return _error(f"read failed: {exc}")
         text = data.decode("utf-8", errors="replace")
-        await _record_access(writer, base_path, name, api.cwd)
+        await _record_access(writer, base_path, name, session.ctx.cwd)
         return _ok(text)
 
     async def _search(args: dict[str, Any]) -> ToolResult:
@@ -244,18 +243,18 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         path = await _resolve_memory_path(writer, base_path, name)
         if path is None:
             return _error(f"memory {name!r} not found in {base_path}")
-        rel = _to_cwd_relative(path, api.cwd)
+        rel = _to_cwd_relative(path, session.ctx.cwd)
         try:
             await writer.delete(rel, rationale="memory_delete")
         except Exception as exc:
             logger.warning("memory delete failed for {}: {}", name, exc)
             return _error(f"delete failed: {exc}")
-        index_error = await _rewrite_index(writer, base_path, api.cwd)
+        index_error = await _rewrite_index(writer, base_path, session.ctx.cwd)
         if index_error is not None:
             return _error(index_error)
         return _ok(f"deleted memory {name}")
 
-    api.register_tool(
+    session.register_tool(
         FunctionTool(
             name="memory_save",
             description=(
@@ -268,7 +267,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             metadata={"memory_op": "save"},
         )
     )
-    api.register_tool(
+    session.register_tool(
         FunctionTool(
             name="memory_read",
             description=(
@@ -281,7 +280,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             metadata={"memory_op": "read"},
         )
     )
-    api.register_tool(
+    session.register_tool(
         FunctionTool(
             name="memory_search",
             description=(
@@ -293,7 +292,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             metadata={"memory_op": "search"},
         )
     )
-    api.register_tool(
+    session.register_tool(
         FunctionTool(
             name="memory_delete",
             description="Delete a memory file and remove its MEMORY.md entry.",

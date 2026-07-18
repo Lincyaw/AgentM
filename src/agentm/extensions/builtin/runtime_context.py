@@ -10,12 +10,13 @@ ground-truth cwd / platform without scenario-specific code.
 """
 
 from __future__ import annotations
+from typing import Any
 
 import platform
 
 from pydantic import BaseModel
 
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import BeforeRunEvent
 from agentm.core.lib import expand_path
 from agentm.extensions import ExtensionManifest
 
@@ -29,7 +30,7 @@ MANIFEST = ExtensionManifest(
     description="Injects workspace cwd + host runtime facts into the system prompt.",
     registers=("event:before_agent_start",),
     config_schema=RuntimeContextConfig,
-    requires=(),  # Leaf atom: reads only api.cwd + stdlib platform.
+    requires=(),  # Leaf atom: reads only session.ctx.cwd + stdlib platform.
     api_version=1,
     tier=1,
 )
@@ -57,22 +58,22 @@ def _build_block(cwd: str) -> str:
 
 
 class _RuntimeContextRuntime:
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
-        self._block = _build_block(api.cwd)
+    def __init__(self, session: Any) -> None:
+        self._session = session
+        self._block = _build_block(session.ctx.cwd)
 
     def install(self) -> None:
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.before_agent_start)
 
-    def before_agent_start(self, event: BeforeAgentStartEvent) -> None:
+    def before_agent_start(self, event: BeforeRunEvent) -> None:
         current = str(event.system or "")
         updated = f"{self._block}\n\n{current}" if current else self._block
         event.system = updated
 
 
-def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
+def install(session: Any, config: RuntimeContextConfig) -> None:
     del config
-    _RuntimeContextRuntime(api).install()
+    _RuntimeContextRuntime(session).install()
 
 
 __all__ = (

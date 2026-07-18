@@ -28,6 +28,7 @@ Or manually::
 """
 
 from __future__ import annotations
+from typing import Any
 
 import asyncio
 import os
@@ -37,7 +38,7 @@ from pathlib import Path
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import ExtensionAPI, SessionShutdownEvent, TurnEndEvent
+from agentm.core.abi import SessionShutdownEvent, TurnCommittedEvent
 from agentm.core.lib import agentm_home_dir
 from agentm.extensions import ExtensionManifest
 
@@ -71,8 +72,8 @@ class _InboxSocketRuntime:
         "_shutdown", "_pending",
     )
 
-    def __init__(self, api: ExtensionAPI, session_id: str) -> None:
-        self._api = api
+    def __init__(self, session: Any, session_id: str) -> None:
+        self._session = session
         self._session_id = session_id
         self._sock_path = _socket_path(session_id)
         self._server: asyncio.AbstractServer | None = None
@@ -118,13 +119,13 @@ class _InboxSocketRuntime:
             mode, message = self._parse_mode(text)
 
             if mode == "now":
-                self._api.post_inbox(source="user", payload=message)
+                self._v2_push_trigger_stub(source="user", payload=message)
                 writer.write(b"ok:now\n")
                 logger.info("inbox_socket: injected {} chars (now)", len(message))
 
             elif mode == "interrupt":
-                self._api.post_inbox(source="user", payload=message)
-                session = self._api.get_service("_session")
+                self._v2_push_trigger_stub(source="user", payload=message)
+                session = self._session.services.get("_session")
                 if session is not None and hasattr(session, "interrupt"):
                     session.interrupt()
                     writer.write(b"ok:interrupted\n")
@@ -144,11 +145,11 @@ class _InboxSocketRuntime:
         finally:
             writer.close()
 
-    async def _on_turn_end(self, _event: TurnEndEvent) -> None:
+    async def _on_turn_end(self, _event: TurnCommittedEvent) -> None:
         """Drain queued messages at the turn boundary."""
         while self._pending:
             message = self._pending.popleft()
-            self._api.post_inbox(source="user", payload=message)
+            self._v2_push_trigger_stub(source="user", payload=message)
             logger.info("inbox_socket: delivered queued message ({} chars) at turn boundary", len(message))
 
     async def stop(self, _event: SessionShutdownEvent) -> None:
@@ -165,10 +166,10 @@ class _InboxSocketRuntime:
         logger.debug("inbox_socket: stopped")
 
 
-async def install(api: ExtensionAPI, config: InboxSocketConfig) -> None:
-    session_id = api.session_id
-    runtime = _InboxSocketRuntime(api, session_id)
+async def install(session: Any, config: InboxSocketConfig) -> None:
+    session_id = session.id
+    runtime = _InboxSocketRuntime(session, session_id)
     await runtime.start()
 
-    api.on("turn_end", runtime._on_turn_end)
-    api.on("session_shutdown", runtime.stop)
+    session.bus.on("turn_end", runtime._on_turn_end)
+    session.bus.on("session_shutdown", runtime.stop)

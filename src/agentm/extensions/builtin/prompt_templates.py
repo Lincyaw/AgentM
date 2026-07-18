@@ -4,10 +4,11 @@ Owns the on-disk markdown template loader, the ``/<name> args`` substituter,
 and the in-memory named-prompt registry used by the compaction subsystem.
 Constructs a :class:`_PromptRegistry` instance at install time and registers
 it under the ``"prompt_templates"`` service key so other atoms reach it via
-``api.get_service("prompt_templates")``.
+``session.services.get("prompt_templates")``.
 """
 
 from __future__ import annotations
+from typing import Any
 
 import os
 import re
@@ -17,7 +18,6 @@ from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    ExtensionAPI,
     InputEvent,
     PROMPT_REGISTRY,
     PROMPT_TEMPLATES_SERVICE,
@@ -159,7 +159,7 @@ class _PromptRegistry:
 
     Holds the named-prompt dict and bridges to filesystem template loading.
     One instance per session, owned by this atom and published via
-    ``api.set_service("prompt_templates", registry)``.
+    ``session.services.register("prompt_templates", registry)``.
     """
 
     def __init__(self, project_prompt_dirs: tuple[str, ...] | None = None) -> None:
@@ -240,12 +240,12 @@ MANIFEST = ExtensionManifest(
 
 
 class _PromptTemplatesRuntime:
-    def __init__(self, api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: PromptTemplatesConfig) -> None:
+        self._session = session
         self._include_defaults = config.include_defaults
         self._configured_prompt_paths = list(config.prompt_paths)
         project_dirs: tuple[str, ...] = tuple(
-            str(path) for path in api.get_project_layout().prompts_dirs()
+            str(path) for path in None  # v2: project_layout pending.prompts_dirs()
         )
         self._registry: PromptRegistry = _PromptRegistry(
             project_prompt_dirs=project_dirs
@@ -253,14 +253,14 @@ class _PromptTemplatesRuntime:
         self._cache: list[PromptTemplateRecord] = []
 
     def install(self) -> None:
-        self._api.set_service(PROMPT_TEMPLATES_SERVICE, self._registry)
-        self._api.on(SessionReadyEvent.CHANNEL, self.populate)
-        self._api.on(InputEvent.CHANNEL, self.on_input)
+        self._session.services.register(PROMPT_TEMPLATES_SERVICE, self._registry)
+        self._session.bus.on(SessionReadyEvent.CHANNEL, self.populate)
+        self._session.bus.on(InputEvent.CHANNEL, self.on_input)
 
     async def populate(self, _: SessionReadyEvent) -> None:
-        responses = await self._api.events.emit(
+        responses = await self._session.bus.emit(
             ResourcesDiscoverEvent.CHANNEL,
-            ResourcesDiscoverEvent(cwd=self._api.cwd, reason="startup"),
+            ResourcesDiscoverEvent(cwd=self._session.ctx.cwd, reason="startup"),
         )
         prompt_paths = list(self._configured_prompt_paths)
         for response in responses:
@@ -271,7 +271,7 @@ class _PromptTemplatesRuntime:
                 continue
             prompt_paths.extend(str(path) for path in extra_paths)
         self._cache[:] = self._registry.load_prompt_templates(
-            cwd=self._api.cwd,
+            cwd=self._session.ctx.cwd,
             agent_dir=str(agentm_home_dir()),
             prompt_paths=tuple(prompt_paths),
             include_defaults=self._include_defaults,
@@ -286,5 +286,5 @@ class _PromptTemplatesRuntime:
             event.text = expanded
 
 
-async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
-    _PromptTemplatesRuntime(api, config).install()
+async def install(session: Any, config: PromptTemplatesConfig) -> None:
+    _PromptTemplatesRuntime(session, config).install()

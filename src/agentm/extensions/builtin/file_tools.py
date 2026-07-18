@@ -23,7 +23,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agentm.core.abi import (
     BashOperations,
-    ExtensionAPI,
     FunctionTool,
     ResourceWriter,
     TOOL_RESULT_FORMAT_METADATA_KEY,
@@ -286,8 +285,8 @@ async def _upload_toolbox(
 # ---------------------------------------------------------------------------
 
 
-def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
-    _FileToolsRuntime(api=api, config=config).install()
+def install(session: Any, config: FileToolsConfig) -> None:
+    _FileToolsRuntime(session=session, config=config).install()
 
 
 def _enabled_tools(configured: list[str] | None) -> frozenset[str]:
@@ -307,27 +306,27 @@ def _enabled_tools(configured: list[str] | None) -> frozenset[str]:
 class _FileToolsRuntime:
     """Owns file_tools registration and per-session handler state."""
 
-    def __init__(self, *, api: ExtensionAPI, config: FileToolsConfig) -> None:
-        self._api = api
+    def __init__(self, *, session: Any, config: FileToolsConfig) -> None:
+        self._session = session
         self._config = config
         self._enabled_tools = _enabled_tools(config.tools)
-        self._allow_globs = _coerce_globs(config.allow_globs, api.cwd)
-        self._deny_globs = _coerce_globs(config.deny_globs, api.cwd)
+        self._allow_globs = _coerce_globs(config.allow_globs, session.ctx.cwd)
+        self._deny_globs = _coerce_globs(config.deny_globs, session.ctx.cwd)
         self._max_size_bytes = config.max_size_bytes
 
         # Detect sandbox vs local mode
-        sandbox_work_dir = api.get_service(_SANDBOX_WORK_DIR_SERVICE)
+        sandbox_work_dir = session.services.get(_SANDBOX_WORK_DIR_SERVICE)
         if sandbox_work_dir is not None:
             self._sandbox = True
             self._sandbox_work_dir = str(sandbox_work_dir)
-            self._bash_ops = api.get_operations().bash
-            self._writer = api.get_resource_writer()
+            self._bash_ops = None  # v2: operations pending.bash
+            self._writer = None  # v2: resource writer pending
             self._toolbox = None
             self._toolbox_uploaded = False
         else:
             self._sandbox = False
             self._toolbox = FileToolbox(
-                cwd=api.cwd,
+                cwd=session.ctx.cwd,
                 max_size=config.max_size_bytes,
                 require_read=config.require_read,
                 default_limit=config.default_limit,
@@ -427,13 +426,13 @@ class _FileToolsRuntime:
     def _read_state_path(self, path: str) -> str:
         if os.path.isabs(path):
             return os.path.normpath(path)
-        return os.path.normpath(os.path.join(self._api.cwd, path))
+        return os.path.normpath(os.path.join(self._session.ctx.cwd, path))
 
     # -- read ---------------------------------------------------------------
 
     def _register_read(self) -> None:
         default_limit = self._config.default_limit
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="read",
                 description=(
@@ -481,7 +480,7 @@ class _FileToolsRuntime:
     # -- write --------------------------------------------------------------
 
     def _register_write(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="write",
                 description=(
@@ -524,7 +523,7 @@ class _FileToolsRuntime:
     # -- edit ---------------------------------------------------------------
 
     def _register_edit(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="edit",
                 description=(

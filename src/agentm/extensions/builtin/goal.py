@@ -18,7 +18,7 @@ Interface:
 * ``/goal`` — show status.
 * ``/goal clear`` — remove the goal before it's met.
 
-§11: single file; ``MANIFEST`` + ``install(api, config)``; no atom-to-atom
+§11: single file; ``MANIFEST`` + ``install(session, config)``; no atom-to-atom
 imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 """
 
@@ -36,10 +36,9 @@ from agentm.core.abi import (
     AgentMessage,
     AgentSessionConfig,
     AssistantMessage,
-    BeforeSendToLlmEvent,
+    BeforeSendEvent,
     CommandSpec,
-    DecideTurnActionEvent,
-    ExtensionAPI,
+    DecideEvent,
     FunctionTool,
     Inject,
     LoopConfig,
@@ -341,8 +340,7 @@ MANIFEST = ExtensionManifest(
 
 
 async def _prompt_child_session_messages(
-    api: ExtensionAPI,
-    scenario: str,
+    session: Any, scenario: str,
     max_turns: int,
     prompt: str,
     purpose: str,
@@ -351,7 +349,7 @@ async def _prompt_child_session_messages(
     atom_config_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> list[AgentMessage] | None:
     config = AgentSessionConfig(
-        cwd=api.cwd,
+        cwd=session.ctx.cwd,
         scenario=scenario,
         extra_extensions=extra_extensions or [],
         extra_tools=extra_tools or [],
@@ -359,14 +357,14 @@ async def _prompt_child_session_messages(
         purpose=purpose,
         lineage={
             "kind": purpose,
-            "parent_session_id": api.session_id,
-            "root_session_id": api.root_session_id,
+            "parent_session_id": session.id,
+            "root_session_id": session.ctx.root_session_id,
             "purpose": purpose,
         },
         loop_config=LoopConfig(max_turns=max_turns),
     )
     try:
-        child = await api.spawn_child_session(config)
+        child = await session.spawn(config)
     except Exception as exc:  # noqa: BLE001
         logger.warning("goal: {} spawn failed: {}", purpose, exc)
         return None
@@ -383,8 +381,8 @@ async def _prompt_child_session_messages(
             logger.debug("goal: {} shutdown (ignored): {}", purpose, exc)
 
 
-def _agent_env_attach_overrides(api: ExtensionAPI) -> dict[str, dict[str, Any]]:
-    session_id = api.get_service(_AGENT_ENV_SESSION_SERVICE)
+def _agent_env_attach_overrides(session: Any) -> dict[str, dict[str, Any]]:
+    session_id = session.services.get(_AGENT_ENV_SESSION_SERVICE)
     if not isinstance(session_id, str) or not session_id:
         return {}
     return {_OPERATIONS_ATOM: {"attach_session": session_id}}
@@ -396,8 +394,7 @@ def _agent_env_attach_overrides(api: ExtensionAPI) -> dict[str, dict[str, Any]]:
 
 
 async def _evaluate_checker(
-    api: ExtensionAPI,
-    scenario: str,
+    session: Any, scenario: str,
     max_turns: int,
     condition: str,
     checker_prompt_override: str | None = None,
@@ -414,7 +411,7 @@ async def _evaluate_checker(
     else:
         prompt = _CHECKER_PROMPT_TEMPLATE.format(condition=condition)
     messages = await _prompt_child_session_messages(
-        api,
+        session,
         scenario,
         max_turns,
         prompt,
@@ -425,7 +422,7 @@ async def _evaluate_checker(
         # the deriver path). Without this, an agent_env checker scenario fails
         # to load ("'image' or 'attach_session' required") and the goal loop
         # silently allows stop-without-verdict.
-        atom_config_overrides=_agent_env_attach_overrides(api),
+        atom_config_overrides=_agent_env_attach_overrides(session),
     )
     if messages is None:
         return None, "checker produced no response"
@@ -532,14 +529,14 @@ def _collect_user_text(messages: list[AgentMessage]) -> str:
 
 
 class _GoalRuntime:
-    def __init__(self, api: ExtensionAPI, config: GoalConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: GoalConfig) -> None:
+        self._session = session
         self._checker_scenario = config.checker_scenario
         self._checker_max_turns = config.checker_max_turns
         self._checker_prompt_override = config.checker_prompt
         self._checker_retries = max(config.checker_retries, 0)
         self._auto_init_enabled = config.auto_init
-        self._auto_init_scenario = config.auto_init_scenario or api.scenario
+        self._auto_init_scenario = config.auto_init_scenario or session.ctx.scenario
         self._auto_init_max_turns = config.auto_init_max_turns
         self._auto_init_retries = max(config.auto_init_retries, 0)
         self._max_rejects = max(config.max_rejects, 1)
@@ -548,7 +545,7 @@ class _GoalRuntime:
 
         if config.condition:
             self._state = _GoalState(condition=config.condition)
-            api.set_service(GOAL_CONDITION_SERVICE, config.condition)
+            session.services.register(GOAL_CONDITION_SERVICE, config.condition)
             logger.info("goal: static condition — {}", config.condition)
 
     def install(self) -> None:
@@ -558,11 +555,11 @@ class _GoalRuntime:
                 "goal: auto_init requires a scenario but none is set — disabled"
             )
             self._auto_init_enabled = False
-        self._api.on(BeforeSendToLlmEvent.CHANNEL, self._on_before_send)
-        self._api.on(DecideTurnActionEvent.CHANNEL, self._on_decide)
+        self._session.bus.on(BeforeSendEvent.CHANNEL, self._on_before_send)
+        self._session.bus.on(DecideEvent.CHANNEL, self._on_decide)
 
     def _register_goal_command(self) -> None:
-        self._api.register_command(
+        self._session_stub_register_command(
             "goal",
             CommandSpec(
                 description=(
@@ -573,23 +570,23 @@ class _GoalRuntime:
             ),
         )
 
-    async def _goal_command(self, args: str, cmd_api: ExtensionAPI) -> None:
+    async def _goal_command(self, args: str, cmd_api: Any) -> None:
         stripped = args.strip()
 
         if not stripped:
-            cmd_api.send_user_message(self._goal_status_message())
+            cmd_api._v2_send_user_stub(self._goal_status_message())
             return
 
         if stripped.lower() in _CLEAR_ALIASES:
             if self._state is not None and not self._state.achieved:
                 self._state = None
-                cmd_api.send_user_message("Goal cleared.")
+                cmd_api._v2_send_user_stub("Goal cleared.")
             else:
-                cmd_api.send_user_message("No active goal to clear.")
+                cmd_api._v2_send_user_stub("No active goal to clear.")
             return
 
         self._state = _GoalState(condition=stripped)
-        cmd_api.send_user_message(
+        cmd_api._v2_send_user_stub(
             f"Goal set (checker scenario={self._checker_scenario}): {stripped}"
         )
 
@@ -619,12 +616,12 @@ class _GoalRuntime:
             msg += f"\nLast evaluation: {state.last_reason}"
         return msg + f"\nChecker: scenario={self._checker_scenario}"
 
-    async def _on_before_send(self, event: BeforeSendToLlmEvent) -> None:
+    async def _on_before_send(self, event: BeforeSendEvent) -> None:
         if (
             self._auto_init_enabled
             and not self._auto_init_started
             and self._state is None
-            and self._api.parent_session_id is None
+            and self._session.ctx.parent_session_id is None
         ):
             user_text = _collect_user_text(event.messages)
             self._auto_init_started = True
@@ -637,7 +634,7 @@ class _GoalRuntime:
                 await self._derive_goal(event.system or "", user_text)
         self._append_goal_criteria(event)
 
-    def _append_goal_criteria(self, event: BeforeSendToLlmEvent) -> None:
+    def _append_goal_criteria(self, event: BeforeSendEvent) -> None:
         """Expose the acceptance criteria to the main agent.
 
         Appended to the system prompt on every request while a goal is
@@ -675,13 +672,13 @@ class _GoalRuntime:
         last_error: Exception | None = None
         for attempt in range(self._auto_init_retries + 1):
             messages = await _prompt_child_session_messages(
-                self._api,
+                self._session,
                 self._auto_init_scenario,
                 self._auto_init_max_turns,
                 prompt,
                 "goal_derivation",
                 extra_extensions=[_STRUCTURED_OUTPUT_EXT, _DERIVER_TURN_REMINDER_EXT],
-                atom_config_overrides=_agent_env_attach_overrides(self._api),
+                atom_config_overrides=_agent_env_attach_overrides(self._session),
             )
             if messages is None:
                 last_error = RuntimeError("goal derivation child produced no response")
@@ -699,7 +696,7 @@ class _GoalRuntime:
                         goal_summary=payload.goal,
                         verification_method=payload.verification_method,
                     )
-                    self._api.set_service(GOAL_CONDITION_SERVICE, condition)
+                    self._session.services.register(GOAL_CONDITION_SERVICE, condition)
                     logger.info(
                         "goal: auto-initialized after {} attempt(s) — {}",
                         attempt + 1,
@@ -732,7 +729,7 @@ class _GoalRuntime:
                 )
             return
 
-    async def _on_decide(self, event: DecideTurnActionEvent) -> Any:
+    async def _on_decide(self, event: DecideEvent) -> Any:
         state = self._state
         if state is None or state.achieved or state.released:
             return None
@@ -750,7 +747,7 @@ class _GoalRuntime:
         reason = ""
         for attempt in range(self._checker_retries + 1):
             is_met, reason = await _evaluate_checker(
-                self._api,
+                self._session,
                 self._checker_scenario,
                 self._checker_max_turns,
                 state.condition,
@@ -809,5 +806,5 @@ class _GoalRuntime:
         return Inject(messages=[text_message(inject_text)])
 
 
-def install(api: ExtensionAPI, config: GoalConfig) -> None:
-    _GoalRuntime(api, config).install()
+def install(session: Any, config: GoalConfig) -> None:
+    _GoalRuntime(session, config).install()

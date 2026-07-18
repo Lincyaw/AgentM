@@ -19,8 +19,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    DecideTurnActionEvent,
-    ExtensionAPI,
+    DecideEvent,
     ModelEndTurn,
     Step,
     Stop,
@@ -62,15 +61,15 @@ def _is_thinking_only(content: list[Any]) -> bool:
 
 
 class _ThinkingRetryRuntime:
-    def __init__(self, api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: ThinkingRetryConfig) -> None:
+        self._session = session
         self._max_retries = config.max_retries
         self._consecutive_count = 0
 
     def install(self) -> None:
-        self._api.on(DecideTurnActionEvent.CHANNEL, self.on_decide)
+        self._session.bus.on(DecideEvent.CHANNEL, self.on_decide)
 
-    def on_decide(self, event: DecideTurnActionEvent) -> Step | None:
+    def on_decide(self, event: DecideEvent) -> Step | None:
         obs = event.observation
         default = obs.default_action
 
@@ -101,5 +100,5 @@ class _ThinkingRetryRuntime:
         self._consecutive_count = 0
 
 
-def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
-    _ThinkingRetryRuntime(api, config).install()
+def install(session: Any, config: ThinkingRetryConfig) -> None:
+    _ThinkingRetryRuntime(session, config).install()

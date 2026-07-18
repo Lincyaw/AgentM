@@ -31,7 +31,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import ExtensionAPI, ToolCallEvent
+from agentm.core.abi import ToolCallEvent
 from agentm.extensions import ExtensionManifest
 
 
@@ -64,8 +64,8 @@ def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
 
 
 class _PermissionRuntime:
-    def __init__(self, api: ExtensionAPI, config: PermissionConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: PermissionConfig) -> None:
+        self._session = session
         self._allow = tuple(config.allow)
         self._deny = tuple(config.deny)
         self._both_set = bool(self._allow) and bool(self._deny)
@@ -74,7 +74,7 @@ class _PermissionRuntime:
         return bool(self._allow or self._deny)
 
     def install(self) -> None:
-        self._api.on(ToolCallEvent.CHANNEL, self.on_tool_call)
+        self._session.bus.on(ToolCallEvent.CHANNEL, self.on_tool_call)
 
     def on_tool_call(self, event: ToolCallEvent) -> dict[str, Any] | None:
         name = event.tool_name
@@ -103,8 +103,8 @@ class _PermissionRuntime:
         return None
 
 
-def install(api: ExtensionAPI, config: PermissionConfig) -> None:
-    runtime = _PermissionRuntime(api, config)
+def install(session: Any, config: PermissionConfig) -> None:
+    runtime = _PermissionRuntime(session, config)
     if not runtime.active():
         return
     runtime.install()

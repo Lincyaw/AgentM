@@ -6,9 +6,9 @@ Owns two pieces the kernel deliberately does not:
    (system persona, fresh summarization, incremental update, branch-summary
    instructions and preamble).
    Registered into the in-memory prompt registry resolved via
-   ``api.get_service("prompt_templates").register_prompt``. Engine callers
+   ``session.services.get("prompt_templates").register_prompt``. Engine callers
    (``llm_compaction``, branch summarization) retrieve them via
-   ``api.get_service("prompt_templates").get_prompt(<name>)``.
+   ``session.services.get("prompt_templates").get_prompt(<name>)``.
 
 2. The default :class:`EntryMaterializer` implementations for the three
    kernel-defined session-entry types: ``message``, ``branch_summary``,
@@ -19,13 +19,14 @@ Owns two pieces the kernel deliberately does not:
 
 The prompt registry is published by the ``prompt_templates`` atom under the
 ``"prompt_templates"`` service key; this atom resolves it via
-``api.get_service("prompt_templates")``.
+``session.services.get("prompt_templates")``.
 
 The single-file contract holds: this atom does not import any other
 atom and reaches services exclusively via :class:`ExtensionAPI`.
 """
 
 from __future__ import annotations
+from typing import Any
 
 from dataclasses import dataclass
 
@@ -40,7 +41,6 @@ from agentm.core.abi import (
     ENTRY_TYPE_BRANCH_SUMMARY,
     ENTRY_TYPE_COMPACTION,
     ENTRY_TYPE_MESSAGE,
-    ExtensionAPI,
     PROMPT_TEMPLATES_SERVICE,
     PROMPT_BRANCH_SUMMARY,
     PROMPT_BRANCH_SUMMARY_PREAMBLE,
@@ -324,8 +324,8 @@ MANIFEST = ExtensionManifest(
 
 
 class _CompactionPromptsRuntime:
-    def __init__(self, api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: CompactionPromptsConfig) -> None:
+        self._session = session
         self._prompt_bodies = {
             PROMPT_SUMMARIZATION_SYSTEM: config.summarization_system
             or _SUMMARIZATION_SYSTEM,
@@ -342,7 +342,7 @@ class _CompactionPromptsRuntime:
         self._register_materializers()
 
     def _register_prompts(self) -> None:
-        registry = self._api.get_service(PROMPT_TEMPLATES_SERVICE)
+        registry = self._session.services.get(PROMPT_TEMPLATES_SERVICE)
         if registry is None:
             raise RuntimeError(
                 "compaction_prompts atom requires the prompt_templates service "
@@ -362,5 +362,5 @@ class _CompactionPromptsRuntime:
         ENTRY_MATERIALIZERS[ENTRY_TYPE_COMPACTION] = _CompactionEntryMaterializer()
 
 
-def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
-    _CompactionPromptsRuntime(api, config).install()
+def install(session: Any, config: CompactionPromptsConfig) -> None:
+    _CompactionPromptsRuntime(session, config).install()

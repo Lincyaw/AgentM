@@ -45,9 +45,8 @@ from typing import Any, Literal
 from loguru import logger
 
 from agentm.core.abi import (
-    AgentStartEvent,
+    BeforeRunEvent,
     BackgroundActivityEvent,
-    ExtensionAPI,
     ExtensionStaleError,
     FunctionTool,
     SessionShutdownEvent,
@@ -553,14 +552,13 @@ class _BgManager:
     def __init__(
         self,
         *,
-        api: ExtensionAPI,
-        timeout: float,
+        session: Any, timeout: float,
         heartbeat_interval: float,
         silence_warning: float,
         denylist: set[str],
         shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
-        self._api = api
+        self._session = session
         self.timeout = timeout
         self._heartbeat = heartbeat_interval
         self._silence_warning = silence_warning
@@ -589,7 +587,7 @@ class _BgManager:
         """
 
         try:
-            return self._api.get_service("bash_output_tails")
+            return self._session.services.get("bash_output_tails")
         except ExtensionStaleError:
             return None
 
@@ -600,7 +598,7 @@ class _BgManager:
         note: str | None = None,
         terminal: bool = False,
     ) -> None:
-        events = getattr(self._api, "events", None)
+        events = getattr(self._session, "events", None)
         if events is None:
             return
         try:
@@ -611,7 +609,7 @@ class _BgManager:
                     activity_id=_activity_id(state.task_id),
                     label=state.label,
                     status=state.status,
-                    session_id=self._api.session_id,
+                    session_id=self._session.id,
                     note=note,
                     terminal=terminal,
                 ),
@@ -631,7 +629,7 @@ class _BgManager:
         names are left as-is; tools already wrapped are skipped.
         """
 
-        tools = self._api.tools
+        tools = self._session.tools
         for index, tool in enumerate(tools):
             if tool.name in _COMPANION_TOOLS or tool.name in self._denylist:
                 continue
@@ -732,7 +730,7 @@ class _BgManager:
         # mid-dispatch atom reload (ExtensionStaleError) skips tracking — the
         # inbox is gone, there is nothing to keep alive for.
         try:
-            bracket = self._api.track_background()
+            bracket = self._session.track_background()
             bracket.__enter__()
             state.work_bracket = bracket
         except ExtensionStaleError:
@@ -758,7 +756,7 @@ class _BgManager:
         return _tool_result(payload)
 
     def _session_dir_name(self) -> str:
-        session_id = getattr(self._api, "session_id", None)
+        session_id = getattr(self._session, "session_id", None)
         if isinstance(session_id, str) and session_id:
             return session_id
         return "unknown-session"
@@ -778,7 +776,7 @@ class _BgManager:
         if log_path is None:
             return
         try:
-            writer = self._api.get_resource_writer()
+            writer = None  # v2: resource writer pending
         except ExtensionStaleError:
             return
         cleanup = asyncio.create_task(
@@ -789,7 +787,7 @@ class _BgManager:
 
     async def wait_inbox_nonempty(self) -> bool:
         try:
-            return await self._api.wait_inbox_nonempty(sources=_PREEMPT_SOURCES)
+            return await self._session.wait_inbox_nonempty(sources=_PREEMPT_SOURCES)
         except ExtensionStaleError:
             return False
 
@@ -904,7 +902,7 @@ class _BgManager:
             terminal=state.status in _ACTIVITY_TERMINAL_STATUSES,
         )
         try:
-            self._api.post_inbox(
+            self._v2_push_trigger_stub(
                 source="background",
                 payload=note,
                 dedup_key=f"bg-complete-{state.task_id}",
@@ -959,7 +957,7 @@ class _BgManager:
                         f"still running ({time.monotonic() - state.started_at:.0f}s)."
                     )
                 self._emit_activity(state, note=note)
-                self._api.post_inbox(
+                self._v2_push_trigger_stub(
                     source="background",
                     payload=note,
                     dedup_key=f"bg-ticker-{state.task_id}",
@@ -1075,10 +1073,10 @@ class _CancelBackgroundParams(BaseModel):
 
 
 class _BackgroundExecRuntime:
-    def __init__(self, api: ExtensionAPI, config: BackgroundExecConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: BackgroundExecConfig) -> None:
+        self._session = session
         self._manager = _BgManager(
-            api=api,
+            api=session,
             timeout=config.timeout,
             heartbeat_interval=config.heartbeat_interval,
             silence_warning=config.silence_warning,
@@ -1087,15 +1085,15 @@ class _BackgroundExecRuntime:
         )
 
     def install(self) -> None:
-        self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
-        self._api.on(SessionShutdownEvent.CHANNEL, self._manager.on_session_shutdown)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.on_agent_start)
+        self._session.bus.on(SessionShutdownEvent.CHANNEL, self._manager.on_session_shutdown)
         self._register_tools()
 
-    def on_agent_start(self, _: AgentStartEvent) -> None:
+    def on_agent_start(self, _: BeforeRunEvent) -> None:
         self._manager.wrap_tools()
 
     def _register_tools(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="check_background",
                 description=(
@@ -1119,7 +1117,7 @@ class _BackgroundExecRuntime:
                 fn=self._manager.check_background,
             )
         )
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="cancel_background",
                 description=(
@@ -1139,8 +1137,8 @@ class _BackgroundExecRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
-    _BackgroundExecRuntime(api, config).install()
+def install(session: Any, config: BackgroundExecConfig) -> None:
+    _BackgroundExecRuntime(session, config).install()
 
 
 __all__ = (

@@ -26,7 +26,6 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -83,7 +82,7 @@ class _InstallArgs(BaseModel):
         description=(
             "Full Python module text. Must contain a top-level "
             "``MANIFEST = ExtensionManifest(...)`` and an "
-            "``install(api, config)`` function. single-file "
+            "``install(session, config)`` function. single-file "
             "contract applies — no imports of other atom modules, "
             "no agentm.core._internal, no agentm.core.runtime.session."
         ),
@@ -124,8 +123,8 @@ class _ListArgs(BaseModel):
 
 
 class _AtomManagementRuntime:
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
+    def __init__(self, session: Any) -> None:
+        self._session = session
 
     def install(self) -> None:
         self._register_install_atom()
@@ -133,7 +132,7 @@ class _AtomManagementRuntime:
         self._register_list_atoms()
 
     def _register_install_atom(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="install_atom",
                 description=(
@@ -161,7 +160,7 @@ class _AtomManagementRuntime:
         if atom_config is not None and not isinstance(atom_config, dict):
             return _error("`config` must be an object/mapping when provided.")
         try:
-            result = self._api.install_atom(
+            result = self._session.install_atom(
                 name=name,
                 source=source,
                 target_path=None,  # default: <cwd>/.agentm/atoms/<name>.py
@@ -185,7 +184,7 @@ class _AtomManagementRuntime:
         )
 
     def _register_unload_atom(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="unload_atom",
                 description=(
@@ -206,7 +205,7 @@ class _AtomManagementRuntime:
         # the args verbatim.
         _ = str(args["rationale"])
         try:
-            result = self._api.unload_atom(name, agent_initiated=True)
+            result = self._session.unload_atom(name, agent_initiated=True)
         except Exception as exc:  # noqa: BLE001
             logger.debug("atom_management: unload_atom raised: {}", exc)
             return _error(f"unload_atom raised: {exc}")
@@ -222,7 +221,7 @@ class _AtomManagementRuntime:
         )
 
     def _register_list_atoms(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="list_atoms",
                 description=(
@@ -239,7 +238,7 @@ class _AtomManagementRuntime:
     async def list_atoms(self, args: dict[str, Any]) -> ToolResult:
         del args
         try:
-            atoms = self._api.list_atoms()
+            atoms = self._session.list_atoms()
         except Exception as exc:  # noqa: BLE001
             logger.debug("atom_management: list_atoms raised: {}", exc)
             return _error(f"list_atoms raised: {exc}")
@@ -252,6 +251,6 @@ class _AtomManagementRuntime:
         return _ok("\n".join(lines))
 
 
-def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
+def install(session: Any, config: AtomManagementConfig) -> None:
     del config
-    _AtomManagementRuntime(api).install()
+    _AtomManagementRuntime(session).install()

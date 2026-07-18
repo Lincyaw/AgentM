@@ -19,8 +19,7 @@ from xml.sax.saxutils import escape
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    BeforeAgentStartEvent,
-    ExtensionAPI,
+    BeforeRunEvent,
     ResolveSubagentEvent,
     SessionReadyEvent,
 )
@@ -40,7 +39,7 @@ MANIFEST = ExtensionManifest(
         "for dispatch_agent via the resolve_subagent event."
     ),
     registers=(
-        f"event:{BeforeAgentStartEvent.CHANNEL}",
+        f"event:{BeforeRunEvent.CHANNEL}",
         f"event:{ResolveSubagentEvent.CHANNEL}",
         f"event:{SessionReadyEvent.CHANNEL}",
     ),
@@ -226,11 +225,11 @@ def _available_agents_block(agents: dict[str, dict[str, Any]]) -> str:
 
 
 class _ClaudeAgentsRuntime:
-    def __init__(self, api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: ClaudeAgentsConfig) -> None:
+        self._session = session
         self._inherit_claude = config.inherit_claude
         self._extra_paths = [
-            expand_path_from_cwd(path, api.cwd) / "agents"
+            expand_path_from_cwd(path, session.ctx.cwd) / "agents"
             for path in config.extra_paths
             if path.strip()
         ]
@@ -238,17 +237,17 @@ class _ClaudeAgentsRuntime:
         self._cached_block = ""
 
     def install(self) -> None:
-        self._api.on(SessionReadyEvent.CHANNEL, self.load)
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
-        self._api.on(ResolveSubagentEvent.CHANNEL, self.resolve)
+        self._session.bus.on(SessionReadyEvent.CHANNEL, self.load)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.inject)
+        self._session.bus.on(ResolveSubagentEvent.CHANNEL, self.resolve)
 
     async def load(self, _event: SessionReadyEvent) -> None:
-        dirs = _discover_dirs(self._api.cwd, self._inherit_claude)
+        dirs = _discover_dirs(self._session.ctx.cwd, self._inherit_claude)
         dirs.extend(self._extra_paths)
         self._agents = _load_agents(dirs)
         self._cached_block = _available_agents_block(self._agents)
 
-    def inject(self, event: BeforeAgentStartEvent) -> None:
+    def inject(self, event: BeforeRunEvent) -> None:
         if not self._cached_block:
             return
         existing = event.system or ""
@@ -279,5 +278,5 @@ class _ClaudeAgentsRuntime:
         }
 
 
-async def install(api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
-    _ClaudeAgentsRuntime(api, config).install()
+async def install(session: Any, config: ClaudeAgentsConfig) -> None:
+    _ClaudeAgentsRuntime(session, config).install()

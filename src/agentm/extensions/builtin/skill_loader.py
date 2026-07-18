@@ -20,9 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import (
-    BeforeAgentStartEvent,
+    BeforeRunEvent,
     DiagnosticEvent,
-    ExtensionAPI,
     FunctionTool,
     ResourcesDiscoverEvent,
     SessionReadyEvent,
@@ -395,8 +394,8 @@ class _ResourceResponseObserver:
 
 
 class _SkillLoaderRuntime:
-    def __init__(self, api: ExtensionAPI, config: SkillLoaderConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: SkillLoaderConfig) -> None:
+        self._session = session
         self._include_defaults = config.include_defaults
         # ``inherit_claude`` defaults to ``include_defaults`` — when callers turn
         # off the standard agentm defaults (e.g. test isolation) they should not
@@ -411,7 +410,7 @@ class _SkillLoaderRuntime:
         self._skills_by_name: dict[str, SkillRecord] = {}
 
     def install(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="load_skill",
                 description=(
@@ -426,8 +425,8 @@ class _SkillLoaderRuntime:
                 fn=self.load_skill,
             )
         )
-        self._api.on(SessionReadyEvent.CHANNEL, self.populate)
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
+        self._session.bus.on(SessionReadyEvent.CHANNEL, self.populate)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.inject)
 
     async def populate(self, _: SessionReadyEvent) -> None:
         discovered_paths = self._discovery_paths()
@@ -442,7 +441,7 @@ class _SkillLoaderRuntime:
         self._cached_prompt_block = format_skills_for_prompt(skills)
         self._skills_by_name = {skill.name: skill for skill in skills}
 
-    def inject(self, event: BeforeAgentStartEvent) -> None:
+    def inject(self, event: BeforeRunEvent) -> None:
         if not self._cached_prompt_block:
             return
         updated = f"{event.system or ''}{self._cached_prompt_block}"
@@ -487,7 +486,7 @@ class _SkillLoaderRuntime:
         # silently ignored by ``load_skills``.
         discovered_paths.append(str(Path.home() / ".claude" / "skills"))
         discovered_paths.append(
-            str(expand_path_from_cwd(".claude/skills", self._api.cwd))
+            str(expand_path_from_cwd(".claude/skills", self._session.ctx.cwd))
         )
         discovered_paths.extend(self._claude_plugin_skill_dirs())
         return discovered_paths
@@ -518,11 +517,11 @@ class _SkillLoaderRuntime:
 
     async def _discover_peer_resources(self) -> tuple[list[Any], dict[int, str]]:
         observer = _ResourceResponseObserver()
-        unsubscribe = self._api.add_observer(observer)
+        unsubscribe = self._session.add_observer(observer)
         try:
-            responses = await self._api.events.emit(
+            responses = await self._session.bus.emit(
                 ResourcesDiscoverEvent.CHANNEL,
-                ResourcesDiscoverEvent(cwd=self._api.cwd, reason="startup"),
+                ResourcesDiscoverEvent(cwd=self._session.ctx.cwd, reason="startup"),
             )
         finally:
             unsubscribe()
@@ -555,7 +554,7 @@ class _SkillLoaderRuntime:
         self, response: dict[Any, Any], origin: str
     ) -> None:
         for key in sorted(set(response) - _RESOURCE_RESPONSE_KEYS):
-            await self._api.events.emit(
+            await self._session.bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
                     level="warning",
@@ -571,10 +570,10 @@ class _SkillLoaderRuntime:
         # Resolve project-scope skill dirs from the harness-supplied layout
         # (previously the SkillsService injected this; now the atom does it
         # directly).
-        layout = self._api.get_project_layout()
+        layout = None  # v2: project_layout pending
         project_dirs = tuple(str(p) for p in layout.skills_dirs())
         skills, _diagnostics = load_skills(
-            cwd=self._api.cwd,
+            cwd=self._session.ctx.cwd,
             agent_dir=str(agentm_home_dir()),
             skill_paths=tuple(discovered_paths),
             include_defaults=self._include_defaults,
@@ -611,5 +610,5 @@ class _SkillLoaderRuntime:
         return None
 
 
-async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
-    _SkillLoaderRuntime(api, config).install()
+async def install(session: Any, config: SkillLoaderConfig) -> None:
+    _SkillLoaderRuntime(session, config).install()

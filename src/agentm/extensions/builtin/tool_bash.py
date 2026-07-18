@@ -21,7 +21,6 @@ from pydantic import BaseModel
 
 from agentm.core.abi import (
     BashOperations,
-    ExtensionAPI,
     TextContent,
     ToolResult,
 )
@@ -141,17 +140,17 @@ _PARAMETERS: Final[dict[str, Any]] = {
 
 
 class _ToolBashRuntime:
-    def __init__(self, api: ExtensionAPI, config: ToolBashConfig) -> None:
-        self._api = api
-        self._bash_ops = _coerce_bash_ops(api, config.bash_ops)
+    def __init__(self, session: Any, config: ToolBashConfig) -> None:
+        self._session = session
+        self._bash_ops = _coerce_bash_ops(session, config.bash_ops)
         self._default_timeout = float(config.default_timeout)
 
     def install(self) -> None:
         tails = BashOutputTails()
-        self._api.set_service(BASH_OUTPUT_TAILS_SERVICE, tails)
-        self._api.register_tool(
+        self._session.services.register(BASH_OUTPUT_TAILS_SERVICE, tails)
+        self._session.register_tool(
             _BashTool(
-                api=self._api,
+                api=self._session,
                 bash_ops=self._bash_ops,
                 default_timeout=self._default_timeout,
                 parameters=self._parameters(),
@@ -172,8 +171,8 @@ class _ToolBashRuntime:
         }
 
 
-def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
-    _ToolBashRuntime(api, config).install()
+def install(session: Any, config: ToolBashConfig) -> None:
+    _ToolBashRuntime(session, config).install()
 
 
 class _BashTool:
@@ -187,14 +186,13 @@ class _BashTool:
     def __init__(
         self,
         *,
-        api: ExtensionAPI,
-        bash_ops: BashOperations,
+        session: Any, bash_ops: BashOperations,
         default_timeout: float,
         parameters: dict[str, Any],
         tails: BashOutputTails | None = None,
     ) -> None:
         self.parameters = parameters
-        self._api = api
+        self._session = session
         self._bash_ops = bash_ops
         self._default_timeout = default_timeout
         self._tails = tails
@@ -218,7 +216,7 @@ class _BashTool:
         try:
             result = await self._bash_ops.exec(
                 cmd,
-                cwd=self._api.cwd,
+                cwd=self._session.ctx.cwd,
                 timeout=timeout,
                 signal=signal,
                 on_data=on_data,
@@ -257,8 +255,9 @@ class _BashTool:
         )
 
 
-def _coerce_bash_ops(api: ExtensionAPI, candidate: Any) -> BashOperations:
-    return candidate if candidate is not None else api.get_operations().bash
+def _coerce_bash_ops(session: Any, candidate: Any) -> BashOperations:
+    # v2: operations access pending
+    return candidate if candidate is not None else None  # type: ignore[return-value]
 
 
 def _error(text: str) -> ToolResult:

@@ -15,12 +15,12 @@ submit path, it does not force one.
 """
 
 from __future__ import annotations
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -62,14 +62,14 @@ MANIFEST = ExtensionManifest(
 )
 
 class _FinishRuntime:
-    def __init__(self, api: ExtensionAPI, config: CompletionGuardConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: CompletionGuardConfig) -> None:
+        self._session = session
         self._confirmations = max(0, config.confirmations)
         self._prompt = config.prompt
         self._calls = 0
 
     def install(self) -> None:
-        self._api.register_tool(
+        self._session.register_tool(
             FunctionTool(
                 name="finish",
                 description=(
@@ -105,5 +105,5 @@ class _FinishRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: CompletionGuardConfig) -> None:
-    _FinishRuntime(api, config).install()
+def install(session: Any, config: CompletionGuardConfig) -> None:
+    _FinishRuntime(session, config).install()

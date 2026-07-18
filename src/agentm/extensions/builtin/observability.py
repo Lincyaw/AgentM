@@ -37,15 +37,14 @@ from typing import Any
 
 from agentm.core.abi import (
     ActiveSetFingerprint,
-    AgentEndEvent,
+    RunEndEvent,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
-    BeforeAgentStartEvent,
-    BeforeSendToLlmEvent,
+    BeforeRunEvent,
+    BeforeSendEvent,
     DiagnosticEvent,
     Event,
     EventBusObserver,
-    ExtensionAPI,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
     ExtensionUnloadEvent,
@@ -60,8 +59,8 @@ from agentm.core.abi import (
     StreamDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
-    TurnEndEvent,
-    TurnStartEvent,
+    TurnCommittedEvent,
+    TurnBeginEvent,
 )
 from agentm.core.observability.otel_dispatch import dispatch_otel
 from pydantic import BaseModel
@@ -186,14 +185,14 @@ _TO_OTEL_CHANNELS: tuple[str, ...] = (
     ApiSendUserMessageEvent.CHANNEL,
     DiagnosticEvent.CHANNEL,
     ExtensionUnloadEvent.CHANNEL,
-    BeforeAgentStartEvent.CHANNEL,
-    AgentEndEvent.CHANNEL,
+    BeforeRunEvent.CHANNEL,
+    RunEndEvent.CHANNEL,
     LlmRequestStartEvent.CHANNEL,
     LlmRequestEndEvent.CHANNEL,
     ToolCallEvent.CHANNEL,
     ToolResultEvent.CHANNEL,
-    TurnStartEvent.CHANNEL,
-    TurnEndEvent.CHANNEL,
+    TurnBeginEvent.CHANNEL,
+    TurnCommittedEvent.CHANNEL,
 )
 
 
@@ -285,8 +284,8 @@ def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
     return [{"path": path or "<root>", "before": before, "after": after}]
 
 
-def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
-    _ObservabilityRuntime(api=api, config=config).install()
+def install(session: Any, config: ObservabilityConfig) -> None:
+    _ObservabilityRuntime(session=session, config=config).install()
 
 
 class _ObservabilityObserver(EventBusObserver):
@@ -295,14 +294,13 @@ class _ObservabilityObserver(EventBusObserver):
     def __init__(
         self,
         *,
-        api: ExtensionAPI,
-        telemetry: SessionTelemetry,
+        session: Any, telemetry: SessionTelemetry,
         include_handlers: bool,
         include_diff: bool,
         exclude_channels: frozenset[str],
         redact_prompts: bool,
     ) -> None:
-        self._api = api
+        self._session = session
         self._telemetry = telemetry
         self._include_handlers = include_handlers
         self._include_diff = include_diff
@@ -358,7 +356,7 @@ class _ObservabilityObserver(EventBusObserver):
         if channel in self._exclude_channels:
             return
         attrs: dict[str, Any] = {
-            "agentm.session.id": self._api.session_id,
+            "agentm.session.id": self._session.id,
             "agentm.event.channel": channel,
             "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
             "agentm.handler.count": len(results),
@@ -379,7 +377,7 @@ class _ObservabilityObserver(EventBusObserver):
         owner: str | None,
     ) -> dict[str, Any]:
         attrs: dict[str, Any] = {
-            "agentm.session.id": self._api.session_id,
+            "agentm.session.id": self._session.id,
             "agentm.event.channel": channel,
             "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
             "agentm.handler.name": _handler_label(handler),
@@ -401,7 +399,7 @@ class _ObservabilityObserver(EventBusObserver):
         except Exception as exc:
             logger.debug("observability: event payload serialization failed: {}", exc)
             return None
-        if channel == BeforeSendToLlmEvent.CHANNEL and isinstance(payload, dict):
+        if channel == BeforeSendEvent.CHANNEL and isinstance(payload, dict):
             payload.pop("messages", None)
         if self._redact_prompts and channel in _REDACTED_CHANNELS:
             return redact_messages(payload)
@@ -430,7 +428,7 @@ class _ObservabilityObserver(EventBusObserver):
         self._telemetry.emit_log(
             "agentm.handler.mutated",
             attributes={
-                "agentm.session.id": self._api.session_id,
+                "agentm.session.id": self._session.id,
                 "agentm.event.channel": channel,
                 "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
                 "agentm.handler.name": _handler_label(handler),
@@ -455,10 +453,10 @@ class _ObservabilityObserver(EventBusObserver):
 class _ObservabilityRuntime:
     """Install-time wiring and observability-owned fingerprint bookkeeping."""
 
-    def __init__(self, *, api: ExtensionAPI, config: ObservabilityConfig) -> None:
-        self._api = api
+    def __init__(self, *, session: Any, config: ObservabilityConfig) -> None:
+        self._session = session
         self._config = config
-        self._telemetry = api.get_session_telemetry()
+        self._telemetry = None  # v2: telemetry pending
         user_excludes = config.exclude_channels
         self._exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
             frozenset(user_excludes) if user_excludes else frozenset()
@@ -469,9 +467,9 @@ class _ObservabilityRuntime:
     def install(self) -> None:
         self._stamp_session_metadata()
         self._emit_session_start()
-        self._api.add_observer(
+        self._session.add_observer(
             _ObservabilityObserver(
-                api=self._api,
+                api=self._session,
                 telemetry=self._telemetry,
                 include_handlers=self._config.include_handler_records,
                 include_diff=self._config.include_mutation_diff,
@@ -484,53 +482,53 @@ class _ObservabilityRuntime:
 
     def _stamp_session_metadata(self) -> None:
         # Every per-event Event.to_otel translator reads these session fields.
-        provider_cfg = self._api.provider
-        self._telemetry.obs_root_session_id = self._api.root_session_id
-        self._telemetry.obs_parent_session_id = self._api.parent_session_id or ""
-        self._telemetry.obs_purpose = self._api.purpose
-        self._telemetry.obs_scenario = self._api.scenario or ""
+        provider_cfg = None  # v2: provider access pending
+        self._telemetry.obs_root_session_id = self._session.ctx.root_session_id
+        self._telemetry.obs_parent_session_id = self._session.ctx.parent_session_id or ""
+        self._telemetry.obs_purpose = self._session.ctx.purpose
+        self._telemetry.obs_scenario = self._session.ctx.scenario or ""
         self._telemetry.obs_provider_name = (
             provider_cfg.name if provider_cfg is not None else ""
         )
-        self._telemetry.obs_cwd = self._api.cwd
+        self._telemetry.obs_cwd = self._session.ctx.cwd
         self._telemetry.obs_redact_prompts = self._config.redact_prompts
         self._telemetry.obs_session_start_ns = time.time_ns()
 
     def _emit_session_start(self) -> None:
         body: dict[str, Any] = {
-            "session_id": self._api.session_id,
-            "root_session_id": self._api.root_session_id,
-            "parent_session_id": self._api.parent_session_id,
-            "purpose": self._api.purpose,
-            "scenario": self._api.scenario,
-            "cwd": self._api.cwd,
+            "session_id": self._session.id,
+            "root_session_id": self._session.ctx.root_session_id,
+            "parent_session_id": self._session.ctx.parent_session_id,
+            "purpose": self._session.ctx.purpose,
+            "scenario": self._session.ctx.scenario,
+            "cwd": self._session.ctx.cwd,
         }
-        if self._api.lineage is not None:
-            body["lineage"] = to_jsonable(self._api.lineage)
-        if self._api.experiment is not None:
-            body["experiment"] = to_jsonable(self._api.experiment)
+        if None is not None:
+            body["lineage"] = to_jsonable(None)
+        if None is not None:
+            body["experiment"] = to_jsonable(None)
         attrs: dict[str, Any] = {
-            "agentm.session.id": self._api.session_id,
-            "agentm.session.root_id": self._api.root_session_id,
-            "agentm.session.parent_id": self._api.parent_session_id or "",
-            "agentm.session.purpose": self._api.purpose,
-            "agentm.session.scenario": self._api.scenario or "",
-            "agentm.session.cwd": self._api.cwd,
+            "agentm.session.id": self._session.id,
+            "agentm.session.root_id": self._session.ctx.root_session_id,
+            "agentm.session.parent_id": self._session.ctx.parent_session_id or "",
+            "agentm.session.purpose": self._session.ctx.purpose,
+            "agentm.session.scenario": self._session.ctx.scenario or "",
+            "agentm.session.cwd": self._session.ctx.cwd,
         }
         attrs.update(
-            _session_metadata_attributes(self._api.lineage, self._api.experiment)
+            _session_metadata_attributes(None, None)
         )
         self._telemetry.emit_log("agentm.session.start", body=body, attributes=attrs)
 
     def _subscribe_otel_dispatch(self) -> None:
         # Declarative dispatcher: one handler per Event.to_otel-backed channel.
         for channel in _TO_OTEL_CHANNELS:
-            self._api.on(channel, self._dispatch_to_otel)
+            self._session.bus.on(channel, self._dispatch_to_otel)
 
     def _subscribe_fingerprint_bookkeeping(self) -> None:
-        self._api.on(SessionReadyEvent.CHANNEL, self._on_session_ready_fingerprint)
-        self._api.on(ExtensionInstallEvent.CHANNEL, self._on_extension_install)
-        self._api.on(ExtensionReloadEvent.CHANNEL, self._on_extension_reload)
+        self._session.bus.on(SessionReadyEvent.CHANNEL, self._on_session_ready_fingerprint)
+        self._session.bus.on(ExtensionInstallEvent.CHANNEL, self._on_extension_install)
+        self._session.bus.on(ExtensionReloadEvent.CHANNEL, self._on_extension_reload)
 
     def _dispatch_to_otel(self, event: Event) -> None:
         dispatch_otel(event, self._telemetry)
@@ -539,25 +537,22 @@ class _ObservabilityRuntime:
         self, *, scenario: str | None = None
     ) -> ActiveSetFingerprint:
         self._active_atom_hashes = {}
-        for atom in self._api.list_atoms():
-            version_hash = self._api.freeze_current(atom.name)
+        for atom in self._session.list_atoms():
+            version_hash = self._session.freeze_current(atom.name)
             if atom.current_hash is not None and atom.current_hash != version_hash:
                 raise RuntimeError(
                     f"atom identity mismatch for {atom.name!r}: "
                     f"list_atoms={atom.current_hash}, freeze={version_hash}"
                 )
             self._active_atom_hashes[atom.name] = version_hash
-        return self._api.catalog.compute_active_set_fingerprint(
-            loaded=self._active_atom_hashes,
-            scenario=scenario,
-            core_hash=None,
-        )
+        # v2: catalog.compute_active_set_fingerprint pending
+        return None
 
     def _on_session_ready_fingerprint(self, event: SessionReadyEvent) -> None:
         # SessionReadyEvent's simple log lives in Event.to_otel; this companion
         # record depends on catalog services and the loaded builtin set.
         self._current_fingerprint = self._compute_loaded_fingerprint(
-            scenario=self._api.scenario
+            scenario=self._session.ctx.scenario
         )
         fp_body: dict[str, Any] = dict(self._current_fingerprint)
         fp_body["task_meta"] = {
@@ -573,7 +568,7 @@ class _ObservabilityRuntime:
             body=fp_body,
             attributes={
                 "agentm.session.id": event.session_id,
-                "agentm.session.scenario": self._api.scenario or "",
+                "agentm.session.scenario": self._session.ctx.scenario or "",
                 "agentm.task.class": getattr(event, "task_class", "") or "",
                 "agentm.task.eval_run_id": getattr(event, "eval_run_id", "") or "",
                 "agentm.task.eval_task_id": getattr(event, "eval_task_id", "") or "",
@@ -585,7 +580,7 @@ class _ObservabilityRuntime:
             "agentm.extension.install",
             body={"config": to_jsonable(event.config)},
             attributes={
-                "agentm.session.id": self._api.session_id,
+                "agentm.session.id": self._session.id,
                 "agentm.extension.module_path": event.module_path,
                 "agentm.extension.phase": event.phase,
                 "agentm.extension.duration_ns": event.duration_ns,
@@ -598,15 +593,8 @@ class _ObservabilityRuntime:
     def _on_extension_reload(self, event: ExtensionReloadEvent) -> None:
         if event.name in self._active_atom_hashes or event.old_hash is None:
             self._active_atom_hashes[event.name] = event.new_hash
-        fingerprint_after = self._api.catalog.compute_active_set_fingerprint(
-            loaded=self._active_atom_hashes,
-            scenario=(
-                None
-                if self._current_fingerprint is None
-                else self._current_fingerprint.get("scenario")
-            ),
-            core_hash=None,
-        )
+        # v2: catalog.compute_active_set_fingerprint pending
+        fingerprint_after = None
         self._current_fingerprint = fingerprint_after
         self._telemetry.emit_log(
             "agentm.atom.reload",
@@ -619,7 +607,7 @@ class _ObservabilityRuntime:
                 "fingerprint_after": fingerprint_after,
             },
             attributes={
-                "agentm.session.id": self._api.session_id,
+                "agentm.session.id": self._session.id,
                 "agentm.atom.name": event.name,
                 "agentm.atom.new_hash": event.new_hash,
                 "agentm.atom.old_hash": event.old_hash or "",

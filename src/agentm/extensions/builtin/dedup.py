@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import AgentStartEvent, ExtensionAPI, ToolCallEvent
+from agentm.core.abi import BeforeRunEvent, ToolCallEvent
 from agentm.extensions import ExtensionManifest
 
 _ToolCallKey = tuple[str, str]
@@ -38,8 +38,8 @@ def _make_key(tool_name: str, args: dict[str, Any]) -> _ToolCallKey:
 
 
 class _DedupRuntime:
-    def __init__(self, api: ExtensionAPI, config: DedupConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: DedupConfig) -> None:
+        self._session = session
         self._window = max(0, config.window)
         self._recent: deque[_ToolCallKey] = deque(maxlen=self._window)
 
@@ -47,10 +47,10 @@ class _DedupRuntime:
         return self._window > 0
 
     def install(self) -> None:
-        self._api.on(AgentStartEvent.CHANNEL, self.reset)
-        self._api.on(ToolCallEvent.CHANNEL, self.on_tool_call)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.reset)
+        self._session.bus.on(ToolCallEvent.CHANNEL, self.on_tool_call)
 
-    def reset(self, _: AgentStartEvent) -> None:
+    def reset(self, _: BeforeRunEvent) -> None:
         self._recent.clear()
 
     def on_tool_call(self, event: ToolCallEvent) -> dict[str, Any] | None:
@@ -64,8 +64,8 @@ class _DedupRuntime:
         return None
 
 
-def install(api: ExtensionAPI, config: DedupConfig) -> None:
-    runtime = _DedupRuntime(api, config)
+def install(session: Any, config: DedupConfig) -> None:
+    runtime = _DedupRuntime(session, config)
     if not runtime.active():
         return
     runtime.install()

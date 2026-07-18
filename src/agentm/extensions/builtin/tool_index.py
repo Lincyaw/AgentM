@@ -1,18 +1,19 @@
 """Builtin ``tool_index`` atom: inject registered tools into the system prompt.
 
 Appends an ``<available_tools>`` block listing every registered tool's
-name and description to the system prompt at ``BeforeAgentStartEvent``
+name and description to the system prompt at ``BeforeRunEvent``
 time — after all atoms have finished ``install`` and registered their
 tools.
 """
 
 from __future__ import annotations
+from typing import Any
 
 from xml.sax.saxutils import escape
 
 from pydantic import BaseModel
 
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import BeforeRunEvent
 from agentm.extensions import ChannelEffects, ExtensionManifest
 
 
@@ -33,14 +34,14 @@ MANIFEST = ExtensionManifest(
 
 
 class _ToolIndexRuntime:
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
+    def __init__(self, session: Any) -> None:
+        self._session = session
 
     def install(self) -> None:
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.inject)
 
-    def inject(self, event: BeforeAgentStartEvent) -> None:
-        tools = self._api.tools
+    def inject(self, event: BeforeRunEvent) -> None:
+        tools = self._session.tools
         if not tools:
             return
         lines = [
@@ -66,5 +67,5 @@ class _ToolIndexRuntime:
         event.system = updated
 
 
-def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:
-    _ToolIndexRuntime(api).install()
+def install(session: Any, _config: ToolIndexConfig) -> None:
+    _ToolIndexRuntime(session).install()

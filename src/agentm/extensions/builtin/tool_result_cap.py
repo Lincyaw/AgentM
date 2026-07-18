@@ -25,7 +25,6 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
     ImageContent,
     TextContent,
     ToolResult,
@@ -71,13 +70,13 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
-    _ToolResultCapRuntime(api, config).install()
+def install(session: Any, config: ToolResultCapConfig) -> None:
+    _ToolResultCapRuntime(session, config).install()
 
 
 class _ToolResultCapRuntime:
-    def __init__(self, api: ExtensionAPI, config: ToolResultCapConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: ToolResultCapConfig) -> None:
+        self._session = session
         self._max_tokens = config.max_tokens
         self._preview_tokens = config.preview_tokens
         self._error_floor_tokens = config.error_floor_tokens
@@ -90,11 +89,11 @@ class _ToolResultCapRuntime:
         self._writer_cache: list[Any] = []
 
     def install(self) -> None:
-        self._api.on(ToolResultEvent.CHANNEL, self.on_tool_result)
+        self._session.bus.on(ToolResultEvent.CHANNEL, self.on_tool_result)
 
     def _get_writer(self) -> Any:
         if not self._writer_cache:
-            self._writer_cache.append(self._api.get_resource_writer())
+            self._writer_cache.append(None)  # v2: resource writer pending
         return self._writer_cache[0]
 
     async def on_tool_result(self, event: ToolResultEvent) -> ToolResult | None:
@@ -138,13 +137,13 @@ class _ToolResultCapRuntime:
         )
 
     def _session_dir_name(self) -> str:
-        session_id = getattr(self._api, "session_id", None)
+        session_id = getattr(self._session, "session_id", None)
         if isinstance(session_id, str) and session_id:
             return _safe_path_name(session_id, fallback="unknown-session")
         return "unknown-session"
 
     def _model_name(self) -> str | None:
-        return self._api.model.id if self._api.model is not None else None
+        return self._session.model.id if self._session.model is not None else None
 
     @staticmethod
     def _text_payload(result: ToolResult) -> str:

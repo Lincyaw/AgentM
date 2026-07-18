@@ -17,7 +17,7 @@ Tools:
 Dependency model: ``blocks`` / ``blocked_by`` edges between tasks.
 Completing a task auto-removes it from downstream ``blocked_by`` lists.
 
-§11: single file; ``MANIFEST`` + ``install(api, config)``; no atom-to-atom
+§11: single file; ``MANIFEST`` + ``install(session, config)``; no atom-to-atom
 imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 State is per-session and in-memory.
 """
@@ -30,7 +30,6 @@ from typing import Any, Literal  # noqa: UP035
 from pydantic import BaseModel, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -293,8 +292,8 @@ class _TaskTrackingRuntime:
     def __init__(self) -> None:
         self._mgr = _TaskManager()
 
-    def install(self, api: ExtensionAPI) -> None:
-        api.register_tool(
+    def install(self, session: Any) -> None:
+        session.register_tool(
             FunctionTool(
                 name="task_create",
                 description=(
@@ -309,7 +308,7 @@ class _TaskTrackingRuntime:
                 fn=self.create,
             )
         )
-        api.register_tool(
+        session.register_tool(
             FunctionTool(
                 name="task_update",
                 description=(
@@ -323,7 +322,7 @@ class _TaskTrackingRuntime:
                 fn=self.update,
             )
         )
-        api.register_tool(
+        session.register_tool(
             FunctionTool(
                 name="task_list",
                 description=(
@@ -334,7 +333,7 @@ class _TaskTrackingRuntime:
                 fn=self.list_tasks,
             )
         )
-        api.register_tool(
+        session.register_tool(
             FunctionTool(
                 name="task_get",
                 description=(
@@ -454,6 +453,6 @@ class _TaskTrackingRuntime:
         return None
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(session: Any, config: dict[str, Any]) -> None:
     del config
-    _TaskTrackingRuntime().install(api)
+    _TaskTrackingRuntime().install(session)

@@ -24,7 +24,7 @@ deliberate: a frozen, verbatim reminder is cache-superior to an ephemeral one
 (removing it later would change already-cached content and force a re-encode),
 and a trail of countdown reminders is harmless context.
 
-Budget is read live from ``api.session.get_loop_config()`` (which reflects the
+Budget is read live from ``None  # v2: readonly session pending.get_loop_config()`` (which reflects the
 ``loop_budget`` atom's registration). With no cap the atom stays silent.
 """
 
@@ -37,13 +37,12 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.core.abi import (
-    AgentStartEvent,
-    BeforeSendToLlmEvent,
-    ExtensionAPI,
+    BeforeRunEvent,
+    BeforeSendEvent,
     TextContent,
     ToolResultEvent,
     ToolResultMessage,
-    TurnStartEvent,
+    TurnBeginEvent,
     UserMessage,
 )
 from agentm.extensions import ExtensionManifest
@@ -84,8 +83,8 @@ MANIFEST = ExtensionManifest(
 
 
 class _TurnReminderRuntime:
-    def __init__(self, api: ExtensionAPI, config: TurnReminderConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: TurnReminderConfig) -> None:
+        self._session = session
         self._warn_within = config.warn_within
         self._finalize_tool = config.finalize_tool
         # Per-run counters. ``turn_index`` is authoritative from ``turn_start``;
@@ -93,22 +92,22 @@ class _TurnReminderRuntime:
         self._state = _TurnReminderState()
 
     def install(self) -> None:
-        self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
-        self._api.on(TurnStartEvent.CHANNEL, self.on_turn_start)
-        self._api.on(ToolResultEvent.CHANNEL, self.on_tool_result)
-        self._api.on(BeforeSendToLlmEvent.CHANNEL, self.before_send)
+        self._session.bus.on(BeforeRunEvent.CHANNEL, self.on_agent_start)
+        self._session.bus.on(TurnBeginEvent.CHANNEL, self.on_turn_start)
+        self._session.bus.on(ToolResultEvent.CHANNEL, self.on_tool_result)
+        self._session.bus.on(BeforeSendEvent.CHANNEL, self.before_send)
 
-    def on_agent_start(self, _: AgentStartEvent) -> None:
+    def on_agent_start(self, _: BeforeRunEvent) -> None:
         # Each loop.run starts a fresh budget frame (range(max_turns) from 0).
         self._state.reset()
 
-    def on_turn_start(self, event: TurnStartEvent) -> None:
+    def on_turn_start(self, event: TurnBeginEvent) -> None:
         self._state.turn_index = event.turn_index
 
     def on_tool_result(self, _: ToolResultEvent) -> None:
         self._state.tool_calls_used += 1
 
-    def before_send(self, event: BeforeSendToLlmEvent) -> None:
+    def before_send(self, event: BeforeSendEvent) -> None:
         runway = self._runway()
         if runway is None:
             return
@@ -124,7 +123,7 @@ class _TurnReminderRuntime:
         _append_to_last_message(event.messages, text, self._state)
 
     def _runway(self) -> tuple[int | None, int | None] | None:
-        cfg = self._api.session.get_loop_config()
+        cfg = self._session.session.get_loop_config()
         max_turns = cfg.max_turns
         max_tool_calls = cfg.max_tool_calls
         # No cap on either axis => nothing to warn about.
@@ -142,8 +141,8 @@ class _TurnReminderRuntime:
         return turns_left, tools_left
 
 
-def install(api: ExtensionAPI, config: TurnReminderConfig) -> None:
-    _TurnReminderRuntime(api, config).install()
+def install(session: Any, config: TurnReminderConfig) -> None:
+    _TurnReminderRuntime(session, config).install()
 
 
 def _warning_triggered(
