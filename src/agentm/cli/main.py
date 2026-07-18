@@ -1398,6 +1398,47 @@ app.add_typer(_contrib_app, name="contrib")
 app.add_typer(_lint_app, name="lint")
 
 
+@app.command(name="send")
+def send_cmd(
+    session: str = typer.Argument(help="Session ID (hex) to send the message to."),
+    message: str = typer.Argument(help="Message text to inject."),
+    interrupt: bool = typer.Option(False, "--interrupt", "-i", help="Abort the current tool and deliver immediately."),
+    now: bool = typer.Option(False, "--now", help="Deliver immediately (tool gets backgrounded)."),
+) -> None:
+    """Send a message to a running session's inbox via its Unix socket.
+
+    Default mode (wait): message is queued and delivered after the current
+    tool finishes.  --interrupt: abort the running tool and deliver now.
+    --now: deliver immediately (tool gets backgrounded, old behavior).
+    """
+    import socket as _socket
+
+    from agentm.core.lib.user_config import agentm_home_dir
+
+    sock_path = agentm_home_dir() / "live" / f"{session}.sock"
+    if not sock_path.exists():
+        typer.echo(f"No live session socket at {sock_path}", err=True)
+        raise typer.Exit(1)
+    if interrupt:
+        payload = f"!interrupt\n{message}"
+    elif now:
+        payload = f"!now\n{message}"
+    else:
+        payload = message
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        sock.connect(str(sock_path))
+        sock.sendall(payload.encode("utf-8"))
+        sock.shutdown(_socket.SHUT_WR)
+        ack = sock.recv(64).decode("utf-8", errors="replace").strip()
+        typer.echo(ack)
+    except ConnectionRefusedError:
+        typer.echo("Session socket exists but connection refused (session may have exited).", err=True)
+        raise typer.Exit(1)
+    finally:
+        sock.close()
+
+
 def main() -> None:
     """Entry point for the ``agentm`` console script."""
     os.environ.setdefault("GRPC_VERBOSITY", "ERROR")

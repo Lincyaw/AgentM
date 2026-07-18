@@ -40,3 +40,4 @@ extensions:
   - module: agentm.extensions.builtin.completion_guard
     config:
       confirmations: 1
+  - module: agentm.extensions.builtin.inbox_socket
