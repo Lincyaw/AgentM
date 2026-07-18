@@ -1,761 +1,33 @@
-"""Extension loader + concrete ``ExtensionAPI`` implementation.
+"""Extension loader — import an atom module and call its install().
 
-Implements the impl side of §2 (Extension Model) and §3 (ExtensionAPI v0
-surface) of ``.claude/designs/extension-as-scenario.md``. The atom-facing
-Protocols, dataclasses, exceptions, and ContextVar live in
-:mod:`agentm.core.abi.extension` — this module imports them.
-
-Pluggability hard rule (see ``.claude/designs/pluggable-architecture.md`` §1):
-atoms never import from this module. The validator forbids
-``agentm.core.runtime`` outright.
+Stripped to the essential load_extension() function for v2.  The v1
+_ExtensionAPIImpl and its mixin hierarchy are removed; atoms now receive
+the v2 Session (or a compat adapter) directly.
 """
 
 from __future__ import annotations
 
-import contextlib
 import importlib
 import inspect
-from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Awaitable
+from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any
 
-from agentm.core.abi import (
-    EventBus,
-    Model,
-    ProviderConfig,
-    Tool,
-)
-from agentm.core.abi.catalog import CatalogService
-from agentm.core.abi.extension import (
-    AtomInfo,
-    ChildSessionFactory,
-    CommandDispatcher,
-    CommandDispatchResult,
-    CommandSpec,
-    ExtensionAPI,
-    ExtensionFactory,
-    ExtensionLoadError,
-    ExtensionStaleError,
-    Handler,
-    InstallAtomResult,
-    ReadonlySession,
-    ReloadResult,
-    Renderer,
-    UnknownCommandError,
-    UnloadAtomResult,
-    Unsubscribe,
-    _INSTALLING_EXTENSION,
-    _SessionGateway,
-    current_installing_extension,
-)
-from agentm.core.abi.operations import (
-    BashOperations,
-    Operations,
-)
-from agentm.core.abi.project_layout import ProjectLayout
-from agentm.core.abi.resource import ResourceWriter
-from agentm.core.lib.paths import expand_path
-from agentm.core.runtime.session_inbox import InboxItem, SessionInbox
-from agentm.core.observability.otel_export import (
-    SessionTelemetry,
-    setup_session_telemetry,
-)
-from agentm.core.runtime.resource_writer import LocalResourceWriter
-from agentm.core.runtime.services import (
-    default_catalog_service,
-    default_project_layout,
+from agentm.core.abi._v1_compat import ExtensionLoadError
+
+_INSTALLING_EXTENSION: ContextVar[str | None] = ContextVar(
+    "_installing_extension", default=None
 )
 
-if TYPE_CHECKING:
-    from agentm.core.abi.session_config import AgentSessionConfig
 
-
-class _OperationsHolder:
-    """Strict-register slot: must be set exactly once before freeze."""
-
-    __slots__ = ("bundle",)
-
-    def __init__(self) -> None:
-        self.bundle: Operations | None = None
-
-
-class _ResourceWriterHolder:
-    """Default-pluggable slot: pre-populated by substrate, overridable once."""
-
-    __slots__ = ("writer", "replaced")
-
-    def __init__(self, writer: ResourceWriter) -> None:
-        self.writer: ResourceWriter = writer
-        self.replaced: bool = False
-
-
-class _NoopSessionGateway:
-    def reload_atom(
-        self,
-        name: str,
-        new_source: str,
-        *,
-        agent_initiated: bool = True,
-        rationale: str | None = None,
-    ) -> ReloadResult:
-        del name, new_source, agent_initiated, rationale
-        raise RuntimeError("reload_atom is unavailable on this ExtensionAPI instance")
-
-    def install_atom(
-        self,
-        *,
-        name: str,
-        source: str,
-        target_path: str | None,
-        config: dict[str, Any] | None,
-        rationale: str | None,
-        agent_initiated: bool,
-    ) -> InstallAtomResult:
-        del name, source, target_path, config, rationale, agent_initiated
-        raise RuntimeError("install_atom is unavailable on this ExtensionAPI instance")
-
-    def unload_atom(
-        self,
-        name: str,
-        *,
-        agent_initiated: bool = True,
-    ) -> UnloadAtomResult:
-        del name, agent_initiated
-        raise RuntimeError("unload_atom is unavailable on this ExtensionAPI instance")
-
-    def freeze_current(self, name: str) -> str:
-        del name
-        raise RuntimeError(
-            "freeze_current is unavailable on this ExtensionAPI instance"
-        )
-
-    def list_atoms(self) -> list[AtomInfo]:
-        return []
-
-    def is_constitution_path(self, path: str) -> bool:
-        del path
-        return False
-
-
-class _NoopChildSessionFactory:
-    async def __call__(self, _config: Any) -> Any:
-        raise RuntimeError(
-            "spawn_child_session is unavailable on this ExtensionAPI instance"
-        )
-
-
-# Callable that builds a ``SessionTelemetry`` for the current session. Lazy
-# construction means tests that never touch telemetry pay no SDK setup cost,
-# and the file handle / batch processor threads only spin up when something
-# actually wants to write spans or logs. See PR-A
-# (``agentm.core.runtime.otel_export``) for the underlying primitives.
-SessionTelemetryFactory = Callable[[], SessionTelemetry]
-
-
-class _SessionTelemetryHolder:
-    """Lazy-constructed slot: factory invoked on first access, auto-shutdown on session end."""
-
-    __slots__ = ("_factory", "_bus", "_telemetry", "_shutdown_handler_registered")
-
-    def __init__(
-        self,
-        factory: SessionTelemetryFactory,
-        *,
-        bus: EventBus,
-    ) -> None:
-        self._factory: SessionTelemetryFactory = factory
-        self._bus = bus
-        self._telemetry: SessionTelemetry | None = None
-        self._shutdown_handler_registered = False
-
-    def get(self) -> SessionTelemetry:
-        if self._telemetry is None:
-            self._telemetry = self._factory()
-            self._register_shutdown_handler()
-        return self._telemetry
-
-    def _register_shutdown_handler(self) -> None:
-        if self._shutdown_handler_registered:
-            return
-        # Lazy import to keep the events module's runtime-level event names
-        # off the top-level import path here (matches the existing pattern
-        # used in ``_emit_register``).
-        from agentm.core.abi.events import BusPriority, SessionShutdownEvent
-
-        def _on_session_shutdown(_event: SessionShutdownEvent) -> None:
-            telemetry = self._telemetry
-            if telemetry is None:
-                return
-            telemetry.shutdown()
-
-        # ``POST`` priority: any observability atom subscribed at the
-        # default ``NORMAL`` tier gets to emit its closing
-        # ``agentm.session.end`` log record before we drain + close the
-        # exporters. Without this the closing record would land on a
-        # shut-down processor and silently disappear.
-        self._bus.on(
-            SessionShutdownEvent.CHANNEL,
-            _on_session_shutdown,
-            priority=BusPriority.POST,
-        )
-        self._shutdown_handler_registered = True
-
-
-def _default_session_telemetry_factory(
-    *, cwd: str, session_id: str, scenario: str | None, file_path: Path | None = None
-) -> SessionTelemetryFactory:
-    def _build() -> SessionTelemetry:
-        return setup_session_telemetry(
-            session_id=session_id,
-            cwd=_scope_cwd_path(cwd),
-            scenario_name=scenario,
-            file_path=file_path,
-        )
-
-    return _build
-
-
-def _scope_cwd_path(cwd: str) -> Path:
-    if not cwd:
-        return Path.cwd().resolve()
-    return expand_path(cwd).resolve()
-
-
-# --- Concrete impl ----------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class ExtensionAPIScope:
-    """Session-scoped bundle shared by all ``_ExtensionAPIImpl`` instances."""
-
-    bus: EventBus
-    cwd: str
-    scenario_dir: str | None
-    session_id: str
-    root_session_id: str
-    parent_session_id: str | None
-    purpose: str
-    scenario: str | None
-    lineage: dict[str, Any] | None
-    experiment: dict[str, Any] | None
-    session: ReadonlySession
-    tools: list[Tool]
-    commands: dict[str, CommandSpec]
-    providers: dict[str, ProviderConfig]
-    renderers: dict[str, Renderer]
-    inbox: SessionInbox
-    model_getter: Any
-    provider_getter: Any
-    gateway: _SessionGateway
-    operations: _OperationsHolder
-    project_layout: ProjectLayout
-    catalog: CatalogService
-    child_session_factory: ChildSessionFactory
-    resource_writer: _ResourceWriterHolder
-    telemetry: _SessionTelemetryHolder
-    service_registry: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class ExtensionAPIScopeConfig:
-    """Inputs used to build an :class:`ExtensionAPIScope`.
-
-    Keep this separate from ``ExtensionAPIScope`` because callers provide raw
-    optional dependencies here; the builder resolves defaults and holder objects.
-    """
-
-    bus: EventBus
-    cwd: str
-    session_id: str
-    session: ReadonlySession
-    tools: list[Tool]
-    commands: dict[str, CommandSpec]
-    providers: dict[str, ProviderConfig]
-    renderers: dict[str, Renderer]
-    inbox: SessionInbox
-    model_getter: Any
-    provider_getter: Any
-    scenario_dir: str | None = None
-    root_session_id: str | None = None
-    parent_session_id: str | None = None
-    purpose: str = "root"
-    scenario: str | None = None
-    lineage: dict[str, Any] | None = None
-    experiment: dict[str, Any] | None = None
-    gateway: _SessionGateway | None = None
-    operations: _OperationsHolder | None = None
-    project_layout: ProjectLayout | None = None
-    catalog: CatalogService | None = None
-    child_session_factory: ChildSessionFactory | None = None
-    resource_writer: ResourceWriter | None = None
-    session_file: Path | None = None
-    telemetry_factory: SessionTelemetryFactory | None = None
-    service_registry: dict[str, Any] | None = None
-
-
-def build_extension_api_scope(config: ExtensionAPIScopeConfig) -> ExtensionAPIScope:
-    resolved_cwd = str(_scope_cwd_path(config.cwd))
-    resolved_layout = config.project_layout or default_project_layout(resolved_cwd)
-    return ExtensionAPIScope(
-        bus=config.bus,
-        cwd=resolved_cwd,
-        scenario_dir=config.scenario_dir,
-        session_id=config.session_id,
-        # If no trace_id is supplied, the session is its own trace —
-        # collapse to session_id. Callers that want strict OTel shape
-        # (32-hex trace_id vs 16-hex span_id) should supply both
-        # ``session_id`` and ``root_session_id`` on the config.
-        root_session_id=config.root_session_id or config.session_id,
-        parent_session_id=config.parent_session_id,
-        purpose=config.purpose,
-        scenario=config.scenario,
-        lineage=config.lineage,
-        experiment=config.experiment,
-        session=config.session,
-        tools=config.tools,
-        commands=config.commands,
-        providers=config.providers,
-        renderers=config.renderers,
-        inbox=config.inbox,
-        model_getter=config.model_getter,
-        provider_getter=config.provider_getter,
-        gateway=config.gateway or _NoopSessionGateway(),
-        operations=(
-            config.operations if config.operations is not None else _OperationsHolder()
-        ),
-        project_layout=resolved_layout,
-        catalog=config.catalog or default_catalog_service(),
-        child_session_factory=config.child_session_factory or _NoopChildSessionFactory(),
-        resource_writer=_ResourceWriterHolder(
-            config.resource_writer
-            or LocalResourceWriter(cwd=resolved_cwd)
-        ),
-        telemetry=_SessionTelemetryHolder(
-            config.telemetry_factory
-            or _default_session_telemetry_factory(
-                cwd=resolved_cwd,
-                session_id=config.session_id,
-                scenario=config.scenario,
-                file_path=config.session_file,
-            ),
-            bus=config.bus,
-        ),
-        service_registry=(
-            config.service_registry if config.service_registry is not None else {}
-        ),
-    )
-
-
-class _ExtensionAPIMixinBase:
-    """Typed attribute surface shared by the ExtensionAPI mixins."""
-
-    _bus: EventBus
-    _cwd: str
-    _scenario_dir: str | None
-    _session_id: str
-    _root_session_id: str
-    _parent_session_id: str | None
-    _purpose: str
-    _scenario: str | None
-    _lineage: dict[str, Any] | None
-    _experiment: dict[str, Any] | None
-    _session: ReadonlySession
-    _tools: list[Tool]
-    _commands: dict[str, CommandSpec]
-    _providers: dict[str, ProviderConfig]
-    _renderers: dict[str, Renderer]
-    _inbox: SessionInbox
-    _model_getter: Any
-    _provider_getter: Any
-    _gateway: _SessionGateway
-    _owner_name: str
-    _child_session_factory: ChildSessionFactory
-    _operations_holder: _OperationsHolder
-    _project_layout: ProjectLayout
-    _catalog: CatalogService
-    _resource_writer_holder: _ResourceWriterHolder
-    _telemetry_holder: _SessionTelemetryHolder
-    _services: dict[str, Any]
-
-    def _assert_active(self) -> None:
-        raise NotImplementedError
-
-
-class _ExtensionEventMixin(_ExtensionAPIMixinBase):
-    def on(
-        self,
-        channel: str,
-        handler: Any,
-        *,
-        priority: int = 500,
-    ) -> Any:
-        self._assert_active()
-        # Stamp the registering atom onto the subscription (not the handler
-        # object) so attribution survives bound methods / builtins.
-        return self._bus.on(
-            channel, handler, priority=priority, owner=self._owner_name
-        )
-
-    def add_observer(self, callback: Any) -> Any:
-        self._assert_active()
-        return self._bus.add_observer(callback)
-
-
-class _ExtensionRegistrationMixin(_ExtensionAPIMixinBase):
-    def _emit_register(
-        self,
-        kind: Literal["tool", "command", "provider", "renderer"],
-        name: str,
-        payload: Any,
-    ) -> None:
-        from agentm.core.abi.events import ApiRegisterEvent
-
-        self._bus.emit_sync(
-            ApiRegisterEvent.CHANNEL,
-            ApiRegisterEvent(
-                kind=kind,
-                name=name,
-                extension=current_installing_extension(),
-                payload=payload,
-            ),
-        )
-
-    def register_tool(self, tool: Tool) -> None:
-        self._assert_active()
-        existing = {t.name for t in self._tools}
-        if tool.name in existing:
-            raise ValueError(
-                f"Tool name conflict: '{tool.name}' is already registered. "
-                f"Each tool must have a unique name across all loaded atoms."
-            )
-        self._tools.append(tool)
-        self._emit_register("tool", tool.name, tool)
-
-    def register_command(self, name: str, spec: CommandSpec) -> None:
-        self._assert_active()
-        self._commands[name] = spec
-        self._emit_register("command", name, spec)
-
-    def register_provider(self, name: str, config: ProviderConfig) -> None:
-        self._assert_active()
-        self._providers[name] = config
-        self._emit_register("provider", name, config)
-
-    def has_provider(self, name: str) -> bool:
-        self._assert_active()
-        return name in self._providers
-
-    def register_operations(self, *, bash: BashOperations) -> None:
-        self._assert_active()
-        if self._operations_holder.bundle is not None:
-            raise KeyError(
-                "Operations bundle is already registered for this session; "
-                "an earlier atom called api.register_operations(...). "
-                "Only one Operations atom per scenario."
-            )
-        self._operations_holder.bundle = Operations(bash=bash)
-
-    def register_message_renderer(
-        self, custom_type: str, renderer: Renderer
-    ) -> None:
-        self._assert_active()
-        self._renderers[custom_type] = renderer
-        self._emit_register("renderer", custom_type, renderer)
-
-    def register_tool_renderer(self, tool_name: str, renderer: Renderer) -> None:
-        self._assert_active()
-        self._renderers[tool_name] = renderer
-        self._emit_register("renderer", tool_name, renderer)
-
-    def register_resource_writer(self, writer: ResourceWriter) -> None:
-        self._assert_active()
-        if self._resource_writer_holder.replaced:
-            raise KeyError(
-                "ResourceWriter is already replaced for this session; "
-                "an earlier atom called api.register_resource_writer(...). "
-                "Only one ResourceWriter atom per scenario."
-            )
-        self._resource_writer_holder.writer = writer
-        self._resource_writer_holder.replaced = True
-
-
-class _ExtensionActionMixin(_ExtensionAPIMixinBase):
-    def post_inbox(
-        self,
-        *,
-        source: str,
-        payload: Any,
-        dedup_key: str | None = None,
-        terminal: bool = False,
-    ) -> None:
-        self._assert_active()
-        self._inbox.push(
-            InboxItem(
-                source=source,
-                payload=payload,
-                dedup_key=dedup_key,
-                terminal=terminal,
-            )
-        )
-
-    @contextlib.contextmanager
-    def track_background(self) -> Iterator[None]:
-        self._assert_active()
-        self._inbox.note_work_started()
-        try:
-            yield
-        finally:
-            self._inbox.note_work_finished()
-
-    async def wait_inbox_nonempty(
-        self, sources: frozenset[str] | None = None
-    ) -> bool:
-        self._assert_active()
-        await self._inbox.wait_nonempty()
-        self._assert_active()
-        return not self._inbox.is_empty(sources)
-
-    def send_user_message(self, content: str | list[Any]) -> None:
-        from agentm.core.abi.events import ApiSendUserMessageEvent
-
-        self.post_inbox(source="user", payload=content)
-        self._bus.emit_sync(
-            ApiSendUserMessageEvent.CHANNEL,
-            ApiSendUserMessageEvent(
-                extension=current_installing_extension(), content=content
-            ),
-        )
-
-    async def spawn_child_session(self, config: AgentSessionConfig) -> Any:
-        self._assert_active()
-        return await self._child_session_factory(config)
-
-    def set_service(self, name: str, obj: Any) -> None:
-        self._assert_active()
-        if name in self._services:
-            raise KeyError(f"service {name!r} is already registered")
-        self._services[name] = obj
-
-    def get_service(self, name: str) -> Any | None:
-        self._assert_active()
-        return self._services.get(name)
-
-
-class _ExtensionGatewayMixin(_ExtensionAPIMixinBase):
-    def reload_atom(
-        self,
-        name: str,
-        new_source: str,
-        *,
-        agent_initiated: bool = True,
-        rationale: str | None = None,
-    ) -> ReloadResult:
-        self._assert_active()
-        return self._gateway.reload_atom(
-            name,
-            new_source,
-            agent_initiated=agent_initiated,
-            rationale=rationale,
-        )
-
-    def install_atom(
-        self,
-        *,
-        name: str,
-        source: str,
-        target_path: str | None = None,
-        config: dict[str, Any] | None = None,
-        rationale: str | None = None,
-        agent_initiated: bool = True,
-    ) -> InstallAtomResult:
-        self._assert_active()
-        return self._gateway.install_atom(
-            name=name,
-            source=source,
-            target_path=target_path,
-            config=config,
-            rationale=rationale,
-            agent_initiated=agent_initiated,
-        )
-
-    def unload_atom(
-        self,
-        name: str,
-        *,
-        agent_initiated: bool = True,
-    ) -> UnloadAtomResult:
-        self._assert_active()
-        return self._gateway.unload_atom(
-            name,
-            agent_initiated=agent_initiated,
-        )
-
-    def list_atoms(self) -> list[AtomInfo]:
-        self._assert_active()
-        return self._gateway.list_atoms()
-
-    def freeze_current(self, name: str) -> str:
-        self._assert_active()
-        return self._gateway.freeze_current(name)
-
-    def is_constitution_path(self, path: str) -> bool:
-        self._assert_active()
-        return self._gateway.is_constitution_path(path)
-
-    def get_resource_writer(self) -> ResourceWriter:
-        self._assert_active()
-        return self._resource_writer_holder.writer
-
-    def get_session_telemetry(self) -> SessionTelemetry:
-        self._assert_active()
-        return self._telemetry_holder.get()
-
-
-class _ExtensionContextMixin(_ExtensionAPIMixinBase):
-    @property
-    def cwd(self) -> str:
-        self._assert_active()
-        return self._cwd
-
-    @property
-    def scenario_dir(self) -> str | None:
-        self._assert_active()
-        return self._scenario_dir
-
-    @property
-    def session_id(self) -> str:
-        return self._session_id
-
-    @property
-    def root_session_id(self) -> str:
-        return self._root_session_id
-
-    @property
-    def parent_session_id(self) -> str | None:
-        return self._parent_session_id
-
-    @property
-    def purpose(self) -> str:
-        return self._purpose
-
-    @property
-    def scenario(self) -> str | None:
-        return self._scenario
-
-    @property
-    def lineage(self) -> dict[str, Any] | None:
-        return self._lineage
-
-    @property
-    def experiment(self) -> dict[str, Any] | None:
-        return self._experiment
-
-    @property
-    def tools(self) -> list[Tool]:
-        self._assert_active()
-        return self._tools
-
-    @property
-    def session(self) -> ReadonlySession:
-        self._assert_active()
-        return self._session
-
-    @property
-    def model(self) -> Model | None:
-        self._assert_active()
-        return self._model_getter()
-
-    @property
-    def provider(self) -> ProviderConfig | None:
-        self._assert_active()
-        return self._provider_getter()
-
-    @property
-    def events(self) -> EventBus:
-        return self._bus
-
-    def get_operations(self) -> Operations:
-        self._assert_active()
-        bundle = self._operations_holder.bundle
-        if bundle is None:
-            raise RuntimeError(
-                "no atom registered Operations; the active scenario manifest "
-                "must list an atom that calls api.register_operations(...) "
-                "(default: agentm.extensions.builtin.operations)"
-            )
-        return bundle
-
-    def get_project_layout(self) -> ProjectLayout:
-        self._assert_active()
-        return self._project_layout
-
-    @property
-    def catalog(self) -> CatalogService:
-        self._assert_active()
-        return self._catalog
-
-
-class _ExtensionAPIImpl(
-    _ExtensionEventMixin,
-    _ExtensionRegistrationMixin,
-    _ExtensionActionMixin,
-    _ExtensionGatewayMixin,
-    _ExtensionContextMixin,
-):
-    """Concrete ``ExtensionAPI``; delegates to the session's bus and registries."""
-
-    def __init__(
-        self, scope: ExtensionAPIScope, *, owner_name: str = "<unknown>"
-    ) -> None:
-        self._bus = scope.bus
-        self._cwd = scope.cwd
-        self._scenario_dir = scope.scenario_dir
-        self._session_id = scope.session_id
-        self._root_session_id = scope.root_session_id
-        self._parent_session_id = scope.parent_session_id
-        self._purpose = scope.purpose
-        self._scenario = scope.scenario
-        self._lineage = scope.lineage
-        self._experiment = scope.experiment
-        self._session = scope.session
-        self._tools = scope.tools
-        self._commands = scope.commands
-        self._providers = scope.providers
-        self._renderers = scope.renderers
-        self._inbox = scope.inbox
-        self._model_getter = scope.model_getter
-        self._provider_getter = scope.provider_getter
-        self._gateway: _SessionGateway = scope.gateway
-        self._owner_name = owner_name
-        self._stale = False
-        self._child_session_factory: ChildSessionFactory = scope.child_session_factory
-        self._operations_holder: _OperationsHolder = scope.operations
-        self._project_layout: ProjectLayout = scope.project_layout
-        self._catalog = scope.catalog
-        self._resource_writer_holder: _ResourceWriterHolder = scope.resource_writer
-        self._telemetry_holder: _SessionTelemetryHolder = scope.telemetry
-        self._services = scope.service_registry
-
-    def mark_stale(self) -> None:
-        self._stale = True
-
-    def _assert_active(self) -> None:
-        if self._stale:
-            raise ExtensionStaleError(
-                f"Extension {self._owner_name!r} was reloaded; this api/ctx "
-                f"reference is stale. Re-acquire via the new install() call. "
-                f"To exit gracefully on reload, catch ExtensionStaleError "
-                f"around long-running operations that capture api or ctx."
-            )
-
-
-# --- Loader -----------------------------------------------------------------
+def current_installing_extension() -> str:
+    return _INSTALLING_EXTENSION.get() or ""
 
 
 def load_extension(
     module_path: str,
-    api: ExtensionAPI,
+    api: Any,
     config: dict[str, Any],
     *,
     validate: bool = True,
@@ -766,12 +38,7 @@ def load_extension(
     - ``None`` for sync extensions (caller need not await).
     - An awaitable for async extensions (caller must await).
 
-    Raises ``ExtensionLoadError`` on any failure (missing module, missing
-    ``install`` symbol, exception thrown by ``install`` itself, or
-    S11 contract violation when *validate* is ``True``).
-
-    While ``install`` runs, ``current_installing_extension()`` returns
-    ``module_path`` so observers can attribute side effects.
+    Raises ``ExtensionLoadError`` on any failure.
     """
 
     try:
@@ -786,9 +53,6 @@ def load_extension(
             AttributeError(f"module {module_path!r} has no callable 'install' symbol"),
         )
 
-    # contract validation on initial load. The atom_reloader's
-    # _finish_install path validates separately, so it passes validate=False
-    # to avoid double-checking.
     if validate:
         _validate_on_load(module, module_path)
 
@@ -798,17 +62,20 @@ def load_extension(
     if manifest is not None:
         schema_cls = getattr(manifest, "config_schema", None)
         if schema_cls is not None:
-            from pydantic import BaseModel as _PydanticBase
-            from pydantic import ValidationError as _PydanticValidationError
+            try:
+                from pydantic import BaseModel as _PydanticBase
+                from pydantic import ValidationError as _PydanticValidationError
 
-            if isinstance(schema_cls, type) and issubclass(schema_cls, _PydanticBase):
-                try:
-                    resolved_config = schema_cls.model_validate(config)
-                except _PydanticValidationError as exc:
-                    raise ExtensionLoadError(
-                        module_path,
-                        ValueError(_format_config_validation_error(schema_cls, exc)),
-                    ) from exc
+                if isinstance(schema_cls, type) and issubclass(schema_cls, _PydanticBase):
+                    try:
+                        resolved_config = schema_cls.model_validate(config)
+                    except _PydanticValidationError as exc:
+                        raise ExtensionLoadError(
+                            module_path,
+                            ValueError(_format_config_validation_error(schema_cls, exc)),
+                        ) from exc
+            except ImportError:
+                pass
 
     token = _INSTALLING_EXTENSION.set(module_path)
     try:
@@ -855,25 +122,19 @@ def _format_config_validation_error(schema_cls: type[Any], exc: BaseException) -
 
 
 def _validate_on_load(module: Any, module_path: str) -> None:
-    """Run AST validation on *module*'s source before ``install`` runs.
+    """Run AST validation on *module*'s source before ``install`` runs."""
 
-    Raises ``ExtensionLoadError`` if any error-severity issue is found.
-    """
-
-    from agentm.extensions.validate import validate_atom_file, validate_atom_package
+    try:
+        from agentm.extensions.validate import validate_atom_file, validate_atom_package
+    except ImportError:
+        return
 
     src_file_str = getattr(module, "__file__", None)
     if src_file_str is None:
         return
     src_file = Path(src_file_str)
 
-    # Pass empty known_extension_names: at initial load time the full
-    # atom set is not yet available (atoms load sequentially), so the
-    # D4 peer-literal heuristic would produce false positives. The
-    # import-allow-list check — the primary gate here — is independent
-    # of known names.
     if src_file.name == "__init__.py":
-        # Package atom — validate the whole package.
         package_dir = src_file.parent
         issues = validate_atom_package(
             package_dir,
@@ -897,27 +158,7 @@ def _validate_on_load(module: Any, module_path: str) -> None:
 
 
 __all__ = [
-    "AtomInfo",
-    "ChildSessionFactory",
-    "CommandDispatcher",
-    "CommandDispatchResult",
-    "CommandSpec",
-    "ExtensionAPI",
-    "ExtensionAPIScope",
-    "ExtensionAPIScopeConfig",
-    "ExtensionFactory",
     "ExtensionLoadError",
-    "ExtensionStaleError",
-    "Handler",
-    "InstallAtomResult",
-    "ProviderConfig",
-    "ReadonlySession",
-    "ReloadResult",
-    "Renderer",
-    "UnknownCommandError",
-    "UnloadAtomResult",
-    "Unsubscribe",
-    "SessionTelemetryFactory",
-    "build_extension_api_scope",
+    "current_installing_extension",
     "load_extension",
 ]

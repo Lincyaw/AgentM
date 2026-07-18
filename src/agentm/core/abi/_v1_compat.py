@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
+from agentm.core.abi.bus import Event
+
 
 # --- ExtensionAPI (v1 atom-facing API) ------------------------------------
 
@@ -162,8 +164,6 @@ Renderer = Any
 # These are frozen stubs with CHANNEL class vars so atoms that subscribe
 # to them via api.on(SomeEvent.CHANNEL, handler) still work at import time.
 # The handlers simply won't fire since the v2 driver doesn't emit these.
-
-from agentm.core.abi.bus import Event
 
 
 @dataclass(frozen=True, slots=True)
