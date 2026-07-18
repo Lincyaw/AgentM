@@ -23,7 +23,6 @@ from .formats import get_format_adapter
 from .runner import (
     DEFAULT_IMAGE_REGISTRY,
     DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
-    HARBOR_FORMAT_BENCHES,
     RunEvalConfig,
     RunEvalJob,
     build_base_images,
@@ -256,7 +255,8 @@ class SandboxAdapter:
             exp_id: Annotated[Optional[str], typer.Option(help="Override experiment ID")] = None,
         ) -> None:
             """Run all tasks in parallel, then evaluate."""
-            if bench in HARBOR_FORMAT_BENCHES:
+            adapter = get_format_adapter(bench)
+            if getattr(adapter, "USE_HARBOR_RUNNER", False):
                 typer.echo(
                     f"Harbor-format benchmark '{bench}' is now driven by the "
                     f"ExternalAgentMAgent.\n"
@@ -273,7 +273,6 @@ class SandboxAdapter:
 
             autoload_dotenv(Path.cwd())
 
-            adapter = get_format_adapter(bench)
             resolved_source = resolve_source(repo, source, bench, adapter)
             registry, prefix, tag = _resolve_defaults(adapter, registry, prefix, tag)
             if not source_images:

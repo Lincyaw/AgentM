@@ -135,15 +135,10 @@ class HarborBashOperations:
             timeout_sec=timeout_sec,
         )
 
-        stdout_raw = result.stdout or ""
-        stderr_raw = result.stderr or ""
-        stdout = stdout_raw.encode("utf-8") if isinstance(stdout_raw, str) else stdout_raw
-        stderr = stderr_raw.encode("utf-8") if isinstance(stderr_raw, str) else stderr_raw
-
         return ExecResult(
             exit_code=result.return_code,
-            stdout=stdout,
-            stderr=stderr,
+            stdout=(result.stdout or "").encode("utf-8"),
+            stderr=(result.stderr or "").encode("utf-8"),
             timed_out=False,
         )
 
@@ -175,8 +170,8 @@ class HarborResourceWriter:
 
     async def read(self, path: str) -> bytes:
         abs_path = self._resolve(path)
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            tmp = f.name
+        fd, tmp = tempfile.mkstemp()
+        os.close(fd)
         try:
             await self._env.download_file(abs_path, tmp)
             return Path(tmp).read_bytes()
@@ -316,12 +311,8 @@ class HarborResourceWriter:
         @asynccontextmanager
         async def _ctx():
             handle = _Batch()
-            try:
-                yield handle
-            except BaseException:
-                raise
-            else:
-                await handle.flush()
+            yield handle
+            await handle.flush()
 
         return _ctx()
 

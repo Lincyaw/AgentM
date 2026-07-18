@@ -60,23 +60,27 @@ class ExternalAgentMAgent(BaseAgent):
 
         set_harbor_environment(environment)
 
-        for key, val in self.extra_env.items():
-            os.environ[key] = val
-        api_key = os.environ.get("AGENTM_API_KEY", "")
+        env_patch = dict(self.extra_env)
+        api_key = env_patch.get("AGENTM_API_KEY", os.environ.get("AGENTM_API_KEY", ""))
         if api_key:
-            os.environ.setdefault("OPENAI_API_KEY", api_key)
-        base_url = os.environ.get("AGENTM_BASE_URL", "")
+            env_patch.setdefault("OPENAI_API_KEY", api_key)
+        base_url = env_patch.get("AGENTM_BASE_URL", os.environ.get("AGENTM_BASE_URL", ""))
         if base_url:
-            os.environ.setdefault("OPENAI_BASE_URL", base_url)
+            env_patch.setdefault("OPENAI_BASE_URL", base_url)
+        if self._reasoning_effort:
+            env_patch.setdefault("AGENTM_REASONING_EFFORT", self._reasoning_effort)
 
-        model = self.model_name or os.environ.get("AGENTM_MODEL")
+        saved: dict[str, str | None] = {}
+        for key, val in env_patch.items():
+            saved[key] = os.environ.get(key)
+            os.environ[key] = val
+
+        model = self.model_name or env_patch.get("AGENTM_MODEL") or os.environ.get("AGENTM_MODEL")
         config = AgentSessionConfig(
             cwd=os.getcwd(),
             model=model,
             scenario=SCENARIO,
         )
-        if self._reasoning_effort:
-            os.environ.setdefault("AGENTM_REASONING_EFFORT", self._reasoning_effort)
 
         session = await AgentSession.create(config)
         logger.info("agentm-external: session {} started", session.session_id)
@@ -85,6 +89,11 @@ class ExternalAgentMAgent(BaseAgent):
             messages = await session.prompt(instruction)
         finally:
             await session.shutdown()
+            for key, prev in saved.items():
+                if prev is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = prev
 
         tool_calls = sum(
             len(m.content)

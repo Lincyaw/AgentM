@@ -44,6 +44,8 @@ def expand_host_env(value: str) -> str:
 class HarborAdapter:
     """Harbor format: task.toml + instruction.md + environment/ dir."""
 
+    USE_HARBOR_RUNNER = True
+
     def discover_tasks(self, source: str) -> list[TaskSpec]:
         repo = Path(source).expanduser().resolve()
         tasks: list[TaskSpec] = []

@@ -35,12 +35,6 @@ DEFAULT_IMAGE_REGISTRY = os.environ.get(
 )
 DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "arl"
 
-# Harbor-format benchmarks are now driven by ``harbor run`` with the
-# ExternalAgentMAgent; the eval harness no longer runs agent sessions or
-# verifiers for these formats.
-HARBOR_FORMAT_BENCHES = frozenset({"harbor", "tb2", "lhtb", "senior-swe"})
-
-
 def _resolve_adapter_repo(adapter: Any, bench: str) -> str:
     """Auto-resolve task repo from adapter defaults: $ENV > $AGENTM_HOME/bench-repos > clone."""
     env_var = getattr(adapter, "DEFAULT_REPO_ENV", None)
