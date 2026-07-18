@@ -271,8 +271,10 @@ async def drive(
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
-        # Clear signal from any previous turn's interrupt — interrupt
-        # aborts the current turn only, not the entire session
+        # Clear signal so a previous turn's interrupt doesn't block this turn.
+        # Note: interrupt() during a turn produces SignalAborted (final=True),
+        # which commits as action="stop" and drive() returns. Multi-trigger
+        # looping only happens when a DecideEvent handler overrides to Step.
         if signal is not None:
             signal.clear()
 

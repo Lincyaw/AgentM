@@ -130,6 +130,7 @@ class Session:
                 except Exception:
                     logger.exception("policy bind failed")
 
+        self.bus.freeze_clear()
         self._driver_task = asyncio.create_task(
             self._run_driver(),
             name=f"v2-driver-{self.id}",
@@ -183,7 +184,7 @@ class Session:
             except asyncio.CancelledError:
                 pass
         await self.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent())
-        self.bus.clear()
+        self.bus._force_clear()
 
     # --- Input ---
 

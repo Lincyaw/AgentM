@@ -60,6 +60,7 @@ class EventBus:
 
     _handlers: dict[str, list[_Subscription]] = field(default_factory=dict)
     _next_seq: int = 0
+    _frozen_clear: bool = False
 
     def on(
         self,
@@ -149,7 +150,23 @@ class EventBus:
             results.append(value)
         return results
 
+    def freeze_clear(self) -> None:
+        """Block clear() from wiping handlers.  Called after atom install."""
+        self._frozen_clear = True
+
     def clear(self) -> None:
+        """Clear all handlers.  Blocked after freeze_clear()."""
+        if self._frozen_clear:
+            logger.warning(
+                "EventBus.clear() ignored — bus is frozen; "
+                "only Session.shutdown() may clear"
+            )
+            return
+        self._handlers.clear()
+
+    def _force_clear(self) -> None:
+        """Unconditional clear — for Session.shutdown() only."""
+        self._frozen_clear = False
         self._handlers.clear()
 
 
