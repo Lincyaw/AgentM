@@ -69,10 +69,18 @@ Session ID is logged at agent start:
 
 ## Scenario manifest
 
-The `harbor_external` scenario is registered as a Python entry point
-(`agentm.scenarios`). The manifest lives at
-`src/agentm_harbor/scenarios/harbor_external/manifest.yaml`. Edit it to add
-or remove atoms, change tool timeouts, etc.
+Harbor uses the `arl:harbor` variant in `contrib/scenarios/arl/`. The
+tool overlay is shared with the default ARL scenario:
+
+```
+contrib/scenarios/arl/
+  overlays/base.yaml       # ARL operations atom (agent_env backend)
+  overlays/harbor.yaml     # Harbor operations atom (harbor_ops)
+  overlays/tools.yaml      # shared tool atoms (file_tools, bash, etc.)
+  manifest.yaml            # arl (default) = base + tools
+  manifest.harbor.yaml     # arl:harbor = harbor + tools
+  manifest.harness.yaml    # arl:harness = base + tools + llmharness
+```
 
 ## Components
 

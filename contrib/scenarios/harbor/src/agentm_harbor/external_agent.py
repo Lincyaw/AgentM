@@ -25,7 +25,7 @@ from loguru import logger
 
 from agentm_harbor.harbor_ops import set_harbor_environment
 
-SCENARIO = "harbor_external"
+SCENARIO = "arl:harbor"
 
 
 class ExternalAgentMAgent(BaseAgent):

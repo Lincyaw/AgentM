@@ -3,6 +3,7 @@ description: Full oversight stack — adapt + goal + async llmharness auditor.
 
 includes:
   - overlays/base.yaml
+  - overlays/tools.yaml
 
 extensions:
   - module: agentm.extensions.builtin.adapt

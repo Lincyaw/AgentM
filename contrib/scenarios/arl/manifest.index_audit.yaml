@@ -3,6 +3,7 @@ description: Baseline + index-grounded auditor that fires on finish.
 
 includes:
   - overlays/base.yaml
+  - overlays/tools.yaml
 
 extensions:
   - module: llmharness.atom

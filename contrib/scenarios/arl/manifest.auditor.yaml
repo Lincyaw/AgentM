@@ -3,6 +3,7 @@ description: Baseline + async llmharness auditor with trajectory index.
 
 includes:
   - overlays/base.yaml
+  - overlays/tools.yaml
 
 extensions:
   - module: llmharness.atom

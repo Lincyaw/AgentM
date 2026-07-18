@@ -3,6 +3,7 @@ description: Baseline + goal-driven oversight (auto-derive + checker).
 
 includes:
   - overlays/base.yaml
+  - overlays/tools.yaml
 
 extensions:
   - module: agentm.extensions.builtin.goal

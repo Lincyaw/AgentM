@@ -3,6 +3,7 @@ description: Sync llmharness auditor — minimal prompt, no methodology.
 
 includes:
   - overlays/base.yaml
+  - overlays/tools.yaml
 
 extensions:
   - module: llmharness.atom

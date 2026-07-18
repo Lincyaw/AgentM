@@ -3,6 +3,7 @@ description: Baseline + sync llmharness auditor every 5 turns.
 
 includes:
   - overlays/base.yaml
+  - overlays/tools.yaml
 
 extensions:
   - module: llmharness.atom

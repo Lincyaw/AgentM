@@ -10,16 +10,12 @@ dependencies = [
 [project.optional-dependencies]
 external = ["agentm"]
 
-[project.entry-points."agentm.scenarios"]
-harbor_external = "agentm_harbor.scenarios.harbor_external"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentm_harbor"]
-artifacts = ["*.yaml"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "../../../src/agentm_toolbox" = "agentm_toolbox"
