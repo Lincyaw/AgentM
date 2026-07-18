@@ -282,3 +282,131 @@ __all__ = [
     "TurnCommittedEvent",
     "TurnObservation",
 ]
+
+
+# --- Domain events (atom-to-atom communication) ---------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class InputEvent(Event):
+    CHANNEL: ClassVar[str] = "input"
+    source: str = ""
+    payload: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundActivityEvent(Event):
+    CHANNEL: ClassVar[str] = "background_activity"
+    source: str = ""
+    activity_id: str = ""
+    label: str = ""
+    status: str = ""
+    session_id: str | None = None
+    note: str | None = None
+    terminal: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BeforeCompactEvent(Event):
+    CHANNEL: ClassVar[str] = "before_compact"
+
+
+@dataclass(frozen=True, slots=True)
+class AfterCompactEvent(Event):
+    CHANNEL: ClassVar[str] = "after_compact"
+
+
+@dataclass(frozen=True, slots=True)
+class CostBudgetExceededEvent(Event):
+    CHANNEL: ClassVar[str] = "cost_budget_exceeded"
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolveSubagentEvent(Event):
+    CHANNEL: ClassVar[str] = "resolve_subagent"
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionInstallEvent(Event):
+    CHANNEL: ClassVar[str] = "extension_install"
+    name: str = ""
+    phase: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionReloadEvent(Event):
+    CHANNEL: ClassVar[str] = "extension_reload"
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionUnloadEvent(Event):
+    CHANNEL: ClassVar[str] = "extension_unload"
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CommandDispatchedEvent(Event):
+    CHANNEL: ClassVar[str] = "command_dispatched"
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ApiRegisterEvent(Event):
+    CHANNEL: ClassVar[str] = "api_register"
+    kind: str = ""
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ApiSendUserMessageEvent(Event):
+    CHANNEL: ClassVar[str] = "api_send_user_message"
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcesDiscoverEvent(Event):
+    CHANNEL: ClassVar[str] = "resources_discover"
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceWriteEvent(Event):
+    CHANNEL: ClassVar[str] = "resource_write"
+    path: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PlanSubmittedEvent(Event):
+    CHANNEL: ClassVar[str] = "plan_submitted"
+
+
+@dataclass(frozen=True, slots=True)
+class MessageAppendedEvent(Event):
+    CHANNEL: ClassVar[str] = "message_appended"
+
+
+@dataclass(frozen=True, slots=True)
+class MessagePersistedEvent(Event):
+    CHANNEL: ClassVar[str] = "message_persisted"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionHeaderEmittedEvent(Event):
+    CHANNEL: ClassVar[str] = "session_header_emitted"
+
+
+@dataclass(frozen=True, slots=True)
+class LlmRequestStartEvent(Event):
+    CHANNEL: ClassVar[str] = "llm_request_start"
+    turn_index: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class LlmRequestEndEvent(Event):
+    CHANNEL: ClassVar[str] = "llm_request_end"
+    turn_index: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class EntryAppendedEvent(Event):
+    CHANNEL: ClassVar[str] = "entry_appended"

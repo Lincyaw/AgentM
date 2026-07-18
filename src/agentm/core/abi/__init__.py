@@ -56,6 +56,28 @@ from .events import (
     TurnBeginEvent,
     TurnCommittedEvent,
     TurnObservation,
+    # domain events (atom-to-atom)
+    AfterCompactEvent,
+    ApiRegisterEvent,
+    ApiSendUserMessageEvent,
+    BackgroundActivityEvent,
+    BeforeCompactEvent,
+    CommandDispatchedEvent,
+    CostBudgetExceededEvent,
+    EntryAppendedEvent,
+    ExtensionInstallEvent,
+    ExtensionReloadEvent,
+    ExtensionUnloadEvent,
+    InputEvent,
+    LlmRequestEndEvent,
+    LlmRequestStartEvent,
+    MessageAppendedEvent,
+    MessagePersistedEvent,
+    PlanSubmittedEvent,
+    ResolveSubagentEvent,
+    ResourceWriteEvent,
+    ResourcesDiscoverEvent,
+    SessionHeaderEmittedEvent,
 )
 
 # -- trajectory --------------------------------------------------------------
@@ -277,6 +299,114 @@ from .roles import (
 
 # -- extension errors --------------------------------------------------------
 from agentm.core.runtime.extension import ExtensionLoadError  # noqa: F401
+
+# -- v1 domain stubs (minimal, for atom import compat) ----------------------
+# These will be replaced with proper v2 equivalents as atoms are rewritten.
+from typing import Any as _Any
+from dataclasses import dataclass as _dc
+
+
+class ExtensionAPI:  # noqa: E302
+    """Stub — atoms typed against v1 ExtensionAPI still import this name."""
+    ...
+
+
+@_dc
+class AgentSessionConfig:
+    """Stub — v1 session config referenced by sub_agent/goal."""
+    ...
+
+
+@_dc
+class CommandSpec:
+    """Stub — v1 command spec referenced by llm_compaction/goal/loop_budget."""
+    name: str = ""
+    description: str = ""
+    parameters: dict[str, _Any] = None  # type: ignore[assignment]
+    def __post_init__(self) -> None:
+        if self.parameters is None:
+            self.parameters = {}
+
+
+class CommandDispatcher:  # noqa: E302
+    """Stub — v1 command dispatcher."""
+    ...
+
+
+ENTRY_MATERIALIZERS: dict[str, _Any] = {}
+ENTRY_TYPE_MESSAGE = "message"
+ENTRY_TYPE_COMPACTION = "compaction"
+ENTRY_TYPE_BRANCH_SUMMARY = "branch_summary"
+
+
+@_dc
+class SessionEntry:
+    """Stub — v1 session entry referenced by compaction_prompts."""
+    entry_type: str = ""
+    content: _Any = None
+
+
+@_dc
+class SessionState:
+    """Stub — v1 session state."""
+    ...
+
+
+class SessionStore:  # noqa: E302
+    """Stub — v1 session store protocol."""
+    ...
+
+
+@_dc
+class CompactionPrompts:
+    """Stub — v1 compaction prompts referenced by llm_compaction."""
+    summarize: str = ""
+    summarize_system: str = ""
+    update: str = ""
+    branch_summary: str = ""
+    branch_summary_preamble: str = ""
+
+
+@_dc
+class CompactionSettings:
+    """Stub — v1 compaction settings."""
+    ...
+
+
+@_dc
+class CompactionResult:
+    """Stub — v1 compaction result."""
+    ...
+
+
+@_dc
+class CompactionDetails:
+    """Stub — v1 compaction details."""
+    ...
+
+
+@_dc
+class ContextUsageSnapshot:
+    """Stub — v1 context usage."""
+    ...
+
+
+class LoopConfig:  # noqa: E302
+    """Stub — v1 loop config referenced by loop_budget."""
+    ...
+
+
+class AgentLoop:  # noqa: E302
+    """Stub — v1 agent loop."""
+    ...
+
+
+PROMPT_SUMMARIZATION = ""
+PROMPT_SUMMARIZATION_SYSTEM = ""
+PROMPT_UPDATE_SUMMARIZATION = ""
+PROMPT_BRANCH_SUMMARY = ""
+PROMPT_BRANCH_SUMMARY_PREAMBLE = ""
+MUTABLE_EVENT_FIELDS_BY_TYPE: dict[str, _Any] = {}
 
 
 # -- trace reader (lib, re-exported for access) -------------------------
