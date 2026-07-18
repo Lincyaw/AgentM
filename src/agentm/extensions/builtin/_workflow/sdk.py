@@ -205,7 +205,7 @@ _SAFE_BUILTINS: Final[dict[str, Any]] = {
 }
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class WorkflowPhaseEvent(Event):
     """A workflow surfacing a named phase or a free-text log line.
 

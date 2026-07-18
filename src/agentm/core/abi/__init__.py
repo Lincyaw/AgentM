@@ -275,11 +275,84 @@ from .roles import (
     WIRE_OUTBOUND_SERVICE,
 )
 
+# -- v1 backward compat (atoms still import these) -----------------------
+from ._v1_compat import (
+    AgentEndEvent,
+    AgentLoop,
+    AgentSessionConfig,
+    AgentStartEvent,
+    AfterCompactEvent,
+    ApiRegisterEvent,
+    ApiSendUserMessageEvent,
+    AtomInfo,
+    BackgroundActivityEvent,
+    BeforeAgentStartEvent,
+    BeforeCompactEvent,
+    BeforeInstallAtomEvent,
+    BeforeSendToLlmEvent,
+    BeforeUnloadAtomEvent,
+    ChildSessionExtendingEvent,
+    CommandDispatchedEvent,
+    CommandDispatcher,
+    CommandSpec,
+    CompactionDetails,
+    CompactionPrompts,
+    CompactionResult,
+    CompactionSettings,
+    ContextUsageSnapshot,
+    CostBudgetExceededEvent,
+    DecideTurnActionEvent,
+    ENTRY_MATERIALIZERS,
+    ENTRY_TYPE_BRANCH_SUMMARY,
+    ENTRY_TYPE_COMPACTION,
+    ENTRY_TYPE_MESSAGE,
+    EntryAppendedEvent,
+    EventBusObserver,
+    ExtensionAPI,
+    ExtensionInstallEvent,
+    ExtensionLoadError,
+    ExtensionReloadEvent,
+    ExtensionStaleError,
+    ExtensionUnloadEvent,
+    HookContract,
+    InputEvent,
+    InstallAtomResult,
+    LlmRequestEndEvent,
+    LlmRequestStartEvent,
+    LoopConfig,
+    MUTABLE_EVENT_FIELDS_BY_TYPE,
+    MessageAppendedEvent,
+    MessagePersistedEvent,
+    ObserverCallback,
+    ObserverRegistration,
+    PlanSubmittedEvent,
+    PROMPT_BRANCH_SUMMARY,
+    PROMPT_BRANCH_SUMMARY_PREAMBLE,
+    PROMPT_SUMMARIZATION,
+    PROMPT_SUMMARIZATION_SYSTEM,
+    PROMPT_UPDATE_SUMMARIZATION,
+    ReloadResult,
+    Renderer,
+    ResolveSubagentEvent,
+    ResourceWriteEvent,
+    ResourcesDiscoverEvent,
+    SessionEntry,
+    SessionHeaderEmittedEvent,
+    SessionState,
+    SessionStore,
+    TurnEndEvent,
+    TurnStartEvent,
+    UnloadAtomResult,
+)
+
 # -- trace reader (lib, re-exported for access) -------------------------
-# NOTE: trace_reader re-export removed during v2 migration.
-# Import directly from agentm.core.lib.trace_reader instead.
-# The re-export triggered a broken import chain through lib/__init__.py
-# which depends on v1 modules deleted in this migration.
+from agentm.core.lib.trace_reader import (
+    LogRecord,
+    SessionIdentity,
+    Span,
+    TraceReader,
+    attr,
+)
 
 __all__ = [
     # bus

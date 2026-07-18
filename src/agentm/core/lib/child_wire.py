@@ -6,7 +6,7 @@ from typing import Any
 
 from loguru import logger
 
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.core.abi.roles import WIRE_CHILD_FORWARDER_SERVICE
 
 

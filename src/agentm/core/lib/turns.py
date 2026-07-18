@@ -25,7 +25,7 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from agentm.core.abi.session import ENTRY_TYPE_MESSAGE, SessionEntry
+from agentm.core.abi import ENTRY_TYPE_MESSAGE, SessionEntry
 
 
 @dataclass(frozen=True, slots=True)
