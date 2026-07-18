@@ -45,6 +45,7 @@ from agentm.core.v2.abi.events import (
     BeforeSendEvent,
     ContextEvent,
     DecideEvent,
+    DiagnosticEvent,
     Inject,
     LoopAction,
     ModelEndTurn,
@@ -215,6 +216,8 @@ def _execution_to_messages(
             messages.append(ToolResultMessage(
                 role="tool_result", content=result_blocks, timestamp=0.0,
             ))
+    # Injected messages go at the tail so they survive context rebuild
+    messages.extend(execution.injected)
     return messages
 
 
@@ -256,6 +259,11 @@ async def drive(
         if max_turns is not None and turns_run >= max_turns:
             return
 
+        # Clear signal from any previous turn's interrupt — interrupt
+        # aborts the current turn only, not the entire session
+        if signal is not None:
+            signal.clear()
+
         execution = trajectory.begin(trigger)
         await bus.emit(TurnBeginEvent.CHANNEL, TurnBeginEvent(
             index=execution.index, trigger=trigger,
@@ -281,7 +289,10 @@ async def drive(
 
             turn = trajectory.commit(outcome, meta)
             if store is not None:
-                store.append(session_id, turn)
+                try:
+                    store.append(session_id, turn)
+                except Exception:
+                    logger.exception("store.append failed; turn committed to trajectory but not persisted")
 
             await bus.emit(TurnCommittedEvent.CHANNEL, TurnCommittedEvent(turn=turn))
             turns_run += 1
@@ -296,7 +307,15 @@ async def drive(
         except Exception:
             await _fire_abandon(lifecycle, session_id, execution)
             trajectory.abandon()
-            logger.exception("driver: round raised; continuing")
+            logger.exception("driver: round raised; abandoning turn")
+            try:
+                await bus.emit(DiagnosticEvent.CHANNEL, DiagnosticEvent(
+                    level="error",
+                    source="driver",
+                    message="turn abandoned: trigger dropped due to internal error",
+                ))
+            except Exception:
+                logger.debug("diagnostic emit failed after turn abandon; non-fatal")
 
 
 async def _react_loop(
@@ -513,10 +532,9 @@ async def _react_loop(
             return Outcome(action="stop", cause=cause), _meta(total_input, total_output, start_ns, effective_model)
 
         if isinstance(action, Inject):
-            # B2 fix: Inject continues inline — append messages and
-            # loop to the next round within the same turn.  Do NOT
-            # return; the injected messages become part of this turn.
-            messages.extend(action.messages)
+            # B2 fix: Inject continues inline — store on Execution so
+            # messages survive context rebuild on subsequent rounds.
+            execution.add_injected(list(action.messages))
 
         # Step or Inject → continue to next round
         round_index += 1
