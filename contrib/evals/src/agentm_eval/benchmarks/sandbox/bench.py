@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any, Iterator, Protocol
+from typing import Iterator, Protocol
 
 from loguru import logger
 
@@ -96,53 +96,6 @@ class BenchAdapter(Protocol):
 
     def pass_at_k_footer(self, all_stats: list[dict], n_tasks: int) -> str:
         """Footer/totals for the pass@k table."""
-        ...
-
-
-class PrivateEvalBuilder(Protocol):
-    """Optional adapter hook for packaging private evaluator assets."""
-
-    def get_eval_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
-        """Return the private evaluator Docker image name."""
-        ...
-
-    def build_eval_image(
-        self,
-        task: TaskSpec,
-        *,
-        base_image: str,
-        eval_image: str,
-        push: bool = False,
-    ) -> None:
-        """Build one private evaluator image for a task."""
-        ...
-
-
-class PrivateEvalRunner(Protocol):
-    """Optional adapter hook for running private-container evaluation."""
-
-    def private_eval_container(
-        self,
-        task: TaskSpec,
-        registry: str,
-        prefix: str,
-        tag: str,
-        *,
-        container: str,
-        image_pull_policy: str,
-    ) -> dict[str, Any]:
-        """Return the ARL private container spec for evaluation."""
-        ...
-
-    def evaluate_private_container(
-        self,
-        session: object,
-        task: TaskSpec,
-        *,
-        container: str = "eval",
-        timeout: int = 300,
-    ) -> dict:
-        """Evaluate using a configured private container."""
         ...
 
 

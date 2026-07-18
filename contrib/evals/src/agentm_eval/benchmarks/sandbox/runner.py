@@ -1,12 +1,13 @@
-"""Core sandbox benchmark runner — extracted from bench.py.
+"""Core sandbox benchmark runner — image helpers and batch orchestration.
 
-Contains all the run+eval logic for Docker-sandbox-based benchmarks.
-No CLI commands; the SandboxAdapter in __init__.py provides those.
+Contains image building, task discovery, and reporting logic for
+Docker-sandbox-based benchmarks.  Agent session management and verifier
+execution for Harbor-format benchmarks have moved to the external Harbor
+agent (``contrib/scenarios/harbor/``).
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import re
@@ -16,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any
 
 import typer
 from loguru import logger
@@ -33,6 +34,11 @@ DEFAULT_IMAGE_REGISTRY = os.environ.get(
     "AGENTM_EVAL_IMAGE_REGISTRY", "pair-cn-guangzhou.cr.volces.com"
 )
 DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "arl"
+
+# Harbor-format benchmarks are now driven by ``harbor run`` with the
+# ExternalAgentMAgent; the eval harness no longer runs agent sessions or
+# verifiers for these formats.
+HARBOR_FORMAT_BENCHES = frozenset({"harbor", "tb2", "lhtb", "senior-swe"})
 
 
 def _resolve_adapter_repo(adapter: Any, bench: str) -> str:
@@ -62,18 +68,6 @@ def _resolve_adapter_repo(adapter: Any, bench: str) -> str:
         )
     subdir = getattr(adapter, "DEFAULT_REPO_SUBDIR", "")
     return str(repo_dir / subdir) if subdir else str(repo_dir)
-
-
-def _filter_supported_kwargs(
-    callable_obj: object, kwargs: dict[str, Any],
-) -> dict[str, Any]:
-    try:
-        sig = inspect.signature(cast(Callable[..., Any], callable_obj))
-    except (TypeError, ValueError):
-        return kwargs
-    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
-        return kwargs
-    return {key: value for key, value in kwargs.items() if key in sig.parameters}
 
 
 def _safe_experiment_id(raw: str, max_len: int = 63) -> str:

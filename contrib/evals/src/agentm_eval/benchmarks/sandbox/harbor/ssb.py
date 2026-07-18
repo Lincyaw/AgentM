@@ -8,7 +8,7 @@ taste, and validation-agent judges).
 
 How to run::
 
-    uv run agentm-eval sandbox batch --bench senior-swe --model azure-gpt -j 5
+    harbor run --agent agentm_harbor:ExternalAgentMAgent -m azure-gpt
 
 Repo auto-clones to ``$AGENTM_HOME/bench-repos/senior-swe`` on first run.
 Override with ``--repo <path>`` or ``$SSB_REPO``.
@@ -18,7 +18,6 @@ Images: ``pair-cn-guangzhou.cr.volces.com/opspai/ssb-{task}:v1``.
 from __future__ import annotations
 
 import os
-import shlex
 
 from loguru import logger
 
@@ -99,55 +98,5 @@ class SeniorSweAdapter(HarborAdapter):
         env.setdefault("OPENAI_API_KEY", api_key)
         return True
 
-    VERIFIER_PIP_DEPS = ("litellm[proxy]",)
     _PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
     _NPM_MIRROR = "https://registry.npmmirror.com/"
-
-    def evaluate(
-        self, session: object, task: TaskSpec, *, timeout: int = 300
-    ) -> dict:
-        mirror = self._PIP_MIRROR
-        npm_mirror = self._NPM_MIRROR
-        session.execute([{  # type: ignore[attr-defined]
-            "name": "setup-mirrors",
-            "command": ["bash", "-lc",
-                # apt mirror + build tools for C extensions
-                "sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; "
-                "s|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; "
-                "s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; "
-                "s|http://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' "
-                "/etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true; "
-                "apt-get update -qq && "
-                "apt-get install -y -qq gcc python3-dev 2>/dev/null || true; "
-                # pip mirror
-                f"mkdir -p ~/.config/pip && "
-                f"printf '[global]\\nindex-url = {mirror}\\n"
-                f"trusted-host = pypi.tuna.tsinghua.edu.cn\\n' > ~/.config/pip/pip.conf && "
-                # npm / pnpm mirror
-                f"npm config set registry {npm_mirror} 2>/dev/null; "
-                # persist for all subprocesses (`bash -l` sources /etc/profile.d/)
-                f"printf '"
-                f"export PIP_INDEX_URL={mirror}\\n"
-                f"export PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn\\n"
-                f"export UV_DEFAULT_INDEX={mirror}\\n"
-                f"export NPM_CONFIG_REGISTRY={npm_mirror}\\n"
-                f"' > /etc/profile.d/mirrors.sh "
-                "|| true"],
-            "work_dir": "/app",
-        }], recover_timeout=120)
-        if self.VERIFIER_PIP_DEPS:
-            deps = " ".join(shlex.quote(d) for d in self.VERIFIER_PIP_DEPS)
-            pip_idx = f"-i {mirror} --trusted-host pypi.tuna.tsinghua.edu.cn"
-            session.execute([{  # type: ignore[attr-defined]
-                "name": "verifier-deps",
-                "command": ["bash", "-lc",
-                    f"python3 -m pip install --break-system-packages -q {pip_idx} {deps} "
-                    f"|| python3 -m pip install -q {pip_idx} {deps} "
-                    f"|| true"],
-                "work_dir": "/app",
-                "timeoutSeconds": 600,
-            }], recover_timeout=720)
-        result = super().evaluate(session, task, timeout=timeout)
-        if result.get("reward") is None:
-            result["invalid_trial"] = True
-        return result

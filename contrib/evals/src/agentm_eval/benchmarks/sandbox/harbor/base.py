@@ -8,14 +8,7 @@ import shlex
 import tomllib
 from pathlib import Path
 
-from loguru import logger
-
-from ..bench import TaskSpec, image_name, upload_file_to_sandbox
-
-
-def _patch_test_sh(content: bytes) -> bytes:
-    """No-op: sandbox has network access, let test.sh install its own deps."""
-    return content
+from ..bench import TaskSpec, image_name
 
 
 def _source_image_from_dockerfile(task_dir: Path) -> str:
@@ -142,73 +135,6 @@ class HarborAdapter:
             fields["memory_request"] = f"{int(memory_mb)}Mi"
             fields["memory_limit"] = f"{int(memory_mb)}Mi"
         return fields
-
-    def evaluate(
-        self, session: object, task: TaskSpec, *, timeout: int = 300
-    ) -> dict:
-        timeout = self.eval_timeout_for(task, timeout)
-        task_dir = Path(task.path)
-
-        tests_dir = task_dir / "tests"
-        if tests_dir.is_dir():
-            session.execute([{  # type: ignore[attr-defined]
-                "name": "prep",
-                "command": ["bash", "-lc", "mkdir -p /tests /logs/verifier /app/_eval_staging"],
-                "work_dir": "/app",
-            }])
-            for f in tests_dir.rglob("*"):
-                if not f.is_file():
-                    continue
-                content = f.read_bytes()
-                if f.name == "test.sh":
-                    content = _patch_test_sh(content)
-                rel = str(f.relative_to(tests_dir))
-                upload_file_to_sandbox(session, f"_eval_staging/{rel}", content)
-            session.execute([{  # type: ignore[attr-defined]
-                "name": "mv-tests",
-                "command": ["bash", "-lc",
-                    'cd /app/_eval_staging && find . -type f | while read f; do '
-                    'mkdir -p "/tests/$(dirname "$f")" && '
-                    'mv "$f" "/tests/$f" && chmod +x "/tests/$f"; done && '
-                    'rm -rf /app/_eval_staging'],
-                "work_dir": "/app",
-            }])
-
-        session.execute([{  # type: ignore[attr-defined]
-            "name": "prep-eval",
-            "command": ["bash", "-lc", "mkdir -p /logs/verifier"],
-            "work_dir": "/app",
-        }])
-
-        env_prefix = "".join(
-            f"{k}={shlex.quote(str(v))} " for k, v in self._verifier_env(task).items()
-        )
-        r = session.execute([{  # type: ignore[attr-defined]
-            "name": "eval",
-            "command": ["bash", "-lc",
-                f"{env_prefix}timeout {timeout} bash /tests/test.sh 2>&1"],
-            "work_dir": "/app",
-            "timeoutSeconds": timeout,
-        }], recover_timeout=timeout + 120)
-        eval_out = r.results[0].output.stdout
-
-        reward = None
-        try:
-            r2 = session.execute([{  # type: ignore[attr-defined]
-                "name": "read-reward",
-                "command": ["bash", "-lc", "cat /logs/verifier/reward.txt 2>/dev/null"],
-                "work_dir": "/app",
-            }])
-            txt = r2.results[0].output.stdout.strip()
-            if txt:
-                reward = float(txt)
-        except Exception as exc:  # noqa: S110
-            logger.debug("Failed to read reward.txt: {}", exc)
-
-        return {
-            "reward": reward,
-            "eval_output": eval_out or "",
-        }
 
     def is_pass(self, result: dict) -> bool:
         reward = result.get("reward")

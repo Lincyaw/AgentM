@@ -23,6 +23,7 @@ from .formats import get_format_adapter
 from .runner import (
     DEFAULT_IMAGE_REGISTRY,
     DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
+    HARBOR_FORMAT_BENCHES,
     RunEvalConfig,
     RunEvalJob,
     build_base_images,
@@ -255,6 +256,18 @@ class SandboxAdapter:
             exp_id: Annotated[Optional[str], typer.Option(help="Override experiment ID")] = None,
         ) -> None:
             """Run all tasks in parallel, then evaluate."""
+            if bench in HARBOR_FORMAT_BENCHES:
+                typer.echo(
+                    f"Harbor-format benchmark '{bench}' is now driven by the "
+                    f"ExternalAgentMAgent.\n"
+                    f"Use harbor run directly:\n\n"
+                    f"  harbor run --agent agentm_harbor:ExternalAgentMAgent "
+                    f"-m {model} --concurrency {concurrency}\n\n"
+                    f"The 'build', 'mirror', and 'list' commands still work here.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
             from agentm.env import autoload_dotenv
             from .swebench import write_predictions
 
