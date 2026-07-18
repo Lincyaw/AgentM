@@ -95,12 +95,15 @@ def _serialize_content_block(block: Any) -> dict[str, Any]:
             "arguments": block.arguments,
         }
     if isinstance(block, ToolResultBlock):
-        return {
+        d = {
             "type": "tool_result",
             "tool_call_id": block.tool_call_id,
             "content": [_serialize_content_block(c) for c in block.content],
             "is_error": block.is_error,
         }
+        if not block.deterministic:
+            d["deterministic"] = False
+        return d
     if dataclasses.is_dataclass(block) and not isinstance(block, type):
         return asdict(block)
     return {"type": "unknown", "repr": repr(block)[:500]}
@@ -135,8 +138,12 @@ def _deserialize_content_block(data: dict[str, Any]) -> Any:
             tool_call_id=data["tool_call_id"],
             content=[_deserialize_content_block(c) for c in data.get("content", [])],
             is_error=data.get("is_error", False),
+            deterministic=data.get("deterministic", True),
         )
-    return TextContent(type="text", text=repr(data)[:200])
+    import json
+    import logging
+    logging.getLogger(__name__).warning("Unknown content block type %r, preserving as JSON text", t)
+    return TextContent(type="text", text=json.dumps(data, default=str))
 
 
 def serialize_message(msg: AgentMessage) -> dict[str, Any]:
@@ -157,6 +164,12 @@ def serialize_message(msg: AgentMessage) -> dict[str, Any]:
             d["stop_reason"] = msg.stop_reason
         if msg.usage is not None:
             d["usage"] = asdict(msg.usage)
+        if msg.termination is not None:
+            from dataclasses import fields as dc_fields
+            d["termination"] = {
+                "__type__": type(msg.termination).__qualname__,
+                **{f.name: getattr(msg.termination, f.name) for f in dc_fields(msg.termination) if not f.name.startswith("_")},
+            }
         return d
     if isinstance(msg, ToolResultMessage):
         return {
@@ -187,12 +200,36 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
                 cache_read=u.get("cache_read", 0),
                 cache_write=u.get("cache_write", 0),
             )
+        termination = None
+        term_data = data.get("termination")
+        if term_data is not None:
+            from agentm.core.abi.termination import (
+                Aborted,
+                EndTurn,
+                MaxTokens,
+                PauseTurn,
+                ProviderError,
+                ToolUseExpected,
+                VendorSpecific,
+            )
+            _term_types: dict[str, type] = {
+                cls.__qualname__: cls
+                for cls in [EndTurn, ToolUseExpected, MaxTokens, PauseTurn, ProviderError, Aborted, VendorSpecific]
+            }
+            term_type_name = term_data.get("__type__")
+            term_cls = _term_types.get(term_type_name) if term_type_name else None
+            if term_cls is not None:
+                try:
+                    termination = term_cls(**{k: v for k, v in term_data.items() if k != "__type__"})
+                except (TypeError, ValueError):
+                    pass
         return AssistantMessage(
             role="assistant",
             content=[_deserialize_content_block(b) for b in data.get("content", [])],
             timestamp=ts,
             stop_reason=data.get("stop_reason"),
             usage=usage,
+            termination=termination,
         )
     if role == "tool_result":
         return ToolResultMessage(
@@ -310,6 +347,10 @@ class CodecRegistry:
     # --- Trigger ---
 
     def serialize_trigger(self, trigger: Any) -> dict[str, Any]:
+        if isinstance(trigger, RawTrigger):
+            result = dict(trigger.data) if isinstance(trigger.data, dict) else {"data": trigger.data}
+            result["__source__"] = trigger.source
+            return result
         source = getattr(trigger, "source", "unknown")
         codec = self._trigger_codecs.get(source)
         if codec is not None:
