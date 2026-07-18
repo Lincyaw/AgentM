@@ -50,6 +50,7 @@ from agentm.core.v2.abi.events import (
     LoopAction,
     ModelEndTurn,
     ProviderTruncated,
+    RunEndEvent,
     SignalAborted,
     Step,
     Stop,
@@ -203,7 +204,12 @@ def _execution_to_messages(
 ) -> list[AgentMessage]:
     """Current execution's trigger + completed rounds → messages."""
     messages: list[AgentMessage] = list(trigger_messages)
-    for rnd in execution.rounds:
+    # Build an index of injected messages by the round they follow
+    inject_by_round: dict[int, list[AgentMessage]] = {}
+    for round_idx, msgs in execution.injected:
+        inject_by_round.setdefault(round_idx, []).extend(msgs)
+
+    for i, rnd in enumerate(execution.rounds):
         messages.append(rnd.response)
         if rnd.tool_results:
             result_blocks = [
@@ -218,8 +224,9 @@ def _execution_to_messages(
             messages.append(ToolResultMessage(
                 role="tool_result", content=result_blocks, timestamp=0.0,
             ))
-    # Injected messages go at the tail so they survive context rebuild
-    messages.extend(execution.injected)
+        # Interleave injected messages at their correct round boundary
+        if i in inject_by_round:
+            messages.extend(inject_by_round[i])
     return messages
 
 
@@ -251,14 +258,17 @@ async def drive(
 
     while True:
         if signal is not None and signal.is_set():
+            await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
         try:
             trigger = await triggers.wait()
         except QueueClosed:
+            await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
         if max_turns is not None and turns_run >= max_turns:
+            await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
         # Clear signal from any previous turn's interrupt — interrupt
@@ -303,6 +313,9 @@ async def drive(
             turns_run += 1
 
             if outcome.action == "stop":
+                await bus.emit(RunEndEvent.CHANNEL, RunEndEvent(
+                    outcome=turn.outcome, meta=turn.meta,
+                ))
                 return
 
         except asyncio.CancelledError:

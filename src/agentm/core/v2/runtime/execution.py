@@ -31,7 +31,7 @@ class Execution:
         self._trigger = trigger
         self._rounds: list[Round] = []
         self._active = True
-        self._injected: list[AgentMessage] = []
+        self._injected: list[tuple[int, list[AgentMessage]]] = []
 
     @property
     def index(self) -> int:
@@ -54,13 +54,15 @@ class Execution:
         return self._active
 
     @property
-    def injected(self) -> list[AgentMessage]:
+    def injected(self) -> list[tuple[int, list[AgentMessage]]]:
         return self._injected
 
     def add_injected(self, messages: list[AgentMessage]) -> None:
         if not self._active:
             raise StateError("cannot add injected messages to an inactive execution")
-        self._injected.extend(messages)
+        # Tag with current round count — inject goes AFTER this round
+        round_index = len(self._rounds) - 1
+        self._injected.append((round_index, messages))
 
     def add_round(
         self, response: AssistantMessage, tool_results: list[ToolRecord]
@@ -76,11 +78,12 @@ class Execution:
             raise StateError("cannot commit an inactive execution")
         self._active = False
         final_outcome = outcome
-        if self._injected:
+        all_injected = [msg for _, msgs in self._injected for msg in msgs]
+        if all_injected:
             final_outcome = Outcome(
                 action=outcome.action,
                 cause=outcome.cause,
-                injected=tuple(self._injected),
+                injected=tuple(all_injected),
             )
         return Turn(
             index=self._index,
