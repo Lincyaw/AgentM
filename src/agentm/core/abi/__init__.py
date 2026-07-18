@@ -58,6 +58,8 @@ from .events import (
     TurnObservation,
     # domain events (atom-to-atom)
     AfterCompactEvent,
+    BeforeInstallAtomEvent,
+    BeforeUnloadAtomEvent,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     BackgroundActivityEvent,
@@ -79,6 +81,15 @@ from .events import (
     ResourcesDiscoverEvent,
     SessionHeaderEmittedEvent,
 )
+
+# v1 event aliases — atoms still import these names
+TurnStartEvent = TurnBeginEvent
+TurnEndEvent = TurnCommittedEvent
+AgentStartEvent = BeforeRunEvent
+AgentEndEvent = RunEndEvent
+BeforeAgentStartEvent = BeforeRunEvent
+BeforeSendToLlmEvent = BeforeSendEvent
+DecideTurnActionEvent = DecideEvent
 
 # -- trajectory --------------------------------------------------------------
 from .trajectory import (
@@ -359,12 +370,9 @@ class SessionStore:  # noqa: E302
 
 @_dc
 class CompactionPrompts:
-    """Stub — v1 compaction prompts referenced by llm_compaction."""
-    summarize: str = ""
-    summarize_system: str = ""
-    update: str = ""
-    branch_summary: str = ""
-    branch_summary_preamble: str = ""
+    """Compaction prompt bodies threaded into the compaction engine."""
+    summarization_system: str = ""
+    update_summarization: str = ""
 
 
 @_dc
@@ -407,6 +415,36 @@ PROMPT_UPDATE_SUMMARIZATION = ""
 PROMPT_BRANCH_SUMMARY = ""
 PROMPT_BRANCH_SUMMARY_PREAMBLE = ""
 MUTABLE_EVENT_FIELDS_BY_TYPE: dict[str, _Any] = {}
+
+
+class ExtensionStaleError(RuntimeError):
+    """Raised when an atom's source has changed since it was loaded."""
+    ...
+
+
+class EventBusObserver:
+    """Stub — v1 bus observer protocol."""
+    ...
+
+
+class ObserverCallback:
+    """Stub — v1 observer callback."""
+    ...
+
+
+class ObserverRegistration:
+    """Stub — v1 observer registration."""
+    ...
+
+
+class HookContract:
+    """Stub — v1 hook contract."""
+    ...
+
+
+class Renderer:
+    """Stub — v1 message renderer."""
+    ...
 
 
 # -- trace reader (lib, re-exported for access) -------------------------

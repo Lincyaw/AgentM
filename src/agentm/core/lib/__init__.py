@@ -53,6 +53,12 @@ from agentm.core.lib.tokens import (
     truncate_text_tokens_middle,
 )
 from agentm.core.lib.user_config import agentm_home_dir, resolve_model_profile
+from agentm.core.abi.trajectory import Turn  # noqa: F401 — re-export for atom compat
+
+
+def enumerate_turns(branch: list) -> list:  # noqa: F811
+    """Stub — v1 turn enumeration. Returns empty until v2 equivalent is wired."""
+    return []
 
 __all__ = [
     "ArtifactCreator", "ArtifactMetadata",

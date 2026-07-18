@@ -40,7 +40,7 @@ def _find_scenario_dir(scenario: str, scenario_dir: str | None = None) -> Path |
     search = list(_SCENARIO_SEARCH_PATHS)
 
     # Source checkout contrib/scenarios/
-    pkg_root = Path(__file__).parents[3]
+    pkg_root = Path(__file__).parents[4]
     search.append(pkg_root / "contrib" / "scenarios")
 
     # Home contrib

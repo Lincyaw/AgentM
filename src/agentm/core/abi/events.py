@@ -410,3 +410,15 @@ class LlmRequestEndEvent(Event):
 @dataclass(frozen=True, slots=True)
 class EntryAppendedEvent(Event):
     CHANNEL: ClassVar[str] = "entry_appended"
+
+
+@dataclass(frozen=True, slots=True)
+class BeforeInstallAtomEvent(Event):
+    CHANNEL: ClassVar[str] = "before_install_atom"
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BeforeUnloadAtomEvent(Event):
+    CHANNEL: ClassVar[str] = "before_unload_atom"
+    name: str = ""
