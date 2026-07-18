@@ -1,7 +1,7 @@
 """Shell operation Protocol (stable ABI).
 
 Operations are a constitution-level port: the ``tool_bash`` atom consumes
-``BashOperations`` exposed by the session services.
+``BashOperations`` exposed by ``ExtensionAPI.get_operations()``.
 """
 
 from __future__ import annotations
@@ -43,6 +43,6 @@ class BashOperations(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Operations:
-    """Bundle returned by the session services."""
+    """Bundle returned by ``ExtensionAPI.get_operations()``."""
 
     bash: BashOperations

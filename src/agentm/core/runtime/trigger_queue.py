@@ -1,6 +1,6 @@
 """TriggerQueue — unified entry point for all input sources.
 
-Unified entry point for all input source (user, background tool,
+Replaces v1's SessionInbox.  Every input source (user, background tool,
 monitor, subagent) pushes a Trigger; the control loop consumes them via
 ``wait()``.  Background work is tracked so callers can block until the
 session is quiescent.

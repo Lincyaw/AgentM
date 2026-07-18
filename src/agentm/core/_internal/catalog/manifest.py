@@ -208,7 +208,7 @@ def configure_manifest_path(manifest_path: Path) -> Token[Path | None]:
 
     Returns the :class:`Token` so the caller can reset the binding on
     teardown. The runtime uses this at session construction and resets in
-    ``Session.shutdown``; tests prefer :func:`override_manifest_path`
+    ``AgentSession.shutdown``; tests prefer :func:`override_manifest_path`
     which wraps the same call in a context manager.
     """
 

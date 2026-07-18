@@ -1,7 +1,7 @@
 """Atom-facing telemetry Protocol.
 
 Defines the structural contract for the per-session OTel handle returned by
-the session services. The concrete implementation
+``ExtensionAPI.get_session_telemetry()``. The concrete implementation
 (:class:`~agentm.core.runtime.otel_export.SessionTelemetry`) is a dataclass
 that satisfies this Protocol; atoms depend only on this module for the
 telemetry handle's shape.

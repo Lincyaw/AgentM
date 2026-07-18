@@ -1,0 +1,1 @@
+"""Packaged chatbot scenario resource."""

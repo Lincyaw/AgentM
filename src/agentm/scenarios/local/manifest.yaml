@@ -1,0 +1,41 @@
+name: local
+description: |
+  Local coding scenario. Tools execute on the local host.
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      # Local coding sessions should keep normal file/document reads inline,
+      # while still spilling accidental large dumps.
+      max_tokens: 50000
+      preview_tokens: 50000
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+  - module: agentm.extensions.builtin.runtime_context
+  - module: agentm.extensions.builtin.skill_loader
+  - module: agentm.extensions.builtin.prompt_templates
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      # Compaction summary prompts use a tighter per-tool-result token limit
+      # than explicit recall.
+      tool_result_max_tokens: 8000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      # Explicit history recall may need more detail than compaction input,
+      # but still must stay bounded.
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
+  - module: agentm.extensions.builtin.memory
+  - module: agentm.extensions.builtin.task_tracking
+  - module: agentm.extensions.builtin.goal
+  - module: agentm.extensions.builtin.thinking_retry
+  - module: agentm.extensions.builtin.tui_snapshot
+  - module: agentm.extensions.builtin.artifact_store
+  - module: agentm.extensions.builtin.workflow
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120

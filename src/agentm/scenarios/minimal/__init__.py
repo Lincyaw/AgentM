@@ -1,0 +1,1 @@
+"""Packaged minimal scenario resource."""

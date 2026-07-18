@@ -1,0 +1,15 @@
+name: minimal
+description: |
+  Bare-minimum scenario for small-context models. Only bash + system prompt,
+  no memory/workflow/skill overhead.
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are a helpful assistant with shell access. Be concise.
+        Reply in the user's language.
+  - module: agentm.extensions.builtin.observability

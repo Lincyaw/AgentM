@@ -1,0 +1,90 @@
+"""CommandRouter — parses, dispatches, formats user-visible errors."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from loguru import logger
+
+from .protocol import (
+    CommandContext,
+    CommandInbound,
+    CommandResult,
+    parse_invocation,
+)
+from .registry import CommandRegistry
+
+
+UNKNOWN_REPLY = (
+    "Unknown command: `{raw}`\nType `/help` to see what's available."
+)
+"""User-visible "no such command" text. The gateway reuses this when a
+slash command is unknown to *both* the gateway registry and the session's
+registered set (see :meth:`_GatewayRuntime._run_command`)."""
+
+_EMPTY_REPLY = "Type `/help` to see available commands."
+
+
+@dataclass(slots=True)
+class CommandRouter:
+    """Routes inbound messages whose content starts with ``/``.
+
+    The router is stateless beyond the registry; per-route capabilities
+    (end session, stats, extension API) are injected via
+    :class:`CommandContext` by the gateway on each dispatch.
+    """
+
+    registry: CommandRegistry
+
+    async def try_dispatch(
+        self, msg: CommandInbound, ctx: CommandContext
+    ) -> CommandResult | None:
+        """Returns ``None`` when the gateway must not handle ``msg`` itself.
+
+        Two distinct ``None`` cases:
+
+        * ``msg`` is not a slash command at all (``parse_invocation``
+          returns ``None``) — the gateway treats it as an ordinary prompt.
+        * ``msg`` is a slash command but no *gateway* handler owns its
+          name. Session-registered commands (``/compact`` and friends,
+          installed by atoms like ``llm_compaction``) live inside the
+          session and are dispatched there by the ``slash_commands`` floor
+          atom — the gateway registry never contains those names. Returning
+          ``None`` lets :meth:`_GatewayRuntime._run_command` forward the raw
+          ``/...`` text to the session prompt path when the live session
+          advertises that command as user-invokable. A name unknown to *both*
+          layers is rejected by the gateway before it can reach the model as
+          plain text. That decision belongs to the gateway, which holds the
+          per-session known-command set; the router is stateless.
+
+        A bare ``/`` still returns a "type /help" hint (not ``None``) so it
+        is handled at the gateway and never forwarded to the session."""
+        inv = parse_invocation(msg)
+        if inv is None:
+            return None
+        if not inv.name:
+            return CommandResult(outbound=[ctx.notice(_EMPTY_REPLY)])
+        handler = self.registry.lookup(namespace=inv.namespace, name=inv.name)
+        if handler is None and inv.namespace is None:
+            # Skills are registered under the ``skill:`` namespace, but the
+            # ergonomic (and what chat clients send) invocation is the bare
+            # ``/<name>`` — mirroring Claude Code's ``/<skill>``. So a bare name
+            # that is not a builtin falls back to a same-named skill. Builtins
+            # are looked up first (above), so they always win a collision; the
+            # explicit ``/skill:<name>`` form keeps working unchanged.
+            handler = self.registry.lookup(namespace="skill", name=inv.name)
+        if handler is None:
+            return None
+        try:
+            return await handler.handle(inv, ctx)
+        except Exception:
+            logger.exception(f"command {inv.raw!r} raised")
+            return CommandResult(
+                outbound=[
+                    ctx.reply(
+                        f"Command `{inv.raw}` failed unexpectedly. "
+                        "The error has been logged.",
+                        kind="diagnostic_error",
+                    )
+                ]
+            )

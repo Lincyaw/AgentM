@@ -15,7 +15,7 @@ def otlp_unwrap(value: Any) -> Any:
     OTLP encodes attribute and body values as tagged unions
     (``{"stringValue": ...}``, ``{"intValue": "12"}``,
     ``{"kvlistValue": {"values": [...]}}``, ``{"arrayValue": ...}``).
-    Readers (the trajectory store, the catalog indexer, the tuner
+    Readers (``SessionManager._load``, the catalog indexer, the tuner
     tools) need plain Python types to pattern-match against; this helper
     is the single canonical converter.
 

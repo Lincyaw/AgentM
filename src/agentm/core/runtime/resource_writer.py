@@ -2,7 +2,7 @@
 
 The writer is a bootstrap runtime service: atom loading and catalog wiring need
 it before any atom can install.  Alternative environments may replace it
-through the session services after bootstrap.
+through ``ExtensionAPI.register_resource_writer`` after bootstrap.
 """
 
 from __future__ import annotations
