@@ -39,8 +39,8 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from agentm.core.v2.abi.trajectory import Turn
-from agentm.core.v2.abi.trigger import (
+from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.trigger import (
     BackgroundCompletion,
     ContinueTrigger,
     Injection,

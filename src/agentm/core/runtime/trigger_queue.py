@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from agentm.core.v2.abi.trigger import ContinueTrigger, Trigger
+from agentm.core.abi.trigger import ContinueTrigger, Trigger
 
 
 class QueueClosed(Exception):

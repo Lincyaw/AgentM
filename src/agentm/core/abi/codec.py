@@ -37,14 +37,14 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
-from agentm.core.v2.abi.trajectory import (
+from agentm.core.abi.trajectory import (
     Outcome,
     Round,
     ToolRecord,
     Turn,
     TurnMeta,
 )
-from agentm.core.v2.abi.trigger import (
+from agentm.core.abi.trigger import (
     BackgroundCompletion,
     ContinueTrigger,
     Injection,
@@ -310,7 +310,7 @@ _BUILTIN_CAUSES: dict[str, type] = {}
 
 
 def _register_builtin_causes() -> None:
-    from agentm.core.v2.abi.events import (
+    from agentm.core.abi.events import (
         BudgetExhausted,
         MaxTurnsExhausted,
         ModelEndTurn,
@@ -497,7 +497,7 @@ class CodecRegistry:
 
     @staticmethod
     def deserialize_session_meta(data: dict[str, Any]) -> Any:
-        from agentm.core.v2.abi.store import SessionMeta
+        from agentm.core.abi.store import SessionMeta
         return SessionMeta(
             id=data["id"],
             parent_id=data.get("parent_id"),

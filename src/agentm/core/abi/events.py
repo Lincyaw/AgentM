@@ -20,9 +20,9 @@ from typing import Any, ClassVar, Literal
 from agentm.core.abi.messages import AgentMessage, AssistantMessage
 from agentm.core.abi.stream import AssistantStreamEvent, Model
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
-from agentm.core.v2.abi.bus import Event
-from agentm.core.v2.abi.trajectory import Outcome, Turn, TurnMeta
-from agentm.core.v2.abi.trigger import Trigger
+from agentm.core.abi.bus import Event
+from agentm.core.abi.trajectory import Outcome, Turn, TurnMeta
+from agentm.core.abi.trigger import Trigger
 
 
 # --- Termination causes (reuse from v1, they're already frozen) -------------

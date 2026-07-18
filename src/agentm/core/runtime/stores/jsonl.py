@@ -23,10 +23,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agentm.core.v2.abi.codec import CodecRegistry, DEFAULT_CODEC
-from agentm.core.v2.abi.store import SessionMeta
-from agentm.core.v2.abi.trajectory import Turn, TurnRef
-from agentm.core.v2.runtime.stores.memory import _prefix_cut
+from agentm.core.abi.codec import CodecRegistry, DEFAULT_CODEC
+from agentm.core.abi.store import SessionMeta
+from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.runtime.stores.memory import _prefix_cut
 
 logger = logging.getLogger(__name__)
 

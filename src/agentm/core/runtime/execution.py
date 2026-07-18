@@ -6,14 +6,14 @@ import time
 from uuid import uuid4
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage
-from agentm.core.v2.abi.trajectory import (
+from agentm.core.abi.trajectory import (
     Outcome,
     Round,
     ToolRecord,
     Turn,
     TurnMeta,
 )
-from agentm.core.v2.abi.trigger import Trigger
+from agentm.core.abi.trigger import Trigger
 
 
 class StateError(RuntimeError):

@@ -38,9 +38,9 @@ from agentm.core.abi.tool import (
     ToolTerminate,
 )
 from agentm.core.abi.tool_executor import execute_tool_call
-from agentm.core.v2.abi.bus import EventBus
-from agentm.core.v2.abi.context import ContextPolicy, build_context, render_trigger
-from agentm.core.v2.abi.events import (
+from agentm.core.abi.bus import EventBus
+from agentm.core.abi.context import ContextPolicy, build_context, render_trigger
+from agentm.core.abi.events import (
     BeforeRunEvent,
     BeforeSendEvent,
     ContextEvent,
@@ -64,22 +64,22 @@ from agentm.core.v2.abi.events import (
     TurnCommittedEvent,
     TurnObservation,
 )
-from agentm.core.v2.abi.store import TrajectoryStore
-from agentm.core.v2.abi.trajectory import (
+from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.trajectory import (
     Outcome,
     ToolRecord,
     TurnMeta,
 )
-from agentm.core.v2.abi.trigger import (
+from agentm.core.abi.trigger import (
     BackgroundCompletion,
     SubagentResult,
     Trigger,
     TriggerRenderer,
 )
-from agentm.core.v2.abi.lifecycle import AbandonEvent, LifecycleHookRegistry
-from agentm.core.v2.runtime.execution import Execution
-from agentm.core.v2.runtime.trajectory import Trajectory
-from agentm.core.v2.runtime.trigger_queue import QueueClosed, TriggerQueue
+from agentm.core.abi.lifecycle import AbandonEvent, LifecycleHookRegistry
+from agentm.core.runtime.execution import Execution
+from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
 
 ThinkingLevel = Literal["off", "low", "medium", "high"]
 
@@ -528,7 +528,7 @@ async def _react_loop(
         # Durable round checkpoint
         if store is not None:
             try:
-                from agentm.core.v2.abi.codec import DEFAULT_CODEC
+                from agentm.core.abi.codec import DEFAULT_CODEC
                 round_data = DEFAULT_CODEC._serialize_round(execution.rounds[-1])
                 round_data["round_index"] = round_index
                 store.append_round(session_id, execution.id, round_data)

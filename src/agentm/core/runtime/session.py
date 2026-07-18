@@ -18,32 +18,32 @@ from loguru import logger
 from agentm.core.abi.messages import AgentMessage, ImageContent, TextContent
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
-from agentm.core.v2.abi.bus import EventBus
-from agentm.core.v2.abi.context import (
+from agentm.core.abi.bus import EventBus
+from agentm.core.abi.context import (
     ContextPolicy,
     PolicyContext,
     build_context_sync,
 )
-from agentm.core.v2.abi.events import (
+from agentm.core.abi.events import (
     ChildSessionStartEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
-from agentm.core.v2.abi.services import ServiceRegistry
-from agentm.core.v2.abi.session_api import SessionContext
-from agentm.core.v2.abi.store import SessionMeta, TrajectoryStore
-from agentm.core.v2.abi.trajectory import TurnRef
-from agentm.core.v2.abi.tree import SessionGraphProtocol
-from agentm.core.v2.abi.trigger import Trigger, TriggerRenderer, UserInput
-from agentm.core.v2.abi.lifecycle import (
+from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.session_api import SessionContext
+from agentm.core.abi.store import SessionMeta, TrajectoryStore
+from agentm.core.abi.trajectory import TurnRef
+from agentm.core.abi.tree import SessionGraphProtocol
+from agentm.core.abi.trigger import Trigger, TriggerRenderer, UserInput
+from agentm.core.abi.lifecycle import (
     ForkEvent,
     LifecycleHook,
     LifecycleHookRegistry,
     ResumeEvent,
 )
-from agentm.core.v2.runtime.driver import ThinkingLevel, drive
-from agentm.core.v2.runtime.trajectory import Trajectory
-from agentm.core.v2.runtime.trigger_queue import TriggerQueue
+from agentm.core.runtime.driver import ThinkingLevel, drive
+from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.runtime.trigger_queue import TriggerQueue
 
 
 class Session:
@@ -260,7 +260,7 @@ class Session:
         self.trigger_renderers[source] = renderer
 
     def register_trigger_codec(self, source: str, codec: object) -> None:
-        from agentm.core.v2.abi.codec import DEFAULT_CODEC
+        from agentm.core.abi.codec import DEFAULT_CODEC
         DEFAULT_CODEC.register_trigger_codec(source, codec)  # type: ignore[arg-type]
 
     def register_lifecycle_hook(self, hook: LifecycleHook) -> None:

@@ -8,69 +8,40 @@ The ABI re-exports the complete atom-facing vocabulary:
 
 - Message data model, stream boundary, termination hints
 - Event bus + typed events (kernel + runtime lifecycle)
-- Tool contract, extension API, loop
-- Operations, resources, catalog, session, roles
+- Tool contract, session API
+- Operations, resources, catalog, roles
 - Telemetry Protocol, trace reader, skills
+- Trajectory model (Turn, Round, Trigger, ContextPolicy)
 """
 
 from __future__ import annotations
 
 # -- bus ---------------------------------------------------------------------
 from .bus import (
+    BusPriority,
+    Envelope,
+    Event,
     EventBus,
-    EventBusObserver,
     Handler,
-    ObserverCallback,
-    ObserverRegistration,
 )
 
 # -- events ------------------------------------------------------------------
 from .events import (
-    AfterCompactEvent,
-    AgentEndEvent,
-    AgentStartEvent,
-    ApiRegisterEvent,
-    ApiSendUserMessageEvent,
-    BackgroundActivityEvent,
-    BeforeAgentStartEvent,
-    BeforeCompactEvent,
-    BeforeInstallAtomEvent,
-    BeforeSendToLlmEvent,
-    BeforeUnloadAtomEvent,
+    BeforeRunEvent,
+    BeforeSendEvent,
     BudgetExhausted,
-    BusPriority,
     ChildSessionEndEvent,
-    ChildSessionExtendingEvent,
     ChildSessionStartEvent,
-    CommandDispatchedEvent,
     ContextEvent,
-    CostBudgetExceededEvent,
-    DecideTurnActionEvent,
+    DecideEvent,
     DiagnosticEvent,
-    EntryAppendedEvent,
-    Event,
-    ExtensionInstallEvent,
-    ExtensionReloadEvent,
-    ExtensionUnloadEvent,
-    HookContract,
     Inject,
-    InputEvent,
-    LlmRequestEndEvent,
-    LlmRequestStartEvent,
     LoopAction,
     MaxTurnsExhausted,
-    MessageAppendedEvent,
-    MessagePersistedEvent,
     ModelEndTurn,
-    MUTABLE_EVENT_FIELDS_BY_TYPE,
     NoPendingInput,
-    PlanSubmittedEvent,
-    ProviderProtocolViolation,
     ProviderTruncated,
-    ResolveSubagentEvent,
-    ResourceWriteEvent,
-    ResourcesDiscoverEvent,
-    SessionHeaderEmittedEvent,
+    RunEndEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
     SignalAborted,
@@ -82,13 +53,91 @@ from .events import (
     ToolErrorEvent,
     ToolResultEvent,
     ToolTerminated,
-    TurnEndEvent,
+    TurnBeginEvent,
+    TurnCommittedEvent,
     TurnObservation,
-    TurnStartEvent,
 )
 
-# -- loop --------------------------------------------------------------------
-from .loop import AgentLoop, LoopConfig
+# -- trajectory --------------------------------------------------------------
+from .trajectory import (
+    Outcome,
+    Round,
+    ToolRecord,
+    Turn,
+    TurnMeta,
+    TurnRef,
+)
+
+# -- trigger -----------------------------------------------------------------
+from .trigger import (
+    BackgroundCompletion,
+    ContinueTrigger,
+    Injection,
+    MonitorFire,
+    SubagentResult,
+    Trigger,
+    TriggerRenderer,
+    UserInput,
+)
+
+# -- context -----------------------------------------------------------------
+from .context import (
+    ContextPolicy,
+    PolicyContext,
+    build_context,
+    build_context_sync,
+    render_trigger,
+    turn_to_messages,
+)
+
+# -- store -------------------------------------------------------------------
+from .store import (
+    SessionMeta,
+    TrajectoryStore,
+)
+
+# -- tree --------------------------------------------------------------------
+from .tree import (
+    EdgeKind,
+    SessionEdge,
+    SessionGraphProtocol,
+    SessionNode,
+)
+
+# -- codec -------------------------------------------------------------------
+from .codec import (
+    CodecRegistry,
+    DEFAULT_CODEC,
+    RawTrigger,
+    TriggerCodec,
+    deserialize_message,
+    serialize_message,
+)
+
+# -- services ----------------------------------------------------------------
+from .services import (
+    ServiceNotFound,
+    ServiceRegistry,
+    ServiceTypeMismatch,
+)
+
+# -- session_api -------------------------------------------------------------
+from .session_api import (
+    AtomAPI,
+    SessionContext,
+    SpawnedSession,
+    Unsubscribe,
+)
+
+# -- lifecycle ---------------------------------------------------------------
+from .lifecycle import (
+    AbandonEvent,
+    ForkEvent,
+    LifecycleHook,
+    LifecycleHookRegistry,
+    ReplayEvent,
+    ResumeEvent,
+)
 
 # -- manifest ----------------------------------------------------------------
 from .manifest import ChannelEffects as ChannelEffects
@@ -102,9 +151,6 @@ from .provider import ProviderConfig, ProviderManifest, ProviderResolver
 
 # -- retry -------------------------------------------------------------------
 from .retry import RetryPolicy
-
-# -- session_store -----------------------------------------------------------
-from .session_store import SessionState, SessionStore
 
 # -- telemetry ---------------------------------------------------------------
 from .telemetry import SessionTelemetry
@@ -182,20 +228,6 @@ from .tool_executor import (
     tool_execution_domain,
 )
 
-# -- extension ---------------------------------------------------------------
-from .extension import (
-    AtomInfo,
-    CommandSpec,
-    CommandDispatcher,
-    ExtensionAPI,
-    ExtensionLoadError,
-    ExtensionStaleError,
-    InstallAtomResult,
-    ReloadResult,
-    UnloadAtomResult,
-    Unsubscribe,
-)
-
 # -- operations --------------------------------------------------------------
 from .operations import (
     BashOperations,
@@ -213,32 +245,6 @@ from .resource import (
 
 # -- catalog -----------------------------------------------------------------
 from .catalog import ActiveSetFingerprint, atom_decisions_path
-
-# -- compaction --------------------------------------------------------------
-from .compaction import (
-    CompactionDetails,
-    CompactionPrompts,
-    CompactionResult,
-    CompactionSettings,
-    ContextUsageSnapshot,
-    PROMPT_BRANCH_SUMMARY,
-    PROMPT_BRANCH_SUMMARY_PREAMBLE,
-    PROMPT_SUMMARIZATION,
-    PROMPT_SUMMARIZATION_SYSTEM,
-    PROMPT_UPDATE_SUMMARIZATION,
-)
-
-# -- session -----------------------------------------------------------------
-from .session import (
-    ENTRY_MATERIALIZERS,
-    ENTRY_TYPE_BRANCH_SUMMARY,
-    ENTRY_TYPE_COMPACTION,
-    ENTRY_TYPE_MESSAGE,
-    SessionEntry,
-)
-
-# -- session_config ----------------------------------------------------------
-from .session_config import AgentSessionConfig
 
 # -- skill -------------------------------------------------------------------
 from .skill import SkillDiagnostic, SkillRecord
@@ -270,67 +276,34 @@ from .roles import (
 )
 
 # -- trace reader (lib, re-exported for access) -------------------------
-from agentm.core.lib.trace_reader import (  # noqa: E402
-    LogRecord,
-    SessionIdentity,
-    Span,
-    TraceReader,
-    attr,
-)
+# NOTE: trace_reader re-export removed during v2 migration.
+# Import directly from agentm.core.lib.trace_reader instead.
+# The re-export triggered a broken import chain through lib/__init__.py
+# which depends on v1 modules deleted in this migration.
 
 __all__ = [
     # bus
-    "EventBus",
-    "EventBusObserver",
-    "Handler",
-    "ObserverCallback",
-    "ObserverRegistration",
-    # events
-    "AfterCompactEvent",
-    "AgentEndEvent",
-    "AgentStartEvent",
-    "ApiRegisterEvent",
-    "ApiSendUserMessageEvent",
-    "BackgroundActivityEvent",
-    "BeforeAgentStartEvent",
-    "BeforeCompactEvent",
-    "BeforeInstallAtomEvent",
-    "BeforeSendToLlmEvent",
-    "BeforeUnloadAtomEvent",
-    "BudgetExhausted",
     "BusPriority",
-    "ChildSessionEndEvent",
-    "ChildSessionExtendingEvent",
-    "ChildSessionStartEvent",
-    "CommandDispatchedEvent",
-    "ContextEvent",
-    "CostBudgetExceededEvent",
-    "DecideTurnActionEvent",
-    "DiagnosticEvent",
-    "EntryAppendedEvent",
+    "Envelope",
     "Event",
-    "ExtensionInstallEvent",
-    "ExtensionReloadEvent",
-    "ExtensionUnloadEvent",
-    "HookContract",
+    "EventBus",
+    "Handler",
+    # events
+    "BeforeRunEvent",
+    "BeforeSendEvent",
+    "BudgetExhausted",
+    "ChildSessionEndEvent",
+    "ChildSessionStartEvent",
+    "ContextEvent",
+    "DecideEvent",
+    "DiagnosticEvent",
     "Inject",
-    "InputEvent",
-    "LlmRequestEndEvent",
-    "LlmRequestStartEvent",
     "LoopAction",
     "MaxTurnsExhausted",
-    "MessageAppendedEvent",
-    "MessagePersistedEvent",
     "ModelEndTurn",
-    "MUTABLE_EVENT_FIELDS_BY_TYPE",
     "NoPendingInput",
-    "PlanSubmittedEvent",
-    "ProviderProtocolViolation",
     "ProviderTruncated",
-    "ResolveSubagentEvent",
-    "ResourceWriteEvent",
-    "ResourcesDiscoverEvent",
-    "SessionHeaderEmittedEvent",
+    "RunEndEvent",
     "SessionReadyEvent",
     "SessionShutdownEvent",
     "SignalAborted",
@@ -342,12 +315,63 @@ __all__ = [
     "ToolErrorEvent",
     "ToolResultEvent",
     "ToolTerminated",
-    "TurnEndEvent",
+    "TurnBeginEvent",
+    "TurnCommittedEvent",
     "TurnObservation",
-    "TurnStartEvent",
-    # loop
-    "AgentLoop",
-    "LoopConfig",
+    # trajectory
+    "Outcome",
+    "Round",
+    "ToolRecord",
+    "Turn",
+    "TurnMeta",
+    "TurnRef",
+    # trigger
+    "BackgroundCompletion",
+    "ContinueTrigger",
+    "Injection",
+    "MonitorFire",
+    "SubagentResult",
+    "Trigger",
+    "TriggerRenderer",
+    "UserInput",
+    # context
+    "ContextPolicy",
+    "PolicyContext",
+    "build_context",
+    "build_context_sync",
+    "render_trigger",
+    "turn_to_messages",
+    # store
+    "SessionMeta",
+    "TrajectoryStore",
+    # tree
+    "EdgeKind",
+    "SessionEdge",
+    "SessionGraphProtocol",
+    "SessionNode",
+    # codec
+    "CodecRegistry",
+    "DEFAULT_CODEC",
+    "RawTrigger",
+    "TriggerCodec",
+    "deserialize_message",
+    "serialize_message",
+    # services
+    "ServiceNotFound",
+    "ServiceRegistry",
+    "ServiceTypeMismatch",
+    # session_api
+    "AtomAPI",
+    "SessionContext",
+    "SpawnedSession",
+    "Unsubscribe",
+    # lifecycle
+    "AbandonEvent",
+    "ForkEvent",
+    "LifecycleHook",
+    "LifecycleHookRegistry",
+    "ReplayEvent",
+    "ResumeEvent",
     # manifest
     "ChannelEffects",
     "ExtensionManifest",
@@ -360,9 +384,6 @@ __all__ = [
     "ProviderResolver",
     # retry
     "RetryPolicy",
-    # session_store
-    "SessionState",
-    "SessionStore",
     # telemetry
     "SessionTelemetry",
     # messages
@@ -422,17 +443,6 @@ __all__ = [
     "ToolProcessTerminated",
     "execute_tool_call",
     "tool_execution_domain",
-    # extension
-    "AtomInfo",
-    "CommandSpec",
-    "CommandDispatcher",
-    "ExtensionAPI",
-    "ExtensionLoadError",
-    "ExtensionStaleError",
-    "InstallAtomResult",
-    "ReloadResult",
-    "UnloadAtomResult",
-    "Unsubscribe",
     # operations
     "BashOperations",
     "ExecResult",
@@ -445,25 +455,6 @@ __all__ = [
     # catalog
     "ActiveSetFingerprint",
     "atom_decisions_path",
-    # compaction
-    "CompactionDetails",
-    "CompactionPrompts",
-    "CompactionResult",
-    "CompactionSettings",
-    "ContextUsageSnapshot",
-    "PROMPT_BRANCH_SUMMARY",
-    "PROMPT_BRANCH_SUMMARY_PREAMBLE",
-    "PROMPT_SUMMARIZATION",
-    "PROMPT_SUMMARIZATION_SYSTEM",
-    "PROMPT_UPDATE_SUMMARIZATION",
-    # session
-    "ENTRY_MATERIALIZERS",
-    "ENTRY_TYPE_BRANCH_SUMMARY",
-    "ENTRY_TYPE_COMPACTION",
-    "ENTRY_TYPE_MESSAGE",
-    "SessionEntry",
-    # session_config
-    "AgentSessionConfig",
     # skill
     "SkillDiagnostic",
     "SkillRecord",
@@ -490,10 +481,4 @@ __all__ = [
     "SYSTEM_PROMPT_PROVIDER",
     "WIRE_CHILD_FORWARDER_SERVICE",
     "WIRE_OUTBOUND_SERVICE",
-    # trace reader
-    "LogRecord",
-    "SessionIdentity",
-    "Span",
-    "TraceReader",
-    "attr",
 ]

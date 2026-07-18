@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-from agentm.core.v2.abi.store import SessionMeta
-from agentm.core.v2.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.store import SessionMeta
+from agentm.core.abi.trajectory import Turn, TurnRef
 
 
 class InMemoryTrajectoryStore:

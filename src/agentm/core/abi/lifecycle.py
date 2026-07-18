@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from agentm.core.v2.abi.trajectory import Round, Turn, TurnRef
+from agentm.core.abi.trajectory import Round, Turn, TurnRef
 
 
 @dataclass(frozen=True, slots=True)

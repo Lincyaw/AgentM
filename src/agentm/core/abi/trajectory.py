@@ -27,7 +27,7 @@ from agentm.core.abi.messages import (
 )
 
 if TYPE_CHECKING:
-    from agentm.core.v2.abi.trigger import Trigger
+    from agentm.core.abi.trigger import Trigger
 
 TurnRef = Union[int, str]
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from agentm.core.v2.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.trajectory import Turn, TurnRef
 
 
 @dataclass(frozen=True, slots=True)

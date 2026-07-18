@@ -18,13 +18,13 @@ from typing import Callable, Protocol, runtime_checkable
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.stream import Model
 from agentm.core.abi.tool import Tool
-from agentm.core.v2.abi.bus import EventBus, Handler
-from agentm.core.v2.abi.context import ContextPolicy
-from agentm.core.v2.abi.lifecycle import LifecycleHook
-from agentm.core.v2.abi.services import ServiceRegistry
-from agentm.core.v2.abi.trajectory import Turn
-from agentm.core.v2.abi.codec import TriggerCodec
-from agentm.core.v2.abi.trigger import Trigger, TriggerRenderer
+from agentm.core.abi.bus import EventBus, Handler
+from agentm.core.abi.context import ContextPolicy
+from agentm.core.abi.lifecycle import LifecycleHook
+from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.codec import TriggerCodec
+from agentm.core.abi.trigger import Trigger, TriggerRenderer
 
 Unsubscribe = Callable[[], None]
 

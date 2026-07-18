@@ -6,12 +6,12 @@ from collections import deque
 
 from typing import Any
 
-from agentm.core.v2.abi.tree import (
+from agentm.core.abi.tree import (
     EdgeKind,
     SessionEdge,
     SessionNode,
 )
-from agentm.core.v2.abi.trajectory import TurnRef
+from agentm.core.abi.trajectory import TurnRef
 
 
 class InMemorySessionGraph:

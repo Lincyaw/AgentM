@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from agentm.core.v2.abi.trajectory import (
+from agentm.core.abi.trajectory import (
     Outcome,
     Turn,
     TurnMeta,
     TurnRef,
 )
-from agentm.core.v2.abi.trigger import Trigger
-from agentm.core.v2.runtime.execution import Execution, StateError
+from agentm.core.abi.trigger import Trigger
+from agentm.core.runtime.execution import Execution, StateError
 
 
 class Trajectory:

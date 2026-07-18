@@ -28,13 +28,13 @@ from agentm.core.abi.tool import (
     ToolResult,
     ToolTerminate,
 )
-from agentm.core.v2.abi.bus import BusPriority, EventBus
-from agentm.core.v2.abi.codec import CodecRegistry, RawTrigger
-from agentm.core.v2.abi.context import (
+from agentm.core.abi.bus import BusPriority, EventBus
+from agentm.core.abi.codec import CodecRegistry, RawTrigger
+from agentm.core.abi.context import (
     PolicyContext,
     render_trigger,
 )
-from agentm.core.v2.abi.events import (
+from agentm.core.abi.events import (
     BeforeRunEvent,
     BeforeSendEvent,
     BudgetExhausted,
@@ -54,16 +54,16 @@ from agentm.core.v2.abi.events import (
     TurnBeginEvent,
     TurnCommittedEvent,
 )
-from agentm.core.v2.abi.lifecycle import (
+from agentm.core.abi.lifecycle import (
     AbandonEvent,
     ForkEvent,
     LifecycleHookRegistry,
     ResumeEvent,
 )
-from agentm.core.v2.abi.services import ServiceRegistry
-from agentm.core.v2.abi.store import SessionMeta
-from agentm.core.v2.abi.trajectory import Outcome, Round, Turn, TurnMeta
-from agentm.core.v2.abi.trigger import (
+from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.store import SessionMeta
+from agentm.core.abi.trajectory import Outcome, Round, Turn, TurnMeta
+from agentm.core.abi.trigger import (
     BackgroundCompletion,
     ContinueTrigger,
     Injection,
@@ -71,12 +71,12 @@ from agentm.core.v2.abi.trigger import (
     SubagentResult,
     UserInput,
 )
-from agentm.core.v2.runtime.execution import Execution, StateError
-from agentm.core.v2.runtime.session import Session
-from agentm.core.v2.runtime.stores.memory import InMemoryTrajectoryStore
-from agentm.core.v2.runtime.trajectory import Trajectory
-from agentm.core.v2.runtime.tree import InMemorySessionGraph
-from agentm.core.v2.runtime.trigger_queue import QueueClosed, TriggerQueue
+from agentm.core.runtime.execution import Execution, StateError
+from agentm.core.runtime.session import Session
+from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
+from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.runtime.tree import InMemorySessionGraph
+from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
 
 # ---------------------------------------------------------------------------
 # Test infrastructure
@@ -660,7 +660,7 @@ def test_session_graph_traversals() -> None:
 
 @pytest.mark.asyncio
 async def test_decide_action_priority() -> None:
-    from agentm.core.v2.runtime.driver import _resolve_action
+    from agentm.core.runtime.driver import _resolve_action
 
     inject_msg = UserMessage(
         role="user", content=[TextContent(type="text", text="injected")], timestamp=0.0,

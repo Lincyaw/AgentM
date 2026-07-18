@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
-from agentm.core.v2.abi.trajectory import TurnRef
+from agentm.core.abi.trajectory import TurnRef
 
 EdgeKind = Literal["spawned", "forked", "workflow_member"]
 
