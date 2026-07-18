@@ -1,5 +1,13 @@
 """Session driver — the single loop that converts triggers into committed turns.
 
+The driver is persistent: it stays alive across multiple turns, exiting
+only on shutdown, QueueClosed, or max_turns.  Two separate signals control
+interruption:
+
+- ``interrupt`` (per-turn) — aborts the current turn's react loop but
+  leaves the driver alive for the next trigger.
+- ``shutdown`` (session-level) — exits the driver loop entirely.
+
 Fixes over initial v2 (per friction review):
 - B1: build_context is async, ContextPolicy.transform is async
 - B2: Inject continues the round loop inline (no return → wait hang)
@@ -230,6 +238,18 @@ def _execution_to_messages(
     return messages
 
 
+# --- Signal helpers ---------------------------------------------------------
+
+
+def _is_interrupted(
+    interrupt: asyncio.Event | None,
+    shutdown: asyncio.Event | None,
+) -> bool:
+    """True when either per-turn interrupt or session-level shutdown is set."""
+    return (interrupt is not None and interrupt.is_set()) or \
+           (shutdown is not None and shutdown.is_set())
+
+
 # --- Main driver ------------------------------------------------------------
 
 
@@ -246,18 +266,30 @@ async def drive(
     system: str | None = None,
     context_policies: list[ContextPolicy] | None = None,
     trigger_renderers: dict[str, TriggerRenderer] | None = None,
-    signal: asyncio.Event | None = None,
+    interrupt: asyncio.Event | None = None,
+    shutdown: asyncio.Event | None = None,
     max_turns: int | None = None,
     thinking: ThinkingLevel = "off",
     lifecycle: LifecycleHookRegistry | None = None,
 ) -> None:
-    """Main session driver loop."""
+    """Main session driver loop.
+
+    Persistent: stays alive across turns until shutdown, QueueClosed, or
+    max_turns.  ``action=stop`` from the model does NOT exit the loop —
+    it simply means the model finished responding, and drive() waits for
+    the next trigger.
+    """
 
     policies = context_policies or []
     turns_run = 0
 
     while True:
-        if signal is not None and signal.is_set():
+        # Only shutdown exits the loop — NOT action=stop
+        if shutdown is not None and shutdown.is_set():
+            await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
+            return
+
+        if max_turns is not None and turns_run >= max_turns:
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
@@ -267,16 +299,9 @@ async def drive(
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
-        if max_turns is not None and turns_run >= max_turns:
-            await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
-            return
-
-        # Clear signal so a previous turn's interrupt doesn't block this turn.
-        # Note: interrupt() during a turn produces SignalAborted (final=True),
-        # which commits as action="stop" and drive() returns. Multi-trigger
-        # looping only happens when a DecideEvent handler overrides to Step.
-        if signal is not None:
-            signal.clear()
+        # Clear interrupt from previous turn so it doesn't affect this one.
+        if interrupt is not None:
+            interrupt.clear()
 
         execution = trajectory.begin(trigger)
         await bus.emit(TurnBeginEvent.CHANNEL, TurnBeginEvent(
@@ -295,7 +320,8 @@ async def drive(
                 system=system,
                 policies=policies,
                 trigger_renderers=trigger_renderers,
-                signal=signal,
+                interrupt=interrupt,
+                shutdown=shutdown,
                 thinking=thinking,
                 store=store,
                 session_id=session_id,
@@ -314,11 +340,10 @@ async def drive(
                 logger.debug("TurnCommittedEvent emit interrupted by cancellation")
             turns_run += 1
 
-            if outcome.action == "stop":
-                await bus.emit(RunEndEvent.CHANNEL, RunEndEvent(
-                    outcome=turn.outcome, meta=turn.meta,
-                ))
-                return
+            await bus.emit(RunEndEvent.CHANNEL, RunEndEvent(
+                outcome=turn.outcome, meta=turn.meta,
+            ))
+            # action=stop: loop back and wait for next trigger.
 
         except asyncio.CancelledError:
             await _fire_abandon(lifecycle, session_id, execution)
@@ -350,7 +375,8 @@ async def _react_loop(
     system: str | None,
     policies: list[ContextPolicy],
     trigger_renderers: dict[str, TriggerRenderer] | None,
-    signal: asyncio.Event | None,
+    interrupt: asyncio.Event | None,
+    shutdown: asyncio.Event | None,
     thinking: ThinkingLevel,
     store: TrajectoryStore | None,
     session_id: str,
@@ -359,6 +385,9 @@ async def _react_loop(
 
     Inject continues the loop inline (B2 fix) — injected messages are
     appended and a new round starts within the same turn.
+
+    Checks both ``interrupt`` (per-turn) and ``shutdown`` (session-level)
+    to abort the current turn.
     """
 
     total_input = 0
@@ -387,7 +416,7 @@ async def _react_loop(
 
     round_index = 0
     while True:
-        if signal is not None and signal.is_set():
+        if _is_interrupted(interrupt, shutdown):
             return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns, cache_read=total_cache_read, cache_write=total_cache_write)
 
         # Multi-round: rebuild context so policies re-run with fresh state
@@ -430,12 +459,13 @@ async def _react_loop(
 
         tool_index = {t.name: t for t in effective_tools}
 
-        # stream LLM
+        # stream LLM — pass interrupt as the signal so in-flight
+        # streaming is aborted when interrupt() or shutdown() fires.
         stream_events: list[AssistantStreamEvent] = []
         async for ev in stream_fn(
             messages=messages, model=effective_model,
             tools=effective_tools, system=effective_system,
-            signal=signal, thinking=thinking,
+            signal=interrupt, thinking=thinking,
         ):
             stream_events.append(ev)
             await bus.emit(StreamDeltaEvent.CHANNEL, StreamDeltaEvent(
@@ -459,7 +489,7 @@ async def _react_loop(
         if tool_calls:
             result_blocks: list[ToolResultBlock] = []
             for tc in tool_calls:
-                if signal is not None and signal.is_set():
+                if _is_interrupted(interrupt, shutdown):
                     execution.add_round(response, tool_records)
                     return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns, cache_read=total_cache_read, cache_write=total_cache_write)
 
@@ -488,7 +518,7 @@ async def _react_loop(
                         ))
                     else:
                         try:
-                            raw = await execute_tool_call(tool, args, signal=signal)
+                            raw = await execute_tool_call(tool, args, signal=interrupt)
                             outcome = raw if isinstance(raw, ToolOutcome) else ToolContinue(result=raw)
                         except asyncio.CancelledError:
                             raise

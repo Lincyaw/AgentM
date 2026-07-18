@@ -93,7 +93,8 @@ class Session:
         self._model = model
         self._max_turns = max_turns
         self._thinking = thinking
-        self._signal = asyncio.Event()
+        self._interrupt = asyncio.Event()   # per-turn abort
+        self._shutdown = asyncio.Event()    # session-level exit
         self._closed = False
         self._driver_task: asyncio.Task[None] | None = None
         self.lifecycle = LifecycleHookRegistry()
@@ -156,7 +157,8 @@ class Session:
                 system=self.system,
                 context_policies=self.context_policies,
                 trigger_renderers=self.trigger_renderers,
-                signal=self._signal,
+                interrupt=self._interrupt,
+                shutdown=self._shutdown,
                 max_turns=self._max_turns,
                 thinking=self._thinking,
                 lifecycle=self.lifecycle,
@@ -170,7 +172,8 @@ class Session:
         if self._closed:
             return
         self._closed = True
-        self._signal.set()
+        self._shutdown.set()
+        self._interrupt.set()    # also interrupt in-flight work
         self.triggers.close()
         if self._driver_task is not None:
             try:
@@ -200,7 +203,8 @@ class Session:
         self.triggers.push(trigger)
 
     def interrupt(self) -> None:
-        self._signal.set()
+        """Interrupt the current turn only. Driver stays alive for next trigger."""
+        self._interrupt.set()
 
     async def idle(self, timeout: float | None = None) -> bool:
         return await self.triggers.wait_quiescent(timeout)

@@ -1322,3 +1322,115 @@ async def test_durable_round_persist_failure() -> None:
     assert len(session.trajectory) == 1
     turn = session.trajectory.turns[0]
     assert turn.outcome.action == "stop"
+
+
+# ---------------------------------------------------------------------------
+# GROUP 13: Interrupt + Resume (persistent driver)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_interrupt_and_resume() -> None:
+    """Driver processes two consecutive triggers without dying between them."""
+    mock = MockStreamFn()
+    mock.enqueue(text_response("turn-1"), text_response("turn-2"))
+
+    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session.start()
+
+    await session.prompt("first")
+    await _wait_turn(session)
+
+    await session.prompt("second")
+    await _wait_turn(session)
+
+    await session.shutdown()
+
+    assert len(session.trajectory) == 2
+    assert isinstance(session.trajectory.turns[0].outcome.cause, ModelEndTurn)
+    assert isinstance(session.trajectory.turns[1].outcome.cause, ModelEndTurn)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_stops_current_turn_only() -> None:
+    """interrupt() aborts the in-flight turn but driver stays alive for the next."""
+    mock = MockStreamFn()
+    mock.enqueue(
+        tool_call_response("add", "i1", {"a": 1, "b": 1}),
+        text_response("should not reach"),  # would be round 2 of turn 1
+        text_response("turn-2-ok"),         # turn 2
+    )
+    session = Session(
+        stream_fn=mock, model=make_model(), system="test",
+        tools=[_make_add_tool()],
+    )
+
+    def on_result(event: ToolResultEvent) -> None:
+        session.interrupt()
+
+    session.bus.on(ToolResultEvent.CHANNEL, on_result)
+    session.start()
+
+    await session.prompt("first")
+    await _wait_turn(session)
+
+    # Turn 1 should be interrupted
+    turn1 = session.trajectory.turns[0]
+    assert isinstance(turn1.outcome.cause, SignalAborted)
+
+    # Push second trigger — driver is still alive
+    await session.prompt("second")
+    await _wait_turn(session)
+
+    await session.shutdown()
+
+    assert len(session.trajectory) == 2
+    turn2 = session.trajectory.turns[1]
+    assert isinstance(turn2.outcome.cause, ModelEndTurn)
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_persistent_driver() -> None:
+    """Driver stays alive across three consecutive triggers."""
+    mock = MockStreamFn()
+    mock.enqueue(
+        text_response("one"),
+        text_response("two"),
+        text_response("three"),
+    )
+    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session.start()
+
+    for prompt_text in ("a", "b", "c"):
+        await session.prompt(prompt_text)
+        await _wait_turn(session)
+
+    await session.shutdown()
+
+    assert len(session.trajectory) == 3
+    for turn in session.trajectory.turns:
+        assert isinstance(turn.outcome.cause, ModelEndTurn)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_exits_driver() -> None:
+    """After shutdown, pushed triggers are not processed."""
+    mock = MockStreamFn()
+    mock.enqueue(text_response("only-one"), text_response("never"))
+
+    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session.start()
+
+    await session.prompt("go")
+    await _wait_turn(session)
+
+    await session.shutdown()
+
+    # Triggers after shutdown are ignored (queue is closed)
+    try:
+        session.push_trigger(UserInput(content=(TextContent(type="text", text="post-shutdown"),)))
+    except Exception:
+        pass  # push on closed queue may raise
+
+    await asyncio.sleep(0.1)
+    assert len(session.trajectory) == 1
