@@ -102,8 +102,10 @@ class EventBus:
         if not subs:
             return []
 
+        # Snapshot to guard against handlers mutating subscriptions
+        snapshot = list(subs)
         results: list[Any] = []
-        for sub in subs:
+        for sub in snapshot:
             try:
                 value = sub.handler(event)
                 if inspect.isawaitable(value):
@@ -124,8 +126,10 @@ class EventBus:
         if not subs:
             return []
 
+        # Snapshot to guard against handlers mutating subscriptions
+        snapshot = list(subs)
         results: list[Any] = []
-        for sub in subs:
+        for sub in snapshot:
             try:
                 value = sub.handler(event)
                 if inspect.isawaitable(value):

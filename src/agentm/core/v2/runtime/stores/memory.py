@@ -10,8 +10,10 @@ from agentm.core.v2.abi.trajectory import Turn, TurnRef
 class InMemoryTrajectoryStore:
     """A ``TrajectoryStore`` backed by a plain dict.
 
-    Non-persistent: all state is lost on process exit.  Returns copies of
-    the stored lists/tuples so callers cannot mutate internal state.
+    Non-persistent: all state is lost on process exit.  Returns shallow
+    copies of the stored Turn lists so callers cannot add/remove turns
+    from internal state.  Turn objects themselves are frozen dataclasses
+    and shared between copies.
     """
 
     __slots__ = ("_sessions",)

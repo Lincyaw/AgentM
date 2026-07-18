@@ -103,7 +103,9 @@ class LifecycleHookRegistry:
             if hasattr(hook, "on_fork"):
                 try:
                     await hook.on_fork(event)
-                except Exception:
+                except (SystemExit, KeyboardInterrupt):
+                    raise
+                except BaseException:
                     from loguru import logger
                     logger.exception("lifecycle on_fork failed")
 
@@ -112,7 +114,9 @@ class LifecycleHookRegistry:
             if hasattr(hook, "on_resume"):
                 try:
                     await hook.on_resume(event)
-                except Exception:
+                except (SystemExit, KeyboardInterrupt):
+                    raise
+                except BaseException:
                     from loguru import logger
                     logger.exception("lifecycle on_resume failed")
 
@@ -121,7 +125,9 @@ class LifecycleHookRegistry:
             if hasattr(hook, "on_replay"):
                 try:
                     await hook.on_replay(event)
-                except Exception:
+                except (SystemExit, KeyboardInterrupt):
+                    raise
+                except BaseException:
                     from loguru import logger
                     logger.exception("lifecycle on_replay failed")
 
@@ -130,7 +136,9 @@ class LifecycleHookRegistry:
             if hasattr(hook, "on_abandon"):
                 try:
                     await hook.on_abandon(event)
-                except Exception:
+                except (SystemExit, KeyboardInterrupt):
+                    raise
+                except BaseException:
                     from loguru import logger
                     logger.exception("lifecycle on_abandon failed")
 

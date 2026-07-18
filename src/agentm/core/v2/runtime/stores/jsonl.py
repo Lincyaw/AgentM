@@ -158,7 +158,12 @@ class JsonlTrajectoryStore:
                 if isinstance(data, dict) and data.get("__durable_round__"):
                     continue
                 if meta is None:
-                    meta = self._codec.deserialize_session_meta(data)
+                    try:
+                        meta = self._codec.deserialize_session_meta(data)
+                    except Exception as exc:
+                        raise KeyError(
+                            f"corrupt session meta for {session_id}: {exc}"
+                        ) from exc
                     continue
                 try:
                     turns.append(self._codec.deserialize_turn(data))
