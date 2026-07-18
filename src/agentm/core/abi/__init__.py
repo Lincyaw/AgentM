@@ -276,7 +276,7 @@ from .roles import (
 )
 
 # -- v1 backward compat (atoms still import these) -----------------------
-from ._v1_compat import (
+from ._v1_compat import (  # noqa: F401
     AgentEndEvent,
     AgentLoop,
     AgentSessionConfig,
@@ -346,7 +346,7 @@ from ._v1_compat import (
 )
 
 # -- trace reader (lib, re-exported for access) -------------------------
-from agentm.core.lib.trace_reader import (
+from agentm.core.lib.trace_reader import (  # noqa: F401
     LogRecord,
     SessionIdentity,
     Span,
