@@ -364,6 +364,7 @@ class _FileToolsRuntime:
             "_cwd": self._sandbox_work_dir,
             "_max_size": self._max_size_bytes,
             "_require_read": self._config.require_read,
+            "_default_limit": self._config.default_limit,
         }
 
         if tool_name == "write" and "content" in exec_args:
@@ -431,12 +432,14 @@ class _FileToolsRuntime:
     # -- read ---------------------------------------------------------------
 
     def _register_read(self) -> None:
+        default_limit = self._config.default_limit
         self._api.register_tool(
             FunctionTool(
                 name="read",
                 description=(
                     "Read a UTF-8 text file from disk. "
-                    "By default reads the entire file. "
+                    f"Without offset/limit, shows up to {default_limit} lines; "
+                    "longer files are truncated (use offset/limit to page). "
                     f"Files larger than {self._max_size_bytes} bytes require "
                     "offset and/or limit parameters. "
                     "Output starts with a header line giving the total or "

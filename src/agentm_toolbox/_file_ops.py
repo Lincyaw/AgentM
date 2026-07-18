@@ -200,7 +200,13 @@ class FileToolbox:
             total = len(all_lines)
 
             off = max(0, int(offset) - 1) if offset is not None else 0
-            lim = int(limit) if limit is not None else None
+            caller_wants_range = offset is not None or limit is not None
+            if limit is not None:
+                lim = int(limit)
+            elif not caller_wants_range and self._default_limit and total > self._default_limit:
+                lim = self._default_limit
+            else:
+                lim = None
 
             if lim is not None and lim > 0:
                 sliced = all_lines[off : off + lim]

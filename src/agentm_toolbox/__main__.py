@@ -42,6 +42,7 @@ def main() -> None:
         cwd=cwd,
         max_size=args.pop("_max_size", 262_144),
         require_read=args.pop("_require_read", True),
+        default_limit=args.pop("_default_limit", 250),
         state=state,
     )
 
