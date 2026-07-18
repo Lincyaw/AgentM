@@ -277,8 +277,17 @@ dependencies = [
     { name = "harbor" },
 ]
 
+[package.optional-dependencies]
+external = [
+    { name = "agentm" },
+]
+
 [package.metadata]
-requires-dist = [{ name = "harbor", specifier = ">=0.1.0" }]
+requires-dist = [
+    { name = "agentm", marker = "extra == 'external'", editable = "." },
+    { name = "harbor", specifier = ">=0.1.0" },
+]
+provides-extras = ["external"]
 
 [[package]]
 name = "agentm-mcp-bridge"
