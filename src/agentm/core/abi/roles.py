@@ -1,149 +1,92 @@
-"""Singleton-role identifiers + cross-boundary config keys.
-
-These constants name the runtime "slots" an atom can fulfil. Each role
-is filled by exactly one atom per session; the discovery layer indexes
-atoms by ``MANIFEST.provides_role`` so the runtime asks for a role
-("who is today's command parser?") rather than a specific atom name.
-
-Constants live in ``agentm.core.abi`` — *not* in any individual atom —
-because they cross the SDK/scenario boundary. A scenario that ships its
-own command parser needs the same role string the runtime checks for.
-"""
+"""Cross-atom service keys used by the minimal SDK."""
 
 from __future__ import annotations
 
 from typing import Final
 
-# --- Singleton roles -------------------------------------------------------
-
-COMMAND_PARSER: Final = "command_parser"
-"""Atom that parses slash commands and dispatches registered handlers.
-
-Default fulfiller: ``agentm.extensions.builtin.slash_commands``.
-Resolved by the session factory to back the ``slash_commands`` service
-and the dispatcher's ``fallback_owner``."""
-
-COMPACTION_PROMPTS: Final = "compaction_prompts"
-"""Atom that registers compaction prompt bodies + entry materializers.
-
-Floor atom: present in every session even when not listed in a scenario
-manifest so the ``llm_compaction`` atom always finds the default English
-prompts.
-Default fulfiller: ``agentm.extensions.builtin.compaction_prompts``."""
-
-PROMPT_REGISTRY: Final = "prompt_registry"
-"""Atom that publishes the in-memory prompt registry (under service key
-``"prompt_templates"``) and the on-disk slash-template loader.
-
-Floor atom: present in every session because ``compaction_prompts`` and
-``llm_compaction`` resolve their bodies through it. Default fulfiller:
-``agentm.extensions.builtin.prompt_templates``."""
-
-SYSTEM_PROMPT_PROVIDER: Final = "system_prompt_provider"
-"""Atom that prepends a system prompt at ``before_agent_start``.
-
-Required whenever ``SUB_AGENT_RUNTIME`` is loaded — sub-agents inject
-inherited prompt text and need this hook in the chain. Default
-fulfiller: ``agentm.extensions.builtin.system_prompt``."""
-
-SUB_AGENT_RUNTIME: Final = "sub_agent_runtime"
-"""Atom that exposes ``dispatch_agent`` and owns the nested-session lifecycle.
-Default fulfiller: ``agentm.extensions.builtin.sub_agent``."""
-
-PROVIDER_INHERITOR: Final = "provider_inheritor"
-"""Atom that re-publishes a parent session's :class:`ProviderConfig` to
-a child session. The session factory installs whichever atom claims this
-role when a child config arrives with ``provider=None``. Default
-fulfiller: ``agentm.extensions.builtin.inherit_provider``."""
-
-
-# --- Cross-boundary config keys -------------------------------------------
-
-PARENT_PROVIDER_CONFIG_KEY: Final = "provider"
-"""Key under which :func:`default_child_provider_factory` hands the
-parent :class:`ProviderConfig` to the ``PROVIDER_INHERITOR`` atom's
-install config. Lives here (rather than on the atom itself) so the
-session factory can build the install spec without importing a specific
-builtin module."""
-
-
-# --- Service registry keys -------------------------------------------------
-
-SLASH_COMMAND_DISPATCHER_SERVICE: Final = "slash_commands"
-"""``service_registry`` key under which the runtime publishes the
-:class:`HarnessCommandDispatcher`. Atoms that need to invoke registered
-slash commands programmatically look it up via
-``api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)``."""
-
-SESSION_STORE_SERVICE: Final = "session_store"
-"""``service_registry`` key under which the session factory publishes
-the :class:`~agentm.core.abi.session_store.SessionStore`. Atoms that
-need to resume existing sessions (e.g. workflow ``agent(session_id=)``)
-look it up via ``api.get_service(SESSION_STORE_SERVICE)``."""
-
 LOOP_BUDGET_SERVICE: Final = "loop_budget"
-"""``service_registry`` key under which the ``loop_budget`` atom publishes a
-loop config. The session factory reads it to set the scenario's turn / tool
-budget. Absent means no cap. An explicit caller override (CLI ``--max-turns``)
-takes precedence over whatever the atom registered."""
-
-MODEL_RESOLVER_SERVICE: Final = "model_resolver"
-"""``service_registry`` key under which the session factory publishes a
-callable ``(model_name: str) -> tuple[str, dict[str, Any]] | None`` that
-resolves a ``config.toml`` profile name to a provider tuple suitable for
-the session config.  Atoms that need model resolution (e.g.
-``workflow`` for its ``model=`` parameter) use this service instead of
-importing presenter-layer modules directly."""
-
-GATEWAY_SCHEDULER_SERVICE: Final = "gateway_scheduler"
-"""Gateway-injected, session-bound durable schedule service.
-
-Atoms use this optional service for persistent host-level wakeups while keeping
-gateway implementation details out of the atom boundary. The gateway binds the
-service to the current ``session_key`` and route metadata before atom install,
-so consumers cannot target arbitrary sessions.
-"""
-
-PROMPT_TEMPLATES_SERVICE: Final = "prompt_templates"
-"""In-memory :class:`PromptRegistry` published by ``prompt_templates`` atom."""
+"""Service key for a session loop budget config."""
 
 RETRY_POLICY_SERVICE: Final = "retry_policy"
-"""Retry policy callable published by ``retry_policy`` atom."""
+"""Service key for the provider retry policy callable."""
 
-ARTIFACT_STORE_SERVICE: Final = "artifact_store"
-"""Artifact store published by ``artifact_store`` atom."""
+PROVIDER_RESOLVER_SERVICE: Final = "provider_resolver"
+"""Service key for selecting the active provider registration."""
 
-COST_QUERY_SERVICE: Final = "cost_query"
-"""Cost query service published by ``cost_budget`` atom."""
+RESOURCE_WRITER_SERVICE: Final = "resource_writer"
+"""Service key for the host-provided resource mutation port."""
 
-WIRE_CHILD_FORWARDER_SERVICE: Final = "child_wire_forwarder"
-"""Callable published by ``wire_driver`` for forwarding child session
-trajectories onto the parent wire. No-op when running outside the gateway."""
+RESOURCE_TXN_SERVICE: Final = "resource_txn"
+"""Service key for the active turn-scoped resource transaction."""
 
-WIRE_OUTBOUND_SERVICE: Final = "wire_outbound"
-"""Outbound sink callable published by the gateway session manager."""
+OPERATIONS_SERVICE: Final = "operations"
+"""Service key for the active Operations bundle."""
 
-APPROVAL_MANAGER_SERVICE: Final = "approval_manager"
-"""``ApprovalManager`` published by the gateway session manager."""
+ENVIRONMENT_OPERATIONS_SERVICE: Final = "operations:environment"
+"""Service key for the active environment operations backend."""
+
+BASH_OPERATIONS_SERVICE: Final = "operations:bash"
+"""Service key for shell execution operations."""
+
+TOOL_EXECUTOR_SERVICE: Final = "tool_executor"
+"""Service key for the host-provided tool execution boundary."""
+
+TOOL_ORCHESTRATOR_SERVICE: Final = "tool_orchestrator"
+"""Service key for the host-provided batch tool orchestration boundary."""
+
+PERMISSION_POLICY_SERVICE: Final = "permission_policy"
+"""Service key for the host-provided permission decision boundary."""
+
+TRAJECTORY_NODE_STORE_SERVICE: Final = "trajectory_node_store"
+"""Service key for message-level trajectory node persistence/query."""
+
+TRAJECTORY_QUERY_STORE_SERVICE: Final = "trajectory_query_store"
+"""Service key for session/turn/span/event trajectory query."""
+
+SESSION_SPEC_RESOLVER_SERVICE: Final = "session_spec_resolver"
+"""Service key for host-owned session config resolution."""
+
+RESOLVED_SESSION_SPEC_SERVICE: Final = "resolved_session_spec"
+"""Service key for the resolved composition/config used by this session."""
+
+CONTEXT_PROJECTION_SERVICE: Final = "context_projection"
+"""Service key for host/session context projection policy."""
+
+EFFECT_SCOPE_SERVICE: Final = "effect_scope"
+"""Service key for the host-provided world-effect lifecycle port."""
+
+VERSIONED_RESOURCE_STORE_SERVICE: Final = "versioned_resource_store"
+"""Service key for versioned SDK resources such as atom identity payloads."""
+
+ATOM_CATALOG_SERVICE: Final = "atom_catalog"
+"""Service key for resolved atom composition identity."""
+
+ACTIVE_SET_FINGERPRINT_SERVICE: Final = "active_set_fingerprint"
+"""Service key for the active atom-set fingerprint for this session."""
+
+SCENARIO_LOADER_SERVICE: Final = "scenario_loader"
+"""Service key for a host-provided scenario resolver."""
 
 __all__ = [
-    "APPROVAL_MANAGER_SERVICE",
-    "ARTIFACT_STORE_SERVICE",
-    "COMMAND_PARSER",
-    "COMPACTION_PROMPTS",
-    "COST_QUERY_SERVICE",
-    "GATEWAY_SCHEDULER_SERVICE",
+    "ACTIVE_SET_FINGERPRINT_SERVICE",
+    "ATOM_CATALOG_SERVICE",
+    "BASH_OPERATIONS_SERVICE",
+    "CONTEXT_PROJECTION_SERVICE",
+    "EFFECT_SCOPE_SERVICE",
+    "ENVIRONMENT_OPERATIONS_SERVICE",
     "LOOP_BUDGET_SERVICE",
-    "MODEL_RESOLVER_SERVICE",
-    "PARENT_PROVIDER_CONFIG_KEY",
-    "PROMPT_REGISTRY",
-    "PROMPT_TEMPLATES_SERVICE",
-    "PROVIDER_INHERITOR",
+    "OPERATIONS_SERVICE",
+    "PERMISSION_POLICY_SERVICE",
+    "PROVIDER_RESOLVER_SERVICE",
     "RETRY_POLICY_SERVICE",
-    "SESSION_STORE_SERVICE",
-    "SLASH_COMMAND_DISPATCHER_SERVICE",
-    "SUB_AGENT_RUNTIME",
-    "SYSTEM_PROMPT_PROVIDER",
-    "WIRE_CHILD_FORWARDER_SERVICE",
-    "WIRE_OUTBOUND_SERVICE",
+    "RESOURCE_WRITER_SERVICE",
+    "RESOURCE_TXN_SERVICE",
+    "RESOLVED_SESSION_SPEC_SERVICE",
+    "SCENARIO_LOADER_SERVICE",
+    "SESSION_SPEC_RESOLVER_SERVICE",
+    "TOOL_EXECUTOR_SERVICE",
+    "TOOL_ORCHESTRATOR_SERVICE",
+    "TRAJECTORY_NODE_STORE_SERVICE",
+    "TRAJECTORY_QUERY_STORE_SERVICE",
+    "VERSIONED_RESOURCE_STORE_SERVICE",
 ]

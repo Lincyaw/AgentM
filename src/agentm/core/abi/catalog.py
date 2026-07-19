@@ -1,91 +1,121 @@
-"""Catalog service Protocol — atom-facing surface.
+"""Versioned resource and atom active-set catalog ports.
 
-Atoms call ``api.catalog`` to query versions, fingerprints, and provenance
-without reaching into ``agentm.core._internal`` directly. The default
-implementation lives in :mod:`agentm.core.runtime.services`; this module
-holds only the stable Protocol plus a small set of path-shaped helpers that
-atoms need from the catalog layout (currently ``atom_decisions_path``).
-
-Pluggability hard rule: this module imports only stdlib + ABI siblings.
+Catalog identity is composition identity: which atom modules, manifests, and
+configs formed a session. It is not the same boundary as ``ResourceWriter``,
+which mutates user/workspace resources.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Protocol, TypedDict, TypeAlias, runtime_checkable
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
+
+from agentm.core.abi.manifest import AtomInstallPriority
 
 
-class ActiveSetFingerprint(TypedDict):
-    core: str | None
-    scenario: str | None
-    atoms: dict[str, str]
+CatalogMeta = Mapping[str, str | int | float | bool | None]
 
 
-ManifestSnapshot: TypeAlias = dict[str, object]
+@dataclass(frozen=True, slots=True)
+class ResourceVersion:
+    """Immutable SDK resource version.
+
+    This is for versioning SDK composition inputs such as atom source,
+    manifests, generated prompts, or scenario specs. It is intentionally
+    separate from ``ResourceWriter``, which mutates user/workspace resources.
+    """
+
+    resource_id: str
+    version_id: str
+    digest: str
+    media_type: str | None = None
+    size_bytes: int = 0
+    metadata: CatalogMeta = field(default_factory=dict)
 
 
 @runtime_checkable
-class CatalogService(Protocol):
-    def list_versions(
-        self, name: str, root: Path | None = None
-    ) -> list[str]: ...
+class VersionedResourceStore(Protocol):
+    """Content-addressed store for immutable SDK resources."""
 
-    def current_version(
-        self, name: str, root: Path | None = None
-    ) -> str: ...
-
-    def get_source_at(
-        self, name: str, version: str, root: Path | None = None
-    ) -> bytes: ...
-
-    def get_manifest_at(
-        self, name: str, version: str, root: Path | None = None
-    ) -> ManifestSnapshot: ...
-
-    def runs_for(
+    async def put(
         self,
-        fingerprint: ActiveSetFingerprint | str,
-        root: Path | None = None,
-    ) -> list[str]: ...
+        *,
+        resource_id: str,
+        content: bytes,
+        media_type: str | None = None,
+        metadata: CatalogMeta | None = None,
+    ) -> ResourceVersion:
+        ...
 
-    def compute_atom_hash(self, source: str) -> str: ...
-
-    def compute_active_set_fingerprint(
+    async def resolve(
         self,
-        loaded: dict[str, str],
-        scenario: str | None,
-        core_hash: str | None,
-    ) -> ActiveSetFingerprint: ...
+        resource_id: str,
+        *,
+        version_id: str | None = None,
+    ) -> ResourceVersion | None:
+        ...
+
+    async def read(self, version: ResourceVersion) -> bytes:
+        ...
+
+    async def alias(self, alias: str, version: ResourceVersion) -> None:
+        ...
+
+    async def resolve_alias(self, alias: str) -> ResourceVersion | None:
+        ...
+
+    async def list_versions(self, resource_id: str) -> list[ResourceVersion]:
+        ...
 
 
-# --- Path helpers ----------------------------------------------------------
-#
-# These mirror :mod:`agentm.core.runtime.catalog._layout` and are exposed
-# here because the ``tool_catalog`` atom needs the path shape to read
-# decisions logs without reaching the private ``_layout`` module. They are
-# pure path-arithmetic functions — no filesystem side effects.
+@dataclass(frozen=True, slots=True)
+class AtomActivation:
+    """One atom as it appears in a resolved session active set."""
+
+    name: str
+    module_path: str
+    version: ResourceVersion | None = None
+    priority: int = AtomInstallPriority.NORMAL
+    requires: tuple[str, ...] = ()
+    registers: tuple[str, ...] = ()
+    config_fingerprint: str | None = None
 
 
-_CATALOG_ROOT = Path(".agentm/catalog")
+@dataclass(frozen=True, slots=True)
+class ActiveSetFingerprint:
+    """Stable fingerprint for the atom set installed into a session."""
+
+    algorithm: str
+    digest: str
+    atoms: tuple[AtomActivation, ...] = ()
+    metadata: CatalogMeta = field(default_factory=dict)
 
 
-def atom_decisions_path(
-    name: str, version_key: str, *, root: Path | None = None
-) -> Path:
-    """Return the path of the per-atom-version decisions log.
+@runtime_checkable
+class AtomCatalog(Protocol):
+    """Catalog for resolved atom composition identity."""
 
-    The catalog tree shape is ``<root>/.agentm/catalog/atoms/<name>/<version>/decisions.jsonl``.
-    Atoms call this rather than importing the private ``_layout`` module
-    in :mod:`agentm.core.runtime.catalog`.
-    """
+    async def record_active_set(
+        self,
+        *,
+        session_id: str,
+        atoms: Sequence[AtomActivation],
+    ) -> ActiveSetFingerprint:
+        ...
 
-    base = (root or Path.cwd()) / _CATALOG_ROOT / "atoms" / name / version_key
-    return base / "decisions.jsonl"
+    async def get_active_set(
+        self,
+        session_id: str,
+    ) -> ActiveSetFingerprint | None:
+        ...
 
 
 __all__ = [
-    "CatalogService",
     "ActiveSetFingerprint",
-    "ManifestSnapshot",
-    "atom_decisions_path",
+    "AtomActivation",
+    "AtomCatalog",
+    "CatalogMeta",
+    "ResourceVersion",
+    "VersionedResourceStore",
 ]

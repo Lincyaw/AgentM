@@ -1,0 +1,45 @@
+requirements:
+  - id: REQ-219-v2-trajectory-runtime-integrity
+    title: V2 trajectory runtime preserves durable and live session integrity
+    description: >
+      Trigger execution must fail-stop after an indeterminate turn failure, close
+      terminal queues, publish receipts only after durable trajectory and effect
+      commits, and wait for synchronous store commits to reach a known outcome
+      despite task cancellation. JSONL stores must recover torn tails without
+      corrupting framing, serialize competing appenders, and isolate codec
+      registries. Spawn, fork, resume, and graph rebuild must preserve execution
+      restrictions, avoid event-loop-blocking store calls, and reconstruct lineage
+      independently of metadata enumeration order.
+    priority: P0
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/catalog.py
+      - path: src/agentm/core/abi/codec.py
+      - path: src/agentm/core/abi/context.py
+      - path: src/agentm/core/abi/lifecycle.py
+      - path: src/agentm/core/abi/messages.py
+      - path: src/agentm/core/abi/permission.py
+      - path: src/agentm/core/abi/query.py
+      - path: src/agentm/core/abi/session_api.py
+      - path: src/agentm/core/abi/session_config.py
+      - path: src/agentm/core/abi/store.py
+      - path: src/agentm/core/abi/tool_executor.py
+      - path: src/agentm/core/abi/tool_orchestration.py
+      - path: src/agentm/core/abi/trajectory.py
+      - path: src/agentm/core/runtime/driver.py
+      - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/runtime/session_factory.py
+      - path: src/agentm/core/runtime/stores/query.py
+      - path: src/agentm/core/runtime/stores/jsonl.py
+      - path: src/agentm/core/runtime/tool_executor.py
+      - path: src/agentm/core/runtime/tool_orchestration.py
+      - path: src/agentm/core/runtime/tree.py
+      - path: src/agentm/core/runtime/trajectory_nodes.py
+      - path: src/agentm/core/runtime/trigger_queue.py
+    tests:
+      - path: tests/integration/test_trajectory.py
+    docs:
+      - path: README.md
+      - path: docs/refactor-abstract-inventory.md
+    depends_on: []

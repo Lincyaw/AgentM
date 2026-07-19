@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, Sequence, runtime_checkable
 
-from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.trajectory import (
+    ContentReplacementState,
+    PromptCacheState,
+    TRAJECTORY_NODE_INDEXES,
+    TrajectoryIndexSpec,
+    TrajectoryLeaf,
+    TrajectoryNode,
+    TrajectoryNodeKind,
+    Turn,
+    TurnRef,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class SessionMeta:
-    """Metadata for a session record in the store."""
+    """Metadata for a session record in the store.
+
+    ``config`` carries JSON-safe, resumable session context such as root
+    session id, depth, scenario name, and scenario-local base directory.
+    """
 
     id: str
     parent_id: str | None = None
@@ -30,6 +44,10 @@ class TrajectoryStore(Protocol):
 
     def create_session(self, meta: SessionMeta) -> None: ...
 
+    def create_session_with_turns(
+        self, meta: SessionMeta, turns: Sequence[Turn]
+    ) -> None: ...
+
     def append(self, session_id: str, turn: Turn) -> None: ...
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]: ...
@@ -45,7 +63,131 @@ class TrajectoryStore(Protocol):
     def list_sessions(self) -> list[SessionMeta]: ...
 
 
+TrajectoryNodeSort = Literal["asc", "desc"]
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryNodeQuery:
+    """Portable query shape for message-level trajectory node stores."""
+
+    session_id: str = ""
+    node_id: str | None = None
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    agent_id: str | None = None
+    is_sidechain: bool | None = None
+    kinds: tuple[TrajectoryNodeKind, ...] = ()
+    parent_id: str | None = None
+    logical_parent_id: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    after_seq: int | None = None
+    before_seq: int | None = None
+    limit: int | None = None
+    sort: TrajectoryNodeSort = "asc"
+
+
+@runtime_checkable
+class TrajectoryNodeStore(Protocol):
+    """Append-only message-level trajectory persistence boundary.
+
+    JSONL implementations can satisfy this by scanning records; SQL-like
+    stores should expose the same query semantics using the advertised index
+    specs. ClickHouse implementations can map the same fields to ORDER BY /
+    primary-key and skip-index choices.
+    """
+
+    @property
+    def indexes(self) -> tuple[TrajectoryIndexSpec, ...]:
+        """Return index/order declarations supported by this store."""
+        ...
+
+    def append_nodes(
+        self,
+        session_id: str,
+        nodes: Sequence[TrajectoryNode],
+    ) -> None:
+        """Atomically append nodes in session sequence order."""
+        ...
+
+    def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
+        """Return nodes matching a portable query."""
+        ...
+
+    def load_chain(
+        self,
+        session_id: str,
+        leaf_node_id: str,
+        *,
+        include_logical_parent: bool = False,
+    ) -> list[TrajectoryNode]:
+        """Reconstruct one visible chain by following parent links.
+
+        ``include_logical_parent`` lets fork/resume and compact-boundary reads
+        continue through ``logical_parent_id`` when the physical parent chain
+        intentionally stops.
+        """
+        ...
+
+    def leaves(
+        self,
+        session_id: str,
+        *,
+        agent_id: str | None = None,
+        is_sidechain: bool | None = None,
+    ) -> list[TrajectoryLeaf]:
+        """Return leaf nodes for a session/agent chain."""
+        ...
+
+    def save_content_replacement_state(
+        self,
+        session_id: str,
+        state: ContentReplacementState,
+    ) -> None:
+        """Persist prompt-cache/content-replacement state."""
+        ...
+
+    def load_content_replacement_state(
+        self,
+        session_id: str,
+        state_key: str,
+    ) -> ContentReplacementState | None:
+        """Load persisted content-replacement state."""
+        ...
+
+    def clone_content_replacement_state(
+        self,
+        *,
+        source_session_id: str,
+        target_session_id: str,
+        state_key: str,
+        target_leaf_id: str | None = None,
+    ) -> ContentReplacementState | None:
+        """Clone state for fork/resume while preserving deterministic decisions."""
+        ...
+
+    def save_prompt_cache_state(
+        self,
+        session_id: str,
+        state: PromptCacheState,
+    ) -> None:
+        """Persist provider prompt-cache identity for a chain prefix."""
+        ...
+
+    def load_prompt_cache_state(
+        self,
+        session_id: str,
+        cache_key: str,
+    ) -> PromptCacheState | None:
+        """Load provider prompt-cache identity for a chain prefix."""
+        ...
+
+
 __all__ = [
     "SessionMeta",
+    "TRAJECTORY_NODE_INDEXES",
     "TrajectoryStore",
+    "TrajectoryNodeQuery",
+    "TrajectoryNodeSort",
+    "TrajectoryNodeStore",
 ]

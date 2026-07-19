@@ -33,6 +33,11 @@ from agentm.core.abi.messages import (
     ToolResultBlock,
     ToolResultMessage,
 )
+from agentm.core.abi.permission import (
+    PermissionPolicy,
+    PermissionRequest,
+    permission_denial_result,
+)
 from agentm.core.abi.resource import (
     ResourceMutation,
     ResourceTxn,
@@ -56,13 +61,22 @@ from agentm.core.abi.tool import (
     ToolResult,
     ToolTerminate,
 )
-from agentm.core.abi.tool_executor import ToolExecutor
+from agentm.core.abi.tool_executor import (
+    ToolExecutionRequirements,
+    ToolExecutor,
+    tool_execution_requirements,
+)
+from agentm.core.abi.tool_orchestration import (
+    ToolOrchestrationRequest,
+    ToolOrchestrationResult,
+    ToolOrchestrator,
+    ToolWorkItem,
+)
 from agentm.core.abi.bus import EventBus
 from agentm.core.abi.context import ContextPolicy, build_context, render_trigger
 from agentm.core.abi.events import (
     BeforeRunEvent,
     BeforeSendEvent,
-    BudgetExhausted,
     ContextEvent,
     DecideEvent,
     DiagnosticEvent,
@@ -70,25 +84,32 @@ from agentm.core.abi.events import (
     LlmRequestEndEvent,
     LlmRequestStartEvent,
     LoopAction,
-    MaxTurnsExhausted,
-    ModelEndTurn,
-    ProviderTruncated,
     RunEndEvent,
-    SignalAborted,
     Step,
     Stop,
     StreamDeltaEvent,
-    TerminationCause,
     ToolCallEvent,
     ToolErrorEvent,
     ToolResultEvent,
-    ToolTerminated,
     TurnBeginEvent,
     TurnCommittedEvent,
     TurnObservation,
 )
-from agentm.core.abi.store import TrajectoryStore
-from agentm.core.abi.termination import Aborted
+from agentm.core.abi.store import (
+    TrajectoryNodeQuery,
+    TrajectoryNodeStore,
+    TrajectoryStore,
+)
+from agentm.core.abi.termination import (
+    Aborted,
+    BudgetExhausted,
+    MaxTurnsExhausted,
+    ModelEndTurn,
+    ProviderTruncated,
+    SignalAborted,
+    TerminationCause,
+    ToolTerminated,
+)
 from agentm.core.abi.trajectory import (
     Outcome,
     ToolRecord,
@@ -102,8 +123,9 @@ from agentm.core.abi.trigger import (
     TriggerRenderer,
 )
 from agentm.core.runtime.execution import Execution
-from agentm.core.runtime.tool_executor import execute_tool_call
 from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
+from agentm.core.runtime.trajectory_nodes import turn_to_nodes
 from agentm.core.runtime.trigger_queue import (
     QueueClosed,
     TriggerQueue,
@@ -300,6 +322,90 @@ def _trigger_carries_terminal(trigger: Trigger) -> TerminationCause | None:
     return None
 
 
+def _outcome_result(outcome: ToolOutcome) -> ToolResult:
+    if isinstance(outcome, (ToolContinue, ToolTerminate)):
+        return outcome.result
+    return ToolResult(content=[], is_error=True)
+
+
+def _normalize_tool_output(output: ToolResult | ToolOutcome) -> ToolOutcome:
+    return output if isinstance(output, ToolOutcome) else ToolContinue(result=output)
+
+
+def _tool_result_block(tool_call_id: str, result: ToolResult) -> ToolResultBlock:
+    return ToolResultBlock(
+        type="tool_result",
+        tool_call_id=tool_call_id,
+        content=list(result.content),
+        is_error=result.is_error,
+        extras=result.extras,
+    )
+
+
+def _permission_request(
+    *,
+    tc: ToolCallBlock,
+    args: dict[str, object],
+    session_id: str,
+    execution: Execution,
+) -> PermissionRequest:
+    return PermissionRequest(
+        action="tool_call",
+        session_id=session_id,
+        turn_id=execution.id,
+        turn_index=execution.index,
+        tool_call_id=tc.id,
+        tool_name=tc.name,
+        args=args,
+        audience="subagent" if session_id and ":" in session_id else "user",
+    )
+
+
+async def _permission_outcome(
+    *,
+    policy: PermissionPolicy | None,
+    request: PermissionRequest,
+    signal: CancelSignal | None,
+) -> ToolOutcome | None:
+    if policy is None:
+        return None
+    decision = await policy.decide(request, signal=signal)
+    if decision.allowed:
+        return None
+    return ToolContinue(result=permission_denial_result(request, decision))
+
+
+async def _orchestration_failure_outcome(
+    *,
+    result: ToolOrchestrationResult,
+    bus: EventBus,
+) -> ToolOutcome:
+    if result.status == "cancelled":
+        reason = result.cancel_reason or "cancelled"
+        return ToolContinue(result=ToolResult(
+            content=[TextContent(type="text", text=f"tool cancelled: {reason}")],
+            is_error=True,
+        ))
+    exc = result.error
+    reason = str(exc) if exc is not None else result.status
+    err_returns = await bus.emit(
+        ToolErrorEvent.CHANNEL,
+        ToolErrorEvent(
+            kind="execution_failed",
+            tool_name=result.item.call.name,
+            reason=reason,
+            exception=exc,
+        ),
+    )
+    err_text = _last_key(err_returns, "text") or (
+        f"tool error: {result.item.call.name}: {reason}"
+    )
+    return ToolContinue(result=ToolResult(
+        content=[TextContent(type="text", text=err_text)],
+        is_error=True,
+    ))
+
+
 async def _emit_lifecycle_diagnostic(
     bus: EventBus,
     *,
@@ -430,6 +536,13 @@ async def _abandon_resource_txn(txn: ResourceTxn | None) -> None:
         await txn.abandon()
 
 
+def _next_node_seq(store: TrajectoryNodeStore, session_id: str) -> int:
+    latest = store.query_nodes(
+        TrajectoryNodeQuery(session_id=session_id, sort="desc", limit=1)
+    )
+    return latest[0].seq + 1 if latest else 0
+
+
 def _clear_resource_txn(services: ServiceRegistry | None) -> None:
     if services is not None:
         services.unregister(RESOURCE_TXN_SERVICE)
@@ -489,6 +602,8 @@ async def drive(
     tools: list[Tool],
     store: TrajectoryStore | None = None,
     session_id: str = "",
+    root_session_id: str | None = None,
+    parent_session_id: str | None = None,
     system: str | None = None,
     context_policies: list[ContextPolicy] | None = None,
     trigger_renderers: dict[str, TriggerRenderer] | None = None,
@@ -499,6 +614,9 @@ async def drive(
     resource_writer: ResourceWriter | None = None,
     services: ServiceRegistry | None = None,
     tool_executor: ToolExecutor | None = None,
+    tool_orchestrator: ToolOrchestrator | None = None,
+    permission_policy: PermissionPolicy | None = None,
+    trajectory_node_store: TrajectoryNodeStore | None = None,
     max_turns: int | None = None,
     thinking: ThinkingLevel = "off",
     max_tool_calls: int | None = None,
@@ -587,6 +705,8 @@ async def drive(
                 parent_cancel_signal=cancel_signal,
                 thinking=thinking,
                 tool_executor=tool_executor,
+                tool_orchestrator=tool_orchestrator,
+                permission_policy=permission_policy,
                 store=store,
                 session_id=session_id,
                 tool_calls_remaining=(
@@ -614,6 +734,29 @@ async def drive(
             trajectory.finalize_commit(turn)
             turn_published = True
             _clear_resource_txn(services)
+            if trajectory_node_store is not None:
+                try:
+                    nodes = turn_to_nodes(
+                        turn,
+                        session_id=session_id,
+                        start_seq=_next_node_seq(trajectory_node_store, session_id),
+                        root_session_id=root_session_id,
+                        parent_session_id=parent_session_id,
+                        renderers=trigger_renderers,
+                    )
+                    if nodes:
+                        await asyncio.to_thread(
+                            trajectory_node_store.append_nodes,
+                            session_id,
+                            nodes,
+                        )
+                except Exception as exc:
+                    logger.exception("trajectory node projection failed")
+                    await _emit_lifecycle_diagnostic(
+                        bus,
+                        action="trajectory_node_projection",
+                        exc=exc,
+                    )
 
             await _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
             triggers.complete(turn)
@@ -681,6 +824,8 @@ async def _react_loop(
     parent_cancel_signal: CancelSignal | None,
     thinking: ThinkingLevel,
     tool_executor: ToolExecutor | None,
+    tool_orchestrator: ToolOrchestrator | None,
+    permission_policy: PermissionPolicy | None,
     store: TrajectoryStore | None,
     session_id: str,
     tool_calls_remaining: int | None,
@@ -850,6 +995,8 @@ async def _react_loop(
 
         if tool_calls:
             result_blocks: list[ToolResultBlock] = []
+            immediate_outcomes: dict[int, ToolOutcome] = {}
+            work_items: list[ToolWorkItem] = []
             for index, tc in enumerate(tool_calls):
                 if turn_signal.is_set():
                     _append_interrupted_tool_records(
@@ -865,7 +1012,11 @@ async def _react_loop(
 
                 if (
                     tool_calls_remaining is not None
-                    and tool_calls_used >= tool_calls_remaining
+                    and (
+                        tool_calls_used
+                        + len(immediate_outcomes)
+                        + len(work_items)
+                    ) >= tool_calls_remaining
                 ):
                     execution.add_round(response, tool_records)
                     return Outcome(cause=BudgetExhausted(
@@ -879,113 +1030,152 @@ async def _react_loop(
                     tool_call_id=tc.id, tool_name=tc.name, args=dict(tc.arguments),
                 ))
                 blocked = _last_key(tc_returns, "block")
-                outcome: ToolOutcome
 
                 if blocked:
                     reason = _last_key(tc_returns, "reason") or "blocked"
-                    outcome = ToolContinue(result=ToolResult(
+                    immediate_outcomes[index] = ToolContinue(result=ToolResult(
                         content=[TextContent(type="text", text=f"blocked: {reason}")],
                         is_error=True,
                     ))
-                else:
-                    rewrite = _last_key(tc_returns, "rewrite")
-                    args = dict(tc.arguments)
-                    if isinstance(rewrite, dict):
-                        args.update(rewrite)
-                    if allowed_tool_names is not None and tc.name not in allowed_tool_names:
-                        outcome = ToolContinue(result=ToolResult(
-                            content=[TextContent(
-                                type="text",
-                                text=f"blocked by tool_allowlist: {tc.name}",
-                            )],
-                            is_error=True,
-                        ))
-                    else:
-                        tool = tool_index.get(tc.name)
-                        if tool is None:
-                            outcome = ToolContinue(result=ToolResult(
-                                content=[TextContent(type="text", text=f"unknown tool: {tc.name}")],
-                                is_error=True,
-                            ))
-                        else:
-                            try:
-                                raw = await execute_tool_call(
-                                    tool,
-                                    args,
-                                    signal=turn_signal,
-                                    executor=tool_executor,
-                                )
-                                if turn_signal.is_set():
-                                    _append_interrupted_tool_records(
-                                        calls=tool_calls[index:],
-                                        records=tool_records,
-                                        result_blocks=result_blocks,
-                                    )
-                                    execution.add_round(response, tool_records)
-                                    return Outcome(cause=_signal_aborted(turn_signal)), _meta(
-                                        total_input, total_output, start_ns,
-                                        cache_read=total_cache_read,
-                                        cache_write=total_cache_write,
-                                    ), tool_calls_used
-                                outcome = raw if isinstance(raw, ToolOutcome) else ToolContinue(result=raw)
-                            except asyncio.CancelledError:
-                                if turn_signal.is_set():
-                                    _append_interrupted_tool_records(
-                                        calls=tool_calls[index:],
-                                        records=tool_records,
-                                        result_blocks=result_blocks,
-                                    )
-                                    execution.add_round(response, tool_records)
-                                    return Outcome(cause=_signal_aborted(turn_signal)), _meta(
-                                        total_input, total_output, start_ns,
-                                        cache_read=total_cache_read,
-                                        cache_write=total_cache_write,
-                                    ), tool_calls_used
-                                raise
-                            except Exception as exc:
-                                if turn_signal.is_set():
-                                    _append_interrupted_tool_records(
-                                        calls=tool_calls[index:],
-                                        records=tool_records,
-                                        result_blocks=result_blocks,
-                                    )
-                                    execution.add_round(response, tool_records)
-                                    return Outcome(cause=_signal_aborted(turn_signal)), _meta(
-                                        total_input, total_output, start_ns,
-                                        cache_read=total_cache_read,
-                                        cache_write=total_cache_write,
-                                    ), tool_calls_used
-                                logger.debug("tool {} raised: {}", tc.name, exc)
-                                err_returns = await bus.emit(
-                                    ToolErrorEvent.CHANNEL,
-                                    ToolErrorEvent(kind="execution_failed", tool_name=tc.name, reason=str(exc), exception=exc),
-                                )
-                                err_text = _last_key(err_returns, "text") or f"tool error: {tc.name}: {exc}"
-                                outcome = ToolContinue(result=ToolResult(
-                                    content=[TextContent(type="text", text=err_text)],
-                                    is_error=True,
-                                ))
+                    continue
 
-                result = outcome.result if isinstance(outcome, (ToolContinue, ToolTerminate)) else ToolResult(content=[], is_error=True)
+                rewrite = _last_key(tc_returns, "rewrite")
+                args = dict(tc.arguments)
+                if isinstance(rewrite, dict):
+                    args.update(rewrite)
+                if allowed_tool_names is not None and tc.name not in allowed_tool_names:
+                    immediate_outcomes[index] = ToolContinue(result=ToolResult(
+                        content=[TextContent(
+                            type="text",
+                            text=f"blocked by tool_allowlist: {tc.name}",
+                        )],
+                        is_error=True,
+                    ))
+                    continue
+
+                tool = tool_index.get(tc.name)
+                if tool is None:
+                    immediate_outcomes[index] = ToolContinue(result=ToolResult(
+                        content=[TextContent(type="text", text=f"unknown tool: {tc.name}")],
+                        is_error=True,
+                    ))
+                    continue
+
+                permission_outcome = await _permission_outcome(
+                    policy=permission_policy,
+                    request=_permission_request(
+                        tc=tc,
+                        args=args,
+                        session_id=session_id,
+                        execution=execution,
+                    ),
+                    signal=turn_signal,
+                )
+                if turn_signal.is_set():
+                    _append_interrupted_tool_records(
+                        calls=tool_calls[index:],
+                        records=tool_records,
+                        result_blocks=result_blocks,
+                    )
+                    execution.add_round(response, tool_records)
+                    return Outcome(cause=_signal_aborted(turn_signal)), _meta(
+                        total_input, total_output, start_ns,
+                        cache_read=total_cache_read,
+                        cache_write=total_cache_write,
+                    ), tool_calls_used
+                if permission_outcome is not None:
+                    immediate_outcomes[index] = permission_outcome
+                    continue
+
+                work_items.append(
+                    ToolWorkItem(
+                        index=index,
+                        call=tc,
+                        tool=tool,
+                        args=args,
+                        requirements=tool_execution_requirements(tool)
+                        or ToolExecutionRequirements(),
+                    )
+                )
+
+            outcomes_by_index: dict[int, ToolOutcome] = dict(immediate_outcomes)
+            if work_items:
+                orchestrator = tool_orchestrator or default_tool_orchestrator()
+                orchestration_results = await orchestrator.execute_batch(
+                    ToolOrchestrationRequest(
+                        items=tuple(work_items),
+                        session_id=session_id,
+                        turn_id=execution.id,
+                        turn_index=execution.index,
+                    ),
+                    signal=turn_signal,
+                    executor=tool_executor,
+                )
+                for orch_result in orchestration_results:
+                    if (
+                        turn_signal.is_set()
+                        and orch_result.status in {"cancelled", "skipped"}
+                    ):
+                        continue
+                    if orch_result.status == "completed" and orch_result.output is not None:
+                        outcomes_by_index[orch_result.item.index] = _normalize_tool_output(
+                            orch_result.output
+                        )
+                    else:
+                        outcomes_by_index[orch_result.item.index] = (
+                            await _orchestration_failure_outcome(
+                                result=orch_result,
+                                bus=bus,
+                            )
+                        )
+
+            if turn_signal.is_set() and len(outcomes_by_index) < len(tool_calls):
+                missing = [
+                    call
+                    for index, call in enumerate(tool_calls)
+                    if index not in outcomes_by_index
+                ]
+                _append_interrupted_tool_records(
+                    calls=missing,
+                    records=tool_records,
+                    result_blocks=result_blocks,
+                )
+                execution.add_round(response, tool_records)
+                return Outcome(cause=_signal_aborted(turn_signal)), _meta(
+                    total_input, total_output, start_ns,
+                    cache_read=total_cache_read,
+                    cache_write=total_cache_write,
+                ), tool_calls_used
+
+            for index, tc in enumerate(tool_calls):
+                outcome = outcomes_by_index.get(index)
+                if outcome is None:
+                    continue
+                result = _outcome_result(outcome)
                 res_returns = await bus.emit(ToolResultEvent.CHANNEL, ToolResultEvent(
                     tool_call_id=tc.id, tool_name=tc.name, result=result,
                 ))
                 replaced = _last_of(res_returns, ToolResult)
                 final_result = replaced if replaced is not None else result
 
-                result_block = ToolResultBlock(
-                    type="tool_result", tool_call_id=tc.id,
-                    content=list(final_result.content), is_error=final_result.is_error,
-                    extras=final_result.extras,
-                )
+                result_block = _tool_result_block(tc.id, final_result)
                 result_blocks.append(result_block)
                 tool_records.append(ToolRecord(call=tc, result=result_block))
                 paired_outcomes.append((tc.name, outcome))
                 tool_calls_used += 1
 
-            messages.append(ToolResultMessage(
-                role="tool_result", content=result_blocks, timestamp=time.time(),
-            ))
+            if result_blocks:
+                messages.append(ToolResultMessage(
+                    role="tool_result", content=result_blocks, timestamp=time.time(),
+                ))
+
+        if turn_signal.is_set():
+            execution.add_round(response, tool_records)
+            return Outcome(cause=_signal_aborted(turn_signal)), _meta(
+                total_input, total_output, start_ns,
+                cache_read=total_cache_read,
+                cache_write=total_cache_write,
+            ), tool_calls_used
 
         execution.add_round(response, tool_records)
 

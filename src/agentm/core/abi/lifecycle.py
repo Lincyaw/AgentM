@@ -1,153 +1,114 @@
-"""Lifecycle hooks for fork, replay, resume, and crash recovery.
+"""World-effect lifecycle ports.
 
-Tools have side effects (file writes, command execution, sandbox
-state).  When a session forks or replays, the environment state may
-be inconsistent with the trajectory.  These hooks let atoms and
-environments execute recovery strategies at the right moments.
-
-Hook registration is per-session via ``api.register_lifecycle_hook``.
-Hooks run in registration order.  Failures are logged but do not
-block the operation — partial recovery is better than no session.
-
-Hook taxonomy:
-
-- ``on_fork``: a new session is being created from a prefix of this
-  session's trajectory.  The hook receives the fork point and can set
-  up the child environment (e.g., snapshot a sandbox).
-- ``on_resume``: a session is being loaded from persisted state.  The
-  hook receives the committed turns and can restore environment state
-  (e.g., replay file writes into a fresh sandbox).
-- ``on_replay``: like resume but the trajectory will be re-executed
-  from a specific point.  The hook can roll back environment state to
-  match the replay point.
-- ``on_abandon``: a turn was abandoned (crash / interrupt).  The hook
-  can clean up partial side effects from the uncommitted turn.
+Lifecycle is the boundary that keeps a session's committed trajectory aligned
+with external effects. It is intentionally narrower than a generic hook API:
+implementations manage turn-scoped effect transactions, forked world state, and
+resume restoration.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from agentm.core.abi.trajectory import Round, Turn, TurnRef
+from agentm.core.abi.trajectory import Turn, TurnRef
+
+
+LifecycleMeta = Mapping[str, str | int | float | bool | None]
 
 
 @dataclass(frozen=True, slots=True)
-class ForkEvent:
-    """Passed to ``on_fork`` hooks."""
-
-    source_session_id: str
-    fork_session_id: str
-    fork_point: TurnRef
-    source_turns: Sequence[Turn]
-
-
-@dataclass(frozen=True, slots=True)
-class ResumeEvent:
-    """Passed to ``on_resume`` hooks."""
+class EffectTxn:
+    """Opaque handle for side effects produced while one turn is executing."""
 
     session_id: str
-    committed_turns: Sequence[Turn]
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayEvent:
-    """Passed to ``on_replay`` hooks."""
-
-    session_id: str
-    replay_from: TurnRef
-    committed_turns: Sequence[Turn]
-
-
-@dataclass(frozen=True, slots=True)
-class AbandonEvent:
-    """Passed to ``on_abandon`` hooks."""
-
-    session_id: str
+    turn_id: str
     turn_index: int
-    completed_rounds: Sequence[Round]
+    token: str = ""
+    metadata: LifecycleMeta = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentSnapshot:
+    """Durable identity for a world-state snapshot."""
+
+    id: str
+    session_id: str = ""
+    ref: TurnRef | None = None
+    metadata: LifecycleMeta = field(default_factory=dict)
 
 
 @runtime_checkable
-class LifecycleHook(Protocol):
-    """Atom-registered hook for session lifecycle transitions.
+class EffectScope(Protocol):
+    """Turn-scoped lifecycle for external effects.
 
-    Each method is optional — implement only the events you care about.
-    All methods are async to support I/O (sandbox API calls, file
-    operations).
+    ``begin_turn`` starts an effect transaction for the active turn,
+    ``commit_turn`` finalizes it after durable commit, and ``abandon_turn``
+    discards it when execution fails or is cancelled.
     """
 
-    async def on_fork(self, event: ForkEvent) -> None: ...
+    async def begin_turn(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        turn_index: int,
+    ) -> EffectTxn:
+        ...
 
-    async def on_resume(self, event: ResumeEvent) -> None: ...
+    async def commit_turn(self, txn: EffectTxn, turn: Turn) -> None:
+        ...
 
-    async def on_replay(self, event: ReplayEvent) -> None: ...
+    async def abandon_turn(self, txn: EffectTxn) -> None:
+        ...
 
-    async def on_abandon(self, event: AbandonEvent) -> None: ...
+    async def fork_at(
+        self,
+        ref: TurnRef,
+        *,
+        source_session_id: str,
+        child_session_id: str,
+    ) -> "EffectScope":
+        ...
+
+    async def restore(
+        self,
+        *,
+        session_id: str,
+        turns: Sequence[Turn],
+    ) -> None:
+        ...
 
 
-class LifecycleHookRegistry:
-    """Collects and dispatches lifecycle hooks."""
+@runtime_checkable
+class EnvironmentSnapshotter(Protocol):
+    """Backend-owned snapshot/restore boundary for execution environments."""
 
-    __slots__ = ("_hooks",)
+    async def snapshot(
+        self,
+        *,
+        session_id: str,
+        ref: TurnRef,
+    ) -> EnvironmentSnapshot:
+        ...
 
-    def __init__(self) -> None:
-        self._hooks: list[LifecycleHook] = []
+    async def fork_from(
+        self,
+        snapshot: EnvironmentSnapshot,
+        *,
+        child_session_id: str,
+    ) -> EnvironmentSnapshot | None:
+        ...
 
-    def register(self, hook: LifecycleHook) -> None:
-        self._hooks.append(hook)
-
-    async def fire_fork(self, event: ForkEvent) -> None:
-        for hook in self._hooks:
-            if hasattr(hook, "on_fork"):
-                try:
-                    await hook.on_fork(event)
-                except (SystemExit, KeyboardInterrupt):
-                    raise
-                except BaseException:
-                    from loguru import logger
-                    logger.exception("lifecycle on_fork failed")
-
-    async def fire_resume(self, event: ResumeEvent) -> None:
-        for hook in self._hooks:
-            if hasattr(hook, "on_resume"):
-                try:
-                    await hook.on_resume(event)
-                except (SystemExit, KeyboardInterrupt):
-                    raise
-                except BaseException:
-                    from loguru import logger
-                    logger.exception("lifecycle on_resume failed")
-
-    async def fire_replay(self, event: ReplayEvent) -> None:
-        for hook in self._hooks:
-            if hasattr(hook, "on_replay"):
-                try:
-                    await hook.on_replay(event)
-                except (SystemExit, KeyboardInterrupt):
-                    raise
-                except BaseException:
-                    from loguru import logger
-                    logger.exception("lifecycle on_replay failed")
-
-    async def fire_abandon(self, event: AbandonEvent) -> None:
-        for hook in self._hooks:
-            if hasattr(hook, "on_abandon"):
-                try:
-                    await hook.on_abandon(event)
-                except (SystemExit, KeyboardInterrupt):
-                    raise
-                except BaseException:
-                    from loguru import logger
-                    logger.exception("lifecycle on_abandon failed")
+    async def restore_to(self, snapshot: EnvironmentSnapshot) -> None:
+        ...
 
 
 __all__ = [
-    "AbandonEvent",
-    "ForkEvent",
-    "LifecycleHook",
-    "LifecycleHookRegistry",
-    "ReplayEvent",
-    "ResumeEvent",
+    "EffectScope",
+    "EffectTxn",
+    "EnvironmentSnapshot",
+    "EnvironmentSnapshotter",
+    "LifecycleMeta",
 ]

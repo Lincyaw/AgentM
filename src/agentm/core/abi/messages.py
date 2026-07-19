@@ -15,10 +15,42 @@ Design constraints:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .termination import TerminationHint
+
+MessageVisibility = Literal["visible", "hidden", "replay_only"]
+MessageTokenAccounting = Literal["normal", "exclude", "metadata_only"]
+MessageReplayPolicy = Literal["include", "skip", "metadata_only"]
+
+
+@dataclass(slots=True, frozen=True)
+class MessageMeta:
+    """Control-plane metadata for synthetic and injected messages.
+
+    The provider-facing message roles stay intentionally small. Hosts,
+    presenters, replay tools, and context policies use this metadata to
+    distinguish ordinary conversation from hidden attachments, no-response
+    prompts, permission results, hook output, mode changes, or local command
+    output.
+    """
+
+    synthetic: bool = False
+    synthetic_kind: str | None = None
+    origin: str | None = None
+    visibility: MessageVisibility = "visible"
+    no_response_requested: bool = False
+    token_accounting: MessageTokenAccounting = "normal"
+    replay: MessageReplayPolicy = "include"
+    target_session_id: str | None = None
+    target_agent_id: str | None = None
+    mode: str | None = None
+    tags: Mapping[str, object] = field(default_factory=dict)
+
+
+DEFAULT_MESSAGE_META = MessageMeta()
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,6 +106,7 @@ class ToolResultBlock:
     content: list[TextContent | ImageContent]
     is_error: bool = False
     deterministic: bool = True
+    extras: Any = None
 
 
 # Discriminated union of content blocks that can appear inside an assistant
@@ -99,6 +132,7 @@ class UserMessage:
     role: Literal["user"]
     content: list[TextContent | ImageContent]
     timestamp: float
+    meta: MessageMeta = field(default_factory=MessageMeta)
 
 
 @dataclass(slots=True, frozen=True)
@@ -121,6 +155,7 @@ class AssistantMessage:
     stop_reason: str | None = None
     termination: TerminationHint | None = None
     usage: Usage | None = None
+    meta: MessageMeta = field(default_factory=MessageMeta)
 
 
 @dataclass(slots=True, frozen=True)
@@ -134,6 +169,7 @@ class ToolResultMessage:
     role: Literal["tool_result"]
     content: list[ToolResultBlock]
     timestamp: float
+    meta: MessageMeta = field(default_factory=MessageMeta)
 
 
 # Discriminated union of every message kind the agent loop manipulates.
@@ -143,7 +179,12 @@ AgentMessage = UserMessage | AssistantMessage | ToolResultMessage
 # --- Helper constructors ----------------------------------------------------
 
 
-def text_message(text: str, *, timestamp: float = 0.0) -> UserMessage:
+def text_message(
+    text: str,
+    *,
+    timestamp: float = 0.0,
+    meta: MessageMeta | None = None,
+) -> UserMessage:
     """Build a ``UserMessage`` containing a single text block.
 
     Convenience for tests and simple invocations. Callers wanting an accurate
@@ -154,6 +195,33 @@ def text_message(text: str, *, timestamp: float = 0.0) -> UserMessage:
         role="user",
         content=[TextContent(type="text", text=text)],
         timestamp=timestamp,
+        meta=meta or MessageMeta(),
+    )
+
+
+def synthetic_user_message(
+    text: str,
+    *,
+    kind: str,
+    origin: str | None = "system",
+    visibility: MessageVisibility = "hidden",
+    no_response_requested: bool = False,
+    timestamp: float = 0.0,
+    tags: Mapping[str, object] | None = None,
+) -> UserMessage:
+    """Build a user-side synthetic message with explicit replay/UI metadata."""
+
+    return text_message(
+        text,
+        timestamp=timestamp,
+        meta=MessageMeta(
+            synthetic=True,
+            synthetic_kind=kind,
+            origin=origin,
+            visibility=visibility,
+            no_response_requested=no_response_requested,
+            tags=tags or {},
+        ),
     )
 
 
@@ -162,6 +230,7 @@ def tool_result(
     text: str,
     *,
     is_error: bool = False,
+    extras: Any = None,
     timestamp: float = 0.0,
 ) -> ToolResultMessage:
     """Build a ``ToolResultMessage`` wrapping a single text-only result block."""
@@ -171,6 +240,7 @@ def tool_result(
         tool_call_id=tool_call_id,
         content=[TextContent(type="text", text=text)],
         is_error=is_error,
+        extras=extras,
     )
     return ToolResultMessage(role="tool_result", content=[block], timestamp=timestamp)
 
@@ -180,7 +250,12 @@ __all__ = [
     "AssistantContent",
     "AssistantMessage",
     "ImageContent",
+    "DEFAULT_MESSAGE_META",
     "TerminationHint",
+    "MessageMeta",
+    "MessageReplayPolicy",
+    "MessageTokenAccounting",
+    "MessageVisibility",
     "TextContent",
     "ThinkingBlock",
     "ToolCallBlock",
@@ -188,6 +263,7 @@ __all__ = [
     "ToolResultMessage",
     "Usage",
     "UserMessage",
+    "synthetic_user_message",
     "text_message",
     "tool_result",
 ]

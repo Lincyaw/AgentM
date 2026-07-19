@@ -25,7 +25,7 @@ bus handlers transform the live tail.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -34,10 +34,10 @@ if TYPE_CHECKING:
 
 from agentm.core.abi.messages import (
     AgentMessage,
-    TextContent,
     ToolResultBlock,
     ToolResultMessage,
     UserMessage,
+    synthetic_user_message,
 )
 from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.trigger import (
@@ -50,9 +50,6 @@ from agentm.core.abi.trigger import (
     TriggerRenderer,
     UserInput,
 )
-
-ContextPolicyState = Mapping[str, object]
-
 
 @dataclass(frozen=True, slots=True)
 class PolicyContext:
@@ -73,8 +70,8 @@ class ContextPolicy(Protocol):
     ``transform`` is async so policies can make LLM calls (compaction)
     or query external services.
 
-    ``bind`` is optional — policies that need session-scoped state
-    (caching, persistence) should implement it.
+    Session binding is a separate optional capability; transform-only policies
+    satisfy this protocol without implementing a no-op method.
     """
 
     async def transform(
@@ -83,31 +80,12 @@ class ContextPolicy(Protocol):
         turns: Sequence[Turn],
     ) -> list[AgentMessage]: ...
 
-    def bind(self, ctx: PolicyContext) -> None: ...
-
 
 @runtime_checkable
-class PersistentContextPolicy(ContextPolicy, Protocol):
-    """Context policy with state that can be persisted across resume/fork.
+class BindableContextPolicy(Protocol):
+    """Optional session-binding capability for context policies."""
 
-    Implement this when a policy replaces durable-looking context with a
-    computed summary, cache marker, or compaction boundary that must survive
-    process restarts. The runtime can persist the returned mapping under
-    ``state_key`` without knowing the policy's internal schema.
-    """
-
-    @property
-    def state_key(self) -> str:
-        """Stable storage key scoped to one session."""
-        ...
-
-    def dump_state(self) -> ContextPolicyState:
-        """Return a serializable policy state snapshot."""
-        ...
-
-    def load_state(self, state: ContextPolicyState) -> None:
-        """Restore a previously dumped policy state snapshot."""
-        ...
+    def bind(self, ctx: PolicyContext) -> None: ...
 
 
 # --- Trigger → message renderers --------------------------------------------
@@ -128,10 +106,11 @@ def _render_user_input(trigger: UserInput) -> list[AgentMessage]:
 def _render_system_reminder(source: str, text: str) -> list[AgentMessage]:
     wrapped = f'<system-reminder source="{source}">\n{text}\n</system-reminder>'
     return [
-        UserMessage(
-            role="user",
-            content=[TextContent(type="text", text=wrapped)],
-            timestamp=0.0,
+        synthetic_user_message(
+            wrapped,
+            kind=f"{source}_reminder",
+            origin=source,
+            visibility="hidden",
         )
     ]
 
@@ -245,9 +224,8 @@ def build_context_sync(
 
 
 __all__ = [
+    "BindableContextPolicy",
     "ContextPolicy",
-    "ContextPolicyState",
-    "PersistentContextPolicy",
     "PolicyContext",
     "build_context",
     "build_context_sync",

@@ -10,6 +10,7 @@ from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
 from agentm.core.abi.tool_executor import (
     ToolExecutionCapabilities,
     ToolExecutionRequest,
+    ToolExecutionRequirements,
     ToolExecutor,
     ToolInterruptBehavior,
     tool_execution_requirements,
@@ -78,21 +79,51 @@ class DirectToolExecutor:
 _DIRECT_EXECUTOR = DirectToolExecutor()
 
 
+def _validate_requirements(
+    requirements: ToolExecutionRequirements | None,
+    capabilities: ToolExecutionCapabilities,
+) -> None:
+    if requirements is None:
+        return
+    unsupported: list[str] = []
+    if requirements.isolation not in capabilities.isolation:
+        unsupported.append(f"isolation={requirements.isolation}")
+    if requirements.filesystem not in capabilities.filesystem:
+        unsupported.append(f"filesystem={requirements.filesystem}")
+    if requirements.killable and not capabilities.killable:
+        unsupported.append("killable=true")
+    if requirements.network and not capabilities.network:
+        unsupported.append("network=true")
+    if requirements.concurrency not in capabilities.concurrency:
+        unsupported.append(f"concurrency={requirements.concurrency}")
+    if requirements.interrupt not in capabilities.interrupt:
+        unsupported.append(f"interrupt={requirements.interrupt}")
+    if unsupported:
+        raise RuntimeError(
+            "tool executor does not satisfy requirements: " + ", ".join(unsupported)
+        )
+
+
 async def execute_tool_call(
     tool: Tool,
     args: Mapping[str, object],
     *,
     signal: CancelSignal | None,
     executor: ToolExecutor | None = None,
+    requirements: ToolExecutionRequirements | None = None,
 ) -> ToolResult | ToolOutcome:
     """Execute one tool call through the configured executor boundary."""
 
+    resolved_requirements = (
+        requirements if requirements is not None else tool_execution_requirements(tool)
+    )
     request = ToolExecutionRequest(
         tool=tool,
         args=args,
-        requirements=tool_execution_requirements(tool),
+        requirements=resolved_requirements,
     )
     chosen = executor or _DIRECT_EXECUTOR
+    _validate_requirements(resolved_requirements, chosen.capabilities())
     return await chosen.execute(request, signal=signal)
 
 

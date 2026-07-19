@@ -18,15 +18,18 @@ from agentm.core.abi.cancel import CancelReason, CancelSignal
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
 from agentm.core.abi.lifecycle import EffectScope
 from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.operations import Operations
+from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
+from agentm.core.abi.tool_orchestration import ToolOrchestrator
 from agentm.core.abi.provider import ProviderConfig, ProviderResolver
 from agentm.core.abi.resource import ResourceTxn, ResourceWriter
 from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.services import ServiceRegistry
-from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.store import TrajectoryNodeStore, TrajectoryStore
 from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer
@@ -92,20 +95,19 @@ class AgentSessionConfig:
     model: Model | None = None
     resource_writer: ResourceWriter | None = None
     tool_executor: ToolExecutor | None = None
+    tool_orchestrator: ToolOrchestrator | None = None
+    permission_policy: PermissionPolicy | None = None
     effect_scope: EffectScope | None = None
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
     store: TrajectoryStore | None = None
+    trajectory_node_store: TrajectoryNodeStore | None = None
     initial_turns: list[Turn] = field(default_factory=list)
     tool_allowlist: list[str] | None = None
     purpose: str = "subagent"
-    lineage: dict[str, Any] = field(default_factory=dict)
     loop_config: LoopConfig | None = None
-    task_id: str | None = None
-    persona: str | None = None
     experiment: dict[str, Any] | None = None
-    trace_label: str | None = None
     session_id: str | None = None
     root_session_id: str | None = None
     parent_session_id: str | None = None
@@ -223,6 +225,10 @@ class AtomAPI(Protocol):
         """Register named operation services, such as ``bash``."""
         ...
 
+    def get_operations(self) -> Operations | None:
+        """Return the active operations bundle, if an environment registered one."""
+        ...
+
     def register_resource_writer(
         self,
         writer: ResourceWriter,
@@ -251,6 +257,45 @@ class AtomAPI(Protocol):
 
     def get_tool_executor(self) -> ToolExecutor | None:
         """Return the tool execution boundary, when registered."""
+        ...
+
+    def register_tool_orchestrator(
+        self,
+        orchestrator: ToolOrchestrator,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register the batch scheduling boundary for tool calls."""
+        ...
+
+    def get_tool_orchestrator(self) -> ToolOrchestrator | None:
+        """Return the batch scheduling boundary, when registered."""
+        ...
+
+    def register_permission_policy(
+        self,
+        policy: PermissionPolicy,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register the permission decision boundary for tool calls."""
+        ...
+
+    def get_permission_policy(self) -> PermissionPolicy | None:
+        """Return the permission policy, when registered."""
+        ...
+
+    def register_trajectory_node_store(
+        self,
+        store: TrajectoryNodeStore,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register the message-level trajectory persistence/query boundary."""
+        ...
+
+    def get_trajectory_node_store(self) -> TrajectoryNodeStore | None:
+        """Return the message-level trajectory store, when registered."""
         ...
 
     def register_effect_scope(

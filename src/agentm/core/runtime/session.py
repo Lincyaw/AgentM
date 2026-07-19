@@ -21,18 +21,23 @@ from loguru import logger
 from agentm.core.abi.cancel import CancelReason, CancelSignal, EventCancelSource
 from agentm.core.abi.codec import CodecRegistry, TriggerCodec
 from agentm.core.abi.catalog import (
+    ActiveSetFingerprint,
     AtomCatalog,
     VersionedResourceStore,
 )
 from agentm.core.abi.lifecycle import EffectScope
 from agentm.core.abi.messages import AgentMessage, ImageContent, TextContent
+from agentm.core.abi.permission import PermissionPolicy
+from agentm.core.abi.operations import EnvironmentOperations, Operations
 from agentm.core.abi.provider import ProviderConfig, ProviderResolver
 from agentm.core.abi.resource import ResourceTxn, ResourceWriter
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
+from agentm.core.abi.tool_orchestration import ToolOrchestrator
 from agentm.core.abi.bus import EventBus, EventBusObserver, Handler
 from agentm.core.abi.context import (
+    BindableContextPolicy,
     ContextPolicy,
     PolicyContext,
     build_context_sync,
@@ -47,15 +52,27 @@ from agentm.core.abi.events import (
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.roles import (
     ATOM_CATALOG_SERVICE,
+    ACTIVE_SET_FINGERPRINT_SERVICE,
+    BASH_OPERATIONS_SERVICE,
     EFFECT_SCOPE_SERVICE,
+    ENVIRONMENT_OPERATIONS_SERVICE,
+    OPERATIONS_SERVICE,
+    PERMISSION_POLICY_SERVICE,
     PROVIDER_RESOLVER_SERVICE,
+    RESOLVED_SESSION_SPEC_SERVICE,
     RESOURCE_WRITER_SERVICE,
     RESOURCE_TXN_SERVICE,
     TOOL_EXECUTOR_SERVICE,
+    TOOL_ORCHESTRATOR_SERVICE,
+    TRAJECTORY_NODE_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_SERVICE,
 )
-from agentm.core.abi.session_api import AgentSessionConfig, SessionContext
-from agentm.core.abi.store import SessionMeta, TrajectoryStore
+from agentm.core.abi.session_api import (
+    AgentSessionConfig,
+    ResolvedSessionSpec,
+    SessionContext,
+)
+from agentm.core.abi.store import SessionMeta, TrajectoryNodeStore, TrajectoryStore
 from agentm.core.abi.trajectory import Turn, TurnRef
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
@@ -93,6 +110,11 @@ class Session:
         thinking: ThinkingLevel = "off",
         cancel_signal: CancelSignal | None = None,
         provider_resolver: ProviderResolver | None = None,
+        tool_executor: ToolExecutor | None = None,
+        tool_orchestrator: ToolOrchestrator | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        trajectory_node_store: TrajectoryNodeStore | None = None,
+        versioned_resource_store: VersionedResourceStore | None = None,
         services: ServiceRegistry | None = None,
         cwd: str = "",
         purpose: str = "root",
@@ -155,6 +177,19 @@ class Session:
                 provider_resolver,
                 scope="host",
             )
+        if tool_executor is not None:
+            self.register_tool_executor(tool_executor, replace=True)
+        if tool_orchestrator is not None:
+            self.register_tool_orchestrator(tool_orchestrator, replace=True)
+        if permission_policy is not None:
+            self.register_permission_policy(permission_policy, replace=True)
+        if trajectory_node_store is not None:
+            self.register_trajectory_node_store(trajectory_node_store, replace=True)
+        if versioned_resource_store is not None:
+            self.register_versioned_resource_store(
+                versioned_resource_store,
+                replace=True,
+            )
         if tool_allowlist is not None:
             self.services.register("tool_allowlist", tuple(tool_allowlist), scope="session")
 
@@ -191,7 +226,7 @@ class Session:
             stream_fn=self._stream_fn,
         )
         for policy in self.context_policies:
-            if hasattr(policy, "bind"):
+            if isinstance(policy, BindableContextPolicy):
                 policy.bind(policy_ctx)
 
         self.bus.freeze_clear()
@@ -222,6 +257,8 @@ class Session:
                 tools=self.tools,
                 store=self.store,
                 session_id=self.id,
+                root_session_id=self.ctx.root_session_id,
+                parent_session_id=self.ctx.parent_session_id,
                 system=self.system,
                 context_policies=self.context_policies,
                 trigger_renderers=self.trigger_renderers,
@@ -232,6 +269,9 @@ class Session:
                 resource_writer=self.get_resource_writer(),
                 services=self.services,
                 tool_executor=self.get_tool_executor(),
+                tool_orchestrator=self.get_tool_orchestrator(),
+                permission_policy=self.get_permission_policy(),
+                trajectory_node_store=self.get_trajectory_node_store(),
                 max_turns=self._max_turns,
                 max_tool_calls=self._max_tool_calls,
                 tool_allowlist=self._tool_allowlist(),
@@ -512,13 +552,30 @@ class Session:
             return self._active_provider_name
         return next(reversed(providers))
 
+    def _resolved_session_spec(self) -> ResolvedSessionSpec | None:
+        spec = self.services.get(RESOLVED_SESSION_SPEC_SERVICE)
+        return spec if isinstance(spec, ResolvedSessionSpec) else None
+
+    def _active_set_fingerprint(self) -> ActiveSetFingerprint | None:
+        fingerprint = self.services.get(ACTIVE_SET_FINGERPRINT_SERVICE)
+        return fingerprint if isinstance(fingerprint, ActiveSetFingerprint) else None
+
     def register_operations(self, **kwargs: object) -> None:
         """Register named operation services."""
         from agentm.core.abi.operations import BashOperations
 
-        protocols = {"bash": BashOperations}
+        service_names = {
+            "bash": BASH_OPERATIONS_SERVICE,
+            "environment": ENVIRONMENT_OPERATIONS_SERVICE,
+            "operations": OPERATIONS_SERVICE,
+        }
+        protocols = {
+            "bash": BashOperations,
+            "environment": EnvironmentOperations,
+            "operations": Operations,
+        }
         for key, value in kwargs.items():
-            service_name = f"operations:{key}"
+            service_name = service_names.get(key, f"operations:{key}")
             if self.services.has(service_name):
                 raise ValueError(f"operation {key!r} already registered")
             self.services.register(
@@ -532,6 +589,25 @@ class Session:
                 key,
                 {"service_name": service_name, "service": value},
             )
+            if key == "environment":
+                self.services.register(
+                    OPERATIONS_SERVICE,
+                    Operations(value),  # type: ignore[arg-type]
+                    Operations,
+                    scope="session",
+                )
+
+    def get_operations(self) -> Operations | None:
+        operations = self.services.get(OPERATIONS_SERVICE, Operations)
+        if isinstance(operations, Operations):
+            return operations
+        environment = self.services.get(
+            ENVIRONMENT_OPERATIONS_SERVICE,
+            EnvironmentOperations,
+        )
+        if environment is None:
+            return None
+        return Operations(environment)
 
     def register_resource_writer(
         self,
@@ -593,31 +669,85 @@ class Session:
             cast(type[ToolExecutor], ToolExecutor),
         )
 
-    def register_effect_scope(
+    def register_tool_orchestrator(
         self,
-        scope: EffectScope,
+        orchestrator: ToolOrchestrator,
         *,
         replace: bool = False,
     ) -> None:
-        service_name = EFFECT_SCOPE_SERVICE
+        service_name = TOOL_ORCHESTRATOR_SERVICE
         if self.services.has(service_name) and not replace:
-            raise ValueError("effect_scope already registered")
+            raise ValueError("tool_orchestrator already registered")
         self.services.register(
             service_name,
-            scope,
-            cast(type[EffectScope], EffectScope),
+            orchestrator,
+            cast(type[ToolOrchestrator], ToolOrchestrator),
+            scope="host",
+        )
+        self._emit_register_event(
+            "tool_orchestrator",
+            service_name,
+            {"service": orchestrator},
+        )
+
+    def get_tool_orchestrator(self) -> ToolOrchestrator | None:
+        return self.services.get(
+            TOOL_ORCHESTRATOR_SERVICE,
+            cast(type[ToolOrchestrator], ToolOrchestrator),
+        )
+
+    def register_permission_policy(
+        self,
+        policy: PermissionPolicy,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = PERMISSION_POLICY_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("permission_policy already registered")
+        self.services.register(
+            service_name,
+            policy,
+            cast(type[PermissionPolicy], PermissionPolicy),
+            scope="host",
+        )
+        self._emit_register_event(
+            "permission_policy",
+            service_name,
+            {"service": policy},
+        )
+
+    def get_permission_policy(self) -> PermissionPolicy | None:
+        return self.services.get(
+            PERMISSION_POLICY_SERVICE,
+            cast(type[PermissionPolicy], PermissionPolicy),
+        )
+
+    def register_trajectory_node_store(
+        self,
+        store: TrajectoryNodeStore,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = TRAJECTORY_NODE_STORE_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("trajectory_node_store already registered")
+        self.services.register(
+            service_name,
+            store,
+            cast(type[TrajectoryNodeStore], TrajectoryNodeStore),
             scope="tree",
         )
         self._emit_register_event(
-            "effect_scope",
+            "trajectory_node_store",
             service_name,
-            {"service": scope},
+            {"service": store},
         )
 
-    def get_effect_scope(self) -> EffectScope | None:
+    def get_trajectory_node_store(self) -> TrajectoryNodeStore | None:
         return self.services.get(
-            EFFECT_SCOPE_SERVICE,
-            cast(type[EffectScope], EffectScope),
+            TRAJECTORY_NODE_STORE_SERVICE,
+            cast(type[TrajectoryNodeStore], TrajectoryNodeStore),
         )
 
     def register_versioned_resource_store(
@@ -645,6 +775,33 @@ class Session:
         return self.services.get(
             VERSIONED_RESOURCE_STORE_SERVICE,
             cast(type[VersionedResourceStore], VersionedResourceStore),
+        )
+
+    def register_effect_scope(
+        self,
+        scope: EffectScope,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = EFFECT_SCOPE_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("effect_scope already registered")
+        self.services.register(
+            service_name,
+            scope,
+            cast(type[EffectScope], EffectScope),
+            scope="tree",
+        )
+        self._emit_register_event(
+            "effect_scope",
+            service_name,
+            {"service": scope},
+        )
+
+    def get_effect_scope(self) -> EffectScope | None:
+        return self.services.get(
+            EFFECT_SCOPE_SERVICE,
+            cast(type[EffectScope], EffectScope),
         )
 
     def register_atom_catalog(
@@ -844,7 +1001,11 @@ class Session:
                     purpose=purpose,
                     cwd=child.ctx.cwd,
                     created_at=time.time(),
-                    config=session_meta_config(child.ctx),
+                    config=session_meta_config(
+                        child.ctx,
+                        resolved_spec=child._resolved_session_spec(),
+                        active_set=child._active_set_fingerprint(),
+                    ),
                 ),
             )
 
@@ -882,7 +1043,11 @@ class Session:
                     purpose=purpose,
                     cwd=source.ctx.cwd,
                     created_at=time.time(),
-                    config=session_meta_config(child_ctx),
+                    config=session_meta_config(
+                        child_ctx,
+                        resolved_spec=source._resolved_session_spec(),
+                        active_set=source._active_set_fingerprint(),
+                    ),
                 ),
                 prefix.turns,
             )
@@ -901,6 +1066,14 @@ class Session:
                 child_effect_scope,
                 cast(type[EffectScope], EffectScope),
                 scope="tree",
+            )
+        active_set = source._active_set_fingerprint()
+        if active_set is not None:
+            child_services.register(
+                ACTIVE_SET_FINGERPRINT_SERVICE,
+                active_set,
+                ActiveSetFingerprint,
+                scope="session",
             )
 
         forked = cls(

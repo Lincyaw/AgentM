@@ -1,7 +1,7 @@
 """Serialization codec for trajectory data.
 
 Every field on Turn must be serializable to a JSON-safe dict so that
-TrajectoryStore implementations can write to JSONL, ClickHouse, SQLite,
+TrajectoryStore implementations can write to JSONL, SQLite,
 or any other backend.
 
 The main challenge is Trigger: it's an open Protocol, so atoms can
@@ -29,6 +29,7 @@ from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
     ImageContent,
+    MessageMeta,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -37,7 +38,18 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from agentm.core.abi.resource import ResourceMutation, ResourceRef
+from agentm.core.abi.termination import (
+    BudgetExhausted,
+    MaxTurnsExhausted,
+    ModelEndTurn,
+    ProviderTruncated,
+    SignalAborted,
+    TerminationCause,
+    ToolTerminated,
+)
 from agentm.core.abi.trajectory import (
+    InjectedMessages,
     Outcome,
     Round,
     ToolRecord,
@@ -73,6 +85,74 @@ class RawTrigger:
 
 # --- Message serialization --------------------------------------------------
 
+def _message_meta_is_default(meta: MessageMeta) -> bool:
+    return meta == MessageMeta()
+
+
+def _serialize_message_meta(meta: MessageMeta) -> dict[str, Any]:
+    data = {
+        "synthetic": meta.synthetic,
+        "synthetic_kind": meta.synthetic_kind,
+        "origin": meta.origin,
+        "visibility": meta.visibility,
+        "no_response_requested": meta.no_response_requested,
+        "token_accounting": meta.token_accounting,
+        "replay": meta.replay,
+        "target_session_id": meta.target_session_id,
+        "target_agent_id": meta.target_agent_id,
+        "mode": meta.mode,
+        "tags": _json_safe(meta.tags),
+    }
+    return {k: v for k, v in data.items() if v not in (None, False, {}, "visible", "normal", "include")}
+
+
+def _deserialize_message_meta(data: dict[str, Any] | None) -> MessageMeta:
+    if not isinstance(data, dict):
+        return MessageMeta()
+    tags = _json_restore(data.get("tags", {}))
+    if not isinstance(tags, dict):
+        tags = {}
+    return MessageMeta(
+        synthetic=bool(data.get("synthetic", False)),
+        synthetic_kind=data.get("synthetic_kind"),
+        origin=data.get("origin"),
+        visibility=data.get("visibility", "visible"),
+        no_response_requested=bool(data.get("no_response_requested", False)),
+        token_accounting=data.get("token_accounting", "normal"),
+        replay=data.get("replay", "include"),
+        target_session_id=data.get("target_session_id"),
+        target_agent_id=data.get("target_agent_id"),
+        mode=data.get("mode"),
+        tags=tags,
+    )
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return {"__bytes_hex__": value.hex()}
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+    return repr(value)
+
+
+def _json_restore(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {"__bytes_hex__"} and isinstance(value["__bytes_hex__"], str):
+            try:
+                return bytes.fromhex(value["__bytes_hex__"])
+            except ValueError:
+                return value
+        return {k: _json_restore(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_restore(v) for v in value]
+    return value
+
+
 def _serialize_content_block(block: Any) -> dict[str, Any]:
     if isinstance(block, TextContent):
         return {"type": "text", "text": block.text}
@@ -103,6 +183,8 @@ def _serialize_content_block(block: Any) -> dict[str, Any]:
         }
         if not block.deterministic:
             d["deterministic"] = False
+        if block.extras is not None:
+            d["extras"] = _json_safe(block.extras)
         return d
     if dataclasses.is_dataclass(block) and not isinstance(block, type):
         return asdict(block)
@@ -139,6 +221,7 @@ def _deserialize_content_block(data: dict[str, Any]) -> Any:
             content=[_deserialize_content_block(c) for c in data.get("content", [])],
             is_error=data.get("is_error", False),
             deterministic=data.get("deterministic", True),
+            extras=_json_restore(data.get("extras")),
         )
     import json
     import logging
@@ -149,11 +232,14 @@ def _deserialize_content_block(data: dict[str, Any]) -> Any:
 def serialize_message(msg: AgentMessage) -> dict[str, Any]:
     """Convert an AgentMessage to a JSON-safe dict."""
     if isinstance(msg, UserMessage):
-        return {
+        data = {
             "role": "user",
             "content": [_serialize_content_block(b) for b in msg.content],
             "timestamp": msg.timestamp,
         }
+        if not _message_meta_is_default(msg.meta):
+            data["meta"] = _serialize_message_meta(msg.meta)
+        return data
     if isinstance(msg, AssistantMessage):
         d: dict[str, Any] = {
             "role": "assistant",
@@ -170,13 +256,18 @@ def serialize_message(msg: AgentMessage) -> dict[str, Any]:
                 "__type__": type(msg.termination).__qualname__,
                 **{f.name: getattr(msg.termination, f.name) for f in dc_fields(msg.termination) if not f.name.startswith("_")},
             }
+        if not _message_meta_is_default(msg.meta):
+            d["meta"] = _serialize_message_meta(msg.meta)
         return d
     if isinstance(msg, ToolResultMessage):
-        return {
+        data = {
             "role": "tool_result",
             "content": [_serialize_content_block(b) for b in msg.content],
             "timestamp": msg.timestamp,
         }
+        if not _message_meta_is_default(msg.meta):
+            data["meta"] = _serialize_message_meta(msg.meta)
+        return data
     return {"role": "unknown", "repr": repr(msg)[:500]}
 
 
@@ -189,6 +280,7 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
             role="user",
             content=[_deserialize_content_block(b) for b in data.get("content", [])],
             timestamp=ts,
+            meta=_deserialize_message_meta(data.get("meta")),
         )
     if role == "assistant":
         usage = None
@@ -230,17 +322,25 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
             stop_reason=data.get("stop_reason"),
             usage=usage,
             termination=termination,
+            meta=_deserialize_message_meta(data.get("meta")),
         )
     if role == "tool_result":
         return ToolResultMessage(
             role="tool_result",
             content=[_deserialize_content_block(b) for b in data.get("content", [])],
             timestamp=ts,
+            meta=_deserialize_message_meta(data.get("meta")),
         )
     return UserMessage(
         role="user",
         content=[TextContent(type="text", text=repr(data)[:200])],
         timestamp=ts,
+        meta=MessageMeta(
+            synthetic=True,
+            synthetic_kind="codec_unknown",
+            visibility="hidden",
+            replay="metadata_only",
+        ),
     )
 
 
@@ -306,24 +406,17 @@ _BUILTIN_CODECS: dict[str, TriggerCodec] = {
 # --- CodecRegistry ----------------------------------------------------------
 
 
-_BUILTIN_CAUSES: dict[str, type] = {}
-
-
-def _register_builtin_causes() -> None:
-    from agentm.core.abi.events import (
-        BudgetExhausted,
-        MaxTurnsExhausted,
-        ModelEndTurn,
-        NoPendingInput,
-        ProviderTruncated,
-        SignalAborted,
-        ToolTerminated,
-    )
+_BUILTIN_CAUSES: dict[str, type[TerminationCause]] = {
+    cls.__qualname__: cls
     for cls in (
-        ModelEndTurn, ToolTerminated, MaxTurnsExhausted, SignalAborted,
-        ProviderTruncated, BudgetExhausted, NoPendingInput,
-    ):
-        _BUILTIN_CAUSES[cls.__qualname__] = cls
+        ModelEndTurn,
+        ToolTerminated,
+        MaxTurnsExhausted,
+        SignalAborted,
+        ProviderTruncated,
+        BudgetExhausted,
+    )
+}
 
 
 class CodecRegistry:
@@ -331,17 +424,16 @@ class CodecRegistry:
 
     def __init__(self) -> None:
         self._trigger_codecs: dict[str, TriggerCodec] = dict(_BUILTIN_CODECS)
-        self._cause_types: dict[str, type] = {}
-        if not _BUILTIN_CAUSES:
-            _register_builtin_causes()
-        self._cause_types.update(_BUILTIN_CAUSES)
+        self._cause_types: dict[str, type[TerminationCause]] = dict(_BUILTIN_CAUSES)
 
     def register_trigger_codec(self, source: str, codec: TriggerCodec) -> None:
         """Register a codec for a custom trigger source."""
         self._trigger_codecs[source] = codec
 
-    def register_cause_type(self, cls: type) -> None:
+    def register_cause_type(self, cls: type[TerminationCause]) -> None:
         """Register a custom TerminationCause subclass for deserialization."""
+        if not issubclass(cls, TerminationCause):
+            raise TypeError("cause type must subclass TerminationCause")
         self._cause_types[cls.__qualname__] = cls
 
     # --- Trigger ---
@@ -409,35 +501,62 @@ class CodecRegistry:
     # --- Outcome ---
 
     def _serialize_outcome(self, outcome: Outcome) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if dataclasses.is_dataclass(outcome.cause) and not isinstance(outcome.cause, type):
-            d["cause"] = {
-                "__type__": type(outcome.cause).__qualname__,
+        if not isinstance(outcome.cause, TerminationCause):
+            raise TypeError("Outcome.cause must be a TerminationCause")
+        cause_type = type(outcome.cause)
+        if cause_type.__qualname__ not in self._cause_types:
+            raise ValueError(
+                f"unregistered termination cause type: {cause_type.__qualname__}"
+            )
+        d: dict[str, Any] = {
+            "cause": {
+                "__type__": cause_type.__qualname__,
                 **asdict(outcome.cause),
             }
-        else:
-            d["cause"] = {"repr": repr(outcome.cause)[:500]}
+        }
         if outcome.injected:
-            d["injected"] = [serialize_message(m) for m in outcome.injected]
+            d["injected"] = [
+                {
+                    "after_round": injection.after_round,
+                    "messages": [
+                        serialize_message(message) for message in injection.messages
+                    ],
+                }
+                for injection in outcome.injected
+            ]
         return d
 
     def _deserialize_outcome(self, data: dict[str, Any]) -> Outcome:
-        from agentm.core.abi.events import ModelEndTurn
         injected = tuple(
-            deserialize_message(m) for m in data.get("injected", [])
+            InjectedMessages(
+                after_round=entry["after_round"],
+                messages=tuple(
+                    deserialize_message(message)
+                    for message in entry.get("messages", [])
+                ),
+            )
+            for entry in data.get("injected", [])
         )
         raw_cause = data.get("cause")
-        cause: Any = raw_cause or ModelEndTurn()
-        if isinstance(raw_cause, dict):
+        if raw_cause is None:
+            cause: TerminationCause = ModelEndTurn()
+        elif not isinstance(raw_cause, dict):
+            raise ValueError("serialized Outcome.cause must be an object")
+        else:
             type_name = raw_cause.get("__type__")
-            cls = self._cause_types.get(type_name) if type_name else None
-            if cls is not None:
-                fields = {f.name for f in dataclasses.fields(cls)} if dataclasses.is_dataclass(cls) else set()
-                filtered = {k: v for k, v in raw_cause.items() if k in fields}
-                try:
-                    cause = cls(**filtered)
-                except (TypeError, ValueError):
-                    cause = raw_cause
+            if not isinstance(type_name, str):
+                raise ValueError("serialized Outcome.cause is missing __type__")
+            cls = self._cause_types.get(type_name)
+            if cls is None:
+                raise ValueError(f"unknown termination cause type: {type_name}")
+            fields = {field.name for field in dataclasses.fields(cls)}
+            filtered = {key: value for key, value in raw_cause.items() if key in fields}
+            try:
+                cause = cls(**filtered)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid serialized termination cause: {type_name}"
+                ) from exc
         return Outcome(
             cause=cause,
             injected=injected,
@@ -447,7 +566,55 @@ class CodecRegistry:
 
     @staticmethod
     def _serialize_meta(meta: TurnMeta) -> dict[str, Any]:
-        return asdict(meta)
+        data = asdict(meta)
+        data["resource_mutations"] = [
+            {
+                "ref": {
+                    "namespace": mutation.ref.namespace,
+                    "path": mutation.ref.path,
+                },
+                "op": mutation.op,
+                "before_version": mutation.before_version,
+                "after_version": mutation.after_version,
+                "metadata": _json_safe(mutation.metadata),
+            }
+            for mutation in meta.resource_mutations
+        ]
+        return data
+
+    @staticmethod
+    def _deserialize_resource_mutations(
+        data: Any,
+    ) -> tuple[ResourceMutation, ...]:
+        if not isinstance(data, list):
+            return ()
+        mutations: list[ResourceMutation] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            ref_data = item.get("ref")
+            if not isinstance(ref_data, dict):
+                continue
+            namespace = ref_data.get("namespace")
+            path = ref_data.get("path")
+            op = item.get("op")
+            if not isinstance(namespace, str) or not isinstance(path, str):
+                continue
+            if op not in {"write", "replace", "delete"}:
+                continue
+            metadata = _json_restore(item.get("metadata", {}))
+            if not isinstance(metadata, dict):
+                metadata = {}
+            mutations.append(
+                ResourceMutation(
+                    ref=ResourceRef(namespace=namespace, path=path),
+                    op=op,
+                    before_version=item.get("before_version"),
+                    after_version=item.get("after_version"),
+                    metadata=metadata,
+                )
+            )
+        return tuple(mutations)
 
     @staticmethod
     def _deserialize_meta(data: dict[str, Any]) -> TurnMeta:
@@ -458,6 +625,9 @@ class CodecRegistry:
             cache_write_tokens=data.get("cache_write_tokens", 0),
             duration_ns=data.get("duration_ns", 0),
             model_id=data.get("model_id"),
+            resource_mutations=CodecRegistry._deserialize_resource_mutations(
+                data.get("resource_mutations", [])
+            ),
         )
 
     # --- Turn ---

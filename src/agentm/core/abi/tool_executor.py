@@ -36,7 +36,7 @@ class ToolExecutionCapabilities:
     filesystem: tuple[FilesystemAccess, ...] = ("none",)
     killable: bool = False
     network: bool = False
-    concurrency: tuple[ToolConcurrency, ...] = ("exclusive",)
+    concurrency: tuple[ToolConcurrency, ...] = ("exclusive", "parallel_safe")
     interrupt: tuple[ToolInterruptBehavior, ...] = ("block",)
 
 
@@ -51,7 +51,7 @@ class ToolExecutionRequest:
 
 @runtime_checkable
 class ToolExecutionRequirementsProvider(Protocol):
-    """Optional Protocol for tools that declare execution requirements."""
+    """Optional protocol for tools that declare executor requirements."""
 
     execution_requirements: ToolExecutionRequirements
 
