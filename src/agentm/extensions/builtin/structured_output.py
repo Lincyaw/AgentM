@@ -6,10 +6,9 @@ schema. When the worker submits a schema-valid result, the session
 terminates and the structured data is returned to the orchestrator; a
 validation failure returns a retryable tool error instead of terminating.
 
-Designed for use with the ``workflow`` atom's ``agent(prompt, schema=...)``
-convenience — the workflow wires the atom config and extracts the result
-automatically. Can also be loaded standalone in any scenario that needs a
-schema-constrained terminal tool.
+Hosts and orchestration atoms can configure this tool when a child session
+must return a machine-validated payload. It can also be loaded standalone in
+any scenario that needs a schema-constrained terminal tool.
 
 single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*``. No atom-to-atom imports.
@@ -131,8 +130,8 @@ class _StructuredOutputRuntime:
             # the result as a JSON string instead of an object. Unwrap only
             # when the raw string fails validation and the decoded value
             # passes — a legitimately-string result is never reinterpreted.
-            # This is the single unwrap point; downstream consumers
-            # (e.g. workflow _auto_parse) must not second-guess it.
+            # This is the single unwrap point; downstream consumers must not
+            # second-guess it.
             try:
                 decoded = json.loads(result)
             except (json.JSONDecodeError, TypeError):
