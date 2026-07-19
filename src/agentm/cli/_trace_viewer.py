@@ -6,7 +6,6 @@ import json
 import os
 import sys
 import termios
-import tty
 from dataclasses import dataclass, field
 from io import StringIO
 
@@ -28,7 +27,7 @@ from agentm.core.abi.trigger import UserInput
 # -- Data model --------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _Message:
     role: str  # user | assistant | tool_call | tool_result | error
     tool_name: str | None = None
@@ -38,7 +37,7 @@ class _Message:
     args_json: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _TurnView:
     turn: Turn
     summary_line: str
@@ -98,13 +97,17 @@ def _extract_messages(turn: Turn) -> list[_Message]:
         text_parts: list[str] = []
         thinking_parts: list[str] = []
 
-        for block in rnd.response.content:
-            if isinstance(block, TextContent):
-                text_parts.append(block.text)
-            elif isinstance(block, ThinkingBlock):
-                thinking_parts.append(block.text)
-            elif isinstance(block, ToolCallBlock):
-                args_str = json.dumps(dict(block.arguments), ensure_ascii=False, indent=2)
+        for response_block in rnd.response.content:
+            if isinstance(response_block, TextContent):
+                text_parts.append(response_block.text)
+            elif isinstance(response_block, ThinkingBlock):
+                thinking_parts.append(response_block.text)
+            elif isinstance(response_block, ToolCallBlock):
+                args_str = json.dumps(
+                    dict(response_block.arguments),
+                    ensure_ascii=False,
+                    indent=2,
+                )
                 if text_parts or thinking_parts:
                     msgs.append(_Message(
                         role="assistant", content="\n".join(text_parts),
@@ -113,7 +116,9 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                     text_parts = []
                     thinking_parts = []
                 msgs.append(_Message(
-                    role="tool_call", tool_name=block.name, args_json=args_str,
+                    role="tool_call",
+                    tool_name=response_block.name,
+                    args_json=args_str,
                 ))
 
         if text_parts or thinking_parts:
@@ -124,8 +129,9 @@ def _extract_messages(turn: Turn) -> list[_Message]:
 
         for rec in rnd.tool_results:
             txt = "".join(
-                block.text for block in rec.result.content
-                if isinstance(block, TextContent)
+                result_block.text
+                for result_block in rec.result.content
+                if isinstance(result_block, TextContent)
             )
             msgs.append(_Message(
                 role="tool_result", tool_name=rec.call.name,
@@ -277,11 +283,9 @@ def _render_message(con: Console, msg: _Message, width: int) -> None:
     if msg.content:
         content = msg.content
         lines = content.split("\n")
-        truncated = False
         if len(lines) > _MAX_LINES:
             half = _MAX_LINES // 2
             content = "\n".join(lines[:half] + [f"\n    ... ({len(lines) - _MAX_LINES} lines omitted) ...\n"] + lines[-half:])
-            truncated = True
 
         if msg.role == "tool_result" and not msg.is_error:
             if _looks_like_json(content):
