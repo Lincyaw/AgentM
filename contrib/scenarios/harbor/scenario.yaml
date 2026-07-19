@@ -7,6 +7,7 @@ extensions:
   - module: agentm_harbor.harbor_ops
     config:
       work_dir: /
+  - module: agentm_harbor.human_interrupt
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 5000
