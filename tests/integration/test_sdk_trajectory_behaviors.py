@@ -15,6 +15,7 @@ import pytest
 from agentm import (
     AgentSession,
     AgentSessionConfig,
+    ExtensionSpec,
     Model,
     ProviderRequestFailed,
     TrajectoryStorage,
@@ -63,6 +64,7 @@ _CUSTOM_TRIGGER = "tests.fixtures.custom_trigger"
 _FILE_TOOLS = "agentm.extensions.builtin.file_tools"
 _LOCAL_RESOURCES = "agentm.extensions.builtin.local_resources"
 _OPERATIONS = "agentm.extensions.builtin.operations"
+_BACKGROUND_EXEC = "agentm.extensions.builtin.background_exec"
 _WAIT_FOR_CANCEL = object()
 
 
@@ -798,6 +800,69 @@ async def test_sdk_interrupt_cancels_one_request_and_session_continues() -> None
         "continued-answer",
     ]
     assert session.status()["phase"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_sdk_background_tool_owns_cancellation_after_detach() -> None:
+    provider = _StubProvider(
+        _tool_call("slow-call", "slow_tool", {}),
+        _WAIT_FOR_CANCEL,
+        "background-completion-observed",
+    )
+    completed = asyncio.Event()
+
+    async def slow_tool(
+        args: dict[str, object],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult:
+        del args
+        await asyncio.sleep(0.1)
+        if signal is not None and signal.is_set():
+            raise AssertionError("parent cancellation leaked into detached tool")
+        completed.set()
+        return ToolResult(
+            content=(TextContent(type="text", text="background-success"),)
+        )
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            extra_extensions=[
+                ExtensionSpec.from_module(
+                    _BACKGROUND_EXEC,
+                    {"timeout": 0.01},
+                )
+            ],
+            extra_tools=[
+                FunctionTool(
+                    name="slow_tool",
+                    description="Complete after the foreground timeout.",
+                    parameters={"type": "object", "properties": {}},
+                    fn=slow_tool,
+                )
+            ],
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    interrupted = asyncio.create_task(session.run("detach-the-tool"))
+    try:
+        await asyncio.wait_for(provider.stream_started.wait(), timeout=2.0)
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(interrupted, timeout=2.0)
+        assert await session.idle(timeout=2.0)
+    finally:
+        if not interrupted.done():
+            interrupted.cancel()
+        await session.shutdown()
+
+    assert provider.observed_cancel_reason == "user_cancel"
+    assert completed.is_set()
+    assert any(
+        "Background task" in text and "background-success" in text
+        for text in _text(provider.requests[-1])
+    )
 
 
 @pytest.mark.asyncio

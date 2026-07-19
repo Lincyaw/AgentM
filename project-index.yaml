@@ -116,6 +116,7 @@ requirements:
       - path: src/agentm/execution/wire.py
       - path: src/agentm/execution/worker.py
       - path: src/agentm/extensions/builtin/file_tools.py
+      - path: src/agentm/extensions/builtin/background_exec.py
       - path: src/agentm/extensions/builtin/context_projection.py
       - path: src/agentm/extensions/builtin/llm_anthropic.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
