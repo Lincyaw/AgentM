@@ -36,19 +36,11 @@ class JsonCatalogStore:
     """Filesystem-backed ``VersionedResourceStore`` and active-set catalog."""
 
     def __init__(self, root: str | Path) -> None:
-        self._root = Path(root)
-        self._versions_path = self._root / "versions.json"
-        self._aliases_path = self._root / "aliases.json"
-        self._active_sets_path = self._root / "active_sets.json"
-        self._content_root = self._root / "content"
-        self._lock_path = self._root / ".lock"
-        self._process_lock = threading.RLock()
-        self._root.mkdir(parents=True, exist_ok=True)
-        self._content_root.mkdir(parents=True, exist_ok=True)
+        self._files = _CatalogFiles(Path(root))
         self._versions: dict[str, list[ResourceVersion]] = {}
         self._aliases: dict[str, ResourceVersion] = {}
         self._records: dict[str, CatalogActiveSetRecord] = {}
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
 
     async def put(
@@ -83,7 +75,7 @@ class JsonCatalogStore:
             size_bytes=len(content),
             metadata=dict(metadata or {}),
         )
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             existing = next(
                 (
@@ -98,7 +90,7 @@ class JsonCatalogStore:
                     "content-addressed resource version metadata changed for "
                     f"{resource_id}:{version.version_id}"
                 )
-            path = self._content_path(version)
+            path = self._files.content_path(version)
             if path.exists():
                 stored = path.read_bytes()
                 if stored != content:
@@ -109,7 +101,7 @@ class JsonCatalogStore:
                 _atomic_write_bytes(path, bytes(content))
             if existing is None:
                 self._versions.setdefault(resource_id, []).append(version)
-                self._persist_versions()
+                self._files.write_versions(self._versions)
             return existing or version
 
     async def resolve(
@@ -125,7 +117,7 @@ class JsonCatalogStore:
         resource_id: str,
         version_id: str | None,
     ) -> ResourceVersion | None:
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             versions = self._versions.get(resource_id, ())
             if not versions:
@@ -145,7 +137,7 @@ class JsonCatalogStore:
         return await asyncio.to_thread(self._read, version)
 
     def _read(self, version: ResourceVersion) -> bytes:
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             known = any(
                 item.version_id == version.version_id
@@ -153,7 +145,7 @@ class JsonCatalogStore:
             )
             if not known:
                 raise KeyError((version.resource_id, version.version_id))
-            content = self._content_path(version).read_bytes()
+            content = self._files.content_path(version).read_bytes()
             if _digest_bytes(content) != version.digest:
                 raise ValueError(
                     f"catalog content digest mismatch for {version.resource_id}"
@@ -168,7 +160,7 @@ class JsonCatalogStore:
         await asyncio.to_thread(self._alias, alias, version)
 
     def _alias(self, alias: str, version: ResourceVersion) -> None:
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             if not any(
                 item.version_id == version.version_id
@@ -176,13 +168,13 @@ class JsonCatalogStore:
             ):
                 raise KeyError((version.resource_id, version.version_id))
             self._aliases[alias] = version
-            self._persist_aliases()
+            self._files.write_aliases(self._aliases)
 
     async def resolve_alias(self, alias: str) -> ResourceVersion | None:
         return await asyncio.to_thread(self._resolve_alias, alias)
 
     def _resolve_alias(self, alias: str) -> ResourceVersion | None:
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             return self._aliases.get(alias)
 
@@ -190,7 +182,7 @@ class JsonCatalogStore:
         return await asyncio.to_thread(self._list_versions, resource_id)
 
     def _list_versions(self, resource_id: str) -> list[ResourceVersion]:
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             return list(self._versions.get(resource_id, ()))
 
@@ -211,7 +203,7 @@ class JsonCatalogStore:
             atoms=captured,
             metadata={"atom_count": len(captured)},
         )
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             self._records[active_set.session_id] = CatalogActiveSetRecord(
                 session_id=active_set.session_id,
@@ -223,14 +215,14 @@ class JsonCatalogStore:
                 created_at=active_set.created_at,
                 metadata=active_set.metadata,
             )
-            self._persist_records()
+            self._files.write_records(self._records)
             return fingerprint
 
     async def get_active_set(self, session_id: str) -> ActiveSetFingerprint | None:
         return await asyncio.to_thread(self._get_active_set, session_id)
 
     def _get_active_set(self, session_id: str) -> ActiveSetFingerprint | None:
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             record = self._records.get(session_id)
             return record.fingerprint if record is not None else None
@@ -247,7 +239,7 @@ class JsonCatalogStore:
     ) -> list[CatalogActiveSetRecord]:
         if query.limit is not None and query.limit < 0:
             raise ValueError("catalog query limit cannot be negative")
-        with self._guard():
+        with self._files.guard():
             self._reload_unlocked()
             records = list(self._records.values())
         if query.session_id is not None:
@@ -322,21 +314,10 @@ class JsonCatalogStore:
             records = records[: query.limit]
         return records
 
-    @contextmanager
-    def _guard(self) -> Iterator[None]:
-        with self._process_lock:
-            self._root.mkdir(parents=True, exist_ok=True)
-            with self._lock_path.open("a+b") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
     def _reload_unlocked(self) -> None:
-        self._versions = self._load_versions()
-        self._aliases = self._load_aliases()
-        self._records = self._load_records()
+        self._versions = self._files.load_versions()
+        self._aliases = self._files.load_aliases()
+        self._records = self._files.load_records()
         known_versions = {
             (version.resource_id, version.version_id)
             for versions in self._versions.values()
@@ -346,7 +327,33 @@ class JsonCatalogStore:
             if (version.resource_id, version.version_id) not in known_versions:
                 raise ValueError(f"catalog alias {alias!r} references an unknown version")
 
-    def _load_versions(self) -> dict[str, list[ResourceVersion]]:
+
+class _CatalogFiles:
+    """Locked filesystem encoding for catalog state."""
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._versions_path = root / "versions.json"
+        self._aliases_path = root / "aliases.json"
+        self._active_sets_path = root / "active_sets.json"
+        self._content_root = root / "content"
+        self._lock_path = root / ".lock"
+        self._process_lock = threading.RLock()
+        root.mkdir(parents=True, exist_ok=True)
+        self._content_root.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def guard(self) -> Iterator[None]:
+        with self._process_lock:
+            self._root.mkdir(parents=True, exist_ok=True)
+            with self._lock_path.open("a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def load_versions(self) -> dict[str, list[ResourceVersion]]:
         rows = _read_json_array(self._versions_path)
         versions: dict[str, list[ResourceVersion]] = {}
         for item in rows:
@@ -354,15 +361,18 @@ class JsonCatalogStore:
             versions.setdefault(version.resource_id, []).append(version)
         return versions
 
-    def _persist_versions(self) -> None:
+    def write_versions(
+        self,
+        versions: Mapping[str, Sequence[ResourceVersion]],
+    ) -> None:
         rows = [
             serialize_resource_version(version)
-            for resource_id in sorted(self._versions)
-            for version in self._versions[resource_id]
+            for resource_id in sorted(versions)
+            for version in versions[resource_id]
         ]
         _atomic_write_json_array(self._versions_path, rows)
 
-    def _load_aliases(self) -> dict[str, ResourceVersion]:
+    def load_aliases(self) -> dict[str, ResourceVersion]:
         rows = _read_json_array(self._aliases_path)
         aliases: dict[str, ResourceVersion] = {}
         for item in rows:
@@ -375,7 +385,7 @@ class JsonCatalogStore:
             aliases[alias] = deserialize_resource_version(version_data)
         return aliases
 
-    def _persist_aliases(self) -> None:
+    def write_aliases(self, aliases: Mapping[str, ResourceVersion]) -> None:
         _atomic_write_json_array(
             self._aliases_path,
             [
@@ -383,11 +393,11 @@ class JsonCatalogStore:
                     "alias": alias,
                     "version": serialize_resource_version(version),
                 }
-                for alias, version in sorted(self._aliases.items())
+                for alias, version in sorted(aliases.items())
             ],
         )
 
-    def _load_records(self) -> dict[str, CatalogActiveSetRecord]:
+    def load_records(self) -> dict[str, CatalogActiveSetRecord]:
         rows = _read_json_array(self._active_sets_path)
         return {
             record.session_id: record
@@ -395,16 +405,19 @@ class JsonCatalogStore:
             for record in (deserialize_catalog_record(row),)
         }
 
-    def _persist_records(self) -> None:
+    def write_records(
+        self,
+        records: Mapping[str, CatalogActiveSetRecord],
+    ) -> None:
         _atomic_write_json_array(
             self._active_sets_path,
             [
                 serialize_catalog_record(record)
-                for _, record in sorted(self._records.items())
+                for _, record in sorted(records.items())
             ],
         )
 
-    def _content_path(self, version: ResourceVersion) -> Path:
+    def content_path(self, version: ResourceVersion) -> Path:
         return (
             self._content_root
             / _path_token(version.resource_id)
