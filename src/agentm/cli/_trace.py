@@ -345,15 +345,32 @@ def messages_cmd(
     if role:
         all_msgs = [m for m in all_msgs if m["role"] == role]
 
+    _ROLE_ANSI = {
+        "user": "\033[1;32m",      # bold green
+        "assistant": "\033[1;34m", # bold blue
+        "tool_result": "\033[36m", # cyan
+        "error": "\033[1;31m",     # bold red
+    }
+    _RESET = "\033[0m"
+    _DIM = "\033[2m"
+
     def _render(m: _MessageRecord) -> str:
         round_label = (
             str(m["round_index"]) if m["round_index"] is not None else "---"
         )
-        hdr = f"[{m['role']}] turn={m['turn_index']} round={round_label}"
-        if m["role"] == "tool_result":
+        role = m["role"]
+        color = _ROLE_ANSI.get(role, "")
+        hdr = f"{color}── {role.upper()} ── turn={m['turn_index']} round={round_label}"
+        if role == "tool_result":
             error = " ERROR" if m.get("is_error") else ""
             hdr += f" tool={m.get('tool', '?')}{error}"
-        return f"{hdr}\n{m['content']}\n"
+        hdr += f" {'─' * 20}{_RESET}"
+        content = m["content"]
+        if role == "tool_result" and not m.get("is_error"):
+            content = f"{_DIM}{content}{_RESET}"
+        elif role == "error":
+            content = f"\033[31m{content}{_RESET}"
+        return f"{hdr}\n{content}\n"
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]{len(all_msgs)} message(s)[/dim]")
@@ -391,6 +408,32 @@ def usage_cmd(
         sys.stdout.write(f"session:          {sid}\nturns:            {summary['turns']}\ninput tokens:     {total_in:>12,}\n  cache read:     {cache_read:>12,}  ({hit_pct:.1f}%)\n  cache write:    {cache_write:>12,}\n  non-cached:     {total_in - cache_read:>12,}\noutput tokens:    {total_out:>12,}\ntotal tokens:     {total_in + total_out:>12,}\n")
     else:
         _emit_json(summary)
+
+
+# -- view (interactive) ------------------------------------------------------
+
+
+@trace_app.command("view")
+def view_cmd(
+    session: str | None = typer.Option(None, "--session", "-s"),
+    latest: bool = typer.Option(False, "--latest"),
+) -> None:
+    """Interactive trace viewer with turn navigation and expand/collapse."""
+    from agentm.cli._trace_viewer import run_interactive_viewer
+
+    if not sys.stdout.isatty():
+        stderr_console.print("[red]error: interactive viewer requires a terminal[/red]")
+        raise typer.Exit(2)
+
+    query = _get_query_store()
+    sid = _resolve_session_id(query, session, latest)
+    try:
+        turns = list(query.turns(sid))
+    except KeyError:
+        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        raise typer.Exit(EXIT_NOT_FOUND)
+
+    run_interactive_viewer(turns, sid)
 
 
 # -- tools -------------------------------------------------------------------
@@ -436,14 +479,21 @@ def tools_cmd(
                     }
                 )
 
+    _T_YELLOW = "\033[1;33m"
+    _T_RED = "\033[1;31m"
+    _T_DIM = "\033[2m"
+    _T_RESET = "\033[0m"
+
     def _render(d: _ToolRecord) -> str:
-        a = json.dumps(d["args"], ensure_ascii=False)[:300]
-        r = d["result"][:500]
-        error = "  ERROR" if d["is_error"] else ""
-        return (
-            f"[{d['tool']}{error}] turn={d['turn_index']} "
-            f"round={d['round_index']}\n  args: {a}\n  result: {r}\n"
+        a = json.dumps(d["args"], ensure_ascii=False, indent=2)[:600]
+        r = d["result"][:800]
+        error_tag = f" {_T_RED}ERROR{_T_RESET}" if d["is_error"] else ""
+        hdr = (
+            f"{_T_YELLOW}── {d['tool']}{error_tag}{_T_YELLOW} ── "
+            f"turn={d['turn_index']} round={d['round_index']} {'─' * 10}{_T_RESET}"
         )
+        result_styled = f"{_T_RED}{r}{_T_RESET}" if d["is_error"] else f"{_T_DIM}{r}{_T_RESET}"
+        return f"{hdr}\n  args:\n{a}\n  result:\n{result_styled}\n"
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]{len(records)} tool call(s)[/dim]")
