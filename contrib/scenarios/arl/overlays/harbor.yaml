@@ -1,4 +1,0 @@
-extensions:
-  - module: agentm_harbor.harbor_ops
-    config:
-      work_dir: /

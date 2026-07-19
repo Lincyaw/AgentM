@@ -1,9 +1,0 @@
-name: rca:baseline
-description: Single-agent RCA investigator with SQL tools.
-task_class: rca_baseline
-
-includes:
-  - overlays/base-investigator.yaml
-  - overlays/runtime-context.yaml
-  - overlays/skills.yaml
-  - overlays/turn-reminder.yaml

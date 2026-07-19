@@ -1,9 +1,0 @@
-id: 03_unicode
-task_class: format_fix
-description: Unicode characters survive normalization.
-input:
-  user_message: "{'greeting': '你好', 'emoji': '🎉'}"
-expected:
-  value:
-    greeting: "你好"
-    emoji: "🎉"

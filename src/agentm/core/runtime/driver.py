@@ -48,6 +48,8 @@ from agentm.core.abi.events import (
     DecideEvent,
     DiagnosticEvent,
     Inject,
+    LlmRequestEndEvent,
+    LlmRequestStartEvent,
     LoopAction,
     ModelEndTurn,
     ProviderTruncated,
@@ -290,7 +292,10 @@ async def drive(
 
         execution = trajectory.begin(trigger)
         await bus.emit(TurnBeginEvent.CHANNEL, TurnBeginEvent(
-            index=execution.index, trigger=trigger,
+            index=execution.index,
+            turn_index=execution.index,
+            turn_id=execution.id,
+            trigger=trigger,
         ))
 
         try:
@@ -438,15 +443,51 @@ async def _react_loop(
         tool_index = {t.name: t for t in effective_tools}
 
         stream_events: list[AssistantStreamEvent] = []
-        async for ev in stream_fn(
-            messages=messages, model=effective_model,
-            tools=effective_tools, system=effective_system,
-            signal=shutdown, thinking=thinking,
-        ):
-            stream_events.append(ev)
-            await bus.emit(StreamDeltaEvent.CHANNEL, StreamDeltaEvent(
-                turn_index=execution.index, delta=ev,
-            ))
+        llm_start_ns = time.perf_counter_ns()
+        system_text = effective_system or ""
+        await bus.emit(
+            LlmRequestStartEvent.CHANNEL,
+            LlmRequestStartEvent(
+                turn_index=execution.index,
+                turn_id=execution.id,
+                model_id=getattr(effective_model, "id", "unknown"),
+                message_count=len(messages),
+                tool_count=len(effective_tools),
+                system_chars=len(system_text),
+                system_text=system_text or None,
+            ),
+        )
+        try:
+            async for ev in stream_fn(
+                messages=messages, model=effective_model,
+                tools=effective_tools, system=effective_system,
+                signal=shutdown, thinking=thinking,
+            ):
+                stream_events.append(ev)
+                await bus.emit(StreamDeltaEvent.CHANNEL, StreamDeltaEvent(
+                    turn_index=execution.index, delta=ev,
+                ))
+        except BaseException as exc:
+            await bus.emit(
+                LlmRequestEndEvent.CHANNEL,
+                LlmRequestEndEvent(
+                    turn_index=execution.index,
+                    turn_id=execution.id,
+                    chunk_count=len(stream_events),
+                    duration_ns=time.perf_counter_ns() - llm_start_ns,
+                    error=f"{type(exc).__name__}: {exc}",
+                ),
+            )
+            raise
+        await bus.emit(
+            LlmRequestEndEvent.CHANNEL,
+            LlmRequestEndEvent(
+                turn_index=execution.index,
+                turn_id=execution.id,
+                chunk_count=len(stream_events),
+                duration_ns=time.perf_counter_ns() - llm_start_ns,
+            ),
+        )
 
         response = _assemble_assistant_message(stream_events)
         if response.usage is not None:
@@ -532,15 +573,6 @@ async def _react_loop(
             ))
 
         execution.add_round(response, tool_records)
-
-        if store is not None:
-            try:
-                from agentm.core.abi.codec import DEFAULT_CODEC
-                round_data = DEFAULT_CODEC._serialize_round(execution.rounds[-1])
-                round_data["round_index"] = round_index
-                store.append_round(session_id, execution.id, round_data)
-            except Exception:
-                logger.debug("durable round persist failed; non-fatal")
 
         terminal_from_trigger = _trigger_carries_terminal(trigger)
         default = _default_action(response, paired_outcomes)

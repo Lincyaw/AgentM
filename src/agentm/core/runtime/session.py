@@ -11,6 +11,7 @@ import asyncio
 import copy
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Iterator
 
 from loguru import logger
@@ -71,12 +72,22 @@ class Session:
         purpose: str = "root",
     ) -> None:
         sid = session_id or uuid.uuid4().hex[:16]
-        self.ctx = ctx or SessionContext(
-            session_id=sid,
-            root_session_id=sid,
-            cwd=cwd,
-            purpose=purpose,
-        )
+        if ctx is None:
+            self.ctx = SessionContext(
+                session_id=sid,
+                root_session_id=sid,
+                cwd=cwd,
+                purpose=purpose,
+            )
+        elif not ctx.session_id or not ctx.root_session_id:
+            resolved_sid = ctx.session_id or sid
+            self.ctx = replace(
+                ctx,
+                session_id=resolved_sid,
+                root_session_id=ctx.root_session_id or resolved_sid,
+            )
+        else:
+            self.ctx = ctx
         self.id = self.ctx.session_id
         self.trajectory = trajectory or Trajectory()
         self.bus = bus or EventBus()
@@ -99,6 +110,7 @@ class Session:
         self._driver_task: asyncio.Task[None] | None = None
         self._pending_installs: list[asyncio.Task[object]] = []
         self.lifecycle = LifecycleHookRegistry()
+        self.installed_extensions: list[str] = []
 
         if self.graph is not None:
             self.graph.register(
@@ -108,6 +120,13 @@ class Session:
             )
 
     # --- Lifecycle ---
+
+    @classmethod
+    async def create(cls, config: AgentSessionConfig) -> "Session":
+        """Create a fully configured root session from an SDK config."""
+        from agentm.core.runtime.session_factory import create_from_config
+
+        return await create_from_config(config)
 
     def start(self) -> None:
         if self._driver_task is not None:
@@ -139,7 +158,12 @@ class Session:
         )
         self.bus.emit_sync(SessionReadyEvent.CHANNEL, SessionReadyEvent(
             session_id=self.id,
+            root_session_id=self.ctx.root_session_id,
+            parent_session_id=self.ctx.parent_session_id,
+            cwd=self.ctx.cwd,
             tool_names=tuple(t.name for t in self.tools),
+            extension_module_paths=tuple(self.installed_extensions),
+            model=self._model,
         ))
 
     async def _run_driver(self) -> None:
@@ -187,6 +211,10 @@ class Session:
             except asyncio.CancelledError:
                 pass
         await self.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent())
+        telemetry = self.services.get("session_telemetry")
+        shutdown = getattr(telemetry, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
         self.bus._force_clear()
 
     # --- Input ---
@@ -350,8 +378,8 @@ class Session:
         self.services.register("resource_writer", writer)
 
     def add_observer(self, observer: object) -> None:
-        """Bridge — bus observer registration (observers not yet wired into bus dispatch)."""
-        self.services.register("bus_observer", observer)
+        """Register a bus observer for session-scoped instrumentation."""
+        self.bus.add_observer(observer)  # type: ignore[arg-type]
 
     def install_atom(self, module_path: str, config: dict[str, object] | None = None) -> None:
         """Load and install an atom at runtime."""
@@ -573,4 +601,6 @@ class Session:
         return session
 
 
-__all__ = ["Session"]
+AgentSession = Session
+
+__all__ = ["AgentSession", "Session"]

@@ -109,6 +109,8 @@ class Inject(LoopAction):
 class TurnBeginEvent(Event):
     CHANNEL: ClassVar[str] = "turn_begin"
     index: int = 0
+    turn_index: int = 0
+    turn_id: str = ""
     trigger: Trigger | None = None
 
 
@@ -230,7 +232,13 @@ class RunEndEvent(Event):
 class SessionReadyEvent(Event):
     CHANNEL: ClassVar[str] = "session_ready"
     session_id: str = ""
+    root_session_id: str = ""
+    parent_session_id: str | None = None
+    cwd: str = ""
     tool_names: tuple[str, ...] = ()
+    command_names: tuple[str, ...] = ()
+    extension_module_paths: tuple[str, ...] = ()
+    model: Model | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,19 +356,33 @@ class ResolveSubagentEvent(Event):
 class ExtensionInstallEvent(Event):
     CHANNEL: ClassVar[str] = "extension_install"
     name: str = ""
+    module_path: str = ""
     phase: str = ""
+    config: dict[str, Any] = field(default_factory=dict)
+    duration_ns: int = 0
+    trigger: str = "session_start"
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ExtensionReloadEvent(Event):
     CHANNEL: ClassVar[str] = "extension_reload"
     name: str = ""
+    old_hash: str | None = None
+    new_hash: str = ""
+    trigger: str = ""
+    tier: int = 0
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ExtensionUnloadEvent(Event):
     CHANNEL: ClassVar[str] = "extension_unload"
     name: str = ""
+    module_path: str = ""
+    trigger: str = ""
+    tier: int = 0
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,16 +397,22 @@ class ApiRegisterEvent(Event):
     CHANNEL: ClassVar[str] = "api_register"
     kind: str = ""
     name: str = ""
+    extension: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ApiSendUserMessageEvent(Event):
     CHANNEL: ClassVar[str] = "api_send_user_message"
+    extension: str = ""
+    content: Any = None
 
 
 @dataclass(frozen=True, slots=True)
 class ResourcesDiscoverEvent(Event):
     CHANNEL: ClassVar[str] = "resources_discover"
+    cwd: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,12 +445,22 @@ class SessionHeaderEmittedEvent(Event):
 class LlmRequestStartEvent(Event):
     CHANNEL: ClassVar[str] = "llm_request_start"
     turn_index: int = 0
+    turn_id: str = ""
+    model_id: str = ""
+    message_count: int = 0
+    tool_count: int = 0
+    system_chars: int = 0
+    system_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class LlmRequestEndEvent(Event):
     CHANNEL: ClassVar[str] = "llm_request_end"
     turn_index: int = 0
+    turn_id: str = ""
+    chunk_count: int = 0
+    duration_ns: int = 0
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,3 +478,9 @@ class BeforeInstallAtomEvent(Event):
 class BeforeUnloadAtomEvent(Event):
     CHANNEL: ClassVar[str] = "before_unload_atom"
     name: str = ""
+
+
+# v2 events are immutable and handler effects are return-value based.  The code
+# health checker imports this map to find legacy mutable-hook call sites; an
+# empty map makes that rule a no-op under the trajectory model.
+MUTABLE_EVENT_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {}

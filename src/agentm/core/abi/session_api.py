@@ -21,6 +21,7 @@ from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.lifecycle import LifecycleHook
 from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.trigger import Trigger, TriggerRenderer
@@ -56,6 +57,9 @@ class AgentSessionConfig:
     extra_tools: list[Tool] = field(default_factory=list)
     atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     provider: tuple[str, dict[str, Any]] | None = None
+    bus: EventBus | None = None
+    store: TrajectoryStore | None = None
+    initial_turns: list[Turn] = field(default_factory=list)
     tool_allowlist: list[str] | None = None
     purpose: str = "subagent"
     lineage: dict[str, Any] = field(default_factory=dict)
@@ -65,6 +69,12 @@ class AgentSessionConfig:
     experiment: dict[str, Any] | None = None
     trace_label: str | None = None
     session_id: str | None = None
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    no_extensions: bool = False
+    no_skills: bool = False
+    no_prompt_templates: bool = False
+    resource_loader: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)

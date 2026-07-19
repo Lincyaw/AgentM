@@ -21,8 +21,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
-
 from agentm.core.abi.codec import CodecRegistry, DEFAULT_CODEC
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Turn, TurnRef
@@ -47,6 +45,9 @@ class JsonlTrajectoryStore:
 
     def _path(self, session_id: str) -> Path:
         return self._dir / f"{session_id}.jsonl"
+
+    def file_path(self, session_id: str) -> Path:
+        return self._path(session_id)
 
     def create_session(self, meta: SessionMeta) -> None:
         path = self._path(meta.id)
@@ -97,46 +98,6 @@ class JsonlTrajectoryStore:
                 result.append(meta)
         return result
 
-    def append_round(
-        self, session_id: str, turn_id: str, round_data: dict[str, Any]
-    ) -> None:
-        path = self._path(session_id)
-        if not path.exists():
-            return
-        record = {
-            "__durable_round__": True,
-            "turn_id": turn_id,
-            **round_data,
-        }
-        line = json.dumps(record, default=str) + "\n"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-
-    def load_durable_rounds(
-        self, session_id: str, turn_id: str
-    ) -> list[dict[str, Any]]:
-        path = self._path(session_id)
-        if not path.exists():
-            return []
-        rounds: list[dict[str, Any]] = []
-        with path.open("r", encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if (
-                    isinstance(data, dict)
-                    and data.get("__durable_round__")
-                    and data.get("turn_id") == turn_id
-                ):
-                    rounds.append(data)
-        return rounds
-
     def _read(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         path = self._path(session_id)
         if not path.exists():
@@ -154,8 +115,6 @@ class JsonlTrajectoryStore:
                     logger.warning(
                         "skipping malformed line %d in %s", lineno, path
                     )
-                    continue
-                if isinstance(data, dict) and data.get("__durable_round__"):
                     continue
                 if meta is None:
                     try:

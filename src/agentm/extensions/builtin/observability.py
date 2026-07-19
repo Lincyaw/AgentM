@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 from loguru import logger
+from pathlib import Path
 import time
 import traceback
 from typing import Any
@@ -63,6 +64,7 @@ from agentm.core.abi import (
     TurnBeginEvent,
 )
 from agentm.core.observability.otel_dispatch import dispatch_otel
+from agentm.core.observability.otel_export import setup_session_telemetry
 from pydantic import BaseModel
 
 from agentm.core.lib import redact_messages, to_jsonable
@@ -308,10 +310,18 @@ class _ObservabilityObserver(EventBusObserver):
         self._redact_prompts = redact_prompts
         self._pending_diff_snapshots: list[tuple[str, Handler, Any, Any]] = []
 
-    def on_emit_start(self, channel: str, event: Any) -> None:
-        del channel, event
+    def on_emit_start(self, channel: str, event: Any, dispatch_id: str) -> None:
+        del channel, event, dispatch_id
 
-    def on_handler_start(self, channel: str, handler: Handler, event: Any) -> None:
+    def on_handler_start(
+        self,
+        channel: str,
+        handler: Handler,
+        event: Any,
+        dispatch_id: str,
+        owner: str | None,
+    ) -> None:
+        del dispatch_id, owner
         if not self._include_diff or not _event_mutable_fields(event):
             return
         try:
@@ -332,10 +342,11 @@ class _ObservabilityObserver(EventBusObserver):
         result: Any,
         error: BaseException | None,
         duration_ns: int,
+        dispatch_id: str,
         owner: str | None = None,
     ) -> None:
         del result
-        self._record_mutation(channel, handler, event, error)
+        self._record_mutation(channel, handler, event, error, dispatch_id)
         if not self._include_handlers or channel in self._exclude_channels:
             return
         attrs = self._handler_attributes(
@@ -345,6 +356,7 @@ class _ObservabilityObserver(EventBusObserver):
             error=error,
             duration_ns=duration_ns,
             owner=owner,
+            dispatch_id=dispatch_id,
         )
         self._telemetry.emit_log(
             "agentm.handler.invoke",
@@ -352,13 +364,15 @@ class _ObservabilityObserver(EventBusObserver):
             severity=SeverityNumber.ERROR if error is not None else SeverityNumber.INFO,
         )
 
-    def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
+    def on_emit_end(
+        self, channel: str, event: Any, results: list[Any], dispatch_id: str
+    ) -> None:
         if channel in self._exclude_channels:
             return
         attrs: dict[str, Any] = {
             "agentm.session.id": self._session.id,
             "agentm.event.channel": channel,
-            "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
+            "agentm.event.dispatch_id": dispatch_id,
             "agentm.handler.count": len(results),
         }
         payload = self._event_payload(channel, event)
@@ -375,11 +389,12 @@ class _ObservabilityObserver(EventBusObserver):
         error: BaseException | None,
         duration_ns: int,
         owner: str | None,
+        dispatch_id: str,
     ) -> dict[str, Any]:
         attrs: dict[str, Any] = {
             "agentm.session.id": self._session.id,
             "agentm.event.channel": channel,
-            "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
+            "agentm.event.dispatch_id": dispatch_id,
             "agentm.handler.name": _handler_label(handler),
             "agentm.handler.duration_ns": duration_ns,
             "agentm.handler.raised": error is not None,
@@ -411,6 +426,7 @@ class _ObservabilityObserver(EventBusObserver):
         handler: Handler,
         event: Any,
         error: BaseException | None,
+        dispatch_id: str,
     ) -> None:
         if not self._include_diff or not _event_mutable_fields(event):
             return
@@ -430,7 +446,7 @@ class _ObservabilityObserver(EventBusObserver):
             attributes={
                 "agentm.session.id": self._session.id,
                 "agentm.event.channel": channel,
-                "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
+                "agentm.event.dispatch_id": dispatch_id,
                 "agentm.handler.name": _handler_label(handler),
                 "agentm.handler.mutations": diff[:100],
                 "agentm.handler.raised": error is not None,
@@ -456,7 +472,11 @@ class _ObservabilityRuntime:
     def __init__(self, *, session: Any, config: ObservabilityConfig) -> None:
         self._session = session
         self._config = config
-        self._telemetry = None  # v2: telemetry pending
+        self._telemetry = setup_session_telemetry(
+            session.id,
+            Path(session.ctx.cwd or "."),
+            scenario_name=session.ctx.scenario,
+        )
         user_excludes = config.exclude_channels
         self._exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
             frozenset(user_excludes) if user_excludes else frozenset()
@@ -465,11 +485,14 @@ class _ObservabilityRuntime:
         self._current_fingerprint: ActiveSetFingerprint | None = None
 
     def install(self) -> None:
+        import agentm.core.observability.event_otel  # noqa: F401
+
+        self._session.services.register("session_telemetry", self._telemetry)
         self._stamp_session_metadata()
         self._emit_session_start()
         self._session.add_observer(
             _ObservabilityObserver(
-                api=self._session,
+                session=self._session,
                 telemetry=self._telemetry,
                 include_handlers=self._config.include_handler_records,
                 include_diff=self._config.include_mutation_diff,
@@ -478,7 +501,6 @@ class _ObservabilityRuntime:
             )
         )
         self._subscribe_otel_dispatch()
-        self._subscribe_fingerprint_bookkeeping()
 
     def _stamp_session_metadata(self) -> None:
         # Every per-event Event.to_otel translator reads these session fields.
@@ -515,9 +537,7 @@ class _ObservabilityRuntime:
             "agentm.session.scenario": self._session.ctx.scenario or "",
             "agentm.session.cwd": self._session.ctx.cwd,
         }
-        attrs.update(
-            _session_metadata_attributes(None, None)
-        )
+        attrs.update(_session_metadata_attributes(self._session.lineage, self._session.experiment))
         self._telemetry.emit_log("agentm.session.start", body=body, attributes=attrs)
 
     def _subscribe_otel_dispatch(self) -> None:

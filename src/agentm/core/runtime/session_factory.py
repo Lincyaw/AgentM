@@ -10,6 +10,7 @@ Atoms receive the Session directly (no adapter).
 from __future__ import annotations
 
 import inspect
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,10 +21,14 @@ if TYPE_CHECKING:
 import yaml
 from loguru import logger
 
+from agentm.core.abi.bus import EventBus
+from agentm.core.abi.events import ExtensionInstallEvent
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import SessionContext
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.stream import Model, StreamFn
+from agentm.core.abi.trajectory import Turn
+from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.extension import load_extension
 
@@ -111,10 +116,21 @@ async def create_session(
     cwd: str = "",
     purpose: str = "root",
     store: TrajectoryStore | None = None,
+    session_id: str | None = None,
+    root_session_id: str | None = None,
+    parent_session_id: str | None = None,
+    bus: EventBus | None = None,
+    initial_turns: list[Turn] | None = None,
     extra_extensions: list[str] | None = None,
+    extensions: list[tuple[str, dict[str, Any]]] | None = None,
+    provider: tuple[str, dict[str, Any]] | None = None,
     atom_configs: dict[str, dict[str, Any]] | None = None,
     services: ServiceRegistry | None = None,
     max_turns: int | None = None,
+    tool_allowlist: list[str] | None = None,
+    no_extensions: bool = False,
+    no_skills: bool = False,
+    no_prompt_templates: bool = False,
 ) -> Session:
     """Create a v2 Session from a scenario manifest.
 
@@ -122,24 +138,48 @@ async def create_session(
     each atom by passing the Session directly.
     """
 
-    extensions, resolved_scenario_dir = _load_scenario_extensions(
-        scenario, scenario_dir
-    )
+    if extensions is not None:
+        extension_specs = list(extensions)
+        resolved_scenario_dir = scenario_dir
+    elif no_extensions:
+        extension_specs = []
+        resolved_scenario_dir = scenario_dir
+    else:
+        extension_specs, resolved_scenario_dir = _load_scenario_extensions(
+            scenario, scenario_dir
+        )
 
     if extra_extensions:
         for ext in extra_extensions:
-            extensions.append((ext, {}))
+            extension_specs.append((ext, {}))
+
+    if no_skills:
+        extension_specs = [
+            item for item in extension_specs
+            if item[0] != "agentm.extensions.builtin.skill_loader"
+        ]
+    if no_prompt_templates:
+        extension_specs = [
+            item for item in extension_specs
+            if item[0] not in {
+                "agentm.extensions.builtin.prompt_templates",
+                "agentm.extensions.builtin.compaction_prompts",
+            }
+        ]
 
     # Apply per-atom config overrides
     if atom_configs:
-        extensions = [
+        extension_specs = [
             (mod, {**cfg, **atom_configs.get(mod, {})})
-            for mod, cfg in extensions
+            for mod, cfg in extension_specs
         ]
 
+    resolved_session_id = session_id or uuid.uuid4().hex[:16]
+    resolved_root_id = root_session_id or resolved_session_id
     ctx = SessionContext(
-        session_id="",
-        root_session_id="",
+        session_id=resolved_session_id,
+        root_session_id=resolved_root_id,
+        parent_session_id=parent_session_id,
         cwd=cwd or "",
         purpose=purpose,
         scenario=scenario,
@@ -148,6 +188,8 @@ async def create_session(
 
     session = Session(
         ctx=ctx,
+        trajectory=Trajectory(turns=initial_turns),
+        bus=bus,
         stream_fn=stream_fn,
         model=model,
         system=system,
@@ -158,19 +200,116 @@ async def create_session(
         purpose=purpose,
     )
 
+    if tool_allowlist is not None:
+        session.services.register("tool_allowlist", tool_allowlist)
+
+    if provider is not None:
+        await _install_extension(session, provider[0], provider[1])
+
     # Install atoms -- pass Session directly
-    for module_path, config in extensions:
+    for module_path, config in extension_specs:
         if not module_path:
             continue
-        try:
-            result = load_extension(module_path, session, config)
-            if inspect.isawaitable(result):
-                await result
-            logger.debug("installed atom: {}", module_path)
-        except Exception:
-            logger.exception("failed to install atom: {}", module_path)
+        await _install_extension(session, module_path, config)
 
     return session
+
+
+async def create_from_config(config: "AgentSessionConfig") -> Session:
+    """Create a root session from the public SDK config dataclass."""
+
+    max_turns = config.loop_config.max_turns if config.loop_config else None
+    services = ServiceRegistry()
+    if config.experiment is not None:
+        services.register("experiment", config.experiment)
+    if config.lineage:
+        services.register("lineage", config.lineage)
+    if config.task_id is not None:
+        services.register("task_id", config.task_id)
+    if config.persona is not None:
+        services.register("persona", config.persona)
+    if config.trace_label is not None:
+        services.register("trace_label", config.trace_label)
+    if config.loop_config is not None:
+        from agentm.core.abi import LOOP_BUDGET_SERVICE
+
+        services.register(LOOP_BUDGET_SERVICE, config.loop_config)
+
+    extra_extensions = [module for module, _ in config.extra_extensions]
+    atom_configs = dict(config.atom_config_overrides)
+    for module, cfg in config.extra_extensions:
+        if cfg:
+            atom_configs[module] = {**atom_configs.get(module, {}), **cfg}
+
+    session = await create_session(
+        scenario=config.scenario or "chatbot",
+        extensions=config.extensions or None,
+        extra_extensions=extra_extensions,
+        provider=config.provider,
+        atom_configs=atom_configs,
+        cwd=config.cwd,
+        purpose=config.purpose,
+        store=config.store,
+        session_id=config.session_id,
+        root_session_id=config.root_session_id,
+        parent_session_id=config.parent_session_id,
+        bus=config.bus,
+        initial_turns=config.initial_turns,
+        services=services,
+        max_turns=max_turns,
+        tool_allowlist=config.tool_allowlist,
+        no_extensions=config.no_extensions,
+        no_skills=config.no_skills,
+        no_prompt_templates=config.no_prompt_templates,
+    )
+
+    for tool in config.extra_tools:
+        session.register_tool(tool)
+    return session
+
+
+async def _install_extension(
+    session: Session,
+    module_path: str,
+    config: dict[str, Any],
+    *,
+    trigger: str = "session_start",
+) -> None:
+    started_ns = time.perf_counter_ns()
+    name = module_path.rsplit(".", 1)[-1]
+    await session.bus.emit(
+        ExtensionInstallEvent.CHANNEL,
+        ExtensionInstallEvent(
+            name=name,
+            module_path=module_path,
+            phase="start",
+            config=dict(config),
+            trigger=trigger,
+        ),
+    )
+    error: str | None = None
+    try:
+        result = load_extension(module_path, session, config)
+        if inspect.isawaitable(result):
+            await result
+        session.installed_extensions.append(module_path)
+        logger.debug("installed atom: {}", module_path)
+    except Exception as exc:
+        error = str(exc)
+        logger.exception("failed to install atom: {}", module_path)
+    finally:
+        await session.bus.emit(
+            ExtensionInstallEvent.CHANNEL,
+            ExtensionInstallEvent(
+                name=name,
+                module_path=module_path,
+                phase="error" if error else "end",
+                config=dict(config),
+                duration_ns=time.perf_counter_ns() - started_ns,
+                trigger=trigger,
+                error=error,
+            ),
+        )
 
 
 async def create_child_session(

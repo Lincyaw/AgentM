@@ -64,16 +64,6 @@ class InMemoryTrajectoryStore:
     def list_sessions(self) -> list[SessionMeta]:
         return [meta for meta, _ in self._sessions.values()]
 
-    def append_round(
-        self, session_id: str, turn_id: str, round_data: dict[str, object]
-    ) -> None:
-        pass
-
-    def load_durable_rounds(
-        self, session_id: str, turn_id: str
-    ) -> list[dict[str, object]]:
-        return []
-
 
 def _prefix_cut(turns: list[Turn], up_to: TurnRef) -> int:
     """Return the list index of the turn identified by ``up_to``.

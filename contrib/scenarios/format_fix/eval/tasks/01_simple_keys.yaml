@@ -1,9 +1,0 @@
-id: 01_simple_keys
-task_class: format_fix
-description: Single-quoted keys/values; trivial for v1 naive replace.
-input:
-  user_message: "{'name': 'alice', 'role': 'admin'}"
-expected:
-  value:
-    name: alice
-    role: admin

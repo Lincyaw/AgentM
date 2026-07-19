@@ -32,12 +32,6 @@ class TrajectoryStore(Protocol):
 
     def append(self, session_id: str, turn: Turn) -> None: ...
 
-    def append_round(
-        self, session_id: str, turn_id: str, round_data: dict[str, object]
-    ) -> None:
-        """Durable round checkpoint.  Optional — stores may no-op."""
-        ...
-
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]: ...
 
     def load_prefix(
@@ -49,10 +43,6 @@ class TrajectoryStore(Protocol):
     def session_exists(self, session_id: str) -> bool: ...
 
     def list_sessions(self) -> list[SessionMeta]: ...
-
-    def load_durable_rounds(
-        self, session_id: str, turn_id: str
-    ) -> list[dict[str, object]]: ...
 
 
 __all__ = [

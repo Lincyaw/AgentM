@@ -1,9 +1,0 @@
-name: arl:adapt
-description: Baseline + adapt self-modification helper.
-
-includes:
-  - overlays/base.yaml
-  - overlays/tools.yaml
-
-extensions:
-  - module: agentm.extensions.builtin.adapt
