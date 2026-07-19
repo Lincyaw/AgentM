@@ -65,6 +65,7 @@ _FILE_TOOLS = "agentm.extensions.builtin.file_tools"
 _LOCAL_RESOURCES = "agentm.extensions.builtin.local_resources"
 _OPERATIONS = "agentm.extensions.builtin.operations"
 _BACKGROUND_EXEC = "agentm.extensions.builtin.background_exec"
+_MEMORY = "agentm.extensions.builtin.memory"
 _WAIT_FOR_CANCEL = object()
 
 
@@ -862,6 +863,59 @@ async def test_sdk_background_tool_owns_cancellation_after_detach() -> None:
     assert any(
         "Background task" in text and "background-success" in text
         for text in _text(provider.requests[-1])
+    )
+
+
+@pytest.mark.asyncio
+async def test_sdk_memory_round_trip_is_provider_visible(tmp_path: Path) -> None:
+    provider = _StubProvider(
+        _tool_call(
+            "save-memory",
+            "memory_save",
+            {
+                "type": "project",
+                "name": "release_rule",
+                "description": "Release branches require a smoke test.",
+                "content": "Run the SDK smoke test before every release.",
+            },
+        ),
+        "memory-saved",
+        _tool_call(
+            "read-memory",
+            "memory_read",
+            {"name": "release_rule"},
+        ),
+        "memory-read",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ExtensionSpec.from_module(_LOCAL_RESOURCES),
+                ExtensionSpec.from_module(_MEMORY),
+            ],
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    try:
+        await session.run("remember the release rule")
+        await session.run("recall the release rule")
+    finally:
+        await session.shutdown()
+
+    visible_results = [
+        block
+        for message in provider.requests[-1]
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+        and block.tool_call_id == "read-memory"
+    ]
+    assert len(visible_results) == 1
+    assert "Run the SDK smoke test before every release." in " ".join(
+        content.text
+        for content in visible_results[0].content
+        if isinstance(content, TextContent)
     )
 
 

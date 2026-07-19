@@ -122,6 +122,7 @@ requirements:
       - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: src/agentm/extensions/builtin/llm_openai.py
       - path: src/agentm/extensions/builtin/local_resources.py
+      - path: src/agentm/extensions/builtin/memory.py
       - path: src/agentm/extensions/builtin/message_patterns.py
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/operations.py

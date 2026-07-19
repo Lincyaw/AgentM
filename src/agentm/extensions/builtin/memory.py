@@ -43,7 +43,7 @@ from loguru import logger
 import re
 import time
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import Final, Literal, Protocol, cast
 
 import frontmatter  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,6 +53,7 @@ from agentm.core.abi import (
     AtomInstallPriority,
     BeforeRunEvent,
     FunctionTool,
+    ResourceWriter,
     TextContent,
     ToolResult,
 )
@@ -60,20 +61,25 @@ from agentm.core.lib import with_model_note
 from agentm.extensions import ExtensionManifest
 
 
-def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+class _FrontmatterPost(Protocol):
+    metadata: object
+    content: str
+
+
+def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     """Parse leading YAML frontmatter, returning ``(metadata, body)``.
 
     On parse failure fall back to the original text with empty metadata.
     """
     try:
-        post = frontmatter.loads(text)
+        post = cast(_FrontmatterPost, frontmatter.loads(text))
     except Exception as exc:
         logger.debug("memory: frontmatter parse failed, returning raw text: {}", exc)
         return {}, text
     metadata = post.metadata
     if not isinstance(metadata, Mapping):
         return {}, cast(str, post.content)
-    return dict(metadata), cast(str, post.content)
+    return dict(metadata), post.content
 
 
 _VALID_TYPES: Final[tuple[str, ...]] = ("feedback", "project", "user", "reference")
@@ -100,7 +106,7 @@ MANIFEST = ExtensionManifest(
         "tool:memory_delete",
     ),
     config_schema=MemoryConfig,
-    requires=(),
+    requires=("service:resource_writer",),
     priority=AtomInstallPriority.CONTEXT,
 )
 
@@ -144,7 +150,12 @@ class _SearchArgs(BaseModel):
             "name + description. Returns up to ``limit`` results."
         ),
     )
-    limit: int = Field(default=10, description="Max results to return (default 10).")
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Max results to return (default 10).",
+    )
 
 
 class _DeleteArgs(BaseModel):
@@ -160,6 +171,8 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
     max_index_lines = config.max_index_lines
 
     writer = api.get_resource_writer()
+    if writer is None:
+        raise RuntimeError("memory requires a ResourceWriter service")
 
     if index_in_prompt:
 
@@ -175,7 +188,7 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
 
         api.on(BeforeRunEvent.CHANNEL, _before_run)
 
-    async def _save(args: dict[str, Any]) -> ToolResult:
+    async def _save(args: dict[str, object]) -> ToolResult:
         mem_type = str(args["type"])
         name = str(args["name"])
         description = str(args["description"]).strip()
@@ -194,8 +207,12 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
         body = _serialize_memory(mem_type, name, description, content)
 
         try:
-            write_result = await writer.write(rel_md, body.encode("utf-8"), rationale="memory_save")
-            if getattr(write_result, "error", None) is not None:
+            write_result = await writer.write(
+                rel_md,
+                body.encode("utf-8"),
+                rationale="memory_save",
+            )
+            if write_result.error is not None:
                 return _error(f"write failed: {write_result.error}")
         except Exception as exc:
             logger.warning("memory save write failed: {}", exc)
@@ -206,7 +223,7 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
             return _error(index_error)
         return _ok(f"saved memory {mem_type}/{name}")
 
-    async def _read(args: dict[str, Any]) -> ToolResult:
+    async def _read(args: dict[str, object]) -> ToolResult:
         name = str(args["name"])
         path = await _resolve_memory_path(writer, base_path, name)
         if path is None:
@@ -220,9 +237,12 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
         await _record_access(writer, base_path, name, cwd)
         return _ok(text)
 
-    async def _search(args: dict[str, Any]) -> ToolResult:
+    async def _search(args: dict[str, object]) -> ToolResult:
         query = str(args["query"]).lower().strip()
-        limit = int(args.get("limit", 10))
+        raw_limit = args.get("limit", 10)
+        if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
+            return _error("limit must be an integer")
+        limit = raw_limit
         if not query:
             return _error("query is empty")
 
@@ -253,14 +273,14 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
             result = _ok("\n".join(lines))
         if skipped:
             # Surface the silently-skipped files to the model, not just the log.
-            with_model_note(
+            result = with_model_note(
                 result,
                 f"{len(skipped)} memory file(s) could not be read and were "
                 f"skipped ({', '.join(skipped)}); this recall may be incomplete.",
             )
         return result
 
-    async def _delete(args: dict[str, Any]) -> ToolResult:
+    async def _delete(args: dict[str, object]) -> ToolResult:
         name = str(args["name"])
         path = await _resolve_memory_path(writer, base_path, name)
         if path is None:
@@ -350,7 +370,10 @@ def _serialize_memory(mem_type: str, name: str, description: str, content: str) 
         f"{body}"
     )
 
-async def _list_memory_files(writer: Any, base: Path) -> list[Path]:
+async def _list_memory_files(
+    writer: ResourceWriter,
+    base: Path,
+) -> list[Path]:
     try:
         names = await writer.list_dir(str(base))
     except Exception as exc:
@@ -363,7 +386,11 @@ async def _list_memory_files(writer: Any, base: Path) -> list[Path]:
         out.append(base / entry)
     return sorted(out)
 
-async def _resolve_memory_path(writer: Any, base: Path, name: str) -> Path | None:
+async def _resolve_memory_path(
+    writer: ResourceWriter,
+    base: Path,
+    name: str,
+) -> Path | None:
     """Find ``<type>_<name>.md`` without forcing the caller to know the type."""
 
     for mem_type in _VALID_TYPES:
@@ -377,7 +404,11 @@ async def _resolve_memory_path(writer: Any, base: Path, name: str) -> Path | Non
             continue
     return None
 
-async def _build_index_block(writer: Any, base: Path, max_lines: int) -> str:
+async def _build_index_block(
+    writer: ResourceWriter,
+    base: Path,
+    max_lines: int,
+) -> str:
     index_path = base / "MEMORY.md"
     try:
         if not await writer.exists(str(index_path)):
@@ -413,7 +444,7 @@ async def _build_index_block(writer: Any, base: Path, max_lines: int) -> str:
     )
 
 async def _rewrite_index(
-    writer: Any,
+    writer: ResourceWriter,
     base: Path,
     cwd: str,
 ) -> str | None:
@@ -438,8 +469,12 @@ async def _rewrite_index(
     body = "\n".join(lines) + ("\n" if lines else "")
     rel = _to_cwd_relative(base / "MEMORY.md", cwd)
     try:
-        result = await writer.write(rel, body.encode("utf-8"), rationale="memory_index_rebuild")
-        if getattr(result, "error", None) is not None:
+        result = await writer.write(
+            rel,
+            body.encode("utf-8"),
+            rationale="memory_index_rebuild",
+        )
+        if result.error is not None:
             return f"index rebuild failed: {result.error}"
     except Exception as exc:
         logger.warning("memory index rebuild failed: {}", exc)
@@ -447,7 +482,7 @@ async def _rewrite_index(
     return None
 
 async def _record_access(
-    writer: Any,
+    writer: ResourceWriter,
     base: Path,
     name: str,
     cwd: str,
@@ -456,20 +491,35 @@ async def _record_access(
     silent so they never break the read path."""
 
     stats_path = base / "access_stats.json"
-    stats: dict[str, Any] = {}
+    stats: dict[str, object] = {}
     try:
         if await writer.exists(str(stats_path)):
             raw = await writer.read(str(stats_path))
-            stats = json.loads(raw.decode("utf-8", errors="replace"))
-            if not isinstance(stats, dict):
+            decoded: object = json.loads(raw.decode("utf-8", errors="replace"))
+            if not isinstance(decoded, dict):
                 stats = {}
+            else:
+                stats = {
+                    str(key): value
+                    for key, value in decoded.items()
+                }
     except Exception as exc:
         logger.debug("memory access stats read failed: {}", exc)
         stats = {}
 
     prev = stats.get(name)
-    record: dict[str, Any] = prev if isinstance(prev, dict) else {}
-    record["count"] = int(record.get("count", 0)) + 1
+    record: dict[str, object] = (
+        {str(key): value for key, value in prev.items()}
+        if isinstance(prev, dict)
+        else {}
+    )
+    previous_count = record.get("count", 0)
+    count = (
+        previous_count
+        if isinstance(previous_count, int) and not isinstance(previous_count, bool)
+        else 0
+    )
+    record["count"] = count + 1
     record["last_access"] = time.strftime("%Y-%m-%d %H:%M:%S")
     stats[name] = record
 
