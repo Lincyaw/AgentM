@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentm.presenter.frontmatter import FrontmatterDocument
+from agentm.authoring.frontmatter import FrontmatterDocument
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +14,20 @@ class AuthoringArtifact:
     path: str
     body: str
     metadata: Mapping[str, str | int | float | bool | None] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError("authoring artifact path must be a non-empty string")
+        candidate = Path(self.path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(
+                f"authoring artifact path must stay relative: {self.path}"
+            )
+        document = FrontmatterDocument(
+            metadata=self.metadata,
+            body=self.body,
+        )
+        object.__setattr__(self, "metadata", document.metadata)
 
     def render(self) -> str:
         return FrontmatterDocument(metadata=self.metadata, body=self.body).render()

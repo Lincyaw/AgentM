@@ -585,6 +585,7 @@ def _check_god_class(tree: ast.Module, path: str) -> list[Issue]:
 _LAYER_RULES: Final[list[tuple[str, str, str]]] = [
     ("gateway/", "extensions/builtin/", "gateway must not import from builtin atoms"),
     ("extensions/", "gateway/", "extensions must not import from gateway"),
+    ("authoring/", "presenter/", "authoring must not import from presenter"),
     ("core/abi/", "core/runtime/", "ABI must not import from runtime"),
     ("core/abi/", "core/_internal/", "ABI must not import from _internal"),
 ]

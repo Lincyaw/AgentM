@@ -108,6 +108,17 @@ from logging.handlers import RotatingFileHandler
     assert rules.count("AM024") == 2
 
 
+def test_code_health_rejects_authoring_presenter_dependency(
+    tmp_path: Path,
+) -> None:
+    rules = _issues_for(
+        tmp_path,
+        "from agentm.presenter.frontmatter import FrontmatterDocument\n",
+        relative="src/agentm/authoring/artifacts.py",
+    )
+    assert "AM010" in rules
+
+
 def test_code_health_allows_typed_dict_and_precise_ignores(
     tmp_path: Path,
 ) -> None:

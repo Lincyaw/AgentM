@@ -44,6 +44,7 @@ requirements:
       - path: src/agentm/code_health.py
       - path: src/agentm/authoring/__init__.py
       - path: src/agentm/authoring/artifacts.py
+      - path: src/agentm/authoring/frontmatter.py
       - path: src/agentm/config/__init__.py
       - path: src/agentm/config/resolver.py
       - path: src/agentm/core/abi/__init__.py
@@ -128,7 +129,6 @@ requirements:
       - path: src/agentm/observability/otlp.py
       - path: src/agentm/observability/query.py
       - path: src/agentm/presenter/__init__.py
-      - path: src/agentm/presenter/frontmatter.py
       - path: src/agentm/scenarios.py
       - path: src/agentm/storage/__init__.py
       - path: src/agentm/storage/catalog/__init__.py
@@ -155,6 +155,7 @@ requirements:
       - path: tests/fixtures/custom_trigger.py
       - path: tests/fixtures/process_tools.py
       - path: tests/fixtures/prompt_cache_adapter.py
+      - path: tests/test_authoring.py
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_code_health.py
