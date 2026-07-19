@@ -71,6 +71,37 @@ class JsonlTrajectoryStore:
         finally:
             temp_path.unlink(missing_ok=True)
 
+    def upsert_turn(self, session_id: str, turn: Turn) -> None:
+        path = self._path(session_id)
+        try:
+            fh = path.open("r+b")
+        except FileNotFoundError:
+            raise KeyError(session_id) from None
+        record = self._encode_record(self._codec.serialize_turn(turn))
+        with fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            raw = fh.read()
+            meta, turns, valid_bytes, terminated = self._decode_records(
+                raw,
+                path,
+                allow_trailing_torn=True,
+            )
+            existing_idx = next(
+                (i for i, t in enumerate(turns) if t.index == turn.index), None,
+            )
+            if existing_idx is not None:
+                turns[existing_idx] = turn
+            else:
+                turns.append(turn)
+            fh.seek(0)
+            fh.truncate(0)
+            fh.write(self._encode_record(self._codec.serialize_session_meta(meta)))
+            for t in turns:
+                fh.write(b"\n")
+                fh.write(self._encode_record(self._codec.serialize_turn(t)))
+            fh.flush()
+            os.fsync(fh.fileno())
+
     def append(self, session_id: str, turn: Turn) -> None:
         path = self._path(session_id)
         try:

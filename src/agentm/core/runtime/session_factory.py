@@ -92,6 +92,7 @@ from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_meta import session_meta_config
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.lib.store_resolve import resolve_trajectory_store_or_create
 
 if TYPE_CHECKING:
     from agentm.core.abi.session_api import AgentSessionConfig
@@ -741,7 +742,7 @@ async def create_from_config(
             scenario_loader=config.scenario_loader,
             cwd=config.cwd,
             purpose=config.purpose,
-            store=config.store,
+            store=config.store if config.store is not None else resolve_trajectory_store_or_create(config.cwd or None),
             session_context=restored_context,
             session_id=config.session_id,
             root_session_id=config.root_session_id,

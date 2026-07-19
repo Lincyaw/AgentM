@@ -73,6 +73,18 @@ class Execution:
             raise StateError("cannot add a round to an inactive execution")
         self._rounds.append(Round(response=response, tool_results=tuple(tool_results)))
 
+    def snapshot(self, outcome: Outcome, meta: TurnMeta) -> Turn:
+        """Build an immutable Turn without deactivating this execution."""
+        return Turn(
+            index=self._index,
+            id=self._id,
+            trigger=self._trigger,
+            rounds=tuple(self._rounds),
+            outcome=outcome,
+            timestamp=time.time(),
+            meta=meta,
+        )
+
     def commit(self, outcome: Outcome, meta: TurnMeta) -> Turn:
         """Freeze this execution into an immutable Turn."""
         if not self._active:

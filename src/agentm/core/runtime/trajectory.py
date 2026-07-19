@@ -41,6 +41,17 @@ class Trajectory:
         self._active = Execution(index=len(self._turns), trigger=trigger)
         return self._active
 
+    def snapshot_in_progress(self, outcome: Outcome, meta: TurnMeta) -> Turn | None:
+        """Build a Turn from the active execution without freezing it.
+
+        Returns None when no execution is active or it has no rounds yet.
+        Used for incremental persistence — the snapshot is overwritten on
+        every round and replaced by the final commit.
+        """
+        if self._active is None or not self._active.rounds:
+            return None
+        return self._active.snapshot(outcome, meta)
+
     def prepare_commit(self, outcome: Outcome, meta: TurnMeta) -> Turn:
         """Freeze the active execution without making the Turn visible yet."""
         if self._active is None:

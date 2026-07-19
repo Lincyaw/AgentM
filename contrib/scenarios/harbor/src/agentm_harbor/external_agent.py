@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import yaml
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
@@ -26,6 +27,30 @@ from loguru import logger
 from agentm_harbor.harbor_ops import set_harbor_environment
 
 SCENARIO = "arl:harbor"
+def _find_scenario_yaml() -> Path:
+    env = os.environ.get("AGENTM_SCENARIO_YAML", "")
+    if env:
+        return Path(env)
+    pkg_dir = Path(__file__).parent
+    for candidate in [pkg_dir / "scenario.yaml", pkg_dir / "../../scenario.yaml"]:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError("scenario.yaml not found next to agentm_harbor package")
+
+
+def _load_scenario(scenario: str) -> "ScenarioSpec":
+    from agentm.core.abi import ScenarioSpec
+
+    manifest_path = _find_scenario_yaml().resolve()
+
+    with open(manifest_path) as f:
+        manifest = yaml.safe_load(f)
+
+    specs = []
+    for ext in manifest.get("extensions", []):
+        specs.append((ext["module"], ext.get("config", {})))
+
+    return ScenarioSpec(extensions=specs, base_dir=str(manifest_path.parent))
 
 
 class ExternalAgentMAgent(BaseAgent):
@@ -75,18 +100,39 @@ class ExternalAgentMAgent(BaseAgent):
             os.environ[key] = val
 
         model = self.model_name or env_patch.get("AGENTM_MODEL") or os.environ.get("AGENTM_MODEL")
+        llm_config: dict[str, Any] = {"name": "harbor"}
+        if model:
+            llm_config["model"] = model
+        api_key_val = saved.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+        if api_key_val:
+            llm_config["api_key"] = api_key_val
+        base_url_val = saved.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "")
+        if base_url_val:
+            llm_config["base_url"] = base_url_val
         config = AgentSessionConfig(
             cwd=os.getcwd(),
-            model=model,
             scenario=SCENARIO,
+            scenario_loader=_load_scenario,
+            extra_extensions=[
+                ("agentm.extensions.builtin.llm_openai", llm_config),
+            ],
         )
 
         session = await AgentSession.create(config)
-        logger.info("agentm-external: session {} started", session.session_id)
+        store_type = type(session.store).__name__ if session.store else "NONE"
+        logger.info("agentm-external: session {} started (store={})", session.session_id, store_type)
 
         try:
-            messages = await session.prompt(instruction)
+            await session.run(instruction)
+        except Exception as exc:
+            logger.error("agentm-external: session {} run failed: {}", session.session_id, exc)
+            raise
         finally:
+            turns = session.get_turns()
+            logger.info(
+                "agentm-external: session {} shutting down, {} turns in trajectory",
+                session.session_id, len(turns),
+            )
             await session.shutdown()
             for key, prev in saved.items():
                 if prev is None:
@@ -94,15 +140,7 @@ class ExternalAgentMAgent(BaseAgent):
                 else:
                     os.environ[key] = prev
 
-        tool_calls = sum(
-            len(m.content)
-            for m in messages
-            if m.role == "tool_result"
-        )
-        logger.info(
-            "agentm-external: session {} done, {} tool calls",
-            session.session_id, tool_calls,
-        )
+        logger.info("agentm-external: session {} done", session.session_id)
 
         self._populate_token_counts(context, session.session_id)
 

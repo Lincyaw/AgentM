@@ -22,6 +22,7 @@ packages = ["src/agentm_harbor"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "../../../src/agentm_toolbox" = "agentm_toolbox"
+"scenario.yaml" = "agentm_harbor/scenario.yaml"
 
 [tool.ruff]
 line-length = 100

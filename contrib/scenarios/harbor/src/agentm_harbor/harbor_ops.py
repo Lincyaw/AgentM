@@ -80,7 +80,7 @@ class HarborOpsConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="harbor_ops",
     description="Routes bash/file operations through Harbor BaseEnvironment.",
-    registers=(),
+    registers=("service:operations:bash", "service:resource_writer"),
     config_schema=HarborOpsConfig,
     requires=(),
     api_version=1,
@@ -136,7 +136,7 @@ class HarborBashOperations:
 
         result = await self._env.exec(
             command=cmd,
-            cwd=cwd or self._default_work_dir or None,
+            cwd=self._default_work_dir,
             env=env,
             timeout_sec=timeout_sec,
         )

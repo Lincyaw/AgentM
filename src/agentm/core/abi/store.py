@@ -107,6 +107,10 @@ class TrajectoryStore(Protocol):
 
     def append(self, session_id: str, turn: Turn) -> None: ...
 
+    def upsert_turn(self, session_id: str, turn: Turn) -> None:
+        """Insert or replace a turn — used for incremental round persistence."""
+        ...
+
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]: ...
 
     def load_prefix(

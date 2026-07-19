@@ -6,8 +6,6 @@ description: |
 extensions:
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.operations
-    config:
-      backend: local
   - module: agentm.extensions.builtin.local_resources
   - module: agentm.extensions.builtin.retry_policy
   - module: agentm.extensions.builtin.tool_result_cap

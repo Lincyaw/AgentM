@@ -130,6 +130,7 @@ from agentm.core.abi.termination import (
     BudgetExhausted,
     MaxTurnsExhausted,
     ModelEndTurn,
+    PauseTurn,
     ProviderRequestFailed,
     ProviderTruncated,
     SignalAborted,
@@ -627,8 +628,23 @@ async def _append_turn(
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            # Cancelling to_thread only cancels its awaiter.  The append is the
-            # commit boundary, so repeated cancellation must not obscure its result.
+            cancelled = True
+    task.result()
+    return cancelled
+
+
+async def _upsert_turn(
+    store: TrajectoryStore,
+    session_id: str,
+    turn: Turn,
+) -> bool:
+    """Upsert durably, returning whether the caller was cancelled meanwhile."""
+    task = asyncio.create_task(asyncio.to_thread(store.upsert_turn, session_id, turn))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
             cancelled = True
     task.result()
     return cancelled
@@ -1422,12 +1438,15 @@ async def drive(config: DriverConfig) -> None:
                     raise asyncio.CancelledError
             cancelled_during_append = False
             if config.store is not None:
+                logger.debug("driver: appending turn {} to store {}", turn.index, type(config.store).__name__)
                 cancelled_during_append = await _append_turn(
                     config.store,
                     config.session_id,
                     turn,
                 )
                 durable_turn_appended = True
+            else:
+                logger.warning("driver: store is None — turn {} NOT persisted", turn.index)
             try:
                 (
                     _,
@@ -1523,6 +1542,26 @@ async def drive(config: DriverConfig) -> None:
 
         except asyncio.CancelledError as exc:
             cancel_error: BaseException = exc
+            if not turn_published and execution is not None and execution.rounds:
+                try:
+                    if execution.active:
+                        turn = trajectory.prepare_commit(
+                            Outcome(cause=Aborted(reason="cancelled")),
+                            TurnMeta(),
+                        )
+                    if config.store is not None:
+                        logger.debug(
+                            "driver: cancel-commit turn {} ({} rounds)",
+                            turn.index, len(turn.rounds),
+                        )
+                        await _upsert_turn(config.store, config.session_id, turn)
+                    trajectory.finalize_commit(turn)
+                    turn_published = True
+                    triggers.complete(turn)
+                except Exception as commit_exc:
+                    logger.debug(
+                        "driver: cancel-commit failed: {}", commit_exc,
+                    )
             if not turn_published:
                 cleanup_errors = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
@@ -2080,6 +2119,23 @@ async def _react_loop(
             ), tool_calls_used
 
         execution.add_round(response, tool_records)
+
+        if config.store is not None:
+            try:
+                in_progress_meta = _meta(
+                    total_input, total_output, start_ns, effective_model,
+                    cache_read=total_cache_read, cache_write=total_cache_write,
+                )
+                snapshot = trajectory.snapshot_in_progress(
+                    Outcome(cause=SignalAborted(reason="in_progress")),
+                    in_progress_meta,
+                )
+                if snapshot is not None:
+                    await asyncio.to_thread(
+                        config.store.upsert_turn, session_id, snapshot,
+                    )
+            except Exception as _persist_exc:
+                logger.debug("incremental turn persist failed (non-fatal): {}", _persist_exc)
 
         terminal_from_trigger = _trigger_carries_terminal(trigger)
         default = _default_action(response, paired_outcomes)

@@ -235,6 +235,25 @@ class PostgresTrajectoryStore:
                 for r in cur.fetchall()
             ]
 
+    def upsert_turn(self, session_id: str, turn: Turn) -> None:
+        turn_json = json.dumps(
+            self._codec.serialize_turn(turn),
+            sort_keys=True,
+            allow_nan=False,
+        )
+        with _cursor(self._connection) as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("turns")}
+                    (session_id, turn_index, turn_id, turn_json)
+                VALUES (%s, %s, %s, %s::jsonb)
+                ON CONFLICT (session_id, turn_index)
+                DO UPDATE SET turn_json = EXCLUDED.turn_json
+                """,
+                (session_id, turn.index, turn.id, turn_json),
+            )
+        _commit(self._connection)
+
     def _insert_turn(
         self, cur: PostgresCursor, session_id: str, turn: Turn
     ) -> None:
