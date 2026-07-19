@@ -130,6 +130,7 @@ from agentm.core.abi.termination import (
     BudgetExhausted,
     MaxTurnsExhausted,
     ModelEndTurn,
+    ProviderRequestFailed,
     ProviderTruncated,
     SignalAborted,
     TerminationCause,
@@ -1346,35 +1347,58 @@ async def drive(
                 trajectory.prepare_commit(outcome, meta),
                 trigger_metadata=envelope.metadata,
             )
-            (
-                resource_mutations,
-                cancelled_during_resource_prepare,
-            ) = await _await_known_outcome(_prepare_resource_txn(resource_txn))
-            if cancelled_during_resource_prepare:
-                raise asyncio.CancelledError
-            if resource_mutations:
-                turn = replace(
-                    turn,
-                    meta=replace(
-                        turn.meta,
-                        resource_mutations=resource_mutations,
-                    ),
-                )
-            _, cancelled_during_resource_apply = await _await_known_outcome(
-                _apply_resource_txn(resource_txn)
-            )
-            if cancelled_during_resource_apply:
-                raise asyncio.CancelledError
-            _, cancelled_during_effect_prepare = await _await_known_outcome(
-                _prepare_effect_turn(
-                    effect_scope,
-                    effect_txn,
-                    turn,
+            if isinstance(outcome.cause, ProviderRequestFailed):
+                cleanup_errors = await _rollback_unpublished_turn(
+                    resource_txn=resource_txn,
+                    abandon_resource=True,
+                    effect_scope=effect_scope,
+                    effect_txn=effect_txn,
                     bus=bus,
                 )
-            )
-            if cancelled_during_effect_prepare:
-                raise asyncio.CancelledError
+                resource_txn = None
+                effect_txn = None
+                _clear_resource_txn(services)
+                if cleanup_errors:
+                    raise BaseExceptionGroup(
+                        "provider request and turn rollback failed",
+                        [
+                            RuntimeError(
+                                f"{outcome.cause.error_type}: "
+                                f"{outcome.cause.detail}"
+                            ),
+                            *cleanup_errors,
+                        ],
+                    )
+            else:
+                (
+                    resource_mutations,
+                    cancelled_during_resource_prepare,
+                ) = await _await_known_outcome(_prepare_resource_txn(resource_txn))
+                if cancelled_during_resource_prepare:
+                    raise asyncio.CancelledError
+                if resource_mutations:
+                    turn = replace(
+                        turn,
+                        meta=replace(
+                            turn.meta,
+                            resource_mutations=resource_mutations,
+                        ),
+                    )
+                _, cancelled_during_resource_apply = await _await_known_outcome(
+                    _apply_resource_txn(resource_txn)
+                )
+                if cancelled_during_resource_apply:
+                    raise asyncio.CancelledError
+                _, cancelled_during_effect_prepare = await _await_known_outcome(
+                    _prepare_effect_turn(
+                        effect_scope,
+                        effect_txn,
+                        turn,
+                        bus=bus,
+                    )
+                )
+                if cancelled_during_effect_prepare:
+                    raise asyncio.CancelledError
             node_append_position: _NodeAppendPosition | None = None
             if trajectory_node_store is not None:
                 (
@@ -1455,7 +1479,10 @@ async def drive(
                     cancelled_during_node_append = False
             else:
                 cancelled_during_node_append = False
-            triggers.complete(turn)
+            if isinstance(outcome.cause, ProviderRequestFailed):
+                triggers.fail(TriggerTerminated(outcome.cause))
+            else:
+                triggers.complete(turn)
             cancelled_during_event = False
             try:
                 await bus.emit(TurnCommittedEvent.CHANNEL, TurnCommittedEvent(turn=turn))
@@ -1770,7 +1797,30 @@ async def _react_loop(
                     total_input, total_output, start_ns,
                     cache_read=total_cache_read, cache_write=total_cache_write,
                 ), tool_calls_used
-            raise
+            if isinstance(exc, asyncio.CancelledError) or not isinstance(
+                exc,
+                Exception,
+            ):
+                raise
+            if stream_events:
+                execution.add_round(
+                    _assemble_assistant_message(stream_events),
+                    [],
+                )
+            return Outcome(
+                cause=ProviderRequestFailed(
+                    error_type=type(exc).__name__,
+                    detail=str(exc),
+                    partial_event_count=len(stream_events),
+                )
+            ), _meta(
+                total_input,
+                total_output,
+                start_ns,
+                effective_model,
+                cache_read=total_cache_read,
+                cache_write=total_cache_write,
+            ), tool_calls_used
         await bus.emit(
             LlmRequestEndEvent.CHANNEL,
             LlmRequestEndEvent(

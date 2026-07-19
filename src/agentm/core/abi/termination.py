@@ -37,6 +37,7 @@ class TerminationCause:
 
     overridable: ClassVar[bool] = True
     session_terminal: ClassVar[bool] = False
+    replayable: ClassVar[bool] = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,33 @@ class SignalAborted(TerminationCause):
 @dataclass(frozen=True, slots=True)
 class ProviderTruncated(TerminationCause):
     kind: Literal["max_tokens", "error"] = "max_tokens"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestFailed(TerminationCause):
+    """A provider request failed after provider-side retry policy completed."""
+
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+    replayable: ClassVar[bool] = False
+
+    error_type: str
+    detail: str
+    partial_event_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.error_type, str) or not self.error_type:
+            raise ValueError("provider failure error_type must be non-empty")
+        if not isinstance(self.detail, str):
+            raise TypeError("provider failure detail must be a string")
+        if (
+            not isinstance(self.partial_event_count, int)
+            or isinstance(self.partial_event_count, bool)
+            or self.partial_event_count < 0
+        ):
+            raise ValueError(
+                "provider failure partial_event_count must be non-negative"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +185,7 @@ __all__ = [
     "ModelEndTurn",
     "PauseTurn",
     "ProviderError",
+    "ProviderRequestFailed",
     "ProviderTruncated",
     "SignalAborted",
     "TerminationCause",

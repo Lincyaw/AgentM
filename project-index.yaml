@@ -23,7 +23,10 @@ requirements:
       from re-entering the SDK, while allowing precise documented ignores at
       genuine dynamic boundaries. Gateway wire DTOs, durable delivery/auth/session
       ports, observability parsing, and SQL driver adapters must remain outside
-      core and fail at their transport or persistence boundaries.
+      core and fail at their transport or persistence boundaries. Provider
+      requests that exhaust retries must persist a non-replayable failed turn
+      before the trigger receipt raises, so trajectory inspection never shows
+      only an unexplained session header.
     priority: P0
     status: tested
     confidence: confirmed

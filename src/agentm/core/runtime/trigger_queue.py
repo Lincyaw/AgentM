@@ -22,11 +22,13 @@ class QueueClosed(Exception):
 
 
 class TriggerTerminated(RuntimeError):
-    """Raised when an accepted trigger terminates without a committed turn."""
+    """Raised when an accepted trigger terminates without a successful result."""
 
     def __init__(self, cause: object) -> None:
         self.cause = cause
-        super().__init__(f"trigger terminated: {type(cause).__name__}")
+        super().__init__(
+            f"trigger terminated: {type(cause).__name__}: {cause}"
+        )
 
 
 _T = TypeVar("_T")

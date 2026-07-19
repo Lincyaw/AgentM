@@ -56,6 +56,7 @@ from agentm.core.abi.events import (
 from agentm.core.abi.termination import (
     BudgetExhausted,
     ModelEndTurn,
+    ProviderRequestFailed,
     SignalAborted,
     ToolTerminated,
 )
@@ -86,6 +87,7 @@ from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.runtime.trigger_queue import TriggerTerminated
 from agentm.core.runtime.tree import InMemorySessionGraph
 from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
 
@@ -1400,7 +1402,7 @@ async def test_tool_empty_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_fn_exception_abandons_turn() -> None:
+async def test_stream_fn_exception_persists_non_replayable_turn() -> None:
     delegate = MockStreamFn()
     delegate.enqueue(text_response("ok after failure"))
     failing = FailingStreamFn(fail_count=1, delegate=delegate)
@@ -1408,12 +1410,16 @@ async def test_stream_fn_exception_abandons_turn() -> None:
     session = Session(stream_fn=failing, model=make_model(), system="test")  # type: ignore[arg-type]
     session.start()
     receipt = await session.prompt("will fail")
-    with pytest.raises(ConnectionError, match="stream failure"):
+    with pytest.raises(TriggerTerminated, match="stream failure"):
         await receipt.wait()
     assert await session.idle(timeout=1.0)
     await session.shutdown()
 
-    assert len(session.trajectory) == 0
+    assert len(session.trajectory) == 1
+    turn = session.trajectory.turns[0]
+    assert isinstance(turn.outcome.cause, ProviderRequestFailed)
+    assert turn.outcome.cause.detail == "stream failure #1"
+    assert build_context_sync(session.trajectory.turns) == []
 
 
 @pytest.mark.asyncio
@@ -1504,11 +1510,15 @@ async def test_consecutive_stream_failures() -> None:
     session = Session(stream_fn=failing, model=make_model(), system="test")  # type: ignore[arg-type]
     session.start()
     receipt = await session.prompt("fail-1")
-    with pytest.raises(ConnectionError, match="stream failure"):
+    with pytest.raises(TriggerTerminated, match="stream failure"):
         await receipt.wait()
     await session.shutdown()
 
-    assert len(session.trajectory) == 0
+    assert len(session.trajectory) == 1
+    assert isinstance(
+        session.trajectory.turns[0].outcome.cause,
+        ProviderRequestFailed,
+    )
     assert failing.call_count == 1
 
 

@@ -115,6 +115,11 @@ def turn_to_nodes(
 
     indexed_messages = _turn_indexed_messages(turn, renderers)
     messages = [message for message, _ in indexed_messages]
+    if not turn.outcome.cause.replayable:
+        messages = [
+            replace(message, meta=replace(message.meta, replay="skip"))
+            for message in messages
+        ]
     round_indexes = [round_index for _, round_index in indexed_messages]
     return messages_to_nodes(
         messages=messages,

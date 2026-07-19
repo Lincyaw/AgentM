@@ -178,8 +178,13 @@ def render_trigger(
 def turn_to_messages(
     turn: Turn,
     renderers: dict[str, TriggerRenderer] | None = None,
+    *,
+    include_non_replayable: bool = False,
 ) -> list[AgentMessage]:
     """Extract the AgentMessages that a committed Turn contributes to context."""
+
+    if not turn.outcome.cause.replayable and not include_non_replayable:
+        return []
 
     messages: list[AgentMessage] = []
     messages.extend(
@@ -289,13 +294,16 @@ async def build_context(
     Async so policies can make LLM calls (compaction).
     """
 
+    replayable_turns = tuple(
+        turn for turn in turns if turn.outcome.cause.replayable
+    )
     messages: list[AgentMessage] = []
-    for turn in turns:
+    for turn in replayable_turns:
         messages.extend(turn_to_messages(turn, renderers))
 
     return await apply_context_policies(
         messages,
-        turns,
+        replayable_turns,
         policies,
         signal=signal,
     )

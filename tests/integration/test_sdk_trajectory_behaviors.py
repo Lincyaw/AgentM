@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from agentm import AgentSession, AgentSessionConfig, Model
+from agentm import (
+    AgentSession,
+    AgentSessionConfig,
+    Model,
+    ProviderRequestFailed,
+)
 from agentm.core.abi.cancel import CancelSignal, cancel_reason
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.messages import (
@@ -93,6 +98,8 @@ class _StubProvider:
             await signal.wait()
             self.observed_cancel_reason = cancel_reason(signal)
             raise RuntimeError("provider request cancelled")
+        if isinstance(action, Exception):
+            raise action
         if isinstance(action, AssistantMessage):
             yield MessageEnd(message=action)
             return
@@ -397,6 +404,57 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
         "question-three",
         "answer-three",
     ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_persists_provider_failure_without_replaying_it(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    provider = _StubProvider(RuntimeError("provider unavailable"))
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[
+                (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
+            ],
+            stream_fn=provider,
+            model=_model(),
+            store=trajectory_backend.open_turn_store(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
+        )
+    )
+    session_id = session.session_id
+    try:
+        with pytest.raises(RuntimeError, match="ProviderRequestFailed"):
+            await session.run("failed-question")
+    finally:
+        await session.shutdown()
+
+    _, failed_turns = trajectory_backend.open_turn_store().load(session_id)
+    assert len(failed_turns) == 1
+    failure = failed_turns[0].outcome.cause
+    assert isinstance(failure, ProviderRequestFailed)
+    assert failure.error_type == "RuntimeError"
+    assert failure.detail == "provider unavailable"
+
+    resumed_provider = _StubProvider("recovered-answer")
+    resumed = await AgentSession.resume(
+        session_id,
+        trajectory_backend.open_turn_store(),
+        config=AgentSessionConfig(
+            extensions=[
+                (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
+            ],
+            stream_fn=resumed_provider,
+            model=_model(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
+        ),
+    )
+    try:
+        await resumed.run("retry-question")
+    finally:
+        await resumed.shutdown()
+
+    assert _text(resumed_provider.requests[0]) == ["retry-question"]
 
 
 @pytest.mark.asyncio

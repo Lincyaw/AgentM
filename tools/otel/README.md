@@ -22,10 +22,15 @@ docker compose -f tools/otel/docker-compose.yaml ps
 For a CLI session whose scenario installs the `observability` atom:
 
 ```bash
+AGENTM_TRAJECTORY_DSN=postgresql://agentm:agentm@localhost:55432/agentm_test \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
 OTEL_EXPORTER_OTLP_INSECURE=true \
 uv run agentm run --scenario chat --message "hello"
 ```
+
+The first variable selects PostgreSQL as the one authoritative trajectory
+store. Without it, the CLI deliberately writes JSONL under the current
+project's `.agentm/trajectory/` directory instead.
 
 Open `http://localhost:8123/play` to query ClickHouse. PostgreSQL is available
 at `postgresql://agentm:agentm@localhost:55432/agentm_test`.

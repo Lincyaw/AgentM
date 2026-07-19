@@ -50,6 +50,7 @@ from agentm.core.abi.termination import (
     BudgetExhausted,
     MaxTurnsExhausted,
     ModelEndTurn,
+    ProviderRequestFailed,
     ProviderTruncated,
     SignalAborted,
     TerminationCause,
@@ -719,6 +720,7 @@ _BUILTIN_CAUSES: Final[dict[str, type[TerminationCause]]] = {
         ToolTerminated,
         MaxTurnsExhausted,
         SignalAborted,
+        ProviderRequestFailed,
         ProviderTruncated,
         BudgetExhausted,
     )

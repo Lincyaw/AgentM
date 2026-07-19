@@ -11,13 +11,20 @@ import typer
 
 from agentm.cli._display import EXIT_NOT_FOUND, is_tty, stderr_console
 from agentm.cli._store import resolve_trajectory_store
-from agentm.core.abi.messages import TextContent, ThinkingBlock, ToolCallBlock
+from agentm.core.abi.messages import (
+    ImageContent,
+    TextContent,
+    ThinkingBlock,
+    ToolCallBlock,
+)
 from agentm.core.abi.query import (
     SessionFilter,
     TrajectoryQueryStore,
 )
 from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.trigger import UserInput
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 
 TraceFormat = Literal["text", "ndjson"]
@@ -37,11 +44,13 @@ class _TurnSummary(TypedDict):
     cache_read: int
     model: str | None
     cause: str
+    error_type: NotRequired[str]
+    error: NotRequired[str]
 
 
 class _MessageRecord(TypedDict):
     turn_index: int
-    round_index: int
+    round_index: int | None
     role: str
     content: str
     tool: NotRequired[str]
@@ -192,7 +201,7 @@ def _turn_summary(turn: Turn) -> _TurnSummary:
             tool_names.append(rec.call.name)
             if rec.result.is_error:
                 tool_errors += 1
-    return {
+    summary: _TurnSummary = {
         "turn_index": turn.index, "turn_id": turn.id,
         "trigger_source": turn.trigger.source,
         "rounds": len(turn.rounds), "tool_calls": tool_names,
@@ -201,6 +210,10 @@ def _turn_summary(turn: Turn) -> _TurnSummary:
         "cache_read": turn.meta.cache_read_tokens, "model": turn.meta.model_id,
         "cause": type(turn.outcome.cause).__name__,
     }
+    if isinstance(turn.outcome.cause, ProviderRequestFailed):
+        summary["error_type"] = turn.outcome.cause.error_type
+        summary["error"] = turn.outcome.cause.detail
+    return summary
 
 
 @trace_app.command("turns")
@@ -223,10 +236,13 @@ def turns_cmd(
 
     def _render(d: _TurnSummary) -> str:
         tools = ", ".join(d["tool_calls"]) if d["tool_calls"] else "---"
-        return (
+        rendered = (
             f"  [{d['turn_index']}] {d['cause']:<20} tools=[{tools}] "
             f"in={d['input_tokens']} out={d['output_tokens']}"
         )
+        if "error_type" in d:
+            rendered += f"\n      error={d['error_type']}: {d.get('error', '')}"
+        return rendered
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]session {sid}: {len(summaries)} turn(s)[/dim]")
@@ -256,6 +272,25 @@ def messages_cmd(
     chosen_fmt = _resolve_format(fmt)
     all_msgs: list[_MessageRecord] = []
     for turn in turns:
+        if isinstance(turn.trigger, UserInput):
+            trigger_content = [
+                block.text
+                if isinstance(block, TextContent)
+                else (
+                    f"[image {block.mime_type}, {len(block.data)} bytes]"
+                    if isinstance(block, ImageContent)
+                    else f"[{type(block).__name__}]"
+                )
+                for block in turn.trigger.content
+            ]
+            all_msgs.append(
+                {
+                    "turn_index": turn.index,
+                    "round_index": None,
+                    "role": "user",
+                    "content": "\n".join(trigger_content),
+                }
+            )
         for ri, rnd in enumerate(turn.rounds):
             blocks: list[str] = []
             for block in rnd.response.content:
@@ -295,11 +330,26 @@ def messages_cmd(
                         "content": txt,
                     }
                 )
+        if isinstance(turn.outcome.cause, ProviderRequestFailed):
+            all_msgs.append(
+                {
+                    "turn_index": turn.index,
+                    "round_index": None,
+                    "role": "error",
+                    "content": (
+                        f"{turn.outcome.cause.error_type}: "
+                        f"{turn.outcome.cause.detail}"
+                    ),
+                }
+            )
     if role:
         all_msgs = [m for m in all_msgs if m["role"] == role]
 
     def _render(m: _MessageRecord) -> str:
-        hdr = f"[{m['role']}] turn={m['turn_index']} round={m['round_index']}"
+        round_label = (
+            str(m["round_index"]) if m["round_index"] is not None else "---"
+        )
+        hdr = f"[{m['role']}] turn={m['turn_index']} round={round_label}"
         if m["role"] == "tool_result":
             error = " ERROR" if m.get("is_error") else ""
             hdr += f" tool={m.get('tool', '?')}{error}"

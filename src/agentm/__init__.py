@@ -77,6 +77,7 @@ from agentm.core.abi.store import (
     TrajectoryNodeStore,
     TrajectoryStore,
 )
+from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.tool_executor import ToolExecutionRequirements, ToolExecutor
 from agentm.core.abi.trigger import (
     BackgroundCompletion,
@@ -129,6 +130,7 @@ __all__ = [
     "ProviderPromptCacheAdapter",
     "ProviderPromptCacheRequest",
     "ProviderPromptCacheResult",
+    "ProviderRequestFailed",
     "ProviderRegistry",
     "ProviderResolver",
     "ProviderSessionIdentity",

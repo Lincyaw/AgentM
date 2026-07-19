@@ -104,12 +104,19 @@ minimal resumable context (`root_session_id`, `depth`, `scenario`, and
 `scenario_dir`) so a child or fork can be loaded in a later process without
 losing its lineage.
 
+`AgentSessionConfig(store=None)` is explicitly ephemeral. Host programs that
+need resume or trace queries must select one store. Provider requests that fail
+after retries are persisted as non-replayable `ProviderRequestFailed` turns
+before the trigger receipt raises, so failed sessions do not collapse to an
+empty session header.
+
 Built-in stores:
 
 | Store | Use |
 |---|---|
 | `InMemoryTrajectoryStore` | Tests and ephemeral embedding. |
 | `JsonlTrajectoryStore` | Local append-only persistence, one JSONL file per session. |
+| `PostgresTrajectoryStore` | Durable transactional session/turn persistence. |
 
 `TrajectoryNodeStore` is a second persistence/query port, not a replacement for
 `TrajectoryStore`. It stores or derives a message tree with stable node ids and
@@ -123,10 +130,10 @@ portable index fields:
 | Turn join | `turn_id`, `turn_index`, `round_index`, `message_index` | Join message nodes back to committed turns and tool records. |
 | Shape | `kind`, `role`, `timestamp` | Filter message, compact boundary, content replacement, snip, checkpoint, and user/assistant/tool-result nodes. |
 
-SQL stores should implement these as normal indexed columns. ClickHouse stores
-should map the same fields to partition/order/skip-index choices. JSONL stores
-may satisfy the same Protocol by scanning or maintaining a sidecar index. The
-SDK relies on the Protocol semantics, not on a JSONL layout.
+SQL stores implement these as normal indexed columns. JSONL stores may satisfy
+the same Protocol by scanning or maintaining a sidecar index. ClickHouse is an
+optional OTLP observability backend, not a trajectory store. The SDK relies on
+the Protocol semantics, not on a JSONL layout.
 
 ## Verification
 
