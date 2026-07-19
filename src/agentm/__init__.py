@@ -75,6 +75,7 @@ from agentm.core.abi.store import (
     TrajectoryNodeQuery,
     TrajectoryNodeSort,
     TrajectoryNodeStore,
+    TrajectoryStorage,
     TrajectoryStore,
 )
 from agentm.core.abi.termination import ProviderRequestFailed
@@ -91,9 +92,8 @@ from agentm.core.abi.trigger import (
     UserInput,
 )
 from agentm.core.runtime.session import Session
+from agentm.sdk import AgentSession
 from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
-
-AgentSession = Session
 
 __all__ = [
     "ActiveSetFingerprint",
@@ -155,6 +155,7 @@ __all__ = [
     "TrajectoryNodeSort",
     "TrajectoryNodeStore",
     "TrajectoryQueryStore",
+    "TrajectoryStorage",
     "TrajectoryStore",
     "Trigger",
     "TriggerMetadata",

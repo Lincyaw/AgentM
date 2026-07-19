@@ -92,7 +92,6 @@ from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_meta import session_meta_config
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
-from agentm.core.lib.store_resolve import resolve_trajectory_store_or_create
 
 if TYPE_CHECKING:
     from agentm.core.abi.session_api import AgentSessionConfig
@@ -484,7 +483,24 @@ class SessionBuildConfig:
     cancel_signal: CancelSignal | None = None
 
 
-async def create_session(config: SessionBuildConfig) -> Session:
+async def _cleanup_failed_session(
+    session: Session,
+    creation_error: BaseException,
+) -> None:
+    try:
+        await session.shutdown()
+    except BaseException as cleanup_error:
+        raise BaseExceptionGroup(
+            "session creation and cleanup failed",
+            (creation_error, cleanup_error),
+        ) from creation_error
+
+
+async def create_session(
+    config: SessionBuildConfig,
+    *,
+    session_type: type[Session] = Session,
+) -> Session:
     """Create a root SDK session."""
 
     scenario = config.scenario
@@ -572,7 +588,7 @@ async def create_session(config: SessionBuildConfig) -> Session:
     else:
         ctx = session_context
 
-    session = Session(
+    session = session_type(
         SessionRuntimeConfig(
             ctx=ctx,
             trajectory=Trajectory(turns=initial_turns),
@@ -605,47 +621,51 @@ async def create_session(config: SessionBuildConfig) -> Session:
             purpose=purpose,
         )
     )
-    if resource_writer is not None:
-        session.register_resource_writer(resource_writer, replace=True)
-    if effect_scope is not None:
-        session.register_effect_scope(effect_scope, replace=True)
-    if environment_operations is not None:
-        session.register_operations(
-            environment=environment_operations,
-            bash=environment_operations.bash,
-        )
-    if atom_catalog is not None:
-        session.register_atom_catalog(atom_catalog, replace=True)
+    try:
+        if resource_writer is not None:
+            session.register_resource_writer(resource_writer, replace=True)
+        if effect_scope is not None:
+            session.register_effect_scope(effect_scope, replace=True)
+        if environment_operations is not None:
+            session.register_operations(
+                environment=environment_operations,
+                bash=environment_operations.bash,
+            )
+        if atom_catalog is not None:
+            session.register_atom_catalog(atom_catalog, replace=True)
 
-    plan_specs = list(extension_specs)
-    if provider is not None:
-        plan_specs.append(normalize_extension_spec(provider))
-    plan = _extension_plan(
-        plan_specs,
-        available_capabilities=_service_capabilities(resolved_services),
-    )
-    for item in plan:
-        await install_extension(session, item.spec)
-    created_at = time.time()
-    active_set = await _record_active_set(session, plan, created_at=created_at)
-    await _ensure_store_session(
-        store,
-        meta=SessionMeta(
-            id=session.id,
-            parent_id=ctx.parent_session_id,
-            fork_point=fork_point,
-            purpose=ctx.purpose,
-            cwd=ctx.cwd,
-            created_at=created_at,
-            config=session_meta_config(
-                ctx,
-                resolved_spec=resolved_spec,
-                active_set=active_set,
-                provider_identity=session.provider_session_identity(),
+        plan_specs = list(extension_specs)
+        if provider is not None:
+            plan_specs.append(normalize_extension_spec(provider))
+        plan = _extension_plan(
+            plan_specs,
+            available_capabilities=_service_capabilities(resolved_services),
+        )
+        for item in plan:
+            await install_extension(session, item.spec)
+        created_at = time.time()
+        active_set = await _record_active_set(session, plan, created_at=created_at)
+        await _ensure_store_session(
+            store,
+            meta=SessionMeta(
+                id=session.id,
+                parent_id=ctx.parent_session_id,
+                fork_point=fork_point,
+                purpose=ctx.purpose,
+                cwd=ctx.cwd,
+                created_at=created_at,
+                config=session_meta_config(
+                    ctx,
+                    resolved_spec=resolved_spec,
+                    active_set=active_set,
+                    provider_identity=session.provider_session_identity(),
+                ),
             ),
-        ),
-        initial_turns=initial_turns or (),
-    )
+            initial_turns=initial_turns or (),
+        )
+    except BaseException as creation_error:
+        await _cleanup_failed_session(session, creation_error)
+        raise
 
     return session
 
@@ -655,12 +675,16 @@ async def create_from_config(
     *,
     restored_context: SessionContext | None = None,
     restored_provider_identity: ProviderSessionIdentity | None = None,
+    session_type: type[Session] = Session,
+    host_services: ServiceRegistry | None = None,
 ) -> Session:
     """Create a root session from the public SDK config dataclass."""
 
     max_turns = config.loop_config.max_turns if config.loop_config else None
     max_tool_calls = config.loop_config.max_tool_calls if config.loop_config else None
     services = ServiceRegistry()
+    if host_services is not None:
+        services.update_from(host_services)
     if config.experiment is not None:
         experiment = freeze_json(config.experiment)
         if not isinstance(experiment, Mapping):
@@ -696,6 +720,7 @@ async def create_from_config(
             ResolvedSessionSpec,
             scope="session",
         )
+    trajectory_storage = config.trajectory_storage
     session = await create_session(
         SessionBuildConfig(
             scenario=(
@@ -729,7 +754,11 @@ async def create_from_config(
             tool_executor=config.tool_executor,
             tool_orchestrator=config.tool_orchestrator,
             permission_policy=config.permission_policy,
-            trajectory_node_store=config.trajectory_node_store,
+            trajectory_node_store=(
+                trajectory_storage.node_store
+                if trajectory_storage is not None
+                else None
+            ),
             effect_scope=config.effect_scope,
             environment_restore_failure_handler=(
                 config.environment_restore_failure_handler
@@ -742,7 +771,11 @@ async def create_from_config(
             scenario_loader=config.scenario_loader,
             cwd=config.cwd,
             purpose=config.purpose,
-            store=config.store if config.store is not None else resolve_trajectory_store_or_create(config.cwd or None),
+            store=(
+                trajectory_storage.turn_store
+                if trajectory_storage is not None
+                else None
+            ),
             session_context=restored_context,
             session_id=config.session_id,
             root_session_id=config.root_session_id,
@@ -755,11 +788,16 @@ async def create_from_config(
             max_tool_calls=max_tool_calls,
             tool_allowlist=config.tool_allowlist,
             cancel_signal=config.cancel_signal,
-        )
+        ),
+        session_type=session_type,
     )
 
-    for tool in config.extra_tools:
-        session.register_tool(tool)
+    try:
+        for tool in config.extra_tools:
+            session.register_tool(tool)
+    except BaseException as creation_error:
+        await _cleanup_failed_session(session, creation_error)
+        raise
     return session
 
 
@@ -861,7 +899,17 @@ async def create_child_session(
         scenario_dir = parent.ctx.scenario_dir
 
     child_id = config.session_id or uuid.uuid4().hex[:16]
-    child_store = config.store if config.store is not None else parent.store
+    trajectory_storage = config.trajectory_storage
+    child_store = (
+        trajectory_storage.turn_store
+        if trajectory_storage is not None
+        else parent.store
+    )
+    child_node_store = (
+        trajectory_storage.node_store
+        if trajectory_storage is not None
+        else parent.get_trajectory_node_store()
+    )
     if child_store is not parent.store:
         child_services.unregister(TRAJECTORY_QUERY_STORE_SERVICE)
         _register_default_query_store(child_services, child_store)
@@ -895,7 +943,7 @@ async def create_child_session(
         else parent_signal
     )
 
-    child = Session(
+    child = type(parent)(
         SessionRuntimeConfig(
             ctx=child_ctx,
             trajectory=Trajectory(turns=config.initial_turns),
@@ -915,71 +963,74 @@ async def create_child_session(
             provider_identity=(
                 resolved_spec.provider_identity if resolved_spec is not None else None
             ),
+            trajectory_node_store=child_node_store,
             services=child_services,
             cwd=config.cwd or parent.ctx.cwd,
             purpose=config.purpose,
         )
     )
-    if config.resource_writer is not None:
-        child.register_resource_writer(config.resource_writer, replace=True)
-    if config.resource_reader is not None:
-        child.register_resource_reader(config.resource_reader, replace=True)
-    if config.resource_store is not None:
-        child.register_resource_store(config.resource_store, replace=True)
-    if config.tool_executor is not None:
-        child.register_tool_executor(config.tool_executor, replace=True)
-    if config.tool_orchestrator is not None:
-        child.register_tool_orchestrator(config.tool_orchestrator, replace=True)
-    if config.permission_policy is not None:
-        child.register_permission_policy(config.permission_policy, replace=True)
-    if config.trajectory_node_store is not None:
-        child.register_trajectory_node_store(config.trajectory_node_store, replace=True)
-    if config.effect_scope is not None:
-        child.register_effect_scope(config.effect_scope, replace=True)
-    if config.versioned_resource_store is not None:
-        child.register_versioned_resource_store(
-            config.versioned_resource_store,
-            replace=True,
+    try:
+        if config.resource_writer is not None:
+            child.register_resource_writer(config.resource_writer, replace=True)
+        if config.resource_reader is not None:
+            child.register_resource_reader(config.resource_reader, replace=True)
+        if config.resource_store is not None:
+            child.register_resource_store(config.resource_store, replace=True)
+        if config.tool_executor is not None:
+            child.register_tool_executor(config.tool_executor, replace=True)
+        if config.tool_orchestrator is not None:
+            child.register_tool_orchestrator(config.tool_orchestrator, replace=True)
+        if config.permission_policy is not None:
+            child.register_permission_policy(config.permission_policy, replace=True)
+        if config.effect_scope is not None:
+            child.register_effect_scope(config.effect_scope, replace=True)
+        if config.versioned_resource_store is not None:
+            child.register_versioned_resource_store(
+                config.versioned_resource_store,
+                replace=True,
+            )
+        if config.atom_catalog is not None:
+            child.register_atom_catalog(config.atom_catalog, replace=True)
+
+        plan_specs = list(extensions)
+        if provider_spec is not None:
+            plan_specs.append(normalize_extension_spec(provider_spec))
+        plan = _extension_plan(
+            plan_specs,
+            available_capabilities=_service_capabilities(child_services),
         )
-    if config.atom_catalog is not None:
-        child.register_atom_catalog(config.atom_catalog, replace=True)
+        for item in plan:
+            await install_extension(
+                child,
+                item.spec,
+                trigger="child_session_start",
+            )
 
-    plan_specs = list(extensions)
-    if provider_spec is not None:
-        plan_specs.append(normalize_extension_spec(provider_spec))
-    plan = _extension_plan(
-        plan_specs,
-        available_capabilities=_service_capabilities(child_services),
-    )
-    for item in plan:
-        await install_extension(
-            child,
-            item.spec,
-            trigger="child_session_start",
-        )
+        for tool in config.extra_tools:
+            child.register_tool(tool)
 
-    for tool in config.extra_tools:
-        child.register_tool(tool)
-
-    created_at = time.time()
-    active_set = await _record_active_set(child, plan, created_at=created_at)
-    await _ensure_store_session(
-        child_store,
-        meta=SessionMeta(
-            id=child.id,
-            parent_id=parent.id,
-            purpose=config.purpose,
-            cwd=child_ctx.cwd,
-            created_at=created_at,
-            config=session_meta_config(
-                child_ctx,
-                resolved_spec=resolved_spec,
-                active_set=active_set,
-                provider_identity=child.provider_session_identity(),
+        created_at = time.time()
+        active_set = await _record_active_set(child, plan, created_at=created_at)
+        await _ensure_store_session(
+            child_store,
+            meta=SessionMeta(
+                id=child.id,
+                parent_id=parent.id,
+                purpose=config.purpose,
+                cwd=child_ctx.cwd,
+                created_at=created_at,
+                config=session_meta_config(
+                    child_ctx,
+                    resolved_spec=resolved_spec,
+                    active_set=active_set,
+                    provider_identity=child.provider_session_identity(),
+                ),
             ),
-        ),
-        initial_turns=config.initial_turns,
-    )
+            initial_turns=config.initial_turns,
+        )
+    except BaseException as creation_error:
+        await _cleanup_failed_session(child, creation_error)
+        raise
 
     return child
 

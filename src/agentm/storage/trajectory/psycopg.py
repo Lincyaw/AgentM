@@ -9,7 +9,6 @@ import psycopg
 from psycopg import Connection, Cursor
 
 from agentm.storage.trajectory.postgres import (
-    PostgresConnection,
     PostgresCursor,
 )
 
@@ -74,7 +73,7 @@ class PsycopgConnectionAdapter:
         self._connection.close()
 
 
-def connect(dsn: str) -> PostgresConnection:
+def connect(dsn: str) -> PsycopgConnectionAdapter:
     """Open a psycopg connection adapted to AgentM's storage port."""
     connection = cast(
         Connection[PsycopgRow],

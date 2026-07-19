@@ -69,7 +69,7 @@ from agentm.core.abi.resource import ResourceMutation, ResourceRef
 from agentm.core.abi.roles import TRAJECTORY_QUERY_STORE_SERVICE
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig
-from agentm.core.abi.store import SessionMeta
+from agentm.core.abi.store import SessionMeta, TrajectoryStorage
 from agentm.core.abi.trajectory import Outcome, Round, Turn, TurnMeta
 from agentm.core.abi.trigger import (
     BackgroundCompletion,
@@ -80,6 +80,7 @@ from agentm.core.abi.trigger import (
     UserInput,
 )
 from agentm.core.runtime.execution import Execution, StateError
+from agentm.core.lib.trajectory_nodes import InMemoryTrajectoryNodeStore
 from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.session_meta import ResumeIdentityError
@@ -94,6 +95,15 @@ from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
 # ---------------------------------------------------------------------------
 # Test infrastructure
 # ---------------------------------------------------------------------------
+
+
+def _memory_storage(
+    turn_store: InMemoryTrajectoryStore,
+) -> TrajectoryStorage:
+    return TrajectoryStorage(
+        turn_store=turn_store,
+        node_store=InMemoryTrajectoryNodeStore(),
+    )
 
 
 class MockStreamFn:
@@ -527,7 +537,7 @@ async def test_store_persistence() -> None:
     mock2.enqueue(text_response("second"))
     session2 = await Session.resume(
         session.id,
-        store,
+        _memory_storage(store),
         AgentSessionConfig(
             extensions=[],
             stream_fn=mock2,
@@ -575,7 +585,7 @@ async def test_session_resume() -> None:
     mock2.enqueue(text_response("turn-2"))
     resumed = await Session.resume(
         session.id,
-        store,
+        _memory_storage(store),
         AgentSessionConfig(
             extensions=[],
             stream_fn=mock2,
@@ -624,7 +634,7 @@ async def test_resume_rejects_unversioned_session_metadata() -> None:
     ):
         await Session.resume(
             "legacy-session",
-            legacy_store,
+            _memory_storage(legacy_store),
             AgentSessionConfig(
                 extensions=[],
                 stream_fn=MockStreamFn(),

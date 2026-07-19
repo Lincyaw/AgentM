@@ -333,10 +333,31 @@ class TrajectoryNodeStore(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class TrajectoryStorage:
+    """One selected trajectory backend exposed through its two internal ports.
+
+    ``turn_store`` is authoritative. ``node_store`` is its rebuildable
+    message-level projection. SDK hosts select and configure the pair as one
+    unit so users cannot accidentally point the two ports at unrelated
+    backends.
+    """
+
+    turn_store: TrajectoryStore
+    node_store: TrajectoryNodeStore
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.turn_store, TrajectoryStore):
+            raise TypeError("turn_store must implement TrajectoryStore")
+        if not isinstance(self.node_store, TrajectoryNodeStore):
+            raise TypeError("node_store must implement TrajectoryNodeStore")
+
+
 __all__ = [
     "SessionMeta",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
+    "TrajectoryStorage",
     "TrajectoryStore",
     "TrajectoryNodeQuery",
     "TrajectoryNodeSort",

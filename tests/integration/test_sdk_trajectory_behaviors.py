@@ -17,6 +17,7 @@ from agentm import (
     AgentSessionConfig,
     Model,
     ProviderRequestFailed,
+    TrajectoryStorage,
 )
 from agentm.core.abi.cancel import CancelSignal, cancel_reason
 from agentm.core.abi.errors import ExtensionLoadError
@@ -29,7 +30,11 @@ from agentm.core.abi.messages import (
     text_message,
 )
 from agentm.core.abi.provider import ProviderPromptCacheRequest
-from agentm.core.abi.store import TrajectoryNodeStore, TrajectoryStore
+from agentm.core.abi.store import (
+    TrajectoryNodeQuery,
+    TrajectoryNodeStore,
+    TrajectoryStore,
+)
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.abi.trajectory import PromptCacheState
@@ -47,7 +52,6 @@ from agentm.storage.trajectory import (
     PostgresTrajectoryNodeStore,
     PostgresTrajectoryStore,
 )
-from agentm.storage.trajectory.postgres import PostgresConnection
 from tests.fixtures.custom_trigger import CustomTrigger
 
 _CONTEXT_PROJECTION = "agentm.extensions.builtin.context_projection"
@@ -62,10 +66,26 @@ _OPERATIONS = "agentm.extensions.builtin.operations"
 _WAIT_FOR_CANCEL = object()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TrajectoryBackend:
     open_turn_store: Callable[[], TrajectoryStore]
     open_node_store: Callable[[], TrajectoryNodeStore]
+
+    def open_storage(self) -> TrajectoryStorage:
+        return TrajectoryStorage(
+            turn_store=self.open_turn_store(),
+            node_store=self.open_node_store(),
+        )
+
+
+def _jsonl_storage(
+    turn_root: Path,
+    node_root: Path,
+) -> TrajectoryStorage:
+    return TrajectoryStorage(
+        turn_store=JsonlTrajectoryStore(turn_root),
+        node_store=JsonlTrajectoryNodeStore(node_root),
+    )
 
 
 class _StubProvider:
@@ -150,11 +170,14 @@ def trajectory_backend(
     if not database_url:
         pytest.skip("set AGENTM_TEST_POSTGRES_URL to run Postgres behavior contracts")
     psycopg = pytest.importorskip("psycopg")
-    from agentm.storage.trajectory.psycopg import connect as connect_postgres
+    from agentm.storage.trajectory.psycopg import (
+        PsycopgConnectionAdapter,
+        connect as connect_postgres,
+    )
 
     schema = f"agentm_test_{uuid.uuid4().hex}"
     admin = psycopg.connect(database_url)
-    connections: list[PostgresConnection] = []
+    connections: list[PsycopgConnectionAdapter] = []
     with admin.cursor() as cursor:
         cursor.execute(f'CREATE SCHEMA "{schema}"')
     admin.commit()
@@ -190,6 +213,76 @@ def _model() -> Model:
         context_window=128_000,
         max_output_tokens=4_096,
     )
+
+
+@pytest.mark.asyncio
+async def test_sdk_dsn_selects_one_paired_postgres_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres DSN contract")
+    psycopg = pytest.importorskip("psycopg")
+    from agentm.storage.trajectory.psycopg import connect as connect_postgres
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    monkeypatch.setenv("AGENTM_TRAJECTORY_DSN", database_url)
+    monkeypatch.setenv("AGENTM_TRAJECTORY_SCHEMA", schema)
+    monkeypatch.delenv("AGENTM_TRAJECTORY_DIR", raising=False)
+
+    provider = _StubProvider("dsn-answer")
+    admin = psycopg.connect(database_url)
+    with admin.cursor() as cursor:
+        cursor.execute(f'CREATE SCHEMA "{schema}"')
+    admin.commit()
+    try:
+        session = await AgentSession.create(
+            AgentSessionConfig(
+                cwd=str(tmp_path),
+                extensions=[],
+                stream_fn=provider,
+                model=_model(),
+            )
+        )
+        session_id = session.session_id
+        try:
+            await session.run("dsn-question")
+        finally:
+            await session.shutdown()
+
+        turn_connection = connect_postgres(database_url)
+        node_connection = connect_postgres(database_url)
+        try:
+            turn_store = PostgresTrajectoryStore(
+                turn_connection,
+                schema=schema,
+                create_schema=False,
+            )
+            node_store = PostgresTrajectoryNodeStore(
+                node_connection,
+                schema=schema,
+                create_schema=False,
+            )
+            metadata, turns = turn_store.load(session_id)
+            nodes = node_store.query_nodes(
+                TrajectoryNodeQuery(session_id=session_id)
+            )
+
+            assert metadata.id == session_id
+            assert len(turns) == 1
+            assert turns[0].index == 0
+            assert _text(
+                [node.message for node in nodes if node.message is not None]
+            ) == ["dsn-question", "dsn-answer"]
+        finally:
+            turn_connection.close()
+            node_connection.close()
+    finally:
+        with admin.cursor() as cursor:
+            cursor.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.commit()
+        admin.close()
 
 
 def _trajectory_extensions(cache_key: str) -> list[tuple[str, dict[str, object]]]:
@@ -360,8 +453,7 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
             extensions=_trajectory_extensions(cache_key),
             stream_fn=provider,
             model=_model(),
-            store=trajectory_backend.open_turn_store(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
+            trajectory_storage=trajectory_backend.open_storage(),
         )
     )
     session_id = session.session_id
@@ -376,12 +468,11 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
     resumed_provider = _StubProvider("answer-three")
     resumed = await AgentSession.resume(
         session_id,
-        trajectory_backend.open_turn_store(),
+        trajectory_backend.open_storage(),
         config=AgentSessionConfig(
             extensions=_trajectory_extensions(cache_key),
             stream_fn=resumed_provider,
             model=_model(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
         ),
     )
     try:
@@ -419,8 +510,7 @@ async def test_sdk_persists_provider_failure_without_replaying_it(
             ],
             stream_fn=provider,
             model=_model(),
-            store=trajectory_backend.open_turn_store(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
+            trajectory_storage=trajectory_backend.open_storage(),
         )
     )
     session_id = session.session_id
@@ -440,14 +530,13 @@ async def test_sdk_persists_provider_failure_without_replaying_it(
     resumed_provider = _StubProvider("recovered-answer")
     resumed = await AgentSession.resume(
         session_id,
-        trajectory_backend.open_turn_store(),
+        trajectory_backend.open_storage(),
         config=AgentSessionConfig(
             extensions=[
                 (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
             ],
             stream_fn=resumed_provider,
             model=_model(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
         ),
     )
     try:
@@ -468,8 +557,7 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
             extensions=_trajectory_extensions("fork-prefix"),
             stream_fn=provider,
             model=_model(),
-            store=trajectory_backend.open_turn_store(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
+            trajectory_storage=trajectory_backend.open_storage(),
         )
     )
     forked: AgentSession | None = None
@@ -534,7 +622,10 @@ async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
             ],
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(tmp_path / "environment-fork-turns"),
+            trajectory_storage=_jsonl_storage(
+                tmp_path / "environment-fork-turns",
+                tmp_path / "environment-fork-nodes",
+            ),
             resource_store=resources,
             resource_writer=resources,
             effect_scope=LocalSnapshotEffectScope(snapshotter=snapshots),
@@ -713,7 +804,8 @@ async def test_sdk_interrupt_cancels_one_request_and_session_continues() -> None
 async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
     trajectory_backend: _TrajectoryBackend,
 ) -> None:
-    store = trajectory_backend.open_turn_store()
+    storage = trajectory_backend.open_storage()
+    store = storage.turn_store
     tool_response = _tool_call("blocking-call", "blocking_tool", {})
     provider = _StubProvider(tool_response)
     tool_started = asyncio.Event()
@@ -738,7 +830,7 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
             extensions=[],
             stream_fn=provider,
             model=_model(),
-            store=store,
+            trajectory_storage=storage,
             extra_tools=[
                 FunctionTool(
                     name="blocking_tool",
@@ -866,8 +958,7 @@ async def test_sdk_compaction_persists_summary_across_resume(
             extensions=extensions,
             stream_fn=provider,
             model=_model(),
-            store=trajectory_backend.open_turn_store(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
+            trajectory_storage=trajectory_backend.open_storage(),
             resource_store=resources,
             resource_writer=resources,
         )
@@ -898,12 +989,11 @@ async def test_sdk_compaction_persists_summary_across_resume(
     resumed_resources = open_resources()
     resumed = await AgentSession.resume(
         session_id,
-        trajectory_backend.open_turn_store(),
+        trajectory_backend.open_storage(),
         config=AgentSessionConfig(
             extensions=extensions,
             stream_fn=resumed_provider,
             model=_model(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
             resource_store=resumed_resources,
             resource_writer=resumed_resources,
         ),
@@ -955,8 +1045,7 @@ async def test_sdk_fork_inherits_compaction_at_matching_logical_leaf(
             ],
             stream_fn=provider,
             model=_model(),
-            store=trajectory_backend.open_turn_store(),
-            trajectory_node_store=trajectory_backend.open_node_store(),
+            trajectory_storage=trajectory_backend.open_storage(),
             resource_store=resources,
             resource_writer=resources,
         )
@@ -1015,9 +1104,9 @@ async def test_sdk_interrupt_cancels_compaction_and_session_continues(
             ],
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(tmp_path / "cancel-turns"),
-            trajectory_node_store=JsonlTrajectoryNodeStore(
-                tmp_path / "cancel-nodes"
+            trajectory_storage=_jsonl_storage(
+                tmp_path / "cancel-turns",
+                tmp_path / "cancel-nodes",
             ),
             resource_store=resources,
             resource_writer=resources,
@@ -1175,7 +1264,10 @@ async def test_sdk_trigger_envelope_is_routed_and_persisted(
             extensions=[],
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(store_path),
+            trajectory_storage=_jsonl_storage(
+                store_path,
+                tmp_path / "trigger-envelope-nodes",
+            ),
         )
     )
     session.start()
@@ -1226,7 +1318,10 @@ async def test_sdk_resume_rehydrates_atom_defined_trigger(
             extensions=[(_CUSTOM_TRIGGER, {})],
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(store_path),
+            trajectory_storage=_jsonl_storage(
+                store_path,
+                tmp_path / "custom-trigger-nodes",
+            ),
         )
     )
     session.start()
@@ -1239,7 +1334,10 @@ async def test_sdk_resume_rehydrates_atom_defined_trigger(
     resumed_provider = _StubProvider("resumed-answer")
     resumed = await AgentSession.resume(
         session_id,
-        JsonlTrajectoryStore(store_path),
+        _jsonl_storage(
+            store_path,
+            tmp_path / "custom-trigger-nodes",
+        ),
         config=AgentSessionConfig(
             extensions=[(_CUSTOM_TRIGGER, {})],
             stream_fn=resumed_provider,

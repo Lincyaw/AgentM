@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Literal, NotRequired, TypeVar, TypedDict
 
 import typer
 
 from agentm.cli._display import EXIT_NOT_FOUND, is_tty, stderr_console
-from agentm.cli._store import resolve_trajectory_store
+from agentm.cli._store import resolve_trajectory_storage
 from agentm.core.abi.messages import (
     ImageContent,
     TextContent,
@@ -21,7 +22,6 @@ from agentm.core.abi.query import (
     SessionFilter,
     TrajectoryQueryStore,
 )
-from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.trigger import UserInput
@@ -66,6 +66,12 @@ class _ToolRecord(TypedDict):
     is_error: bool
     result: str
 
+
+@dataclass(frozen=True, slots=True)
+class _TraceContext:
+    query: TrajectoryQueryStore
+
+
 trace_app = typer.Typer(
     name="trace",
     help="Query session trajectories.",
@@ -74,10 +80,19 @@ trace_app = typer.Typer(
 )
 
 
-def _get_store() -> TrajectoryStore:
-    store = resolve_trajectory_store()
-    if store is not None:
-        return store
+def _get_query_store(ctx: typer.Context) -> TrajectoryQueryStore:
+    state = ctx.obj
+    if isinstance(state, _TraceContext):
+        return state.query
+    if state is not None:
+        raise TypeError("agentm trace received an unexpected command context")
+
+    resolved = resolve_trajectory_storage()
+    if resolved is not None:
+        query = TrajectoryStoreQueryAdapter(resolved.storage.turn_store)
+        ctx.obj = _TraceContext(query=query)
+        ctx.call_on_close(resolved.close)
+        return query
     stderr_console.print(
         "[red]error: no trajectory store found[/red]\n"
         "[dim]Set AGENTM_TRAJECTORY_DSN for Postgres, "
@@ -85,10 +100,6 @@ def _get_store() -> TrajectoryStore:
         "with .agentm/trajectory.[/dim]"
     )
     raise typer.Exit(EXIT_NOT_FOUND)
-
-
-def _get_query_store() -> TrajectoryQueryStore:
-    return TrajectoryStoreQueryAdapter(_get_store())
 
 
 def _resolve_session_id(
@@ -151,13 +162,14 @@ def _emit_records(
 
 @trace_app.command("sessions")
 def sessions_cmd(
+    ctx: typer.Context,
     purpose: str | None = typer.Option(None, "--purpose"),
     parent: str | None = typer.Option(None, "--parent"),
     limit: int | None = typer.Option(None, "--limit"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """List sessions in the trajectory store."""
-    query = _get_query_store()
+    query = _get_query_store(ctx)
     rows = list(
         query.sessions(
             SessionFilter(
@@ -248,13 +260,14 @@ def _checkpoint_summary(checkpoint: TurnCheckpoint) -> _TurnSummary:
 
 @trace_app.command("turns")
 def turns_cmd(
+    ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     latest: bool = typer.Option(False, "--latest"),
     limit: int | None = typer.Option(None, "--limit"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print per-turn summaries for a session."""
-    query = _get_query_store()
+    query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session, latest)
     try:
         turns = list(query.turns(sid))
@@ -293,6 +306,7 @@ def turns_cmd(
 
 @trace_app.command("messages")
 def messages_cmd(
+    ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     latest: bool = typer.Option(False, "--latest"),
     role: str | None = typer.Option(None, "--role"),
@@ -301,7 +315,7 @@ def messages_cmd(
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print the conversation messages for a session."""
-    query = _get_query_store()
+    query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session, latest)
     try:
         turns = list(query.turns(sid))
@@ -429,12 +443,13 @@ def messages_cmd(
 
 @trace_app.command("usage")
 def usage_cmd(
+    ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     latest: bool = typer.Option(False, "--latest"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Token usage summary for a session."""
-    query = _get_query_store()
+    query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session, latest)
     try:
         turns = list(query.turns(sid))
@@ -462,6 +477,7 @@ def usage_cmd(
 
 @trace_app.command("view")
 def view_cmd(
+    ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     latest: bool = typer.Option(False, "--latest"),
 ) -> None:
@@ -472,7 +488,7 @@ def view_cmd(
         stderr_console.print("[red]error: interactive viewer requires a terminal[/red]")
         raise typer.Exit(2)
 
-    query = _get_query_store()
+    query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session, latest)
     try:
         turns = list(query.turns(sid))
@@ -488,6 +504,7 @@ def view_cmd(
 
 @trace_app.command("tools")
 def tools_cmd(
+    ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     latest: bool = typer.Option(False, "--latest"),
     tool: str | None = typer.Option(None, "--tool"),
@@ -495,7 +512,7 @@ def tools_cmd(
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print tool calls with arguments and results."""
-    query = _get_query_store()
+    query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session, latest)
     try:
         turns = list(query.turns(sid))

@@ -48,6 +48,7 @@ from agentm.core.abi.roles import (
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig, ResolvedSessionSpec
+from agentm.core.abi.store import TrajectoryStorage
 from agentm.core.abi.stream import MessageEnd, Model, TextDelta
 from agentm.core.abi.tool import ToolOutcome, ToolResult, ToolTerminate
 from agentm.core.abi.tool_executor import (
@@ -74,6 +75,7 @@ from agentm.core.runtime.session_factory import (
     create_from_config,
     create_session,
 )
+from agentm.core.lib.trajectory_nodes import InMemoryTrajectoryNodeStore
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.tool_orchestration import DefaultToolOrchestrator
 from agentm.config import DefaultSessionSpecResolver
@@ -683,7 +685,10 @@ async def test_effect_scope_fork_and_resume() -> None:
     resume_scope = _RecordingEffectScope()
     resumed = await Session.resume(
         session.id,
-        store,
+        TrajectoryStorage(
+            turn_store=store,
+            node_store=InMemoryTrajectoryNodeStore(),
+        ),
         AgentSessionConfig(
             extensions=[],
             stream_fn=_StaticStream("resumed"),
@@ -1222,7 +1227,10 @@ async def test_session_spec_resolver_records_resolved_spec() -> None:
             spec_resolver=_Resolver(),
             stream_fn=_StaticStream(),
             model=_model(),
-            store=store,
+            trajectory_storage=TrajectoryStorage(
+                turn_store=store,
+                node_store=InMemoryTrajectoryNodeStore(),
+            ),
         )
     )
 

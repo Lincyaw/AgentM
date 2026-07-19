@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Iterator, cast
@@ -257,6 +257,7 @@ class _SessionLifecycle:
         self._closed = False
         self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
+        self._cleanup_callbacks: list[Callable[[], Awaitable[None]]] = []
         self.installed_extensions: list[str] = []
         self._installed_extension_specs: list[ExtensionSpec] = []
         self._active_provider_name: str | None = None
@@ -471,6 +472,12 @@ class _SessionLifecycle:
                 telemetry.shutdown()
             except BaseException as exc:
                 cleanup_errors.append(exc)
+        for callback in reversed(self._cleanup_callbacks):
+            try:
+                await callback()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        self._cleanup_callbacks.clear()
         self.bus._force_clear()
         if cleanup_errors:
             raise BaseExceptionGroup("session shutdown cleanup failed", cleanup_errors)
@@ -537,6 +544,16 @@ class _SessionLifecycle:
 
     def interrupt(self, reason: CancelReason | str = "user_cancel") -> None:
         self._interrupt.set(reason)
+
+    def register_cleanup(
+        self,
+        callback: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Register a presenter-owned async cleanup for session shutdown."""
+
+        if self._closed:
+            raise RuntimeError("cannot register cleanup on a closed session")
+        self._cleanup_callbacks.append(callback)
 
     async def idle(self, timeout: float | None = None) -> bool:
         return await self.triggers.wait_quiescent(timeout)

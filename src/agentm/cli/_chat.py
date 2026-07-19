@@ -23,7 +23,6 @@ from agentm.core.abi.termination import SignalAborted
 from agentm.scenarios import builtin_scenario_loader
 
 from agentm.cli._display import SessionStats, stderr_console
-from agentm.cli._store import resolve_trajectory_store_or_create
 
 
 class _StreamCollector:
@@ -86,7 +85,6 @@ async def _run_chat(
         project_config=project_config,
         user_config=user_config,
     )
-    store = resolve_trajectory_store_or_create()
     config = AgentSessionConfig(
         cwd=str(Path.cwd()),
         scenario=scenario,
@@ -94,7 +92,6 @@ async def _run_chat(
         spec_resolver=resolver,
         extra_extensions=[(mod, {}) for mod in extensions],
         system=system_prompt,
-        store=store,
     )
     session = await AgentSession.create(config)
     session.start()

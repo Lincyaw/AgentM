@@ -40,7 +40,11 @@ from agentm.core.abi.resource import (
 from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.services import ServiceRegistry
-from agentm.core.abi.store import TrajectoryNodeStore, TrajectoryStore
+from agentm.core.abi.store import (
+    TrajectoryNodeStore,
+    TrajectoryStorage,
+    TrajectoryStore,
+)
 from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer
@@ -253,8 +257,7 @@ class AgentSessionConfig:
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
-    store: TrajectoryStore | None = None
-    trajectory_node_store: TrajectoryNodeStore | None = None
+    trajectory_storage: TrajectoryStorage | None = None
     initial_turns: list[Turn] = field(default_factory=list)
     tool_allowlist: list[str] | None = None
     purpose: str = "subagent"

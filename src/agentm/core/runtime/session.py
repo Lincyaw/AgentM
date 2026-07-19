@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import cast
+from typing import Self, cast
 
 from agentm.core.abi.cancel import (
     CancelSignal,
@@ -42,7 +42,7 @@ from agentm.core.abi.session_api import (
 from agentm.core.abi.store import (
     TrajectoryNodeQuery,
     TrajectoryNodeStore,
-    TrajectoryStore,
+    TrajectoryStorage,
 )
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
@@ -308,7 +308,7 @@ class Session(_SessionComposition):
         extra_services: ServiceRegistry | None = None,
         cancel_signal: CancelSignal | None = None,
         parent_cancellation: ChildCancellationMode = "inherit",
-    ) -> Session:
+    ) -> Self:
         """Spawn a child by reinstalling the parent's atom composition."""
 
         child_ctx = self.ctx.child(
@@ -388,23 +388,24 @@ class Session(_SessionComposition):
                 ),
                 thinking=self._thinking,
                 cancel_signal=child_cancel_signal,
-            )
+            ),
+            session_type=type(self),
         )
 
         await self._register_child(child, purpose=purpose)
-        return child
+        return cast(Self, child)
 
     async def spawn_child_session(
         self,
         config: AgentSessionConfig,
-    ) -> Session:
+    ) -> Self:
         """Spawn a fully-constructed child via the session factory."""
 
         from agentm.core.runtime.session_factory import create_child_session
 
         child = await create_child_session(parent=self, config=config)
         await self._register_child(child, purpose=config.purpose)
-        return child
+        return cast(Self, child)
 
     async def _register_child(self, child: Session, *, purpose: str) -> None:
         async def _on_child_shutdown(_: SessionShutdownEvent) -> None:
@@ -453,7 +454,7 @@ class Session(_SessionComposition):
         at: TurnRef | TrajectoryForkPoint,
         *,
         purpose: str = "fork",
-    ) -> Session:
+    ) -> Self:
         turn_ref = await _resolve_fork_turn_ref(source=source, at=at)
         prefix = source.trajectory.prefix(turn_ref)
         child_ctx = source.ctx.child(
@@ -582,7 +583,8 @@ class Session(_SessionComposition):
                     else None
                 ),
                 thinking=source._thinking,
-            )
+            ),
+            session_type=cls,
         )
 
         if forked.graph is not None:
@@ -603,15 +605,16 @@ class Session(_SessionComposition):
                 target_parent_session_id=source.id,
                 turns=prefix.turns,
             )
-        return forked
+        return cast(Self, forked)
 
     @classmethod
     async def resume(
         cls,
         session_id: str,
-        store: TrajectoryStore,
+        storage: TrajectoryStorage,
         config: AgentSessionConfig,
-    ) -> Session:
+    ) -> Self:
+        store = storage.turn_store
         meta, turns = await asyncio.to_thread(store.load, session_id)
         validate_resume_metadata(meta, has_committed_turns=bool(turns))
         ctx = context_from_session_meta(session_id, meta)
@@ -626,7 +629,7 @@ class Session(_SessionComposition):
             cwd=ctx.cwd,
             scenario=resume_scenario,
             purpose=ctx.purpose,
-            store=store,
+            trajectory_storage=storage,
             session_id=ctx.session_id,
             root_session_id=ctx.root_session_id,
             parent_session_id=ctx.parent_session_id,
@@ -636,6 +639,7 @@ class Session(_SessionComposition):
             resume_config,
             restored_context=ctx,
             restored_provider_identity=provider_identity,
+            session_type=cls,
         )
         restored_turns = _rehydrate_turn_triggers(turns, session.codec)
         if restored_turns != turns:
@@ -715,7 +719,7 @@ class Session(_SessionComposition):
                     renderers=session.trigger_renderers,
                 )
 
-        return session
+        return cast(Self, session)
 
 
 __all__ = ["Session", "SessionRuntimeConfig"]

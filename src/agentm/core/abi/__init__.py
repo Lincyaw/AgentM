@@ -249,6 +249,7 @@ from .store import (
     TrajectoryNodeQuery,
     TrajectoryNodeSort,
     TrajectoryNodeStore,
+    TrajectoryStorage,
     TrajectoryStore,
 )
 from .stream import (
@@ -643,6 +644,7 @@ __all__ = [
     "TrajectoryProjectionState",
     "TrajectoryProjectionStatus",
     "TrajectoryQueryStore",
+    "TrajectoryStorage",
     "TrajectoryStore",
     "Trigger",
     "TriggerCodec",
