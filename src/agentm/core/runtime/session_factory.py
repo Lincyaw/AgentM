@@ -11,8 +11,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import uuid
 import time
+
+from loguru import logger
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from importlib import import_module
@@ -338,6 +341,29 @@ def _register_default_query_store(
     )
 
 
+_DEFAULT_TRAJECTORY_DSN = "postgresql://agentm:agentm@localhost:55432/agentm_test"
+
+
+def _resolve_default_store(cwd: str) -> TrajectoryStore | None:
+    """Auto-create a Postgres trajectory store.
+
+    Uses ``AGENTM_TRAJECTORY_DSN`` if set, otherwise falls back to the
+    local dev Postgres from ``tools/otel/docker-compose.yaml``.
+    """
+    dsn = os.environ.get("AGENTM_TRAJECTORY_DSN", _DEFAULT_TRAJECTORY_DSN)
+    try:
+        import psycopg2  # noqa: F811
+
+        from agentm.storage.trajectory.postgres_turns import (
+            PostgresTrajectoryStore,
+        )
+
+        conn = psycopg2.connect(dsn)
+        return PostgresTrajectoryStore(conn, create_schema=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("trajectory store: Postgres unavailable ({}), persistence disabled", exc)
+
+
 def _resolve_session_spec(config: "AgentSessionConfig") -> ResolvedSessionSpec | None:
     resolver = config.spec_resolver
     if resolver is None:
@@ -519,6 +545,8 @@ async def create_session(
             provider_resolver,
             scope="host",
         )
+    if store is None:
+        store = _resolve_default_store(cwd)
     _register_default_catalog_services(resolved_services)
     _register_default_query_store(resolved_services, store)
 

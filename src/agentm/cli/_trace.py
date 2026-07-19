@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from collections.abc import Iterable
-from pathlib import Path
 from typing import Any
 
 import typer
@@ -25,33 +23,16 @@ trace_app = typer.Typer(
 
 
 def _get_store() -> Any:
-    dsn = os.environ.get("AGENTM_TRAJECTORY_DSN")
-    if dsn:
-        from agentm.cli._store import _postgres_store
-        store = _postgres_store(dsn)
-        if store is not None:
-            return store
+    from agentm.cli._store import resolve_trajectory_store
 
-    explicit_dir = os.environ.get("AGENTM_TRAJECTORY_DIR")
-    if explicit_dir:
-        d = Path(explicit_dir).expanduser()
-    else:
-        home = os.environ.get("AGENTM_HOME")
-        d = Path(home).expanduser() / "trajectory" if home else Path.home() / ".agentm" / "trajectory"
-
-    if not d.is_dir():
-        project_local = Path.cwd() / ".agentm" / "trajectory"
-        if project_local.is_dir():
-            d = project_local
-        else:
-            stderr_console.print(
-                "[red]error: no trajectory store found[/red]\n"
-                "[dim]Set AGENTM_TRAJECTORY_DSN for Postgres, or AGENTM_TRAJECTORY_DIR for JSONL.[/dim]"
-            )
-            raise typer.Exit(EXIT_NOT_FOUND)
-
-    from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
-    return JsonlTrajectoryStore(d)
+    store = resolve_trajectory_store()
+    if store is None:
+        stderr_console.print(
+            "[red]error: Postgres trajectory store unavailable[/red]\n"
+            "[dim]Start Postgres: docker compose -f tools/otel/docker-compose.yaml up -d postgres[/dim]"
+        )
+        raise typer.Exit(EXIT_NOT_FOUND)
+    return store
 
 
 def _get_query_store() -> Any:

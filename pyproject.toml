@@ -42,6 +42,11 @@ packaged-minimal = [
     "opentelemetry-exporter-otlp>=1.30.0",
     "tiktoken>=0.12.0",
 ]
+harbor = [
+    "agentm-harbor",
+    "arl-env",
+    "dockerfile-parse",
+]
 
 [dependency-groups]
 dev = [
@@ -60,9 +65,14 @@ agentm = "agentm.cli:main"
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
+[tool.uv.sources]
+agentm-harbor = { workspace = true }
+arl-env = { path = "/home/ddq/AoyangSpace/agent-env/sdk/python/arl" }
+
 [tool.uv.workspace]
 members = [
     "contrib/extensions/policy",
+    "contrib/scenarios/harbor",
 ]
 
 [tool.pytest.ini_options]

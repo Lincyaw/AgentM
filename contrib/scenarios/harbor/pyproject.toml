@@ -4,11 +4,14 @@ version = "0.1.0"
 description = "Harbor external agent adapter — AgentM runs locally, tool calls route to Harbor sandbox"
 requires-python = ">=3.12"
 dependencies = [
-    "harbor>=0.1.0",
+    "harbor==0.19.0",
 ]
 
 [project.optional-dependencies]
 external = ["agentm"]
+
+[tool.uv.sources]
+agentm = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

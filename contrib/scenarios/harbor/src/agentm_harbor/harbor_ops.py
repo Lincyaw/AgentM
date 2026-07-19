@@ -132,6 +132,8 @@ class HarborBashOperations:
 
         result = await self._env.exec(
             command=cmd,
+            cwd=cwd or self._default_work_dir or None,
+            env=env,
             timeout_sec=timeout_sec,
         )
 
