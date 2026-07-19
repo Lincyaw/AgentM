@@ -8,9 +8,11 @@ how it is audited, or which paths are protected.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+import math
+from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 
@@ -27,7 +29,7 @@ ResourceNamespace = Literal[
     "observability",
     "environment",
 ]
-ResourceMeta = dict[str, str | int | float | bool | None]
+ResourceMeta = Mapping[str, str | int | float | bool | None]
 RESOURCE_NAMESPACE_WORKSPACE = "workspace"
 RESOURCE_NAMESPACE_ARTIFACT = "artifact"
 RESOURCE_NAMESPACE_SANDBOX = "sandbox"
@@ -36,6 +38,39 @@ RESOURCE_NAMESPACE_CONTENT = "content"
 RESOURCE_NAMESPACE_CATALOG = "catalog"
 RESOURCE_NAMESPACE_OBSERVABILITY = "observability"
 RESOURCE_NAMESPACE_ENVIRONMENT = "environment"
+
+
+def _require_nonempty_string(
+    value: object,
+    label: str,
+    *,
+    optional: bool = False,
+) -> None:
+    if optional and value is None:
+        return
+    if not isinstance(value, str) or not value:
+        expected = "a non-empty string or None" if optional else "a non-empty string"
+        raise TypeError(f"{label} must be {expected}")
+
+
+def _require_index(value: object, label: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TypeError(f"{label} must be a non-negative integer")
+
+
+def _freeze_metadata(value: ResourceMeta, label: str) -> ResourceMeta:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a mapping")
+    copied: dict[str, str | int | float | bool | None] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{label} keys must be strings")
+        if item is not None and not isinstance(item, (str, int, float, bool)):
+            raise TypeError(f"{label}[{key!r}] must be a JSON scalar")
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"{label}[{key!r}] must be finite")
+        copied[key] = item
+    return MappingProxyType(copied)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,9 +85,14 @@ class ResourceRef:
     path: str
 
     def __post_init__(self) -> None:
-        if not self.namespace or ":" in self.namespace or "\0" in self.namespace:
+        if (
+            not isinstance(self.namespace, str)
+            or not self.namespace
+            or ":" in self.namespace
+            or "\0" in self.namespace
+        ):
             raise ValueError(f"invalid resource namespace: {self.namespace!r}")
-        if not self.path or "\0" in self.path:
+        if not isinstance(self.path, str) or not self.path or "\0" in self.path:
             raise ValueError(f"invalid resource path: {self.path!r}")
 
     def uri(self) -> str:
@@ -81,6 +121,42 @@ class ResourceMutation:
     after_version: str | None = None
     metadata: ResourceMeta = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.ref, ResourceRef):
+            raise TypeError("resource mutation ref must be a ResourceRef")
+        if self.op not in {"create", "write", "replace", "delete"}:
+            raise ValueError(f"invalid resource mutation op: {self.op!r}")
+        _require_nonempty_string(
+            self.transaction_id,
+            "resource mutation transaction_id",
+            optional=True,
+        )
+        _require_nonempty_string(
+            self.before_version,
+            "resource mutation before_version",
+            optional=True,
+        )
+        _require_nonempty_string(
+            self.after_version,
+            "resource mutation after_version",
+            optional=True,
+        )
+        if self.op == "create" and self.before_version is not None:
+            raise ValueError("create mutation cannot have a before_version")
+        if self.op in {"create", "write"} and self.after_version is None:
+            raise ValueError(f"{self.op} mutation requires an after_version")
+        if self.op == "replace" and (
+            self.before_version is None or self.after_version is None
+        ):
+            raise ValueError("replace mutation requires before_version and after_version")
+        if self.op == "delete" and self.after_version is not None:
+            raise ValueError("delete mutation cannot have an after_version")
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "resource mutation metadata"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ResourceTxnContext:
@@ -92,6 +168,15 @@ class ResourceTxnContext:
     rationale: str = ""
     author: WriterAuthor = "agent"
 
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.session_id, "resource transaction session_id")
+        _require_nonempty_string(self.turn_id, "resource transaction turn_id")
+        _require_index(self.turn_index, "resource transaction turn_index")
+        if not isinstance(self.rationale, str):
+            raise TypeError("resource transaction rationale must be a string")
+        if self.author not in {"agent", "human", "indexer"}:
+            raise ValueError(f"invalid resource transaction author: {self.author!r}")
+
 
 @dataclass(frozen=True, slots=True)
 class ResourceRecoveryContext:
@@ -99,6 +184,20 @@ class ResourceRecoveryContext:
 
     session_id: str
     committed_transaction_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.session_id, "resource recovery session_id")
+        if not isinstance(self.committed_transaction_ids, tuple):
+            raise TypeError("committed_transaction_ids must be a tuple")
+        for transaction_id in self.committed_transaction_ids:
+            _require_nonempty_string(
+                transaction_id,
+                "committed resource transaction id",
+            )
+        if len(set(self.committed_transaction_ids)) != len(
+            self.committed_transaction_ids
+        ):
+            raise ValueError("committed_transaction_ids must not contain duplicates")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +207,12 @@ class WriteResult:
     path: str
     path_class: PathClass
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.path, "write result path")
+        if self.path_class not in {"managed", "unmanaged", "constitution"}:
+            raise ValueError(f"invalid write result path_class: {self.path_class!r}")
+        _require_nonempty_string(self.error, "write result error", optional=True)
 
 
 class BatchHandle(Protocol):

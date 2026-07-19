@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     AtomInstallPriority,
     BASH_OPERATIONS_SERVICE,
     ENVIRONMENT_OPERATIONS_SERVICE,
+    AtomAPI,
     BashOperations,
     EnvironmentOperations,
 )
@@ -23,6 +23,8 @@ from agentm.extensions import ExtensionManifest
 
 class OperationsConfig(BaseModel):
     """Configuration placeholder for the local operations backend."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 MANIFEST = ExtensionManifest(
@@ -38,7 +40,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(session: Any, config: OperationsConfig) -> None:
+def install(session: AtomAPI, config: OperationsConfig) -> None:
     del config
     existing_environment = session.services.get(ENVIRONMENT_OPERATIONS_SERVICE)
     existing_bash = session.services.get(BASH_OPERATIONS_SERVICE)
@@ -55,7 +57,7 @@ def install(session: Any, config: OperationsConfig) -> None:
             )
         return
     bash = LocalBashOperations()
-    cwd = getattr(getattr(session, "ctx", None), "cwd", "") or os.getcwd()
+    cwd = session.ctx.cwd or os.getcwd()
     environment = LocalEnvironmentOperations(cwd=cwd, bash=bash)
     session.register_operations(environment=environment, bash=bash)
 

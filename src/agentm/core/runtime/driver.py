@@ -730,19 +730,25 @@ async def _rollback_unpublished_turn(
     effect_txn: EffectTxn | None,
     bus: EventBus,
 ) -> tuple[BaseException, ...]:
-    cleanup: list[Any] = []
-    if abandon_resource:
-        cleanup.append(_abandon_resource_txn(resource_txn, bus=bus))
+    errors: list[BaseException] = []
+
+    # EffectScope is the outer world transaction: it snapshots the state after
+    # ResourceTxn.apply(). Restore that world first, then let the resource
+    # participant validate/remove its own journal. Running both concurrently
+    # races over the same files for local and sandbox implementations.
     if effect_scope is not None and effect_txn is not None:
-        cleanup.append(_abandon_effect_turn(effect_scope, effect_txn, bus=bus))
-    if not cleanup:
-        return ()
-    results = await asyncio.gather(*cleanup, return_exceptions=True)
-    return tuple(
-        result
-        for result in results
-        if isinstance(result, BaseException)
-    )
+        try:
+            await _await_known_outcome(
+                _abandon_effect_turn(effect_scope, effect_txn, bus=bus)
+            )
+        except BaseException as exc:
+            errors.append(exc)
+    if abandon_resource:
+        try:
+            await _await_known_outcome(_abandon_resource_txn(resource_txn, bus=bus))
+        except BaseException as exc:
+            errors.append(exc)
+    return tuple(errors)
 
 
 async def _node_append_position(
@@ -1393,6 +1399,9 @@ async def drive(
             trajectory.finalize_commit(turn)
             turn_published = True
             _clear_resource_txn(services)
+            _, cancelled_during_effect_commit = await _await_known_outcome(
+                _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
+            )
 
             if trajectory_node_store is not None and node_append_position is not None:
                 nodes = turn_to_nodes(
@@ -1435,9 +1444,6 @@ async def drive(
                     cancelled_during_node_append = False
             else:
                 cancelled_during_node_append = False
-            _, cancelled_during_effect_commit = await _await_known_outcome(
-                _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
-            )
             triggers.complete(turn)
             cancelled_during_event = False
             try:

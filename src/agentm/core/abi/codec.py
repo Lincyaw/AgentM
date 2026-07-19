@@ -968,22 +968,28 @@ class CodecRegistry:
 
     @staticmethod
     def _serialize_meta(meta: TurnMeta) -> dict[str, Any]:
-        data = asdict(meta)
-        data["resource_mutations"] = [
-            {
-                "ref": {
-                    "namespace": mutation.ref.namespace,
-                    "path": mutation.ref.path,
-                },
-                "op": mutation.op,
-                "transaction_id": mutation.transaction_id,
-                "before_version": mutation.before_version,
-                "after_version": mutation.after_version,
-                "metadata": _json_safe(mutation.metadata),
-            }
-            for mutation in meta.resource_mutations
-        ]
-        return data
+        return {
+            "total_input_tokens": meta.total_input_tokens,
+            "total_output_tokens": meta.total_output_tokens,
+            "cache_read_tokens": meta.cache_read_tokens,
+            "cache_write_tokens": meta.cache_write_tokens,
+            "duration_ns": meta.duration_ns,
+            "model_id": meta.model_id,
+            "resource_mutations": [
+                {
+                    "ref": {
+                        "namespace": mutation.ref.namespace,
+                        "path": mutation.ref.path,
+                    },
+                    "op": mutation.op,
+                    "transaction_id": mutation.transaction_id,
+                    "before_version": mutation.before_version,
+                    "after_version": mutation.after_version,
+                    "metadata": _json_safe(mutation.metadata),
+                }
+                for mutation in meta.resource_mutations
+            ],
+        }
 
     @staticmethod
     def _deserialize_resource_mutations(

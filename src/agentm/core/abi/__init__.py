@@ -291,6 +291,7 @@ from .tool import (
     ToolTerminate,
 )
 from .tool_executor import (
+    EnvironmentExecutableTool,
     FilesystemAccess,
     IsolationLevel,
     ToolConcurrency,
@@ -419,6 +420,7 @@ __all__ = [
     "EnvironmentKind",
     "EnvironmentOperations",
     "EnvironmentCheckpoint",
+    "EnvironmentExecutableTool",
     "EnvironmentFork",
     "EnvironmentForkableResourceWriter",
     "EnvironmentRef",

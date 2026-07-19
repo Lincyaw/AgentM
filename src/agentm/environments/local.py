@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -33,6 +34,9 @@ from agentm.core.abi.operations import EnvironmentRef, ExecResult
 from agentm.core.abi.trajectory import Turn, TurnRef
 
 
+_DEFAULT_CONTROL_PLANE_EXCLUSIONS = (".agentm",)
+
+
 class LocalBashOperations:
     """Local shell implementation backed by asyncio subprocesses."""
 
@@ -48,6 +52,19 @@ class LocalBashOperations:
         signal: CancelSignal | None = None,
         log_path: str | None = None,
     ) -> ExecResult:
+        if not isinstance(cmd, str):
+            raise TypeError("bash command must be a string")
+        if not isinstance(cwd, str) or not cwd:
+            raise TypeError("bash cwd must be a non-empty string")
+        if timeout is not None and (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise ValueError("bash timeout must be a finite positive number")
+        if signal is not None and signal.is_set():
+            raise asyncio.CancelledError("bash command interrupted before start")
         process = await asyncio.create_subprocess_shell(
             cmd,
             cwd=cwd,
@@ -110,6 +127,7 @@ class LocalBashOperations:
             asyncio.create_task(signal.wait()) if signal is not None else None
         )
         wait_task = asyncio.create_task(process.wait())
+        interrupted = False
         try:
             done, _ = await asyncio.wait(
                 [task for task in (wait_task, signal_task) if task is not None],
@@ -117,21 +135,37 @@ class LocalBashOperations:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if wait_task not in done:
-                timed_out = signal_task not in done
+                interrupted = signal_task is not None and signal_task in done
+                timed_out = not interrupted
                 await self._terminate_process_group(process)
-            await wait_task
+                await _await_process_exit(wait_task)
+            else:
+                await wait_task
+        except asyncio.CancelledError:
+            await self._terminate_process_group(process)
+            await _await_process_exit(wait_task)
+            raise
         finally:
-            if signal_task is not None and not signal_task.done():
-                signal_task.cancel()
-                await asyncio.gather(signal_task, return_exceptions=True)
-            if stdin_task is not None:
-                await asyncio.gather(stdin_task, return_exceptions=True)
-            await asyncio.gather(stdout_task, stderr_task)
-            if log_file is not None:
-                try:
-                    log_file.close()
-                except OSError as exc:
-                    logger.debug("local bash: cannot close log {}: {}", log_path, exc)
+            try:
+                if signal_task is not None and not signal_task.done():
+                    signal_task.cancel()
+                    await asyncio.gather(signal_task, return_exceptions=True)
+                if stdin_task is not None:
+                    await asyncio.gather(stdin_task, return_exceptions=True)
+                await asyncio.gather(stdout_task, stderr_task)
+            finally:
+                if log_file is not None:
+                    try:
+                        log_file.close()
+                    except OSError as exc:
+                        logger.debug(
+                            "local bash: cannot close log {}: {}",
+                            log_path,
+                            exc,
+                        )
+
+        if interrupted:
+            raise asyncio.CancelledError("bash command interrupted")
 
         return ExecResult(
             stdout=b"".join(stdout_chunks),
@@ -174,6 +208,15 @@ async def _write_stdin(
             await writer.wait_closed()
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             pass
+
+
+async def _await_process_exit(task: asyncio.Task[int]) -> int:
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
 
 
 class LocalEnvironmentOperations:
@@ -226,14 +269,20 @@ class LocalEnvironmentOperations:
 
 
 class LocalSnapshotStore(EnvironmentSnapshotter):
-    """Persist copy-based filesystem snapshots under a local directory."""
+    """Persist copy-based external-world snapshots under a local directory.
+
+    ``.agentm`` is excluded by default because it is SDK control-plane state,
+    not part of the environment world. Hosts that place trajectory, resource
+    transaction, catalog, or snapshot state elsewhere inside the workspace
+    must add those top-level names to ``excluded_names``.
+    """
 
     def __init__(
         self,
         *,
         workspace_root: str | Path,
         snapshot_root: str | Path,
-        excluded_names: Sequence[str] = (),
+        excluded_names: Sequence[str] = _DEFAULT_CONTROL_PLANE_EXCLUSIONS,
     ) -> None:
         self._workspace_root = Path(workspace_root)
         self._snapshot_root = Path(snapshot_root)
@@ -315,10 +364,6 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
         if fork_data is None:
             return None
         forked_snapshot, child_workspace = fork_data
-        if forked_snapshot.ref is None:
-            raise RuntimeError(
-                f"forked snapshot {forked_snapshot.id!r} has no trajectory ref"
-            )
         child_snapshotter = LocalSnapshotStore(
             workspace_root=child_workspace,
             snapshot_root=self._snapshot_root,
@@ -730,7 +775,15 @@ def _remove_path(path: Path) -> None:
 
 def _snapshot_created_at(snapshot: EnvironmentSnapshot) -> float:
     value = snapshot.metadata.get("created_at")
-    return float(value) if isinstance(value, (int, float)) else 0.0
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+    ):
+        raise ValueError(
+            f"snapshot {snapshot.id!r} has invalid created_at metadata"
+        )
+    return float(value)
 
 
 def _write_manifest(path: Path, snapshot: EnvironmentSnapshot) -> None:
@@ -749,7 +802,13 @@ def _write_manifest(path: Path, snapshot: EnvironmentSnapshot) -> None:
     tmp = Path(tmp_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            json.dump(
+                payload,
+                handle,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -770,7 +829,7 @@ def _read_snapshot_manifest(path: Path) -> EnvironmentSnapshot:
     metadata = payload.get("metadata")
     if not isinstance(snapshot_id, str) or not isinstance(session_id, str):
         raise ValueError(f"snapshot manifest has invalid identity: {path}")
-    if ref is not None and not isinstance(ref, (str, int)):
+    if isinstance(ref, bool) or not isinstance(ref, (str, int)):
         raise ValueError(f"snapshot manifest has invalid turn ref: {path}")
     if not isinstance(metadata, dict):
         raise ValueError(f"snapshot manifest has invalid metadata: {path}")

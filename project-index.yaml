@@ -5,11 +5,16 @@ requirements:
       Trigger execution must fail-stop after an indeterminate turn failure, close
       terminal queues, publish receipts only after durable trajectory and effect
       commits, and wait for synchronous store commits to reach a known outcome
-      despite task cancellation. JSONL stores must recover torn tails without
+      despite task cancellation. Effect snapshots must exclude SDK control-plane
+      persistence, unpublished world/resource rollback must be serialized, and
+      rebuildable node projection failures must not prevent effect commit after the
+      authoritative turn append. JSONL stores must recover torn tails without
       corrupting framing, serialize competing appenders, and isolate codec
       registries. Spawn, fork, resume, and graph rebuild must preserve execution
       restrictions, avoid event-loop-blocking store calls, and reconstruct lineage
-      independently of metadata enumeration order.
+      independently of metadata enumeration order. Process and environment tool
+      executors must use explicit typed adapters, safe portable wire data, and
+      terminate-and-reap subprocesses on both signal and caller cancellation.
     priority: P0
     status: tested
     confidence: confirmed
@@ -17,6 +22,7 @@ requirements:
       - path: pyproject.toml
       - path: uv.lock
       - path: src/agentm/__init__.py
+      - path: src/agentm/cli.py
       - path: src/agentm/authoring/__init__.py
       - path: src/agentm/authoring/artifacts.py
       - path: src/agentm/config/__init__.py
@@ -68,6 +74,7 @@ requirements:
       - path: src/agentm/execution/__init__.py
       - path: src/agentm/execution/process.py
       - path: src/agentm/execution/sandbox.py
+      - path: src/agentm/execution/wire.py
       - path: src/agentm/execution/worker.py
       - path: src/agentm/extensions/builtin/file_tools.py
       - path: src/agentm/extensions/builtin/context_projection.py
@@ -113,6 +120,7 @@ requirements:
     tests:
       - path: tests/fixtures/__init__.py
       - path: tests/fixtures/custom_trigger.py
+      - path: tests/fixtures/process_tools.py
       - path: tests/fixtures/prompt_cache_adapter.py
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py

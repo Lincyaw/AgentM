@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.messages import TextContent
 from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.tool import ToolOutcome, ToolResult
 from agentm.core.abi.tool_executor import (
+    EnvironmentExecutableTool,
     ToolExecutionCapabilities,
     ToolExecutionRequest,
 )
@@ -38,54 +38,19 @@ class SandboxToolExecutor:
         signal: CancelSignal | None = None,
     ) -> ToolResult | ToolOutcome:
         requirements = request.requirements
-        if requirements is not None and requirements.isolation == "environment":
-            return await self._execute_environment_tool(request, signal=signal)
-        if request.tool.name == "bash" and "cmd" in request.args:
-            return await self._execute_bash(request, signal=signal)
-        return await self._direct.execute(request, signal=signal)
-
-    async def _execute_environment_tool(
-        self,
-        request: ToolExecutionRequest,
-        *,
-        signal: CancelSignal | None,
-    ) -> ToolResult | ToolOutcome:
-        if request.tool.name == "bash" and "cmd" in request.args:
-            return await self._execute_bash(request, signal=signal)
-        return await self._direct.execute(request, signal=signal)
-
-    async def _execute_bash(
-        self,
-        request: ToolExecutionRequest,
-        *,
-        signal: CancelSignal | None,
-    ) -> ToolResult:
-        cmd = request.args.get("cmd")
-        if not isinstance(cmd, str):
-            return ToolResult(
-                content=[TextContent(type="text", text="bash cmd must be a string")],
-                is_error=True,
+        if isinstance(request.tool, EnvironmentExecutableTool):
+            return await request.tool.execute_in_environment(
+                request.args,
+                environment=self._environment,
+                cwd=request.cwd,
+                signal=signal,
             )
-        timeout = request.args.get("timeout")
-        cwd = request.cwd or str(self._environment.ref.metadata.get("cwd", ""))
-        result = await self._environment.bash.exec(
-            cmd,
-            cwd=cwd,
-            timeout=timeout if isinstance(timeout, (int, float)) else None,
-            signal=signal,
-        )
-        text = result.stdout.decode("utf-8", errors="replace")
-        if result.stderr:
-            text = f"{text}\n{result.stderr.decode('utf-8', errors='replace')}"
-        return ToolResult(
-            content=[TextContent(type="text", text=text)],
-            is_error=result.exit_code != 0 or result.timed_out,
-            extras={
-                "exit_code": result.exit_code,
-                "timed_out": result.timed_out,
-                "environment_id": self._environment.ref.id,
-            },
-        )
+        if requirements is not None and requirements.isolation == "environment":
+            raise RuntimeError(
+                f"tool {request.tool.name!r} requires environment isolation "
+                "but does not implement EnvironmentExecutableTool"
+            )
+        return await self._direct.execute(request, signal=signal)
 
 
 __all__ = ["SandboxToolExecutor"]

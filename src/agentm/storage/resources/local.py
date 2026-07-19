@@ -1121,9 +1121,15 @@ def _path_digest(path: Path) -> str | None:
 def _write_manifest(path: Path, manifest: Mapping[str, object]) -> None:
     _atomic_write_bytes(
         path,
-        (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode(
-            "utf-8"
-        ),
+        (
+            json.dumps(
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8"),
     )
 
 

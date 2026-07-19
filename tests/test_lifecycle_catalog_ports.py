@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
+import shlex
 from typing import Any, Literal
 
 import pytest
 
+from agentm.core.abi.cancel import CancelSignal, EventCancelSource
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     CatalogActiveSetInput,
@@ -22,6 +24,7 @@ from agentm.core.abi.compaction import (
 from agentm.core.abi.lifecycle import EffectTxn, EnvironmentFork
 from agentm.core.abi.messages import (
     AssistantMessage,
+    ImageContent,
     TextContent,
     ToolCallBlock,
     UserMessage,
@@ -46,17 +49,28 @@ from agentm.core.abi.roles import (
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig, ResolvedSessionSpec
 from agentm.core.abi.stream import MessageEnd, Model, TextDelta
-from agentm.core.abi.tool import ToolOutcome, ToolResult
+from agentm.core.abi.tool import ToolOutcome, ToolResult, ToolTerminate
 from agentm.core.abi.tool_executor import (
+    EnvironmentExecutableTool,
     ToolExecutionCapabilities,
     ToolExecutionRequest,
     ToolExecutionRequirements,
 )
-from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.trajectory import (
+    TrajectoryHead,
+    TrajectoryHeadAdvance,
+    TrajectoryNode,
+    TrajectoryProjectionStatus,
+    Turn,
+    TurnRef,
+)
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_factory import create_from_config, create_session
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.config import DefaultSessionSpecResolver
+from agentm.environments import LocalBashOperations, LocalEnvironmentOperations
+from agentm.execution import ProcessToolExecutor, SandboxToolExecutor
+from agentm.storage.trajectory import JsonlTrajectoryNodeStore
 
 
 def _model() -> Model:
@@ -283,6 +297,54 @@ class _RequirementsTool:
         raise AssertionError("custom tool executor should run this tool")
 
 
+class _ProcessEntrypointTool:
+    name = "process_tool"
+    description = "importable process tool"
+    parameters: dict[str, object] = {}
+
+    def __init__(self, entrypoint: str) -> None:
+        self.metadata = {"process_entrypoint": entrypoint}
+
+    async def execute(
+        self,
+        args: dict[str, Any],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult | ToolOutcome:
+        del args, signal
+        raise AssertionError("process executor must not call Tool.execute")
+
+
+class _EnvironmentAwareTool(EnvironmentExecutableTool):
+    name = "environment_tool"
+    description = "typed environment tool"
+    parameters: dict[str, object] = {}
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def execute(
+        self,
+        args: dict[str, Any],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult | ToolOutcome:
+        del args, signal
+        raise AssertionError("sandbox executor must use execute_in_environment")
+
+    async def execute_in_environment(
+        self,
+        args: Mapping[str, object],
+        *,
+        environment: EnvironmentOperations,
+        cwd: str | None = None,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult | ToolOutcome:
+        del args, signal
+        self.calls.append((environment.ref.id, cwd))
+        return ToolResult(content=[TextContent(type="text", text="sandboxed")])
+
+
 class _RecordingToolExecutor:
     def __init__(self) -> None:
         self.requests: list[ToolExecutionRequest] = []
@@ -498,6 +560,74 @@ class _TransactionalWriter:
         return _NoopBatch()
 
 
+class _FailingAppendStore(InMemoryTrajectoryStore):
+    def append(self, session_id: str, turn: Turn) -> None:
+        del session_id, turn
+        raise RuntimeError("authoritative append failed")
+
+
+class _FailingNodeStore(JsonlTrajectoryNodeStore):
+    def append_nodes(
+        self,
+        session_id: str,
+        nodes: Sequence[TrajectoryNode],
+        *,
+        advance_head: TrajectoryHeadAdvance | None = None,
+    ) -> None:
+        del session_id, nodes, advance_head
+        raise RuntimeError("projection append failed")
+
+    def replace_session_projection(
+        self,
+        session_id: str,
+        nodes: Sequence[TrajectoryNode],
+        *,
+        heads: Sequence[TrajectoryHead] = (),
+        status: TrajectoryProjectionStatus | None = None,
+    ) -> None:
+        if nodes:
+            raise RuntimeError("projection rebuild failed")
+        super().replace_session_projection(
+            session_id,
+            nodes,
+            heads=heads,
+            status=status,
+        )
+
+
+class _OrderedEffectScope(_RecordingEffectScope):
+    def __init__(self, order: list[str]) -> None:
+        super().__init__()
+        self._order = order
+
+    async def abandon_turn(self, txn: EffectTxn) -> None:
+        self._order.append("effect")
+        await super().abandon_turn(txn)
+
+
+class _OrderedResourceTxn(_RecordingResourceTxn):
+    def __init__(self, context: ResourceTxnContext, order: list[str]) -> None:
+        super().__init__(context)
+        self._order = order
+
+    async def abandon(self) -> None:
+        if self._order != ["effect"]:
+            raise RuntimeError("resource rollback raced effect rollback")
+        self._order.append("resource")
+        await super().abandon()
+
+
+class _OrderedTransactionalWriter(_TransactionalWriter):
+    def __init__(self, order: list[str]) -> None:
+        super().__init__()
+        self._order = order
+
+    async def begin_txn(self, context: ResourceTxnContext) -> _OrderedResourceTxn:
+        txn = _OrderedResourceTxn(context, self._order)
+        self.txns.append(txn)
+        return txn
+
+
 @pytest.mark.asyncio
 async def test_effect_scope_wraps_committed_turns() -> None:
     scope = _RecordingEffectScope()
@@ -551,6 +681,61 @@ async def test_effect_scope_fork_and_resume() -> None:
 
     assert resumed.id == session.id
     assert resume_scope.events == [("restore", session.id, 1)]
+
+
+@pytest.mark.asyncio
+async def test_unpublished_turn_rolls_back_effect_before_resource() -> None:
+    order: list[str] = []
+    scope = _OrderedEffectScope(order)
+    writer = _OrderedTransactionalWriter(order)
+    session = await create_session(
+        extensions=[],
+        stream_fn=_StaticStream(),
+        model=_model(),
+        store=_FailingAppendStore(),
+        resource_writer=writer,
+        effect_scope=scope,
+    )
+
+    session.start()
+    receipt = await session.prompt("go")
+    with pytest.raises(RuntimeError, match="authoritative append failed"):
+        await receipt.wait()
+    await session.shutdown()
+
+    assert order == ["effect", "resource"]
+    assert writer.txns[0].applied
+    assert writer.txns[0].abandoned
+    assert len(session.trajectory) == 0
+
+
+@pytest.mark.asyncio
+async def test_effect_commit_precedes_rebuildable_projection_failure(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryTrajectoryStore()
+    scope = _RecordingEffectScope()
+    session = await create_session(
+        extensions=[],
+        stream_fn=_StaticStream(),
+        model=_model(),
+        store=store,
+        trajectory_node_store=_FailingNodeStore(tmp_path / "nodes"),
+        effect_scope=scope,
+    )
+
+    session.start()
+    receipt = await session.prompt("go")
+    with pytest.raises(
+        ExceptionGroup,
+        match="trajectory projection append and rebuild failed",
+    ):
+        await receipt.wait()
+    await session.shutdown()
+
+    assert [event[0] for event in scope.events] == ["begin", "prepare", "commit"]
+    assert len(session.trajectory) == 1
+    assert len(store.load(session.id)[1]) == 1
 
 
 @pytest.mark.asyncio
@@ -787,6 +972,162 @@ async def test_default_tool_executor_rejects_unsupported_requirements() -> None:
     assert "tool executor does not satisfy requirements" in result.content[0].text
     assert "isolation=process" in result.content[0].text
     assert "killable=true" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_process_executor_uses_strict_json_result_wire() -> None:
+    executor = ProcessToolExecutor()
+    requirements = ToolExecutionRequirements(
+        isolation="process",
+        killable=True,
+    )
+    result = await executor.execute(
+        ToolExecutionRequest(
+            tool=_ProcessEntrypointTool("tests.fixtures.process_tools:echo"),
+            args={"text": "from child", "count": 3},
+            requirements=requirements,
+        )
+    )
+
+    assert isinstance(result, ToolResult)
+    assert isinstance(result.content[0], TextContent)
+    assert result.content[0].text == "from child"
+    assert isinstance(result.content[1], ImageContent)
+    assert result.content[1].data == b"\x00\x01"
+    assert result.extras == {"nested": [3, True, None]}
+
+    terminating = await executor.execute(
+        ToolExecutionRequest(
+            tool=_ProcessEntrypointTool("tests.fixtures.process_tools:terminate"),
+            args={"text": "complete"},
+            requirements=requirements,
+        )
+    )
+    assert isinstance(terminating, ToolTerminate)
+    assert terminating.reason == "test:complete"
+    assert terminating.result.content[0].text == "complete"
+
+
+@pytest.mark.asyncio
+async def test_process_executor_reaps_on_signal_and_caller_cancellation(
+    tmp_path: Path,
+) -> None:
+    executor = ProcessToolExecutor()
+    requirements = ToolExecutionRequirements(
+        isolation="process",
+        killable=True,
+        interrupt="cancel",
+    )
+
+    async def start(marker: Path) -> asyncio.Task[ToolResult | ToolOutcome]:
+        task = asyncio.create_task(
+            executor.execute(
+                ToolExecutionRequest(
+                    tool=_ProcessEntrypointTool(
+                        "tests.fixtures.process_tools:wait_forever"
+                    ),
+                    args={"started_path": str(marker)},
+                    requirements=requirements,
+                ),
+                signal=signal,
+            )
+        )
+        for _ in range(200):
+            if marker.exists():
+                return task
+            await asyncio.sleep(0.01)
+        task.cancel()
+        raise TimeoutError("process tool did not start")
+
+    signal = EventCancelSource()
+    signalled = await start(tmp_path / "signal-started")
+    signal.set("task_stop")
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(signalled, timeout=2.0)
+
+    signal = EventCancelSource()
+    caller_cancelled = await start(tmp_path / "caller-started")
+    caller_cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller_cancelled, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_local_bash_reaps_on_signal_and_caller_cancellation(
+    tmp_path: Path,
+) -> None:
+    operations = LocalBashOperations()
+
+    async def start(
+        marker: Path,
+        signal: EventCancelSource,
+    ) -> asyncio.Task[object]:
+        command = (
+            f"printf started > {shlex.quote(str(marker))}; "
+            "sleep 3600"
+        )
+        task: asyncio.Task[object] = asyncio.create_task(
+            operations.exec(
+                command,
+                cwd=str(tmp_path),
+                signal=signal,
+            )
+        )
+        for _ in range(200):
+            if marker.exists():
+                return task
+            await asyncio.sleep(0.01)
+        task.cancel()
+        raise TimeoutError("local bash command did not start")
+
+    signal = EventCancelSource()
+    signalled = await start(tmp_path / "bash-signal-started", signal)
+    signal.set("user_cancel")
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(signalled, timeout=2.0)
+
+    signal = EventCancelSource()
+    caller_cancelled = await start(tmp_path / "bash-caller-started", signal)
+    caller_cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller_cancelled, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_executor_requires_typed_environment_adapter(
+    tmp_path: Path,
+) -> None:
+    environment = LocalEnvironmentOperations(cwd=tmp_path)
+    executor = SandboxToolExecutor(environment)
+    requirements = ToolExecutionRequirements(
+        isolation="environment",
+        environment_id=environment.ref.id,
+    )
+    tool = _EnvironmentAwareTool()
+    result = await executor.execute(
+        ToolExecutionRequest(
+            tool=tool,
+            args={},
+            requirements=requirements,
+            environment=environment.ref,
+            cwd=str(tmp_path),
+        )
+    )
+
+    assert isinstance(result, ToolResult)
+    assert tool.calls == [(environment.ref.id, str(tmp_path))]
+
+    with pytest.raises(RuntimeError, match="EnvironmentExecutableTool"):
+        await executor.execute(
+            ToolExecutionRequest(
+                tool=_ProcessEntrypointTool(
+                    "tests.fixtures.process_tools:echo"
+                ),
+                args={},
+                requirements=requirements,
+                environment=environment.ref,
+            )
+        )
 
 
 @pytest.mark.asyncio

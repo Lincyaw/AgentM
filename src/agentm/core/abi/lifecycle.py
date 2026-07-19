@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import math
+from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.operations import EnvironmentOperations
@@ -21,6 +23,46 @@ EnvironmentRestoreState = Literal["restored", "degraded_readonly"]
 EnvironmentCheckpoint = Literal["before_turn", "after_turn", "fork"]
 
 
+def _require_nonempty_string(
+    value: object,
+    label: str,
+    *,
+    optional: bool = False,
+) -> None:
+    if optional and value is None:
+        return
+    if not isinstance(value, str) or not value:
+        expected = "a non-empty string or None" if optional else "a non-empty string"
+        raise TypeError(f"{label} must be {expected}")
+
+
+def _require_turn_ref(value: object, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise TypeError(f"{label} must be a non-empty string or non-negative integer")
+    if (isinstance(value, str) and not value) or (isinstance(value, int) and value < 0):
+        raise ValueError(f"{label} must be a non-empty string or non-negative integer")
+
+
+def _require_index(value: object, label: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TypeError(f"{label} must be a non-negative integer")
+
+
+def _freeze_metadata(value: LifecycleMeta, label: str) -> LifecycleMeta:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a mapping")
+    copied: dict[str, str | int | float | bool | None] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{label} keys must be strings")
+        if item is not None and not isinstance(item, (str, int, float, bool)):
+            raise TypeError(f"{label}[{key!r}] must be a JSON scalar")
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"{label}[{key!r}] must be finite")
+        copied[key] = item
+    return MappingProxyType(copied)
+
+
 @dataclass(frozen=True, slots=True)
 class EffectTxn:
     """Opaque handle for side effects produced while one turn is executing."""
@@ -28,8 +70,19 @@ class EffectTxn:
     session_id: str
     turn_id: str
     turn_index: int
-    token: str = ""
+    token: str
     metadata: LifecycleMeta = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.session_id, "effect transaction session_id")
+        _require_nonempty_string(self.turn_id, "effect transaction turn_id")
+        _require_index(self.turn_index, "effect transaction turn_index")
+        _require_nonempty_string(self.token, "effect transaction token")
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "effect transaction metadata"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,9 +90,19 @@ class EnvironmentSnapshot:
     """Durable identity for a world-state snapshot."""
 
     id: str
-    session_id: str = ""
-    ref: TurnRef | None = None
+    session_id: str
+    ref: TurnRef
     metadata: LifecycleMeta = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.id, "environment snapshot id")
+        _require_nonempty_string(self.session_id, "environment snapshot session_id")
+        _require_turn_ref(self.ref, "environment snapshot ref")
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "environment snapshot metadata"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +114,29 @@ class EnvironmentRestoreStatus:
     state: EnvironmentRestoreState
     error: str | None = None
     metadata: LifecycleMeta = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.session_id, "environment restore session_id")
+        if not isinstance(self.restored, bool):
+            raise TypeError("environment restore restored must be a bool")
+        if self.state not in {"restored", "degraded_readonly"}:
+            raise ValueError(f"invalid environment restore state: {self.state!r}")
+        _require_nonempty_string(
+            self.error,
+            "environment restore error",
+            optional=True,
+        )
+        if self.restored != (self.state == "restored"):
+            raise ValueError("environment restore state must agree with restored")
+        if self.restored and self.error is not None:
+            raise ValueError("a restored environment cannot carry an error")
+        if not self.restored and self.error is None:
+            raise ValueError("a degraded environment restore requires an error")
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "environment restore metadata"),
+        )
 
 
 class EnvironmentRestoreError(RuntimeError):
@@ -76,6 +162,12 @@ class EffectScope(Protocol):
     ``prepare_turn`` durably captures the resulting world before the
     authoritative Turn append, ``commit_turn`` confirms it after append, and
     ``abandon_turn`` restores the pre-turn world when execution fails.
+
+    The captured world must exclude control-plane persistence owned by other
+    commit participants, including trajectory logs, resource transaction
+    journals, catalogs, and snapshot metadata. Those stores recover from their
+    own durable records; restoring them as world state would rewind a commit
+    that already reached a known outcome.
     """
 
     async def begin_turn(

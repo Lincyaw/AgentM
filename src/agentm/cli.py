@@ -2,8 +2,7 @@
 
 Usage::
 
-    agentm-chat                          # default scenario + config
-    agentm-chat -s interrupt_demo        # named scenario from manifest.yaml
+    python -m agentm.cli                 # default scenario + config
 
 Ctrl+C interrupts the current turn. Ctrl+D or 'exit' quits.
 """
@@ -12,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import signal
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,8 +18,6 @@ import typer
 from rich.console import Console
 from rich.live import Live
 from rich.text import Text
-from rich.panel import Panel
-from rich.markdown import Markdown
 
 from agentm import AgentSession, AgentSessionConfig
 from agentm.config.resolver import DefaultSessionSpecResolver
@@ -79,7 +75,7 @@ class _StreamCollector:
         self._live: Live | None = None
         self._stats = stats
 
-    def attach_live(self, live: Live) -> None:
+    def attach_live(self, live: Live | None) -> None:
         self._live = live
 
     def on_delta(self, event: StreamDeltaEvent) -> None:

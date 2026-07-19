@@ -362,6 +362,36 @@ async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
 
 
 @pytest.mark.asyncio
+async def test_local_environment_restore_does_not_rewind_sdk_control_plane(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    control_plane = workspace / ".agentm"
+    workspace.mkdir()
+    control_plane.mkdir()
+    world_file = workspace / "world.txt"
+    control_file = control_plane / "state.json"
+    world_file.write_text("before")
+    control_file.write_text("before")
+    snapshots = LocalSnapshotStore(
+        workspace_root=workspace,
+        snapshot_root=tmp_path / "snapshots",
+    )
+    before = await snapshots.snapshot(
+        session_id="session-1",
+        ref=0,
+        metadata={"checkpoint": "before_turn", "turn_id": "turn-1"},
+    )
+
+    world_file.write_text("after")
+    control_file.write_text("committed-control-state")
+    await snapshots.restore_to(before)
+
+    assert world_file.read_text() == "before"
+    assert control_file.read_text() == "committed-control-state"
+
+
+@pytest.mark.asyncio
 async def test_sdk_file_toolbox_transactions_share_behavior_and_protect_constitution(
     tmp_path: Path,
 ) -> None:

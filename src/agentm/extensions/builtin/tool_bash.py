@@ -11,21 +11,27 @@ command is still running. No key bound → no buffering.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import math
 import time
 from contextvars import ContextVar, Token
 from typing import Any, Callable, Final
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AtomInstallPriority,
+    BASH_OPERATIONS_SERVICE,
+    AtomAPI,
     BashOperations,
     CancelSignal,
+    EnvironmentOperations,
     TextContent,
     ToolExecutionRequirements,
     ToolResult,
 )
+from agentm.core.abi.tool_executor import EnvironmentExecutableTool
 from agentm.extensions import ExtensionManifest
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -106,10 +112,13 @@ class BashOutputTails:
 
 
 class ToolBashConfig(BaseModel):
-    model_config = {"extra": "allow"}
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-    bash_ops: Any = None
-    default_timeout: float = _DEFAULT_TIMEOUT_SECONDS
+    default_timeout: float = Field(
+        default=_DEFAULT_TIMEOUT_SECONDS,
+        gt=0,
+        allow_inf_nan=False,
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -143,10 +152,10 @@ _PARAMETERS: Final[dict[str, Any]] = {
 
 
 class _ToolBashRuntime:
-    def __init__(self, session: Any, config: ToolBashConfig) -> None:
+    def __init__(self, session: AtomAPI, config: ToolBashConfig) -> None:
         self._session = session
-        self._bash_ops = _coerce_bash_ops(session, config.bash_ops)
-        self._default_timeout = float(config.default_timeout)
+        self._bash_ops = _require_bash_ops(session)
+        self._default_timeout = config.default_timeout
 
     def install(self) -> None:
         tails = BashOutputTails()
@@ -178,11 +187,11 @@ class _ToolBashRuntime:
         }
 
 
-def install(session: Any, config: ToolBashConfig) -> None:
+def install(session: AtomAPI, config: ToolBashConfig) -> None:
     _ToolBashRuntime(session, config).install()
 
 
-class _BashTool:
+class _BashTool(EnvironmentExecutableTool):
     name = "bash"
     execution_requirements = ToolExecutionRequirements(
         filesystem="write",
@@ -198,7 +207,8 @@ class _BashTool:
     def __init__(
         self,
         *,
-        session: Any, bash_ops: BashOperations,
+        session: AtomAPI,
+        bash_ops: BashOperations,
         default_timeout: float,
         parameters: dict[str, Any],
         tails: BashOutputTails | None = None,
@@ -215,8 +225,56 @@ class _BashTool:
         *,
         signal: CancelSignal | None = None,
     ) -> ToolResult:
-        cmd = str(args["cmd"])
-        timeout = float(args.get("timeout", self._default_timeout))
+        return await self._execute_with(
+            args,
+            bash_ops=self._bash_ops,
+            cwd=self._session.ctx.cwd,
+            signal=signal,
+        )
+
+    async def execute_in_environment(
+        self,
+        args: Mapping[str, object],
+        *,
+        environment: EnvironmentOperations,
+        cwd: str | None = None,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult:
+        resolved_cwd = cwd
+        if resolved_cwd is None:
+            candidate = environment.ref.metadata.get("cwd")
+            if not isinstance(candidate, str) or not candidate:
+                return _error(
+                    f"Environment {environment.ref.id!r} does not declare a cwd"
+                )
+            resolved_cwd = candidate
+        return await self._execute_with(
+            args,
+            bash_ops=environment.bash,
+            cwd=resolved_cwd,
+            signal=signal,
+        )
+
+    async def _execute_with(
+        self,
+        args: Mapping[str, object],
+        *,
+        bash_ops: BashOperations,
+        cwd: str,
+        signal: CancelSignal | None,
+    ) -> ToolResult:
+        cmd = args.get("cmd")
+        if not isinstance(cmd, str) or not cmd:
+            return _error("bash cmd must be a non-empty string")
+        timeout_value = args.get("timeout", self._default_timeout)
+        if (
+            not isinstance(timeout_value, (int, float))
+            or isinstance(timeout_value, bool)
+            or not math.isfinite(timeout_value)
+            or timeout_value <= 0
+        ):
+            return _error("bash timeout must be a finite positive number")
+        timeout = float(timeout_value)
         on_data: Callable[[bytes], None] | None = None
         log_path: str | None = None
         if self._tails is not None:
@@ -226,9 +284,9 @@ class _BashTool:
                 log_path = self._tails.log_path(tail_key)
         t0 = time.monotonic()
         try:
-            result = await self._bash_ops.exec(
+            result = await bash_ops.exec(
                 cmd,
-                cwd=self._session.ctx.cwd,
+                cwd=cwd,
                 timeout=timeout,
                 signal=signal,
                 on_data=on_data,
@@ -267,11 +325,9 @@ class _BashTool:
         )
 
 
-def _coerce_bash_ops(session: Any, candidate: Any) -> BashOperations:
-    if candidate is not None:
-        return candidate
-    service = session.services.get("operations:bash")
-    if service is None:
+def _require_bash_ops(session: AtomAPI) -> BashOperations:
+    service = session.services.get(BASH_OPERATIONS_SERVICE)
+    if not isinstance(service, BashOperations):
         raise RuntimeError("tool_bash requires the operations atom to register bash")
     return service
 
