@@ -40,7 +40,7 @@ class _ToolIndexRuntime:
     def install(self) -> None:
         self._session.bus.on(BeforeRunEvent.CHANNEL, self.inject)
 
-    def inject(self, event: BeforeRunEvent) -> None:
+    def inject(self, event: BeforeRunEvent) -> dict[str, str] | None:
         tools = self._session.tools
         if not tools:
             return
@@ -64,7 +64,7 @@ class _ToolIndexRuntime:
         block = "\n".join(lines)
         current = event.system or ""
         updated = f"{current}\n\n{block}" if current else block
-        event.system = updated
+        return {"system": updated}
 
 
 def install(session: Any, _config: ToolIndexConfig) -> None:

@@ -640,6 +640,7 @@ class _AdaptRuntime:
 
     def __init__(self, session: Any, config: AdaptConfig) -> None:
         self.api = session
+        self.session = session
         self.max_events = max(1, config.max_events)
         self.inject_events = max(0, min(config.inject_events, self.max_events))
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=self.max_events)
@@ -688,26 +689,16 @@ class _AdaptRuntime:
             return
         self._record(
             "extension_install",
-            {
-                "module_path": event.module_path,
-                "phase": event.phase,
-                "trigger": event.trigger,
-                "error": event.error,
-            },
+            {"name": event.name, "phase": event.phase},
         )
 
     def _on_extension_reload(self, event: ExtensionReloadEvent) -> None:
         self._record(
             "extension_reload",
-            {
-                "name": event.name,
-                "trigger": event.trigger,
-                "error": event.error,
-                "is_self_modify": event.is_self_modify,
-            },
+            {"name": event.name},
         )
 
-    def _inject(self, event: BeforeRunEvent) -> None:
+    def _inject(self, event: BeforeRunEvent) -> dict[str, str] | None:
         lines = [
             "# Adapt",
             "",
@@ -761,7 +752,7 @@ class _AdaptRuntime:
             )
         block = "\n".join(lines)
         current = event.system or ""
-        event.system = f"{current}\n\n{block}" if current else block
+        return {"system": f"{current}\n\n{block}" if current else block}
 
     async def _status(self, args: dict[str, Any]) -> ToolResult:
         params = _parse_params(_EmptyParams, args)

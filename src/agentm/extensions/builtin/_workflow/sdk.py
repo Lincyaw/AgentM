@@ -250,11 +250,14 @@ class _BudgetService:
         """
 
         def _on_turn_end(event: TurnEndEvent) -> None:
-            usage = getattr(event.message, "usage", None)
-            if usage is None:
+            turn = getattr(event, "turn", None)
+            if turn is None:
                 return
-            self.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
-            self.output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+            meta = getattr(turn, "meta", None)
+            if meta is None:
+                return
+            self.input_tokens += int(getattr(meta, "total_input_tokens", 0) or 0)
+            self.output_tokens += int(getattr(meta, "total_output_tokens", 0) or 0)
 
         child.bus.on(TurnEndEvent.CHANNEL, _on_turn_end)
 
@@ -636,7 +639,7 @@ class _WorkflowRun:
         call_index: int,
     ) -> str:
         effective_scenario = (
-            opts.get("scenario") or self.default_scenario or self.api.scenario
+            opts.get("scenario") or self.default_scenario or self.api.ctx.scenario
         )
         payload: dict[str, Any] = {
             "mock": True,
@@ -746,7 +749,7 @@ class _WorkflowRun:
         # reference so it is not GC'd mid-flight.
         try:
             task = asyncio.create_task(
-                self.api.events.emit(
+                self.api.bus.emit(
                     WorkflowPhaseEvent.CHANNEL,
                     WorkflowPhaseEvent(kind=kind, text=text),
                 )
@@ -791,18 +794,6 @@ class _WorkflowRun:
         if extra_extensions:
             extensions.extend(extra_extensions)
 
-        session_manager: Any = None
-        if session_id is not None:
-            from agentm.core.abi import SESSION_STORE_SERVICE
-
-            store = self.api.get_service(SESSION_STORE_SERVICE)
-            if store is None:
-                raise RuntimeError(
-                    "workflow: session_id requires the session_store service, "
-                    "but it is not available in this session"
-                )
-            session_manager = store.open(session_id)
-
         provider_override = self.provider_override
         if isinstance(model, str) and model.strip():
             if self.model_resolver is None:
@@ -815,21 +806,19 @@ class _WorkflowRun:
                 raise RuntimeError(f"workflow: unknown model profile {model!r}")
 
         config = AgentSessionConfig(
-            cwd=self.cwd_override or self.api.cwd,
-            # Resolved upfront via MODEL_RESOLVER_SERVICE; None = inherit parent's provider.
+            cwd=self.cwd_override or self.api.ctx.cwd,
             provider=provider_override,
-            scenario=scenario or self.default_scenario or self.api.scenario,
+            scenario=scenario or self.default_scenario or self.api.ctx.scenario,
             extra_extensions=extensions,
             atom_config_overrides=atom_config_overrides,
             tool_allowlist=tool_allowlist,
             purpose=_WORKER_PURPOSE,
             trace_label=trace_label,
-            session_manager=session_manager,
             session_id=session_id,
             lineage={
                 "kind": "workflow_agent",
-                "parent_session_id": self.api.session_id,
-                "root_session_id": self.api.root_session_id,
+                "parent_session_id": self.api.id,
+                "root_session_id": self.api.ctx.root_session_id,
                 "purpose": _WORKER_PURPOSE,
                 "trace_label": trace_label,
                 "workflow_node_id": trace_label,

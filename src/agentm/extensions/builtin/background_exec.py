@@ -902,7 +902,7 @@ class _BgManager:
             terminal=state.status in _ACTIVITY_TERMINAL_STATUSES,
         )
         try:
-            self._v2_push_trigger_stub(
+            self._session._v2_push_trigger_stub(
                 source="background",
                 payload=note,
                 dedup_key=f"bg-complete-{state.task_id}",
@@ -957,7 +957,7 @@ class _BgManager:
                         f"still running ({time.monotonic() - state.started_at:.0f}s)."
                     )
                 self._emit_activity(state, note=note)
-                self._v2_push_trigger_stub(
+                self._session._v2_push_trigger_stub(
                     source="background",
                     payload=note,
                     dedup_key=f"bg-ticker-{state.task_id}",

@@ -629,7 +629,7 @@ class _AnthropicProviderRuntime:
         model_id = self._model_id()
         stream_fn = self._build_stream_fn()
         model = _build_model(model_id, **self._model_kwargs())
-        self._session_stub_register_provider(
+        self._session.register_provider(
             "anthropic",
             ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
         )

@@ -441,11 +441,11 @@ class _SkillLoaderRuntime:
         self._cached_prompt_block = format_skills_for_prompt(skills)
         self._skills_by_name = {skill.name: skill for skill in skills}
 
-    def inject(self, event: BeforeRunEvent) -> None:
+    def inject(self, event: BeforeRunEvent) -> dict[str, str] | None:
         if not self._cached_prompt_block:
-            return
+            return None
         updated = f"{event.system or ''}{self._cached_prompt_block}"
-        event.system = updated
+        return {"system": updated}
 
     async def load_skill(self, args: dict[str, Any]) -> Any:
         name = str(args.get("name", "")).strip()

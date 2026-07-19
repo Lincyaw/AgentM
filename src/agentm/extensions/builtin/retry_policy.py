@@ -239,7 +239,7 @@ class _RetryPolicyRuntime:
         if wrapped_provider is provider:
             return
         self._wrapped.add(name)
-        self._session_stub_register_provider(name, wrapped_provider)
+        self._session.register_provider(name, wrapped_provider)
         if emit_diagnostic:
             self._emit_wrapped_diagnostic(name)
 

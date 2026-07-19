@@ -77,14 +77,12 @@ class Execution:
         if not self._active:
             raise StateError("cannot commit an inactive execution")
         self._active = False
-        final_outcome = outcome
         all_injected = [msg for _, msgs in self._injected for msg in msgs]
-        if all_injected:
-            final_outcome = Outcome(
-                action=outcome.action,
-                cause=outcome.cause,
-                injected=tuple(all_injected),
-            )
+        final_outcome = (
+            Outcome(cause=outcome.cause, injected=tuple(all_injected))
+            if all_injected
+            else outcome
+        )
         return Turn(
             index=self._index,
             id=self._id,

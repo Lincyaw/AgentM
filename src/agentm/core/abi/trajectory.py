@@ -17,7 +17,7 @@ Type hierarchy::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Union
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -63,10 +63,11 @@ class Round:
 
 @dataclass(frozen=True, slots=True)
 class Outcome:
-    """The resolved decision at the end of a Turn."""
+    """Why a turn ended.  Every committed Turn has an Outcome with a
+    typed cause and any injected messages that were accumulated during
+    the turn's ReAct rounds."""
 
-    action: Literal["step", "stop", "inject"]
-    cause: object | None = None
+    cause: object
     injected: tuple[AgentMessage, ...] = ()
 
 

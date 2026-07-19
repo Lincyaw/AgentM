@@ -102,7 +102,12 @@ class _ReadHistoryRuntime:
         if end < start:
             start, end = end, start
 
-        turns = enumerate_turns(self._session.session.get_branch())
+        from agentm.core.abi import Turn as TrajectoryTurn, turn_to_messages
+        trajectory_turns = self._session.get_turns()
+        turns = [
+            Turn(index=t.index, messages=turn_to_messages(t))
+            for t in trajectory_turns
+        ]
         if not turns:
             return _error("No turns recorded yet.")
         last = turns[-1].index

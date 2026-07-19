@@ -139,11 +139,10 @@ def _agent_end_to_otel(
             telemetry.span_tracker.pop(tracker_key, None)
         telemetry.current_turn_span = None
     span = telemetry.pop_span(_SPAN_INVOKE_AGENT, session_id)
-    cause = self.cause
+    cause = self.outcome.cause if self.outcome is not None else None
     cause_attrs: dict[str, Any] = {
-        "agentm.agent.message_count": len(self.messages),
-        "agentm.agent.cause_kind": type(cause).__name__,
-        "agentm.agent.cause_final": type(cause).final,
+        "agentm.agent.cause_kind": type(cause).__name__ if cause is not None else "unknown",
+        "agentm.agent.cause_session_terminal": getattr(type(cause), "session_terminal", False) if cause is not None else False,
     }
     from agentm.core.lib import to_jsonable
 
@@ -158,7 +157,7 @@ def _agent_end_to_otel(
         span.end()
     telemetry.emit_log(
         "agentm.agent.end",
-        body={"cause": cause_payload, "message_count": len(self.messages)},
+        body={"cause": cause_payload},
         attributes={"agentm.session.id": session_id, **cause_attrs},
     )
 
@@ -167,7 +166,7 @@ def _llm_request_start_to_otel(
     self: "LlmRequestStartEvent", telemetry: Any
 ) -> None:
     """Open the ``chat <model>`` CLIENT span for one LLM call."""
-    model_id = self.model_id or "unknown"
+    model_id = getattr(self, "model_id", None) or "unknown"
     turn_span = telemetry.current_turn_span
     parent_ctx = set_span_in_context(turn_span) if turn_span is not None else None
     span = telemetry.tracer.start_span(

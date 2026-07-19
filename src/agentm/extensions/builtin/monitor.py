@@ -589,7 +589,7 @@ class _MonitorManager:
         }
         self._emit_activity(state, terminal=True)
         try:
-            self._v2_push_trigger_stub(
+            self._session._v2_push_trigger_stub(
                 source="monitor",
                 payload=payload,
                 dedup_key=f"monitor-wake-{state.monitor_id}",
@@ -685,7 +685,7 @@ class _MonitorManager:
                     "poll_interval": interval,
                 }
                 self._emit_activity(state)
-                self._v2_push_trigger_stub(
+                self._session._v2_push_trigger_stub(
                     source="monitor",
                     payload=payload,
                     dedup_key=f"monitor-cond-{state.monitor_id}",
@@ -802,7 +802,7 @@ class _MonitorManager:
                 "event_summary": event_summary,
             }
             try:
-                self._v2_push_trigger_stub(
+                self._session._v2_push_trigger_stub(
                     source="monitor",
                     payload=payload,
                     dedup_key=f"monitor-chan-{state.monitor_id}",

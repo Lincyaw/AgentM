@@ -830,7 +830,7 @@ class _OpenAIProviderRuntime:
         model = _build_model(model_id, **self._model_kwargs())
         name = self._provider_name()
         self._ensure_provider_name_available(name)
-        self._session_stub_register_provider(
+        self._session.register_provider(
             name,
             ProviderConfig(stream_fn=stream_fn, model=model, name=name),
         )

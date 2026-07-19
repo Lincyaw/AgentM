@@ -101,13 +101,19 @@ class _CostBudgetRuntime:
 
     def before_agent_start(
         self, event: BeforeRunEvent
-    ) -> None:
+    ) -> dict[str, object] | None:
         if not self._state.overflowed:
-            return
-        event.veto = BudgetExhausted(detail="cost")
+            return None
+        return {"veto": BudgetExhausted(detail="cost")}
 
     async def on_turn_end(self, event: TurnCommittedEvent) -> None:
-        usage = event.message.usage
+        if event.turn is None:
+            return
+        usage = None
+        for rnd in reversed(event.turn.rounds):
+            if rnd.response.usage is not None:
+                usage = rnd.response.usage
+                break
         if usage is None:
             return
         provider_pricing = await self._pricing_for(self._current_provider())
@@ -143,9 +149,7 @@ class _CostBudgetRuntime:
         await self._session.bus.emit(
             CostBudgetExceededEvent.CHANNEL,
             CostBudgetExceededEvent(
-                used=self._state.used,
-                limit=self._limit,
-                currency=self._currency,
+                detail=f"used={self._state.used:.4f} limit={self._limit:.4f} {self._currency}",
             ),
         )
 

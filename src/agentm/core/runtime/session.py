@@ -30,9 +30,9 @@ from agentm.core.abi.events import (
     SessionShutdownEvent,
 )
 from agentm.core.abi.services import ServiceRegistry
-from agentm.core.abi.session_api import SessionContext
+from agentm.core.abi.session_api import AgentSessionConfig, SessionContext
 from agentm.core.abi.store import SessionMeta, TrajectoryStore
-from agentm.core.abi.trajectory import TurnRef
+from agentm.core.abi.trajectory import Turn, TurnRef
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import Trigger, TriggerRenderer, UserInput
 from agentm.core.abi.lifecycle import (
@@ -93,9 +93,11 @@ class Session:
         self._model = model
         self._max_turns = max_turns
         self._thinking = thinking
-        self._signal = asyncio.Event()
+        self._interrupt = asyncio.Event()
+        self._shutdown = asyncio.Event()
         self._closed = False
         self._driver_task: asyncio.Task[None] | None = None
+        self._pending_installs: list[asyncio.Task[object]] = []
         self.lifecycle = LifecycleHookRegistry()
 
         if self.graph is not None:
@@ -156,7 +158,8 @@ class Session:
                 system=self.system,
                 context_policies=self.context_policies,
                 trigger_renderers=self.trigger_renderers,
-                signal=self._signal,
+                interrupt=self._interrupt,
+                shutdown=self._shutdown,
                 max_turns=self._max_turns,
                 thinking=self._thinking,
                 lifecycle=self.lifecycle,
@@ -170,7 +173,7 @@ class Session:
         if self._closed:
             return
         self._closed = True
-        self._signal.set()
+        self._shutdown.set()
         self.triggers.close()
         if self._driver_task is not None:
             try:
@@ -200,7 +203,7 @@ class Session:
         self.triggers.push(trigger)
 
     def interrupt(self) -> None:
-        self._signal.set()
+        self._interrupt.set()
 
     async def idle(self, timeout: float | None = None) -> bool:
         return await self.triggers.wait_quiescent(timeout)
@@ -226,6 +229,9 @@ class Session:
     def get_messages(self) -> list[AgentMessage]:
         return build_context_sync(self.trajectory.turns, self.trigger_renderers)
 
+    def get_turns(self) -> list[Turn]:
+        return list(self.trajectory.turns)
+
     def status(self) -> dict[str, str | int | list[str]]:
         phase: str
         if self._closed:
@@ -242,6 +248,17 @@ class Session:
             "turns": len(self.trajectory),
             "tool_names": [t.name for t in self.tools],
         }
+
+    # --- Bus delegation ---
+
+    def on(
+        self,
+        channel: str,
+        handler: object,
+        *,
+        priority: int = 500,
+    ) -> object:
+        return self.bus.on(channel, handler, priority=priority)  # type: ignore[arg-type]
 
     # --- Registration ---
 
@@ -266,6 +283,119 @@ class Session:
     def register_lifecycle_hook(self, hook: LifecycleHook) -> None:
         self.lifecycle.register(hook)
 
+    def _v2_push_trigger_stub(self, *, source: str, payload: str, **kwargs: object) -> None:
+        """Bridge for atoms that construct triggers from raw source+payload."""
+        from agentm.core.abi.trigger import (
+            BackgroundCompletion, MonitorFire, SubagentResult, UserInput,
+        )
+        if source == "monitor":
+            monitor_id = str(kwargs.get("dedup_key", ""))
+            self.push_trigger(MonitorFire(monitor_id=monitor_id, payload=payload))
+        elif source == "background":
+            task_id = str(kwargs.get("task_id", ""))
+            terminal = bool(kwargs.get("terminal", False))
+            self.push_trigger(BackgroundCompletion(task_id=task_id, payload=payload, terminal=terminal))
+        elif source == "subagent":
+            child_id = str(kwargs.get("child_session_id", ""))
+            terminal = bool(kwargs.get("terminal", False))
+            self.push_trigger(SubagentResult(child_session_id=child_id, payload=payload, terminal=terminal))
+        else:
+            content = (TextContent(type="text", text=payload),)
+            self.push_trigger(UserInput(content=content))
+
+    def _v2_send_user_stub(self, text: str) -> None:
+        """Bridge for atoms that want to emit a message to the user."""
+        from agentm.core.abi.events import DiagnosticEvent
+        self.bus.emit_sync(DiagnosticEvent.CHANNEL, DiagnosticEvent(
+            level="info", source="session", message=text,
+        ))
+
+    def register_provider(self, name: str, config: object) -> None:
+        """Register an LLM provider — sets model and stream_fn from config."""
+        stream_fn = getattr(config, "stream_fn", None)
+        model = getattr(config, "model", None)
+        if stream_fn is not None:
+            self._stream_fn = stream_fn
+        if model is not None:
+            self._model = model
+        self.services.register(f"provider:{name}", config)
+
+    def get_service(self, key: str) -> object | None:
+        """Bridge — atoms that called api.get_service() now call session.get_service()."""
+        return self.services.get(key)
+
+    def set_service(self, key: str, value: object) -> None:
+        """Bridge — atoms that called api.set_service() now call session.set_service()."""
+        self.services.register(key, value)
+
+    def register_operations(self, **kwargs: object) -> None:
+        """Bridge — register bash/sandbox operations as services."""
+        for key, value in kwargs.items():
+            self.services.register(f"operations:{key}", value)
+
+    def register_resource_writer(self, writer: object) -> None:
+        """Bridge — register the resource writer as a service."""
+        self.services.register("resource_writer", writer)
+
+    def add_observer(self, observer: object) -> None:
+        """Bridge — bus observer registration (observers not yet wired into bus dispatch)."""
+        self.services.register("bus_observer", observer)
+
+    def install_atom(self, module_path: str, config: dict[str, object] | None = None) -> None:
+        """Load and install an atom at runtime."""
+        from agentm.core.runtime.extension import load_extension
+        result = load_extension(module_path, self, config or {})
+        if result is not None:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                task = asyncio.ensure_future(result)
+                self._pending_installs.append(task)
+
+    def unload_atom(self, name: str, **kwargs: object) -> None:
+        """Placeholder — atom unloading not yet supported in v2."""
+        logger.warning("unload_atom({!r}) called but not implemented in v2", name)
+
+    def reload_atom(self, name: str, **kwargs: object) -> None:
+        """Placeholder — atom reloading not yet supported in v2."""
+        logger.warning("reload_atom({!r}) called but not implemented in v2", name)
+
+    def list_atoms(self) -> list[str]:
+        """Placeholder — atom listing not yet supported in v2."""
+        return []
+
+    @property
+    def cwd(self) -> str:
+        return self.ctx.cwd
+
+    @property
+    def root_session_id(self) -> str:
+        return self.ctx.root_session_id
+
+    @property
+    def scenario(self) -> str | None:
+        return self.ctx.scenario
+
+    @property
+    def lineage(self) -> dict[str, str]:
+        return {
+            "session_id": self.id,
+            "root_session_id": self.ctx.root_session_id,
+            "parent_session_id": self.ctx.parent_session_id or "",
+            "purpose": self.ctx.purpose,
+        }
+
+    @property
+    def provider(self) -> object | None:
+        """Active ProviderConfig, if any provider atom registered one."""
+        for name in self.services.names():
+            if name.startswith("provider:"):
+                return self.services.get(name)
+        return None
+
+    @property
+    def experiment(self) -> dict[str, object] | None:
+        return self.services.get("experiment")  # type: ignore[return-value]
+
     # --- Spawn (child session with inheritance) ---
 
     async def spawn(
@@ -281,7 +411,7 @@ class Session:
         max_turns: int | None = None,
         extra_services: ServiceRegistry | None = None,
     ) -> "Session":
-        """Spawn a child session inheriting parent config.
+        """Spawn a lightweight child inheriting parent config.
 
         Only specify what you want to override.
         """
@@ -314,6 +444,26 @@ class Session:
             services=child_services,
         )
 
+        await self._register_child(child, purpose=purpose)
+        return child
+
+    async def spawn_child_session(
+        self,
+        config: AgentSessionConfig,
+    ) -> "Session":
+        """Spawn a fully-constructed child via the session factory.
+
+        Goes through the full factory pipeline: resolves scenario,
+        loads extensions, installs atoms.  Use this when the child
+        needs a different scenario or extension set from the parent.
+        """
+        from agentm.core.runtime.session_factory import create_child_session
+
+        child = await create_child_session(parent=self, config=config)
+        await self._register_child(child, purpose=config.purpose)
+        return child
+
+    async def _register_child(self, child: "Session", *, purpose: str) -> None:
         if child.store is not None:
             child.store.create_session(SessionMeta(
                 id=child.id,
@@ -335,12 +485,6 @@ class Session:
             parent_session_id=self.id,
             purpose=purpose,
         ))
-
-        # TODO: ChildSessionEndEvent requires a parent-bus reference on the
-        # child so shutdown() can notify the parent. Deferred until the
-        # session graph carries bus references.
-
-        return child
 
     # --- Fork / Resume ---
 

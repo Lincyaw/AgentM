@@ -68,7 +68,7 @@ def _socket_path(session_id: str) -> Path:
 
 class _InboxSocketRuntime:
     __slots__ = (
-        "_api", "_session_id", "_server", "_sock_path",
+        "_session", "_session_id", "_server", "_sock_path",
         "_shutdown", "_pending",
     )
 
@@ -119,12 +119,12 @@ class _InboxSocketRuntime:
             mode, message = self._parse_mode(text)
 
             if mode == "now":
-                self._v2_push_trigger_stub(source="user", payload=message)
+                self._session._v2_push_trigger_stub(source="user", payload=message)
                 writer.write(b"ok:now\n")
                 logger.info("inbox_socket: injected {} chars (now)", len(message))
 
             elif mode == "interrupt":
-                self._v2_push_trigger_stub(source="user", payload=message)
+                self._session._v2_push_trigger_stub(source="user", payload=message)
                 session = self._session.services.get("_session")
                 if session is not None and hasattr(session, "interrupt"):
                     session.interrupt()
@@ -149,7 +149,7 @@ class _InboxSocketRuntime:
         """Drain queued messages at the turn boundary."""
         while self._pending:
             message = self._pending.popleft()
-            self._v2_push_trigger_stub(source="user", payload=message)
+            self._session._v2_push_trigger_stub(source="user", payload=message)
             logger.info("inbox_socket: delivered queued message ({} chars) at turn boundary", len(message))
 
     async def stop(self, _event: SessionShutdownEvent) -> None:
@@ -171,5 +171,5 @@ async def install(session: Any, config: InboxSocketConfig) -> None:
     runtime = _InboxSocketRuntime(session, session_id)
     await runtime.start()
 
-    session.bus.on("turn_end", runtime._on_turn_end)
-    session.bus.on("session_shutdown", runtime.stop)
+    session.bus.on(TurnCommittedEvent.CHANNEL, runtime._on_turn_end)
+    session.bus.on(SessionShutdownEvent.CHANNEL, runtime.stop)

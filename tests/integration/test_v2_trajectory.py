@@ -253,7 +253,7 @@ async def test_single_turn_text() -> None:
     assert turn.id
     assert turn.timestamp > 0
     assert len(turn.rounds) == 1
-    assert turn.outcome.action == "stop"
+    assert turn.outcome.cause is not None
     assert isinstance(turn.outcome.cause, ModelEndTurn)
     assert isinstance(turn.trigger, UserInput)
     assert turn.meta.model_id == "mock-model"
@@ -306,7 +306,7 @@ async def test_tool_terminate() -> None:
 
     assert len(session.trajectory) == 1
     turn = session.trajectory.turns[0]
-    assert turn.outcome.action == "stop"
+    assert turn.outcome.cause is not None
     assert isinstance(turn.outcome.cause, ToolTerminated)
     assert turn.outcome.cause.tool_name == "finish"
 
@@ -739,7 +739,7 @@ async def test_signal_abort() -> None:
     turns = session.trajectory.turns
     assert len(turns) == 1
     turn = turns[0]
-    assert turn.outcome.action == "stop"
+    assert turn.outcome.cause is not None
     assert isinstance(turn.outcome.cause, SignalAborted)
 
 
@@ -926,7 +926,7 @@ def test_codec_round_trip() -> None:
         timestamp=1234.0,
         stop_reason="end_turn",
     )
-    outcome = Outcome(action="stop", cause=ModelEndTurn())
+    outcome = Outcome(cause=ModelEndTurn())
     meta = TurnMeta(
         total_input_tokens=100, total_output_tokens=50,
         model_id="mock-model",
@@ -943,7 +943,7 @@ def test_codec_round_trip() -> None:
     assert restored.index == turn.index
     assert restored.id == turn.id
     assert restored.timestamp == turn.timestamp
-    assert restored.outcome.action == turn.outcome.action
+    assert type(restored.outcome.cause).__name__ == type(turn.outcome.cause).__name__
     assert isinstance(restored.outcome.cause, ModelEndTurn)
     assert restored.meta.total_input_tokens == 100
     assert restored.meta.model_id == "mock-model"
@@ -999,7 +999,7 @@ def test_execution_state_errors() -> None:
         ex.add_round(response, [])
 
     ex2 = Execution(index=0, trigger=trigger)
-    outcome = Outcome(action="stop", cause=ModelEndTurn())
+    outcome = Outcome(cause=ModelEndTurn())
     meta = TurnMeta()
     ex2.commit(outcome, meta)
 
@@ -1116,7 +1116,7 @@ async def test_empty_llm_response() -> None:
 
     assert len(session.trajectory) == 1
     turn = session.trajectory.turns[0]
-    assert turn.outcome.action == "stop"
+    assert turn.outcome.cause is not None
     assert len(turn.rounds[0].response.content) == 0
 
 
@@ -1321,4 +1321,4 @@ async def test_durable_round_persist_failure() -> None:
 
     assert len(session.trajectory) == 1
     turn = session.trajectory.turns[0]
-    assert turn.outcome.action == "stop"
+    assert turn.outcome.cause is not None

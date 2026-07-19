@@ -364,7 +364,7 @@ async def _prompt_child_session_messages(
         loop_config=LoopConfig(max_turns=max_turns),
     )
     try:
-        child = await session.spawn(config)
+        child = await session.spawn_child_session(config)
     except Exception as exc:  # noqa: BLE001
         logger.warning("goal: {} spawn failed: {}", purpose, exc)
         return None
@@ -559,8 +559,8 @@ class _GoalRuntime:
         self._session.bus.on(DecideEvent.CHANNEL, self._on_decide)
 
     def _register_goal_command(self) -> None:
-        self._session_stub_register_command(
-            "goal",
+        self._session.services.register(
+            "command:goal",
             CommandSpec(
                 description=(
                     "Set a completion condition that keeps the session running "
@@ -634,21 +634,13 @@ class _GoalRuntime:
                 await self._derive_goal(event.system or "", user_text)
         self._append_goal_criteria(event)
 
-    def _append_goal_criteria(self, event: BeforeSendEvent) -> None:
-        """Expose the acceptance criteria to the main agent.
-
-        Appended to the system prompt on every request while a goal is
-        active: the block is identical each turn, so it forms a stable
-        prefix (KV-cache friendly) and — unlike a conversation message —
-        survives compaction. The agent sees the bar it will be checked
-        against from turn one and can build verification that covers it,
-        instead of discovering the criteria through rejections.
-        """
+    def _append_goal_criteria(self, event: BeforeSendEvent) -> dict[str, str] | None:
+        """Expose the acceptance criteria to the main agent."""
 
         state = self._state
         if state is None or state.achieved or state.released:
-            return
-        event.system = (
+            return None
+        updated = (
             (event.system or "")
             + "\n\n## Completion criteria\n"
             "An independent checker will verify your work against the "
@@ -658,6 +650,7 @@ class _GoalRuntime:
             "they pass.\n\n"
             + state.condition
         )
+        return {"system": updated}
 
     async def _derive_goal(self, system: str, user_text: str) -> None:
         if self._auto_init_scenario is None:
@@ -738,7 +731,7 @@ class _GoalRuntime:
         if not isinstance(default, Stop):
             return None
         cause = default.cause
-        if cause.final:
+        if not getattr(cause, "overridable", True):
             return None
         if not isinstance(cause, (ModelEndTurn, ToolTerminated)):
             return None

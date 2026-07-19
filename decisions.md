@@ -762,3 +762,21 @@ numbers — do not change prompts mid-run):
   package root with the required llmharness index extra, separates scenario
   checks to avoid duplicate top-level modules, validates the requirements
   index and §11 extension contract, and leaves terminal-go unchanged.
+
+## 2026-07-19 — v2 spawn design (AgentSessionConfig + spawn_child_session)
+
+- **Two spawn patterns are both needed** (L4: architecture).
+  `Session.spawn()` is lightweight inheritance (child gets parent's tools/model).
+  `Session.spawn_child_session(config)` goes through the factory pipeline
+  (scenario resolution, extension loading, atom installation). sub_agent and
+  workflow/sdk need the latter. Keeping both is deliberate — they serve
+  different use cases, not a workaround.
+- **AgentSessionConfig fields are atom-facing only** (L3: boundary contract).
+  Added 8 fields back (provider, tool_allowlist, task_id, persona, experiment,
+  trace_label, session_id, extensions). Excluded runtime-internal types
+  (session_manager, bus, resource_loader) — the factory infers these from
+  the parent session. The config is JSON-safe.
+- **experiment stored as a service, not a Session attribute** (L2: codebase
+  convention). Session.experiment reads from `services.get("experiment")`.
+  This keeps Session's constructor clean and lets atoms set/override
+  experiment metadata via the service registry.

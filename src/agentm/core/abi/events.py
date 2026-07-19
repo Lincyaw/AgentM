@@ -25,32 +25,43 @@ from agentm.core.abi.trajectory import Outcome, Turn, TurnMeta
 from agentm.core.abi.trigger import Trigger
 
 
-# --- Termination causes (reuse from v1, they're already frozen) -------------
+# --- Termination causes -----------------------------------------------------
+# Each cause carries two ClassVar flags:
+#   overridable  — can a DecideEvent handler override this Stop to Step/Inject?
+#   session_terminal — should the driver exit the persistent loop?
 
 @dataclass(frozen=True, slots=True)
 class TerminationCause:
-    final: ClassVar[bool] = False
+    overridable: ClassVar[bool] = True
+    session_terminal: ClassVar[bool] = False
 
 
 @dataclass(frozen=True, slots=True)
 class ModelEndTurn(TerminationCause):
+    """LLM chose to stop responding — turn done, session continues."""
     pass
 
 
 @dataclass(frozen=True, slots=True)
 class ToolTerminated(TerminationCause):
+    """A tool explicitly terminated the session."""
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
     tool_name: str = ""
     reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class MaxTurnsExhausted(TerminationCause):
-    final: ClassVar[bool] = True
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
 
 
 @dataclass(frozen=True, slots=True)
 class SignalAborted(TerminationCause):
-    final: ClassVar[bool] = True
+    """Turn was interrupted — not session-terminal."""
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +71,8 @@ class ProviderTruncated(TerminationCause):
 
 @dataclass(frozen=True, slots=True)
 class BudgetExhausted(TerminationCause):
-    final: ClassVar[bool] = True
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
     detail: str = ""
 
 
@@ -289,9 +301,14 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class InputEvent(Event):
+    """User input pre-filter.
+
+    Handlers return ``{"text": "rewritten"}`` to modify,
+    ``{"handled": True}`` to consume (no trigger fires),
+    or ``None`` for no opinion.
+    """
     CHANNEL: ClassVar[str] = "input"
-    source: str = ""
-    payload: str = ""
+    text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +367,7 @@ class ExtensionUnloadEvent(Event):
 class CommandDispatchedEvent(Event):
     CHANNEL: ClassVar[str] = "command_dispatched"
     name: str = ""
+    args: str = ""
 
 
 @dataclass(frozen=True, slots=True)

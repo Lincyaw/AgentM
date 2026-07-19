@@ -475,7 +475,7 @@ class WorkflowRunner:
         """Persist a ``workflow_delivery`` artifact with execution metadata.
 
         Best-effort: failures are logged, never raised."""
-        store: _ArtifactStore | None = self._api.get_service(
+        store: _ArtifactStore | None = self._api.services.get(
             ARTIFACT_STORE_SERVICE,
         )
         if store is None:
@@ -488,8 +488,8 @@ class WorkflowRunner:
         summary = self.last_run_summary
         delivery: dict[str, Any] = {
             "script": str(source_path) if source_path else None,
-            "trace_id": self._api.root_session_id,
-            "session_id": self._api.session_id,
+            "trace_id": self._api.ctx.root_session_id,
+            "session_id": self._api.id,
             "success": success,
             "execution": {
                 "wall_clock_s": summary["wall_clock_s"],
@@ -533,7 +533,7 @@ class WorkflowRunner:
         """Run a pre-written workflow script file."""
         sp = Path(path)
         if not sp.is_absolute():
-            sp = expand_path_from_cwd(sp, self._api.cwd)
+            sp = expand_path_from_cwd(sp, self._api.ctx.cwd)
         sp = sp.resolve()
         if not sp.is_file():
             raise FileNotFoundError(f"workflow script not found: {sp}")
@@ -590,7 +590,7 @@ class WorkflowRunner:
         self._last_run = run = _WorkflowRun(
             api=self._api,
             journal=_Journal(
-                store=self._api.get_service(ARTIFACT_STORE_SERVICE),
+                store=self._api.services.get(ARTIFACT_STORE_SERVICE),
             ),
             budget_svc=_BudgetService(
                 total_budget_tokens=self._budget_tokens,

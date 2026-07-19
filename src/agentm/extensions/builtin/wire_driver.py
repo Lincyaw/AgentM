@@ -166,32 +166,28 @@ def _content_text(blocks: Any, limit: int = _PREVIEW_LIMIT) -> str:
 # --- projectors (pure: event -> JSON-safe body) ----------------------------
 
 def _p_turn_start(ev: TurnBeginEvent) -> ProjectorResult:
-    return {"kind": "turn_start", "turn_id": ev.turn_id, "turn_index": ev.turn_index}
+    return {"kind": "turn_start", "turn_index": ev.index}
 
 def _p_llm_request_start(ev: LlmRequestStartEvent) -> ProjectorResult:
     return {
         "kind": "llm_request_start",
-        "turn_id": ev.turn_id,
         "turn_index": ev.turn_index,
-        "model": ev.model_id,
     }
 
 def _p_stream_delta(ev: StreamDeltaEvent) -> ProjectorResult:
     delta = ev.delta
     if isinstance(delta, TextDelta):
         return (
-            {"kind": "stream_text", "content": delta.text, "turn_id": ev.turn_id}
+            {"kind": "stream_text", "content": delta.text, "turn_index": ev.turn_index}
             if delta.text
             else None
         )
     if isinstance(delta, ThinkingDelta):
         return (
-            {"kind": "stream_thinking", "content": delta.text, "turn_id": ev.turn_id}
+            {"kind": "stream_thinking", "content": delta.text, "turn_index": ev.turn_index}
             if delta.text
             else None
         )
-    # ToolCallStart / ArgsDelta / End / MessageEnd are surfaced via the
-    # tool_call / tool_result / turn_end channels instead.
     return None
 
 def _p_tool_call(ev: ToolCallEvent) -> ProjectorResult:
@@ -216,22 +212,25 @@ def _p_tool_result(ev: ToolResultEvent) -> ProjectorResult:
     }
 
 def _p_turn_end(ev: TurnCommittedEvent) -> ProjectorResult:
+    if ev.turn is None:
+        return None
     bodies: list[dict[str, Any]] = []
-    text = _assistant_text(ev.message)
-    if text.strip():
-        bodies.append({"kind": "assistant_text", "content": text})
-    usage = ev.message.usage
-    if usage is not None:
-        bodies.append(
-            {
-                "kind": "usage",
-                "turn_id": ev.turn_id,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "cache_read": usage.cache_read,
-                "cache_write": usage.cache_write,
-            }
-        )
+    if ev.turn.rounds:
+        last_resp = ev.turn.rounds[-1].response
+        text = _assistant_text(last_resp)
+        if text.strip():
+            bodies.append({"kind": "assistant_text", "content": text})
+    meta = ev.turn.meta
+    bodies.append(
+        {
+            "kind": "usage",
+            "turn_index": ev.turn.index,
+            "input_tokens": meta.total_input_tokens,
+            "output_tokens": meta.total_output_tokens,
+            "cache_read": meta.cache_read_tokens,
+            "cache_write": meta.cache_write_tokens,
+        }
+    )
     return bodies or None
 
 def _p_child_start(ev: ChildSessionStartEvent) -> ProjectorResult:
@@ -245,8 +244,6 @@ def _p_child_end(ev: ChildSessionEndEvent) -> ProjectorResult:
     return {
         "kind": "child_end",
         "child_id": ev.child_session_id,
-        "final_message_count": ev.final_message_count,
-        "error": ev.error,
     }
 
 def _p_diagnostic(ev: DiagnosticEvent) -> ProjectorResult:
@@ -257,35 +254,30 @@ def _p_diagnostic(ev: DiagnosticEvent) -> ProjectorResult:
     return None  # info is not surfaced
 
 def _p_agent_end(ev: RunEndEvent) -> ProjectorResult:
-    cause = type(ev.cause).__name__
-    if cause == "ModelEndTurn":
-        cause = "normal"
-    return {"kind": "agent_end", "cause": cause}
+    cause_name = "normal"
+    if ev.outcome is not None and ev.outcome.cause is not None:
+        cause_name = type(ev.outcome.cause).__name__
+        if cause_name == "ModelEndTurn":
+            cause_name = "normal"
+    return {"kind": "agent_end", "cause": cause_name}
 
 def _p_extension_install(ev: ExtensionInstallEvent) -> ProjectorResult:
     return {
         "kind": "extension_install",
-        "module_path": ev.module_path,
+        "name": ev.name,
         "phase": ev.phase,
-        "trigger": ev.trigger,
-        "error": ev.error,
     }
 
 def _p_extension_reload(ev: ExtensionReloadEvent) -> ProjectorResult:
     return {
         "kind": "extension_reload",
         "name": ev.name,
-        "is_self_modify": ev.is_self_modify,
-        "trigger": ev.trigger,
-        "error": ev.error,
     }
 
 def _p_extension_unload(ev: ExtensionUnloadEvent) -> ProjectorResult:
     return {
         "kind": "extension_unload",
         "name": ev.name,
-        "trigger": ev.trigger,
-        "error": ev.error,
     }
 
 def _p_api_register(ev: ApiRegisterEvent) -> ProjectorResult:
@@ -295,43 +287,22 @@ def _p_api_register(ev: ApiRegisterEvent) -> ProjectorResult:
         "kind": "api_register",
         "reg_kind": ev.kind,
         "name": ev.name,
-        "extension": ev.extension,
     }
 
 def _p_api_send_user_message(ev: ApiSendUserMessageEvent) -> ProjectorResult:
-    return {
-        "kind": "api_send_user_message",
-        "extension": ev.extension,
-        "content": _content_text(ev.content),
-    }
+    return {"kind": "api_send_user_message"}
 
 def _p_resource_write(ev: ResourceWriteEvent) -> ProjectorResult:
-    return {
-        "kind": "resource_write",
-        "path": ev.path,
-        "author": ev.author,
-        "rationale": ev.rationale,
-        "post_sha": ev.post_sha,
-    }
+    return {"kind": "resource_write", "path": ev.path}
 
 def _p_plan_submitted(ev: PlanSubmittedEvent) -> ProjectorResult:
-    return {"kind": "plan_submitted", "plan_id": ev.plan_id, "content": ev.plan_text}
+    return {"kind": "plan_submitted"}
 
 def _p_after_compact(ev: AfterCompactEvent) -> ProjectorResult:
-    return {
-        "kind": "after_compact",
-        "kept": ev.kept_message_count,
-        "discarded": ev.discarded_message_count,
-        "content": ev.summary,
-    }
+    return {"kind": "after_compact"}
 
 def _p_cost_budget(ev: CostBudgetExceededEvent) -> ProjectorResult:
-    return {
-        "kind": "cost_budget_exceeded",
-        "used": ev.used,
-        "limit": ev.limit,
-        "currency": ev.currency,
-    }
+    return {"kind": "cost_budget_exceeded", "detail": ev.detail}
 
 def _p_background_activity(ev: BackgroundActivityEvent) -> ProjectorResult:
     return {
@@ -359,8 +330,6 @@ def _make_session_ready_projector(model_names: list[str]) -> Projector:
         return {
             "kind": "session_ready",
             "tool_names": list(ev.tool_names),
-            "command_names": list(ev.command_names),
-            "model": ev.model.id if ev.model is not None else None,
             "models": list(model_names),
         }
 
@@ -371,7 +340,6 @@ def _p_command_dispatched(ev: CommandDispatchedEvent) -> ProjectorResult:
         "kind": "command_dispatched",
         "name": ev.name,
         "args": ev.args,
-        "owner": ev.owner,
     }
 
 # Channels dispatched via async ``bus.emit`` — async handlers preserve order
@@ -571,7 +539,7 @@ class _WireDriverRuntime:
                 "this atom only works inside the agentm gateway process."
             )
         return cls(
-            api=session,
+            session=session,
             outbound_sink=outbound_sink,
             session_key=session_key,
             turn_context=session.services.get("turn_context"),

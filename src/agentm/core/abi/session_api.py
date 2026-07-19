@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
-from typing import Callable, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.stream import Model
@@ -26,6 +26,45 @@ from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.trigger import Trigger, TriggerRenderer
 
 Unsubscribe = Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class LoopConfig:
+    """Driver loop budget — max turns and tool calls per session."""
+
+    max_turns: int | None = None
+    max_tool_calls: int | None = None
+
+
+@dataclass(slots=True)
+class AgentSessionConfig:
+    """Configuration for spawning a child session.
+
+    Atoms like ``sub_agent`` and ``workflow`` construct this to pass
+    structured spawn parameters through ``spawn_child_session``.
+    Fields are atom-facing and JSON-safe — no runtime types leak here.
+
+    Two extension modes (mutually exclusive in intent):
+    - ``extensions``: explicit full list — replaces scenario's list.
+    - ``extra_extensions``: additions appended to the scenario's list.
+    """
+
+    cwd: str = ""
+    scenario: str | None = None
+    extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    extra_extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    extra_tools: list[Tool] = field(default_factory=list)
+    atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    provider: tuple[str, dict[str, Any]] | None = None
+    tool_allowlist: list[str] | None = None
+    purpose: str = "subagent"
+    lineage: dict[str, Any] = field(default_factory=dict)
+    loop_config: LoopConfig | None = None
+    task_id: str | None = None
+    persona: str | None = None
+    experiment: dict[str, Any] | None = None
+    trace_label: str | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,12 +197,22 @@ class AtomAPI(Protocol):
         max_turns: int | None = None,
         extra_services: ServiceRegistry | None = None,
     ) -> "SpawnedSession":
-        """Spawn a child session inheriting parent's config.
+        """Spawn a lightweight child inheriting parent's config.
 
         Only override what you need — everything else inherits from
         the parent (tools, model, system, policies, graph, store).
+        """
+        ...
 
-        Returns a SpawnedSession handle for interaction.
+    async def spawn_child_session(
+        self,
+        config: AgentSessionConfig,
+    ) -> "SpawnedSession":
+        """Spawn a fully-constructed child session from config.
+
+        Goes through the factory pipeline: resolves scenario, loads
+        extensions, installs atoms.  Use this when the child needs a
+        different scenario or extension set from the parent.
         """
         ...
 
@@ -171,6 +220,9 @@ class AtomAPI(Protocol):
 
     @property
     def model(self) -> Model | None: ...
+
+    @property
+    def experiment(self) -> dict[str, Any] | None: ...
 
 
 @runtime_checkable
@@ -196,7 +248,9 @@ class SpawnedSession(Protocol):
 
 
 __all__ = [
+    "AgentSessionConfig",
     "AtomAPI",
+    "LoopConfig",
     "SessionContext",
     "SpawnedSession",
     "Unsubscribe",

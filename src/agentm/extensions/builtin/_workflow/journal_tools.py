@@ -84,7 +84,7 @@ class JournalTools:
         self._api = api
 
     def _store(self) -> _ArtifactStore | None:
-        return self._api.get_service(ARTIFACT_STORE_SERVICE)
+        return self._api.services.get(ARTIFACT_STORE_SERVICE)
 
     async def lineage(self, args: dict[str, Any]) -> ToolResult:
         try:

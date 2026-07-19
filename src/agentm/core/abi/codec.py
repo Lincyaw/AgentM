@@ -409,25 +409,25 @@ class CodecRegistry:
     # --- Outcome ---
 
     def _serialize_outcome(self, outcome: Outcome) -> dict[str, Any]:
-        d: dict[str, Any] = {"action": outcome.action}
-        if outcome.cause is not None:
-            if dataclasses.is_dataclass(outcome.cause) and not isinstance(outcome.cause, type):
-                d["cause"] = {
-                    "__type__": type(outcome.cause).__qualname__,
-                    **asdict(outcome.cause),
-                }
-            else:
-                d["cause"] = {"repr": repr(outcome.cause)[:500]}
+        d: dict[str, Any] = {}
+        if dataclasses.is_dataclass(outcome.cause) and not isinstance(outcome.cause, type):
+            d["cause"] = {
+                "__type__": type(outcome.cause).__qualname__,
+                **asdict(outcome.cause),
+            }
+        else:
+            d["cause"] = {"repr": repr(outcome.cause)[:500]}
         if outcome.injected:
             d["injected"] = [serialize_message(m) for m in outcome.injected]
         return d
 
     def _deserialize_outcome(self, data: dict[str, Any]) -> Outcome:
+        from agentm.core.abi.events import ModelEndTurn
         injected = tuple(
             deserialize_message(m) for m in data.get("injected", [])
         )
         raw_cause = data.get("cause")
-        cause: Any = raw_cause
+        cause: Any = raw_cause or ModelEndTurn()
         if isinstance(raw_cause, dict):
             type_name = raw_cause.get("__type__")
             cls = self._cause_types.get(type_name) if type_name else None
@@ -439,7 +439,6 @@ class CodecRegistry:
                 except (TypeError, ValueError):
                     cause = raw_cause
         return Outcome(
-            action=data.get("action", "stop"),
             cause=cause,
             injected=injected,
         )

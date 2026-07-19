@@ -10,7 +10,7 @@ import pytest
 
 from agentm.core.abi import AssistantMessage
 from agentm.core.abi.extension import ExtensionLoadError
-from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
 from agentm.core.runtime.session import AgentSession
 

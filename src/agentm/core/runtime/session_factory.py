@@ -10,8 +10,12 @@ Atoms receive the Session directly (no adapter).
 from __future__ import annotations
 
 import inspect
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agentm.core.abi.session_api import AgentSessionConfig
 
 import yaml
 from loguru import logger
@@ -169,6 +173,111 @@ async def create_session(
     return session
 
 
+async def create_child_session(
+    *,
+    parent: Session,
+    config: "AgentSessionConfig",
+) -> Session:
+    """Create a child session from an ``AgentSessionConfig``.
+
+    Resolves extensions either from ``config.extensions`` (explicit full
+    list) or from the scenario + ``config.extra_extensions``.  Inherits
+    the parent's store, graph, stream_fn, and model unless overridden.
+    """
+    scenario = config.scenario or parent.ctx.scenario or "chatbot"
+
+    if config.extensions:
+        extensions = list(config.extensions)
+    else:
+        extensions, _ = _load_scenario_extensions(
+            scenario, parent.ctx.scenario_dir
+        )
+        for mod, cfg in config.extra_extensions:
+            extensions.append((mod, cfg))
+
+    if config.atom_config_overrides:
+        extensions = [
+            (mod, {**cfg, **config.atom_config_overrides.get(mod, {})})
+            for mod, cfg in extensions
+        ]
+
+    child_id = config.session_id or uuid.uuid4().hex[:16]
+    child_ctx = parent.ctx.child(
+        session_id=child_id,
+        purpose=config.purpose,
+        cwd=config.cwd or None,
+        scenario=scenario,
+    )
+
+    child_services = ServiceRegistry()
+    child_services.update_from(parent.services)
+
+    if config.experiment is not None:
+        child_services.register("experiment", config.experiment)
+    if config.lineage:
+        child_services.register("lineage", config.lineage)
+    if config.task_id is not None:
+        child_services.register("task_id", config.task_id)
+    if config.persona is not None:
+        child_services.register("persona", config.persona)
+    if config.trace_label is not None:
+        child_services.register("trace_label", config.trace_label)
+    if config.loop_config is not None:
+        from agentm.core.abi import LOOP_BUDGET_SERVICE
+        child_services.register(LOOP_BUDGET_SERVICE, config.loop_config)
+
+    max_turns = config.loop_config.max_turns if config.loop_config else None
+
+    child = Session(
+        ctx=child_ctx,
+        stream_fn=parent._stream_fn,
+        model=parent._model,
+        store=parent.store,
+        graph=parent.graph,
+        max_turns=max_turns,
+        services=child_services,
+        cwd=config.cwd or parent.ctx.cwd,
+        purpose=config.purpose,
+    )
+
+    if config.tool_allowlist is not None:
+        child.services.register("tool_allowlist", config.tool_allowlist)
+
+    # Provider wiring:
+    # - provider=None: child inherits parent's stream_fn/model via constructor
+    #   AND parent's provider:<name> service via update_from.  No extra atom.
+    # - provider=(module, cfg): explicit provider extension — install after
+    #   the main extension list so it overrides the inherited one.
+    provider_ext: tuple[str, dict[str, Any]] | None = None
+    if config.provider is not None:
+        provider_ext = config.provider
+
+    for module_path, ext_config in extensions:
+        if not module_path:
+            continue
+        try:
+            result = load_extension(module_path, child, ext_config)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("failed to install atom in child: {}", module_path)
+
+    if provider_ext is not None:
+        mod, cfg = provider_ext
+        try:
+            result = load_extension(mod, child, cfg)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("failed to install provider in child: {}", mod)
+
+    for tool in config.extra_tools:
+        child.tools.append(tool)
+
+    return child
+
+
 __all__ = [
+    "create_child_session",
     "create_session",
 ]

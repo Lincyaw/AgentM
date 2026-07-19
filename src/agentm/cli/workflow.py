@@ -105,7 +105,7 @@ async def _run_async(
 ) -> int:
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
     from agentm.core.abi import EventBus
-    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.abi.session_api import AgentSessionConfig
     from agentm.core.lib.user_config import (
         ModelBuildConfig,
         apply_reasoning_effort,

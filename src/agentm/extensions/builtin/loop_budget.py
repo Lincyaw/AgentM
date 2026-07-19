@@ -56,8 +56,8 @@ class _LoopBudgetRuntime:
 
     def install(self) -> None:
         self._session.services.register(LOOP_BUDGET_SERVICE, self._loop_config)
-        self._session_stub_register_command(
-            "loop",
+        self._session.services.register(
+            "command:loop",
             CommandSpec(
                 description="Show this session's agent-loop turn/tool budget.",
                 handler=self.loop_command,
@@ -65,12 +65,17 @@ class _LoopBudgetRuntime:
         )
 
     async def loop_command(self, _args: str, cmd_api: Any) -> None:
-        cfg = cmd_api.session.get_loop_config()
-        cmd_api._v2_send_user_stub(
-            "Loop budget: "
-            f"max_turns={_render_limit(cfg.max_turns)}, "
-            f"max_tool_calls={_render_limit(cfg.max_tool_calls)}, "
-            f"max_tool_calls_per_turn={_render_limit(cfg.max_tool_calls_per_turn)}."
+        cfg = self._loop_config
+        from agentm.core.abi import DiagnosticEvent
+        await self._session.bus.emit(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="info", source="loop_budget",
+                message=(
+                    f"Loop budget: max_turns={_render_limit(cfg.max_turns)}, "
+                    f"max_tool_calls={_render_limit(cfg.max_tool_calls)}."
+                ),
+            ),
         )
 
 

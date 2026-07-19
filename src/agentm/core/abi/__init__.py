@@ -3,29 +3,21 @@
 Atoms import from ``agentm.core.abi`` only; direct sub-module imports
 (``from agentm.core.abi.events import ...``) are forbidden by the §11
 validator. This keeps the public surface explicit and auditable.
-
-The ABI re-exports the complete atom-facing vocabulary:
-
-- Message data model, stream boundary, termination hints
-- Event bus + typed events (kernel + runtime lifecycle)
-- Tool contract, session API
-- Operations, resources, catalog, roles
-- Telemetry Protocol, trace reader, skills
-- Trajectory model (Turn, Round, Trigger, ContextPolicy)
 """
 
 from __future__ import annotations
 
 # -- bus ---------------------------------------------------------------------
-from .bus import (
+from .bus import (  # noqa: E402
     BusPriority,
     Envelope,
     Event,
     EventBus,
+    EventBusObserver,
     Handler,
 )
 
-# -- events ------------------------------------------------------------------
+# -- events (kernel) ---------------------------------------------------------
 from .events import (
     BeforeRunEvent,
     BeforeSendEvent,
@@ -56,14 +48,17 @@ from .events import (
     TurnBeginEvent,
     TurnCommittedEvent,
     TurnObservation,
-    # domain events (atom-to-atom)
+)
+
+# -- events (domain, atom-to-atom) ------------------------------------------
+from .events import (  # noqa: F811
     AfterCompactEvent,
-    BeforeInstallAtomEvent,
-    BeforeUnloadAtomEvent,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     BackgroundActivityEvent,
     BeforeCompactEvent,
+    BeforeInstallAtomEvent,
+    BeforeUnloadAtomEvent,
     CommandDispatchedEvent,
     CostBudgetExceededEvent,
     EntryAppendedEvent,
@@ -81,15 +76,6 @@ from .events import (
     ResourcesDiscoverEvent,
     SessionHeaderEmittedEvent,
 )
-
-# v1 event aliases — atoms still import these names
-TurnStartEvent = TurnBeginEvent
-TurnEndEvent = TurnCommittedEvent
-AgentStartEvent = BeforeRunEvent
-AgentEndEvent = RunEndEvent
-BeforeAgentStartEvent = BeforeRunEvent
-BeforeSendToLlmEvent = BeforeSendEvent
-DecideTurnActionEvent = DecideEvent
 
 # -- trajectory --------------------------------------------------------------
 from .trajectory import (
@@ -156,7 +142,9 @@ from .services import (
 
 # -- session_api -------------------------------------------------------------
 from .session_api import (
+    AgentSessionConfig,
     AtomAPI,
+    LoopConfig,
     SessionContext,
     SpawnedSession,
     Unsubscribe,
@@ -175,7 +163,6 @@ from .lifecycle import (
 # -- manifest ----------------------------------------------------------------
 from .manifest import ChannelEffects as ChannelEffects
 from .manifest import ExtensionManifest as ExtensionManifest
-
 
 # -- messages ----------------------------------------------------------------
 from .messages import (
@@ -309,146 +296,36 @@ from .retry import RetryPolicy  # noqa: F401
 # -- telemetry ---------------------------------------------------------------
 from .telemetry import SessionTelemetry  # noqa: F401
 
+# -- command -----------------------------------------------------------------
+from .command import (
+    CommandDispatcher,
+    CommandSpec,
+    DispatchResult,
+)
+
+# -- compaction --------------------------------------------------------------
+from .compaction import (
+    ENTRY_MATERIALIZERS,
+    ENTRY_TYPE_BRANCH_SUMMARY,
+    ENTRY_TYPE_COMPACTION,
+    ENTRY_TYPE_MESSAGE,
+    CompactionDetails,
+    CompactionPrompts,
+    CompactionResult,
+    CompactionSettings,
+    ContextUsageSnapshot,
+    PROMPT_BRANCH_SUMMARY,
+    PROMPT_BRANCH_SUMMARY_PREAMBLE,
+    PROMPT_SUMMARIZATION,
+    PROMPT_SUMMARIZATION_SYSTEM,
+    PROMPT_UPDATE_SUMMARIZATION,
+    SessionEntry,
+)
+
 # -- extension errors --------------------------------------------------------
 from agentm.core.runtime.extension import ExtensionLoadError  # noqa: F401
 
-# -- v1 domain stubs (minimal, for atom import compat) ----------------------
-# These will be replaced with proper v2 equivalents as atoms are rewritten.
-from typing import Any as _Any
-from dataclasses import dataclass as _dc
-
-
-class ExtensionAPI:  # noqa: E302
-    """Stub — atoms typed against v1 ExtensionAPI still import this name."""
-    ...
-
-
-@_dc
-class AgentSessionConfig:
-    """Stub — v1 session config referenced by sub_agent/goal."""
-    ...
-
-
-@_dc
-class CommandSpec:
-    """Stub — v1 command spec referenced by llm_compaction/goal/loop_budget."""
-    name: str = ""
-    description: str = ""
-    parameters: dict[str, _Any] = None  # type: ignore[assignment]
-    def __post_init__(self) -> None:
-        if self.parameters is None:
-            self.parameters = {}
-
-
-class CommandDispatcher:  # noqa: E302
-    """Stub — v1 command dispatcher."""
-    ...
-
-
-ENTRY_MATERIALIZERS: dict[str, _Any] = {}
-ENTRY_TYPE_MESSAGE = "message"
-ENTRY_TYPE_COMPACTION = "compaction"
-ENTRY_TYPE_BRANCH_SUMMARY = "branch_summary"
-
-
-@_dc
-class SessionEntry:
-    """Stub — v1 session entry referenced by compaction_prompts."""
-    entry_type: str = ""
-    content: _Any = None
-
-
-@_dc
-class SessionState:
-    """Stub — v1 session state."""
-    ...
-
-
-class SessionStore:  # noqa: E302
-    """Stub — v1 session store protocol."""
-    ...
-
-
-@_dc
-class CompactionPrompts:
-    """Compaction prompt bodies threaded into the compaction engine."""
-    summarization_system: str = ""
-    update_summarization: str = ""
-
-
-@_dc
-class CompactionSettings:
-    """Stub — v1 compaction settings."""
-    ...
-
-
-@_dc
-class CompactionResult:
-    """Stub — v1 compaction result."""
-    ...
-
-
-@_dc
-class CompactionDetails:
-    """Stub — v1 compaction details."""
-    ...
-
-
-@_dc
-class ContextUsageSnapshot:
-    """Stub — v1 context usage."""
-    ...
-
-
-class LoopConfig:  # noqa: E302
-    """Stub — v1 loop config referenced by loop_budget."""
-    ...
-
-
-class AgentLoop:  # noqa: E302
-    """Stub — v1 agent loop."""
-    ...
-
-
-PROMPT_SUMMARIZATION = ""
-PROMPT_SUMMARIZATION_SYSTEM = ""
-PROMPT_UPDATE_SUMMARIZATION = ""
-PROMPT_BRANCH_SUMMARY = ""
-PROMPT_BRANCH_SUMMARY_PREAMBLE = ""
-MUTABLE_EVENT_FIELDS_BY_TYPE: dict[str, _Any] = {}
-
-
-class ExtensionStaleError(RuntimeError):
-    """Raised when an atom's source has changed since it was loaded."""
-    ...
-
-
-class EventBusObserver:
-    """Stub — v1 bus observer protocol."""
-    ...
-
-
-class ObserverCallback:
-    """Stub — v1 observer callback."""
-    ...
-
-
-class ObserverRegistration:
-    """Stub — v1 observer registration."""
-    ...
-
-
-class HookContract:
-    """Stub — v1 hook contract."""
-    ...
-
-
-class Renderer:
-    """Stub — v1 message renderer."""
-    ...
-
-
-# -- trace reader (lib, re-exported for access) -------------------------
+# -- trace reader (lib, re-exported for access) ------------------------------
 from agentm.core.lib.trace_reader import (  # noqa: F401
     LogRecord,
     SessionIdentity,
@@ -457,204 +334,138 @@ from agentm.core.lib.trace_reader import (  # noqa: F401
     attr,
 )
 
+# ---------------------------------------------------------------------------
+# Non-import definitions AFTER all imports (avoids E402)
+# ---------------------------------------------------------------------------
+
+
+class ExtensionStaleError(RuntimeError):
+    """Raised when an atom's source has changed since it was loaded."""
+    ...
+
+
+# Type alias — atoms typed against the legacy name still import it
+ExtensionAPI = AtomAPI
+
+# Event aliases — atoms may import these names
+TurnStartEvent = TurnBeginEvent
+TurnEndEvent = TurnCommittedEvent
+AgentStartEvent = BeforeRunEvent
+AgentEndEvent = RunEndEvent
+BeforeAgentStartEvent = BeforeRunEvent
+BeforeSendToLlmEvent = BeforeSendEvent
+DecideTurnActionEvent = DecideEvent
+
 __all__ = [
     # bus
-    "BusPriority",
-    "Envelope",
-    "Event",
-    "EventBus",
-    "Handler",
-    # events
-    "BeforeRunEvent",
-    "BeforeSendEvent",
-    "BudgetExhausted",
-    "ChildSessionEndEvent",
-    "ChildSessionStartEvent",
-    "ContextEvent",
-    "DecideEvent",
-    "DiagnosticEvent",
-    "Inject",
-    "LoopAction",
-    "MaxTurnsExhausted",
-    "ModelEndTurn",
-    "NoPendingInput",
-    "ProviderTruncated",
-    "RunEndEvent",
-    "SessionReadyEvent",
-    "SessionShutdownEvent",
-    "SignalAborted",
-    "Step",
-    "Stop",
-    "StreamDeltaEvent",
-    "TerminationCause",
-    "ToolCallEvent",
-    "ToolErrorEvent",
-    "ToolResultEvent",
-    "ToolTerminated",
-    "TurnBeginEvent",
-    "TurnCommittedEvent",
-    "TurnObservation",
+    "BusPriority", "Envelope", "Event", "EventBus", "EventBusObserver", "Handler",
+    # events (kernel)
+    "BeforeRunEvent", "BeforeSendEvent", "BudgetExhausted",
+    "ChildSessionEndEvent", "ChildSessionStartEvent",
+    "ContextEvent", "DecideEvent", "DiagnosticEvent",
+    "Inject", "LoopAction", "MaxTurnsExhausted", "ModelEndTurn",
+    "NoPendingInput", "ProviderTruncated",
+    "RunEndEvent", "SessionReadyEvent", "SessionShutdownEvent",
+    "SignalAborted", "Step", "Stop", "StreamDeltaEvent",
+    "TerminationCause", "ToolCallEvent", "ToolErrorEvent",
+    "ToolResultEvent", "ToolTerminated",
+    "TurnBeginEvent", "TurnCommittedEvent", "TurnObservation",
+    # events (domain)
+    "AfterCompactEvent", "ApiRegisterEvent", "ApiSendUserMessageEvent",
+    "BackgroundActivityEvent", "BeforeCompactEvent",
+    "BeforeInstallAtomEvent", "BeforeUnloadAtomEvent",
+    "CommandDispatchedEvent", "CostBudgetExceededEvent",
+    "EntryAppendedEvent", "ExtensionInstallEvent",
+    "ExtensionReloadEvent", "ExtensionUnloadEvent",
+    "InputEvent", "LlmRequestEndEvent", "LlmRequestStartEvent",
+    "MessageAppendedEvent", "MessagePersistedEvent",
+    "PlanSubmittedEvent", "ResolveSubagentEvent",
+    "ResourceWriteEvent", "ResourcesDiscoverEvent",
+    "SessionHeaderEmittedEvent",
+    # event aliases
+    "TurnStartEvent", "TurnEndEvent", "AgentStartEvent", "AgentEndEvent",
+    "BeforeAgentStartEvent", "BeforeSendToLlmEvent", "DecideTurnActionEvent",
     # trajectory
-    "Outcome",
-    "Round",
-    "ToolRecord",
-    "Turn",
-    "TurnMeta",
-    "TurnRef",
+    "Outcome", "Round", "ToolRecord", "Turn", "TurnMeta", "TurnRef",
     # trigger
-    "BackgroundCompletion",
-    "ContinueTrigger",
-    "Injection",
-    "MonitorFire",
-    "SubagentResult",
-    "Trigger",
-    "TriggerRenderer",
-    "UserInput",
+    "BackgroundCompletion", "ContinueTrigger", "Injection", "MonitorFire",
+    "SubagentResult", "Trigger", "TriggerRenderer", "UserInput",
     # context
-    "ContextPolicy",
-    "PolicyContext",
-    "build_context",
-    "build_context_sync",
-    "render_trigger",
-    "turn_to_messages",
+    "ContextPolicy", "PolicyContext",
+    "build_context", "build_context_sync", "render_trigger", "turn_to_messages",
     # store
-    "SessionMeta",
-    "TrajectoryStore",
+    "SessionMeta", "TrajectoryStore",
     # tree
-    "EdgeKind",
-    "SessionEdge",
-    "SessionGraphProtocol",
-    "SessionNode",
+    "EdgeKind", "SessionEdge", "SessionGraphProtocol", "SessionNode",
     # codec
-    "CodecRegistry",
-    "DEFAULT_CODEC",
-    "RawTrigger",
-    "TriggerCodec",
-    "deserialize_message",
-    "serialize_message",
+    "CodecRegistry", "DEFAULT_CODEC", "RawTrigger", "TriggerCodec",
+    "deserialize_message", "serialize_message",
     # services
-    "ServiceNotFound",
-    "ServiceRegistry",
-    "ServiceTypeMismatch",
+    "ServiceNotFound", "ServiceRegistry", "ServiceTypeMismatch",
     # session_api
-    "AtomAPI",
-    "SessionContext",
-    "SpawnedSession",
-    "Unsubscribe",
+    "AgentSessionConfig", "AtomAPI", "ExtensionAPI",
+    "LoopConfig", "SessionContext", "SpawnedSession", "Unsubscribe",
     # lifecycle
-    "AbandonEvent",
-    "ForkEvent",
-    "LifecycleHook",
-    "LifecycleHookRegistry",
-    "ReplayEvent",
-    "ResumeEvent",
+    "AbandonEvent", "ForkEvent", "LifecycleHook", "LifecycleHookRegistry",
+    "ReplayEvent", "ResumeEvent",
     # manifest
-    "ChannelEffects",
-    "ExtensionManifest",
-    # presenter
-    "PHASE_GLYPHS",
-    "Phase",
-    # provider
-    "ProviderConfig",
-    "ProviderManifest",
-    "ProviderResolver",
-    # retry
-    "RetryPolicy",
-    # telemetry
-    "SessionTelemetry",
+    "ChannelEffects", "ExtensionManifest",
     # messages
-    "AgentMessage",
-    "AssistantContent",
-    "AssistantMessage",
-    "ImageContent",
-    "TextContent",
-    "ThinkingBlock",
-    "ToolCallBlock",
-    "ToolResultBlock",
-    "ToolResultMessage",
-    "Usage",
-    "UserMessage",
-    "text_message",
-    "tool_result",
+    "AgentMessage", "AssistantContent", "AssistantMessage",
+    "ImageContent", "TextContent", "ThinkingBlock",
+    "ToolCallBlock", "ToolResultBlock", "ToolResultMessage",
+    "Usage", "UserMessage", "text_message", "tool_result",
     # stream
-    "AssistantStreamEvent",
-    "MessageEnd",
-    "Model",
-    "StreamFn",
-    "TextDelta",
-    "ThinkingDelta",
-    "ToolCallArgsDelta",
-    "ToolCallArgsParseError",
-    "ToolCallEnd",
-    "ToolCallStart",
+    "AssistantStreamEvent", "MessageEnd", "Model", "StreamFn",
+    "TextDelta", "ThinkingDelta", "ToolCallArgsDelta",
+    "ToolCallArgsParseError", "ToolCallEnd", "ToolCallStart",
     # termination
-    "Aborted",
-    "EndTurn",
-    "MaxTokens",
-    "PauseTurn",
-    "ProviderError",
-    "TerminationHint",
-    "ToolUseExpected",
-    "VendorSpecific",
+    "Aborted", "EndTurn", "MaxTokens", "PauseTurn",
+    "ProviderError", "TerminationHint", "ToolUseExpected", "VendorSpecific",
     # tool
-    "FILE_OP_EDIT",
-    "FILE_OP_METADATA_KEY",
-    "FILE_OP_READ",
-    "FILE_OP_WRITE",
+    "FILE_OP_EDIT", "FILE_OP_METADATA_KEY", "FILE_OP_READ", "FILE_OP_WRITE",
     "FunctionTool",
-    "TOOL_EXECUTION_DOMAIN_EVENT_LOOP",
-    "TOOL_EXECUTION_DOMAIN_METADATA_KEY",
-    "TOOL_EXECUTION_DOMAIN_PROCESS",
-    "TOOL_EXECUTION_DOMAIN_SANDBOX",
-    "TOOL_EXECUTION_DOMAIN_THREAD",
-    "TOOL_RESULT_FORMAT_METADATA_KEY",
-    "Tool",
-    "ToolContinue",
-    "ToolExecutionDomain",
-    "ToolOutcome",
-    "ToolResult",
-    "ToolTerminate",
-    "ToolExecutionDomainUnavailable",
-    "ToolProcessFailed",
-    "ToolProcessTerminated",
-    "execute_tool_call",
-    "tool_execution_domain",
+    "TOOL_EXECUTION_DOMAIN_EVENT_LOOP", "TOOL_EXECUTION_DOMAIN_METADATA_KEY",
+    "TOOL_EXECUTION_DOMAIN_PROCESS", "TOOL_EXECUTION_DOMAIN_SANDBOX",
+    "TOOL_EXECUTION_DOMAIN_THREAD", "TOOL_RESULT_FORMAT_METADATA_KEY",
+    "Tool", "ToolContinue", "ToolExecutionDomain", "ToolOutcome",
+    "ToolResult", "ToolTerminate",
+    "ToolExecutionDomainUnavailable", "ToolProcessFailed",
+    "ToolProcessTerminated", "execute_tool_call", "tool_execution_domain",
     # operations
-    "BashOperations",
-    "ExecResult",
+    "BashOperations", "ExecResult",
     # resource
-    "BatchHandle",
-    "PathClass",
-    "ResourceWriter",
-    "WriteResult",
-    "WriterAuthor",
+    "BatchHandle", "PathClass", "ResourceWriter", "WriteResult", "WriterAuthor",
     # catalog
-    "ActiveSetFingerprint",
-    "atom_decisions_path",
+    "ActiveSetFingerprint", "atom_decisions_path",
     # skill
-    "SkillDiagnostic",
-    "SkillRecord",
+    "SkillDiagnostic", "SkillRecord",
     # prompt_template
-    "PromptRegistry",
-    "PromptTemplateRecord",
+    "PromptRegistry", "PromptTemplateRecord",
+    # command
+    "CommandDispatcher", "CommandSpec", "DispatchResult",
+    # compaction
+    "CompactionDetails", "CompactionPrompts", "CompactionResult",
+    "CompactionSettings", "ContextUsageSnapshot",
+    "ENTRY_MATERIALIZERS", "ENTRY_TYPE_BRANCH_SUMMARY",
+    "ENTRY_TYPE_COMPACTION", "ENTRY_TYPE_MESSAGE",
+    "PROMPT_BRANCH_SUMMARY", "PROMPT_BRANCH_SUMMARY_PREAMBLE",
+    "PROMPT_SUMMARIZATION", "PROMPT_SUMMARIZATION_SYSTEM",
+    "PROMPT_UPDATE_SUMMARIZATION", "SessionEntry",
+    # presenter / provider / retry / telemetry
+    "PHASE_GLYPHS", "Phase",
+    "ProviderConfig", "ProviderManifest", "ProviderResolver",
+    "RetryPolicy", "SessionTelemetry",
+    # errors
+    "ExtensionStaleError", "ExtensionLoadError",
     # roles
-    "APPROVAL_MANAGER_SERVICE",
-    "ARTIFACT_STORE_SERVICE",
-    "COMMAND_PARSER",
-    "COMPACTION_PROMPTS",
-    "COST_QUERY_SERVICE",
-    "GATEWAY_SCHEDULER_SERVICE",
-    "LOOP_BUDGET_SERVICE",
-    "MODEL_RESOLVER_SERVICE",
-    "PARENT_PROVIDER_CONFIG_KEY",
-    "PROMPT_REGISTRY",
-    "PROMPT_TEMPLATES_SERVICE",
-    "PROVIDER_INHERITOR",
-    "RETRY_POLICY_SERVICE",
-    "SESSION_STORE_SERVICE",
-    "SLASH_COMMAND_DISPATCHER_SERVICE",
-    "SUB_AGENT_RUNTIME",
-    "SYSTEM_PROMPT_PROVIDER",
-    "WIRE_CHILD_FORWARDER_SERVICE",
+    "APPROVAL_MANAGER_SERVICE", "ARTIFACT_STORE_SERVICE",
+    "COMMAND_PARSER", "COMPACTION_PROMPTS", "COST_QUERY_SERVICE",
+    "GATEWAY_SCHEDULER_SERVICE", "LOOP_BUDGET_SERVICE",
+    "MODEL_RESOLVER_SERVICE", "PARENT_PROVIDER_CONFIG_KEY",
+    "PROMPT_REGISTRY", "PROMPT_TEMPLATES_SERVICE", "PROVIDER_INHERITOR",
+    "RETRY_POLICY_SERVICE", "SESSION_STORE_SERVICE",
+    "SLASH_COMMAND_DISPATCHER_SERVICE", "SUB_AGENT_RUNTIME",
+    "SYSTEM_PROMPT_PROVIDER", "WIRE_CHILD_FORWARDER_SERVICE",
     "WIRE_OUTBOUND_SERVICE",
 ]

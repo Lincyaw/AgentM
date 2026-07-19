@@ -675,7 +675,7 @@ def _build_session_config(
     provider_registry: ProviderRegistry = DEFAULT_PROVIDER_REGISTRY,
     loop_config: LoopConfig | None = None,
 ) -> tuple[Any, SessionState]:
-    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.abi.session_api import AgentSessionConfig
 
     store = session_store or _make_default_session_store(config.cwd)
     session_state = _resolve_session_state(

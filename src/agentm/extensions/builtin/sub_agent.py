@@ -392,8 +392,6 @@ async def _shutdown_child_with_error(
         ChildSessionEndEvent(
             child_session_id=child.session_id,
             parent_session_id=parent_session_id,
-            final_message_count=len(child.session_manager.get_messages()),
-            error=error,
         ),
     )
     child.bus.clear()
@@ -476,7 +474,7 @@ class _ChildTaskManager:
         # completions land. The parent session may park while the child runs;
         # this push is the wakeup and the delivery path.
         try:
-            self._v2_push_trigger_stub(
+            self._session._v2_push_trigger_stub(
                 source="subagent",
                 payload=_format_subagent_result(state),
                 dedup_key=f"subagent-finding-{state.task_id}",
@@ -555,7 +553,7 @@ class _ChildTaskManager:
                 final_messages=(
                     final_messages
                     if final_messages is not None
-                    else state.session.session_manager.get_messages()
+                    else state.session.get_messages()
                 ),
                 error="aborted",
             )
@@ -565,7 +563,7 @@ class _ChildTaskManager:
             await self._finalize_state(
                 state,
                 status=_ERROR,
-                final_messages=state.session.session_manager.get_messages(),
+                final_messages=state.session.get_messages(),
                 error=str(exc) or exc.__class__.__name__,
             )
             return state.final_messages
@@ -638,7 +636,8 @@ class _ChildTaskManager:
         # surfaces before the slot-reservation bookkeeping below.
         _get_active_provider(self._session)
         task_id = uuid.uuid4().hex
-        parent_loop_config = self._session.session.get_loop_config()
+        from agentm.core.abi import LOOP_BUDGET_SERVICE, LoopConfig
+        parent_loop_config = self._session.services.get(LOOP_BUDGET_SERVICE) or LoopConfig()
         child_loop_config, applied_budget = _resolve_child_loop_config(
             parent=parent_loop_config,
             persona_budget=persona_budget,
@@ -711,7 +710,7 @@ class _ChildTaskManager:
             experiment=None,
         )
         try:
-            child = await self._session.spawn(child_config)
+            child = await self._session.spawn_child_session(child_config)
         except Exception as exc:  # noqa: BLE001
             logger.warning("sub_agent spawn_child_session failed: {}", exc)
             await self._registry.release_slot()
@@ -966,7 +965,7 @@ class _SubAgentRuntime:
         available_inherited = dict(self._config.available_inherited_extensions)
         self._validate_inheritance_config(inherit_extensions, available_inherited)
         manager = _ChildTaskManager(
-            api=self._session,
+            session=self._session,
             inherit_extensions=inherit_extensions,
             available_inherited=available_inherited,
             max_workers=self._config.max_workers,

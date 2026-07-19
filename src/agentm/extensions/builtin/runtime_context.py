@@ -65,10 +65,10 @@ class _RuntimeContextRuntime:
     def install(self) -> None:
         self._session.bus.on(BeforeRunEvent.CHANNEL, self.before_agent_start)
 
-    def before_agent_start(self, event: BeforeRunEvent) -> None:
+    def before_agent_start(self, event: BeforeRunEvent) -> dict[str, str] | None:
         current = str(event.system or "")
         updated = f"{self._block}\n\n{current}" if current else self._block
-        event.system = updated
+        return {"system": updated}
 
 
 def install(session: Any, config: RuntimeContextConfig) -> None:

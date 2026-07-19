@@ -54,6 +54,6 @@ def install(session: Any, config: InheritProviderConfig) -> None:
                 "AgentSessionConfig(provider=None) and let the factory wire it."
             ),
         )
-    session._v2_stub_register_provider(provider.name, provider)
+    session.register_provider(provider.name, provider)
 
 __all__: Final = ["MANIFEST", "install"]

@@ -170,10 +170,26 @@ class EventBus:
         self._handlers.clear()
 
 
+class EventBusObserver:
+    """Observer protocol for bus-level instrumentation.
+
+    The observability atom subclasses this to record dispatch spans
+    and handler invocations without coupling to bus internals.
+    """
+
+    def on_emit_start(self, channel: str, event: Any) -> None: ...
+    def on_handler_start(self, channel: str, handler: Handler, event: Any) -> None: ...
+    def on_handler_done(
+        self, channel: str, handler: Handler, event: Any, result: Any
+    ) -> None: ...
+    def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None: ...
+
+
 __all__ = [
     "BusPriority",
     "Envelope",
     "Event",
     "EventBus",
+    "EventBusObserver",
     "Handler",
 ]

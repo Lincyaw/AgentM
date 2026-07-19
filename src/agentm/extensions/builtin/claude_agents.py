@@ -247,14 +247,14 @@ class _ClaudeAgentsRuntime:
         self._agents = _load_agents(dirs)
         self._cached_block = _available_agents_block(self._agents)
 
-    def inject(self, event: BeforeRunEvent) -> None:
+    def inject(self, event: BeforeRunEvent) -> dict[str, str] | None:
         if not self._cached_block:
-            return
+            return None
         existing = event.system or ""
         merged = (
             f"{existing}\n\n{self._cached_block}" if existing else self._cached_block
         )
-        event.system = merged
+        return {"system": merged}
 
     def resolve(self, payload: Any) -> dict[str, Any] | None:
         if isinstance(payload, ResolveSubagentEvent):

@@ -168,7 +168,7 @@ class _PersonaRuntime:
 
     async def before_agent_start(
         self, event: BeforeRunEvent
-    ) -> None:
+    ) -> dict[str, str] | None:
         if self._defaults and not self._seeded:
             self._seeded = True
             await _seed_defaults(
@@ -188,10 +188,10 @@ class _PersonaRuntime:
             model_name,
         )
         if not block:
-            return
+            return None
         current = str(event.system or "")
         updated = f"{block}\n\n{current}" if current else block
-        event.system = updated
+        return {"system": updated}
 
 
 def install(session: Any, config: PersonaConfig) -> None:

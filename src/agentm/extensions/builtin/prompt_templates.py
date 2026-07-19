@@ -277,13 +277,14 @@ class _PromptTemplatesRuntime:
             include_defaults=self._include_defaults,
         )
 
-    def on_input(self, event: InputEvent) -> None:
+    def on_input(self, event: InputEvent) -> dict[str, str] | None:
         text = event.text
         if not isinstance(text, str) or not text.startswith("/"):
-            return
+            return None
         expanded = self._registry.expand_prompt_template(text, self._cache)
         if expanded is not None:
-            event.text = expanded
+            return {"text": expanded}
+        return None
 
 
 async def install(session: Any, config: PromptTemplatesConfig) -> None:

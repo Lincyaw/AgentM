@@ -43,7 +43,6 @@ from agentm.core.abi import (
     CompactionSettings,
     ContextUsageSnapshot,
     DiagnosticEvent,
-    ENTRY_TYPE_COMPACTION,
     FILE_OP_EDIT,
     FILE_OP_METADATA_KEY,
     FILE_OP_READ,
@@ -55,18 +54,18 @@ from agentm.core.abi import (
     PROMPT_UPDATE_SUMMARIZATION,
     ProviderConfig,
     ProviderError,
-    SessionEntry,
     TextContent,
     Tool,
     ToolCallBlock,
     ToolResultMessage,
     Usage,
     UserMessage,
+    turn_to_messages,
 )
+from agentm.core.abi import Turn as TrajectoryTurn
 from agentm.core.lib import (
     Turn,
     count_text_tokens,
-    enumerate_turns,
     truncate_text_tokens,
 )
 from agentm.extensions import ExtensionManifest
@@ -416,48 +415,45 @@ def should_compact(
     return tokens > threshold
 
 
-def _find_previous_compaction(branch: list[SessionEntry]) -> SessionEntry | None:
-    for entry in reversed(branch):
-        if entry.type == ENTRY_TYPE_COMPACTION:
-            return entry
-    return None
+def _trajectory_turns_to_lib(trajectory_turns: Sequence[TrajectoryTurn]) -> list[Turn]:
+    """Convert trajectory Turns to the lib Turn format used by the engine."""
+    return [
+        Turn(index=t.index, messages=turn_to_messages(t))
+        for t in trajectory_turns
+    ]
+
+
+@dataclass(slots=True)
+class CompactionState:
+    """Atom-local storage for incremental compaction."""
+    previous_summary: str | None = None
+    covered_through_turn: int = 0
+    read_files: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
 
 
 def prepare_compaction(
-    branch: list[SessionEntry],
+    trajectory_turns: Sequence[TrajectoryTurn],
     settings: CompactionSettings,
+    compaction_state: CompactionState | None = None,
     current_messages: list[AgentMessage] | None = None,
     tools: ToolRegistry | None = None,
     model_name: str | None = None,
 ) -> CompactionPreparation | None:
-    """Collect the turns to fold into the running summary.
+    """Collect the turns to fold into the running summary."""
 
-    Full-compress: every turn after the previous compaction's
-    ``covered_through_turn`` is summarized; nothing is kept verbatim. Returns
-    ``None`` when there is no new material to compress.
-    """
-
-    all_turns = enumerate_turns(branch)
+    all_turns = _trajectory_turns_to_lib(trajectory_turns)
     if not all_turns:
         return None
 
-    previous = _find_previous_compaction(branch)
     previous_summary: str | None = None
     covered_before = 0
     file_ops = create_file_ops()
-    if previous is not None and isinstance(previous.payload, dict):
-        raw_summary = previous.payload.get("summary")
-        if isinstance(raw_summary, str) and raw_summary:
-            previous_summary = raw_summary
-        raw_covered = previous.payload.get("covered_through_turn")
-        if isinstance(raw_covered, int):
-            covered_before = raw_covered
-        read_files = previous.payload.get("read_files")
-        modified_files = previous.payload.get("modified_files")
-        if isinstance(read_files, list):
-            file_ops.read.update(p for p in read_files if isinstance(p, str))
-        if isinstance(modified_files, list):
-            file_ops.edited.update(p for p in modified_files if isinstance(p, str))
+    if compaction_state is not None:
+        previous_summary = compaction_state.previous_summary
+        covered_before = compaction_state.covered_through_turn
+        file_ops.read.update(compaction_state.read_files)
+        file_ops.edited.update(compaction_state.modified_files)
 
     new_turns = [turn for turn in all_turns if turn.index > covered_before]
     if len(new_turns) < 2:
@@ -576,12 +572,13 @@ class _LlmCompactionRuntime:
             tool_result_max_tokens=config.tool_result_max_tokens,
         )
         self._custom_instructions = config.custom_instructions
+        self._compaction_state = CompactionState()
 
     def install(self) -> None:
         self._session.services.register(COMPACTION_CONTROL_SERVICE, _CompactionControl(self))
         self._session.bus.on(BeforeSendEvent.CHANNEL, self.before_send_to_llm)
-        self._session_stub_register_command(
-            "compact",
+        self._session.services.register(
+            "command:compact",
             CommandSpec(
                 description="Compact this session's history now to free up context.",
                 handler=self.compact_command,
@@ -591,7 +588,7 @@ class _LlmCompactionRuntime:
 
     async def _request_compaction(self, reason: str = "requested") -> bool:
         """Programmatic compaction entry point for peer atoms."""
-        session_messages = self._session.session.get_messages()
+        session_messages = self._session.get_messages()
         rebuilt = await self._run_compaction(reason, session_messages)
         return rebuilt is not None
 
@@ -613,25 +610,23 @@ class _LlmCompactionRuntime:
         is nothing to compact / no provider. Shared by the automatic overflow
         path and the on-demand ``/compact`` command.
         """
-        provider = None  # v2: provider access pending
         model = self._session.model
-        if provider is None or model is None:
+        if model is None:
+            return None
+        stream_fn = getattr(self._session, '_stream_fn', None)
+        if stream_fn is None:
             return None
 
-        before_compact = BeforeCompactEvent(
-            messages=session_messages,
-            reason=reason,
-        )
         await self._session.bus.emit(
             BeforeCompactEvent.CHANNEL,
-            before_compact,
+            BeforeCompactEvent(),
         )
-        session_messages = before_compact.messages
 
-        branch = self._session.session.get_branch()
+        trajectory_turns = self._session.get_turns()
         preparation = prepare_compaction(
-            branch,
+            trajectory_turns,
             self._settings,
+            compaction_state=self._compaction_state,
             current_messages=session_messages,
             tools=list(self._session.tools),
             model_name=model.id,
@@ -643,7 +638,7 @@ class _LlmCompactionRuntime:
 
         result = await compact(
             preparation,
-            _ProviderSummarizer(provider, model),
+            _ProviderSummarizer(stream_fn, model),
             summarization_body,
             self._custom_instructions,
             prompts=prompts,
@@ -675,20 +670,17 @@ class _LlmCompactionRuntime:
             "read_files": result.details.read_files,
             "modified_files": result.details.modified_files,
         }
-        entry_id = self._session.session.append_entry("compaction", details)
-        details["entry_id"] = entry_id
+        self._compaction_state = CompactionState(
+            previous_summary=final_summary,
+            covered_through_turn=result.covered_through_turn,
+            read_files=result.details.read_files,
+            modified_files=result.details.modified_files,
+        )
 
-        rebuilt_messages = self._session.session.get_messages()
+        rebuilt_messages = self._session.get_messages()
         await self._session.bus.emit(
             AfterCompactEvent.CHANNEL,
-            AfterCompactEvent(
-                summary=final_summary,
-                kept_message_count=len(rebuilt_messages),
-                discarded_message_count=max(
-                    0, len(session_messages) - len(rebuilt_messages)
-                ),
-                details=details,
-            ),
+            AfterCompactEvent(),
         )
         return rebuilt_messages
 
@@ -696,7 +688,7 @@ class _LlmCompactionRuntime:
         model = self._session.model
         if model is None:
             return
-        session_messages = self._session.session.get_messages()
+        session_messages = self._session.get_messages()
         usage_snapshot = capture_context_usage(
             session_messages,
             model_name=model.id,
@@ -718,7 +710,7 @@ class _LlmCompactionRuntime:
         # On-demand compaction. Skips the overflow gate (the user asked for it)
         # but still no-ops when there is nothing summarisable. Feedback reaches
         # the user via the AfterCompactEvent the shared path emits.
-        session_messages = self._session.session.get_messages()
+        session_messages = self._session.get_messages()
         rebuilt = await self._run_compaction("manual", session_messages)
         if rebuilt is None:
             await self._session.bus.emit(
@@ -804,8 +796,8 @@ async def _resolve_prompts(session: Any) -> tuple[CompactionPrompts, str]:
 
 
 class _ProviderSummarizer:
-    def __init__(self, provider: ProviderConfig, model: Model) -> None:
-        self._provider = provider
+    def __init__(self, stream_fn: Any, model: Model) -> None:
+        self._stream_fn = stream_fn
         self._model = model
         self.model_name = model.id
 
@@ -827,7 +819,7 @@ class _ProviderSummarizer:
             )
         ]
         final_message: AssistantMessage | None = None
-        async for stream_event in self._provider.stream_fn(
+        async for stream_event in self._stream_fn(
             messages=messages,
             model=summary_model,
             tools=[],

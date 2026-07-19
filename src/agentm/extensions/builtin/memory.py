@@ -143,13 +143,13 @@ def install(session: Any, config: MemoryConfig) -> None:
 
         async def _before_agent_start(
             event: BeforeRunEvent,
-        ) -> None:
+        ) -> dict[str, str] | None:
             block = await _build_index_block(writer, base_path, max_index_lines)
             if not block:
-                return
+                return None
             current = str(event.system or "")
             updated = f"{block}\n\n{current}" if current else block
-            event.system = updated
+            return {"system": updated}
 
         session.bus.on(BeforeRunEvent.CHANNEL, _before_agent_start)
 

@@ -102,30 +102,33 @@ class _TurnReminderRuntime:
         self._state.reset()
 
     def on_turn_start(self, event: TurnBeginEvent) -> None:
-        self._state.turn_index = event.turn_index
+        self._state.turn_index = event.index
 
     def on_tool_result(self, _: ToolResultEvent) -> None:
         self._state.tool_calls_used += 1
 
-    def before_send(self, event: BeforeSendEvent) -> None:
+    def before_send(self, event: BeforeSendEvent) -> dict[str, list[object]] | None:
         runway = self._runway()
         if runway is None:
-            return
+            return None
         turns_left, tools_left = runway
         if not _warning_triggered(turns_left, tools_left, self._warn_within):
-            return
+            return None
 
+        msgs = list(event.messages)
         if _last_step(turns_left, tools_left, threshold=2) and self._finalize_tool:
-            event.messages.append(_finalize_now_message(self._finalize_tool))
-            return
+            msgs.append(_finalize_now_message(self._finalize_tool))
+            return {"messages": msgs}
 
         text = _format_warning(turns_left, tools_left, self._finalize_tool)
-        _append_to_last_message(event.messages, text, self._state)
+        _append_to_last_message(msgs, text, self._state)
+        return {"messages": msgs}
 
     def _runway(self) -> tuple[int | None, int | None] | None:
-        cfg = self._session.session.get_loop_config()
-        max_turns = cfg.max_turns
-        max_tool_calls = cfg.max_tool_calls
+        from agentm.core.abi import LOOP_BUDGET_SERVICE
+        svc = self._session.services.get(LOOP_BUDGET_SERVICE)
+        max_turns = getattr(svc, "max_turns", None) if svc else None
+        max_tool_calls = getattr(svc, "max_tool_calls", None) if svc else None
         # No cap on either axis => nothing to warn about.
         if max_turns is None and max_tool_calls is None:
             return None

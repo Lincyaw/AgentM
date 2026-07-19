@@ -1,10 +1,11 @@
-"""Session driver — the single loop that converts triggers into committed turns.
+"""Session driver — persistent loop that converts triggers into committed turns.
 
-Fixes over initial v2 (per friction review):
-- B1: build_context is async, ContextPolicy.transform is async
-- B2: Inject continues the round loop inline (no return → wait hang)
-- Durable rounds: each completed round persisted to store
-- Multi-round context rebuild: policies re-run each round
+Design:
+- Outer loop: one trigger → one Turn.  Exits on shutdown / queue-closed / max_turns.
+- Inner loop (_react_loop): ReAct rounds within one turn.  Exits on Stop action.
+- interrupt: aborts current turn only (SignalAborted), driver continues.
+- shutdown: aborts current turn AND exits driver.
+- ToolTerminate: sets shutdown, turn commits, driver exits.
 """
 
 from __future__ import annotations
@@ -84,6 +85,12 @@ from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
 ThinkingLevel = Literal["off", "low", "medium", "high"]
 
 
+# --- Helpers ----------------------------------------------------------------
+
+def _is_aborted(interrupt: asyncio.Event, shutdown: asyncio.Event) -> bool:
+    return interrupt.is_set() or shutdown.is_set()
+
+
 def _last_of(returns: list[Any], typ: type) -> Any | None:
     chosen = None
     for value in returns:
@@ -158,7 +165,7 @@ def _default_action(
 
 
 def _resolve_action(default: LoopAction, returns: list[Any]) -> LoopAction:
-    if isinstance(default, Stop) and getattr(default.cause, "final", False):
+    if isinstance(default, Stop) and not getattr(default.cause, "overridable", True):
         return default
     overrides = [r for r in returns if isinstance(r, LoopAction)]
     inject_msgs: list[AgentMessage] = []
@@ -202,9 +209,7 @@ def _execution_to_messages(
     execution: Execution,
     trigger_messages: list[AgentMessage],
 ) -> list[AgentMessage]:
-    """Current execution's trigger + completed rounds → messages."""
     messages: list[AgentMessage] = list(trigger_messages)
-    # Build an index of injected messages by the round they follow
     inject_by_round: dict[int, list[AgentMessage]] = {}
     for round_idx, msgs in execution.injected:
         inject_by_round.setdefault(round_idx, []).extend(msgs)
@@ -224,7 +229,6 @@ def _execution_to_messages(
             messages.append(ToolResultMessage(
                 role="tool_result", content=result_blocks, timestamp=0.0,
             ))
-        # Interleave injected messages at their correct round boundary
         if i in inject_by_round:
             messages.extend(inject_by_round[i])
     return messages
@@ -246,18 +250,29 @@ async def drive(
     system: str | None = None,
     context_policies: list[ContextPolicy] | None = None,
     trigger_renderers: dict[str, TriggerRenderer] | None = None,
-    signal: asyncio.Event | None = None,
+    interrupt: asyncio.Event | None = None,
+    shutdown: asyncio.Event | None = None,
     max_turns: int | None = None,
     thinking: ThinkingLevel = "off",
     lifecycle: LifecycleHookRegistry | None = None,
 ) -> None:
-    """Main session driver loop."""
+    """Persistent driver loop.
 
+    Processes triggers one at a time.  Each trigger becomes one Turn
+    (potentially with multiple ReAct rounds).  Exits when:
+    - shutdown is set
+    - trigger queue is closed (QueueClosed)
+    - max_turns committed turns reached
+    - a session-terminal cause fires (ToolTerminated, BudgetExhausted)
+    """
+
+    _interrupt = interrupt or asyncio.Event()
+    _shutdown = shutdown or asyncio.Event()
     policies = context_policies or []
     turns_run = 0
 
     while True:
-        if signal is not None and signal.is_set():
+        if _shutdown.is_set():
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
@@ -271,12 +286,7 @@ async def drive(
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
-        # Clear signal so a previous turn's interrupt doesn't block this turn.
-        # Note: interrupt() during a turn produces SignalAborted (final=True),
-        # which commits as action="stop" and drive() returns. Multi-trigger
-        # looping only happens when a DecideEvent handler overrides to Step.
-        if signal is not None:
-            signal.clear()
+        _interrupt.clear()
 
         execution = trajectory.begin(trigger)
         await bus.emit(TurnBeginEvent.CHANNEL, TurnBeginEvent(
@@ -295,7 +305,8 @@ async def drive(
                 system=system,
                 policies=policies,
                 trigger_renderers=trigger_renderers,
-                signal=signal,
+                interrupt=_interrupt,
+                shutdown=_shutdown,
                 thinking=thinking,
                 store=store,
                 session_id=session_id,
@@ -306,7 +317,7 @@ async def drive(
                 try:
                     store.append(session_id, turn)
                 except Exception:
-                    logger.exception("store.append failed; turn committed to trajectory but not persisted")
+                    logger.exception("store.append failed; turn committed but not persisted")
 
             try:
                 await bus.emit(TurnCommittedEvent.CHANNEL, TurnCommittedEvent(turn=turn))
@@ -314,7 +325,7 @@ async def drive(
                 logger.debug("TurnCommittedEvent emit interrupted by cancellation")
             turns_run += 1
 
-            if outcome.action == "stop":
+            if getattr(outcome.cause, "session_terminal", False):
                 await bus.emit(RunEndEvent.CHANNEL, RunEndEvent(
                     outcome=turn.outcome, meta=turn.meta,
                 ))
@@ -350,16 +361,13 @@ async def _react_loop(
     system: str | None,
     policies: list[ContextPolicy],
     trigger_renderers: dict[str, TriggerRenderer] | None,
-    signal: asyncio.Event | None,
+    interrupt: asyncio.Event,
+    shutdown: asyncio.Event,
     thinking: ThinkingLevel,
     store: TrajectoryStore | None,
     session_id: str,
 ) -> tuple[Outcome, TurnMeta]:
-    """ReAct loop within one turn.  May produce multiple Rounds.
-
-    Inject continues the loop inline (B2 fix) — injected messages are
-    appended and a new round starts within the same turn.
-    """
+    """ReAct loop within one turn.  Returns when a Stop action fires."""
 
     total_input = 0
     total_output = 0
@@ -368,7 +376,6 @@ async def _react_loop(
     start_ns = time.perf_counter_ns()
     trigger_messages = render_trigger(trigger, trigger_renderers)
 
-    # before_run hook — can veto
     history_messages = await build_context(trajectory.turns, policies, trigger_renderers)
     messages = list(history_messages) + list(trigger_messages)
 
@@ -377,7 +384,7 @@ async def _react_loop(
     ))
     veto = _last_key(before_returns, "veto")
     if veto is not None:
-        return Outcome(action="stop", cause=veto), _meta(0, 0, start_ns, cache_read=0, cache_write=0)
+        return Outcome(cause=veto), _meta(0, 0, start_ns)
     replacement_msgs = _last_key(before_returns, "messages")
     if isinstance(replacement_msgs, list):
         messages = replacement_msgs
@@ -387,16 +394,17 @@ async def _react_loop(
 
     round_index = 0
     while True:
-        if signal is not None and signal.is_set():
-            return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns, cache_read=total_cache_read, cache_write=total_cache_write)
+        if _is_aborted(interrupt, shutdown):
+            return Outcome(cause=SignalAborted()), _meta(
+                total_input, total_output, start_ns,
+                cache_read=total_cache_read, cache_write=total_cache_write,
+            )
 
-        # Multi-round: rebuild context so policies re-run with fresh state
         if round_index > 0:
             history_messages = await build_context(trajectory.turns, policies, trigger_renderers)
             round_messages = _execution_to_messages(execution, trigger_messages)
             messages = list(history_messages) + round_messages
 
-        # context event — handlers can replace the full message list
         ctx_returns = await bus.emit(
             ContextEvent.CHANNEL,
             ContextEvent(messages=tuple(messages), turn_index=execution.index),
@@ -405,7 +413,6 @@ async def _react_loop(
         if ctx_replacement is not None:
             messages = ctx_replacement
 
-        # before_send event — handlers return override dicts
         send_returns = await bus.emit(
             BeforeSendEvent.CHANNEL,
             BeforeSendEvent(
@@ -430,12 +437,11 @@ async def _react_loop(
 
         tool_index = {t.name: t for t in effective_tools}
 
-        # stream LLM
         stream_events: list[AssistantStreamEvent] = []
         async for ev in stream_fn(
             messages=messages, model=effective_model,
             tools=effective_tools, system=effective_system,
-            signal=signal, thinking=thinking,
+            signal=shutdown, thinking=thinking,
         ):
             stream_events.append(ev)
             await bus.emit(StreamDeltaEvent.CHANNEL, StreamDeltaEvent(
@@ -451,7 +457,6 @@ async def _react_loop(
 
         messages.append(response)
 
-        # tool execution
         tool_calls = _extract_tool_calls(response)
         tool_records: list[ToolRecord] = []
         paired_outcomes: list[tuple[str, ToolOutcome]] = []
@@ -459,9 +464,12 @@ async def _react_loop(
         if tool_calls:
             result_blocks: list[ToolResultBlock] = []
             for tc in tool_calls:
-                if signal is not None and signal.is_set():
+                if _is_aborted(interrupt, shutdown):
                     execution.add_round(response, tool_records)
-                    return Outcome(action="stop", cause=SignalAborted()), _meta(total_input, total_output, start_ns, cache_read=total_cache_read, cache_write=total_cache_write)
+                    return Outcome(cause=SignalAborted()), _meta(
+                        total_input, total_output, start_ns,
+                        cache_read=total_cache_read, cache_write=total_cache_write,
+                    )
 
                 tc_returns = await bus.emit(ToolCallEvent.CHANNEL, ToolCallEvent(
                     tool_call_id=tc.id, tool_name=tc.name, args=dict(tc.arguments),
@@ -488,7 +496,7 @@ async def _react_loop(
                         ))
                     else:
                         try:
-                            raw = await execute_tool_call(tool, args, signal=signal)
+                            raw = await execute_tool_call(tool, args, signal=shutdown)
                             outcome = raw if isinstance(raw, ToolOutcome) else ToolContinue(result=raw)
                         except asyncio.CancelledError:
                             raise
@@ -525,7 +533,6 @@ async def _react_loop(
 
         execution.add_round(response, tool_records)
 
-        # Durable round checkpoint
         if store is not None:
             try:
                 from agentm.core.abi.codec import DEFAULT_CODEC
@@ -535,7 +542,6 @@ async def _react_loop(
             except Exception:
                 logger.debug("durable round persist failed; non-fatal")
 
-        # decide
         terminal_from_trigger = _trigger_carries_terminal(trigger)
         default = _default_action(response, paired_outcomes)
         if terminal_from_trigger is not None and isinstance(default, Step):
@@ -553,14 +559,14 @@ async def _react_loop(
 
         if isinstance(action, Stop):
             cause = action.cause if action.cause is not None else ModelEndTurn()
-            return Outcome(action="stop", cause=cause), _meta(total_input, total_output, start_ns, effective_model, cache_read=total_cache_read, cache_write=total_cache_write)
+            return Outcome(cause=cause), _meta(
+                total_input, total_output, start_ns, effective_model,
+                cache_read=total_cache_read, cache_write=total_cache_write,
+            )
 
         if isinstance(action, Inject):
-            # B2 fix: Inject continues inline — store on Execution so
-            # messages survive context rebuild on subsequent rounds.
             execution.add_injected(list(action.messages))
 
-        # Step or Inject → continue to next round
         round_index += 1
 
 
@@ -581,4 +587,4 @@ async def _fire_abandon(
         logger.debug("lifecycle on_abandon failed; non-fatal")
 
 
-__all__ = ["drive"]
+__all__ = ["ThinkingLevel", "drive"]

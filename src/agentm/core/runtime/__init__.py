@@ -7,11 +7,6 @@ effects at module import time (``agentm.core`` stays Jupyter-clean to
 import). Atoms reach this layer only through ``agentm.core.abi.*``
 Protocols and ``api.*`` hooks; direct atom imports of
 ``agentm.core.runtime.*`` are validator-rejected.
-
-NOTE: v2 migration phase 1 — many v1 re-exports removed.
-Infrastructure modules (extension, resource_loader, resource_writer)
-are still present as files but not re-exported here because they
-chain to deleted v1 abi modules. They will be updated in phase 2.
 """
 
 from __future__ import annotations
