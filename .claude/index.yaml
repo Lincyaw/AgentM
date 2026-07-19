@@ -10,9 +10,10 @@ concepts:
       Stable SDK contracts and implementation status for provider streaming,
       cancellation, tool execution, trajectory fork/resume/cache/compaction,
       persistence, resources, environments, extensions, and gateway boundaries.
-      Exactly one selected TrajectoryStorage pairs an authoritative turn store
-      with its rebuildable node projection; optional telemetry is an independent
-      diagnostic plane.
+      Exactly one selected TrajectoryStore owns incomplete steps, committed
+      turns, message indexes, heads, and cache/compaction state behind one
+      transaction boundary; optional telemetry is an independent diagnostic
+      plane.
     design: "../docs/refactor-abstract-inventory.md"
     related_concepts: [observability]
 

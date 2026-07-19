@@ -4,7 +4,7 @@
 
 | Concern | Decision |
 | --- | --- |
-| Source of truth | Exactly one selected `TrajectoryStorage` backend exposes an authoritative turn port plus its rebuildable node projection; users do not configure those ports independently. |
+| Source of truth | Exactly one selected `TrajectoryStore` backend owns incomplete checkpoints, committed turns, message indexes, heads, and cache/compaction state behind one transaction boundary. |
 | Diagnostic plane | `SessionTelemetry` emits logs and spans independently of trajectory persistence. |
 | Recovery | Resume, fork, cache, and compaction never read OTLP or ClickHouse observability tables. |
 | Correlation | Both planes carry stable session, root, parent, and turn ids where applicable. |
@@ -15,9 +15,7 @@
 
 | Port | Responsibility | Implementations |
 | --- | --- | --- |
-| `TrajectoryStorage` | One host-selected backend pair; prevents authoritative turns and node projection from drifting to unrelated locations | JSONL pair, PostgreSQL pair |
-| `TrajectoryStore` | Durable incomplete checkpoints plus atomic committed session/turn persistence; resume loads committed turns only | Memory, JSONL, PostgreSQL |
-| `TrajectoryNodeStore` | Rebuildable committed-turn message/head/cache/content projection in the selected backend | Memory, JSONL, PostgreSQL |
+| `TrajectoryStore` | One host-selected backend; durable incomplete checkpoints plus atomic committed turn/message/head persistence; resume loads committed turns only | Memory, JSONL, PostgreSQL |
 | `TrajectoryQueryStore` | Read sessions, committed turns, and diagnostic incomplete checkpoints from the selected trajectory backend | `TrajectoryStoreQueryAdapter` |
 | `SessionTelemetry` | Atom-facing diagnostic emission | OTel SDK implementation installed by the observability atom |
 | `ObservabilityQueryStore` | Read diagnostic events and spans | Local OTLP JSONL, collector-managed ClickHouse |
@@ -44,4 +42,4 @@ external data product, not an SDK fallback or a second persistence contract.
 | `auto` | Use OTLP when the collector is reachable; otherwise use local diagnostic JSONL. |
 
 The `auto` decision changes only the diagnostic sink. It never changes the
-selected trajectory backend.
+selected trajectory store.
