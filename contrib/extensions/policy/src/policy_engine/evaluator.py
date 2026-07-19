@@ -207,7 +207,12 @@ class PolicyEvaluator:
             if rule.escalate_context_expr is not None:
                 try:
                     ctx_value = eval(rule.escalate_context_expr, namespace)  # noqa: S307
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        "rule '{}' context expression error: {}",
+                        rule.rule_id,
+                        exc,
+                    )
                     ctx_value = None
 
             diagnostic = build_diagnostic(

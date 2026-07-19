@@ -44,7 +44,7 @@ packaged-minimal = [
 ]
 harbor = [
     "agentm-harbor",
-    "arl-env",
+    "arl-env>=0.19.8",
     "dockerfile-parse",
 ]
 
@@ -67,7 +67,6 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 agentm-harbor = { workspace = true }
-arl-env = { path = "/home/ddq/AoyangSpace/agent-env/sdk/python/arl" }
 
 [tool.uv.workspace]
 members = [

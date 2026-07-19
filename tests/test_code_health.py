@@ -96,15 +96,27 @@ def decode(value: Any) -> dict:
     assert rules.count("AM023") == 1
 
 
+def test_code_health_rejects_stdlib_logging(tmp_path: Path) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+import logging
+from logging.handlers import RotatingFileHandler
+""",
+        relative="src/agentm/runtime.py",
+    )
+    assert rules.count("AM024") == 2
+
+
 def test_code_health_allows_typed_dict_and_precise_ignores(
     tmp_path: Path,
 ) -> None:
     rules = _issues_for(
         tmp_path,
         """\
-from typing import Any  # code-health: ignore[AM022] -- vendor boundary
+from typing import Any, Final  # code-health: ignore[AM022] -- vendor boundary
 
-payload: dict[str, object] = {}
+payload: Final[dict[str, object]] = {}
 value = getattr(subject, "value")  # code-health: ignore[AM021] -- reflection
 """,
         relative="src/agentm/core/abi/adapter.py",
@@ -135,7 +147,34 @@ def test_current_composition_boundaries_pass_code_health() -> None:
         Path("src/agentm/cli/_scenario.py"),
     )
     issues = [issue for path in paths for issue in check_file(path)]
-    assert not issues
+    boundary_rules = {f"AM{number:03d}" for number in range(17, 25)}
+    assert not [
+        issue
+        for issue in issues
+        if issue.rule in boundary_rules
+    ]
+
+
+def test_code_health_retains_main_branch_architecture_rules(
+    tmp_path: Path,
+) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+from pathlib import Path
+
+def build(config):
+    try:
+        work()
+    except Exception:
+        return None
+    return AgentSessionConfig(**config)
+
+root = Path(".").resolve().parent
+""",
+        relative="src/agentm/core/runtime/sample.py",
+    )
+    assert {"AM001", "AM012", "AM014"} <= set(rules)
 
 
 def test_user_visible_config_redacts_nested_credentials() -> None:

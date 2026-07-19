@@ -1496,6 +1496,10 @@ async def drive(
                 try:
                     trajectory.abandon()
                 except BaseException as cleanup_exc:
+                    logger.debug(
+                        "trajectory abandon failed during cancellation: {}",
+                        cleanup_exc,
+                    )
                     cleanup_errors = (*cleanup_errors, cleanup_exc)
                 if cleanup_errors:
                     cancel_error = BaseExceptionGroup(
@@ -1520,6 +1524,10 @@ async def drive(
                 try:
                     trajectory.abandon()
                 except BaseException as cleanup_exc:
+                    logger.debug(
+                        "trajectory abandon failed during rollback: {}",
+                        cleanup_exc,
+                    )
                     cleanup_errors = (*cleanup_errors, cleanup_exc)
                 if cleanup_errors:
                     execution_error = BaseExceptionGroup(

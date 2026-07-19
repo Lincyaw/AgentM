@@ -89,7 +89,7 @@ from agentm.extensions.observability.paths import (  # noqa: E402
     file_export_requested,
     resolve_observability_dir,
 )
-from agentm.extensions.observability.otlp import (  # noqa: E402
+from agentm.observability.otlp import (  # noqa: E402
     iter_log_records,
     iter_spans,
     otlp_unwrap,

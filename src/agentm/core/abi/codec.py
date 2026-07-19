@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 import math
 from types import MappingProxyType
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Final, Protocol, cast, runtime_checkable
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -699,7 +699,7 @@ class _InjectionCodec:
         return Injection(messages=messages)
 
 
-_BUILTIN_CODECS: dict[str, TriggerCodec] = {
+_BUILTIN_CODECS: Final[dict[str, TriggerCodec]] = {
     "user": _UserInputCodec(),
     "background": _DataclassTriggerCodec(BackgroundCompletion, "background"),
     "monitor": _DataclassTriggerCodec(MonitorFire, "monitor"),
@@ -712,7 +712,7 @@ _BUILTIN_CODECS: dict[str, TriggerCodec] = {
 # --- CodecRegistry ----------------------------------------------------------
 
 
-_BUILTIN_CAUSES: dict[str, type[TerminationCause]] = {
+_BUILTIN_CAUSES: Final[dict[str, type[TerminationCause]]] = {
     cls.__qualname__: cls
     for cls in (
         ModelEndTurn,

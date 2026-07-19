@@ -7,6 +7,11 @@ from collections.abc import Sequence
 
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.lib.trajectory_store import (
+    turn_prefix_cut,
+    validate_turn_append,
+    validate_turn_sequence,
+)
 
 
 class InMemoryTrajectoryStore:
@@ -32,16 +37,14 @@ class InMemoryTrajectoryStore:
         if meta.id in self._sessions:
             raise ValueError(f"session already exists: {meta.id}")
         copied = list(turns)
-        _validate_turn_sequence(copied)
+        validate_turn_sequence(copied)
         self._sessions[meta.id] = (meta, copied)
 
     def append(self, session_id: str, turn: Turn) -> None:
         record = self._sessions.get(session_id)
         if record is None:
             raise KeyError(session_id)
-        expected = len(record[1])
-        if turn.index != expected:
-            raise ValueError(f"turn index {turn.index} does not follow {expected - 1}")
+        validate_turn_append(record[1], turn)
         record[1].append(turn)
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
@@ -60,7 +63,7 @@ class InMemoryTrajectoryStore:
         if record is None:
             raise KeyError(session_id)
         meta, turns = record
-        cut = _prefix_cut(turns, up_to)
+        cut = turn_prefix_cut(turns, up_to)
         return (meta, list(turns[: cut + 1]))
 
     def session_children(self, session_id: str) -> list[str]:
@@ -75,31 +78,5 @@ class InMemoryTrajectoryStore:
 
     def list_sessions(self) -> list[SessionMeta]:
         return [meta for meta, _ in self._sessions.values()]
-
-
-def _validate_turn_sequence(turns: Sequence[Turn]) -> None:
-    for expected, turn in enumerate(turns):
-        if turn.index != expected:
-            raise ValueError(
-                f"turn index {turn.index} does not match expected {expected}"
-            )
-
-
-def _prefix_cut(turns: list[Turn], up_to: TurnRef) -> int:
-    """Return the list index of the turn identified by ``up_to``.
-
-    ``up_to`` is a turn index (int) or a turn id (str).  Raises
-    ``KeyError`` if no matching turn exists.
-    """
-    if isinstance(up_to, int):
-        for i, turn in enumerate(turns):
-            if turn.index == up_to:
-                return i
-        raise KeyError(up_to)
-    for i, turn in enumerate(turns):
-        if turn.id == up_to:
-            return i
-    raise KeyError(up_to)
-
 
 __all__ = ["InMemoryTrajectoryStore"]

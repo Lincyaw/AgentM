@@ -12,7 +12,11 @@ from pathlib import Path
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Turn, TurnRef
-from agentm.core.runtime.stores.memory import _prefix_cut, _validate_turn_sequence
+from agentm.core.lib.trajectory_store import (
+    turn_prefix_cut,
+    validate_turn_append,
+    validate_turn_sequence,
+)
 
 
 class JsonlTrajectoryStore:
@@ -47,7 +51,7 @@ class JsonlTrajectoryStore:
         self, meta: SessionMeta, turns: Sequence[Turn]
     ) -> None:
         copied = list(turns)
-        _validate_turn_sequence(copied)
+        validate_turn_sequence(copied)
         records = [self._codec.serialize_session_meta(meta)]
         records.extend(self._codec.serialize_turn(turn) for turn in copied)
         payload = b"".join(self._encode_record(record) for record in records)
@@ -82,9 +86,7 @@ class JsonlTrajectoryStore:
                 path,
                 allow_trailing_torn=True,
             )
-            expected = len(turns)
-            if turn.index != expected:
-                raise ValueError(f"turn index {turn.index} does not follow {expected - 1}")
+            validate_turn_append(turns, turn)
             fh.truncate(valid_bytes)
             fh.seek(valid_bytes)
             if not terminated:
@@ -102,7 +104,7 @@ class JsonlTrajectoryStore:
         up_to: TurnRef,
     ) -> tuple[SessionMeta, list[Turn]]:
         meta, turns = self._read(session_id)
-        cut = _prefix_cut(turns, up_to)
+        cut = turn_prefix_cut(turns, up_to)
         return (meta, turns[: cut + 1])
 
     def session_children(self, session_id: str) -> list[str]:
@@ -173,7 +175,7 @@ class JsonlTrajectoryStore:
             valid_terminated = terminated
         if meta is None:
             raise ValueError(f"corrupt session metadata in {path}")
-        _validate_turn_sequence(turns)
+        validate_turn_sequence(turns)
         return meta, turns, valid_bytes, valid_terminated
 
     def _read_meta(self, path: Path) -> SessionMeta:

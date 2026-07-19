@@ -8,11 +8,11 @@ session or inherited by child sessions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeVar, overload
+from typing import Final, Literal, TypeVar, overload
 
 T = TypeVar("T")
 ServiceScope = Literal["session", "tree", "host", "process", "resource"]
-_INHERITED_SCOPES: frozenset[ServiceScope] = frozenset(
+_INHERITED_SCOPES: Final[frozenset[ServiceScope]] = frozenset(
     {"tree", "host", "process", "resource"}
 )
 

@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 import math
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi.catalog import ActiveSetFingerprint
 from agentm.core.abi.provider import ProviderSessionIdentity
@@ -18,6 +18,7 @@ from agentm.core.abi.session_api import (
 from agentm.core.abi.store import SessionMeta
 
 MetaConfigValue = str | int | float | bool | None
+SESSION_METADATA_VERSION: Final = 1
 
 
 class ResumeIdentityError(RuntimeError):
@@ -34,6 +35,7 @@ def session_meta_config(
     """Return the minimal SessionContext fields needed to resume a session."""
 
     config: dict[str, MetaConfigValue] = {
+        "session_metadata_version": SESSION_METADATA_VERSION,
         "root_session_id": ctx.root_session_id,
         "depth": ctx.depth,
     }
@@ -103,17 +105,59 @@ def context_from_session_meta(session_id: str, meta: SessionMeta) -> SessionCont
     """Reconstruct the resumable SessionContext subset from SessionMeta."""
 
     config = meta.config
-    root_session_id = _config_str(config, "root_session_id") or session_id
     return SessionContext(
         session_id=session_id,
-        root_session_id=root_session_id,
+        root_session_id=_required_config_str(config, "root_session_id"),
         parent_session_id=meta.parent_id,
-        depth=_config_int(config, "depth", default=1 if meta.parent_id else 0),
+        depth=_required_config_int(config, "depth"),
         cwd=meta.cwd,
         purpose=meta.purpose,
         scenario=_config_str(config, "scenario"),
         scenario_dir=_config_str(config, "scenario_dir"),
     )
+
+
+def validate_resume_metadata(
+    meta: SessionMeta,
+    *,
+    has_committed_turns: bool,
+) -> None:
+    """Reject incomplete or unsupported durable session identity."""
+
+    version = _required_config_int(meta.config, "session_metadata_version")
+    if version != SESSION_METADATA_VERSION:
+        raise ResumeIdentityError(
+            "unsupported session metadata version: "
+            f"{version}; expected {SESSION_METADATA_VERSION}"
+        )
+    root_session_id = _required_config_str(meta.config, "root_session_id")
+    depth = _required_config_int(meta.config, "depth")
+    if meta.parent_id is None:
+        if root_session_id != meta.id or depth != 0:
+            raise ResumeIdentityError(
+                "root session metadata must identify itself at depth zero"
+            )
+    elif depth == 0:
+        raise ResumeIdentityError(
+            "child session metadata must have a positive depth"
+        )
+    if not has_committed_turns:
+        return
+    _required_config_str(meta.config, "provider_name")
+    _required_config_str(meta.config, "provider_model_id")
+    active_set_digest = _required_config_str(
+        meta.config,
+        "active_set_digest",
+    )
+    provider_active_set_digest = _required_config_str(
+        meta.config,
+        "provider_active_set_digest",
+    )
+    if active_set_digest != provider_active_set_digest:
+        raise ResumeIdentityError(
+            "stored provider active-set identity does not match the session "
+            f"active set: {provider_active_set_digest} != {active_set_digest}"
+        )
 
 
 def provider_identity_from_session_meta(
@@ -144,15 +188,27 @@ def _config_str(config: Mapping[str, MetaConfigValue], key: str) -> str | None:
     return value
 
 
-def _config_int(
+def _required_config_str(
     config: Mapping[str, MetaConfigValue],
     key: str,
-    *,
-    default: int,
+) -> str:
+    value = _config_str(config, key)
+    if value is None:
+        raise ResumeIdentityError(
+            f"stored session config requires {key!r}"
+        )
+    return value
+
+
+def _required_config_int(
+    config: Mapping[str, MetaConfigValue],
+    key: str,
 ) -> int:
     value = config.get(key)
     if value is None:
-        return default
+        raise ResumeIdentityError(
+            f"stored session config requires {key!r}"
+        )
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ResumeIdentityError(
             f"stored session config {key!r} must be a non-negative integer"
@@ -275,9 +331,11 @@ def _stable_json(value: Any) -> str:
 
 __all__ = [
     "ResumeIdentityError",
+    "SESSION_METADATA_VERSION",
     "context_from_session_meta",
     "provider_identity_from_session_meta",
     "resolved_spec_digest",
     "session_meta_config",
     "validate_resume_identity",
+    "validate_resume_metadata",
 ]

@@ -8,13 +8,16 @@ from collections.abc import Sequence
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.lib.trajectory_store import (
+    turn_prefix_cut,
+    validate_turn_sequence,
+)
 from agentm.storage.trajectory.postgres import (
     PostgresConnection,
     PostgresCursor,
     _commit,
     _cursor,
     _json_mapping,
-    _rollback,
     _validate_identifier,
 )
 
@@ -67,7 +70,8 @@ class PostgresTrajectoryStore:
                     turn_index integer NOT NULL,
                     turn_id text NOT NULL,
                     turn_json jsonb NOT NULL,
-                    PRIMARY KEY (session_id, turn_index)
+                    PRIMARY KEY (session_id, turn_index),
+                    UNIQUE (session_id, turn_id)
                 )
                 """
             )
@@ -75,6 +79,13 @@ class PostgresTrajectoryStore:
                 f"""
                 CREATE INDEX IF NOT EXISTS {self._index("turns_session_idx")}
                 ON {self._table("turns")} (session_id, turn_index)
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    {self._index("turns_session_turn_id_idx")}
+                ON {self._table("turns")} (session_id, turn_id)
                 """
             )
             cur.execute(
@@ -97,41 +108,45 @@ class PostgresTrajectoryStore:
     def create_session_with_turns(
         self, meta: SessionMeta, turns: Sequence[Turn]
     ) -> None:
+        copied_turns = list(turns)
+        validate_turn_sequence(copied_turns)
         meta_json = json.dumps(
             self._codec.serialize_session_meta(meta),
             sort_keys=True,
             allow_nan=False,
         )
         with _cursor(self._connection) as cur:
-            try:
-                cur.execute(
-                    f"""
-                    INSERT INTO {self._table("sessions")}
-                        (id, parent_id, purpose, cwd, created_at, meta_json)
-                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-                    """,
-                    (
-                        meta.id,
-                        meta.parent_id,
-                        meta.purpose,
-                        meta.cwd,
-                        meta.created_at,
-                        meta_json,
-                    ),
-                )
-            except Exception as exc:
-                if "duplicate key" in str(exc).lower() or "unique" in str(exc).lower():
-                    _rollback(self._connection)
-                    raise ValueError(f"session already exists: {meta.id}") from None
-                raise
-            for turn in turns:
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("sessions")}
+                    (id, parent_id, purpose, cwd, created_at, meta_json)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    meta.id,
+                    meta.parent_id,
+                    meta.purpose,
+                    meta.cwd,
+                    meta.created_at,
+                    meta_json,
+                ),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(f"session already exists: {meta.id}")
+            for turn in copied_turns:
                 self._insert_turn(cur, meta.id, turn)
         _commit(self._connection)
 
     def append(self, session_id: str, turn: Turn) -> None:
         with _cursor(self._connection) as cur:
             cur.execute(
-                f"SELECT 1 FROM {self._table('sessions')} WHERE id = %s",
+                f"""
+                SELECT 1 FROM {self._table("sessions")}
+                WHERE id = %s
+                FOR UPDATE
+                """,
                 (session_id,),
             )
             if cur.fetchone() is None:
@@ -142,11 +157,27 @@ class PostgresTrajectoryStore:
             )
             row = cur.fetchone()
             raw_max = row[0] if row is not None else None
-            max_index: int = int(raw_max) if raw_max is not None else -1  # type: ignore[call-overload]
+            if raw_max is None:
+                max_index = -1
+            elif isinstance(raw_max, int) and not isinstance(raw_max, bool):
+                max_index = raw_max
+            else:
+                raise ValueError("Postgres MAX(turn_index) returned a non-integer")
             expected = max_index + 1
             if turn.index != expected:
                 raise ValueError(
                     f"turn index {turn.index} does not follow {max_index}"
+                )
+            cur.execute(
+                f"""
+                SELECT 1 FROM {self._table("turns")}
+                WHERE session_id = %s AND turn_id = %s
+                """,
+                (session_id, turn.id),
+            )
+            if cur.fetchone() is not None:
+                raise ValueError(
+                    f"duplicate turn id in session: {turn.id}"
                 )
             self._insert_turn(cur, session_id, turn)
         _commit(self._connection)
@@ -175,7 +206,7 @@ class PostgresTrajectoryStore:
         self, session_id: str, up_to: TurnRef
     ) -> tuple[SessionMeta, list[Turn]]:
         meta, turns = self.load(session_id)
-        cut = _prefix_cut(turns, up_to)
+        cut = turn_prefix_cut(turns, up_to)
         return (meta, turns[: cut + 1])
 
     def session_children(self, session_id: str) -> list[str]:
@@ -226,18 +257,5 @@ class PostgresTrajectoryStore:
 
     def _index(self, name: str) -> str:
         return f"agentm_trajectory_{name}"
-
-
-def _prefix_cut(turns: list[Turn], up_to: TurnRef) -> int:
-    if isinstance(up_to, int):
-        for i, turn in enumerate(turns):
-            if turn.index == up_to:
-                return i
-        raise KeyError(up_to)
-    for i, turn in enumerate(turns):
-        if turn.id == up_to:
-            return i
-    raise KeyError(up_to)
-
 
 __all__ = ["PostgresTrajectoryStore"]

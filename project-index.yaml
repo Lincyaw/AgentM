@@ -19,8 +19,11 @@ requirements:
       internally consistent, and propagate caller cancellation without detached
       work or stale post-hook observations. Project-specific AST checks must
       prevent runtime composition policy, legacy extension shapes, dynamic
-      attribute probing, and untyped ABI contracts from re-entering the SDK,
-      while allowing precise documented ignores at genuine dynamic boundaries.
+      attribute probing, untyped ABI contracts, and standard-library logging
+      from re-entering the SDK, while allowing precise documented ignores at
+      genuine dynamic boundaries. Gateway wire DTOs, durable delivery/auth/session
+      ports, observability parsing, and SQL driver adapters must remain outside
+      core and fail at their transport or persistence boundaries.
     priority: P0
     status: tested
     confidence: confirmed
@@ -36,6 +39,8 @@ requirements:
       - path: src/agentm/cli/_display.py
       - path: src/agentm/cli/_run.py
       - path: src/agentm/cli/_scenario.py
+      - path: src/agentm/cli/_store.py
+      - path: src/agentm/cli/_trace.py
       - path: src/agentm/code_health.py
       - path: src/agentm/authoring/__init__.py
       - path: src/agentm/authoring/artifacts.py
@@ -75,6 +80,7 @@ requirements:
       - path: src/agentm/core/lib/tool_executor.py
       - path: src/agentm/core/lib/tool_result.py
       - path: src/agentm/core/lib/tool_schema.py
+      - path: src/agentm/core/lib/trajectory_store.py
       - path: src/agentm/core/lib/trajectory_nodes.py
       - path: src/agentm/core/runtime/catalog.py
       - path: src/agentm/core/runtime/driver.py
@@ -84,6 +90,7 @@ requirements:
       - path: src/agentm/core/runtime/session_meta.py
       - path: src/agentm/core/runtime/stores/query.py
       - path: src/agentm/core/runtime/stores/jsonl.py
+      - path: src/agentm/core/runtime/stores/memory.py
       - path: src/agentm/core/runtime/tool_orchestration.py
       - path: src/agentm/core/runtime/tree.py
       - path: src/agentm/core/runtime/trigger_queue.py
@@ -112,11 +119,13 @@ requirements:
       - path: src/agentm/extensions/observability/event_otel.py
       - path: src/agentm/extensions/observability/otel_dispatch.py
       - path: src/agentm/extensions/observability/otel_export.py
-      - path: src/agentm/extensions/observability/otlp.py
       - path: src/agentm/extensions/observability/paths.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/forwarding.py
+      - path: src/agentm/gateway/ports.py
+      - path: src/agentm/gateway/wire.py
       - path: src/agentm/observability/__init__.py
+      - path: src/agentm/observability/otlp.py
       - path: src/agentm/observability/query.py
       - path: src/agentm/presenter/__init__.py
       - path: src/agentm/presenter/frontmatter.py
@@ -132,11 +141,14 @@ requirements:
       - path: src/agentm/storage/trajectory/__init__.py
       - path: src/agentm/storage/trajectory/jsonl.py
       - path: src/agentm/storage/trajectory/postgres.py
+      - path: src/agentm/storage/trajectory/postgres_turns.py
+      - path: src/agentm/storage/trajectory/psycopg.py
       - path: src/agentm_toolbox/__main__.py
       - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/external_agent.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/harbor_ops.py
+      - path: contrib/extensions/policy/src/policy_engine/evaluator.py
       - path: tools/otel/docker-compose.yaml
     tests:
       - path: tests/fixtures/__init__.py
@@ -146,6 +158,7 @@ requirements:
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_code_health.py
+      - path: tests/test_gateway_contracts.py
       - path: tests/test_lifecycle_catalog_ports.py
     docs:
       - path: .claude/index.yaml

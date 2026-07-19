@@ -84,7 +84,7 @@ dev = [
 requires-dist = [
     { name = "agentm-harbor", marker = "extra == 'harbor'", editable = "contrib/scenarios/harbor" },
     { name = "anthropic", marker = "extra == 'provider-anthropic'", specifier = ">=0.86.0" },
-    { name = "arl-env", marker = "extra == 'harbor'", directory = "../../../../agent-env/sdk/python/arl" },
+    { name = "arl-env", marker = "extra == 'harbor'", specifier = ">=0.19.8" },
     { name = "clickhouse-connect", marker = "extra == 'storage-clickhouse'", specifier = ">=0.7.0" },
     { name = "dockerfile-parse", marker = "extra == 'harbor'" },
     { name = "httpx", marker = "extra == 'provider-anthropic'", specifier = ">=0.28.0" },
@@ -311,32 +311,18 @@ wheels = [
 
 [[package]]
 name = "arl-env"
-version = "0.21.0"
-source = { directory = "../../../../agent-env/sdk/python/arl" }
+version = "0.20.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "protobuf" },
     { name = "pydantic" },
     { name = "rich" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "dockerfile-parse", marker = "extra == 'harbor'", specifier = ">=2.0" },
-    { name = "harbor", marker = "extra == 'harbor'", specifier = ">=0.19.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "iroh", marker = "extra == 'direct'", specifier = ">=1.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0" },
-    { name = "protobuf", specifier = ">=7.35.1" },
-    { name = "pydantic", specifier = ">=2" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.2.1" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=2.8.1" },
-    { name = "rich", specifier = ">=13.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
-    { name = "websockets", marker = "extra == 'shell'", specifier = ">=12.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/30/a4/aebba98d9af83d97861f81aa5de2bb431ac449e04577e9b3867ec0196478/arl_env-0.20.0.tar.gz", hash = "sha256:68679e9c3db6606943767eb80e7bb987a98627cad1fea11dafe6b3417a270bd9", size = 61691, upload-time = "2026-07-18T19:10:01.157Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/7a/a1783884098fc8bafad8ac74c9e5728daffa27e071a922a036be815aa683/arl_env-0.20.0-py3-none-any.whl", hash = "sha256:b9275d0b5dc61a1ef15763c2fca2caf9f2950bab19173b9d981787dfa4833105", size = 58460, upload-time = "2026-07-18T19:10:00.032Z" },
 ]
-provides-extras = ["shell", "direct", "harbor", "dev"]
 
 [[package]]
 name = "ast-serialize"

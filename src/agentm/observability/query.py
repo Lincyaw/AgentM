@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
 from agentm.core.abi.query import (
     EventRecord,
     QueryMeta,
     SpanRecord,
 )
-from agentm.extensions.observability.otlp import (
+from agentm.observability.otlp import (
     iter_log_records,
     iter_spans,
     otlp_unwrap,
@@ -91,10 +90,10 @@ class OtlpJsonlQueryStore:
         return self._root / f"{session_id}.jsonl"
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
     if not path.exists():
         return []
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, object]] = []
     content = path.read_bytes()
     lines = content.splitlines(keepends=True)
     for line_no, raw_line in enumerate(lines, start=1):

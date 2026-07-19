@@ -11,12 +11,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import uuid
 import time
-
-from loguru import logger
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +33,7 @@ from agentm.core.abi.catalog import (
 )
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
+from agentm.core.abi.messages import freeze_json
 from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.manifest import (
     AtomInstallPriority,
@@ -336,29 +334,6 @@ def _register_default_query_store(
     )
 
 
-_DEFAULT_TRAJECTORY_DSN = "postgresql://agentm:agentm@localhost:55432/agentm_test"
-
-
-def _resolve_default_store(cwd: str) -> TrajectoryStore | None:
-    """Auto-create a Postgres trajectory store.
-
-    Uses ``AGENTM_TRAJECTORY_DSN`` if set, otherwise falls back to the
-    local dev Postgres from ``tools/otel/docker-compose.yaml``.
-    """
-    dsn = os.environ.get("AGENTM_TRAJECTORY_DSN", _DEFAULT_TRAJECTORY_DSN)
-    try:
-        import psycopg2  # noqa: F811
-
-        from agentm.storage.trajectory.postgres_turns import (
-            PostgresTrajectoryStore,
-        )
-
-        conn = psycopg2.connect(dsn)
-        return PostgresTrajectoryStore(conn, create_schema=True)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("trajectory store: Postgres unavailable ({}), persistence disabled", exc)
-
-
 def _resolve_session_spec(config: "AgentSessionConfig") -> ResolvedSessionSpec | None:
     resolver = config.spec_resolver
     if resolver is None:
@@ -540,8 +515,6 @@ async def create_session(
             provider_resolver,
             scope="host",
         )
-    if store is None:
-        store = _resolve_default_store(cwd)
     _register_default_catalog_services(resolved_services)
     _register_default_query_store(resolved_services, store)
 
@@ -650,7 +623,10 @@ async def create_from_config(
     )
     services = ServiceRegistry()
     if config.experiment is not None:
-        services.register("experiment", config.experiment, scope="tree")
+        experiment = freeze_json(config.experiment)
+        if not isinstance(experiment, Mapping):
+            raise TypeError("experiment config must be a JSON object")
+        services.register("experiment", experiment, scope="tree")
     if config.loop_config is not None:
         services.register(LOOP_BUDGET_SERVICE, config.loop_config, scope="session")
     if config.scenario_loader is not None:
@@ -755,7 +731,10 @@ async def create_child_session(
     child_services.inherit_from(parent.services)
     _register_default_catalog_services(child_services)
     if config.experiment is not None:
-        child_services.register("experiment", config.experiment, scope="tree")
+        experiment = freeze_json(config.experiment)
+        if not isinstance(experiment, Mapping):
+            raise TypeError("experiment config must be a JSON object")
+        child_services.register("experiment", experiment, scope="tree")
     if config.loop_config is not None:
         child_services.register(LOOP_BUDGET_SERVICE, config.loop_config, scope="session")
     if config.scenario_loader is not None:

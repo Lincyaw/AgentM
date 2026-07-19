@@ -791,7 +791,7 @@ class Turn:
 
     index: int
     id: str
-    trigger: Trigger | object
+    trigger: Trigger
     rounds: tuple[Round, ...]
     outcome: Outcome
     timestamp: float

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import typer
+from importlib.metadata import PackageNotFoundError, version
 
 from agentm.cli._chat import chat
 from agentm.cli._run import run
@@ -29,10 +30,9 @@ app.add_typer(lint_app, name="lint")
 
 def _version_callback(value: bool) -> None:
     if value:
-        from importlib.metadata import version
         try:
             v = version("agentm")
-        except Exception:
+        except PackageNotFoundError:
             v = "unknown"
         typer.echo(f"agentm {v}")
         raise typer.Exit()

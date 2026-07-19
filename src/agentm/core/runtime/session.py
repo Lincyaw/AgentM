@@ -11,7 +11,7 @@ import asyncio
 import copy
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Iterator, cast
@@ -43,7 +43,13 @@ from agentm.core.abi.lifecycle import (
     EnvironmentRestoreFailureHandler,
     EnvironmentRestoreStatus,
 )
-from agentm.core.abi.messages import AgentMessage, ImageContent, JsonValue, TextContent
+from agentm.core.abi.messages import (
+    AgentMessage,
+    ImageContent,
+    JsonValue,
+    TextContent,
+    freeze_json,
+)
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.permission import PermissionAudience
 from agentm.core.abi.operations import EnvironmentOperations
@@ -112,7 +118,6 @@ from agentm.core.abi.session_api import (
     SessionContext,
 )
 from agentm.core.abi.store import (
-    SessionMeta,
     TrajectoryNodeQuery,
     TrajectoryNodeStore,
     TrajectoryStore,
@@ -133,8 +138,8 @@ from agentm.core.runtime.driver import ThinkingLevel, drive
 from agentm.core.runtime.session_meta import (
     context_from_session_meta,
     provider_identity_from_session_meta,
-    session_meta_config,
     validate_resume_identity,
+    validate_resume_metadata,
 )
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.lib.trajectory_nodes import turns_to_nodes
@@ -1023,25 +1028,14 @@ class Session:
             return
         provider_name = self._active_provider_name
         if provider_name is None or provider_name not in providers:
-            matching_names = [
-                name
-                for name, config in providers.items()
-                if first_model_id is not None
-                and config.model.id == first_model_id
-            ]
-            if len(matching_names) == 1:
-                provider_name = matching_names[0]
-            elif len(matching_names) > 1:
-                raise RuntimeError(
-                    "cannot recover provider identity: multiple registered "
-                    f"providers use model {first_model_id!r}"
-                )
-            else:
-                provider_name = self._resolve_provider_name(providers)
+            raise RuntimeError(
+                "cannot freeze provider identity: committed turns have no "
+                "active registered provider"
+            )
         provider = providers[provider_name]
         if first_model_id is not None and provider.model.id != first_model_id:
             raise RuntimeError(
-                "cannot recover provider identity: committed model "
+                "cannot freeze provider identity: committed model "
                 f"{first_model_id!r} does not match selected provider model "
                 f"{provider.model.id!r}"
             )
@@ -1597,8 +1591,16 @@ class Session:
         return self.get_provider()
 
     @property
-    def experiment(self) -> dict[str, object] | None:
-        return self.services.get("experiment")  # type: ignore[return-value]
+    def experiment(self) -> dict[str, JsonValue] | None:
+        value = self.services.get("experiment")
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise TypeError("experiment service must be a JSON object")
+        frozen = freeze_json(value)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("experiment service must be a JSON object")
+        return dict(frozen)
 
     # --- Spawn (child session with inheritance) ---
 
@@ -1734,21 +1736,9 @@ class Session:
             child.store.session_exists,
             child.id,
         ):
-            await asyncio.to_thread(
-                child.store.create_session,
-                SessionMeta(
-                    id=child.id,
-                    parent_id=self.id,
-                    purpose=purpose,
-                    cwd=child.ctx.cwd,
-                    created_at=time.time(),
-                    config=session_meta_config(
-                        child.ctx,
-                        resolved_spec=child._resolved_session_spec(),
-                        active_set=child._active_set_fingerprint(),
-                        provider_identity=child.provider_session_identity(),
-                    ),
-                ),
+            raise RuntimeError(
+                "child session factory returned before persisting session "
+                f"metadata for {child.id}"
             )
 
         if child.graph is not None:
@@ -1933,6 +1923,10 @@ class Session:
         config: AgentSessionConfig,
     ) -> "Session":
         meta, turns = await asyncio.to_thread(store.load, session_id)
+        validate_resume_metadata(
+            meta,
+            has_committed_turns=bool(turns),
+        )
         ctx = context_from_session_meta(session_id, meta)
         provider_identity = provider_identity_from_session_meta(meta)
         from agentm.core.runtime.session_factory import create_from_config

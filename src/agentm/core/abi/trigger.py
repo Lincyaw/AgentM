@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -21,7 +21,7 @@ from agentm.core.abi.messages import (
 )
 
 TriggerPriority = Literal["now", "next", "later"]
-_TRIGGER_PRIORITY_RANK: dict[TriggerPriority, int] = {
+_TRIGGER_PRIORITY_RANK: Final[dict[TriggerPriority, int]] = {
     "now": 0,
     "next": 1,
     "later": 2,

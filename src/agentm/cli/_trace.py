@@ -4,15 +4,57 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import Literal, NotRequired, TypeVar, TypedDict
 
 import typer
 
 from agentm.cli._display import EXIT_NOT_FOUND, is_tty, stderr_console
+from agentm.cli._store import resolve_trajectory_store
 from agentm.core.abi.messages import TextContent, ThinkingBlock, ToolCallBlock
-from agentm.core.abi.query import SessionFilter
+from agentm.core.abi.query import (
+    SessionFilter,
+    TrajectoryQueryStore,
+)
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import Turn
+from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
+
+TraceFormat = Literal["text", "ndjson"]
+RecordT = TypeVar("RecordT")
+
+
+class _TurnSummary(TypedDict):
+    turn_index: int
+    turn_id: str
+    trigger_source: str
+    rounds: int
+    tool_calls: list[str]
+    tool_call_count: int
+    tool_error_count: int
+    input_tokens: int
+    output_tokens: int
+    cache_read: int
+    model: str | None
+    cause: str
+
+
+class _MessageRecord(TypedDict):
+    turn_index: int
+    round_index: int
+    role: str
+    content: str
+    tool: NotRequired[str]
+    is_error: NotRequired[bool]
+
+
+class _ToolRecord(TypedDict):
+    turn_index: int
+    round_index: int
+    tool: str
+    args: dict[str, object]
+    is_error: bool
+    result: str
 
 trace_app = typer.Typer(
     name="trace",
@@ -22,53 +64,66 @@ trace_app = typer.Typer(
 )
 
 
-def _get_store() -> Any:
-    from agentm.cli._store import resolve_trajectory_store
-
+def _get_store() -> TrajectoryStore:
     store = resolve_trajectory_store()
-    if store is None:
-        stderr_console.print(
-            "[red]error: Postgres trajectory store unavailable[/red]\n"
-            "[dim]Start Postgres: docker compose -f tools/otel/docker-compose.yaml up -d postgres[/dim]"
-        )
-        raise typer.Exit(EXIT_NOT_FOUND)
-    return store
+    if store is not None:
+        return store
+    stderr_console.print(
+        "[red]error: no trajectory store found[/red]\n"
+        "[dim]Set AGENTM_TRAJECTORY_DSN for Postgres, "
+        "AGENTM_TRAJECTORY_DIR for JSONL, or run from a project "
+        "with .agentm/trajectory.[/dim]"
+    )
+    raise typer.Exit(EXIT_NOT_FOUND)
 
 
-def _get_query_store() -> Any:
-    from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
+def _get_query_store() -> TrajectoryQueryStore:
     return TrajectoryStoreQueryAdapter(_get_store())
 
 
-def _resolve_session_id(session: str | None, latest: bool) -> str:
+def _resolve_session_id(
+    query: TrajectoryQueryStore,
+    session: str | None,
+    latest: bool,
+) -> str:
     if session and latest:
         stderr_console.print("[red]error: --session and --latest are mutually exclusive[/red]")
         raise typer.Exit(2)
     if session:
         return session
     if latest:
-        store = _get_store()
-        metas = store.list_sessions()
+        metas = list(query.sessions())
         if not metas:
             stderr_console.print("[red]error: no sessions in store[/red]")
             raise typer.Exit(EXIT_NOT_FOUND)
-        metas.sort(key=lambda m: m.created_at, reverse=True)
-        return metas[0].id
+        return max(metas, key=lambda item: item.created_at).id
     stderr_console.print("[red]error: must specify --session or --latest[/red]")
     raise typer.Exit(2)
 
 
-def _resolve_format(fmt: str | None) -> str:
+def _resolve_format(fmt: str | None) -> TraceFormat:
+    if fmt == "text":
+        return "text"
+    if fmt == "ndjson":
+        return "ndjson"
     if fmt is not None:
-        return fmt
+        raise typer.BadParameter(
+            "format must be 'text' or 'ndjson'",
+            param_hint="--format",
+        )
     return "text" if is_tty() else "ndjson"
 
 
 def _emit_json(obj: object) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def _emit_records(records: Iterable[dict[str, Any]], fmt: str, render_fn: Any, limit: int | None) -> int:
+def _emit_records(
+    records: Iterable[RecordT],
+    fmt: TraceFormat,
+    render_fn: Callable[[RecordT], str],
+    limit: int | None,
+) -> int:
     count = 0
     for record in records:
         if limit is not None and count >= limit:
@@ -93,33 +148,53 @@ def sessions_cmd(
 ) -> None:
     """List sessions in the trajectory store."""
     query = _get_query_store()
-    rows = list(query.sessions(SessionFilter(parent_session_id=parent, purpose=purpose, limit=limit)))
+    rows = list(
+        query.sessions(
+            SessionFilter(
+                parent_session_id=parent,
+                purpose=purpose,
+                limit=limit,
+            )
+        )
+    )
     chosen_fmt = _resolve_format(fmt)
-    dicts = [{"id": r.id, "parent_session_id": r.parent_session_id, "purpose": r.purpose, "cwd": r.cwd, "created_at": r.created_at} for r in rows]
 
     if chosen_fmt == "text":
-        stderr_console.print(f"[dim]{len(dicts)} session(s)[/dim]")
-        for d in dicts:
-            sys.stdout.write(f"  {d['id']:<20} purpose={d['purpose']:<8} parent={d.get('parent_session_id') or '---'}\n")
+        stderr_console.print(f"[dim]{len(rows)} session(s)[/dim]")
+        for row in rows:
+            parent_id = row.parent_session_id or "---"
+            sys.stdout.write(
+                f"  {row.id:<20} purpose={row.purpose:<8} "
+                f"parent={parent_id}\n"
+            )
     else:
-        for d in dicts:
-            _emit_json(d)
+        for row in rows:
+            _emit_json(
+                {
+                    "id": row.id,
+                    "parent_session_id": row.parent_session_id,
+                    "root_session_id": row.root_session_id,
+                    "purpose": row.purpose,
+                    "cwd": row.cwd,
+                    "created_at": row.created_at,
+                }
+            )
 
 
 # -- turns -------------------------------------------------------------------
 
 
-def _turn_summary(turn: Turn) -> dict[str, Any]:
+def _turn_summary(turn: Turn) -> _TurnSummary:
     tool_names: list[str] = []
     tool_errors = 0
     for rnd in turn.rounds:
         for rec in rnd.tool_results:
-            tool_names.append(rec.call.name if hasattr(rec.call, "name") else "?")
+            tool_names.append(rec.call.name)
             if rec.result.is_error:
                 tool_errors += 1
     return {
         "turn_index": turn.index, "turn_id": turn.id,
-        "trigger_source": getattr(turn.trigger, "source", "?"),
+        "trigger_source": turn.trigger.source,
         "rounds": len(turn.rounds), "tool_calls": tool_names,
         "tool_call_count": len(tool_names), "tool_error_count": tool_errors,
         "input_tokens": turn.meta.total_input_tokens, "output_tokens": turn.meta.total_output_tokens,
@@ -136,18 +211,22 @@ def turns_cmd(
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print per-turn summaries for a session."""
-    sid = _resolve_session_id(session, latest)
+    query = _get_query_store()
+    sid = _resolve_session_id(query, session, latest)
     try:
-        turns = list(_get_query_store().turns(sid))
+        turns = list(query.turns(sid))
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
     summaries = [_turn_summary(t) for t in turns]
 
-    def _render(d: dict[str, Any]) -> str:
+    def _render(d: _TurnSummary) -> str:
         tools = ", ".join(d["tool_calls"]) if d["tool_calls"] else "---"
-        return f"  [{d['turn_index']}] {d['cause']:<20} tools=[{tools}] in={d['input_tokens']} out={d['output_tokens']}"
+        return (
+            f"  [{d['turn_index']}] {d['cause']:<20} tools=[{tools}] "
+            f"in={d['input_tokens']} out={d['output_tokens']}"
+        )
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]session {sid}: {len(summaries)} turn(s)[/dim]")
@@ -167,14 +246,15 @@ def messages_cmd(
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print the conversation messages for a session."""
-    sid = _resolve_session_id(session, latest)
+    query = _get_query_store()
+    sid = _resolve_session_id(query, session, latest)
     try:
-        turns = list(_get_query_store().turns(sid))
+        turns = list(query.turns(sid))
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
-    all_msgs: list[dict[str, Any]] = []
+    all_msgs: list[_MessageRecord] = []
     for turn in turns:
         for ri, rnd in enumerate(turn.rounds):
             blocks: list[str] = []
@@ -184,18 +264,45 @@ def messages_cmd(
                 elif isinstance(block, ThinkingBlock) and not hide_thinking:
                     blocks.append(f"[thinking] {block.text}")
                 elif isinstance(block, ToolCallBlock):
-                    blocks.append(f"[tool_call: {block.name}({json.dumps(dict(block.arguments), ensure_ascii=False)[:200]})]")
-            all_msgs.append({"turn_index": turn.index, "round_index": ri, "role": "assistant", "content": "\n".join(blocks)})
+                    arguments = json.dumps(
+                        dict(block.arguments),
+                        ensure_ascii=False,
+                    )[:200]
+                    blocks.append(
+                        f"[tool_call: {block.name}({arguments})]"
+                    )
+            all_msgs.append(
+                {
+                    "turn_index": turn.index,
+                    "round_index": ri,
+                    "role": "assistant",
+                    "content": "\n".join(blocks),
+                }
+            )
             for rec in rnd.tool_results:
-                txt = "".join(b.text for b in rec.result.content if isinstance(b, TextContent))[:500]
-                all_msgs.append({"turn_index": turn.index, "round_index": ri, "role": "tool_result", "tool": rec.call.name, "is_error": rec.result.is_error, "content": txt})
+                txt = "".join(
+                    block.text
+                    for block in rec.result.content
+                    if isinstance(block, TextContent)
+                )[:500]
+                all_msgs.append(
+                    {
+                        "turn_index": turn.index,
+                        "round_index": ri,
+                        "role": "tool_result",
+                        "tool": rec.call.name,
+                        "is_error": rec.result.is_error,
+                        "content": txt,
+                    }
+                )
     if role:
         all_msgs = [m for m in all_msgs if m["role"] == role]
 
-    def _render(m: dict[str, Any]) -> str:
+    def _render(m: _MessageRecord) -> str:
         hdr = f"[{m['role']}] turn={m['turn_index']} round={m['round_index']}"
         if m["role"] == "tool_result":
-            hdr += f" tool={m.get('tool','?')}{' ERROR' if m.get('is_error') else ''}"
+            error = " ERROR" if m.get("is_error") else ""
+            hdr += f" tool={m.get('tool', '?')}{error}"
         return f"{hdr}\n{m['content']}\n"
 
     if chosen_fmt == "text":
@@ -213,9 +320,10 @@ def usage_cmd(
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Token usage summary for a session."""
-    sid = _resolve_session_id(session, latest)
+    query = _get_query_store()
+    sid = _resolve_session_id(query, session, latest)
     try:
-        turns = list(_get_query_store().turns(sid))
+        turns = list(query.turns(sid))
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
@@ -247,27 +355,45 @@ def tools_cmd(
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print tool calls with arguments and results."""
-    sid = _resolve_session_id(session, latest)
+    query = _get_query_store()
+    sid = _resolve_session_id(query, session, latest)
     try:
-        turns = list(_get_query_store().turns(sid))
+        turns = list(query.turns(sid))
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
-    records: list[dict[str, Any]] = []
+    records: list[_ToolRecord] = []
     for turn in turns:
         for ri, rnd in enumerate(turn.rounds):
             for rec in rnd.tool_results:
-                name = rec.call.name if hasattr(rec.call, "name") else "?"
+                name = rec.call.name
                 if tool and name != tool:
                     continue
-                txt = "".join(b.text for b in rec.result.content if isinstance(b, TextContent))
-                records.append({"turn_index": turn.index, "round_index": ri, "tool": name, "args": dict(rec.call.arguments) if hasattr(rec.call, "arguments") else {}, "is_error": rec.result.is_error, "result": txt})
+                txt = "".join(
+                    block.text
+                    for block in rec.result.content
+                    if isinstance(block, TextContent)
+                )
+                records.append(
+                    {
+                        "turn_index": turn.index,
+                        "round_index": ri,
+                        "tool": name,
+                        "args": dict(rec.call.arguments),
+                        "is_error": rec.result.is_error,
+                        "result": txt,
+                    }
+                )
 
-    def _render(d: dict[str, Any]) -> str:
+    def _render(d: _ToolRecord) -> str:
         a = json.dumps(d["args"], ensure_ascii=False)[:300]
         r = d["result"][:500]
-        return f"[{d['tool']}{'  ERROR' if d['is_error'] else ''}] turn={d['turn_index']} round={d['round_index']}\n  args: {a}\n  result: {r}\n"
+        error = "  ERROR" if d["is_error"] else ""
+        return (
+            f"[{d['tool']}{error}] turn={d['turn_index']} "
+            f"round={d['round_index']}\n  args: {a}\n  result: {r}\n"
+        )
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]{len(records)} tool call(s)[/dim]")

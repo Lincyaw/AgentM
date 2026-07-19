@@ -81,6 +81,7 @@ from agentm.core.abi.trigger import (
 from agentm.core.runtime.execution import Execution, StateError
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_factory import create_session
+from agentm.core.runtime.session_meta import ResumeIdentityError
 from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
@@ -500,11 +501,13 @@ async def test_store_persistence() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("first"), text_response("second"))
 
-    session = Session(
-        stream_fn=mock, model=make_model(), system="test",
+    session = await create_session(
+        extensions=[],
+        stream_fn=mock,
+        model=make_model(),
+        system="test",
         store=store,
     )
-    store.create_session(SessionMeta(id=session.id, purpose="root"))
     session.start()
     await session.prompt("one")
     await _wait_turn(session)
@@ -545,10 +548,13 @@ async def test_session_resume() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("turn-1"))
 
-    session = Session(
-        stream_fn=mock, model=make_model(), system="test", store=store,
+    session = await create_session(
+        extensions=[],
+        stream_fn=mock,
+        model=make_model(),
+        system="test",
+        store=store,
     )
-    store.create_session(SessionMeta(id=session.id, purpose="root"))
     session.start()
     await session.prompt("first")
     await _wait_turn(session)
@@ -580,6 +586,42 @@ async def test_session_resume() -> None:
     await resumed.shutdown()
     assert len(resumed.trajectory) == 2
     assert resumed.trajectory.turns[1].index == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_unversioned_session_metadata() -> None:
+    source_store = InMemoryTrajectoryStore()
+    mock = MockStreamFn()
+    mock.enqueue(text_response("turn-1"))
+    session = await create_session(
+        extensions=[],
+        stream_fn=mock,
+        model=make_model(),
+        store=source_store,
+    )
+    session.start()
+    await session.prompt("first")
+    await _wait_turn(session)
+    await session.shutdown()
+
+    legacy_store = InMemoryTrajectoryStore()
+    legacy_store.create_session_with_turns(
+        SessionMeta(id="legacy-session"),
+        session.trajectory.turns,
+    )
+    with pytest.raises(
+        ResumeIdentityError,
+        match="session_metadata_version",
+    ):
+        await Session.resume(
+            "legacy-session",
+            legacy_store,
+            AgentSessionConfig(
+                extensions=[],
+                stream_fn=MockStreamFn(),
+                model=make_model(),
+            ),
+        )
 
 
 def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
