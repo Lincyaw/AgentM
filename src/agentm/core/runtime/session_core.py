@@ -76,7 +76,7 @@ from agentm.core.abi.events import (
     SessionShutdownEvent,
     TurnCommittedEvent,
 )
-from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.roles import (
     ATOM_CATALOG_SERVICE,
     ACTIVE_SET_FINGERPRINT_SERVICE,
@@ -964,7 +964,13 @@ class _SessionResourceServices(_SessionProviders):
         fingerprint = self.services.get(ACTIVE_SET_FINGERPRINT_SERVICE)
         return fingerprint if isinstance(fingerprint, ActiveSetFingerprint) else None
 
-    def register_operations(self, **kwargs: object) -> None:
+    def register_operations(
+        self,
+        *,
+        replace: bool = False,
+        service_scope: ServiceScope = "session",
+        **kwargs: object,
+    ) -> None:
         """Register named operation services."""
         from agentm.core.abi.operations import BashOperations
 
@@ -979,12 +985,14 @@ class _SessionResourceServices(_SessionProviders):
         for key, value in kwargs.items():
             service_name = service_names.get(key, f"operations:{key}")
             if self.services.has(service_name):
-                raise ValueError(f"operation {key!r} already registered")
+                if not replace:
+                    raise ValueError(f"operation {key!r} already registered")
+                self.services.unregister(service_name)
             self.services.register(
                 service_name,
                 value,
                 protocols.get(key),
-                scope="session",
+                scope=service_scope,
             )
             self._emit_register_event(
                 "operations",

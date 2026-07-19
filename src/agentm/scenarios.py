@@ -117,9 +117,7 @@ def _contained_path(base_dir: Path, relative: str, *, label: str) -> Path:
     real_base = base_dir.resolve()
     real_target = (base_dir / relative_path).resolve()
     if not real_target.is_relative_to(real_base):
-        raise ScenarioManifestError(
-            f"{label} escapes scenario directory: {relative!r}"
-        )
+        raise ScenarioManifestError(f"{label} escapes scenario directory: {relative!r}")
     return real_target
 
 
@@ -160,9 +158,7 @@ def _extension_entries(
 
     declared = manifest.get("extensions", ())
     if not isinstance(declared, Sequence) or isinstance(declared, (str, bytes)):
-        raise ScenarioManifestError(
-            f"'extensions' must be a list in {manifest_path}"
-        )
+        raise ScenarioManifestError(f"'extensions' must be a list in {manifest_path}")
     entries.extend(declared)
     return entries
 
@@ -238,8 +234,7 @@ def _load_manifest(path: Path, requested_name: str) -> ScenarioSpec:
         manifest_path=path,
     )
     extensions = tuple(
-        _extension_from_entry(entry, scenario_dir=scenario_dir)
-        for entry in entries
+        _extension_from_entry(entry, scenario_dir=scenario_dir) for entry in entries
     )
     real_scenario_dir = scenario_dir.resolve()
     return ScenarioSpec(
@@ -279,15 +274,27 @@ def builtin_scenario_loader(scenario: str) -> ScenarioSpec:
         raise ValueError(
             f"unknown packaged scenario {scenario!r}; known: {known}"
         ) from exc
-    extensions = tuple(
-        normalize_extension_spec(item)
-        for item in spec.extensions
-    )
+    extensions = tuple(normalize_extension_spec(item) for item in spec.extensions)
     return ScenarioSpec(extensions=extensions, base_dir=spec.base_dir)
+
+
+def load_scenario_manifest(
+    path: str | Path,
+    *,
+    requested_name: str,
+) -> ScenarioSpec:
+    """Load one host-selected scenario manifest from an explicit path."""
+
+    manifest_path = Path(path)
+    if not manifest_path.is_file():
+        raise ScenarioManifestError(f"scenario manifest not found: {manifest_path}")
+    _scenario_parts(requested_name)
+    return _load_manifest(manifest_path, requested_name)
 
 
 __all__ = [
     "ScenarioManifestError",
     "builtin_scenario_loader",
+    "load_scenario_manifest",
     "packaged_scenario_names",
 ]

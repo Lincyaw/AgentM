@@ -36,7 +36,11 @@ requirements:
       and cache/compaction state; there is no separately selectable or
       rebuildable node store. A configured DSN/path applies to that one port;
       core factories do not discover backends, and resolver-owned resources
-      remain alive across sharing descendants.
+      remain alive across sharing descendants. External hosts inject
+      EnvironmentOperations and ResourceWriter through public SDK fields;
+      resource-scoped operation bindings inherit across ordinary children and
+      can be explicitly replaced for another environment without ambient
+      globals. Extension manifests reject unknown contract fields.
     priority: P0
     status: tested
     confidence: confirmed
@@ -168,27 +172,35 @@ requirements:
       - path: src/agentm_toolbox/_state.py
       - path: contrib/scenarios/chat/manifest.yaml
       - path: contrib/scenarios/interrupt_demo/manifest.yaml
+      - path: contrib/scenarios/harbor/pyproject.toml
       - path: contrib/scenarios/harbor/scenario.yaml
+      - path: contrib/scenarios/harbor/src/agentm_harbor/__init__.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/external_agent.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/harbor_ops.py
+      - path: contrib/scenarios/harbor/src/agentm_harbor/human_interrupt.py
+      - path: contrib/scenarios/harbor/src/agentm_harbor/interrupt_cli.py
       - path: contrib/extensions/policy/src/policy_engine/evaluator.py
       - path: tools/otel/docker-compose.yaml
     tests:
       - path: tests/fixtures/__init__.py
       - path: tests/fixtures/custom_trigger.py
+      - path: tests/fixtures/harbor_provider.py
       - path: tests/fixtures/process_tools.py
       - path: tests/fixtures/prompt_cache_adapter.py
       - path: tests/test_authoring.py
+      - path: tests/integration/test_harbor_adapter.py
       - path: tests/integration/test_observability_backends.py
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_code_health.py
       - path: tests/test_gateway_contracts.py
       - path: tests/test_lifecycle_catalog_ports.py
+      - path: tests/test_manifest_contract.py
     docs:
       - path: .claude/index.yaml
       - path: .claude/designs/observability.md
       - path: README.md
+      - path: contrib/scenarios/harbor/README.md
       - path: docs/refactor-abstract-inventory.md
       - path: tools/otel/README.md
     depends_on: []

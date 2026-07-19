@@ -10,28 +10,36 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from pathlib import Path
+
+from agentm_harbor.human_interrupt import socket_path
 
 
-def _default_inbox_root() -> Path:
-    return Path.home() / ".agentm" / "inbox"
-
-
-def _socket_path(session_id: str) -> Path:
-    return _default_inbox_root() / f"{session_id}.sock"
+class InterruptDeliveryError(RuntimeError):
+    """The target session rejected an interrupt message."""
 
 
 async def _send(session_id: str, message: str) -> None:
-    sock = _socket_path(session_id)
+    sock = socket_path(session_id)
     if not sock.exists():
-        print(f"error: no active session {session_id} (socket not found)", file=sys.stderr)
-        sys.exit(1)
+        raise InterruptDeliveryError(f"no active session {session_id} (socket not found)")
     reader, writer = await asyncio.open_unix_connection(str(sock))
-    writer.write(message.encode("utf-8"))
-    writer.write_eof()
-    await writer.drain()
-    writer.close()
-    await writer.wait_closed()
+    try:
+        writer.write(message.encode("utf-8"))
+        writer.write_eof()
+        await writer.drain()
+        response = (
+            (await reader.readline())
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+            .strip()
+        )
+    finally:
+        writer.close()
+        await writer.wait_closed()
+    if response != "ok":
+        raise InterruptDeliveryError(response or "session returned no acknowledgement")
     print(f"sent {len(message)} chars to session {session_id}")
 
 
@@ -47,7 +55,11 @@ def main() -> None:
     if not message:
         print("error: empty message", file=sys.stderr)
         sys.exit(1)
-    asyncio.run(_send(session_id, message))
+    try:
+        asyncio.run(_send(session_id, message))
+    except (InterruptDeliveryError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

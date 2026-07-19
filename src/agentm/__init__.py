@@ -28,6 +28,12 @@ from agentm.core.abi.lifecycle import (
 )
 from agentm.core.abi.messages import InterruptionMessagePolicy
 from agentm.core.abi.messages import JsonValue
+from agentm.core.abi.operations import (
+    BashOperations,
+    EnvironmentOperations,
+    EnvironmentRef,
+    ExecResult,
+)
 from agentm.core.abi.query import (
     ObservabilityQueryStore,
     TraceQueryStore,
@@ -92,7 +98,11 @@ from agentm.core.abi.trigger import (
 )
 from agentm.core.runtime.session import Session
 from agentm.sdk import AgentSession
-from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
+from agentm.scenarios import (
+    builtin_scenario_loader,
+    load_scenario_manifest,
+    packaged_scenario_names,
+)
 
 __all__ = [
     "ActiveSetFingerprint",
@@ -100,6 +110,7 @@ __all__ = [
     "AgentSessionConfig",
     "AtomActivation",
     "AtomCatalog",
+    "BashOperations",
     "CancelReason",
     "CancelSignal",
     "CancelSource",
@@ -111,6 +122,8 @@ __all__ = [
     "EnvironmentCheckpoint",
     "EnvironmentFork",
     "EnvironmentForkableResourceWriter",
+    "EnvironmentOperations",
+    "EnvironmentRef",
     "EnvironmentRestoreError",
     "EnvironmentRestoreFailureHandler",
     "EnvironmentRestoreState",
@@ -120,6 +133,7 @@ __all__ = [
     "ExtensionInput",
     "ExtensionSource",
     "ExtensionSpec",
+    "ExecResult",
     "InterruptionMessagePolicy",
     "JsonValue",
     "LoopConfig",
@@ -167,6 +181,7 @@ __all__ = [
     "TransactionalResourceWriter",
     "WriteResult",
     "builtin_scenario_loader",
+    "load_scenario_manifest",
     "normalize_extension_spec",
     "packaged_scenario_names",
 ]

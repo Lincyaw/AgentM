@@ -669,6 +669,8 @@ async def create_session(
             session.register_operations(
                 environment=environment_operations,
                 bash=environment_operations.bash,
+                replace=True,
+                service_scope="resource",
             )
         if atom_catalog is not None:
             session.register_atom_catalog(atom_catalog, replace=True)
@@ -798,6 +800,7 @@ async def create_from_config(
             tool_orchestrator=config.tool_orchestrator,
             permission_policy=config.permission_policy,
             effect_scope=config.effect_scope,
+            environment_operations=config.environment_operations,
             environment_restore_failure_handler=(
                 config.environment_restore_failure_handler
             ),
@@ -1008,6 +1011,13 @@ async def create_child_session(
             child.register_permission_policy(config.permission_policy, replace=True)
         if config.effect_scope is not None:
             child.register_effect_scope(config.effect_scope, replace=True)
+        if config.environment_operations is not None:
+            child.register_operations(
+                environment=config.environment_operations,
+                bash=config.environment_operations.bash,
+                replace=True,
+                service_scope="resource",
+            )
         if config.versioned_resource_store is not None:
             child.register_versioned_resource_store(
                 config.versioned_resource_store,

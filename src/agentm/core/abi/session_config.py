@@ -2,6 +2,7 @@
 
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
 from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
+from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.provider import ProviderResolver, ProviderSessionIdentity
 from agentm.core.abi.resource import ResourceReader, ResourceStore, ResourceWriter
@@ -31,6 +32,7 @@ __all__ = [
     "ConfigValueProvenance",
     "EffectScope",
     "EnvironmentRestoreFailureHandler",
+    "EnvironmentOperations",
     "ExtensionInput",
     "ExtensionSource",
     "ExtensionSpec",

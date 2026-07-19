@@ -22,6 +22,7 @@ from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
 from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
 from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
 from agentm.core.abi.permission import PermissionPolicy
+from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
@@ -39,7 +40,7 @@ from agentm.core.abi.resource import (
 )
 from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
-from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.store import (
     TrajectoryStore,
 )
@@ -71,7 +72,10 @@ class ExtensionSource:
             return
         if not Path(self.location).is_absolute():
             raise ValueError("file extension source location must be absolute")
-        if not isinstance(self.digest, str) or _SHA256_RE.fullmatch(self.digest) is None:
+        if (
+            not isinstance(self.digest, str)
+            or _SHA256_RE.fullmatch(self.digest) is None
+        ):
             raise ValueError(
                 "file extension source digest must be sha256:<64 lowercase hex>"
             )
@@ -159,9 +163,7 @@ def normalize_extension_spec(value: ExtensionInput) -> ExtensionSpec:
         or not isinstance(value[0], str)
         or not isinstance(value[1], Mapping)
     ):
-        raise TypeError(
-            "extension must be ExtensionSpec or (module, config) tuple"
-        )
+        raise TypeError("extension must be ExtensionSpec or (module, config) tuple")
     return ExtensionSpec.from_module(value[0], value[1])
 
 
@@ -216,8 +218,7 @@ class ScenarioLoader(Protocol):
     storage locations.
     """
 
-    def __call__(self, scenario: str) -> ScenarioSpec | Sequence[ExtensionInput]:
-        ...
+    def __call__(self, scenario: str) -> ScenarioSpec | Sequence[ExtensionInput]: ...
 
 
 @dataclass(slots=True)
@@ -236,9 +237,7 @@ class AgentSessionConfig:
     extensions: list[ExtensionInput] | None = None
     extra_extensions: list[ExtensionInput] = field(default_factory=list)
     extra_tools: list[Tool] = field(default_factory=list)
-    atom_config_overrides: dict[str, dict[str, JsonValue]] = field(
-        default_factory=dict
-    )
+    atom_config_overrides: dict[str, dict[str, JsonValue]] = field(default_factory=dict)
     provider: ExtensionInput | None = None
     provider_resolver: ProviderResolver | None = None
     stream_fn: StreamFn | None = None
@@ -251,6 +250,7 @@ class AgentSessionConfig:
     tool_orchestrator: ToolOrchestrator | None = None
     permission_policy: PermissionPolicy | None = None
     effect_scope: EffectScope | None = None
+    environment_operations: EnvironmentOperations | None = None
     environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
@@ -295,8 +295,7 @@ class ResolvedSessionSpec:
 class SessionSpecResolver(Protocol):
     """Host-owned resolver for scenario, user config, env, and overrides."""
 
-    def resolve(self, request: AgentSessionConfig) -> ResolvedSessionSpec:
-        ...
+    def resolve(self, request: AgentSessionConfig) -> ResolvedSessionSpec: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,7 +334,9 @@ class SessionContext:
             cwd=self.cwd if cwd is None else cwd,
             purpose=purpose,
             scenario=self.scenario if scenario is None else scenario,
-            scenario_dir=scenario_dir if scenario_dir is not None else self.scenario_dir,
+            scenario_dir=scenario_dir
+            if scenario_dir is not None
+            else self.scenario_dir,
         )
 
 
@@ -387,7 +388,13 @@ class AtomAPI(Protocol):
         """Register a codec for custom trigger persistence."""
         ...
 
-    def register_operations(self, **kwargs: object) -> None:
+    def register_operations(
+        self,
+        *,
+        replace: bool = False,
+        service_scope: ServiceScope = "session",
+        **kwargs: object,
+    ) -> None:
         """Register named operation services, such as ``bash``."""
         ...
 

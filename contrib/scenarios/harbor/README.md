@@ -4,7 +4,8 @@ AgentM as a Harbor external agent. Agent runs locally, tool calls (bash, file
 I/O) route through Harbor's `BaseEnvironment` into the sandbox. The sandbox
 backend is pluggable (Docker, Modal, E2B, GKE, Daytona, etc.) -- this adapter
 is backend-agnostic, it only talks to the `BaseEnvironment` interface.
-Trajectory is managed by AgentM's own observability layer (ClickHouse / OTLP).
+Trajectory is managed by AgentM's selected `TrajectoryStore`; OTLP is an
+independent diagnostics channel.
 
 ## Architecture
 
@@ -14,11 +15,12 @@ Host                              Harbor sandbox (any backend)
 │  AgentM session      │          │  task environment │
 │  (model inference)   │          │                   │
 │         │            │          │                   │
-│    harbor_ops atom   │─exec()──>│  bash commands    │
+│  host-injected ports │─exec()──>│  bash commands    │
 │         │            │─upload()>│  file writes      │
 │         │            │<download─│  file reads       │
 │         │            │          │                   │
-│  observability ──> ClickHouse   │  verifier (test.sh)
+│ TrajectoryStore      │          │  verifier (test.sh)
+│ OTLP (optional) ──> collector   │
 └──────────────────────┘          └──────────────────┘
 ```
 
@@ -47,12 +49,16 @@ Single-task runs with full control over env injection and timeout multipliers.
 ```toml
 [models.<profile-name>]
 provider = "openai"
-name = "<profile-name>"
 model = "<model-id-on-proxy>"           # e.g. "azure-chat", "DeepSeek-V4-pro"
-base_url = "${LITELLM_BASE_URL}/v1"     # litellm proxy endpoint
-api_key = "${LITELLM_API_KEY}"
+base_url = "https://<litellm-host>/v1"
+api_key_env = "OPENAI_API_KEY"
 context_window = 262144
 ```
+
+Harbor's `-m <profile-name>` selects this AgentM profile. Per-trial `--ae`
+values are passed to an explicit resolver snapshot; the adapter never mutates
+process-wide environment variables, so concurrent trials cannot exchange
+provider or trajectory configuration.
 
 **Run command:**
 
@@ -158,8 +164,11 @@ cat jobs/<job-dir>/<trial>/verifier/test-stdout.txt
 
 ## Trajectory
 
-Trajectories go to ClickHouse via OTLP (AgentM's default observability path).
-Inspect with:
+Set `AGENTM_TRAJECTORY_DSN` for PostgreSQL or
+`AGENTM_TRAJECTORY_DIR` for JSONL. Without either setting, the normal AgentM
+configuration resolver selects the project/user trajectory backend. OTLP and
+ClickHouse contain diagnostic events and spans, not a second trajectory copy.
+Inspect the selected trajectory store with:
 
 ```bash
 agentm trace messages --session <session-id> --format text
@@ -174,14 +183,24 @@ Session ID is logged at agent start:
 
 The adapter owns and packages
 `contrib/scenarios/harbor/scenario.yaml`. Harbor injects its
-`BaseEnvironment` before the SDK session is created, and that manifest selects
-the matching operations atom. It is intentionally separate from source-tree
-CLI scenarios: installing the Harbor extra must not change or shadow the
-default SDK composition.
+`BaseEnvironment` as explicit `EnvironmentOperations` and `ResourceWriter`
+ports before the SDK session is created. The manifest selects only reusable
+AgentM policy/tool atoms. It is intentionally separate from source-tree CLI
+scenarios: installing the Harbor extra must not change or shadow the default
+SDK composition.
+
+## Human interrupt
+
+`agentm-interrupt <session-id> <message>` queues the operator message with
+immediate priority and cancels the active model/tool request with the
+`submit_interrupt` reason. The command succeeds only after the running session
+acknowledges the message.
 
 ## Components
 
 | File | Role |
 |---|---|
 | `external_agent.py` | `BaseAgent` subclass; sets up env vars, creates AgentM session, reports token counts |
-| `harbor_ops.py` | Operations atom; `HarborBashOperations` wraps `environment.exec()` (forwarding cwd + env), `HarborResourceWriter` wraps `upload_file()`/`download_file()` via tempfile (Harbor interface constraint) |
+| `harbor_ops.py` | Host bindings; `HarborEnvironmentOperations` wraps sandbox identity and execution, while `HarborResourceWriter` wraps transfer APIs |
+| `human_interrupt.py` | Presenter-owned Unix socket that uses the public immediate-prompt API |
+| `interrupt_cli.py` | Sends one interrupt and verifies the session acknowledgement |

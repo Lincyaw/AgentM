@@ -118,7 +118,11 @@ class ExtensionManifest(BaseModel):
     otherwise independent atoms; ``requires`` wins.
     """
 
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        frozen=True,
+        arbitrary_types_allowed=True,
+        extra="forbid",
+    )
 
     name: str
     description: str

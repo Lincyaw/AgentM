@@ -1,68 +1,90 @@
-"""Harbor external agent — AgentM runs locally, tool calls in sandbox.
-
-Usage::
-
-    harbor trial start -p <task> \\
-        --agent-import-path agentm_harbor:ExternalAgentMAgent \\
-        --ae AGENTM_MODEL=doubao \\
-        --ae AGENTM_API_KEY=... \\
-        --ae AGENTM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-
-Trajectory is managed by AgentM's own observability layer (OTLP / JSONL),
-not Harbor's ATIF format.  Inspect with ``agentm trace``.
-"""
+"""Harbor external agent backed by an embedded AgentM SDK session."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
-import yaml
+from agentm import (
+    AgentSession,
+    AgentSessionConfig,
+    ScenarioLoader,
+    ScenarioSpec,
+    load_scenario_manifest,
+)
+from agentm.config import DefaultSessionSpecResolver
+from agentm.storage.trajectory import resolve_trajectory_store_or_create
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from loguru import logger
 
-from agentm_harbor.harbor_ops import set_harbor_environment
+from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
+from agentm_harbor.human_interrupt import HumanInterruptServer
 
 SCENARIO = "arl:harbor"
-def _find_scenario_yaml() -> Path:
-    env = os.environ.get("AGENTM_SCENARIO_YAML", "")
-    if env:
-        return Path(env)
-    pkg_dir = Path(__file__).parent
-    for candidate in [pkg_dir / "scenario.yaml", pkg_dir / "../../scenario.yaml"]:
-        if candidate.exists():
+
+
+def _find_scenario_yaml(configured: str | None = None) -> Path:
+    if configured:
+        return Path(configured).expanduser()
+    package_dir = Path(__file__).parent
+    for candidate in (
+        package_dir / "scenario.yaml",
+        package_dir.parents[1] / "scenario.yaml",
+    ):
+        if candidate.is_file():
             return candidate
-    raise FileNotFoundError("scenario.yaml not found next to agentm_harbor package")
+    raise FileNotFoundError("scenario.yaml not found in agentm_harbor package")
 
 
-def _load_scenario(scenario: str) -> "ScenarioSpec":
-    from agentm.core.abi import ScenarioSpec
+def _load_scenario(scenario: str) -> ScenarioSpec:
+    return load_scenario_manifest(
+        _find_scenario_yaml(),
+        requested_name=scenario,
+    )
 
-    manifest_path = _find_scenario_yaml().resolve()
 
-    with open(manifest_path) as f:
-        manifest = yaml.safe_load(f)
+def _scenario_loader(path: Path) -> ScenarioLoader:
+    def load(scenario: str) -> ScenarioSpec:
+        return load_scenario_manifest(
+            path,
+            requested_name=scenario,
+        )
 
-    specs = []
-    for ext in manifest.get("extensions", []):
-        specs.append((ext["module"], ext.get("config", {})))
+    return load
 
-    return ScenarioSpec(extensions=specs, base_dir=str(manifest_path.parent))
+
+def _effective_env(
+    process_env: Mapping[str, str],
+    overrides: Mapping[str, str],
+) -> dict[str, str]:
+    values = dict(process_env)
+    values.update(overrides)
+    return values
+
+
+def _user_config_path(env: Mapping[str, str]) -> Path:
+    home = env.get("AGENTM_HOME")
+    if home:
+        return Path(home).expanduser() / "config.toml"
+    return Path.home() / ".agentm" / "config.toml"
+
+
+def _raise_run_errors(errors: list[BaseException]) -> None:
+    if not errors:
+        return
+    if len(errors) == 1:
+        raise errors[0]
+    raise BaseExceptionGroup(
+        "AgentM Harbor run failed during multiple lifecycle phases",
+        errors,
+    )
 
 
 class ExternalAgentMAgent(BaseAgent):
-    """AgentM as a Harbor external agent.
-
-    The agent process runs on the host; bash and file tool calls route
-    through Harbor's ``BaseEnvironment`` into the sandbox container.
-    """
-
-    def __init__(self, logs_dir: Path, *args: Any, **kwargs: Any) -> None:
-        self._reasoning_effort: str | None = kwargs.pop("reasoning_effort", None)
-        super().__init__(logs_dir, *args, **kwargs)
+    """Run AgentM locally while Harbor owns the sandbox lifecycle."""
 
     @staticmethod
     def name() -> str:
@@ -72,7 +94,7 @@ class ExternalAgentMAgent(BaseAgent):
         return None
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        pass
+        del environment
 
     async def run(
         self,
@@ -80,82 +102,98 @@ class ExternalAgentMAgent(BaseAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        from agentm import AgentSession, AgentSessionConfig
-
-        set_harbor_environment(environment)
-
-        env_patch = dict(self.extra_env)
-        api_key = env_patch.get("AGENTM_API_KEY", os.environ.get("AGENTM_API_KEY", ""))
-        if api_key:
-            env_patch.setdefault("OPENAI_API_KEY", api_key)
-        base_url = env_patch.get("AGENTM_BASE_URL", os.environ.get("AGENTM_BASE_URL", ""))
-        if base_url:
-            env_patch.setdefault("OPENAI_BASE_URL", base_url)
-        if self._reasoning_effort:
-            env_patch.setdefault("AGENTM_REASONING_EFFORT", self._reasoning_effort)
-
-        saved: dict[str, str | None] = {}
-        for key, val in env_patch.items():
-            saved[key] = os.environ.get(key)
-            os.environ[key] = val
-
-        model = self.model_name or env_patch.get("AGENTM_MODEL") or os.environ.get("AGENTM_MODEL")
-        llm_config: dict[str, Any] = {"name": "harbor"}
-        if model:
-            llm_config["model"] = model
-        api_key_val = saved.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-        if api_key_val:
-            llm_config["api_key"] = api_key_val
-        base_url_val = saved.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "")
-        if base_url_val:
-            llm_config["base_url"] = base_url_val
-        config = AgentSessionConfig(
-            cwd=os.getcwd(),
-            scenario=SCENARIO,
-            scenario_loader=_load_scenario,
-            extra_extensions=[
-                ("agentm.extensions.builtin.llm_openai", llm_config),
-            ],
+        effective_env = _effective_env(os.environ, self.extra_env)
+        if "AGENTM_API_KEY" not in effective_env:
+            openai_api_key = effective_env.get("OPENAI_API_KEY")
+            if openai_api_key:
+                effective_env["AGENTM_API_KEY"] = openai_api_key
+        if "AGENTM_BASE_URL" not in effective_env:
+            openai_base_url = effective_env.get("OPENAI_BASE_URL")
+            if openai_base_url:
+                effective_env["AGENTM_BASE_URL"] = openai_base_url
+        if self.model_name:
+            effective_env["AGENTM_PROVIDER"] = self.model_name
+        scenario_path = _find_scenario_yaml(effective_env.get("AGENTM_SCENARIO_YAML"))
+        spec_resolver = DefaultSessionSpecResolver(
+            user_config=_user_config_path(effective_env),
+            env=effective_env,
         )
-
-        session = await AgentSession.create(config)
-        store_type = type(session.store).__name__ if session.store else "NONE"
-        logger.info("agentm-external: session {} started (store={})", session.session_id, store_type)
-
+        trajectory = resolve_trajectory_store_or_create(
+            str(self.logs_dir),
+            env=effective_env,
+        )
+        operations, writer = harbor_bindings(
+            environment,
+            HarborOpsConfig(work_dir="/"),
+        )
         try:
-            await session.run(instruction)
-        except Exception as exc:
-            logger.error("agentm-external: session {} run failed: {}", session.session_id, exc)
+            session = await AgentSession.create(
+                AgentSessionConfig(
+                    cwd="/",
+                    scenario=SCENARIO,
+                    scenario_loader=_scenario_loader(scenario_path),
+                    spec_resolver=spec_resolver,
+                    environment_operations=operations,
+                    resource_writer=writer,
+                    trajectory_store=trajectory.store,
+                )
+            )
+        except BaseException as creation_error:
+            try:
+                trajectory.close()
+            except Exception as close_error:
+                raise BaseExceptionGroup(
+                    "AgentM session creation and trajectory cleanup failed",
+                    (creation_error, close_error),
+                ) from creation_error
             raise
+
+        errors: list[BaseException] = []
+        turns = session.get_turns()
+        try:
+            interrupt = HumanInterruptServer(session)
+            await interrupt.start()
+            try:
+                session.register_cleanup(interrupt.stop)
+            except BaseException:
+                await interrupt.stop()
+                raise
+            logger.info(
+                "agentm-external: session {} started",
+                session.session_id,
+            )
+            await session.run(instruction)
+            await session.idle()
+        except BaseException as run_error:
+            errors.append(run_error)
+            logger.error(
+                "agentm-external: session {} failed: {}",
+                session.session_id,
+                run_error,
+            )
         finally:
             turns = session.get_turns()
+            context.n_input_tokens = sum(turn.meta.total_input_tokens for turn in turns)
+            context.n_output_tokens = sum(turn.meta.total_output_tokens for turn in turns)
+            context.n_cache_tokens = sum(
+                turn.meta.cache_read_tokens + turn.meta.cache_write_tokens for turn in turns
+            )
+            try:
+                await session.shutdown()
+            except BaseException as shutdown_error:
+                errors.append(shutdown_error)
+            try:
+                trajectory.close()
+            except Exception as close_error:
+                errors.append(close_error)
+
+        if not errors:
             logger.info(
-                "agentm-external: session {} shutting down, {} turns in trajectory",
-                session.session_id, len(turns),
+                "agentm-external: session {} completed with {} turn(s)",
+                session.session_id,
+                len(turns),
             )
-            await session.shutdown()
-            for key, prev in saved.items():
-                if prev is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = prev
+        _raise_run_errors(errors)
 
-        logger.info("agentm-external: session {} done", session.session_id)
 
-        self._populate_token_counts(context, session.session_id)
-
-    def _populate_token_counts(self, context: AgentContext, session_id: str) -> None:
-        try:
-            from agentm.core.observability import clickhouse as ch
-
-            url = ch.get_url()
-            if url is None:
-                return
-            usage = ch.usage(url, session_id) or {}
-            context.n_input_tokens = usage.get("input_tokens", 0)
-            context.n_output_tokens = usage.get("output_tokens", 0)
-            context.n_cache_tokens = (
-                usage.get("cache_read", 0) + usage.get("cache_write", 0)
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("token count lookup failed: {}", exc)
+__all__ = ("ExternalAgentMAgent",)

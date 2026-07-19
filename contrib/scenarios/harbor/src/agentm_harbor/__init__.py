@@ -2,7 +2,7 @@
 
 AgentM runs on the host; tool calls (bash, file I/O) route through
 Harbor's ``BaseEnvironment`` into the sandbox container.  Trajectory
-is managed locally by AgentM's own trace layer.
+is managed by AgentM's selected ``TrajectoryStore``.
 
 ::
 
