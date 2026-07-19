@@ -1,10 +1,7 @@
 """Anthropic Messages API provider — native ``StreamFn`` implementation.
 
-This module is the first concrete LLM provider for AgentM v2. It plugs into
-the kernel via the ``StreamFn`` Protocol described in
-``.claude/designs/pluggable-architecture.md`` §3.1 and is loaded through the
-extension mechanism described in ``.claude/designs/extension-as-scenario.md``
-§7 (LLM providers as extensions).
+This module plugs into the kernel via the ``StreamFn`` Protocol and extension
+composition contracts described in ``docs/refactor-abstract-inventory.md``.
 
 Boundaries:
 

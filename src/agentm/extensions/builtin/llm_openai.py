@@ -3,10 +3,8 @@
 Sibling of :mod:`agentm.extensions.builtin.llm_anthropic` for OpenAI-compatible endpoints (the
 official OpenAI API, plus proxies that speak the same protocol: LiteLLM,
 DeepSeek, Doubao Ark, Together, Fireworks, vLLM, Ollama, …). Plugs into the
-kernel via the ``StreamFn`` Protocol described in
-``.claude/designs/pluggable-architecture.md`` §3.1 and is loaded through the
-extension mechanism described in ``.claude/designs/extension-as-scenario.md``
-§7 (LLM providers as extensions).
+kernel via the ``StreamFn`` Protocol and extension composition contracts
+described in ``docs/refactor-abstract-inventory.md``.
 
 Boundaries:
 
@@ -495,8 +493,8 @@ class _StreamState:
 def _map_finish_reason(raw: str | None) -> TerminationHint | None:
     """Translate OpenAI ``finish_reason`` into a kernel ``TerminationHint``.
 
-    Per `.claude/designs/pluggable-architecture.md` §3.1, providers own the
-    vocabulary translation so the kernel never inspects vendor strings.
+    Providers own this vocabulary translation so the kernel never inspects
+    vendor strings, per ``docs/refactor-abstract-inventory.md``.
     """
 
     if raw is None:

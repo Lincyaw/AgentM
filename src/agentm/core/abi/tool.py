@@ -1,8 +1,8 @@
 """Kernel tool contract.
 
-Implements §3.2 (Tool Execution boundary) of
-`.claude/designs/pluggable-architecture.md` — the bare ``Tool`` Protocol the
-agent loop sees, plus the ``ToolResult`` / ``ToolOutcome`` data shapes.
+Implements the Tool Execution boundary in
+``docs/refactor-abstract-inventory.md``: the bare ``Tool`` Protocol the agent
+loop sees, plus the ``ToolResult`` / ``ToolOutcome`` data shapes.
 
 ``FunctionTool`` is a concrete adapter that wraps an async callable — it
 lives in this module alongside the Protocol for ergonomic ``from

@@ -1,9 +1,8 @@
 """Kernel message data model.
 
 Implements the message types that flow through the agent loop, per
-`.claude/designs/pluggable-architecture.md` §3 (Five Pluggability Axes) — the
-data shape that crosses the LLM Stream boundary (§3.1) and the Tool Execution
-boundary (§3.2).
+``docs/refactor-abstract-inventory.md``: the data shape that crosses the LLM
+stream and tool-execution boundaries.
 
 Design constraints:
 - Plain ``@dataclass(slots=True, frozen=True)`` — no pydantic, no langchain.
