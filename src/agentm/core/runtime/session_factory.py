@@ -159,11 +159,7 @@ def _resolve_extensions(
         configured: list[ExtensionSpec] = []
         for spec in resolved:
             manifest = _load_manifest(spec)
-            atom_name = (
-                manifest.name
-                if manifest is not None
-                else spec.module_path
-            )
+            atom_name = manifest.name if manifest is not None else spec.module_path
             configured.append(
                 spec.with_config(
                     {
@@ -229,18 +225,13 @@ def _extension_plan(
         if name in by_name:
             previous = by_name[name]
             raise ValueError(
-                f"duplicate atom {name!r}: {previous.module_path!r} and "
-                f"{module_path!r}"
+                f"duplicate atom {name!r}: {previous.module_path!r} and {module_path!r}"
             )
         items.append(item)
         by_name[name] = item
 
     available = set(available_capabilities or ())
-    plan_capabilities = {
-        capability
-        for item in items
-        for capability in item.provides
-    }
+    plan_capabilities = {capability for item in items for capability in item.provides}
     missing: dict[str, list[str]] = {}
     for item in items:
         for requirement in item.requires:
@@ -393,8 +384,7 @@ def _atom_activation(
         requires=tuple(item.requires),
         registers=tuple(item.registers),
         required_capabilities=tuple(
-            requirement_key(requirement)
-            for requirement in item.requires
+            requirement_key(requirement) for requirement in item.requires
         ),
         provided_capabilities=tuple(item.provides),
         config_fingerprint=_config_fingerprint(
@@ -479,9 +469,7 @@ class SessionBuildConfig:
     trajectory_node_store: TrajectoryNodeStore | None = None
     effect_scope: EffectScope | None = None
     environment_operations: EnvironmentOperations | None = None
-    environment_restore_failure_handler: (
-        EnvironmentRestoreFailureHandler | None
-    ) = None
+    environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
     atom_configs: dict[str, dict[str, Any]] | None = None
@@ -531,9 +519,7 @@ async def create_session(config: SessionBuildConfig) -> Session:
     trajectory_node_store = config.trajectory_node_store
     effect_scope = config.effect_scope
     environment_operations = config.environment_operations
-    environment_restore_failure_handler = (
-        config.environment_restore_failure_handler
-    )
+    environment_restore_failure_handler = config.environment_restore_failure_handler
     versioned_resource_store = config.versioned_resource_store
     atom_catalog = config.atom_catalog
     atom_configs = config.atom_configs
@@ -585,37 +571,39 @@ async def create_session(config: SessionBuildConfig) -> Session:
     else:
         ctx = session_context
 
-    session = Session(SessionRuntimeConfig(
-        ctx=ctx,
-        trajectory=Trajectory(turns=initial_turns),
-        bus=bus,
-        stream_fn=stream_fn,
-        model=model,
-        system=system,
-        store=store,
-        graph=graph,
-        tools=list(tools or ()),
-        context_policies=list(context_policies or ()),
-        trigger_renderers=dict(trigger_renderers or {}),
-        codec=codec,
-        max_turns=max_turns,
-        max_tool_calls=max_tool_calls,
-        tool_allowlist=tool_allowlist,
-        thinking=thinking,
-        cancel_signal=cancel_signal,
-        tool_executor=tool_executor,
-        tool_orchestrator=tool_orchestrator,
-        permission_policy=permission_policy,
-        resource_reader=resource_reader,
-        resource_store=resource_store,
-        trajectory_node_store=trajectory_node_store,
-        versioned_resource_store=versioned_resource_store,
-        environment_restore_failure_handler=environment_restore_failure_handler,
-        provider_identity=provider_identity,
-        services=resolved_services,
-        cwd=cwd,
-        purpose=purpose,
-    ))
+    session = Session(
+        SessionRuntimeConfig(
+            ctx=ctx,
+            trajectory=Trajectory(turns=initial_turns),
+            bus=bus,
+            stream_fn=stream_fn,
+            model=model,
+            system=system,
+            store=store,
+            graph=graph,
+            tools=list(tools or ()),
+            context_policies=list(context_policies or ()),
+            trigger_renderers=dict(trigger_renderers or {}),
+            codec=codec,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
+            tool_allowlist=tool_allowlist,
+            thinking=thinking,
+            cancel_signal=cancel_signal,
+            tool_executor=tool_executor,
+            tool_orchestrator=tool_orchestrator,
+            permission_policy=permission_policy,
+            resource_reader=resource_reader,
+            resource_store=resource_store,
+            trajectory_node_store=trajectory_node_store,
+            versioned_resource_store=versioned_resource_store,
+            environment_restore_failure_handler=environment_restore_failure_handler,
+            provider_identity=provider_identity,
+            services=resolved_services,
+            cwd=cwd,
+            purpose=purpose,
+        )
+    )
     if resource_writer is not None:
         session.register_resource_writer(resource_writer, replace=True)
     if effect_scope is not None:
@@ -670,9 +658,7 @@ async def create_from_config(
     """Create a root session from the public SDK config dataclass."""
 
     max_turns = config.loop_config.max_turns if config.loop_config else None
-    max_tool_calls = (
-        config.loop_config.max_tool_calls if config.loop_config else None
-    )
+    max_tool_calls = config.loop_config.max_tool_calls if config.loop_config else None
     services = ServiceRegistry()
     if config.experiment is not None:
         experiment = freeze_json(config.experiment)
@@ -709,63 +695,67 @@ async def create_from_config(
             ResolvedSessionSpec,
             scope="session",
         )
-    session = await create_session(SessionBuildConfig(
-        scenario=(
-            resolved_spec.scenario
-            if resolved_spec is not None
-            else config.scenario
-        ),
-        extensions=(
-            list(resolved_spec.extensions)
-            if resolved_spec is not None
-            else config.extensions
-        ),
-        extra_extensions=config.extra_extensions,
-        provider=resolved_spec.provider if resolved_spec is not None else config.provider,
-        provider_resolver=config.provider_resolver,
-        provider_identity=(
-            restored_provider_identity
-            if restored_provider_identity is not None
-            else (
-                resolved_spec.provider_identity
+    session = await create_session(
+        SessionBuildConfig(
+            scenario=(
+                resolved_spec.scenario if resolved_spec is not None else config.scenario
+            ),
+            extensions=(
+                list(resolved_spec.extensions)
                 if resolved_spec is not None
-                else None
-            )
-        ),
-        stream_fn=config.stream_fn,
-        model=config.model,
-        system=config.system,
-        resource_reader=config.resource_reader,
-        resource_store=config.resource_store,
-        resource_writer=config.resource_writer,
-        tool_executor=config.tool_executor,
-        tool_orchestrator=config.tool_orchestrator,
-        permission_policy=config.permission_policy,
-        trajectory_node_store=config.trajectory_node_store,
-        effect_scope=config.effect_scope,
-        environment_restore_failure_handler=(
-            config.environment_restore_failure_handler
-        ),
-        versioned_resource_store=config.versioned_resource_store,
-        atom_catalog=config.atom_catalog,
-        atom_configs=_resolved_atom_config(resolved_spec, config.atom_config_overrides),
-        scenario_loader=config.scenario_loader,
-        cwd=config.cwd,
-        purpose=config.purpose,
-        store=config.store,
-        session_context=restored_context,
-        session_id=config.session_id,
-        root_session_id=config.root_session_id,
-        parent_session_id=config.parent_session_id,
-        bus=config.bus,
-        initial_turns=config.initial_turns,
-        services=services,
-        resolved_spec=resolved_spec,
-        max_turns=max_turns,
-        max_tool_calls=max_tool_calls,
-        tool_allowlist=config.tool_allowlist,
-        cancel_signal=config.cancel_signal,
-    ))
+                else config.extensions
+            ),
+            extra_extensions=config.extra_extensions,
+            provider=resolved_spec.provider
+            if resolved_spec is not None
+            else config.provider,
+            provider_resolver=config.provider_resolver,
+            provider_identity=(
+                restored_provider_identity
+                if restored_provider_identity is not None
+                else (
+                    resolved_spec.provider_identity
+                    if resolved_spec is not None
+                    else None
+                )
+            ),
+            stream_fn=config.stream_fn,
+            model=config.model,
+            system=config.system,
+            resource_reader=config.resource_reader,
+            resource_store=config.resource_store,
+            resource_writer=config.resource_writer,
+            tool_executor=config.tool_executor,
+            tool_orchestrator=config.tool_orchestrator,
+            permission_policy=config.permission_policy,
+            trajectory_node_store=config.trajectory_node_store,
+            effect_scope=config.effect_scope,
+            environment_restore_failure_handler=(
+                config.environment_restore_failure_handler
+            ),
+            versioned_resource_store=config.versioned_resource_store,
+            atom_catalog=config.atom_catalog,
+            atom_configs=_resolved_atom_config(
+                resolved_spec, config.atom_config_overrides
+            ),
+            scenario_loader=config.scenario_loader,
+            cwd=config.cwd,
+            purpose=config.purpose,
+            store=config.store,
+            session_context=restored_context,
+            session_id=config.session_id,
+            root_session_id=config.root_session_id,
+            parent_session_id=config.parent_session_id,
+            bus=config.bus,
+            initial_turns=config.initial_turns,
+            services=services,
+            resolved_spec=resolved_spec,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
+            tool_allowlist=config.tool_allowlist,
+            cancel_signal=config.cancel_signal,
+        )
+    )
 
     for tool in config.extra_tools:
         session.register_tool(tool)
@@ -788,7 +778,9 @@ async def create_child_session(
             raise TypeError("experiment config must be a JSON object")
         child_services.register("experiment", experiment, scope="tree")
     if config.loop_config is not None:
-        child_services.register(LOOP_BUDGET_SERVICE, config.loop_config, scope="session")
+        child_services.register(
+            LOOP_BUDGET_SERVICE, config.loop_config, scope="session"
+        )
     if config.scenario_loader is not None:
         child_services.register(
             SCENARIO_LOADER_SERVICE,
@@ -825,11 +817,7 @@ async def create_child_session(
     provider_spec = (
         resolved_spec.provider if resolved_spec is not None else config.provider
     )
-    if (
-        provider_spec is None
-        and config.stream_fn is None
-        and config.model is None
-    ):
+    if provider_spec is None and config.stream_fn is None and config.model is None:
         inherited_provider = parent.get_provider()
         if inherited_provider is not None:
             child_services.register(
@@ -840,9 +828,7 @@ async def create_child_session(
 
     scenario_loader = config.scenario_loader or _get_scenario_loader(child_services)
     inherit_parent_composition = (
-        resolved_spec is None
-        and config.scenario is None
-        and config.extensions is None
+        resolved_spec is None and config.scenario is None and config.extensions is None
     )
     if resolved_spec is not None:
         scenario = resolved_spec.scenario
@@ -887,14 +873,10 @@ async def create_child_session(
     )
 
     max_turns = config.loop_config.max_turns if config.loop_config else None
-    max_tool_calls = (
-        config.loop_config.max_tool_calls if config.loop_config else None
-    )
+    max_tool_calls = config.loop_config.max_tool_calls if config.loop_config else None
 
     if config.parent_cancellation not in {"inherit", "independent"}:
-        raise ValueError(
-            "parent_cancellation must be 'inherit' or 'independent'"
-        )
+        raise ValueError("parent_cancellation must be 'inherit' or 'independent'")
     parent_signal = (
         CompositeCancelSignal(
             parent._interrupt,
@@ -907,34 +889,36 @@ async def create_child_session(
     child_cancel_signal = (
         CompositeCancelSignal(parent_signal, config.cancel_signal)
         if parent_signal is not None and config.cancel_signal is not None
-        else config.cancel_signal if config.cancel_signal is not None else parent_signal
+        else config.cancel_signal
+        if config.cancel_signal is not None
+        else parent_signal
     )
 
-    child = Session(SessionRuntimeConfig(
-        ctx=child_ctx,
-        trajectory=Trajectory(turns=config.initial_turns),
-        bus=config.bus,
-        stream_fn=config.stream_fn or parent._stream_fn,
-        model=config.model or parent._model,
-        system=config.system if config.system is not None else parent.system,
-        store=child_store,
-        graph=parent.graph,
-        max_turns=max_turns,
-        max_tool_calls=max_tool_calls,
-        tool_allowlist=config.tool_allowlist,
-        cancel_signal=child_cancel_signal,
-        environment_restore_failure_handler=(
-            config.environment_restore_failure_handler
-        ),
-        provider_identity=(
-            resolved_spec.provider_identity
-            if resolved_spec is not None
-            else None
-        ),
-        services=child_services,
-        cwd=config.cwd or parent.ctx.cwd,
-        purpose=config.purpose,
-    ))
+    child = Session(
+        SessionRuntimeConfig(
+            ctx=child_ctx,
+            trajectory=Trajectory(turns=config.initial_turns),
+            bus=config.bus,
+            stream_fn=config.stream_fn or parent._stream_fn,
+            model=config.model or parent._model,
+            system=config.system if config.system is not None else parent.system,
+            store=child_store,
+            graph=parent.graph,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
+            tool_allowlist=config.tool_allowlist,
+            cancel_signal=child_cancel_signal,
+            environment_restore_failure_handler=(
+                config.environment_restore_failure_handler
+            ),
+            provider_identity=(
+                resolved_spec.provider_identity if resolved_spec is not None else None
+            ),
+            services=child_services,
+            cwd=config.cwd or parent.ctx.cwd,
+            purpose=config.purpose,
+        )
+    )
     if config.resource_writer is not None:
         child.register_resource_writer(config.resource_writer, replace=True)
     if config.resource_reader is not None:

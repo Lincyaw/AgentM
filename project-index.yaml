@@ -90,6 +90,7 @@ requirements:
       - path: src/agentm/core/runtime/driver.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/runtime/session_core.py
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_meta.py
       - path: src/agentm/core/runtime/stores/query.py
