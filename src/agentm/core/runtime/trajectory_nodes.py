@@ -169,6 +169,7 @@ class InMemoryTrajectoryNodeStore:
 
     def __init__(self) -> None:
         self._nodes: dict[str, list[TrajectoryNode]] = {}
+        self._node_ids: set[str] = set()
         self._content_states: dict[tuple[str, str], ContentReplacementState] = {}
         self._prompt_cache_states: dict[tuple[str, str], PromptCacheState] = {}
 
@@ -183,20 +184,21 @@ class InMemoryTrajectoryNodeStore:
     ) -> None:
         if not nodes:
             return
-        current = self._nodes.setdefault(session_id, [])
+        current = self._nodes.get(session_id, [])
         expected = current[-1].seq + 1 if current else 0
         copied = list(nodes)
+        batch_ids: set[str] = set()
         for node in copied:
             if node.session_id != session_id:
                 raise ValueError("node session_id does not match append session")
             if node.seq != expected:
                 raise ValueError(f"node seq {node.seq} does not follow {expected - 1}")
+            if node.id in self._node_ids or node.id in batch_ids:
+                raise ValueError(f"duplicate trajectory node id: {node.id}")
+            batch_ids.add(node.id)
             expected += 1
-        existing_ids = {node.id for node in current}
-        duplicates = existing_ids.intersection(node.id for node in copied)
-        if duplicates:
-            raise ValueError(f"duplicate trajectory node id: {sorted(duplicates)[0]}")
-        current.extend(copied)
+        self._nodes.setdefault(session_id, []).extend(copied)
+        self._node_ids.update(batch_ids)
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         if query.session_id:

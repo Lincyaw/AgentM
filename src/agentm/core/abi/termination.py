@@ -28,6 +28,57 @@ Variants are intentionally narrow:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar, Literal
+
+
+@dataclass(frozen=True, slots=True)
+class TerminationCause:
+    """Typed, durable reason why a committed turn ended."""
+
+    overridable: ClassVar[bool] = True
+    session_terminal: ClassVar[bool] = False
+
+
+@dataclass(frozen=True, slots=True)
+class ModelEndTurn(TerminationCause):
+    """The model chose to finish this turn; the session remains active."""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolTerminated(TerminationCause):
+    """A tool explicitly terminated the session."""
+
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+    tool_name: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MaxTurnsExhausted(TerminationCause):
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+
+
+@dataclass(frozen=True, slots=True)
+class SignalAborted(TerminationCause):
+    """The current turn was interrupted; the session remains reusable."""
+
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = False
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderTruncated(TerminationCause):
+    kind: Literal["max_tokens", "error"] = "max_tokens"
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetExhausted(TerminationCause):
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+    detail: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,11 +150,18 @@ TerminationHint = (
 
 __all__ = [
     "Aborted",
+    "BudgetExhausted",
     "EndTurn",
     "MaxTokens",
+    "MaxTurnsExhausted",
+    "ModelEndTurn",
     "PauseTurn",
     "ProviderError",
+    "ProviderTruncated",
+    "SignalAborted",
+    "TerminationCause",
     "TerminationHint",
+    "ToolTerminated",
     "ToolUseExpected",
     "VendorSpecific",
 ]

@@ -15,7 +15,7 @@ from agentm.core.runtime.catalog import (
     InMemoryAtomCatalog,
     InMemoryVersionedResourceStore,
 )
-from agentm.core.runtime.session import AgentSession, Session
+from agentm.core.runtime.session import Session
 from agentm.core.runtime.execution import Execution
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, QueueClosed
@@ -28,7 +28,6 @@ from agentm.core.runtime.extension import load_extension, ExtensionLoadError
 __all__ = [
     "Execution",
     "ExtensionLoadError",
-    "AgentSession",
     "InMemoryAtomCatalog",
     "InMemorySessionGraph",
     "InMemoryTrajectoryStore",

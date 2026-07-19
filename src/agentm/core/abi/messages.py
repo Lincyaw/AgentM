@@ -15,15 +15,30 @@ Design constraints:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import Any, Literal, TypeAlias
 
 from .termination import TerminationHint
 
 MessageVisibility = Literal["visible", "hidden", "replay_only"]
 MessageTokenAccounting = Literal["normal", "exclude", "metadata_only"]
 MessageReplayPolicy = Literal["include", "skip", "metadata_only"]
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
+
+
+def freeze_json(value: Any) -> JsonValue:
+    """Defensively copy a JSON value into immutable containers."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_json(item) for item in value)
+    raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,7 +62,10 @@ class MessageMeta:
     target_session_id: str | None = None
     target_agent_id: str | None = None
     mode: str | None = None
-    tags: Mapping[str, object] = field(default_factory=dict)
+    tags: Mapping[str, JsonValue] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tags", freeze_json(self.tags))
 
 
 DEFAULT_MESSAGE_META = MessageMeta()
@@ -94,7 +112,10 @@ class ToolCallBlock:
     type: Literal["tool_call"]
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", freeze_json(self.arguments))
 
 
 @dataclass(slots=True, frozen=True)
@@ -103,10 +124,14 @@ class ToolResultBlock:
 
     type: Literal["tool_result"]
     tool_call_id: str
-    content: list[TextContent | ImageContent]
+    content: Sequence[TextContent | ImageContent]
     is_error: bool = False
     deterministic: bool = True
-    extras: Any = None
+    extras: JsonValue = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
+        object.__setattr__(self, "extras", freeze_json(self.extras))
 
 
 # Discriminated union of content blocks that can appear inside an assistant
@@ -130,9 +155,12 @@ class UserMessage:
     """A message authored by the user (or a synthetic user-side observation)."""
 
     role: Literal["user"]
-    content: list[TextContent | ImageContent]
+    content: Sequence[TextContent | ImageContent]
     timestamp: float
     meta: MessageMeta = field(default_factory=MessageMeta)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
 
 
 @dataclass(slots=True, frozen=True)
@@ -150,12 +178,15 @@ class AssistantMessage:
     """
 
     role: Literal["assistant"]
-    content: list[AssistantContent]
+    content: Sequence[AssistantContent]
     timestamp: float
     stop_reason: str | None = None
     termination: TerminationHint | None = None
     usage: Usage | None = None
     meta: MessageMeta = field(default_factory=MessageMeta)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
 
 
 @dataclass(slots=True, frozen=True)
@@ -167,9 +198,12 @@ class ToolResultMessage:
     """
 
     role: Literal["tool_result"]
-    content: list[ToolResultBlock]
+    content: Sequence[ToolResultBlock]
     timestamp: float
     meta: MessageMeta = field(default_factory=MessageMeta)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content", tuple(self.content))
 
 
 # Discriminated union of every message kind the agent loop manipulates.
@@ -207,7 +241,7 @@ def synthetic_user_message(
     visibility: MessageVisibility = "hidden",
     no_response_requested: bool = False,
     timestamp: float = 0.0,
-    tags: Mapping[str, object] | None = None,
+    tags: Mapping[str, JsonValue] | None = None,
 ) -> UserMessage:
     """Build a user-side synthetic message with explicit replay/UI metadata."""
 
@@ -250,6 +284,7 @@ __all__ = [
     "AssistantContent",
     "AssistantMessage",
     "ImageContent",
+    "JsonValue",
     "DEFAULT_MESSAGE_META",
     "TerminationHint",
     "MessageMeta",
@@ -266,4 +301,5 @@ __all__ = [
     "synthetic_user_message",
     "text_message",
     "tool_result",
+    "freeze_json",
 ]

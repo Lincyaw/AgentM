@@ -41,13 +41,23 @@ class Trajectory:
         self._active = Execution(index=len(self._turns), trigger=trigger)
         return self._active
 
-    def commit(self, outcome: Outcome, meta: TurnMeta) -> Turn:
-        """Freeze the active Execution into a Turn and append it."""
+    def prepare_commit(self, outcome: Outcome, meta: TurnMeta) -> Turn:
+        """Freeze the active execution without making the Turn visible yet."""
         if self._active is None:
             raise StateError("no active execution to commit")
-        turn = self._active.commit(outcome, meta)
+        return self._active.commit(outcome, meta)
+
+    def finalize_commit(self, turn: Turn) -> None:
+        """Publish a prepared Turn after its durable append succeeds."""
+        if self._active is None:
+            raise StateError("no active execution to finalize")
         self._turns.append(turn)
         self._active = None
+
+    def commit(self, outcome: Outcome, meta: TurnMeta) -> Turn:
+        """Freeze and immediately publish the active Execution."""
+        turn = self.prepare_commit(outcome, meta)
+        self.finalize_commit(turn)
         return turn
 
     def abandon(self) -> None:
@@ -56,12 +66,6 @@ class Trajectory:
             return
         self._active.abandon()
         self._active = None
-
-    def find_turn(self, ref: TurnRef) -> Turn | None:
-        """Look up a committed turn by index (int) or id (str)."""
-        if isinstance(ref, int):
-            return next((t for t in self._turns if t.index == ref), None)
-        return next((t for t in self._turns if t.id == ref), None)
 
     def prefix(self, ref: TurnRef) -> Trajectory:
         """Return a new Trajectory with committed turns up to and including ``ref``."""

@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 
 from agentm.core.lib.paths import expand_path
-from agentm.core.lib.user_config import agentm_home_dir
 
+_ENV_AGENTM_HOME = "AGENTM_HOME"
 _ENV_OBSERVABILITY_DIR = "AGENTM_OBSERVABILITY_DIR"
 
 
@@ -20,11 +20,14 @@ def resolve_observability_dir(cwd: str | Path | None = None) -> Path:
     """Return the observability directory, honoring AGENTM_OBSERVABILITY_DIR.
 
     When the env var is set, expands environment variables and ``~``.
-    When unset, falls back to ``$AGENTM_HOME/observability`` (usually
-    ``~/.agentm/observability``). ``cwd`` is accepted for API compatibility.
+    When unset, falls back to ``$AGENTM_HOME/observability`` and then
+    ``~/.agentm/observability``. ``cwd`` is accepted for API compatibility.
     """
     del cwd
     env_dir = os.environ.get(_ENV_OBSERVABILITY_DIR)
     if env_dir:
         return expand_path(env_dir)
-    return agentm_home_dir() / "observability"
+    home = os.environ.get(_ENV_AGENTM_HOME)
+    if home:
+        return expand_path(home) / "observability"
+    return Path.home() / ".agentm" / "observability"

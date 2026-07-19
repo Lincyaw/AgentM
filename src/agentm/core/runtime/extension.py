@@ -6,19 +6,19 @@ Atoms receive the Session object directly.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import inspect
+import time
 from collections.abc import Awaitable
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-class ExtensionLoadError(Exception):
-    """Raised when an extension module fails to load or install."""
+from loguru import logger
 
-    def __init__(self, module_path: str, cause: BaseException | None = None) -> None:
-        self.module_path = module_path
-        self.cause = cause
-        super().__init__(f"failed to load extension {module_path!r}: {cause}")
+from agentm.core.abi.errors import ExtensionLoadError
+from agentm.core.abi.events import ExtensionInstallEvent
+
 
 _INSTALLING_EXTENSION: ContextVar[str | None] = ContextVar(
     "_installing_extension", default=None
@@ -27,6 +27,56 @@ _INSTALLING_EXTENSION: ContextVar[str | None] = ContextVar(
 
 def current_installing_extension() -> str:
     return _INSTALLING_EXTENSION.get() or ""
+
+
+async def install_extension(
+    api: Any,
+    module_path: str,
+    config: dict[str, Any] | None = None,
+    *,
+    trigger: str = "session_start",
+) -> None:
+    """Install one extension and emit the standard install lifecycle event."""
+
+    resolved_config = dict(config or {})
+    started_ns = time.perf_counter_ns()
+    name = module_path.rsplit(".", 1)[-1]
+    await api.bus.emit(
+        ExtensionInstallEvent.CHANNEL,
+        ExtensionInstallEvent(
+            name=name,
+            module_path=module_path,
+            phase="start",
+            config=resolved_config,
+            trigger=trigger,
+        ),
+    )
+    error: str | None = None
+    try:
+        result = load_extension(module_path, api, resolved_config)
+        if inspect.isawaitable(result):
+            await result
+        installed = getattr(api, "installed_extensions", None)
+        if isinstance(installed, list):
+            installed.append(module_path)
+        logger.debug("installed atom: {}", module_path)
+    except Exception as exc:
+        error = str(exc)
+        logger.exception("failed to install atom: {}", module_path)
+        raise
+    finally:
+        await api.bus.emit(
+            ExtensionInstallEvent.CHANNEL,
+            ExtensionInstallEvent(
+                name=name,
+                module_path=module_path,
+                phase="error" if error else "end",
+                config=resolved_config,
+                duration_ns=time.perf_counter_ns() - started_ns,
+                trigger=trigger,
+                error=error,
+            ),
+        )
 
 
 def load_extension(
@@ -45,6 +95,9 @@ def load_extension(
     Raises ``ExtensionLoadError`` on any failure.
     """
 
+    if validate:
+        validate_extension_source(module_path)
+
     try:
         module = importlib.import_module(module_path)
     except Exception as exc:  # noqa: BLE001
@@ -56,9 +109,6 @@ def load_extension(
             module_path,
             AttributeError(f"module {module_path!r} has no callable 'install' symbol"),
         )
-
-    if validate:
-        _validate_on_load(module, module_path)
 
     # Auto-validate config via MANIFEST.config_schema (Pydantic model class).
     resolved_config: Any = config
@@ -125,44 +175,68 @@ def _format_config_validation_error(schema_cls: type[Any], exc: BaseException) -
     return f"config for {schema_cls.__name__} is invalid: {exc}"
 
 
-def _validate_on_load(module: Any, module_path: str) -> None:
-    """Run AST validation on *module*'s source before ``install`` runs."""
+def validate_extension_source(module_path: str) -> None:
+    """Run AST validation before importing an atom module."""
 
     try:
         from agentm.extensions.validate import validate_atom_file, validate_atom_package
-    except ImportError:
-        return
-
-    src_file_str = getattr(module, "__file__", None)
-    if src_file_str is None:
-        return
-    src_file = Path(src_file_str)
-
-    if src_file.name == "__init__.py":
-        package_dir = src_file.parent
-        issues = validate_atom_package(
-            package_dir,
-            module_path=module_path,
-            known_extension_names=set(),
-        )
-    else:
-        issues = validate_atom_file(
-            src_file,
-            module_path=module_path,
-            known_extension_names=set(),
-        )
-
-    blocking = [i for i in issues if i.severity == "error"]
-    if blocking:
-        msg = "; ".join(f"[{i.rule}] {i.message}" for i in blocking[:5])
+    except ImportError as exc:
         raise ExtensionLoadError(
             module_path,
-            RuntimeError(f"contract violation: {msg}"),
-        )
+            RuntimeError("extension validator unavailable"),
+        ) from exc
+
+    try:
+        spec = importlib.util.find_spec(module_path)
+    except Exception as exc:  # noqa: BLE001
+        raise ExtensionLoadError(module_path, exc) from exc
+    if spec is None:
+        return
+
+    issues = []
+    if spec.submodule_search_locations:
+        for package_dir in spec.submodule_search_locations:
+            issues.extend(
+                validate_atom_package(
+                    package_dir,
+                    module_path=module_path,
+                    known_extension_names=set(),
+                )
+            )
+    elif spec.origin is not None:
+        src_file = Path(spec.origin)
+        if src_file.suffix != ".py":
+            return
+        if src_file.name == "__init__.py":
+            issues = validate_atom_package(
+                src_file.parent,
+                module_path=module_path,
+                known_extension_names=set(),
+            )
+        else:
+            issues = validate_atom_file(
+                src_file,
+                module_path=module_path,
+                known_extension_names=set(),
+            )
+    _raise_blocking_validation_issues(module_path, issues)
+
+
+def _raise_blocking_validation_issues(module_path: str, issues: list[Any]) -> None:
+    blocking = [i for i in issues if i.severity == "error"]
+    if not blocking:
+        return
+    msg = "; ".join(f"[{i.rule}] {i.message}" for i in blocking[:5])
+    raise ExtensionLoadError(
+        module_path,
+        RuntimeError(f"contract violation: {msg}"),
+    )
 
 
 __all__ = [
     "ExtensionLoadError",
     "current_installing_extension",
+    "install_extension",
     "load_extension",
+    "validate_extension_source",
 ]

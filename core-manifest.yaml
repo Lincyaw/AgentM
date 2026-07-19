@@ -3,35 +3,19 @@ version: 1
 
 constitution:
   paths:
-    # The kernel — mechanism, must not change without human review
+    # SDK kernel: mechanism and public ABI.
     - src/agentm/core/abi/**
     - src/agentm/core/lib/**
-    - src/agentm/core/_internal/**
     - src/agentm/core/runtime/**
-    # Provider boundary
-    - src/agentm/ai/**
-    # Extension subsystem mechanism
-    - src/agentm/extensions/loader.py
-    - src/agentm/extensions/discover.py
+    - src/agentm/core/observability/**
+    # Extension contract mechanism.
     - src/agentm/extensions/validate.py
-    # Presenter startup contract
-    - src/agentm/cli/**
-    # Catalog data — atom-identity and evidence-spoof barrier. Immutable
-    # source/manifest snapshots plus derived metrics and run links live here.
-    # Runtime catalog mechanism is the only writer; ResourceWriter rejects this
-    # namespace so atoms cannot rewrite their own identity or evaluation data.
-    - .agentm/catalog/**
     # The manifest itself — self-referential lock
     - core-manifest.yaml
 
 managed:
   globs:
     - src/agentm/extensions/builtin/**.py
-    - src/agentm/extensions/contrib/**.py
-    - .agentm/atoms/**.py
-    - scenarios/**
-    - skills/**
-    - prompts/**
     - .claude/**.md
     - "*.md"
 
@@ -46,12 +30,5 @@ extension_api:
     grace: 1
 
 reload:
-  # Atoms in tier_2 require explicit `propose_change` decision to reload.
-  # contrib.extensions.cc lives under contrib/extensions/cc/ and is opt-in;
-  # scenarios that load its atoms can re-list them in their own manifest's
-  # reload.tier_2_atoms.
-  tier_2_atoms:
-    - permission
-    - cost_budget
-    - tool_filter
-    - llm_compaction
+  # Hot reload is not part of the reduced SDK core yet.
+  tier_2_atoms: []

@@ -65,7 +65,7 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.trace import Span, Tracer
 
-from agentm.core.lib import to_jsonable
+from agentm.core.lib.serialization import to_jsonable
 
 __all__ = [
     "BlockingBatchLogRecordProcessor",
@@ -310,10 +310,8 @@ def otlp_export_reachable() -> bool:
     configured ``OTEL_EXPORTER_OTLP_ENDPOINT`` or the ``localhost:4317``
     default, probed via a short TCP connect. Unlike :func:`otlp_is_active`
     (which reports whether the process sink is *already* attached) this can be
-    called before any session emits, so the session-store selection can decide
-    whether the ClickHouse-backed store is safe: its ``create()`` persists
-    nothing locally and relies entirely on this export path reaching the
-    collector.
+    called before any session emits, so hosts can decide whether remote-only
+    telemetry export is acceptable or whether to force a local file sink.
     """
     return _probe_endpoint(resolve_otlp_endpoint())
 
@@ -321,9 +319,9 @@ def otlp_export_reachable() -> bool:
 # --- Trace sinks --------------------------------------------------------------
 #
 # Exactly one sink handles routine export for any given record: the
-# process-level :class:`OtlpSink` when a collector is reachable (spans/logs
-# reach ClickHouse via the collector), otherwise a per-session
-# :class:`LocalFileSink`. Selection happens in :func:`setup_process_telemetry`
+# process-level :class:`OtlpSink` when a collector is reachable, otherwise a
+# per-session :class:`LocalFileSink`. Selection happens in
+# :func:`setup_process_telemetry`
 # / :func:`setup_session_telemetry` and nowhere else — a single attach site is
 # what rules out double export by construction. Explicit ``file_path``
 # (trajectory store persistence) and the ``AGENTM_OBSERVABILITY_DIR`` opt-in
@@ -555,9 +553,9 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
 
 # --- Operational-log bridge -------------------------------------------------
 # Forward loguru (operator-facing stderr logs) into the OTel *logs* signal so
-# they ship to the collector → ClickHouse alongside structured trace events,
-# queryable via ``agentm trace logs``. This is the log signal, NOT traces:
-# operational logs become OTLP LogRecords on the process-level LoggerProvider.
+# they ship to the same configured telemetry sink. This is the log signal,
+# NOT traces: operational logs become OTLP LogRecords on the process-level
+# LoggerProvider.
 
 # loguru level name → OTLP SeverityNumber.
 _LOGURU_OTEL_SEVERITY: dict[str, SeverityNumber] = {
@@ -868,11 +866,9 @@ class SessionTelemetry:
     ) -> None:
         """Emit one log record through this session's OTel ``Logger``.
 
-        The PR-A ``FileLogExporter`` writes one OTLP ``ResourceLogs``
-        element per line. The ``event_name`` plays the role of the OTel
-        "event name" — consumers (trajectory store, indexer,
-        query_traces, llmharness CLI) filter on it instead of on a
-        legacy ``kind`` field.
+        The file exporter writes one OTLP ``ResourceLogs`` element per line.
+        The ``event_name`` plays the role of the OTel event name, so consumers
+        filter on it instead of on ad hoc payload fields.
 
         Attribute values are coerced through :meth:`to_otel_attr` so atoms
         can pass Python objects directly without repeating the JSON dance.

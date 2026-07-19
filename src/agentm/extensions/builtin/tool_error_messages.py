@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi import ToolErrorEvent
+from agentm.core.abi import AtomInstallPriority, ToolErrorEvent
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -32,6 +32,7 @@ MANIFEST = ExtensionManifest(
     registers=("event:tool_error",),
     config_schema=None,
     requires=(),  # Leaf atom: formats tool_error events only.
+    priority=AtomInstallPriority.TOOL,
 )
 
 
@@ -54,7 +55,7 @@ class _ToolErrorMessagesRuntime:
         self._session = session
 
     def install(self) -> None:
-        self._session.bus.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
+        self._session.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
 
     def on_tool_error(self, event: ToolErrorEvent) -> dict[str, str]:
         return {"text": self._message_for(event)}

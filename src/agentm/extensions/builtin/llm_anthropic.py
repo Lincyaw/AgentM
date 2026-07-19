@@ -23,7 +23,6 @@ Conversion layout:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from loguru import logger
 import os
@@ -35,9 +34,11 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 from agentm.core.abi import (
     Aborted,
     AgentMessage,
+    AtomInstallPriority,
     AssistantContent,
     AssistantMessage,
     AssistantStreamEvent,
+    CancelSignal,
     EndTurn,
     ImageContent,
     MaxTokens,
@@ -90,7 +91,8 @@ MANIFEST = ExtensionManifest(
     description="Register an Anthropic Messages API LLM stream provider.",
     registers=("provider:anthropic",),
     config_schema=LlmAnthropicConfig,
-    requires=("retry_policy",),
+    requires=(),
+    priority=AtomInstallPriority.PROVIDER,
 )
 
 def _is_anthropic_retryable(exc: BaseException) -> bool:
@@ -398,7 +400,7 @@ class AnthropicStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None = None,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
         thinking: Literal["off", "low", "medium", "high"] = "off",
     ) -> AsyncIterator[AssistantStreamEvent]:
         return self._iter(
@@ -417,7 +419,7 @@ class AnthropicStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None,
-        signal: asyncio.Event | None,
+        signal: CancelSignal | None,
         thinking: Literal["off", "low", "medium", "high"],
     ) -> AsyncIterator[AssistantStreamEvent]:
         client = self._get_client()
@@ -629,6 +631,11 @@ class _AnthropicProviderRuntime:
         model_id = self._model_id()
         stream_fn = self._build_stream_fn()
         model = _build_model(model_id, **self._model_kwargs())
+        if self._session.has_provider("anthropic"):
+            raise ValueError(
+                "agentm.extensions.builtin.llm_anthropic.install: provider "
+                "'anthropic' is already registered in this session."
+            )
         self._session.register_provider(
             "anthropic",
             ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
@@ -677,7 +684,7 @@ def install(session: Any, config: LlmAnthropicConfig) -> None:
 
     Reads ``config.model`` (required), optional ``config.api_key`` and
     ``config.base_url``, then registers the resulting ``AnthropicStreamFn``
-    on the given :class:`ExtensionAPI` under the name ``"anthropic"``.
+    on the given :class:`AtomAPI` under the name ``"anthropic"``.
 
     """
 

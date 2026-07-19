@@ -1,9 +1,8 @@
 """Simplified EventBus for v2.
 
-Key difference from v1: events are frozen dataclasses.  Handlers
-express intent through return values, not mutation.  The bus wraps each
-emission in an Envelope that carries the dispatch id — the event object
-itself is never written to.
+Events are frozen dataclasses. Handlers express intent through return values,
+not mutation. Each emission gets a dispatch id passed to observers; the event
+object itself is never written to.
 
 No readonly-field snapshot/restore machinery needed.
 """
@@ -27,15 +26,6 @@ class Event:
     """Base for all v2 events.  Frozen — handlers cannot mutate."""
 
     pass
-
-
-@dataclass(frozen=True, slots=True)
-class Envelope:
-    """Wraps an Event emission with a unique dispatch id."""
-
-    dispatch_id: str
-    channel: str
-    event: Any
 
 
 @dataclass(slots=True)
@@ -325,7 +315,6 @@ class EventBusObserver:
 
 __all__ = [
     "BusPriority",
-    "Envelope",
     "Event",
     "EventBus",
     "EventBusObserver",

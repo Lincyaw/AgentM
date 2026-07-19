@@ -32,13 +32,22 @@ class InMemorySessionGraph:
         if node is None:
             node = SessionNode(session_id=session_id)
             self._nodes[session_id] = node
+        old_parent_id = node.parent_id
+        if old_parent_id is not None and old_parent_id != parent_id:
+            old_parent = self._nodes.get(old_parent_id)
+            if old_parent is not None and session_id in old_parent.children:
+                old_parent.children.remove(session_id)
+        self._edges = [edge for edge in self._edges if edge.child_id != session_id]
         node.parent_id = parent_id
         node.fork_point = fork_point
         node.purpose = purpose
         node.edge_kind = edge_kind
         if parent_id is not None:
             parent = self._nodes.get(parent_id)
-            if parent is not None and session_id not in parent.children:
+            if parent is None:
+                parent = SessionNode(session_id=parent_id)
+                self._nodes[parent_id] = parent
+            if session_id not in parent.children:
                 parent.children.append(session_id)
             self._edges.append(SessionEdge(
                 parent_id=parent_id,

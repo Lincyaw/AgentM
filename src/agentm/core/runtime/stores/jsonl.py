@@ -1,32 +1,18 @@
-"""JSONL-file TrajectoryStore — one file per session, append-only.
-
-File layout for ``{session_id}.jsonl``::
-
-    <line 0>  SessionMeta as JSON
-    <line 1>  Turn as JSON
-    <line 2>  Turn as JSON
-    ...
-
-Each Turn is one complete JSON line, written in append mode.  A crash
-mid-write leaves a trailing partial (unterminated / unparseable) line,
-which ``load`` skips — so recovery needs no truncation or markers.
-
-Serialization is delegated to :class:`CodecRegistry` from ``codec.py``
-so custom Trigger types round-trip correctly when their atom registers
-a codec.
-"""
+"""Crash-aware JSONL trajectory store with one file per session."""
 
 from __future__ import annotations
 
+import fcntl
 import json
-import logging
+import os
+import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from agentm.core.abi.codec import CodecRegistry, DEFAULT_CODEC
+
+from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Turn, TurnRef
-from agentm.core.runtime.stores.memory import _prefix_cut
-
-logger = logging.getLogger(__name__)
+from agentm.core.runtime.stores.memory import _prefix_cut, _validate_turn_sequence
 
 
 class JsonlTrajectoryStore:
@@ -41,7 +27,11 @@ class JsonlTrajectoryStore:
     ) -> None:
         self._dir = Path(directory)
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._codec = codec or DEFAULT_CODEC
+        self._codec = codec if codec is not None else CodecRegistry()
+
+    @property
+    def codec(self) -> CodecRegistry:
+        return self._codec
 
     def _path(self, session_id: str) -> Path:
         return self._dir / f"{session_id}.jsonl"
@@ -50,22 +40,57 @@ class JsonlTrajectoryStore:
         return self._path(session_id)
 
     def create_session(self, meta: SessionMeta) -> None:
+        self.create_session_with_turns(meta, ())
+
+    def create_session_with_turns(
+        self, meta: SessionMeta, turns: Sequence[Turn]
+    ) -> None:
+        copied = list(turns)
+        _validate_turn_sequence(copied)
+        records = [self._codec.serialize_session_meta(meta)]
+        records.extend(self._codec.serialize_turn(turn) for turn in copied)
+        payload = b"".join(self._encode_record(record) for record in records)
         path = self._path(meta.id)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{meta.id}.", dir=self._dir)
+        temp_path = Path(temp_name)
         try:
-            fh = path.open("x", encoding="utf-8")
-        except FileExistsError:
-            raise ValueError(f"session already exists: {meta.id}") from None
-        with fh:
-            fh.write(json.dumps(self._codec.serialize_session_meta(meta)) + "\n")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(temp_path, path)
+            except FileExistsError:
+                raise ValueError(f"session already exists: {meta.id}") from None
+            self._fsync_directory()
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def append(self, session_id: str, turn: Turn) -> None:
         path = self._path(session_id)
-        if not path.exists():
-            raise KeyError(session_id)
-        line = json.dumps(self._codec.serialize_turn(turn), default=str) + "\n"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
+        try:
+            fh = path.open("r+b")
+        except FileNotFoundError:
+            raise KeyError(session_id) from None
+        record = self._encode_record(self._codec.serialize_turn(turn))
+        with fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            raw = fh.read()
+            _, turns, valid_bytes, terminated = self._decode_records(
+                raw,
+                path,
+                allow_trailing_torn=True,
+            )
+            expected = len(turns)
+            if turn.index != expected:
+                raise ValueError(f"turn index {turn.index} does not follow {expected - 1}")
+            fh.truncate(valid_bytes)
+            fh.seek(valid_bytes)
+            if not terminated:
+                fh.write(b"\n")
+            fh.write(record)
             fh.flush()
+            os.fsync(fh.fileno())
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         return self._read(session_id)
@@ -80,75 +105,89 @@ class JsonlTrajectoryStore:
         return (meta, turns[: cut + 1])
 
     def session_children(self, session_id: str) -> list[str]:
-        children: list[str] = []
-        for path in self._dir.glob("*.jsonl"):
-            meta = self._read_meta(path)
-            if meta is not None and meta.parent_id == session_id:
-                children.append(meta.id)
-        return children
+        return [
+            meta.id
+            for meta in self.list_sessions()
+            if meta.parent_id == session_id
+        ]
 
     def session_exists(self, session_id: str) -> bool:
         return self._path(session_id).exists()
 
     def list_sessions(self) -> list[SessionMeta]:
-        result: list[SessionMeta] = []
-        for path in self._dir.glob("*.jsonl"):
-            meta = self._read_meta(path)
-            if meta is not None:
-                result.append(meta)
-        return result
+        return [self._read_meta(path) for path in self._dir.glob("*.jsonl")]
 
     def _read(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         path = self._path(session_id)
         if not path.exists():
             raise KeyError(session_id)
+        meta, turns, _, _ = self._read_records(path, allow_trailing_torn=True)
+        return meta, turns
+
+    def _read_records(
+        self,
+        path: Path,
+        *,
+        allow_trailing_torn: bool,
+    ) -> tuple[SessionMeta, list[Turn], int, bool]:
+        return self._decode_records(
+            path.read_bytes(),
+            path,
+            allow_trailing_torn=allow_trailing_torn,
+        )
+
+    def _decode_records(
+        self,
+        raw: bytes,
+        path: Path,
+        *,
+        allow_trailing_torn: bool,
+    ) -> tuple[SessionMeta, list[Turn], int, bool]:
+        if not raw:
+            raise ValueError(f"corrupt empty session file: {path}")
+        chunks = raw.splitlines(keepends=True)
         meta: SessionMeta | None = None
         turns: list[Turn] = []
-        with path.open("r", encoding="utf-8") as fh:
-            for lineno, raw in enumerate(fh):
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "skipping malformed line %d in %s", lineno, path
-                    )
-                    continue
+        valid_bytes = 0
+        valid_terminated = False
+        for lineno, chunk in enumerate(chunks, start=1):
+            terminated = chunk.endswith(b"\n") or chunk.endswith(b"\r")
+            try:
+                data = json.loads(chunk)
                 if meta is None:
-                    try:
-                        meta = self._codec.deserialize_session_meta(data)
-                    except Exception as exc:
-                        raise KeyError(
-                            f"corrupt session meta for {session_id}: {exc}"
-                        ) from exc
-                    continue
-                try:
+                    meta = self._codec.deserialize_session_meta(data)
+                else:
                     turns.append(self._codec.deserialize_turn(data))
-                except (KeyError, TypeError, ValueError) as exc:
-                    logger.warning(
-                        "skipping malformed turn on line %d in %s: %s",
-                        lineno,
-                        path,
-                        exc,
-                    )
+            except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                is_last = lineno == len(chunks)
+                if allow_trailing_torn and is_last and not terminated and meta is not None:
+                    break
+                raise ValueError(
+                    f"corrupt record {lineno} in {path}: {exc}"
+                ) from exc
+            valid_bytes += len(chunk)
+            valid_terminated = terminated
         if meta is None:
-            raise KeyError(session_id)
-        return (meta, turns)
+            raise ValueError(f"corrupt session metadata in {path}")
+        _validate_turn_sequence(turns)
+        return meta, turns, valid_bytes, valid_terminated
 
-    def _read_meta(self, path: Path) -> SessionMeta | None:
+    def _read_meta(self, path: Path) -> SessionMeta:
+        meta, _, _, _ = self._read_records(path, allow_trailing_torn=True)
+        return meta
+
+    @staticmethod
+    def _encode_record(record: object) -> bytes:
+        return (
+            json.dumps(record, default=str, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+
+    def _fsync_directory(self) -> None:
+        fd = os.open(self._dir, os.O_RDONLY)
         try:
-            with path.open("r", encoding="utf-8") as fh:
-                first = fh.readline().strip()
-        except OSError:
-            return None
-        if not first:
-            return None
-        try:
-            return self._codec.deserialize_session_meta(json.loads(first))
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            return None
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 __all__ = ["JsonlTrajectoryStore"]

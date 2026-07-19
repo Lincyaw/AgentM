@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 
+from collections.abc import Sequence
+
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Turn, TurnRef
 
@@ -22,14 +24,24 @@ class InMemoryTrajectoryStore:
         self._sessions: dict[str, tuple[SessionMeta, list[Turn]]] = {}
 
     def create_session(self, meta: SessionMeta) -> None:
+        self.create_session_with_turns(meta, ())
+
+    def create_session_with_turns(
+        self, meta: SessionMeta, turns: Sequence[Turn]
+    ) -> None:
         if meta.id in self._sessions:
             raise ValueError(f"session already exists: {meta.id}")
-        self._sessions[meta.id] = (meta, [])
+        copied = list(turns)
+        _validate_turn_sequence(copied)
+        self._sessions[meta.id] = (meta, copied)
 
     def append(self, session_id: str, turn: Turn) -> None:
         record = self._sessions.get(session_id)
         if record is None:
             raise KeyError(session_id)
+        expected = len(record[1])
+        if turn.index != expected:
+            raise ValueError(f"turn index {turn.index} does not follow {expected - 1}")
         record[1].append(turn)
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
@@ -63,6 +75,14 @@ class InMemoryTrajectoryStore:
 
     def list_sessions(self) -> list[SessionMeta]:
         return [meta for meta, _ in self._sessions.values()]
+
+
+def _validate_turn_sequence(turns: Sequence[Turn]) -> None:
+    for expected, turn in enumerate(turns):
+        if turn.index != expected:
+            raise ValueError(
+                f"turn index {turn.index} does not match expected {expected}"
+            )
 
 
 def _prefix_cut(turns: list[Turn], up_to: TurnRef) -> int:

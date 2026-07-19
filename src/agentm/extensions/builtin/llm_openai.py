@@ -43,8 +43,10 @@ from typing import Any, Literal
 from agentm.core.abi import (
     Aborted,
     AgentMessage,
+    AtomInstallPriority,
     AssistantMessage,
     AssistantStreamEvent,
+    CancelSignal,
     DiagnosticEvent,
     EndTurn,
     EventBus,
@@ -104,7 +106,8 @@ MANIFEST = ExtensionManifest(
     description="Register an OpenAI Chat Completions API LLM stream provider.",
     registers=("provider:openai",),
     config_schema=LlmOpenaiConfig,
-    requires=("retry_policy",),
+    requires=(),
+    priority=AtomInstallPriority.PROVIDER,
 )
 
 def _is_openai_retryable(exc: BaseException) -> bool:
@@ -585,7 +588,7 @@ class OpenAIStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None = None,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
         thinking: Literal["off", "low", "medium", "high"] = "off",
     ) -> AsyncIterator[AssistantStreamEvent]:
         return self._iter(
@@ -604,7 +607,7 @@ class OpenAIStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None,
-        signal: asyncio.Event | None,
+        signal: CancelSignal | None,
         thinking: Literal["off", "low", "medium", "high"],
     ) -> AsyncIterator[AssistantStreamEvent]:
         # ``thinking`` is intentionally not forwarded: vanilla OpenAI Chat
@@ -911,7 +914,7 @@ class _OpenAIProviderRuntime:
         return name
 
     def _ensure_provider_name_available(self, name: str) -> None:
-        if False:  # v2: has_provider pending (name)
+        if self._session.has_provider(name):
             raise DuplicateProviderError(
                 f"agentm.extensions.builtin.llm_openai.install: provider name {name!r} is already "
                 "registered in this session. Choose a unique config['name'] for "

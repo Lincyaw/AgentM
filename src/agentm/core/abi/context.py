@@ -158,10 +158,11 @@ def turn_to_messages(
     messages: list[AgentMessage] = []
     messages.extend(render_trigger(turn.trigger, renderers))
 
-    injected_by_round = {
-        injection.after_round: injection.messages
-        for injection in turn.outcome.injected
-    }
+    injected_by_round: dict[int, list[AgentMessage]] = {}
+    for injection in turn.outcome.injected:
+        injected_by_round.setdefault(injection.after_round, []).extend(
+            injection.messages
+        )
     for round_index, rnd in enumerate(turn.rounds):
         messages.append(rnd.response)
         if rnd.tool_results:

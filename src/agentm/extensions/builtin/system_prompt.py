@@ -5,9 +5,9 @@ from pydantic import BaseModel
 
 from typing import Any
 
-from agentm.core.abi import BeforeRunEvent, SYSTEM_PROMPT_PROVIDER
+from agentm.core.abi import AtomInstallPriority, BeforeRunEvent, BusPriority
 from agentm.core.lib import expand_path, expand_path_from_cwd
-from agentm.extensions import ChannelEffects, ExtensionManifest
+from agentm.extensions import ExtensionManifest
 
 
 class SystemPromptConfig(BaseModel):
@@ -26,14 +26,10 @@ MANIFEST = ExtensionManifest(
         "is set, context files (CLAUDE.md / AGENTS.md) are loaded from the "
         "filesystem hierarchy."
     ),
-    registers=("event:before_agent_start",),
+    registers=("event:before_run",),
     config_schema=SystemPromptConfig,
     requires=(),
-    provides_role=(SYSTEM_PROMPT_PROVIDER,),
-    # Prepends its text to event.system while preserving existing content —
-    # a prepend commutes with tail-appenders, so this is an append, not a
-    # mutation.
-    effects={"before_agent_start": ChannelEffects(appends=("system",))},
+    priority=AtomInstallPriority.CONTEXT,
 )
 
 _CONTEXT_FILENAMES = ("AGENTS.md", "CLAUDE.md")
@@ -84,7 +80,11 @@ class _SystemPromptRuntime:
     def install(self) -> None:
         if not self._prompt:
             return
-        self._session.bus.on(BeforeRunEvent.CHANNEL, self.before_agent_start)
+        self._session.on(
+            BeforeRunEvent.CHANNEL,
+            self.before_agent_start,
+            priority=BusPriority.PRE,
+        )
 
     def before_agent_start(self, event: BeforeRunEvent) -> dict[str, str] | None:
         current = str(event.system or "")

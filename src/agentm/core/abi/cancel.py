@@ -44,16 +44,6 @@ class CancelSource(CancelSignal, Protocol):
 
 
 @runtime_checkable
-class ReasonedCancelSignal(CancelSignal, Protocol):
-    """Cancellation signal that exposes why it fired."""
-
-    @property
-    def reason(self) -> CancelReason | str | None:
-        """Return the cancellation reason, when available."""
-        ...
-
-
-@runtime_checkable
 class ResettableCancelSource(CancelSource, Protocol):
     """Mutable cancellation source that can be re-used across turns."""
 
@@ -109,7 +99,6 @@ __all__ = [
     "CancelSignal",
     "CancelSource",
     "EventCancelSource",
-    "ReasonedCancelSignal",
     "ResettableCancelSource",
     "cancel_reason",
 ]

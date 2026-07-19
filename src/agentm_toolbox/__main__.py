@@ -3,6 +3,7 @@
 Usage::
 
     python3 -m agentm_toolbox read '{"path": "/repo/file.py", "offset": 10}'
+    printf '%s' '{"path": "/repo/file.py"}' | python3 -m agentm_toolbox read -
     python3 -m agentm_toolbox write '{"path": "/repo/file.py", "content_file": "/tmp/.upload"}'
     python3 -m agentm_toolbox edit '{"path": "/repo/file.py", "old_string": "x", "new_string": "y"}'
 
@@ -30,6 +31,8 @@ def main() -> None:
 
     tool_name = sys.argv[1]
     raw_args = sys.argv[2] if len(sys.argv) > 2 else "{}"
+    if raw_args == "-":
+        raw_args = sys.stdin.read()
     try:
         args = json.loads(raw_args)
     except json.JSONDecodeError as exc:

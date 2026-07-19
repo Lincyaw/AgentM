@@ -10,7 +10,7 @@ agentm.core.abi import FunctionTool`` access.
 
 Schemas are raw JSON Schema dicts; no pydantic in the kernel.
 
-Tools may return either a bare :class:`ToolResult` (legacy/simple tools) or a
+Tools may return either a bare :class:`ToolResult` (simple tools) or a
 structured :class:`ToolOutcome` — see :mod:`agentm.core.abi.loop` for how the
 kernel resolves each variant into the next loop action. This split keeps the
 "this tool wants to terminate" decision out of ``ToolResult`` itself, where it
@@ -19,11 +19,12 @@ would have to compete with ``is_error`` for meaning.
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+from .cancel import CancelSignal
 from .messages import ImageContent, TextContent
 
 
@@ -38,22 +39,6 @@ FILE_OP_READ = "read"
 FILE_OP_WRITE = "write"
 FILE_OP_EDIT = "edit"
 TOOL_RESULT_FORMAT_METADATA_KEY = "result_format"
-
-# --- Tool execution metadata vocabulary ------------------------------------
-#
-# Tools default to running on the session event loop. Tool authors may opt into
-# a different substrate-owned executor by setting
-# ``metadata[TOOL_EXECUTION_DOMAIN_METADATA_KEY]`` to one of the constants
-# below. The kernel intentionally keeps this as metadata so existing Tool
-# implementers are not forced to grow a new required Protocol member.
-
-ToolExecutionDomain = Literal["event_loop", "thread", "process", "sandbox"]
-
-TOOL_EXECUTION_DOMAIN_METADATA_KEY = "execution_domain"
-TOOL_EXECUTION_DOMAIN_EVENT_LOOP: ToolExecutionDomain = "event_loop"
-TOOL_EXECUTION_DOMAIN_THREAD: ToolExecutionDomain = "thread"
-TOOL_EXECUTION_DOMAIN_PROCESS: ToolExecutionDomain = "process"
-TOOL_EXECUTION_DOMAIN_SANDBOX: ToolExecutionDomain = "sandbox"
 
 
 @dataclass(slots=True)
@@ -121,10 +106,10 @@ class Tool(Protocol):
     The agent loop only depends on these four members:
 
     - ``name`` / ``description`` / ``parameters`` (JSON Schema dict) — used
-      when assembling the tool catalog passed to the LLM stream.
+      when assembling the tool list passed to the LLM stream.
     - ``execute(args, *, signal)`` — the call that runs the tool.
 
-    ``signal`` is an :class:`asyncio.Event`; tools may poll it to abort
+    ``signal`` is a :class:`CancelSignal`; tools may poll it to abort
     cooperatively. Streaming progress is intentionally *not* part of the
     kernel surface: the previous ``on_update`` parameter was never wired
     through and has been removed. A future progress channel will be a
@@ -132,10 +117,9 @@ class Tool(Protocol):
 
     Returning a bare :class:`ToolResult` is treated as ``ToolContinue(result)``;
     a tool that wants to end the loop returns :class:`ToolTerminate` instead.
-    Tools may also expose an optional ``metadata`` dict. The kernel reads
-    ``metadata["execution_domain"]`` when present to choose a task, thread, or
-    process execution boundary; missing metadata preserves the default
-    event-loop behavior.
+    Tools may also expose an optional ``metadata`` dict for cross-cutting
+    classification such as file operation type or result format. Execution
+    substrate is runtime policy, not a per-tool ABI contract.
     """
 
     name: str
@@ -146,7 +130,7 @@ class Tool(Protocol):
         self,
         args: dict[str, Any],
         *,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
     ) -> ToolResult | ToolOutcome: ...
 
 
@@ -155,7 +139,8 @@ class FunctionTool:
     """Concrete ``Tool`` adapter wrapping an async callable.
 
     Useful for tests and trivial cases where a full tool class would be
-    overkill. The wrapped ``fn`` is called with the raw ``args`` dict; if it
+    overkill. The wrapped ``fn`` is called with the raw ``args`` dict, and also
+    receives ``signal=`` when its signature declares that parameter. If it
     raises, the exception **propagates** — ``FunctionTool`` deliberately does
     not convert exceptions to ``ToolResult(is_error=True)``. The agent loop is
     responsible for that conversion so the policy is uniform across all tool
@@ -173,8 +158,9 @@ class FunctionTool:
     name: str
     description: str
     parameters: dict[str, Any]
-    fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]]
+    fn: Callable[..., Awaitable[ToolResult | ToolOutcome]]
     metadata: dict[str, Any] = field(default_factory=dict)
+    _accepts_signal: bool = False
 
     def __init__(
         self,
@@ -182,13 +168,14 @@ class FunctionTool:
         name: str,
         description: str,
         parameters: dict[str, Any] | type,
-        fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]],
+        fn: Callable[..., Awaitable[ToolResult | ToolOutcome]],
         metadata: dict[str, Any] | None = None,
     ) -> None:
         self.name = name
         self.description = description
         self.fn = fn
         self.metadata = metadata or {}
+        self._accepts_signal = _accepts_signal(fn)
         if isinstance(parameters, type):
             from agentm.core.lib.tool_schema import pydantic_to_tool_schema
 
@@ -200,11 +187,21 @@ class FunctionTool:
         self,
         args: dict[str, Any],
         *,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
     ) -> ToolResult | ToolOutcome:
         """Invoke the wrapped function. Exceptions propagate unchanged."""
 
+        if self._accepts_signal:
+            return await self.fn(args, signal=signal)
         return await self.fn(args)
+
+
+def _accepts_signal(fn: Callable[..., object]) -> bool:
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "signal" in parameters
 
 
 __all__ = [
@@ -213,15 +210,9 @@ __all__ = [
     "FILE_OP_READ",
     "FILE_OP_WRITE",
     "FunctionTool",
-    "TOOL_EXECUTION_DOMAIN_EVENT_LOOP",
-    "TOOL_EXECUTION_DOMAIN_METADATA_KEY",
-    "TOOL_EXECUTION_DOMAIN_PROCESS",
-    "TOOL_EXECUTION_DOMAIN_SANDBOX",
-    "TOOL_EXECUTION_DOMAIN_THREAD",
     "TOOL_RESULT_FORMAT_METADATA_KEY",
     "Tool",
     "ToolContinue",
-    "ToolExecutionDomain",
     "ToolOutcome",
     "ToolResult",
     "ToolTerminate",

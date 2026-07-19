@@ -11,9 +11,12 @@ from typing import Any, Final, TypeVar
 from pydantic import BaseModel as PydanticBaseModel
 
 from agentm.core.abi import (
+    AtomAPI,
+    AtomInstallPriority,
     RETRY_POLICY_SERVICE,
     ApiRegisterEvent,
     AssistantStreamEvent,
+    CancelSignal,
     DiagnosticEvent,
     Model,
     ProviderConfig,
@@ -48,7 +51,7 @@ MANIFEST = ExtensionManifest(
     registers=("event:api_register",),
     config_schema=RetryPolicyConfig,
     requires=(),
-    tier=1,
+    priority=AtomInstallPriority.POLICY,
 )
 
 
@@ -95,7 +98,7 @@ class _RetryingStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None = None,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
         thinking: str = "off",
     ) -> AsyncIterator[AssistantStreamEvent]:
         if not self.retry_streaming:
@@ -123,7 +126,7 @@ class _RetryingStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None,
-        signal: asyncio.Event | None,
+        signal: CancelSignal | None,
         thinking: str,
     ) -> AsyncIterator[AssistantStreamEvent]:
         yielded = False
@@ -181,7 +184,7 @@ def _wrap_provider(
 
 
 class _RetryPolicyRuntime:
-    def __init__(self, session: Any, config: RetryPolicyConfig) -> None:
+    def __init__(self, session: AtomAPI, config: RetryPolicyConfig) -> None:
         self._session = session
         self._policy = ExponentialBackoffRetry(
             max_retries=max(0, config.max_retries),
@@ -194,16 +197,20 @@ class _RetryPolicyRuntime:
         self._wrapped: set[str] = set()
 
     def install(self) -> None:
-        self._session.services.register(RETRY_POLICY_SERVICE, self._policy)
+        self._session.services.register(
+            RETRY_POLICY_SERVICE,
+            self._policy,
+            scope="session",
+        )
         if not self._wrap_providers:
             return
         self._wrap_current_provider()
-        self._session.bus.on(ApiRegisterEvent.CHANNEL, self.on_api_register)
+        self._session.on(ApiRegisterEvent.CHANNEL, self.on_api_register)
 
     def on_api_register(self, event: ApiRegisterEvent) -> None:
         if event.kind != "provider":
             return
-        provider = event.payload
+        provider = event.payload.get("provider")
         if not isinstance(provider, ProviderConfig):
             return
         self._wrap_provider_by_name(
@@ -213,7 +220,7 @@ class _RetryPolicyRuntime:
         )
 
     def _wrap_current_provider(self) -> None:
-        current = None  # v2: provider access pending
+        current = self._session.get_provider()
         if current is None:
             return
         self._wrap_provider_by_name(
@@ -239,7 +246,7 @@ class _RetryPolicyRuntime:
         if wrapped_provider is provider:
             return
         self._wrapped.add(name)
-        self._session.register_provider(name, wrapped_provider)
+        self._session.register_provider(name, wrapped_provider, replace=True)
         if emit_diagnostic:
             self._emit_wrapped_diagnostic(name)
 
@@ -254,7 +261,7 @@ class _RetryPolicyRuntime:
         )
 
 
-def install(session: Any, config: RetryPolicyConfig) -> None:
+def install(session: AtomAPI, config: RetryPolicyConfig) -> None:
     _RetryPolicyRuntime(session, config).install()
 
 

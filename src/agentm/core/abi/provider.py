@@ -4,36 +4,32 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar
+from typing import Protocol
 
 from .stream import Model, StreamFn
-
-ProviderT = TypeVar("ProviderT", contravariant=True)
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderConfig:
-    """LLM provider registration record shared across provider and runtime layers."""
+    """Session-local LLM provider registration.
+
+    Provider atoms install through the normal ``ExtensionManifest`` path, then
+    register one of these records with the session. Host selection policy lives
+    separately in ``ProviderResolver``.
+    """
 
     stream_fn: StreamFn
     model: Model
     name: str
 
 
-@dataclass(frozen=True, slots=True)
-class ProviderManifest:
-    """Provider extension metadata that stays inside the core ABI boundary."""
-
-    name: str
-    description: str
-    registers: tuple[str, ...]
-    config_schema: dict[str, Any] | None = None
+ProviderRegistry = Mapping[str, ProviderConfig]
 
 
-class ProviderResolver(Protocol[ProviderT]):
-    """Select the active provider registration from a provider registry."""
+class ProviderResolver(Protocol):
+    """Tree-scoped host policy for selecting the active provider."""
 
-    def resolve_provider(self, providers: Mapping[str, ProviderT]) -> str | None: ...
+    def resolve_provider(self, providers: ProviderRegistry) -> str | None: ...
 
 
-__all__ = ["ProviderConfig", "ProviderManifest", "ProviderResolver"]
+__all__ = ["ProviderConfig", "ProviderRegistry", "ProviderResolver"]

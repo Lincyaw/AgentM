@@ -15,9 +15,8 @@ def otlp_unwrap(value: Any) -> Any:
     OTLP encodes attribute and body values as tagged unions
     (``{"stringValue": ...}``, ``{"intValue": "12"}``,
     ``{"kvlistValue": {"values": [...]}}``, ``{"arrayValue": ...}``).
-    Readers (the trajectory store, the catalog indexer, the tuner
-    tools) need plain Python types to pattern-match against; this helper
-    is the single canonical converter.
+    Readers need plain Python types to pattern-match against; this helper is
+    the single canonical converter.
 
     Returns the input unchanged when it isn't a tagged union — useful
     for already-unwrapped intermediate dicts.
@@ -56,8 +55,8 @@ def otlp_unwrap(value: Any) -> Any:
 def iter_spans(line: dict[str, Any]) -> list[dict[str, Any]]:
     """Iterate spans on one OTLP/JSON ndjson line.
 
-    Handles both the collector-compatible format
-    (``{"resourceSpans": [{...}]}``) and the legacy unwrapped format
+    Handles both collector resource-wrapped lines
+    (``{"resourceSpans": [{...}]}``) and scope-only lines
     (``{"scopeSpans": [...]}``) transparently.
     """
     out: list[dict[str, Any]] = []
@@ -75,7 +74,7 @@ def iter_spans(line: dict[str, Any]) -> list[dict[str, Any]]:
 def iter_log_records(line: dict[str, Any]) -> list[dict[str, Any]]:
     """Iterate log records on one OTLP/JSON ndjson line.
 
-    Handles both ``{"resourceLogs": [{...}]}`` and legacy ``{"scopeLogs": [...]}``.
+    Handles both ``{"resourceLogs": [{...}]}`` and ``{"scopeLogs": [...]}``.
     """
     out: list[dict[str, Any]] = []
     resources = line.get("resourceLogs")

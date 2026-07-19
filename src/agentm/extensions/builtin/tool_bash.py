@@ -11,7 +11,6 @@ command is still running. No key bound → no buffering.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from contextvars import ContextVar, Token
 from typing import Any, Callable, Final
@@ -20,7 +19,9 @@ from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
+    AtomInstallPriority,
     BashOperations,
+    CancelSignal,
     TextContent,
     ToolResult,
 )
@@ -115,7 +116,8 @@ MANIFEST = ExtensionManifest(
     description="Register the bash tool backed by BashOperations.",
     registers=("tool:bash",),
     config_schema=ToolBashConfig,
-    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
+    requires=("operations",),
+    priority=AtomInstallPriority.TOOL,
 )
 
 
@@ -147,10 +149,14 @@ class _ToolBashRuntime:
 
     def install(self) -> None:
         tails = BashOutputTails()
-        self._session.services.register(BASH_OUTPUT_TAILS_SERVICE, tails)
+        self._session.services.register(
+            BASH_OUTPUT_TAILS_SERVICE,
+            tails,
+            scope="session",
+        )
         self._session.register_tool(
             _BashTool(
-                api=self._session,
+                session=self._session,
                 bash_ops=self._bash_ops,
                 default_timeout=self._default_timeout,
                 parameters=self._parameters(),
@@ -201,7 +207,7 @@ class _BashTool:
         self,
         args: dict[str, Any],
         *,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
     ) -> ToolResult:
         cmd = str(args["cmd"])
         timeout = float(args.get("timeout", self._default_timeout))
@@ -256,8 +262,12 @@ class _BashTool:
 
 
 def _coerce_bash_ops(session: Any, candidate: Any) -> BashOperations:
-    # v2: operations access pending
-    return candidate if candidate is not None else None  # type: ignore[return-value]
+    if candidate is not None:
+        return candidate
+    service = session.services.get("operations:bash")
+    if service is None:
+        raise RuntimeError("tool_bash requires the operations atom to register bash")
+    return service
 
 
 def _error(text: str) -> ToolResult:

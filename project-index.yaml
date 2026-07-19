@@ -39,6 +39,7 @@ requirements:
       - path: src/agentm/core/runtime/trigger_queue.py
     tests:
       - path: tests/integration/test_trajectory.py
+      - path: tests/test_lifecycle_catalog_ports.py
     docs:
       - path: README.md
       - path: docs/refactor-abstract-inventory.md

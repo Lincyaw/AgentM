@@ -9,11 +9,11 @@ Python-native event taxonomy.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
+from .cancel import CancelSignal
 from .messages import AgentMessage, AssistantMessage
 from .tool import Tool
 
@@ -130,7 +130,7 @@ class StreamFn(Protocol):
         model: Model,
         tools: list[Tool],
         system: str | None = None,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
         thinking: Literal["off", "low", "medium", "high"] = "off",
     ) -> AsyncIterator[AssistantStreamEvent]: ...
 

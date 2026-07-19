@@ -132,5 +132,9 @@ uv run mypy src/
 uv run pytest --tb=short
 ```
 
-This worktree intentionally has no `project-index.yaml`; requirement-index
-validation from main does not apply until the reduced SDK defines its own index.
+Keep `project-index.yaml` synchronized with every code and test change, then
+validate it with:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml
+```

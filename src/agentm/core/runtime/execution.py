@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage
 from agentm.core.abi.trajectory import (
+    InjectedMessages,
     Outcome,
     Round,
     ToolRecord,
@@ -77,10 +78,13 @@ class Execution:
         if not self._active:
             raise StateError("cannot commit an inactive execution")
         self._active = False
-        all_injected = [msg for _, msgs in self._injected for msg in msgs]
+        anchored = tuple(
+            InjectedMessages(after_round=round_index, messages=tuple(messages))
+            for round_index, messages in self._injected
+        )
         final_outcome = (
-            Outcome(cause=outcome.cause, injected=tuple(all_injected))
-            if all_injected
+            Outcome(cause=outcome.cause, injected=anchored)
+            if anchored
             else outcome
         )
         return Turn(

@@ -22,6 +22,7 @@ Usage::
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any, Protocol, runtime_checkable
 
@@ -131,7 +132,7 @@ def _json_safe(value: Any) -> Any:
         return value
     if isinstance(value, bytes):
         return {"__bytes_hex__": value.hex()}
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(k): _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
@@ -172,7 +173,7 @@ def _serialize_content_block(block: Any) -> dict[str, Any]:
             "type": "tool_call",
             "id": block.id,
             "name": block.name,
-            "arguments": block.arguments,
+            "arguments": _json_safe(block.arguments),
         }
     if isinstance(block, ToolResultBlock):
         d = {
@@ -537,10 +538,10 @@ class CodecRegistry:
             )
             for entry in data.get("injected", [])
         )
-        raw_cause = data.get("cause")
-        if raw_cause is None:
-            cause: TerminationCause = ModelEndTurn()
-        elif not isinstance(raw_cause, dict):
+        if "cause" not in data:
+            raise ValueError("serialized Outcome is missing cause")
+        raw_cause = data["cause"]
+        if not isinstance(raw_cause, dict):
             raise ValueError("serialized Outcome.cause must be an object")
         else:
             type_name = raw_cause.get("__type__")
