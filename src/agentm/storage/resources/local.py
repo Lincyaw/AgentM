@@ -46,96 +46,64 @@ _DEFAULT_NAMESPACES = (
 )
 
 
-class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
-    """Map logical ``ResourceRef`` namespaces to local directories."""
+class _LocalResourceFiles:
+    """Path resolution, mutation policy, and locked filesystem operations."""
 
     def __init__(
         self,
         *,
-        workspace_root: str | Path,
-        root: str | Path | None = None,
-        namespace_roots: Mapping[str, str | Path] | None = None,
-        manifest_path: str | Path | None = None,
-        discover_manifest: bool = True,
+        workspace_root: Path,
+        root: Path,
+        namespace_roots: Mapping[str, str | Path] | None,
+        manifest_path: Path | None,
     ) -> None:
-        self._workspace_root = Path(workspace_root)
-        self._root = Path(root) if root is not None else self._workspace_root / ".agentm"
-        self._namespace_roots: dict[str, Path] = {
-            "workspace": self._workspace_root,
-            **{namespace: self._root / namespace for namespace in _DEFAULT_NAMESPACES},
+        self.workspace_root = workspace_root
+        self.root = root
+        self.namespace_roots: dict[str, Path] = {
+            "workspace": workspace_root,
+            **{namespace: root / namespace for namespace in _DEFAULT_NAMESPACES},
         }
         if namespace_roots:
-            self._namespace_roots.update(
-                {namespace: Path(path) for namespace, path in namespace_roots.items()}
+            self.namespace_roots.update(
+                {
+                    namespace: Path(path)
+                    for namespace, path in namespace_roots.items()
+                }
             )
-        self._transactions_root = self._root / "resource_transactions"
-        self._lock_path = self._root / "resource.lock"
-        resolved_manifest = (
-            Path(manifest_path)
-            if manifest_path is not None
-            else self._workspace_root / "core-manifest.yaml"
-            if discover_manifest
-            and (self._workspace_root / "core-manifest.yaml").is_file()
-            else None
-        )
+        self._lock_path = root / "resource.lock"
         (
             self._constitution_globs,
             self._managed_globs,
-        ) = _load_resource_globs(resolved_manifest)
+        ) = _load_resource_globs(manifest_path)
 
-    async def read_ref(self, ref: ResourceRef) -> bytes:
-        return await asyncio.to_thread(self._read_ref, ref)
+    def read_ref(self, ref: ResourceRef) -> bytes:
+        return self.resolve_ref(ref).read_bytes()
 
-    def _read_ref(self, ref: ResourceRef) -> bytes:
-        return self._resolve_ref(ref).read_bytes()
+    def exists_ref(self, ref: ResourceRef) -> bool:
+        return self.resolve_ref(ref).exists()
 
-    async def exists_ref(self, ref: ResourceRef) -> bool:
-        return await asyncio.to_thread(self._exists_ref, ref)
-
-    def _exists_ref(self, ref: ResourceRef) -> bool:
-        return self._resolve_ref(ref).exists()
-
-    async def list_ref(self, ref: ResourceRef) -> list[ResourceRef]:
-        return await asyncio.to_thread(self._list_ref, ref)
-
-    def _list_ref(self, ref: ResourceRef) -> list[ResourceRef]:
-        path = self._resolve_ref(ref)
+    def list_ref(self, ref: ResourceRef) -> list[ResourceRef]:
+        path = self.resolve_ref(ref)
         if not path.exists():
             return []
         if not path.is_dir():
             return [ref]
-        root = self._namespace_root(ref.namespace)
+        root = self.namespace_root(ref.namespace)
         return [
             ResourceRef(namespace=ref.namespace, path=str(child.relative_to(root)))
             for child in sorted(path.iterdir())
         ]
 
-    async def write_ref(
-        self,
-        ref: ResourceRef,
-        content: bytes,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> ResourceMutation:
-        return await asyncio.to_thread(
-            self._write_ref,
-            ref,
-            content,
-            rationale,
-            author,
-        )
-
-    def _write_ref(
+    def write_ref(
         self,
         ref: ResourceRef,
         content: bytes,
         rationale: str,
         author: WriterAuthor,
     ) -> ResourceMutation:
-        with self._locked():
-            self._assert_mutation_allowed(ref)
-            path = self._resolve_ref(ref)
+        with self.locked():
+            self.assert_mutation_allowed(ref)
+            path = self.resolve_ref(ref)
             before = _digest_bytes(path.read_bytes()) if path.exists() else None
             _atomic_write_bytes(path, content)
             return _resource_mutation(
@@ -147,25 +115,7 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
                 author,
             )
 
-    async def replace_ref(
-        self,
-        ref: ResourceRef,
-        old: bytes,
-        new: bytes,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> ResourceMutation:
-        return await asyncio.to_thread(
-            self._replace_ref,
-            ref,
-            old,
-            new,
-            rationale,
-            author,
-        )
-
-    def _replace_ref(
+    def replace_ref(
         self,
         ref: ResourceRef,
         old: bytes,
@@ -173,9 +123,9 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         rationale: str,
         author: WriterAuthor,
     ) -> ResourceMutation:
-        with self._locked():
-            self._assert_mutation_allowed(ref)
-            path = self._resolve_ref(ref)
+        with self.locked():
+            self.assert_mutation_allowed(ref)
+            path = self.resolve_ref(ref)
             if not path.exists():
                 raise FileNotFoundError(path)
             current = path.read_bytes()
@@ -191,29 +141,15 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
                 author,
             )
 
-    async def delete_ref(
-        self,
-        ref: ResourceRef,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> ResourceMutation:
-        return await asyncio.to_thread(
-            self._delete_ref,
-            ref,
-            rationale,
-            author,
-        )
-
-    def _delete_ref(
+    def delete_ref(
         self,
         ref: ResourceRef,
         rationale: str,
         author: WriterAuthor,
     ) -> ResourceMutation:
-        with self._locked():
-            self._assert_mutation_allowed(ref)
-            path = self._resolve_ref(ref)
+        with self.locked():
+            self.assert_mutation_allowed(ref)
+            path = self.resolve_ref(ref)
             before = _digest_bytes(path.read_bytes()) if path.exists() else None
             if path.exists():
                 _unlink_and_fsync(path)
@@ -226,26 +162,357 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
                 author,
             )
 
-    async def read(self, path: str) -> bytes:
-        return await asyncio.to_thread(self._read_workspace, path)
+    def read_workspace(self, path: str) -> bytes:
+        return self.resolve_workspace_path(path).read_bytes()
 
-    def _read_workspace(self, path: str) -> bytes:
-        return self._resolve_workspace_path(path).read_bytes()
+    def exists_workspace(self, path: str) -> bool:
+        return self.resolve_workspace_path(path).exists()
 
-    async def exists(self, path: str) -> bool:
-        return await asyncio.to_thread(self._exists_workspace, path)
-
-    def _exists_workspace(self, path: str) -> bool:
-        return self._resolve_workspace_path(path).exists()
-
-    async def list_dir(self, path: str) -> list[str]:
-        return await asyncio.to_thread(self._list_dir, path)
-
-    def _list_dir(self, path: str) -> list[str]:
-        resolved = self._resolve_workspace_path(path)
+    def list_dir(self, path: str) -> list[str]:
+        resolved = self.resolve_workspace_path(path)
         if not resolved.exists():
             return []
         return [child.name for child in sorted(resolved.iterdir())]
+
+    def write_workspace(self, path: str, content: bytes) -> Path:
+        with self.locked():
+            resolved = self.resolve_workspace_path(path)
+            _atomic_write_bytes(resolved, content)
+            return resolved
+
+    def replace_workspace(
+        self,
+        path: str,
+        old: bytes,
+        new: bytes,
+    ) -> tuple[Path, bool]:
+        with self.locked():
+            resolved = self.resolve_workspace_path(path)
+            if not resolved.exists():
+                return resolved, False
+            current = resolved.read_bytes()
+            if current != old:
+                return resolved, False
+            _atomic_write_bytes(resolved, new)
+            return resolved, True
+
+    def delete_workspace(self, path: str) -> Path:
+        with self.locked():
+            resolved = self.resolve_workspace_path(path)
+            if resolved.exists():
+                _unlink_and_fsync(resolved)
+            return resolved
+
+    def classify(self, path: str) -> PathClass:
+        candidates = self.workspace_path_candidates(path)
+        if any(
+            _matches_resource_glob(pattern, candidate)
+            for candidate in candidates
+            for pattern in self._constitution_globs
+        ):
+            return "constitution"
+        if any(
+            _matches_resource_glob(pattern, candidate)
+            for candidate in candidates
+            for pattern in self._managed_globs
+        ):
+            return "managed"
+        return "unmanaged"
+
+    def resolve_ref(self, ref: ResourceRef) -> Path:
+        return _resolve_inside(self.namespace_root(ref.namespace), ref.path)
+
+    def resolve_workspace_path(self, path: str) -> Path:
+        return _resolve_inside(self.workspace_root, path)
+
+    def workspace_path_candidates(self, path: str) -> tuple[str, ...]:
+        resolved = self.resolve_workspace_path(path)
+        physical = resolved.relative_to(_real_path(self.workspace_root)).as_posix()
+        candidate = Path(path)
+        if candidate.is_absolute():
+            try:
+                lexical = candidate.absolute().relative_to(
+                    self.workspace_root.absolute()
+                ).as_posix()
+            except ValueError:
+                lexical = physical
+        else:
+            lexical = candidate.as_posix()
+        return tuple(dict.fromkeys((lexical, physical)))
+
+    def assert_mutation_allowed(self, ref: ResourceRef) -> None:
+        if ref.namespace == "workspace" and self.classify(ref.path) == "constitution":
+            raise PermissionError(
+                f"refusing to modify constitution resource {ref.uri()!r}"
+            )
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock_path.open("a+b") as handle:
+            _lock_file(handle)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def namespace_root(self, namespace: str) -> Path:
+        try:
+            return self.namespace_roots[namespace]
+        except KeyError as exc:
+            raise ValueError(f"unknown resource namespace: {namespace}") from exc
+
+
+class _LocalTransactionJournal:
+    """Crash-recoverable prepare/apply/commit records for resource turns."""
+
+    def __init__(self, files: _LocalResourceFiles) -> None:
+        self._files = files
+        self._transactions_root = files.root / "resource_transactions"
+
+    def recover(self, context: ResourceRecoveryContext) -> None:
+        with self._files.locked():
+            committed = set(context.committed_transaction_ids)
+            seen: set[str] = set()
+            if self._transactions_root.exists():
+                for txn_dir in sorted(self._transactions_root.iterdir()):
+                    manifest_path = txn_dir / "manifest.json"
+                    if not manifest_path.exists():
+                        _rmtree_and_fsync(txn_dir)
+                        continue
+                    manifest = _read_manifest(manifest_path)
+                    session_id = _manifest_str(manifest, "session_id")
+                    if session_id != context.session_id:
+                        continue
+                    transaction_id = _manifest_str(manifest, "transaction_id")
+                    _validate_manifest_identity(
+                        manifest,
+                        transaction_id=transaction_id,
+                    )
+                    seen.add(transaction_id)
+                    if transaction_id in committed:
+                        self._commit_locked(transaction_id)
+                    elif _manifest_status(manifest) != "committed":
+                        self._abandon_locked(transaction_id)
+            missing = committed - seen
+            if missing:
+                raise RuntimeError(
+                    "resource transaction staging is missing for committed turns: "
+                    + ", ".join(sorted(missing))
+                )
+
+    def transaction_dir(self, transaction_id: str) -> Path:
+        return self._transactions_root / transaction_id.removeprefix("sha256:")
+
+    def commit(self, transaction_id: str) -> None:
+        with self._files.locked():
+            self._commit_locked(transaction_id)
+
+    def _commit_locked(self, transaction_id: str) -> None:
+        txn_dir = self.transaction_dir(transaction_id)
+        manifest_path = txn_dir / "manifest.json"
+        manifest = _read_manifest(manifest_path)
+        _validate_manifest_identity(manifest, transaction_id=transaction_id)
+        if _manifest_status(manifest) == "committed":
+            return
+        if _manifest_status(manifest) == "prepared":
+            self._apply_locked(transaction_id)
+            manifest = _read_manifest(manifest_path)
+            _validate_manifest_identity(manifest, transaction_id=transaction_id)
+        if _manifest_status(manifest) != "applied":
+            raise RuntimeError(
+                f"resource transaction {transaction_id} has invalid status "
+                f"{manifest.get('status')!r}"
+            )
+        manifest["status"] = "committed"
+        _write_manifest(manifest_path, manifest)
+
+    def apply(self, transaction_id: str) -> None:
+        with self._files.locked():
+            self._apply_locked(transaction_id)
+
+    def _apply_locked(self, transaction_id: str) -> None:
+        txn_dir = self.transaction_dir(transaction_id)
+        manifest_path = txn_dir / "manifest.json"
+        manifest = _read_manifest(manifest_path)
+        _validate_manifest_identity(manifest, transaction_id=transaction_id)
+        status = _manifest_status(manifest)
+        if status in {"applied", "committed"}:
+            return
+        if status != "prepared":
+            raise RuntimeError(
+                f"resource transaction {transaction_id} has invalid status "
+                f"{status!r}"
+            )
+        for operation in _manifest_operations(manifest):
+            ref = _operation_ref(operation)
+            path = self._files.resolve_ref(ref)
+            before = _optional_manifest_str(operation, "before_version")
+            after = _optional_manifest_str(operation, "after_version")
+            current = _path_digest(path)
+            if current == after:
+                continue
+            if current != before:
+                raise RuntimeError(
+                    f"resource changed during transaction {transaction_id}: "
+                    f"{ref.uri()} is {current!r}, expected {before!r}"
+                )
+            new_file = _optional_manifest_str(operation, "new_file")
+            if new_file is None:
+                if path.exists():
+                    _unlink_and_fsync(path)
+            else:
+                _atomic_write_bytes(path, (txn_dir / new_file).read_bytes())
+        manifest["status"] = "applied"
+        _write_manifest(manifest_path, manifest)
+
+    def abandon(self, transaction_id: str) -> None:
+        with self._files.locked():
+            self._abandon_locked(transaction_id)
+
+    def _abandon_locked(self, transaction_id: str) -> None:
+        txn_dir = self.transaction_dir(transaction_id)
+        manifest_path = txn_dir / "manifest.json"
+        if not manifest_path.exists():
+            if txn_dir.exists():
+                _rmtree_and_fsync(txn_dir)
+            return
+        manifest = _read_manifest(manifest_path)
+        _validate_manifest_identity(manifest, transaction_id=transaction_id)
+        if _manifest_status(manifest) == "committed":
+            raise RuntimeError(
+                f"cannot abandon committed resource transaction {transaction_id}"
+            )
+        for operation in reversed(_manifest_operations(manifest)):
+            ref = _operation_ref(operation)
+            path = self._files.resolve_ref(ref)
+            before = _optional_manifest_str(operation, "before_version")
+            after = _optional_manifest_str(operation, "after_version")
+            current = _path_digest(path)
+            if current == before:
+                continue
+            if current != after:
+                raise RuntimeError(
+                    f"resource changed while abandoning transaction {transaction_id}: "
+                    f"{ref.uri()} is {current!r}, expected {after!r}"
+                )
+            before_file = _optional_manifest_str(operation, "before_file")
+            if before_file is None:
+                if path.exists():
+                    _unlink_and_fsync(path)
+            else:
+                _atomic_write_bytes(path, (txn_dir / before_file).read_bytes())
+        _rmtree_and_fsync(txn_dir)
+
+    def forget(self, transaction_id: str) -> None:
+        with self._files.locked():
+            txn_dir = self.transaction_dir(transaction_id)
+            manifest = _read_manifest(txn_dir / "manifest.json")
+            _validate_manifest_identity(manifest, transaction_id=transaction_id)
+            if _manifest_status(manifest) != "committed":
+                raise RuntimeError(
+                    f"cannot discard uncommitted resource transaction {transaction_id}"
+                )
+            _rmtree_and_fsync(txn_dir)
+
+
+class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
+    """Map logical ``ResourceRef`` namespaces to local directories."""
+
+    def __init__(
+        self,
+        *,
+        workspace_root: str | Path,
+        root: str | Path | None = None,
+        namespace_roots: Mapping[str, str | Path] | None = None,
+        manifest_path: str | Path | None = None,
+        discover_manifest: bool = True,
+    ) -> None:
+        workspace_path = Path(workspace_root)
+        resource_root = (
+            Path(root) if root is not None else workspace_path / ".agentm"
+        )
+        resolved_manifest = (
+            Path(manifest_path)
+            if manifest_path is not None
+            else workspace_path / "core-manifest.yaml"
+            if discover_manifest
+            and (workspace_path / "core-manifest.yaml").is_file()
+            else None
+        )
+        self._files = _LocalResourceFiles(
+            workspace_root=workspace_path,
+            root=resource_root,
+            namespace_roots=namespace_roots,
+            manifest_path=resolved_manifest,
+        )
+        self._journal = _LocalTransactionJournal(self._files)
+
+    async def read_ref(self, ref: ResourceRef) -> bytes:
+        return await asyncio.to_thread(self._files.read_ref, ref)
+
+    async def exists_ref(self, ref: ResourceRef) -> bool:
+        return await asyncio.to_thread(self._files.exists_ref, ref)
+
+    async def list_ref(self, ref: ResourceRef) -> list[ResourceRef]:
+        return await asyncio.to_thread(self._files.list_ref, ref)
+
+    async def write_ref(
+        self,
+        ref: ResourceRef,
+        content: bytes,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> ResourceMutation:
+        return await asyncio.to_thread(
+            self._files.write_ref,
+            ref,
+            content,
+            rationale,
+            author,
+        )
+
+    async def replace_ref(
+        self,
+        ref: ResourceRef,
+        old: bytes,
+        new: bytes,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> ResourceMutation:
+        return await asyncio.to_thread(
+            self._files.replace_ref,
+            ref,
+            old,
+            new,
+            rationale,
+            author,
+        )
+
+    async def delete_ref(
+        self,
+        ref: ResourceRef,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> ResourceMutation:
+        return await asyncio.to_thread(
+            self._files.delete_ref,
+            ref,
+            rationale,
+            author,
+        )
+
+    async def read(self, path: str) -> bytes:
+        return await asyncio.to_thread(self._files.read_workspace, path)
+
+    async def exists(self, path: str) -> bool:
+        return await asyncio.to_thread(self._files.exists_workspace, path)
+
+    async def list_dir(self, path: str) -> list[str]:
+        return await asyncio.to_thread(self._files.list_dir, path)
 
     async def write(
         self,
@@ -260,17 +527,11 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         if path_class == "constitution":
             return _constitution_write_error(path)
         resolved = await asyncio.to_thread(
-            self._write_workspace,
+            self._files.write_workspace,
             path,
             content,
         )
         return WriteResult(path=str(resolved), path_class=self.classify(path))
-
-    def _write_workspace(self, path: str, content: bytes) -> Path:
-        with self._locked():
-            resolved = self._resolve_workspace_path(path)
-            _atomic_write_bytes(resolved, content)
-            return resolved
 
     async def replace(
         self,
@@ -286,7 +547,7 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         if path_class == "constitution":
             return _constitution_write_error(path)
         resolved, replaced = await asyncio.to_thread(
-            self._replace_workspace,
+            self._files.replace_workspace,
             path,
             old,
             new,
@@ -299,22 +560,6 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
             )
         return WriteResult(path=str(resolved), path_class=self.classify(path))
 
-    def _replace_workspace(
-        self,
-        path: str,
-        old: bytes,
-        new: bytes,
-    ) -> tuple[Path, bool]:
-        with self._locked():
-            resolved = self._resolve_workspace_path(path)
-            if not resolved.exists():
-                return resolved, False
-            current = resolved.read_bytes()
-            if current != old:
-                return resolved, False
-            _atomic_write_bytes(resolved, new)
-            return resolved, True
-
     async def delete(
         self,
         path: str,
@@ -326,31 +571,11 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         path_class = self.classify(path)
         if path_class == "constitution":
             return _constitution_write_error(path)
-        resolved = await asyncio.to_thread(self._delete_workspace, path)
+        resolved = await asyncio.to_thread(self._files.delete_workspace, path)
         return WriteResult(path=str(resolved), path_class=self.classify(path))
 
-    def _delete_workspace(self, path: str) -> Path:
-        with self._locked():
-            resolved = self._resolve_workspace_path(path)
-            if resolved.exists():
-                _unlink_and_fsync(resolved)
-            return resolved
-
     def classify(self, path: str) -> PathClass:
-        candidates = self._workspace_path_candidates(path)
-        if any(
-            _matches_resource_glob(pattern, candidate)
-            for candidate in candidates
-            for pattern in self._constitution_globs
-        ):
-            return "constitution"
-        if any(
-            _matches_resource_glob(pattern, candidate)
-            for candidate in candidates
-            for pattern in self._managed_globs
-        ):
-            return "managed"
-        return "unmanaged"
+        return self._files.classify(path)
 
     @asynccontextmanager
     async def batch(
@@ -376,7 +601,7 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         return _LocalResourceTxn(self, context)
 
     async def recover(self, context: ResourceRecoveryContext) -> None:
-        await asyncio.to_thread(self._recover, context)
+        await asyncio.to_thread(self._journal.recover, context)
 
     async def fork_for_environment(
         self,
@@ -389,212 +614,15 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         del child_session_id
         namespace_roots = {
             namespace: root
-            for namespace, root in self._namespace_roots.items()
+            for namespace, root in self._files.namespace_roots.items()
             if namespace != "workspace"
         }
         return LocalResourceStore(
             workspace_root=workspace_root,
-            root=self._root,
+            root=self._files.root,
             namespace_roots=namespace_roots,
             discover_manifest=True,
         )
-
-    def _resolve_ref(self, ref: ResourceRef) -> Path:
-        root = self._namespace_root(ref.namespace)
-        return _resolve_inside(root, ref.path)
-
-    def _resolve_workspace_path(self, path: str) -> Path:
-        return _resolve_inside(self._workspace_root, path)
-
-    def _workspace_relative(self, path: str) -> Path:
-        resolved = self._resolve_workspace_path(path)
-        return resolved.relative_to(_real_path(self._workspace_root))
-
-    def _workspace_path_candidates(self, path: str) -> tuple[str, ...]:
-        physical = self._workspace_relative(path).as_posix()
-        candidate = Path(path)
-        if candidate.is_absolute():
-            try:
-                lexical = candidate.absolute().relative_to(
-                    self._workspace_root.absolute()
-                ).as_posix()
-            except ValueError:
-                lexical = physical
-        else:
-            lexical = candidate.as_posix()
-        return tuple(dict.fromkeys((lexical, physical)))
-
-    def _assert_mutation_allowed(self, ref: ResourceRef) -> None:
-        if ref.namespace == "workspace" and self.classify(ref.path) == "constitution":
-            raise PermissionError(
-                f"refusing to modify constitution resource {ref.uri()!r}"
-            )
-
-    @contextmanager
-    def _locked(self) -> Iterator[None]:
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock_path.open("a+b") as handle:
-            _lock_file(handle)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    def _namespace_root(self, namespace: str) -> Path:
-        try:
-            return self._namespace_roots[namespace]
-        except KeyError as exc:
-            raise ValueError(f"unknown resource namespace: {namespace}") from exc
-
-    def _recover(self, context: ResourceRecoveryContext) -> None:
-        with self._locked():
-            self._recover_locked(context)
-
-    def _recover_locked(self, context: ResourceRecoveryContext) -> None:
-        committed = set(context.committed_transaction_ids)
-        seen: set[str] = set()
-        if self._transactions_root.exists():
-            for txn_dir in sorted(self._transactions_root.iterdir()):
-                manifest_path = txn_dir / "manifest.json"
-                if not manifest_path.exists():
-                    # A manifest is the prepare boundary. A crash before its
-                    # atomic write leaves no transaction that can be committed.
-                    _rmtree_and_fsync(txn_dir)
-                    continue
-                manifest = _read_manifest(manifest_path)
-                session_id = _manifest_str(manifest, "session_id")
-                if session_id != context.session_id:
-                    continue
-                transaction_id = _manifest_str(manifest, "transaction_id")
-                _validate_manifest_identity(manifest, transaction_id=transaction_id)
-                seen.add(transaction_id)
-                if transaction_id in committed:
-                    self._commit_prepared_locked(transaction_id)
-                elif _manifest_status(manifest) != "committed":
-                    self._abandon_prepared_locked(transaction_id)
-        missing = committed - seen
-        if missing:
-            raise RuntimeError(
-                "resource transaction staging is missing for committed turns: "
-                + ", ".join(sorted(missing))
-            )
-
-    def _transaction_dir(self, transaction_id: str) -> Path:
-        return self._transactions_root / transaction_id.removeprefix("sha256:")
-
-    def _commit_prepared(self, transaction_id: str) -> None:
-        with self._locked():
-            self._commit_prepared_locked(transaction_id)
-
-    def _commit_prepared_locked(self, transaction_id: str) -> None:
-        txn_dir = self._transaction_dir(transaction_id)
-        manifest_path = txn_dir / "manifest.json"
-        manifest = _read_manifest(manifest_path)
-        _validate_manifest_identity(manifest, transaction_id=transaction_id)
-        if _manifest_status(manifest) == "committed":
-            return
-        if _manifest_status(manifest) == "prepared":
-            self._apply_prepared_locked(transaction_id)
-            manifest = _read_manifest(manifest_path)
-            _validate_manifest_identity(manifest, transaction_id=transaction_id)
-        if _manifest_status(manifest) != "applied":
-            raise RuntimeError(
-                f"resource transaction {transaction_id} has invalid status "
-                f"{manifest.get('status')!r}"
-            )
-        manifest["status"] = "committed"
-        _write_manifest(manifest_path, manifest)
-
-    def _apply_prepared(self, transaction_id: str) -> None:
-        with self._locked():
-            self._apply_prepared_locked(transaction_id)
-
-    def _apply_prepared_locked(self, transaction_id: str) -> None:
-        txn_dir = self._transaction_dir(transaction_id)
-        manifest_path = txn_dir / "manifest.json"
-        manifest = _read_manifest(manifest_path)
-        _validate_manifest_identity(manifest, transaction_id=transaction_id)
-        status = _manifest_status(manifest)
-        if status in {"applied", "committed"}:
-            return
-        if status != "prepared":
-            raise RuntimeError(
-                f"resource transaction {transaction_id} has invalid status "
-                f"{status!r}"
-            )
-        for operation in _manifest_operations(manifest):
-            ref = _operation_ref(operation)
-            path = self._resolve_ref(ref)
-            before = _optional_manifest_str(operation, "before_version")
-            after = _optional_manifest_str(operation, "after_version")
-            current = _path_digest(path)
-            if current == after:
-                continue
-            if current != before:
-                raise RuntimeError(
-                    f"resource changed during transaction {transaction_id}: "
-                    f"{ref.uri()} is {current!r}, expected {before!r}"
-                )
-            new_file = _optional_manifest_str(operation, "new_file")
-            if new_file is None:
-                if path.exists():
-                    _unlink_and_fsync(path)
-            else:
-                _atomic_write_bytes(path, (txn_dir / new_file).read_bytes())
-        manifest["status"] = "applied"
-        _write_manifest(manifest_path, manifest)
-
-    def _abandon_prepared(self, transaction_id: str) -> None:
-        with self._locked():
-            self._abandon_prepared_locked(transaction_id)
-
-    def _abandon_prepared_locked(self, transaction_id: str) -> None:
-        txn_dir = self._transaction_dir(transaction_id)
-        manifest_path = txn_dir / "manifest.json"
-        if not manifest_path.exists():
-            if txn_dir.exists():
-                _rmtree_and_fsync(txn_dir)
-            return
-        manifest = _read_manifest(manifest_path)
-        _validate_manifest_identity(manifest, transaction_id=transaction_id)
-        if _manifest_status(manifest) == "committed":
-            raise RuntimeError(
-                f"cannot abandon committed resource transaction {transaction_id}"
-            )
-        for operation in reversed(_manifest_operations(manifest)):
-            ref = _operation_ref(operation)
-            path = self._resolve_ref(ref)
-            before = _optional_manifest_str(operation, "before_version")
-            after = _optional_manifest_str(operation, "after_version")
-            current = _path_digest(path)
-            if current == before:
-                continue
-            if current != after:
-                raise RuntimeError(
-                    f"resource changed while abandoning transaction {transaction_id}: "
-                    f"{ref.uri()} is {current!r}, expected {after!r}"
-                )
-            before_file = _optional_manifest_str(operation, "before_file")
-            if before_file is None:
-                if path.exists():
-                    _unlink_and_fsync(path)
-            else:
-                _atomic_write_bytes(path, (txn_dir / before_file).read_bytes())
-        _rmtree_and_fsync(txn_dir)
-
-    def _forget_committed(self, transaction_id: str) -> None:
-        with self._locked():
-            self._forget_committed_locked(transaction_id)
-
-    def _forget_committed_locked(self, transaction_id: str) -> None:
-        txn_dir = self._transaction_dir(transaction_id)
-        manifest = _read_manifest(txn_dir / "manifest.json")
-        _validate_manifest_identity(manifest, transaction_id=transaction_id)
-        if _manifest_status(manifest) != "committed":
-            raise RuntimeError(
-                f"cannot discard uncommitted resource transaction {transaction_id}"
-            )
-        _rmtree_and_fsync(txn_dir)
 
 
 class _LocalBatchHandle:
@@ -664,7 +692,7 @@ class _LocalBatchHandle:
             await self._txn.abandon()
             raise
         await asyncio.to_thread(
-            self._store._forget_committed,
+            self._store._journal.forget,
             self._txn._transaction_id,
         )
 
@@ -704,7 +732,7 @@ class _LocalResourceTxn(ResourceTxn):
         )
 
     def _read_base(self, ref: ResourceRef) -> bytes | None:
-        path = self._store._resolve_ref(ref)
+        path = self._store._files.resolve_ref(ref)
         return path.read_bytes() if path.exists() else None
 
     async def create(
@@ -716,7 +744,7 @@ class _LocalResourceTxn(ResourceTxn):
         author: WriterAuthor = "agent",
     ) -> ResourceMutation:
         self._ensure_open()
-        self._store._assert_mutation_allowed(ref)
+        self._store._files.assert_mutation_allowed(ref)
         self._pending.append(
             _PendingMutation(
                 "create",
@@ -745,7 +773,7 @@ class _LocalResourceTxn(ResourceTxn):
         author: WriterAuthor = "agent",
     ) -> ResourceMutation:
         self._ensure_open()
-        self._store._assert_mutation_allowed(ref)
+        self._store._files.assert_mutation_allowed(ref)
         self._pending.append(
             _PendingMutation(
                 "replace",
@@ -766,10 +794,10 @@ class _LocalResourceTxn(ResourceTxn):
         author: WriterAuthor = "agent",
     ) -> ResourceMutation:
         self._ensure_open()
-        self._store._assert_mutation_allowed(ref)
+        self._store._files.assert_mutation_allowed(ref)
         before = await asyncio.to_thread(
             _path_digest,
-            self._store._resolve_ref(ref),
+            self._store._files.resolve_ref(ref),
         )
         self._pending.append(
             _PendingMutation("delete", ref, rationale=rationale, author=author)
@@ -789,7 +817,7 @@ class _LocalResourceTxn(ResourceTxn):
         if not self._applied:
             raise RuntimeError("resource transaction must be applied before commit")
         await asyncio.to_thread(
-            self._store._commit_prepared,
+            self._store._journal.commit,
             self._transaction_id,
         )
         self._closed = True
@@ -799,7 +827,7 @@ class _LocalResourceTxn(ResourceTxn):
         if self._prepared is None:
             raise RuntimeError("resource transaction must be prepared before apply")
         await asyncio.to_thread(
-            self._store._apply_prepared,
+            self._store._journal.apply,
             self._transaction_id,
         )
         self._applied = True
@@ -809,7 +837,7 @@ class _LocalResourceTxn(ResourceTxn):
             return
         if self._prepared is not None:
             await asyncio.to_thread(
-                self._store._abandon_prepared,
+                self._store._journal.abandon,
                 self._transaction_id,
             )
         self._closed = True
@@ -844,11 +872,11 @@ class _LocalResourceTxn(ResourceTxn):
         )
 
     def _prepare(self) -> tuple[ResourceMutation, ...]:
-        with self._store._locked():
+        with self._store._files.locked():
             return self._prepare_locked()
 
     def _prepare_locked(self) -> tuple[ResourceMutation, ...]:
-        txn_dir = self._store._transaction_dir(self._transaction_id)
+        txn_dir = self._store._journal.transaction_dir(self._transaction_id)
         manifest_path = txn_dir / "manifest.json"
         if manifest_path.exists():
             manifest = _read_manifest(manifest_path)
@@ -865,7 +893,7 @@ class _LocalResourceTxn(ResourceTxn):
         operations: list[dict[str, object]] = []
         try:
             for index, pending in enumerate(self._pending):
-                path = self._store._resolve_ref(pending.ref)
+                path = self._store._files.resolve_ref(pending.ref)
                 current = (
                     virtual[pending.ref]
                     if pending.ref in virtual
