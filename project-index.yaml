@@ -87,6 +87,7 @@ requirements:
       - path: src/agentm/core/abi/trigger.py
       - path: src/agentm/core/lib/__init__.py
       - path: src/agentm/core/lib/async_cancel.py
+      - path: src/agentm/core/lib/background_tasks.py
       - path: src/agentm/core/lib/redact.py
       - path: src/agentm/core/lib/serialization.py
       - path: src/agentm/core/lib/tool_executor.py
@@ -128,6 +129,7 @@ requirements:
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/prompt_cache.py
       - path: src/agentm/extensions/builtin/retry_policy.py
+      - path: src/agentm/extensions/builtin/sub_agent.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/validate.py

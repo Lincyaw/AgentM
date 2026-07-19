@@ -66,6 +66,8 @@ _LOCAL_RESOURCES = "agentm.extensions.builtin.local_resources"
 _OPERATIONS = "agentm.extensions.builtin.operations"
 _BACKGROUND_EXEC = "agentm.extensions.builtin.background_exec"
 _MEMORY = "agentm.extensions.builtin.memory"
+_SYSTEM_PROMPT = "agentm.extensions.builtin.system_prompt"
+_SUB_AGENT = "agentm.extensions.builtin.sub_agent"
 _WAIT_FOR_CANCEL = object()
 
 
@@ -917,6 +919,116 @@ async def test_sdk_memory_round_trip_is_provider_visible(tmp_path: Path) -> None
         for content in visible_results[0].content
         if isinstance(content, TextContent)
     )
+
+
+@pytest.mark.asyncio
+async def test_sdk_background_child_has_an_independent_cancel_domain(
+    tmp_path: Path,
+) -> None:
+    parent_waiting = asyncio.Event()
+    child_done = asyncio.Event()
+    parent_cancel_reason: list[str | None] = []
+    completion_seen = asyncio.Event()
+
+    async def provider(
+        *,
+        messages: list[AgentMessage],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: CancelSignal | None = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[TextDelta | MessageEnd]:
+        del model, tools, system, thinking
+        texts = _text(messages)
+        if "child-work" in texts:
+            await asyncio.sleep(0.1)
+            if signal is not None and signal.is_set():
+                raise AssertionError(
+                    f"parent cancellation leaked into child: {signal.reason}"
+                )
+            child_done.set()
+            yield MessageEnd(
+                message=AssistantMessage(
+                    role="assistant",
+                    content=(TextContent(type="text", text="child-finished"),),
+                    timestamp=0.0,
+                    stop_reason="end_turn",
+                )
+            )
+            return
+        if any("<subagent_result" in text for text in texts):
+            assert any("child-finished" in text for text in texts)
+            completion_seen.set()
+            yield MessageEnd(
+                message=AssistantMessage(
+                    role="assistant",
+                    content=(
+                        TextContent(type="text", text="child-result-observed"),
+                    ),
+                    timestamp=0.0,
+                    stop_reason="end_turn",
+                )
+            )
+            return
+        if any(
+            isinstance(block, ToolResultBlock)
+            and block.tool_call_id == "dispatch-child"
+            for message in messages
+            for block in message.content
+        ):
+            if signal is None:
+                raise AssertionError("parent request has no cancellation signal")
+            parent_waiting.set()
+            await signal.wait()
+            parent_cancel_reason.append(cancel_reason(signal))
+            raise RuntimeError("parent provider cancelled")
+        if "start-child" in texts:
+            yield MessageEnd(
+                message=_tool_call(
+                    "dispatch-child",
+                    "dispatch_agent",
+                    {
+                        "purpose": "cancel-domain-test",
+                        "prompt": "child-work",
+                        "background": True,
+                    },
+                )
+            )
+            return
+        raise AssertionError(f"unexpected provider context: {texts!r}")
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ExtensionSpec.from_module(
+                    _SYSTEM_PROMPT,
+                    {"prompt": "Test child-session cancellation."},
+                ),
+                ExtensionSpec.from_module(
+                    _SUB_AGENT,
+                    {"max_workers": 2},
+                ),
+            ],
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    parent_run = asyncio.create_task(session.run("start-child"))
+    try:
+        await asyncio.wait_for(parent_waiting.wait(), timeout=2.0)
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(parent_run, timeout=2.0)
+        assert await session.idle(timeout=2.0)
+    finally:
+        if not parent_run.done():
+            parent_run.cancel()
+        await session.shutdown()
+
+    assert parent_cancel_reason == ["user_cancel"]
+    assert child_done.is_set()
+    assert completion_seen.is_set()
 
 
 @pytest.mark.asyncio

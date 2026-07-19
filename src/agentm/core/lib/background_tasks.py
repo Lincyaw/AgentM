@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from agentm.core.abi.cancel import CancelSource
 
@@ -29,7 +29,7 @@ class BackgroundTask:
     """
 
     task_id: str
-    task: asyncio.Task[Any]
+    task: asyncio.Task[None] | None = None
     abort_signal: CancelSource
     status: str = RUNNING
     read: bool = False

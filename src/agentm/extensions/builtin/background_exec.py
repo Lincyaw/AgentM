@@ -53,7 +53,16 @@ _ERROR: Literal["error"] = "error"
 _CANCELLED: Literal["cancelled"] = "cancelled"
 _Status = Literal["running", "completed", "error", "cancelled"]
 
-_COMPANION_TOOLS = frozenset({"check_background", "cancel_background"})
+_BYPASS_TOOLS = frozenset(
+    {
+        "check_background",
+        "cancel_background",
+        # Child dispatch owns a separate foreground/background cancellation
+        # choice. Wrapping it here would detach the tool call without changing
+        # the child's parent-cancellation domain.
+        "dispatch_agent",
+    }
+)
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_SHUTDOWN_GRACE_SECONDS = 5.0
 _MAX_ACTIVITY_LABEL_CHARS = 96
@@ -233,7 +242,7 @@ class _BackgroundManager:
 
     def should_detach(self, tool_name: str) -> bool:
         return (
-            tool_name not in _COMPANION_TOOLS
+            tool_name not in _BYPASS_TOOLS
             and tool_name not in self._denylist
         )
 
@@ -284,7 +293,6 @@ class _BackgroundManager:
             task_id=task_id,
             tool_name=tool_name,
             label=_activity_label(tool_name, args),
-            task=inner_task,
             abort_signal=abort_source,
         )
         try:
@@ -407,7 +415,11 @@ class _BackgroundManager:
             for state in states:
                 if state.status == _RUNNING:
                     state.abort_signal.set("shutdown")
-        running = [state.task for state in states if state.status == _RUNNING]
+        running = [
+            state.task
+            for state in states
+            if state.status == _RUNNING and state.task is not None
+        ]
         if running:
             _, pending = await asyncio.wait(
                 running,
