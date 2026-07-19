@@ -15,14 +15,14 @@ from agentm.core.runtime.catalog import (
     InMemoryAtomCatalog,
     InMemoryVersionedResourceStore,
 )
-from agentm.core.runtime.session import Session
+from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.execution import Execution
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, QueueClosed
 from agentm.core.runtime.tree import InMemorySessionGraph
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
-from agentm.core.runtime.session_factory import create_session
+from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.extension import load_extension, ExtensionLoadError
 
 __all__ = [
@@ -34,6 +34,8 @@ __all__ = [
     "InMemoryVersionedResourceStore",
     "QueueClosed",
     "Session",
+    "SessionBuildConfig",
+    "SessionRuntimeConfig",
     "Trajectory",
     "TrajectoryStoreQueryAdapter",
     "TriggerQueue",

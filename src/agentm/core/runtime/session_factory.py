@@ -88,7 +88,7 @@ from agentm.core.runtime.extension import (
     install_extension,
     load_extension_module,
 )
-from agentm.core.runtime.session import Session
+from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_meta import session_meta_config
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
@@ -442,57 +442,109 @@ async def _record_active_set(
     return fingerprint
 
 
-async def create_session(
-    *,
-    scenario: str | None = None,
-    stream_fn: StreamFn | None = None,
-    model: Model | None = None,
-    system: str | None = None,
-    cwd: str = "",
-    purpose: str = "root",
-    store: TrajectoryStore | None = None,
-    graph: SessionGraphProtocol | None = None,
-    session_context: SessionContext | None = None,
-    session_id: str | None = None,
-    root_session_id: str | None = None,
-    parent_session_id: str | None = None,
-    bus: EventBus | None = None,
-    initial_turns: list[Turn] | None = None,
-    fork_point: TurnRef | None = None,
-    tools: list[Tool] | None = None,
-    context_policies: list[ContextPolicy] | None = None,
-    trigger_renderers: dict[str, TriggerRenderer] | None = None,
-    codec: CodecRegistry | None = None,
-    extensions: Sequence[ExtensionInput] | None = None,
-    extra_extensions: Sequence[ExtensionInput] = (),
-    provider: ExtensionInput | None = None,
-    provider_resolver: ProviderResolver | None = None,
-    provider_identity: ProviderSessionIdentity | None = None,
-    resource_reader: ResourceReader | None = None,
-    resource_store: ResourceStore | None = None,
-    resource_writer: ResourceWriter | None = None,
-    tool_executor: ToolExecutor | None = None,
-    tool_orchestrator: ToolOrchestrator | None = None,
-    permission_policy: PermissionPolicy | None = None,
-    trajectory_node_store: TrajectoryNodeStore | None = None,
-    effect_scope: EffectScope | None = None,
-    environment_operations: EnvironmentOperations | None = None,
+@dataclass(slots=True)
+class SessionBuildConfig:
+    """Normalized composition and runtime inputs for the low-level factory."""
+
+    scenario: str | None = None
+    stream_fn: StreamFn | None = None
+    model: Model | None = None
+    system: str | None = None
+    cwd: str = ""
+    purpose: str = "root"
+    store: TrajectoryStore | None = None
+    graph: SessionGraphProtocol | None = None
+    session_context: SessionContext | None = None
+    session_id: str | None = None
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    bus: EventBus | None = None
+    initial_turns: list[Turn] | None = None
+    fork_point: TurnRef | None = None
+    tools: list[Tool] | None = None
+    context_policies: list[ContextPolicy] | None = None
+    trigger_renderers: dict[str, TriggerRenderer] | None = None
+    codec: CodecRegistry | None = None
+    extensions: Sequence[ExtensionInput] | None = None
+    extra_extensions: Sequence[ExtensionInput] = ()
+    provider: ExtensionInput | None = None
+    provider_resolver: ProviderResolver | None = None
+    provider_identity: ProviderSessionIdentity | None = None
+    resource_reader: ResourceReader | None = None
+    resource_store: ResourceStore | None = None
+    resource_writer: ResourceWriter | None = None
+    tool_executor: ToolExecutor | None = None
+    tool_orchestrator: ToolOrchestrator | None = None
+    permission_policy: PermissionPolicy | None = None
+    trajectory_node_store: TrajectoryNodeStore | None = None
+    effect_scope: EffectScope | None = None
+    environment_operations: EnvironmentOperations | None = None
     environment_restore_failure_handler: (
         EnvironmentRestoreFailureHandler | None
-    ) = None,
-    versioned_resource_store: VersionedResourceStore | None = None,
-    atom_catalog: AtomCatalog | None = None,
-    atom_configs: dict[str, dict[str, Any]] | None = None,
-    scenario_loader: ScenarioLoader | None = None,
-    services: ServiceRegistry | None = None,
-    resolved_spec: ResolvedSessionSpec | None = None,
-    max_turns: int | None = None,
-    max_tool_calls: int | None = None,
-    tool_allowlist: list[str] | None = None,
-    thinking: ThinkingLevel = "off",
-    cancel_signal: CancelSignal | None = None,
-) -> Session:
+    ) = None
+    versioned_resource_store: VersionedResourceStore | None = None
+    atom_catalog: AtomCatalog | None = None
+    atom_configs: dict[str, dict[str, Any]] | None = None
+    scenario_loader: ScenarioLoader | None = None
+    services: ServiceRegistry | None = None
+    resolved_spec: ResolvedSessionSpec | None = None
+    max_turns: int | None = None
+    max_tool_calls: int | None = None
+    tool_allowlist: list[str] | None = None
+    thinking: ThinkingLevel = "off"
+    cancel_signal: CancelSignal | None = None
+
+
+async def create_session(config: SessionBuildConfig) -> Session:
     """Create a root SDK session."""
+
+    scenario = config.scenario
+    stream_fn = config.stream_fn
+    model = config.model
+    system = config.system
+    cwd = config.cwd
+    purpose = config.purpose
+    store = config.store
+    graph = config.graph
+    session_context = config.session_context
+    session_id = config.session_id
+    root_session_id = config.root_session_id
+    parent_session_id = config.parent_session_id
+    bus = config.bus
+    initial_turns = config.initial_turns
+    fork_point = config.fork_point
+    tools = config.tools
+    context_policies = config.context_policies
+    trigger_renderers = config.trigger_renderers
+    codec = config.codec
+    extensions = config.extensions
+    extra_extensions = config.extra_extensions
+    provider = config.provider
+    provider_resolver = config.provider_resolver
+    provider_identity = config.provider_identity
+    resource_reader = config.resource_reader
+    resource_store = config.resource_store
+    resource_writer = config.resource_writer
+    tool_executor = config.tool_executor
+    tool_orchestrator = config.tool_orchestrator
+    permission_policy = config.permission_policy
+    trajectory_node_store = config.trajectory_node_store
+    effect_scope = config.effect_scope
+    environment_operations = config.environment_operations
+    environment_restore_failure_handler = (
+        config.environment_restore_failure_handler
+    )
+    versioned_resource_store = config.versioned_resource_store
+    atom_catalog = config.atom_catalog
+    atom_configs = config.atom_configs
+    scenario_loader = config.scenario_loader
+    services = config.services
+    resolved_spec = config.resolved_spec
+    max_turns = config.max_turns
+    max_tool_calls = config.max_tool_calls
+    tool_allowlist = config.tool_allowlist
+    thinking = config.thinking
+    cancel_signal = config.cancel_signal
 
     resolved_services = services or ServiceRegistry()
     effective_loader = scenario_loader or _get_scenario_loader(resolved_services)
@@ -533,7 +585,7 @@ async def create_session(
     else:
         ctx = session_context
 
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         ctx=ctx,
         trajectory=Trajectory(turns=initial_turns),
         bus=bus,
@@ -542,9 +594,9 @@ async def create_session(
         system=system,
         store=store,
         graph=graph,
-        tools=tools,
-        context_policies=context_policies,
-        trigger_renderers=trigger_renderers,
+        tools=list(tools or ()),
+        context_policies=list(context_policies or ()),
+        trigger_renderers=dict(trigger_renderers or {}),
         codec=codec,
         max_turns=max_turns,
         max_tool_calls=max_tool_calls,
@@ -563,7 +615,7 @@ async def create_session(
         services=resolved_services,
         cwd=cwd,
         purpose=purpose,
-    )
+    ))
     if resource_writer is not None:
         session.register_resource_writer(resource_writer, replace=True)
     if effect_scope is not None:
@@ -657,7 +709,7 @@ async def create_from_config(
             ResolvedSessionSpec,
             scope="session",
         )
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         scenario=(
             resolved_spec.scenario
             if resolved_spec is not None
@@ -713,7 +765,7 @@ async def create_from_config(
         max_tool_calls=max_tool_calls,
         tool_allowlist=config.tool_allowlist,
         cancel_signal=config.cancel_signal,
-    )
+    ))
 
     for tool in config.extra_tools:
         session.register_tool(tool)
@@ -858,7 +910,7 @@ async def create_child_session(
         else config.cancel_signal if config.cancel_signal is not None else parent_signal
     )
 
-    child = Session(
+    child = Session(SessionRuntimeConfig(
         ctx=child_ctx,
         trajectory=Trajectory(turns=config.initial_turns),
         bus=config.bus,
@@ -882,7 +934,7 @@ async def create_child_session(
         services=child_services,
         cwd=config.cwd or parent.ctx.cwd,
         purpose=config.purpose,
-    )
+    ))
     if config.resource_writer is not None:
         child.register_resource_writer(config.resource_writer, replace=True)
     if config.resource_reader is not None:
@@ -948,6 +1000,7 @@ async def create_child_session(
 
 
 __all__ = [
+    "SessionBuildConfig",
     "create_child_session",
     "create_from_config",
     "create_session",

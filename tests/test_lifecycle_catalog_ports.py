@@ -68,8 +68,12 @@ from agentm.core.abi.trajectory import (
     Turn,
     TurnRef,
 )
-from agentm.core.runtime.session import Session
-from agentm.core.runtime.session_factory import create_from_config, create_session
+from agentm.core.runtime.session import Session, SessionRuntimeConfig
+from agentm.core.runtime.session_factory import (
+    SessionBuildConfig,
+    create_from_config,
+    create_session,
+)
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.tool_orchestration import DefaultToolOrchestrator
 from agentm.config import DefaultSessionSpecResolver
@@ -636,7 +640,11 @@ class _OrderedTransactionalWriter(_TransactionalWriter):
 @pytest.mark.asyncio
 async def test_effect_scope_wraps_committed_turns() -> None:
     scope = _RecordingEffectScope()
-    session = Session(stream_fn=_StaticStream(), model=_model(), system="test")
+    session = Session(SessionRuntimeConfig(
+        stream_fn=_StaticStream(),
+        model=_model(),
+        system="test",
+    ))
     session.register_effect_scope(scope)
 
     session.start()
@@ -655,13 +663,13 @@ async def test_effect_scope_wraps_committed_turns() -> None:
 async def test_effect_scope_fork_and_resume() -> None:
     store = InMemoryTrajectoryStore()
     scope = _RecordingEffectScope()
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=_StaticStream(),
         model=_model(),
         store=store,
         effect_scope=scope,
-    )
+    ))
 
     session.start()
     await session.prompt("go")
@@ -693,14 +701,14 @@ async def test_unpublished_turn_rolls_back_effect_before_resource() -> None:
     order: list[str] = []
     scope = _OrderedEffectScope(order)
     writer = _OrderedTransactionalWriter(order)
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=_StaticStream(),
         model=_model(),
         store=_FailingAppendStore(),
         resource_writer=writer,
         effect_scope=scope,
-    )
+    ))
 
     session.start()
     receipt = await session.prompt("go")
@@ -720,14 +728,14 @@ async def test_effect_commit_precedes_rebuildable_projection_failure(
 ) -> None:
     store = InMemoryTrajectoryStore()
     scope = _RecordingEffectScope()
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=_StaticStream(),
         model=_model(),
         store=store,
         trajectory_node_store=_FailingNodeStore(tmp_path / "nodes"),
         effect_scope=scope,
-    )
+    ))
 
     session.start()
     receipt = await session.prompt("go")
@@ -746,12 +754,12 @@ async def test_effect_commit_precedes_rebuildable_projection_failure(
 @pytest.mark.asyncio
 async def test_atom_catalog_records_active_set_service() -> None:
     catalog = _RecordingCatalog()
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=_StaticStream(),
         model=_model(),
         atom_catalog=catalog,
-    )
+    ))
 
     fingerprint = session.services.get(ACTIVE_SET_FINGERPRINT_SERVICE)
 
@@ -793,7 +801,9 @@ def test_multiple_providers_require_explicit_selection_policy() -> None:
     assert unresolved.provider_names() == ["first"]
     assert unresolved.get_provider() is first
 
-    resolved = Session(provider_resolver=_ProviderResolver("second"))
+    resolved = Session(SessionRuntimeConfig(
+        provider_resolver=_ProviderResolver("second")
+    ))
     resolved.register_provider("first", first)
     resolved.register_provider("second", second)
 
@@ -869,7 +879,7 @@ def test_session_spec_provider_precedence_is_source_accurate(
 async def test_atom_catalog_freezes_atom_identity_versions() -> None:
     catalog = _RecordingCatalog()
     store = InMemoryTrajectoryStore()
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[
             (
                 "agentm.extensions.builtin.system_prompt",
@@ -880,7 +890,7 @@ async def test_atom_catalog_freezes_atom_identity_versions() -> None:
         model=_model(),
         store=store,
         atom_catalog=catalog,
-    )
+    ))
 
     assert len(catalog.active_sets) == 1
     atoms = catalog.active_sets[0].atoms
@@ -926,11 +936,11 @@ async def test_tool_executor_receives_typed_requirements() -> None:
         content=[TextContent(type="text", text="done")],
         timestamp=0.0,
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=_QueuedStream(tool_call, final),
         model=_model(),
         tools=[_RequirementsTool()],
-    )
+    ))
     session.register_tool_executor(executor)
 
     session.start()
@@ -964,11 +974,11 @@ async def test_default_tool_executor_rejects_unsupported_requirements() -> None:
         content=[TextContent(type="text", text="done")],
         timestamp=0.0,
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=_QueuedStream(tool_call, final),
         model=_model(),
         tools=[_RequirementsTool()],
-    )
+    ))
 
     session.start()
     await session.prompt("go")
@@ -1228,12 +1238,12 @@ async def test_session_spec_resolver_records_resolved_spec() -> None:
 
 @pytest.mark.asyncio
 async def test_operations_atom_registers_environment_backend_and_bash_alias() -> None:
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[("agentm.extensions.builtin.operations", {})],
         stream_fn=_StaticStream(),
         model=_model(),
         cwd="/tmp",
-    )
+    ))
 
     environment = session.services.get(
         ENVIRONMENT_OPERATIONS_SERVICE,
@@ -1259,11 +1269,11 @@ async def test_context_projection_service_projects_committed_history() -> None:
         ContextProjection,
         scope="session",
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=stream,
         model=_model(),
         services=services,
-    )
+    ))
 
     session.start()
     await session.prompt("go")
@@ -1303,12 +1313,12 @@ async def test_file_tools_write_uses_active_resource_txn() -> None:
         content=[TextContent(type="text", text="done")],
         timestamp=0.0,
     )
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[("agentm.extensions.builtin.file_tools", {"tools": ["write"]})],
         stream_fn=_QueuedStream(tool_call, final),
         model=_model(),
         resource_writer=writer,
-    )
+    ))
 
     session.start()
     await session.prompt("go")
@@ -1330,12 +1340,12 @@ async def test_file_tools_write_uses_active_resource_txn() -> None:
 @pytest.mark.asyncio
 async def test_resource_txn_abandons_on_turn_failure() -> None:
     writer = _TransactionalWriter()
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=_FailingStream(),
         model=_model(),
         resource_writer=writer,
-    )
+    ))
 
     session.start()
     receipt = await session.prompt("go")

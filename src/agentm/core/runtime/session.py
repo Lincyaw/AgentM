@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Iterator, cast
 
 from loguru import logger
@@ -366,53 +366,68 @@ async def _resolve_fork_turn_ref(
     raise KeyError(node_id)
 
 
+@dataclass(slots=True)
+class SessionRuntimeConfig:
+    """Low-level runtime dependencies after factory composition is resolved."""
+
+    ctx: SessionContext | None = None
+    session_id: str | None = None
+    trajectory: Trajectory | None = None
+    bus: EventBus | None = None
+    store: TrajectoryStore | None = None
+    graph: SessionGraphProtocol | None = None
+    stream_fn: StreamFn | None = None
+    model: Model | None = None
+    tools: list[Tool] = field(default_factory=list)
+    system: str | None = None
+    context_policies: list[ContextPolicy] = field(default_factory=list)
+    trigger_renderers: dict[str, TriggerRenderer] = field(default_factory=dict)
+    codec: CodecRegistry | None = None
+    max_turns: int | None = None
+    max_tool_calls: int | None = None
+    tool_allowlist: Sequence[str] | None = None
+    thinking: ThinkingLevel = "off"
+    cancel_signal: CancelSignal | None = None
+    provider_resolver: ProviderResolver | None = None
+    tool_executor: ToolExecutor | None = None
+    tool_orchestrator: ToolOrchestrator | None = None
+    permission_policy: PermissionPolicy | None = None
+    resource_reader: ResourceReader | None = None
+    resource_store: ResourceStore | None = None
+    trajectory_node_store: TrajectoryNodeStore | None = None
+    versioned_resource_store: VersionedResourceStore | None = None
+    environment_restore_failure_handler: (
+        EnvironmentRestoreFailureHandler | None
+    ) = None
+    provider_identity: ProviderSessionIdentity | None = None
+    services: ServiceRegistry | None = None
+    cwd: str = ""
+    purpose: str = "root"
+
+
 class Session:
     """Top-level session lifecycle object."""
 
-    def __init__(
-        self,
-        *,
-        ctx: SessionContext | None = None,
-        session_id: str | None = None,
-        trajectory: Trajectory | None = None,
-        bus: EventBus | None = None,
-        store: TrajectoryStore | None = None,
-        graph: SessionGraphProtocol | None = None,
-        stream_fn: StreamFn | None = None,
-        model: Model | None = None,
-        tools: list[Tool] | None = None,
-        system: str | None = None,
-        context_policies: list[ContextPolicy] | None = None,
-        trigger_renderers: dict[str, TriggerRenderer] | None = None,
-        codec: CodecRegistry | None = None,
-        max_turns: int | None = None,
-        max_tool_calls: int | None = None,
-        tool_allowlist: Sequence[str] | None = None,
-        thinking: ThinkingLevel = "off",
-        cancel_signal: CancelSignal | None = None,
-        provider_resolver: ProviderResolver | None = None,
-        tool_executor: ToolExecutor | None = None,
-        tool_orchestrator: ToolOrchestrator | None = None,
-        permission_policy: PermissionPolicy | None = None,
-        resource_reader: ResourceReader | None = None,
-        resource_store: ResourceStore | None = None,
-        trajectory_node_store: TrajectoryNodeStore | None = None,
-        versioned_resource_store: VersionedResourceStore | None = None,
-        environment_restore_failure_handler: (
-            EnvironmentRestoreFailureHandler | None
-        ) = None,
-        provider_identity: ProviderSessionIdentity | None = None,
-        services: ServiceRegistry | None = None,
-        cwd: str = "",
-        purpose: str = "root",
-    ) -> None:
+    def __init__(self, config: SessionRuntimeConfig | None = None) -> None:
+        runtime = config or SessionRuntimeConfig()
+        ctx = runtime.ctx
+        session_id = runtime.session_id
+        trajectory = runtime.trajectory
+        bus = runtime.bus
+        store = runtime.store
+        graph = runtime.graph
+        tools = runtime.tools
+        context_policies = runtime.context_policies
+        trigger_renderers = runtime.trigger_renderers
+        codec = runtime.codec
+        services = runtime.services
         sid = session_id or uuid.uuid4().hex[:16]
         if ctx is None:
             self.ctx = SessionContext(
                 session_id=sid,
                 root_session_id=sid,
-                cwd=cwd,
-                purpose=purpose,
+                cwd=runtime.cwd,
+                purpose=runtime.purpose,
             )
         elif not ctx.session_id or not ctx.root_session_id:
             resolved_sid = ctx.session_id or sid
@@ -436,7 +451,7 @@ class Session:
         self._tool_owners: dict[int, str | None] = {
             id(tool): None for tool in self.tools
         }
-        self.system = system
+        self.system = runtime.system
         self.context_policies: list[ContextPolicy] = list(context_policies or [])
         self._context_policy_owners: dict[int, str | None] = {
             id(policy): None for policy in self.context_policies
@@ -459,12 +474,12 @@ class Session:
         )
         self.services = services or ServiceRegistry()
 
-        self._stream_fn = stream_fn
-        self._model = model
-        self._max_turns = max_turns
-        self._max_tool_calls = max_tool_calls
-        self._thinking = thinking
-        self._parent_cancel_signal = cancel_signal
+        self._stream_fn = runtime.stream_fn
+        self._model = runtime.model
+        self._max_turns = runtime.max_turns
+        self._max_tool_calls = runtime.max_tool_calls
+        self._thinking = runtime.thinking
+        self._parent_cancel_signal = runtime.cancel_signal
         self._interrupt = EventCancelSource()
         self._shutdown = EventCancelSource()
         self._closed = False
@@ -479,8 +494,8 @@ class Session:
             ProviderSessionIdentity,
         )
         self._provider_identity: ProviderSessionIdentity | None = (
-            provider_identity
-            if provider_identity is not None
+            runtime.provider_identity
+            if runtime.provider_identity is not None
             else inherited_provider_identity
             if isinstance(inherited_provider_identity, ProviderSessionIdentity)
             else None
@@ -492,38 +507,45 @@ class Session:
                 ProviderSessionIdentity,
                 scope="session",
             )
-        if provider_resolver is not None:
+        if runtime.provider_resolver is not None:
             self.services.register(
                 PROVIDER_RESOLVER_SERVICE,
-                provider_resolver,
+                runtime.provider_resolver,
                 scope="host",
             )
-        if tool_executor is not None:
-            self.register_tool_executor(tool_executor, replace=True)
-        if tool_orchestrator is not None:
-            self.register_tool_orchestrator(tool_orchestrator, replace=True)
-        if permission_policy is not None:
-            self.register_permission_policy(permission_policy, replace=True)
-        if resource_reader is not None:
-            self.register_resource_reader(resource_reader, replace=True)
-        if resource_store is not None:
-            self.register_resource_store(resource_store, replace=True)
-        if trajectory_node_store is not None:
-            self.register_trajectory_node_store(trajectory_node_store, replace=True)
-        if versioned_resource_store is not None:
-            self.register_versioned_resource_store(
-                versioned_resource_store,
+        if runtime.tool_executor is not None:
+            self.register_tool_executor(runtime.tool_executor, replace=True)
+        if runtime.tool_orchestrator is not None:
+            self.register_tool_orchestrator(runtime.tool_orchestrator, replace=True)
+        if runtime.permission_policy is not None:
+            self.register_permission_policy(runtime.permission_policy, replace=True)
+        if runtime.resource_reader is not None:
+            self.register_resource_reader(runtime.resource_reader, replace=True)
+        if runtime.resource_store is not None:
+            self.register_resource_store(runtime.resource_store, replace=True)
+        if runtime.trajectory_node_store is not None:
+            self.register_trajectory_node_store(
+                runtime.trajectory_node_store,
                 replace=True,
             )
-        if environment_restore_failure_handler is not None:
+        if runtime.versioned_resource_store is not None:
+            self.register_versioned_resource_store(
+                runtime.versioned_resource_store,
+                replace=True,
+            )
+        if runtime.environment_restore_failure_handler is not None:
             self.services.register(
                 ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
-                environment_restore_failure_handler,
+                runtime.environment_restore_failure_handler,
                 EnvironmentRestoreFailureHandler,
                 scope="host",
             )
-        if tool_allowlist is not None:
-            self.services.register("tool_allowlist", tuple(tool_allowlist), scope="session")
+        if runtime.tool_allowlist is not None:
+            self.services.register(
+                "tool_allowlist",
+                tuple(runtime.tool_allowlist),
+                scope="session",
+            )
 
         if self.graph is not None and self.ctx.parent_session_id is None:
             self.graph.register(
@@ -1664,10 +1686,13 @@ class Session:
                 include_provider_atoms=not direct_provider_override,
             )
         )
-        from agentm.core.runtime.session_factory import create_session
+        from agentm.core.runtime.session_factory import (
+            SessionBuildConfig,
+            create_session,
+        )
 
         source_tool_allowlist = self._tool_allowlist()
-        child = await create_session(
+        child = await create_session(SessionBuildConfig(
             scenario=child_ctx.scenario,
             extensions=extension_specs,
             session_context=child_ctx,
@@ -1697,7 +1722,7 @@ class Session:
             ),
             thinking=self._thinking,
             cancel_signal=child_cancel_signal,
-        )
+        ))
 
         await self._register_child(child, purpose=purpose)
         return child
@@ -1841,10 +1866,13 @@ class Session:
                     )
                 child_resource_reader = child_resource_writer
 
-        from agentm.core.runtime.session_factory import create_session
+        from agentm.core.runtime.session_factory import (
+            SessionBuildConfig,
+            create_session,
+        )
 
         source_tool_allowlist = source._tool_allowlist()
-        forked = await create_session(
+        forked = await create_session(SessionBuildConfig(
             extensions=source._composition_extensions(include_provider_atoms=True),
             stream_fn=source._stream_fn,
             model=source._model,
@@ -1894,7 +1922,7 @@ class Session:
                 else None
             ),
             thinking=source._thinking,
-        )
+        ))
 
         if forked.graph is not None:
             forked.graph.register(

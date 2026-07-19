@@ -80,8 +80,8 @@ from agentm.core.abi.trigger import (
     UserInput,
 )
 from agentm.core.runtime.execution import Execution, StateError
-from agentm.core.runtime.session import Session
-from agentm.core.runtime.session_factory import create_session
+from agentm.core.runtime.session import Session, SessionRuntimeConfig
+from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.session_meta import ResumeIdentityError
 from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
@@ -257,7 +257,9 @@ def _make_finish_tool() -> FunctionTool:
 async def test_single_turn_text() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("hello"))
-    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session = Session(
+        SessionRuntimeConfig(stream_fn=mock, model=make_model(), system="test")
+    )
     session.start()
     await session.prompt("hi")
     await _wait_turn(session)
@@ -284,10 +286,10 @@ async def test_multi_round_tool_call() -> None:
         tool_call_response("add", "call-1", {"a": 2, "b": 3}),
         text_response("the answer is 5"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[_make_add_tool()],
-    )
+    ))
     session.start()
     await session.prompt("add 2 and 3")
     await _wait_turn(session)
@@ -310,10 +312,10 @@ async def test_multi_round_tool_call() -> None:
 async def test_tool_terminate() -> None:
     mock = MockStreamFn()
     mock.enqueue(tool_call_response("finish", "call-f", {}))
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[_make_finish_tool()],
-    )
+    ))
     session.start()
     await session.prompt("finish")
     await _wait_turn(session)
@@ -330,7 +332,12 @@ async def test_tool_terminate() -> None:
 async def test_max_turns() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("one"), text_response("two"), text_response("three"))
-    session = Session(stream_fn=mock, model=make_model(), system="test", max_turns=2)
+    session = Session(SessionRuntimeConfig(
+        stream_fn=mock,
+        model=make_model(),
+        system="test",
+        max_turns=2,
+    ))
     session.start()
     await session.prompt("first")
     await _wait_turn(session)
@@ -374,10 +381,10 @@ async def test_cross_atom_services() -> None:
     services = ServiceRegistry()
     services.register("counter", counter)
 
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[inc_tool, rep_tool], services=services,
-    )
+    ))
     session.start()
     await session.prompt("increment then report")
     await _wait_turn(session)
@@ -419,10 +426,10 @@ async def test_context_policy() -> None:
     mock.enqueue(text_response("ok"))
 
     policy = MarkerPolicy()
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         context_policies=[policy],  # type: ignore[list-item]
-    )
+    ))
 
     session.bus.on(BeforeSendEvent.CHANNEL, lambda ev: captured_messages.extend(ev.messages))
 
@@ -447,10 +454,10 @@ async def test_event_coverage() -> None:
         tool_call_response("add", "ec1", {"a": 1, "b": 2}),
         text_response("done"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[_make_add_tool()],
-    )
+    ))
     collector = EventCollector(session.bus)
     session.start()
     await session.prompt("go")
@@ -503,13 +510,13 @@ async def test_store_persistence() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("first"), text_response("second"))
 
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=mock,
         model=make_model(),
         system="test",
         store=store,
-    )
+    ))
     session.start()
     await session.prompt("one")
     await _wait_turn(session)
@@ -550,13 +557,13 @@ async def test_session_resume() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("turn-1"))
 
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=mock,
         model=make_model(),
         system="test",
         store=store,
-    )
+    ))
     session.start()
     await session.prompt("first")
     await _wait_turn(session)
@@ -595,12 +602,12 @@ async def test_resume_rejects_unversioned_session_metadata() -> None:
     source_store = InMemoryTrajectoryStore()
     mock = MockStreamFn()
     mock.enqueue(text_response("turn-1"))
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=mock,
         model=make_model(),
         store=source_store,
-    )
+    ))
     session.start()
     await session.prompt("first")
     await _wait_turn(session)
@@ -746,12 +753,12 @@ def test_trajectory_query_store_adapter_filters_sessions_and_turns() -> None:
 @pytest.mark.asyncio
 async def test_session_factory_registers_default_trajectory_query_store() -> None:
     store = InMemoryTrajectoryStore()
-    session = await create_session(
+    session = await create_session(SessionBuildConfig(
         extensions=[],
         stream_fn=MockStreamFn(),
         model=make_model(),
         store=store,
-    )
+    ))
 
     query = session.services.get(
         TRAJECTORY_QUERY_STORE_SERVICE,
@@ -773,10 +780,10 @@ async def test_spawn_inheritance() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("parent"))
 
-    parent = Session(
+    parent = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test system",
         graph=graph, tools=[_make_add_tool()],
-    )
+    ))
     parent.services.register("test_svc", {"data": 42})
     parent.start()
     await parent.prompt("go")
@@ -805,9 +812,9 @@ async def test_fork_lifecycle() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("turn-0"), text_response("turn-1"))
 
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test", graph=graph,
-    )
+    ))
     session.start()
     await session.prompt("first")
     await _wait_turn(session)
@@ -815,11 +822,11 @@ async def test_fork_lifecycle() -> None:
 
     mock2 = MockStreamFn()
     mock2.enqueue(text_response("turn-1b"))
-    session2 = Session(
+    session2 = Session(SessionRuntimeConfig(
         stream_fn=mock2, model=make_model(), system="test", graph=graph,
         session_id=session.id,
-        trajectory=session.trajectory._replace_turns(list(session.trajectory.turns)) if hasattr(session.trajectory, '_replace_turns') else Trajectory(turns=list(session.trajectory.turns)),
-    )
+        trajectory=Trajectory(turns=list(session.trajectory.turns)),
+    ))
     session2.start()
     await session2.prompt("second")
     await _wait_turn(session2)
@@ -906,7 +913,9 @@ async def test_inject_inline() -> None:
         return None
 
     mock.enqueue(text_response("first"), text_response("second"))
-    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session = Session(
+        SessionRuntimeConfig(stream_fn=mock, model=make_model(), system="test")
+    )
     session.bus.on(DecideEvent.CHANNEL, decide_handler)
     session.start()
     await session.prompt("go")
@@ -931,10 +940,10 @@ async def test_signal_abort() -> None:
         tool_call_response("add", "sa1", {"a": 1, "b": 1}),
         text_response("should not reach"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[_make_add_tool()],
-    )
+    ))
 
     def on_result(event: ToolResultEvent) -> None:
         session.interrupt()
@@ -956,7 +965,9 @@ async def test_signal_abort() -> None:
 async def test_before_run_veto() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("should not reach"))
-    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session = Session(
+        SessionRuntimeConfig(stream_fn=mock, model=make_model(), system="test")
+    )
 
     def veto_handler(event: BeforeRunEvent) -> dict[str, Any]:
         return {"veto": BudgetExhausted(detail="test")}
@@ -996,10 +1007,10 @@ async def test_tool_call_blocked() -> None:
         tool_call_response("blocked_tool", "bc1", {}),
         text_response("ok"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[tool],
-    )
+    ))
 
     def block_handler(event: ToolCallEvent) -> dict[str, Any]:
         return {"block": True, "reason": "denied"}
@@ -1038,10 +1049,10 @@ async def test_tool_result_replaced() -> None:
         tool_call_response("echo", "e1", {}),
         text_response("done"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[tool],
-    )
+    ))
 
     def replace_handler(event: ToolResultEvent) -> ToolResult:
         return replacement
@@ -1073,7 +1084,9 @@ async def test_tool_result_replaced() -> None:
 async def test_run_waits_for_its_receipt_while_idle_tracks_background() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("done"))
-    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session = Session(
+        SessionRuntimeConfig(stream_fn=mock, model=make_model(), system="test")
+    )
     session.triggers.note_work_started()
     try:
         messages = await asyncio.wait_for(session.run("go"), timeout=1.0)
@@ -1277,10 +1290,10 @@ async def test_tool_exception_becomes_error_result() -> None:
         tool_call_response("bad_tool", "bt1", {}),
         text_response("recovered"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[tool],
-    )
+    ))
     collector = EventCollector(session.bus)
     session.start()
     await session.prompt("go")
@@ -1302,7 +1315,9 @@ async def test_unknown_tool_error() -> None:
         tool_call_response("nonexistent_tool", "nt1", {}),
         text_response("ok"),
     )
-    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session = Session(
+        SessionRuntimeConfig(stream_fn=mock, model=make_model(), system="test")
+    )
     session.start()
     await session.prompt("go")
     await _wait_turn(session)
@@ -1330,10 +1345,10 @@ async def test_tool_error_event_custom_text() -> None:
         tool_call_response("err_tool", "et1", {}),
         text_response("done"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[tool],
-    )
+    ))
 
     def custom_error(event: ToolErrorEvent) -> dict[str, str]:
         return {"text": "please retry"}
@@ -1353,7 +1368,9 @@ async def test_tool_error_event_custom_text() -> None:
 async def test_empty_llm_response() -> None:
     mock = MockStreamFn()
     mock.enqueue(empty_response())
-    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session = Session(
+        SessionRuntimeConfig(stream_fn=mock, model=make_model(), system="test")
+    )
     session.start()
     await session.prompt("go")
     await _wait_turn(session)
@@ -1380,10 +1397,10 @@ async def test_tool_empty_result() -> None:
         tool_call_response("empty_tool", "emp1", {}),
         text_response("done"),
     )
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         tools=[tool],
-    )
+    ))
     session.start()
     await session.prompt("go")
     await _wait_turn(session)
@@ -1407,7 +1424,11 @@ async def test_stream_fn_exception_persists_non_replayable_turn() -> None:
     delegate.enqueue(text_response("ok after failure"))
     failing = FailingStreamFn(fail_count=1, delegate=delegate)
 
-    session = Session(stream_fn=failing, model=make_model(), system="test")  # type: ignore[arg-type]
+    session = Session(SessionRuntimeConfig(  # type: ignore[arg-type]
+        stream_fn=failing,
+        model=make_model(),
+        system="test",
+    ))
     session.start()
     receipt = await session.prompt("will fail")
     with pytest.raises(TriggerTerminated, match="stream failure"):
@@ -1441,10 +1462,10 @@ async def test_policy_exception_abandons_turn() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("after policy fix"))
 
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test",
         context_policies=[FailOncePolicy()],  # type: ignore[list-item]
-    )
+    ))
     session.start()
     receipt = await session.prompt("will fail due to policy")
     with pytest.raises(RuntimeError, match="policy exploded"):
@@ -1469,9 +1490,9 @@ async def test_store_append_failure_is_fail_stop() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("turn-1"))
 
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test", store=store,
-    )
+    ))
     store.create_session(SessionMeta(id=session.id, purpose="root"))
     session.start()
     receipt = await session.prompt("go")
@@ -1507,7 +1528,11 @@ async def test_consecutive_stream_failures() -> None:
     delegate.enqueue(text_response("success"))
     failing = FailingStreamFn(fail_count=2, delegate=delegate)
 
-    session = Session(stream_fn=failing, model=make_model(), system="test")  # type: ignore[arg-type]
+    session = Session(SessionRuntimeConfig(  # type: ignore[arg-type]
+        stream_fn=failing,
+        model=make_model(),
+        system="test",
+    ))
     session.start()
     receipt = await session.prompt("fail-1")
     with pytest.raises(TriggerTerminated, match="stream failure"):
@@ -1534,9 +1559,9 @@ async def test_durable_round_persist_failure() -> None:
     mock = MockStreamFn()
     mock.enqueue(text_response("ok"))
 
-    session = Session(
+    session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test", store=store,
-    )
+    ))
     store.create_session(SessionMeta(id=session.id, purpose="root"))
     session.start()
     await session.prompt("go")
