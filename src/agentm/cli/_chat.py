@@ -1,11 +1,4 @@
-"""Interactive CLI — typer + rich, streaming thinking display.
-
-Usage::
-
-    python -m agentm.cli                 # default scenario + config
-
-Ctrl+C interrupts the current turn. Ctrl+D or 'exit' quits.
-"""
+"""``agentm chat`` — interactive REPL with streaming display."""
 
 from __future__ import annotations
 
@@ -15,7 +8,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
-from rich.console import Console
+from loguru import logger
+from rich.console import Console, Group
 from rich.live import Live
 from rich.text import Text
 
@@ -27,49 +21,13 @@ from agentm.core.abi.events import StreamDeltaEvent
 from agentm.core.abi.termination import SignalAborted
 from agentm.scenarios import builtin_scenario_loader
 
-app = typer.Typer(add_completion=False)
-console = Console()
-
-
-class _SessionStats:
-    """Tracks cumulative session statistics."""
-
-    def __init__(self) -> None:
-        self.turns = 0
-        self.input_tokens = 0
-        self.output_tokens = 0
-        self.cache_read_tokens = 0
-
-    def update_from_turn(self, turn: Any) -> None:
-        self.turns += 1
-        meta = turn.meta
-        self.input_tokens += meta.total_input_tokens
-        self.output_tokens += meta.total_output_tokens
-        self.cache_read_tokens += meta.cache_read_tokens
-
-    @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
-
-    def title_string(self) -> str:
-        return (
-            f"agentm | turn {self.turns} | "
-            f"↑{self.input_tokens:,} ↓{self.output_tokens:,} "
-            f"(cache:{self.cache_read_tokens:,})"
-        )
-
-    def status_line(self) -> str:
-        return (
-            f"turn {self.turns} | "
-            f"in:{self.input_tokens:,} out:{self.output_tokens:,} "
-            f"cache:{self.cache_read_tokens:,} total:{self.total_tokens:,}"
-        )
+from agentm.cli._display import SessionStats, stderr_console
 
 
 class _StreamCollector:
-    """Collects streaming deltas for live display."""
+    """Collects streaming deltas for live Rich display."""
 
-    def __init__(self, stats: _SessionStats) -> None:
+    def __init__(self, stats: SessionStats) -> None:
         self.thinking_buf: list[str] = []
         self.text_buf: list[str] = []
         self._live: Live | None = None
@@ -101,7 +59,6 @@ class _StreamCollector:
         if self.text_buf:
             parts.append(Text("".join(self.text_buf)))
         if parts:
-            from rich.console import Group
             self._live.update(Group(*parts))
 
     def reset(self) -> None:
@@ -109,13 +66,16 @@ class _StreamCollector:
         self.text_buf.clear()
 
 
-async def _run(
+async def _run_chat(
     scenario: str | None,
     extensions: list[str],
     project_config: str | None,
     user_config: str | None,
     system_prompt: str | None,
 ) -> None:
+    logger.remove()
+    logger.add(sys.stderr, level="WARNING")
+
     if project_config is None:
         candidate = Path.cwd() / "agentm.toml"
         project_config = str(candidate) if candidate.exists() else None
@@ -125,6 +85,7 @@ async def _run(
         user_config=user_config,
     )
     config = AgentSessionConfig(
+        cwd=str(Path.cwd()),
         scenario=scenario,
         scenario_loader=builtin_scenario_loader,
         spec_resolver=resolver,
@@ -146,7 +107,8 @@ async def _run(
 
     loop.add_signal_handler(signal.SIGINT, _on_sigint)
 
-    stats = _SessionStats()
+    console = Console()
+    stats = SessionStats()
     collector = _StreamCollector(stats)
     session.on(StreamDeltaEvent.CHANNEL, collector.on_delta)
 
@@ -239,7 +201,6 @@ async def _run(
         await session.shutdown()
 
 
-@app.command()
 def chat(
     scenario: Optional[str] = typer.Option(None, "-s", "--scenario", help="Named scenario"),
     extension: Optional[list[str]] = typer.Option(None, "-e", "--extension", help="Extra extension modules"),
@@ -247,19 +208,27 @@ def chat(
     user_config: Optional[str] = typer.Option(None, "--user-config", help="User config TOML path"),
     system: Optional[str] = typer.Option(None, "--system", help="System prompt override"),
 ) -> None:
-    """Interactive agent chat session."""
-    asyncio.run(_run(
+    """Interactive agent chat session.
+
+    Starts a REPL where you type messages and see streaming responses.
+    Ctrl+C interrupts the current turn. Ctrl+D or 'exit' quits.
+
+    Examples:
+
+        agentm chat
+
+        agentm chat -s chat
+
+        agentm chat -s minimal --system "You are a translator."
+    """
+    if not sys.stdin.isatty():
+        stderr_console.print("[red]error: chat requires a TTY; use 'agentm run' for non-interactive execution[/red]")
+        raise typer.Exit(2)
+
+    asyncio.run(_run_chat(
         scenario=scenario,
         extensions=extension or [],
         project_config=project_config,
         user_config=user_config,
         system_prompt=system,
     ))
-
-
-def main() -> None:
-    app()
-
-
-if __name__ == "__main__":
-    main()
