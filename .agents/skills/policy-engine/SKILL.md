@@ -20,7 +20,7 @@ context injection, not a separate call).
 ## Quick Start
 
 Policy files live at:
-- `src/agentm/extensions/builtin/policy/base_policy.yaml` — ships with the engine
+- `contrib/extensions/policy/src/policy_engine/base_policy.yaml` — ships with the engine
 - `~/.agentm/policies/<name>.yaml` — user-authored
 - `<scenario>/policies/<name>.yaml` — scenario-specific
 

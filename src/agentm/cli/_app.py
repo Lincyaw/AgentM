@@ -21,11 +21,6 @@ app.command("run")(run)
 app.add_typer(config_app, name="config")
 app.add_typer(scenario_app, name="scenario")
 
-try:
-    from agentm.extensions.builtin.policy.__main__ import app as _policy_app
-    app.add_typer(_policy_app, name="policy", help="Policy engine queries and management.")
-except ImportError:
-    pass
 
 
 def _version_callback(value: bool) -> None:

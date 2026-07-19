@@ -60,6 +60,11 @@ agentm = "agentm.cli:main"
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
+[tool.uv.workspace]
+members = [
+    "contrib/extensions/policy",
+]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: tests that may run for many minutes (real-LLM E2E)",

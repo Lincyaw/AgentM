@@ -14,7 +14,7 @@ extensions:
   - module: agentm.extensions.builtin.tool_error_messages
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
-  - module: agentm.extensions.builtin.policy
+  - module: policy_engine
     config:
       policy_files: []
       extraction_mode: heuristic

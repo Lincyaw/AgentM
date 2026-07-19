@@ -1,0 +1,20 @@
+[project]
+name = "policy-engine"
+version = "0.1.0"
+description = "DSL-driven deterministic policy detection and enforcement for AgentM agents."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "typer>=0.12",
+  "pydantic>=2.0",
+  "loguru>=0.7",
+  "pyyaml>=6.0",
+  "rich>=13.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/policy_engine"]
