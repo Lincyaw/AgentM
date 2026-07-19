@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from agentm.core.abi.context import render_trigger
 from agentm.core.abi.messages import (
@@ -35,61 +35,70 @@ from agentm.core.abi.trajectory import (
 from agentm.core.abi.trigger import TriggerRenderer
 
 
+@dataclass(frozen=True, slots=True)
+class NodeProjectionContext:
+    """Stable identity and linkage for one sequence of projected messages."""
+
+    session_id: str
+    node_id_prefix: str
+    start_seq: int = 0
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID
+    head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID
+    parent_node_id: str | None = None
+    logical_parent_id: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    round_indexes: Sequence[int | None] | None = None
+    message_index_start: int = 0
+    agent_id: str | None = None
+    is_sidechain: bool = False
+    timestamp: float = 0.0
+
+
 def messages_to_nodes(
-    *,
     messages: Sequence[AgentMessage],
-    session_id: str,
-    node_id_prefix: str,
-    start_seq: int = 0,
-    root_session_id: str | None = None,
-    parent_session_id: str | None = None,
-    branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID,
-    head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID,
-    parent_node_id: str | None = None,
-    logical_parent_id: str | None = None,
-    turn_id: str | None = None,
-    turn_index: int | None = None,
-    round_indexes: Sequence[int | None] | None = None,
-    message_index_start: int = 0,
-    agent_id: str | None = None,
-    is_sidechain: bool = False,
-    timestamp: float = 0.0,
+    context: NodeProjectionContext,
 ) -> list[TrajectoryNode]:
     """Convert linear messages into linked trajectory nodes."""
 
     nodes: list[TrajectoryNode] = []
-    parent = parent_node_id
+    parent = context.parent_node_id
     for offset, message in enumerate(messages):
         tool_call_ids, tool_names, cache_key, content_ref = _message_indexes(message)
         node = TrajectoryNode(
-            id=f"{node_id_prefix}:{offset}",
-            session_id=session_id,
-            seq=start_seq + offset,
+            id=f"{context.node_id_prefix}:{offset}",
+            session_id=context.session_id,
+            seq=context.start_seq + offset,
             kind="message",
-            root_session_id=root_session_id,
-            parent_session_id=parent_session_id,
-            branch_id=branch_id,
-            head_id=head_id,
+            root_session_id=context.root_session_id,
+            parent_session_id=context.parent_session_id,
+            branch_id=context.branch_id,
+            head_id=context.head_id,
             role=message.role,
             parent_id=parent,
-            logical_parent_id=logical_parent_id if offset == 0 else None,
-            turn_id=turn_id,
-            turn_index=turn_index,
+            logical_parent_id=(
+                context.logical_parent_id if offset == 0 else None
+            ),
+            turn_id=context.turn_id,
+            turn_index=context.turn_index,
             round_index=(
-                round_indexes[offset]
-                if round_indexes is not None and offset < len(round_indexes)
+                context.round_indexes[offset]
+                if context.round_indexes is not None
+                and offset < len(context.round_indexes)
                 else None
             ),
-            message_index=message_index_start + offset,
-            agent_id=agent_id,
-            is_sidechain=is_sidechain,
+            message_index=context.message_index_start + offset,
+            agent_id=context.agent_id,
+            is_sidechain=context.is_sidechain,
             tool_call_ids=tool_call_ids,
             tool_names=tool_names,
             cache_key=cache_key,
             content_ref=content_ref,
             visibility=message.meta.visibility,
             message=message,
-            timestamp=timestamp,
+            timestamp=context.timestamp,
         )
         nodes.append(node)
         parent = node.id
@@ -122,22 +131,24 @@ def turn_to_nodes(
         ]
     round_indexes = [round_index for _, round_index in indexed_messages]
     return messages_to_nodes(
-        messages=messages,
-        session_id=session_id,
-        node_id_prefix=f"session:{session_id}:turn:{turn.id}",
-        start_seq=start_seq,
-        root_session_id=root_session_id,
-        parent_session_id=parent_session_id,
-        branch_id=branch_id,
-        head_id=head_id,
-        parent_node_id=parent_node_id,
-        logical_parent_id=logical_parent_id,
-        turn_id=turn.id,
-        turn_index=turn.index,
-        round_indexes=round_indexes,
-        agent_id=agent_id,
-        is_sidechain=is_sidechain,
-        timestamp=turn.timestamp,
+        messages,
+        NodeProjectionContext(
+            session_id=session_id,
+            node_id_prefix=f"session:{session_id}:turn:{turn.id}",
+            start_seq=start_seq,
+            root_session_id=root_session_id,
+            parent_session_id=parent_session_id,
+            branch_id=branch_id,
+            head_id=head_id,
+            parent_node_id=parent_node_id,
+            logical_parent_id=logical_parent_id,
+            turn_id=turn.id,
+            turn_index=turn.index,
+            round_indexes=round_indexes,
+            agent_id=agent_id,
+            is_sidechain=is_sidechain,
+            timestamp=turn.timestamp,
+        ),
     )
 
 

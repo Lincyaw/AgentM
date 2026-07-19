@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, TypeVar, cast
 
 from loguru import logger
@@ -1172,38 +1172,54 @@ def _context_budget(model: Model) -> ContextBudget:
 # --- Main driver ------------------------------------------------------------
 
 
-async def drive(
-    *,
-    trajectory: Trajectory,
-    triggers: TriggerQueue,
-    bus: EventBus,
-    stream_fn: StreamFn,
-    model: Model,
-    tools: list[Tool],
-    store: TrajectoryStore | None = None,
-    session_id: str = "",
-    root_session_id: str | None = None,
-    parent_session_id: str | None = None,
-    permission_audience: PermissionAudience = "user",
-    system: str | None = None,
-    context_policies: list[ContextPolicy] | None = None,
-    prompt_cache_adapter: ProviderPromptCacheAdapter | None = None,
-    trigger_renderers: dict[str, TriggerRenderer] | None = None,
-    interrupt: ResettableCancelSource | None = None,
-    shutdown: ResettableCancelSource | None = None,
-    cancel_signal: CancelSignal | None = None,
-    effect_scope: EffectScope | None = None,
-    resource_writer: ResourceWriter | None = None,
-    services: ServiceRegistry | None = None,
-    tool_executor: ToolExecutor | None = None,
-    tool_orchestrator: ToolOrchestrator | None = None,
-    permission_policy: PermissionPolicy | None = None,
-    trajectory_node_store: TrajectoryNodeStore | None = None,
-    max_turns: int | None = None,
-    thinking: ThinkingLevel = "off",
-    max_tool_calls: int | None = None,
-    tool_allowlist: tuple[str, ...] | None = None,
-) -> None:
+@dataclass(slots=True)
+class DriverConfig:
+    """Stable dependencies and policy inputs for one session driver."""
+
+    trajectory: Trajectory
+    triggers: TriggerQueue
+    bus: EventBus
+    stream_fn: StreamFn
+    model: Model
+    tools: list[Tool] = field(default_factory=list)
+    store: TrajectoryStore | None = None
+    session_id: str = ""
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    permission_audience: PermissionAudience = "user"
+    system: str | None = None
+    context_policies: list[ContextPolicy] | None = None
+    prompt_cache_adapter: ProviderPromptCacheAdapter | None = None
+    trigger_renderers: dict[str, TriggerRenderer] | None = None
+    interrupt: ResettableCancelSource | None = None
+    shutdown: ResettableCancelSource | None = None
+    cancel_signal: CancelSignal | None = None
+    effect_scope: EffectScope | None = None
+    resource_writer: ResourceWriter | None = None
+    services: ServiceRegistry | None = None
+    tool_executor: ToolExecutor | None = None
+    tool_orchestrator: ToolOrchestrator | None = None
+    permission_policy: PermissionPolicy | None = None
+    trajectory_node_store: TrajectoryNodeStore | None = None
+    max_turns: int | None = None
+    thinking: ThinkingLevel = "off"
+    max_tool_calls: int | None = None
+    tool_allowlist: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReactionRequest:
+    execution: Execution
+    trigger: Trigger
+    trigger_metadata: TriggerMetadata
+    config: DriverConfig
+    context_projection: ContextProjection | None
+    prompt_cache_adapter: ProviderPromptCacheAdapter | None
+    interruption_policy: InterruptionMessagePolicy | None
+    tool_calls_remaining: int | None
+
+
+async def drive(config: DriverConfig) -> None:
     """Persistent driver loop.
 
     Processes triggers one at a time.  Each trigger becomes one Turn
@@ -1214,28 +1230,32 @@ async def drive(
     - a session-terminal cause fires (ToolTerminated, BudgetExhausted)
     """
 
-    _interrupt = interrupt or EventCancelSource()
-    _shutdown = shutdown or EventCancelSource()
-    policies = context_policies or []
+    trajectory = config.trajectory
+    triggers = config.triggers
+    bus = config.bus
+    _interrupt = config.interrupt or EventCancelSource()
+    _shutdown = config.shutdown or EventCancelSource()
+    policies = config.context_policies or []
     context_projection = (
-        services.get(
+        config.services.get(
             CONTEXT_PROJECTION_SERVICE,
             cast(type[ContextProjection], ContextProjection),
         )
-        if services is not None
+        if config.services is not None
         else None
     )
-    if prompt_cache_adapter is None and services is not None:
-        prompt_cache_adapter = services.get(
+    prompt_cache_adapter = config.prompt_cache_adapter
+    if prompt_cache_adapter is None and config.services is not None:
+        prompt_cache_adapter = config.services.get(
             PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
             cast(type[ProviderPromptCacheAdapter], ProviderPromptCacheAdapter),
         )
     interruption_policy = (
-        services.get(
+        config.services.get(
             INTERRUPTION_MESSAGE_POLICY_SERVICE,
             cast(type[InterruptionMessagePolicy], InterruptionMessagePolicy),
         )
-        if services is not None
+        if config.services is not None
         else None
     )
     turns_run = 0
@@ -1247,7 +1267,7 @@ async def drive(
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
 
-        if max_turns is not None and turns_run >= max_turns:
+        if config.max_turns is not None and turns_run >= config.max_turns:
             cause = MaxTurnsExhausted()
             triggers.terminate(TriggerTerminated(cause))
             await bus.emit(
@@ -1282,9 +1302,9 @@ async def drive(
 
             effect_txn, cancelled_during_effect_begin = await _await_known_outcome(
                 _begin_effect_turn(
-                    effect_scope,
+                    config.effect_scope,
                     bus=bus,
-                    session_id=session_id,
+                    session_id=config.session_id,
                     turn_id=execution.id,
                     turn_index=execution.index,
                 )
@@ -1293,50 +1313,34 @@ async def drive(
                 raise asyncio.CancelledError
             resource_txn, cancelled_during_resource_begin = await _await_known_outcome(
                 _begin_resource_txn(
-                    resource_writer,
-                    services,
-                    session_id=session_id,
+                    config.resource_writer,
+                    config.services,
+                    session_id=config.session_id,
                     turn_id=execution.id,
                     turn_index=execution.index,
                 )
             )
             if cancelled_during_resource_begin:
                 raise asyncio.CancelledError
-            outcome, meta, tool_calls_used = await _react_loop(
+            outcome, meta, tool_calls_used = await _react_loop(_ReactionRequest(
                 execution=execution,
-                trajectory=trajectory,
                 trigger=trigger,
                 trigger_metadata=envelope.metadata,
-                bus=bus,
-                stream_fn=stream_fn,
-                model=model,
-                tools=tools,
-                system=system,
-                policies=policies,
+                config=replace(
+                    config,
+                    context_policies=policies,
+                    interrupt=_interrupt,
+                    shutdown=_shutdown,
+                ),
                 context_projection=context_projection,
                 prompt_cache_adapter=prompt_cache_adapter,
-                trigger_renderers=trigger_renderers,
-                interrupt=_interrupt,
-                shutdown=_shutdown,
-                parent_cancel_signal=cancel_signal,
-                thinking=thinking,
-                tool_executor=tool_executor,
-                tool_orchestrator=tool_orchestrator,
-                permission_policy=permission_policy,
-                trajectory_node_store=trajectory_node_store,
-                store=store,
-                session_id=session_id,
-                root_session_id=root_session_id,
-                parent_session_id=parent_session_id,
-                permission_audience=permission_audience,
                 interruption_policy=interruption_policy,
                 tool_calls_remaining=(
                     None
-                    if max_tool_calls is None
-                    else max(0, max_tool_calls - tool_calls_run)
+                    if config.max_tool_calls is None
+                    else max(0, config.max_tool_calls - tool_calls_run)
                 ),
-                tool_allowlist=tool_allowlist,
-            )
+            ))
 
             _record_interruption_message(
                 execution,
@@ -1351,13 +1355,13 @@ async def drive(
                 cleanup_errors = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
                     abandon_resource=True,
-                    effect_scope=effect_scope,
+                    effect_scope=config.effect_scope,
                     effect_txn=effect_txn,
                     bus=bus,
                 )
                 resource_txn = None
                 effect_txn = None
-                _clear_resource_txn(services)
+                _clear_resource_txn(config.services)
                 if cleanup_errors:
                     raise BaseExceptionGroup(
                         "provider request and turn rollback failed",
@@ -1391,7 +1395,7 @@ async def drive(
                     raise asyncio.CancelledError
                 _, cancelled_during_effect_prepare = await _await_known_outcome(
                     _prepare_effect_turn(
-                        effect_scope,
+                        config.effect_scope,
                         effect_txn,
                         turn,
                         bus=bus,
@@ -1400,25 +1404,29 @@ async def drive(
                 if cancelled_during_effect_prepare:
                     raise asyncio.CancelledError
             node_append_position: _NodeAppendPosition | None = None
-            if trajectory_node_store is not None:
+            if config.trajectory_node_store is not None:
                 (
                     node_append_position,
                     cancelled_during_node_position,
                 ) = await _await_known_outcome(
                     _node_append_position(
-                        trajectory_node_store,
-                        session_id,
+                        config.trajectory_node_store,
+                        config.session_id,
                         committed_turns=trajectory.turns,
-                        root_session_id=root_session_id,
-                        parent_session_id=parent_session_id,
-                        trigger_renderers=trigger_renderers,
+                        root_session_id=config.root_session_id,
+                        parent_session_id=config.parent_session_id,
+                        trigger_renderers=config.trigger_renderers,
                     )
                 )
                 if cancelled_during_node_position:
                     raise asyncio.CancelledError
             cancelled_during_append = False
-            if store is not None:
-                cancelled_during_append = await _append_turn(store, session_id, turn)
+            if config.store is not None:
+                cancelled_during_append = await _append_turn(
+                    config.store,
+                    config.session_id,
+                    turn,
+                )
                 durable_turn_appended = True
             try:
                 (
@@ -1433,46 +1441,49 @@ async def drive(
                 raise
             trajectory.finalize_commit(turn)
             turn_published = True
-            _clear_resource_txn(services)
+            _clear_resource_txn(config.services)
             _, cancelled_during_effect_commit = await _await_known_outcome(
-                _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
+                _commit_effect_turn(config.effect_scope, effect_txn, turn, bus=bus)
             )
 
-            if trajectory_node_store is not None and node_append_position is not None:
+            if (
+                config.trajectory_node_store is not None
+                and node_append_position is not None
+            ):
                 nodes = turn_to_nodes(
                     turn,
-                    session_id=session_id,
+                    session_id=config.session_id,
                     start_seq=node_append_position.start_seq,
-                    root_session_id=root_session_id,
-                    parent_session_id=parent_session_id,
+                    root_session_id=config.root_session_id,
+                    parent_session_id=config.parent_session_id,
                     branch_id=node_append_position.branch_id,
                     head_id=node_append_position.head_id,
                     parent_node_id=node_append_position.parent_node_id,
                     logical_parent_id=node_append_position.logical_parent_id,
-                    renderers=trigger_renderers,
+                    renderers=config.trigger_renderers,
                 )
                 if nodes:
                     advance_head = TrajectoryHeadAdvance(
-                        session_id=session_id,
+                        session_id=config.session_id,
                         node_id=nodes[-1].id,
                         seq=nodes[-1].seq,
                         previous_node_id=node_append_position.parent_node_id,
                         head_id=node_append_position.head_id,
                         branch_id=node_append_position.branch_id,
-                        root_session_id=root_session_id,
-                        parent_session_id=parent_session_id,
+                        root_session_id=config.root_session_id,
+                        parent_session_id=config.parent_session_id,
                         updated_at=time.time(),
                     )
                     _, cancelled_during_node_append = await _await_known_outcome(
                         _append_or_rebuild_nodes(
-                            store=trajectory_node_store,
-                            session_id=session_id,
+                            store=config.trajectory_node_store,
+                            session_id=config.session_id,
                             nodes=nodes,
                             advance_head=advance_head,
                             committed_turns=trajectory.turns,
-                            root_session_id=root_session_id,
-                            parent_session_id=parent_session_id,
-                            trigger_renderers=trigger_renderers,
+                            root_session_id=config.root_session_id,
+                            parent_session_id=config.parent_session_id,
+                            trigger_renderers=config.trigger_renderers,
                         )
                     )
                 else:
@@ -1516,7 +1527,7 @@ async def drive(
                 cleanup_errors = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
                     abandon_resource=not resource_txn_committed,
-                    effect_scope=effect_scope,
+                    effect_scope=config.effect_scope,
                     effect_txn=effect_txn,
                     bus=bus,
                 )
@@ -1533,7 +1544,7 @@ async def drive(
                         "turn cancellation and rollback failed",
                         [exc, *cleanup_errors],
                     )
-            _clear_resource_txn(services)
+            _clear_resource_txn(config.services)
             triggers.terminate(cancel_error)
             if cancel_error is exc:
                 raise
@@ -1544,7 +1555,7 @@ async def drive(
                 cleanup_errors = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
                     abandon_resource=not resource_txn_committed,
-                    effect_scope=effect_scope,
+                    effect_scope=config.effect_scope,
                     effect_txn=effect_txn,
                     bus=bus,
                 )
@@ -1561,7 +1572,7 @@ async def drive(
                         "turn execution and rollback failed",
                         [exc, *cleanup_errors],
                     )
-            _clear_resource_txn(services)
+            _clear_resource_txn(config.services)
             triggers.terminate(execution_error)
             diagnostic_message = (
                 "driver stopped after a committed turn"
@@ -1581,38 +1592,41 @@ async def drive(
 
 
 async def _react_loop(
-    *,
-    execution: Execution,
-    trajectory: Trajectory,
-    trigger: Trigger,
-    trigger_metadata: TriggerMetadata,
-    bus: EventBus,
-    stream_fn: StreamFn,
-    model: Model,
-    tools: list[Tool],
-    system: str | None,
-    policies: list[ContextPolicy],
-    context_projection: ContextProjection | None,
-    prompt_cache_adapter: ProviderPromptCacheAdapter | None,
-    trigger_renderers: dict[str, TriggerRenderer] | None,
-    interrupt: ResettableCancelSource,
-    shutdown: ResettableCancelSource,
-    parent_cancel_signal: CancelSignal | None,
-    thinking: ThinkingLevel,
-    tool_executor: ToolExecutor | None,
-    tool_orchestrator: ToolOrchestrator | None,
-    permission_policy: PermissionPolicy | None,
-    trajectory_node_store: TrajectoryNodeStore | None,
-    store: TrajectoryStore | None,
-    session_id: str,
-    root_session_id: str | None,
-    parent_session_id: str | None,
-    permission_audience: PermissionAudience,
-    interruption_policy: InterruptionMessagePolicy | None,
-    tool_calls_remaining: int | None,
-    tool_allowlist: tuple[str, ...] | None,
+    request: _ReactionRequest,
 ) -> tuple[Outcome, TurnMeta, int]:
     """ReAct loop within one turn.  Returns when a Stop action fires."""
+
+    config = request.config
+    execution = request.execution
+    trajectory = config.trajectory
+    trigger = request.trigger
+    trigger_metadata = request.trigger_metadata
+    bus = config.bus
+    stream_fn = config.stream_fn
+    model = config.model
+    tools = config.tools
+    system = config.system
+    policies = config.context_policies or []
+    context_projection = request.context_projection
+    prompt_cache_adapter = request.prompt_cache_adapter
+    trigger_renderers = config.trigger_renderers
+    interrupt = config.interrupt
+    shutdown = config.shutdown
+    if interrupt is None or shutdown is None:
+        raise RuntimeError("reaction requires resolved cancellation sources")
+    parent_cancel_signal = config.cancel_signal
+    thinking = config.thinking
+    tool_executor = config.tool_executor
+    tool_orchestrator = config.tool_orchestrator
+    permission_policy = config.permission_policy
+    trajectory_node_store = config.trajectory_node_store
+    session_id = config.session_id
+    root_session_id = config.root_session_id
+    parent_session_id = config.parent_session_id
+    permission_audience = config.permission_audience
+    interruption_policy = request.interruption_policy
+    tool_calls_remaining = request.tool_calls_remaining
+    tool_allowlist = config.tool_allowlist
 
     total_input = 0
     total_output = 0

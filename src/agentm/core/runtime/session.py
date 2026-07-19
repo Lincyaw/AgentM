@@ -134,7 +134,7 @@ from agentm.core.abi.trajectory import (
 )
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
-from agentm.core.runtime.driver import ThinkingLevel, drive
+from agentm.core.runtime.driver import DriverConfig, ThinkingLevel, drive
 from agentm.core.runtime.session_meta import (
     context_from_session_meta,
     provider_identity_from_session_meta,
@@ -590,7 +590,7 @@ class Session:
             assert self._stream_fn is not None
             assert self._model is not None
             provider = self.get_provider()
-            await drive(
+            await drive(DriverConfig(
                 trajectory=self.trajectory,
                 triggers=self.triggers,
                 bus=self.bus,
@@ -625,7 +625,7 @@ class Session:
                 max_tool_calls=self._max_tool_calls,
                 tool_allowlist=self._tool_allowlist(),
                 thinking=self._thinking,
-            )
+            ))
         except asyncio.CancelledError:
             pass
         except Exception as exc:
