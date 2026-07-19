@@ -24,7 +24,7 @@ from agentm.core.abi.messages import (
     text_message,
 )
 from agentm.core.abi.provider import ProviderPromptCacheRequest
-from agentm.core.abi.store import TrajectoryNodeStore
+from agentm.core.abi.store import TrajectoryNodeStore, TrajectoryStore
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.trajectory import PromptCacheState
 from agentm.core.abi.trigger import UserInput
@@ -39,7 +39,9 @@ from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import (
     JsonlTrajectoryNodeStore,
     PostgresTrajectoryNodeStore,
+    PostgresTrajectoryStore,
 )
+from agentm.storage.trajectory.postgres import PostgresConnection
 from tests.fixtures.custom_trigger import CustomTrigger
 
 _CONTEXT_PROJECTION = "agentm.extensions.builtin.context_projection"
@@ -55,8 +57,9 @@ _WAIT_FOR_CANCEL = object()
 
 
 @dataclass(frozen=True)
-class _NodeStoreBackend:
-    open: Callable[[], TrajectoryNodeStore]
+class _TrajectoryBackend:
+    open_turn_store: Callable[[], TrajectoryStore]
+    open_node_store: Callable[[], TrajectoryNodeStore]
 
 
 class _StubProvider:
@@ -122,33 +125,47 @@ def _tool_call(call_id: str, name: str, arguments: dict[str, object]) -> Assista
 
 
 @pytest.fixture(params=("jsonl", "postgres"))
-def node_store_backend(
+def trajectory_backend(
     request: pytest.FixtureRequest,
     tmp_path: Path,
-) -> Iterator[_NodeStoreBackend]:
+) -> Iterator[_TrajectoryBackend]:
     if request.param == "jsonl":
-        root = tmp_path / "trajectory-nodes"
-        yield _NodeStoreBackend(open=lambda: JsonlTrajectoryNodeStore(root))
+        turn_root = tmp_path / "turns"
+        node_root = tmp_path / "trajectory-nodes"
+        yield _TrajectoryBackend(
+            open_turn_store=lambda: JsonlTrajectoryStore(turn_root),
+            open_node_store=lambda: JsonlTrajectoryNodeStore(node_root),
+        )
         return
 
     database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
     if not database_url:
         pytest.skip("set AGENTM_TEST_POSTGRES_URL to run Postgres behavior contracts")
     psycopg = pytest.importorskip("psycopg")
+    from agentm.storage.trajectory.psycopg import connect as connect_postgres
+
     schema = f"agentm_test_{uuid.uuid4().hex}"
     admin = psycopg.connect(database_url)
-    connections: list[Any] = []
+    connections: list[PostgresConnection] = []
     with admin.cursor() as cursor:
         cursor.execute(f'CREATE SCHEMA "{schema}"')
     admin.commit()
 
-    def open_store() -> TrajectoryNodeStore:
-        connection = psycopg.connect(database_url)
+    def open_turn_store() -> TrajectoryStore:
+        connection = connect_postgres(database_url)
+        connections.append(connection)
+        return PostgresTrajectoryStore(connection, schema=schema)
+
+    def open_node_store() -> TrajectoryNodeStore:
+        connection = connect_postgres(database_url)
         connections.append(connection)
         return PostgresTrajectoryNodeStore(connection, schema=schema)
 
     try:
-        yield _NodeStoreBackend(open=open_store)
+        yield _TrajectoryBackend(
+            open_turn_store=open_turn_store,
+            open_node_store=open_node_store,
+        )
     finally:
         for connection in connections:
             connection.close()
@@ -326,10 +343,8 @@ async def test_sdk_rejects_changed_scenario_local_source(
 
 @pytest.mark.asyncio
 async def test_sdk_resume_replays_history_and_durable_cache_state(
-    node_store_backend: _NodeStoreBackend,
-    tmp_path: Path,
+    trajectory_backend: _TrajectoryBackend,
 ) -> None:
-    turn_store_path = tmp_path / "turns"
     cache_key = "resume-prefix"
     provider = _StubProvider("answer-one", "answer-two")
     session = await AgentSession.create(
@@ -337,8 +352,8 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
             extensions=_trajectory_extensions(cache_key),
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(turn_store_path),
-            trajectory_node_store=node_store_backend.open(),
+            store=trajectory_backend.open_turn_store(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
         )
     )
     session_id = session.session_id
@@ -353,12 +368,12 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
     resumed_provider = _StubProvider("answer-three")
     resumed = await AgentSession.resume(
         session_id,
-        JsonlTrajectoryStore(turn_store_path),
+        trajectory_backend.open_turn_store(),
         config=AgentSessionConfig(
             extensions=_trajectory_extensions(cache_key),
             stream_fn=resumed_provider,
             model=_model(),
-            trajectory_node_store=node_store_backend.open(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
         ),
     )
     try:
@@ -386,8 +401,7 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
 
 @pytest.mark.asyncio
 async def test_sdk_fork_replays_only_the_selected_prefix(
-    node_store_backend: _NodeStoreBackend,
-    tmp_path: Path,
+    trajectory_backend: _TrajectoryBackend,
 ) -> None:
     provider = _StubProvider("answer-one", "parent-answer", "branch-answer")
     session = await AgentSession.create(
@@ -395,8 +409,8 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
             extensions=_trajectory_extensions("fork-prefix"),
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(tmp_path / "turns"),
-            trajectory_node_store=node_store_backend.open(),
+            store=trajectory_backend.open_turn_store(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
         )
     )
     forked: AgentSession | None = None
@@ -696,10 +710,9 @@ async def test_sdk_child_cancellation_domain_is_explicit() -> None:
 
 @pytest.mark.asyncio
 async def test_sdk_compaction_persists_summary_across_resume(
-    node_store_backend: _NodeStoreBackend,
+    trajectory_backend: _TrajectoryBackend,
     tmp_path: Path,
 ) -> None:
-    turn_store_path = tmp_path / "compaction-turns"
     resource_root = tmp_path / "resources"
 
     def open_resources() -> LocalResourceStore:
@@ -730,8 +743,8 @@ async def test_sdk_compaction_persists_summary_across_resume(
             extensions=extensions,
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(turn_store_path),
-            trajectory_node_store=node_store_backend.open(),
+            store=trajectory_backend.open_turn_store(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
             resource_store=resources,
             resource_writer=resources,
         )
@@ -762,12 +775,12 @@ async def test_sdk_compaction_persists_summary_across_resume(
     resumed_resources = open_resources()
     resumed = await AgentSession.resume(
         session_id,
-        JsonlTrajectoryStore(turn_store_path),
+        trajectory_backend.open_turn_store(),
         config=AgentSessionConfig(
             extensions=extensions,
             stream_fn=resumed_provider,
             model=_model(),
-            trajectory_node_store=node_store_backend.open(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
             resource_store=resumed_resources,
             resource_writer=resumed_resources,
         ),
@@ -791,7 +804,7 @@ async def test_sdk_compaction_persists_summary_across_resume(
 
 @pytest.mark.asyncio
 async def test_sdk_fork_inherits_compaction_at_matching_logical_leaf(
-    node_store_backend: _NodeStoreBackend,
+    trajectory_backend: _TrajectoryBackend,
     tmp_path: Path,
 ) -> None:
     provider = _StubProvider(
@@ -819,8 +832,8 @@ async def test_sdk_fork_inherits_compaction_at_matching_logical_leaf(
             ],
             stream_fn=provider,
             model=_model(),
-            store=JsonlTrajectoryStore(tmp_path / "fork-compaction-turns"),
-            trajectory_node_store=node_store_backend.open(),
+            store=trajectory_backend.open_turn_store(),
+            trajectory_node_store=trajectory_backend.open_node_store(),
             resource_store=resources,
             resource_writer=resources,
         )
