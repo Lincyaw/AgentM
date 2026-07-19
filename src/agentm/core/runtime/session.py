@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Iterator
@@ -19,7 +20,7 @@ from loguru import logger
 from agentm.core.abi.messages import AgentMessage, ImageContent, TextContent
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
-from agentm.core.abi.bus import EventBus
+from agentm.core.abi.bus import EventBus, EventBusObserver
 from agentm.core.abi.context import (
     ContextPolicy,
     PolicyContext,
@@ -377,9 +378,9 @@ class Session:
         """Bridge — register the resource writer as a service."""
         self.services.register("resource_writer", writer)
 
-    def add_observer(self, observer: object) -> None:
+    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
         """Register a bus observer for session-scoped instrumentation."""
-        self.bus.add_observer(observer)  # type: ignore[arg-type]
+        return self.bus.add_observer(observer)
 
     def install_atom(self, module_path: str, config: dict[str, object] | None = None) -> None:
         """Load and install an atom at runtime."""

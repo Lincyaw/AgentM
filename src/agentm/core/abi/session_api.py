@@ -52,7 +52,7 @@ class AgentSessionConfig:
 
     cwd: str = ""
     scenario: str | None = None
-    extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    extensions: list[tuple[str, dict[str, Any]]] | None = None
     extra_extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     extra_tools: list[Tool] = field(default_factory=list)
     atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -71,10 +71,6 @@ class AgentSessionConfig:
     session_id: str | None = None
     root_session_id: str | None = None
     parent_session_id: str | None = None
-    no_extensions: bool = False
-    no_skills: bool = False
-    no_prompt_templates: bool = False
-    resource_loader: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)

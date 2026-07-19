@@ -128,9 +128,6 @@ async def create_session(
     services: ServiceRegistry | None = None,
     max_turns: int | None = None,
     tool_allowlist: list[str] | None = None,
-    no_extensions: bool = False,
-    no_skills: bool = False,
-    no_prompt_templates: bool = False,
 ) -> Session:
     """Create a v2 Session from a scenario manifest.
 
@@ -141,9 +138,6 @@ async def create_session(
     if extensions is not None:
         extension_specs = list(extensions)
         resolved_scenario_dir = scenario_dir
-    elif no_extensions:
-        extension_specs = []
-        resolved_scenario_dir = scenario_dir
     else:
         extension_specs, resolved_scenario_dir = _load_scenario_extensions(
             scenario, scenario_dir
@@ -152,20 +146,6 @@ async def create_session(
     if extra_extensions:
         for ext in extra_extensions:
             extension_specs.append((ext, {}))
-
-    if no_skills:
-        extension_specs = [
-            item for item in extension_specs
-            if item[0] != "agentm.extensions.builtin.skill_loader"
-        ]
-    if no_prompt_templates:
-        extension_specs = [
-            item for item in extension_specs
-            if item[0] not in {
-                "agentm.extensions.builtin.prompt_templates",
-                "agentm.extensions.builtin.compaction_prompts",
-            }
-        ]
 
     # Apply per-atom config overrides
     if atom_configs:
@@ -243,7 +223,7 @@ async def create_from_config(config: "AgentSessionConfig") -> Session:
 
     session = await create_session(
         scenario=config.scenario or "chatbot",
-        extensions=config.extensions or None,
+        extensions=config.extensions,
         extra_extensions=extra_extensions,
         provider=config.provider,
         atom_configs=atom_configs,
@@ -258,9 +238,6 @@ async def create_from_config(config: "AgentSessionConfig") -> Session:
         services=services,
         max_turns=max_turns,
         tool_allowlist=config.tool_allowlist,
-        no_extensions=config.no_extensions,
-        no_skills=config.no_skills,
-        no_prompt_templates=config.no_prompt_templates,
     )
 
     for tool in config.extra_tools:
@@ -297,6 +274,7 @@ async def _install_extension(
     except Exception as exc:
         error = str(exc)
         logger.exception("failed to install atom: {}", module_path)
+        raise
     finally:
         await session.bus.emit(
             ExtensionInstallEvent.CHANNEL,
@@ -325,7 +303,7 @@ async def create_child_session(
     """
     scenario = config.scenario or parent.ctx.scenario or "chatbot"
 
-    if config.extensions:
+    if config.extensions is not None:
         extensions = list(config.extensions)
     else:
         extensions, _ = _load_scenario_extensions(

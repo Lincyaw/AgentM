@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi import TextContent, ToolErrorEvent
+from agentm.core.abi import ToolErrorEvent
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -56,12 +56,8 @@ class _ToolErrorMessagesRuntime:
     def install(self) -> None:
         self._session.bus.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
 
-    def on_tool_error(self, event: ToolErrorEvent) -> None:
-        if event.result.content:
-            return
-        event.result.content.append(
-            TextContent(type="text", text=self._message_for(event))
-        )
+    def on_tool_error(self, event: ToolErrorEvent) -> dict[str, str]:
+        return {"text": self._message_for(event)}
 
     def _message_for(self, event: ToolErrorEvent) -> str:
         if event.kind == "execution_failed":
