@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from opentelemetry._logs import SeverityNumber
 from opentelemetry.trace import SpanKind, Status, StatusCode, set_span_in_context
 
 from agentm.core.abi.events import (
@@ -24,7 +23,7 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.messages import TextContent, ToolCallBlock, ToolResultBlock
 from agentm.core.lib.serialization import to_jsonable
-from agentm.core.observability.otel_dispatch import register_otel
+from agentm.extensions.observability.otel_dispatch import register_otel
 
 _SPAN_RUN = "run"
 _SPAN_TURN = "turn"
@@ -295,10 +294,10 @@ def _api_register_to_otel(event: ApiRegisterEvent, telemetry: Any) -> None:
 
 def _diagnostic_to_otel(event: DiagnosticEvent, telemetry: Any) -> None:
     severity = {
-        "info": SeverityNumber.INFO,
-        "warning": SeverityNumber.WARN,
-        "error": SeverityNumber.ERROR,
-    }.get(event.level, SeverityNumber.INFO)
+        "info": "info",
+        "warning": "warning",
+        "error": "error",
+    }.get(event.level, "info")
     telemetry.emit_log(
         "agentm.diagnostic",
         body={"level": event.level, "message": event.message},
@@ -328,7 +327,7 @@ def _extension_install_to_otel(event: ExtensionInstallEvent, telemetry: Any) -> 
                 "agentm.extension.error": event.error or "",
             },
         ),
-        severity=SeverityNumber.ERROR if event.error else SeverityNumber.INFO,
+        severity="error" if event.error else "info",
     )
 
 

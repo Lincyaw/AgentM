@@ -1,8 +1,4 @@
-"""Pure OTLP/JSON parsing utilities.
-
-Moved from ``runtime/otel_export.py`` so ``lib/`` and ``abi/`` consumers
-can use them without importing the runtime layer.
-"""
+"""Pure OTLP/JSON parsing utilities for observability backends."""
 
 from __future__ import annotations
 

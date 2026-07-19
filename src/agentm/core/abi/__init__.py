@@ -246,7 +246,7 @@ from .stream import (
     ToolCallEnd,
     ToolCallStart,
 )
-from .telemetry import SessionTelemetry
+from .telemetry import SessionTelemetry, TelemetrySeverity
 from .termination import (
     Aborted,
     BudgetExhausted,
@@ -533,6 +533,7 @@ __all__ = [
     "SessionShutdownEvent",
     "SessionSpecResolver",
     "SessionTelemetry",
+    "TelemetrySeverity",
     "SignalAborted",
     "SpawnedSession",
     "SpanRecord",

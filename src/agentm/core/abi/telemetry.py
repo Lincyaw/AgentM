@@ -1,25 +1,23 @@
 """Atom-facing telemetry Protocol.
 
-Defines the structural contract for the per-session OTel handle returned by
-the session services. The concrete implementation
-(:class:`~agentm.core.runtime.otel_export.SessionTelemetry`) is a dataclass
-that satisfies this Protocol; atoms depend only on this module for the
-telemetry handle's shape.
+Core defines only AgentM's stable telemetry surface. Concrete backends such
+as OTel, JSONL, ClickHouse, or host-provided sinks adapt to this Protocol
+outside the core substrate.
 """
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
-from opentelemetry._logs import SeverityNumber
+TelemetrySeverity = Literal["trace", "debug", "info", "warning", "error", "fatal"]
 
 
 @runtime_checkable
 class SessionTelemetry(Protocol):
-    """Atom-facing view of the per-session OTel telemetry handle.
+    """Atom-facing view of the per-session telemetry handle.
 
     ``obs_*`` fields are written by the ``observability`` atom at install
-    time and read by per-event OTel translators in ``event_otel.py``.
+    time and read by backend-specific event translators.
     """
 
     session_id: str
@@ -33,20 +31,16 @@ class SessionTelemetry(Protocol):
     obs_redact_prompts: bool
     obs_session_start_ns: int
 
-    # OTel providers — typed Any to avoid pulling opentelemetry SDK into ABI.
-    tracer_provider: Any
-    logger_provider: Any
-
     def emit_log(
         self,
         event_name: str,
         *,
         body: Any = None,
         attributes: dict[str, Any] | None = None,
-        severity: SeverityNumber = SeverityNumber.INFO,
+        severity: TelemetrySeverity = "info",
     ) -> None: ...
 
     def shutdown(self) -> None: ...
 
 
-__all__ = ["SessionTelemetry"]
+__all__ = ["SessionTelemetry", "TelemetrySeverity"]

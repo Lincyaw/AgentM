@@ -12,10 +12,9 @@ from __future__ import annotations
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
-from opentelemetry._logs import SeverityNumber
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -42,9 +41,9 @@ from agentm.core.abi import (
     TurnCommittedEvent,
 )
 from agentm.core.lib.serialization import to_jsonable
-from agentm.core.observability.otel_dispatch import dispatch_otel
-from agentm.core.observability.otel_export import setup_session_telemetry
-from agentm.core.observability.redact import redact_messages
+from agentm.core.lib.redact import redact_messages
+from agentm.extensions.observability.otel_dispatch import dispatch_otel
+from agentm.extensions.observability.otel_export import setup_session_telemetry
 from agentm.extensions import ExtensionManifest
 
 _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
@@ -76,6 +75,7 @@ class ObservabilityConfig(BaseModel):
     include_handler_records: bool = True
     exclude_channels: list[str] | None = None
     redact_prompts: bool = True
+    export: Literal["auto", "local_file", "otlp"] = "auto"
 
 
 MANIFEST = ExtensionManifest(
@@ -174,7 +174,7 @@ class _ObservabilityObserver(EventBusObserver):
         self._telemetry.emit_log(
             "agentm.handler.invoke",
             attributes=attrs,
-            severity=SeverityNumber.ERROR if error is not None else SeverityNumber.INFO,
+            severity="error" if error is not None else "info",
         )
 
     def on_emit_end(
@@ -218,6 +218,7 @@ class _ObservabilityRuntime:
             session.ctx.session_id,
             Path(session.ctx.cwd or "."),
             scenario_name=session.ctx.scenario,
+            export_mode=config.export,
         )
         user_excludes = config.exclude_channels
         self._exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
@@ -225,7 +226,7 @@ class _ObservabilityRuntime:
         )
 
     def install(self) -> None:
-        import agentm.core.observability.event_otel  # noqa: F401
+        import agentm.extensions.observability.event_otel  # noqa: F401
 
         self._session.services.register(
             "session_telemetry",

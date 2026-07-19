@@ -34,7 +34,7 @@ from agentm.core.lib.tool_schema import (
     pydantic_to_openai_tool_schema,
     pydantic_to_tool_schema,
 )
-from agentm.core.observability.redact import redact_headers, redact_messages
+from agentm.core.lib.redact import redact_headers, redact_messages
 
 __all__ = [
     "RUNNING",

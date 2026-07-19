@@ -1,9 +1,8 @@
-"""Registry-based OTel dispatch for kernel events.
+"""Registry-based OTel dispatch for session events.
 
-Replaces the monkey-patch pattern where ``abi/events.py`` overwrote
-``Event.to_otel`` on concrete subclasses. The registry lives in ``lib/``
-(not ``abi/`` or ``runtime/``) so both layers can reach it without creating
-a circular dependency.
+This is part of the OTel observability implementation, not the SDK substrate.
+The builtin observability atom calls :func:`dispatch_otel`; backend-specific
+translator modules register handlers here.
 """
 
 from __future__ import annotations

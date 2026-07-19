@@ -14,6 +14,7 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
+      - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/core/abi/catalog.py
       - path: src/agentm/core/abi/codec.py
       - path: src/agentm/core/abi/compaction.py
@@ -30,9 +31,12 @@ requirements:
       - path: src/agentm/core/abi/session_api.py
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/core/abi/store.py
+      - path: src/agentm/core/abi/telemetry.py
       - path: src/agentm/core/abi/tool_executor.py
       - path: src/agentm/core/abi/tool_orchestration.py
       - path: src/agentm/core/abi/trajectory.py
+      - path: src/agentm/core/lib/__init__.py
+      - path: src/agentm/core/lib/redact.py
       - path: src/agentm/core/runtime/catalog.py
       - path: src/agentm/core/runtime/driver.py
       - path: src/agentm/core/runtime/session.py
@@ -45,8 +49,15 @@ requirements:
       - path: src/agentm/core/runtime/tree.py
       - path: src/agentm/core/runtime/trajectory_nodes.py
       - path: src/agentm/core/runtime/trigger_queue.py
+      - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/tool_bash.py
+      - path: src/agentm/extensions/observability/__init__.py
+      - path: src/agentm/extensions/observability/event_otel.py
+      - path: src/agentm/extensions/observability/otel_dispatch.py
+      - path: src/agentm/extensions/observability/otel_export.py
+      - path: src/agentm/extensions/observability/otlp.py
+      - path: src/agentm/extensions/observability/paths.py
     tests:
       - path: tests/integration/test_trajectory.py
       - path: tests/test_lifecycle_catalog_ports.py

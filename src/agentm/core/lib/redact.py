@@ -14,11 +14,10 @@ Both helpers operate on **already-JSON-serialized dicts** (post
 they're orthogonal to dataclass shapes and trivial to unit-test from a
 fabricated input.
 
-Lives in ``core.lib`` because the ``observability`` atom and the
-``Event.to_otel`` translators in ``core.abi.events`` both need identical
-semantics, and atom-to-atom / atom-to-runtime imports are forbidden by
-the single-file contract. ``core.lib`` is the sanctioned shared
-"stdlib for atoms".
+Lives in ``core.lib`` because observability atoms and provider/logging
+adapters need identical redaction semantics, while atom-to-atom and
+atom-to-runtime imports remain forbidden. ``core.lib`` is the sanctioned
+shared "stdlib for atoms".
 """
 
 from __future__ import annotations

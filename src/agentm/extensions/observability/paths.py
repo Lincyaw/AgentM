@@ -1,4 +1,4 @@
-"""Resolve the local observability output directory."""
+"""Resolve local observability output paths for the OTel/file backend."""
 
 from __future__ import annotations
 

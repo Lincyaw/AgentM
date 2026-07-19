@@ -13,7 +13,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Tear down process-level OTel providers after tests."""
     del session, exitstatus
     try:
-        from agentm.core.observability.otel_export import shutdown_process_telemetry
+        from agentm.extensions.observability.otel_export import (
+            shutdown_process_telemetry,
+        )
 
         shutdown_process_telemetry()
     except Exception as exc:  # noqa: BLE001

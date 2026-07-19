@@ -1,4 +1,4 @@
-"""File-backed OTLP exporters for spans and logs.
+"""OTel-backed telemetry implementation for the builtin observability atom.
 
 Writes one OTLP ``ResourceSpans`` / ``ResourceLogs`` element per line as
 ndjson at ``$AGENTM_HOME/observability/<session_id>.jsonl`` by default. Each
@@ -42,7 +42,7 @@ import threading
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import IO, Any, Protocol, Sequence
+from typing import IO, Any, Literal, Protocol, Sequence
 
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
@@ -65,6 +65,7 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.trace import Span, Tracer
 
+from agentm.core.abi.telemetry import TelemetrySeverity
 from agentm.core.lib.serialization import to_jsonable
 
 __all__ = [
@@ -73,6 +74,7 @@ __all__ = [
     "FileLogExporter",
     "FileSpanExporter",
     "LocalFileSink",
+    "ObservabilityExportMode",
     "OtlpSink",
     "SessionTelemetry",
     "TraceSink",
@@ -89,11 +91,11 @@ __all__ = [
     "shutdown_process_telemetry",
 ]
 
-from agentm.core.lib.observability_dir import (  # noqa: E402
+from agentm.extensions.observability.paths import (  # noqa: E402
     file_export_requested,
     resolve_observability_dir,
 )
-from agentm.core.observability.otlp import (  # noqa: E402
+from agentm.extensions.observability.otlp import (  # noqa: E402
     iter_log_records,
     iter_spans,
     otlp_unwrap,
@@ -276,6 +278,8 @@ _process_otlp_sink: "OtlpSink | None" = None
 
 _DEFAULT_OTLP_ENDPOINT = "http://localhost:4317"
 
+ObservabilityExportMode = Literal["auto", "local_file", "otlp"]
+
 
 def otlp_is_active() -> bool:
     """Whether the process-level OTLP sink is attached."""
@@ -318,14 +322,11 @@ def otlp_export_reachable() -> bool:
 
 # --- Trace sinks --------------------------------------------------------------
 #
-# Exactly one sink handles routine export for any given record: the
-# process-level :class:`OtlpSink` when a collector is reachable, otherwise a
-# per-session :class:`LocalFileSink`. Selection happens in
-# :func:`setup_process_telemetry`
-# / :func:`setup_session_telemetry` and nowhere else — a single attach site is
-# what rules out double export by construction. Explicit ``file_path``
-# (trajectory store persistence) and the ``AGENTM_OBSERVABILITY_DIR`` opt-in
-# additionally force a file sink regardless of collector reachability.
+# Export mode is an observability-atom policy. ``auto`` selects the
+# process-level :class:`OtlpSink` when a collector is reachable and otherwise
+# attaches a per-session :class:`LocalFileSink`; ``local_file`` forces a file
+# sink; ``otlp`` uses only the process-level sink. Explicit ``file_path`` keeps
+# the SDK-host escape hatch for deterministic local artifacts.
 
 
 class TraceSink(Protocol):
@@ -501,7 +502,10 @@ class LocalFileSink:
             self._log_exporter.shutdown()
 
 
-def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
+def setup_process_telemetry(
+    *,
+    enable_otlp: bool = True,
+) -> tuple[TracerProvider, LoggerProvider]:
     """Lazily construct the process-level OTel providers.
 
     Idempotent — subsequent calls return the same provider instances. The
@@ -510,12 +514,12 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
     ``agentm.scenario.name``) is emitted as **per-span / per-log
     attributes** by the observability atom, not as resource attributes.
 
-    Sink selection happens here, once per process: when the collector at
-    ``OTEL_EXPORTER_OTLP_ENDPOINT`` (default ``http://localhost:4317``) is
-    reachable, an :class:`OtlpSink` is attached — before any session emits
-    its first event — and every record ships to the collector. When it is
-    not, :func:`setup_session_telemetry` attaches a per-session
-    :class:`LocalFileSink` instead.
+    Sink selection happens here, once per process. When ``enable_otlp`` is
+    true and the collector at ``OTEL_EXPORTER_OTLP_ENDPOINT`` (default
+    ``http://localhost:4317``) is reachable, an :class:`OtlpSink` is attached
+    before any session emits its first event. When it is not,
+    :func:`setup_session_telemetry` may attach a per-session
+    :class:`LocalFileSink`, depending on its export mode.
 
     Returns ``(tracer_provider, logger_provider)``.
     """
@@ -535,16 +539,17 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
         )
         _global_tracer_provider = TracerProvider(resource=resource)
         _global_logger_provider = LoggerProvider(resource=resource)
-        endpoint = resolve_otlp_endpoint()
-        if _probe_endpoint(endpoint):
-            sink = OtlpSink(endpoint)
-            if sink.attach(_global_tracer_provider, _global_logger_provider):
-                _process_otlp_sink = sink
-        else:
-            logger.debug(
-                "otel_export: collector at {} unreachable, sessions fall back to file export",
-                endpoint,
-            )
+        if enable_otlp:
+            endpoint = resolve_otlp_endpoint()
+            if _probe_endpoint(endpoint):
+                sink = OtlpSink(endpoint)
+                if sink.attach(_global_tracer_provider, _global_logger_provider):
+                    _process_otlp_sink = sink
+            else:
+                logger.debug(
+                    "otel_export: collector at {} unreachable",
+                    endpoint,
+                )
         if not _global_atexit_registered:
             atexit.register(shutdown_process_telemetry)
             _global_atexit_registered = True
@@ -567,6 +572,21 @@ _LOGURU_OTEL_SEVERITY: dict[str, SeverityNumber] = {
     "ERROR": SeverityNumber.ERROR,
     "CRITICAL": SeverityNumber.FATAL,
 }
+
+_TELEMETRY_SEVERITY: dict[TelemetrySeverity, SeverityNumber] = {
+    "trace": SeverityNumber.TRACE,
+    "debug": SeverityNumber.DEBUG,
+    "info": SeverityNumber.INFO,
+    "warning": SeverityNumber.WARN,
+    "error": SeverityNumber.ERROR,
+    "fatal": SeverityNumber.FATAL,
+}
+
+
+def _severity_number(severity: TelemetrySeverity | SeverityNumber) -> SeverityNumber:
+    if isinstance(severity, SeverityNumber):
+        return severity
+    return _TELEMETRY_SEVERITY.get(severity, SeverityNumber.INFO)
 
 # Reentrancy guard: the OTel export path itself logs via loguru, so without
 # this a failing exporter could recurse through the sink indefinitely.
@@ -628,7 +648,7 @@ def attach_loguru_otel_sink(*, level: str = "DEBUG") -> int | None:
 
     # Ensure the process-level provider + network log exporter exist before
     # the first operational record arrives.
-    setup_process_telemetry()
+    setup_process_telemetry(enable_otlp=True)
     return _logger.add(_emit_loguru_record_to_otel, level=level, format="{message}")
 
 
@@ -862,7 +882,7 @@ class SessionTelemetry:
         *,
         body: Any = None,
         attributes: dict[str, Any] | None = None,
-        severity: SeverityNumber = SeverityNumber.INFO,
+        severity: TelemetrySeverity | SeverityNumber = "info",
     ) -> None:
         """Emit one log record through this session's OTel ``Logger``.
 
@@ -880,10 +900,11 @@ class SessionTelemetry:
             }
         else:
             coerced = None
+        severity_number = _severity_number(severity)
         self.logger.emit(
             body=to_jsonable(body) if body is not None else None,
-            severity_number=severity,
-            severity_text=severity.name,
+            severity_number=severity_number,
+            severity_text=severity_number.name,
             event_name=event_name,
             attributes=coerced,
         )
@@ -908,14 +929,15 @@ def setup_session_telemetry(
     export_timeout_millis: int = 30_000,
     max_export_batch_size: int | None = None,
     file_path: Path | None = None,
+    export_mode: ObservabilityExportMode = "auto",
 ) -> SessionTelemetry:
     """Build a per-session telemetry handle.
 
     Constructs (lazily, once) the process-level ``TracerProvider`` +
-    ``LoggerProvider`` and attaches a fresh per-session
-    ``BlockingBatchSpanProcessor`` + ``BlockingBatchLogRecordProcessor`` to
-    them. The processors forward exclusively to this session's file
-    exporter, so concurrent sessions never cross-contaminate.
+    ``LoggerProvider``. ``export_mode`` is the explicit backend policy:
+    ``auto`` uses OTel when a collector is reachable and otherwise writes
+    local files, ``local_file`` always writes a local file sink, and ``otlp``
+    only uses the process-level OTel sink.
 
     The output path defaults to ``$AGENTM_HOME/observability/<session_id>.jsonl``.
     Callers that already know the absolute path (e.g. the trajectory store
@@ -937,12 +959,21 @@ def setup_session_telemetry(
     """
     del scenario_name  # No longer on the resource; observability atom emits as attribute.
 
-    tracer_provider, logger_provider = setup_process_telemetry()
+    tracer_provider, logger_provider = setup_process_telemetry(
+        enable_otlp=export_mode != "local_file",
+    )
 
-    # File export: explicit path (trajectory store persistence), user opt-in
-    # via AGENTM_OBSERVABILITY_DIR, or automatic fallback when no OTLP
-    # sink is attached (so traces are never silently lost).
-    write_files = file_path is not None or file_export_requested() or not otlp_is_active()
+    # File export is now an explicit observability-atom policy. ``auto`` keeps
+    # the historical local-file fallback, but the fallback no longer lives in
+    # core and is not hidden from configuration.
+    write_files = (
+        export_mode == "local_file"
+        or file_path is not None
+        or (
+            export_mode == "auto"
+            and (file_export_requested() or not otlp_is_active())
+        )
+    )
     resolved_path: Path | None = None
     file_sink: LocalFileSink | None = None
 
