@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from agentm.storage.trajectory.resolve import (
-    ResolvedTrajectoryStorage,
-    resolve_trajectory_storage,
-    resolve_trajectory_storage_or_create,
+    ResolvedTrajectoryStore,
+    resolve_trajectory_store,
+    resolve_trajectory_store_or_create,
 )
 
 __all__ = [
-    "ResolvedTrajectoryStorage",
-    "resolve_trajectory_storage",
-    "resolve_trajectory_storage_or_create",
+    "ResolvedTrajectoryStore",
+    "resolve_trajectory_store",
+    "resolve_trajectory_store_or_create",
 ]

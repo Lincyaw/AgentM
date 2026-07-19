@@ -12,11 +12,11 @@ from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_core import SessionRuntimeConfig
 from agentm.core.runtime.session_factory import create_from_config
 from agentm.storage.trajectory.resolve import (
-    ResolvedTrajectoryStorage,
-    resolve_trajectory_storage_or_create,
+    ResolvedTrajectoryStore,
+    resolve_trajectory_store_or_create,
 )
 
-_STORAGE_OWNER_SERVICE = "agentm.sdk.trajectory_storage_owner"
+_STORE_OWNER_SERVICE = "agentm.sdk.trajectory_store_owner"
 
 
 class AgentSession(Session):
@@ -24,44 +24,40 @@ class AgentSession(Session):
 
     def __init__(self, runtime: SessionRuntimeConfig) -> None:
         super().__init__(runtime)
-        storage_owner = self.services.get(
-            _STORAGE_OWNER_SERVICE,
-            ResolvedTrajectoryStorage,
+        store_owner = self.services.get(
+            _STORE_OWNER_SERVICE,
+            ResolvedTrajectoryStore,
         )
-        if storage_owner is None:
+        if store_owner is None:
             return
-        selected = storage_owner.storage
-        if (
-            selected.turn_store is not self.store
-            or selected.node_store is not self.get_trajectory_node_store()
-        ):
+        if store_owner.store is not self.store:
             return
-        storage_owner.acquire()
+        store_owner.acquire()
 
-        async def release_storage() -> None:
-            await asyncio.to_thread(storage_owner.release)
+        async def release_store() -> None:
+            await asyncio.to_thread(store_owner.release)
 
-        self.register_cleanup(release_storage)
+        self.register_cleanup(release_store)
 
     @classmethod
     async def create(cls, config: AgentSessionConfig) -> "AgentSession":
-        if config.trajectory_storage is not None:
+        if config.trajectory_store is not None:
             session = await create_from_config(config, session_type=cls)
             return cast(AgentSession, session)
 
-        resolved = resolve_trajectory_storage_or_create(config.cwd or None)
+        resolved = resolve_trajectory_store_or_create(config.cwd or None)
         host_services = ServiceRegistry()
         host_services.register(
-            _STORAGE_OWNER_SERVICE,
+            _STORE_OWNER_SERVICE,
             resolved,
-            ResolvedTrajectoryStorage,
+            ResolvedTrajectoryStore,
             scope="resource",
         )
         try:
             session = await create_from_config(
                 replace(
                     config,
-                    trajectory_storage=resolved.storage,
+                    trajectory_store=resolved.store,
                 ),
                 session_type=cls,
                 host_services=host_services,

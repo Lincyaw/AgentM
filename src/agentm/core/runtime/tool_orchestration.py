@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 
 from agentm.core.abi.cancel import (
     CancelSignal,
@@ -106,33 +106,35 @@ async def _run_item(
 class DefaultToolOrchestrator:
     """Default scheduler matching the SDK's conservative execution semantics."""
 
-    async def execute_batch(
+    async def stream_batch(
         self,
         request: ToolOrchestrationRequest,
         *,
         signal: CancelSignal | None = None,
         executor: ToolExecutor | None = None,
-    ) -> list[ToolOrchestrationResult]:
-        results: list[ToolOrchestrationResult] = []
+    ) -> AsyncIterator[ToolOrchestrationResult]:
         for batch in _partition(request.items):
             if len(batch) == 1:
-                results.append(
-                    await _run_item(batch[0], signal=signal, executor=executor)
+                yield await _run_item(
+                    batch[0],
+                    signal=signal,
+                    executor=executor,
                 )
                 continue
-            results.extend(
-                await self._execute_parallel(batch, signal=signal, executor=executor)
-            )
-        results.sort(key=lambda result: result.item.index)
-        return results
+            async for result in self._stream_parallel(
+                batch,
+                signal=signal,
+                executor=executor,
+            ):
+                yield result
 
-    async def _execute_parallel(
+    async def _stream_parallel(
         self,
         batch: tuple[ToolWorkItem, ...],
         *,
         signal: CancelSignal | None,
         executor: ToolExecutor | None,
-    ) -> list[ToolOrchestrationResult]:
+    ) -> AsyncIterator[ToolOrchestrationResult]:
         sibling = EventCancelSource()
         child_signal = _CombinedCancelSignal(signal, sibling)
         tasks: dict[asyncio.Task[ToolOrchestrationResult], ToolWorkItem] = {
@@ -143,7 +145,6 @@ class DefaultToolOrchestrator:
             for item in batch
         }
         pending = set(tasks)
-        results: list[ToolOrchestrationResult] = []
         try:
             while pending:
                 done, pending = await asyncio.wait(
@@ -152,10 +153,9 @@ class DefaultToolOrchestrator:
                 )
                 for task in done:
                     result = task.result()
-                    results.append(result)
+                    yield result
                     if result.status == "failed" and not sibling.is_set():
                         sibling.set("sibling_error")
-            return results
         finally:
             unfinished = [task for task in tasks if not task.done()]
             for task in unfinished:

@@ -54,7 +54,6 @@ TrajectoryNodeKind = Literal[
 ]
 TrajectoryNodeRole = Literal["user", "assistant", "tool_result", "control"]
 TrajectoryHeadStatus = Literal["active", "dead", "archived"]
-TrajectoryProjectionState = Literal["current", "stale", "failed"]
 TrajectoryIndexField = Literal[
     "root_session_id",
     "session_id",
@@ -127,7 +126,7 @@ def _string_tuple(value: object, label: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryIndexSpec:
-    """Backend-neutral index declaration for trajectory node stores."""
+    """Backend-neutral declaration for a trajectory message index."""
 
     name: str
     fields: tuple[TrajectoryIndexField, ...]
@@ -171,7 +170,7 @@ TRAJECTORY_NODE_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
     TrajectoryIndexSpec(
         name="trajectory_nodes_branch_seq",
         fields=("session_id", "branch_id", "head_id", "seq"),
-        purpose="branch/head ordered replay and active-head repair",
+        purpose="branch/head ordered replay and consistency checks",
     ),
     TrajectoryIndexSpec(
         name="trajectory_nodes_logical_parent",
@@ -191,7 +190,7 @@ TRAJECTORY_NODE_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
     TrajectoryIndexSpec(
         name="trajectory_nodes_turn",
         fields=("session_id", "turn_index", "round_index", "message_index", "turn_id"),
-        purpose="turn-to-node projection and trace joins",
+        purpose="committed turn/message ordering and trace joins",
     ),
     TrajectoryIndexSpec(
         name="trajectory_nodes_tool_call",
@@ -444,7 +443,7 @@ class TrajectoryForkPoint:
 
     ``turn_ref`` preserves the existing turn-prefix fork API. ``node_id`` and
     ``head_id`` let hosts fork from message-level nodes or active heads once a
-    ``TrajectoryNodeStore`` is present.
+    ``TrajectoryStore`` is present.
     """
 
     session_id: str
@@ -480,50 +479,6 @@ class TrajectoryForkPoint:
         _require_string(self.branch_id, "trajectory fork branch_id")
         if not isinstance(self.include_logical_parent, bool):
             raise TypeError("trajectory fork include_logical_parent must be a bool")
-
-
-@dataclass(frozen=True, slots=True)
-class TrajectoryProjectionStatus:
-    """Projection health for rebuildable message-node stores."""
-
-    session_id: str
-    state: TrajectoryProjectionState = "current"
-    high_water_turn_id: str | None = None
-    high_water_turn_index: int | None = None
-    node_count: int = 0
-    updated_at: float = 0.0
-    error: str | None = None
-    metadata: Mapping[str, object] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        _require_string(self.session_id, "projection status session_id")
-        if self.state not in {"current", "stale", "failed"}:
-            raise ValueError(f"invalid projection state: {self.state!r}")
-        _require_string(
-            self.high_water_turn_id,
-            "projection high_water_turn_id",
-            optional=True,
-        )
-        _require_index(
-            self.high_water_turn_index,
-            "projection high_water_turn_index",
-            optional=True,
-        )
-        if (self.high_water_turn_id is None) != (
-            self.high_water_turn_index is None
-        ):
-            raise ValueError(
-                "projection high-water turn id and index must be set together"
-            )
-        _require_index(self.node_count, "projection node_count")
-        _require_finite(self.updated_at, "projection updated_at")
-        if self.error is not None and not isinstance(self.error, str):
-            raise TypeError("projection error must be a string or None")
-        object.__setattr__(
-            self,
-            "metadata",
-            _freeze_metadata(self.metadata, "projection status metadata"),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -940,8 +895,6 @@ __all__ = [
     "TrajectoryNodeKind",
     "TrajectoryNodeRef",
     "TrajectoryNodeRole",
-    "TrajectoryProjectionState",
-    "TrajectoryProjectionStatus",
     "Turn",
     "TurnCheckpoint",
     "TurnMeta",

@@ -9,7 +9,7 @@
 | Recovery | Resume, fork, cache, and compaction never read OTLP or ClickHouse observability tables. |
 | Correlation | Both planes carry stable session, root, parent, and turn ids where applicable. |
 | Privacy | Prompt-bearing diagnostic payloads are redacted by default; observability is not a hidden trajectory replica. |
-| Failure | A configured authoritative turn-store failure is fatal to the turn commit. A node-projection failure is repairable from committed turns. Telemetry delivery failure cannot be treated as a successful trajectory commit. |
+| Failure | A configured trajectory-store failure is fatal to the turn commit. Turn, node/head indexes, and checkpoint supersession succeed or roll back together; no node-index repair path exists. Telemetry delivery failure remains independent and cannot be treated as trajectory persistence. |
 
 ## Ports
 
@@ -25,7 +25,7 @@
 
 | Backend | Stored data | Consistency role |
 | --- | --- | --- |
-| JSONL or PostgreSQL | Full `SessionMeta`, latest incomplete `TurnCheckpoint`, committed `Turn`, and paired node/head state | One backend selection; turns authoritative, nodes rebuildable |
+| JSONL or PostgreSQL | Full `SessionMeta`, latest incomplete `TurnCheckpoint`, committed `Turn`, node/head indexes, and cache/compaction state | One authoritative backend and atomic turn publication boundary |
 | Local OTLP JSONL | Session-scoped diagnostic logs and spans | Optional diagnostics |
 | ClickHouse `otel_logs` / `otel_traces` | Collector-managed diagnostic logs and spans | Optional, eventually visible query backend |
 

@@ -7,7 +7,7 @@ parallel-safe grouping, cooperative cancellation, and sibling-error cascading.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -143,13 +143,19 @@ class ToolOrchestrationResult:
 class ToolOrchestrator(Protocol):
     """Replaceable scheduler for batches of tool calls."""
 
-    async def execute_batch(
+    def stream_batch(
         self,
         request: ToolOrchestrationRequest,
         *,
         signal: CancelSignal | None = None,
         executor: ToolExecutor | None = None,
-    ) -> Sequence[ToolOrchestrationResult]:
+    ) -> AsyncIterator[ToolOrchestrationResult]:
+        """Yield each request item exactly once as soon as it terminates.
+
+        Results must reference the original ``ToolWorkItem`` object from
+        ``request.items``. Completion order is intentionally unconstrained;
+        the runtime restores assistant call order for provider context.
+        """
         ...
 
 

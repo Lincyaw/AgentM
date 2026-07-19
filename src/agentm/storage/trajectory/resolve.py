@@ -1,4 +1,4 @@
-"""Host-side trajectory backend resolution and paired store construction."""
+"""Host-side trajectory backend resolution and store construction."""
 
 from __future__ import annotations
 
@@ -11,17 +11,14 @@ from pathlib import Path
 from threading import Lock
 from typing import Protocol
 
-from agentm.core.abi.store import TrajectoryStorage
-from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
-from agentm.storage.trajectory.jsonl import JsonlTrajectoryNodeStore
+from agentm.core.abi.store import TrajectoryStore
+from agentm.storage.trajectory.jsonl import JsonlTrajectoryStore
 from agentm.storage.trajectory.postgres import (
     PostgresConnection,
-    PostgresTrajectoryNodeStore,
+    PostgresTrajectoryStore,
 )
-from agentm.storage.trajectory.postgres_turns import PostgresTrajectoryStore
 
 _CONFIG_KEYS = frozenset({"dir", "dsn", "schema"})
-_NODE_DIRECTORY = "_nodes"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,10 +40,10 @@ class _OwnedPostgresConnection(PostgresConnection, Protocol):
 
 
 @dataclass(slots=True)
-class ResolvedTrajectoryStorage:
-    """A paired storage selection plus shared resolver-owned resources."""
+class ResolvedTrajectoryStore:
+    """A selected trajectory store plus shared resolver-owned resources."""
 
-    storage: TrajectoryStorage
+    store: TrajectoryStore
     _closers: tuple[Callable[[], None], ...] = field(
         default=(),
         repr=False,
@@ -103,30 +100,30 @@ class ResolvedTrajectoryStorage:
             )
 
 
-def resolve_trajectory_storage(
+def resolve_trajectory_store(
     cwd: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
-) -> ResolvedTrajectoryStorage | None:
-    """Resolve and open one configured turn/node storage pair."""
+) -> ResolvedTrajectoryStore | None:
+    """Resolve and open one configured trajectory store."""
 
     location = _resolve_location(cwd, env=env, create=False)
     if location is None:
         return None
-    return _open_storage(location)
+    return _open_store(location)
 
 
-def resolve_trajectory_storage_or_create(
+def resolve_trajectory_store_or_create(
     cwd: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
-) -> ResolvedTrajectoryStorage:
-    """Resolve a configured backend or create the project-local JSONL pair."""
+) -> ResolvedTrajectoryStore:
+    """Resolve a configured backend or create the project-local JSONL store."""
 
     location = _resolve_location(cwd, env=env, create=True)
     if location is None:
         raise RuntimeError("trajectory location resolution returned no backend")
-    return _open_storage(location)
+    return _open_store(location)
 
 
 def _resolve_location(
@@ -259,45 +256,32 @@ def _unique_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(unique)
 
 
-def _open_storage(
+def _open_store(
     location: _TrajectoryLocation,
-) -> ResolvedTrajectoryStorage:
+) -> ResolvedTrajectoryStore:
     if isinstance(location, _JsonlLocation):
-        directory = location.directory
-        return ResolvedTrajectoryStorage(
-            storage=TrajectoryStorage(
-                turn_store=JsonlTrajectoryStore(directory),
-                node_store=JsonlTrajectoryNodeStore(directory / _NODE_DIRECTORY),
-            )
+        return ResolvedTrajectoryStore(
+            store=JsonlTrajectoryStore(location.directory)
         )
-    return _open_postgres_storage(location)
+    return _open_postgres_store(location)
 
 
-def _open_postgres_storage(
+def _open_postgres_store(
     location: _PostgresLocation,
-) -> ResolvedTrajectoryStorage:
+) -> ResolvedTrajectoryStore:
     connect = _postgres_connect()
     with ExitStack() as cleanup:
-        turn_connection = connect(location.dsn)
-        cleanup.callback(turn_connection.close)
-        node_connection = connect(location.dsn)
-        cleanup.callback(node_connection.close)
-        storage = TrajectoryStorage(
-            turn_store=PostgresTrajectoryStore(
-                turn_connection,
-                schema=location.schema,
-                create_schema=True,
-            ),
-            node_store=PostgresTrajectoryNodeStore(
-                node_connection,
-                schema=location.schema,
-                create_schema=True,
-            ),
+        connection = connect(location.dsn)
+        cleanup.callback(connection.close)
+        store = PostgresTrajectoryStore(
+            connection,
+            schema=location.schema,
+            create_schema=True,
         )
         cleanup.pop_all()
-    return ResolvedTrajectoryStorage(
-        storage=storage,
-        _closers=(turn_connection.close, node_connection.close),
+    return ResolvedTrajectoryStore(
+        store=store,
+        _closers=(connection.close,),
     )
 
 
@@ -319,7 +303,7 @@ def _postgres_connect() -> Callable[[str], _OwnedPostgresConnection]:
 
 
 __all__ = [
-    "ResolvedTrajectoryStorage",
-    "resolve_trajectory_storage",
-    "resolve_trajectory_storage_or_create",
+    "ResolvedTrajectoryStore",
+    "resolve_trajectory_store",
+    "resolve_trajectory_store_or_create",
 ]

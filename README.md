@@ -18,8 +18,8 @@ The SDK is mechanism, not policy. Policy enters through atoms.
 | `TriggerEnvelope` | Queue/routing metadata around a trigger: priority (`now`/`next`/`later`), target identity, origin, mode, and presenter/system flags. |
 | `MessageMeta` | Control-plane metadata for synthetic messages, hidden attachments, no-response prompts, replay policy, token accounting, origin, mode, and target identity. |
 | `Turn` | Durable trajectory unit: trigger, assistant rounds, tool records, structured tool extras, outcome, timing, and usage. |
-| `TrajectoryStore` | Replaceable persistence boundary for session metadata and committed turns. |
-| `TrajectoryNode` / `TrajectoryNodeStore` | Message-level append-only projection for fork, resume, sidechain, compact boundary, snip/rewind, content replacement, and prompt-cache state. |
+| `TrajectoryStore` | The single replaceable persistence boundary for session metadata, incomplete checkpoints, committed turns, message-node indexes, heads, and cache/compaction state. |
+| `TrajectoryNode` | A committed message/index record used for fork, resume, sidechains, compact boundaries, snip/rewind, content replacement, and prompt-cache lookup. |
 | `ContextPolicy` | Replaceable context reconstruction policy. Policies may expose `PersistentContextPolicy` state for compaction and content replacement that must survive resume/fork. |
 | `EventBus` | Immutable event dispatch surface for observation and policy hooks. |
 | `AtomAPI` | The only surface atoms receive at install time. |
@@ -63,14 +63,14 @@ The public path is `AgentSession.create(AgentSessionConfig(...))`.
 from pathlib import Path
 
 from agentm import AgentSession, AgentSessionConfig, LoopConfig, builtin_scenario_loader
-from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
+from agentm.storage.trajectory import JsonlTrajectoryStore
 
 session = await AgentSession.create(AgentSessionConfig(
     cwd=".",
     scenario="minimal",
     scenario_loader=builtin_scenario_loader,
     provider=("agentm.extensions.builtin.llm_openai", {"model": "gpt-4o"}),
-    store=JsonlTrajectoryStore(Path(".agentm/trajectory")),
+    trajectory_store=JsonlTrajectoryStore(Path(".agentm/trajectory")),
     loop_config=LoopConfig(max_turns=8, max_tool_calls=32),
     tool_allowlist=["read", "bash"],
 ))
@@ -96,15 +96,18 @@ install `agentm[provider-openai,packaged-minimal]` when using the example above.
 
 ## Persistence
 
-`TrajectoryStore` owns durable session metadata and committed turns. When a store
-is supplied through the SDK factory, root session metadata is created
-automatically before the session starts. Child and forked sessions register their
-own metadata through the session graph path. `SessionMeta.config` persists the
-minimal resumable context (`root_session_id`, `depth`, `scenario`, and
-`scenario_dir`) so a child or fork can be loaded in a later process without
-losing its lineage.
+`TrajectoryStore` owns durable session metadata, cumulative incomplete
+checkpoints, committed turns, message nodes, explicit heads, and cache/compaction
+state. A committed turn and its node/head indexes share one atomic publication
+boundary. Root metadata is created automatically before the session starts;
+child and forked sessions register their own metadata through the session graph
+path. `SessionMeta.config` persists the minimal resumable context
+(`root_session_id`, `depth`, `scenario`, and `scenario_dir`) so a child or fork
+can be loaded in a later process without losing its lineage.
 
-`AgentSessionConfig(store=None)` is explicitly ephemeral. Host programs that
+`AgentSessionConfig(trajectory_store=None)` lets the SDK host resolver select
+the configured/default backend. Low-level core factories remain explicitly
+ephemeral when no store is supplied. Host programs that
 need resume or trace queries must select one store. Provider requests that fail
 after retries are persisted as non-replayable `ProviderRequestFailed` turns
 before the trigger receipt raises, so failed sessions do not collapse to an
@@ -116,11 +119,10 @@ Built-in stores:
 |---|---|
 | `InMemoryTrajectoryStore` | Tests and ephemeral embedding. |
 | `JsonlTrajectoryStore` | Local append-only persistence, one JSONL file per session. |
-| `PostgresTrajectoryStore` | Durable transactional session/turn persistence. |
+| `PostgresTrajectoryStore` | Durable transactional session, turn, node/head, and policy-state persistence. |
 
-`TrajectoryNodeStore` is a second persistence/query port, not a replacement for
-`TrajectoryStore`. It stores or derives a message tree with stable node ids and
-portable index fields:
+The same `TrajectoryStore` exposes committed message-tree queries with stable
+node ids and portable index fields:
 
 | Field group | Fields | Purpose |
 |---|---|---|
@@ -130,10 +132,10 @@ portable index fields:
 | Turn join | `turn_id`, `turn_index`, `round_index`, `message_index` | Join message nodes back to committed turns and tool records. |
 | Shape | `kind`, `role`, `timestamp` | Filter message, compact boundary, content replacement, snip, checkpoint, and user/assistant/tool-result nodes. |
 
-SQL stores implement these as normal indexed columns. JSONL stores may satisfy
-the same Protocol by scanning or maintaining a sidecar index. ClickHouse is an
-optional OTLP observability backend, not a trajectory store. The SDK relies on
-the Protocol semantics, not on a JSONL layout.
+SQL stores implement these as normal indexed columns. JSONL stores replay the
+same per-session journal; they do not maintain a separately recoverable sidecar
+truth. ClickHouse is an optional OTLP observability backend, not a trajectory
+store. The SDK relies on the Protocol semantics, not on a JSONL layout.
 
 ## Verification
 

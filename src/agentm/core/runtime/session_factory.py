@@ -58,6 +58,7 @@ from agentm.core.abi.roles import (
     SCENARIO_LOADER_SERVICE,
     SESSION_SPEC_RESOLVER_SERVICE,
     TRAJECTORY_QUERY_STORE_SERVICE,
+    TRAJECTORY_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_SERVICE,
 )
 from agentm.core.abi.services import ServiceRegistry
@@ -70,11 +71,16 @@ from agentm.core.abi.session_api import (
     SessionContext,
     normalize_extension_spec,
 )
-from agentm.core.abi.store import SessionMeta, TrajectoryNodeStore, TrajectoryStore
+from agentm.core.abi.store import SessionMeta, TrajectoryStore
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
-from agentm.core.abi.trajectory import Turn
-from agentm.core.abi.trajectory import TurnRef
+from agentm.core.abi.trajectory import (
+    DEFAULT_TRAJECTORY_BRANCH_ID,
+    DEFAULT_TRAJECTORY_HEAD_ID,
+    TrajectoryHead,
+    Turn,
+    TurnRef,
+)
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import TriggerRenderer
 from agentm.core.runtime.catalog import (
@@ -92,6 +98,7 @@ from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_meta import session_meta_config
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.lib.trajectory_nodes import turns_to_nodes
 
 if TYPE_CHECKING:
     from agentm.core.abi.session_api import AgentSessionConfig
@@ -280,12 +287,45 @@ async def _ensure_store_session(
     *,
     meta: SessionMeta,
     initial_turns: Sequence[Turn],
+    initial_head: TrajectoryHead | None,
+    root_session_id: str,
+    parent_session_id: str | None,
+    trigger_renderers: dict[str, TriggerRenderer],
 ) -> None:
     if store is None:
         return
     exists = await asyncio.to_thread(store.session_exists, meta.id)
     if not exists:
-        await asyncio.to_thread(store.create_session_with_turns, meta, initial_turns)
+        nodes = (
+            []
+            if initial_head is not None
+            else turns_to_nodes(
+                initial_turns,
+                session_id=meta.id,
+                root_session_id=root_session_id,
+                parent_session_id=parent_session_id,
+                renderers=trigger_renderers,
+            )
+        )
+        last = nodes[-1] if nodes else None
+        head = initial_head or TrajectoryHead(
+            session_id=meta.id,
+            head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+            branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+            node_id=last.id if last is not None else None,
+            seq=last.seq if last is not None else None,
+            root_session_id=root_session_id,
+            parent_session_id=parent_session_id,
+            status="active",
+            updated_at=time.time(),
+        )
+        await asyncio.to_thread(
+            store.create_session,
+            meta,
+            turns=initial_turns,
+            nodes=nodes,
+            head=head,
+        )
 
 
 def _register_default_catalog_services(services: ServiceRegistry) -> None:
@@ -450,6 +490,7 @@ class SessionBuildConfig:
     parent_session_id: str | None = None
     bus: EventBus | None = None
     initial_turns: list[Turn] | None = None
+    initial_head: TrajectoryHead | None = None
     fork_point: TurnRef | None = None
     tools: list[Tool] | None = None
     context_policies: list[ContextPolicy] | None = None
@@ -466,7 +507,6 @@ class SessionBuildConfig:
     tool_executor: ToolExecutor | None = None
     tool_orchestrator: ToolOrchestrator | None = None
     permission_policy: PermissionPolicy | None = None
-    trajectory_node_store: TrajectoryNodeStore | None = None
     effect_scope: EffectScope | None = None
     environment_operations: EnvironmentOperations | None = None
     environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
@@ -517,6 +557,7 @@ async def create_session(
     parent_session_id = config.parent_session_id
     bus = config.bus
     initial_turns = config.initial_turns
+    initial_head = config.initial_head
     fork_point = config.fork_point
     tools = config.tools
     context_policies = config.context_policies
@@ -533,7 +574,6 @@ async def create_session(
     tool_executor = config.tool_executor
     tool_orchestrator = config.tool_orchestrator
     permission_policy = config.permission_policy
-    trajectory_node_store = config.trajectory_node_store
     effect_scope = config.effect_scope
     environment_operations = config.environment_operations
     environment_restore_failure_handler = config.environment_restore_failure_handler
@@ -612,7 +652,6 @@ async def create_session(
             permission_policy=permission_policy,
             resource_reader=resource_reader,
             resource_store=resource_store,
-            trajectory_node_store=trajectory_node_store,
             versioned_resource_store=versioned_resource_store,
             environment_restore_failure_handler=environment_restore_failure_handler,
             provider_identity=provider_identity,
@@ -662,6 +701,10 @@ async def create_session(
                 ),
             ),
             initial_turns=initial_turns or (),
+            initial_head=initial_head,
+            root_session_id=ctx.root_session_id,
+            parent_session_id=ctx.parent_session_id,
+            trigger_renderers=session.trigger_renderers,
         )
     except BaseException as creation_error:
         await _cleanup_failed_session(session, creation_error)
@@ -720,7 +763,7 @@ async def create_from_config(
             ResolvedSessionSpec,
             scope="session",
         )
-    trajectory_storage = config.trajectory_storage
+    trajectory_store = config.trajectory_store
     session = await create_session(
         SessionBuildConfig(
             scenario=(
@@ -754,11 +797,6 @@ async def create_from_config(
             tool_executor=config.tool_executor,
             tool_orchestrator=config.tool_orchestrator,
             permission_policy=config.permission_policy,
-            trajectory_node_store=(
-                trajectory_storage.node_store
-                if trajectory_storage is not None
-                else None
-            ),
             effect_scope=config.effect_scope,
             environment_restore_failure_handler=(
                 config.environment_restore_failure_handler
@@ -771,11 +809,7 @@ async def create_from_config(
             scenario_loader=config.scenario_loader,
             cwd=config.cwd,
             purpose=config.purpose,
-            store=(
-                trajectory_storage.turn_store
-                if trajectory_storage is not None
-                else None
-            ),
+            store=trajectory_store,
             session_context=restored_context,
             session_id=config.session_id,
             root_session_id=config.root_session_id,
@@ -899,19 +933,10 @@ async def create_child_session(
         scenario_dir = parent.ctx.scenario_dir
 
     child_id = config.session_id or uuid.uuid4().hex[:16]
-    trajectory_storage = config.trajectory_storage
-    child_store = (
-        trajectory_storage.turn_store
-        if trajectory_storage is not None
-        else parent.store
-    )
-    child_node_store = (
-        trajectory_storage.node_store
-        if trajectory_storage is not None
-        else parent.get_trajectory_node_store()
-    )
+    child_store = config.trajectory_store or parent.store
     if child_store is not parent.store:
         child_services.unregister(TRAJECTORY_QUERY_STORE_SERVICE)
+        child_services.unregister(TRAJECTORY_STORE_SERVICE)
         _register_default_query_store(child_services, child_store)
     child_ctx = parent.ctx.child(
         session_id=child_id,
@@ -963,7 +988,6 @@ async def create_child_session(
             provider_identity=(
                 resolved_spec.provider_identity if resolved_spec is not None else None
             ),
-            trajectory_node_store=child_node_store,
             services=child_services,
             cwd=config.cwd or parent.ctx.cwd,
             purpose=config.purpose,
@@ -1027,6 +1051,10 @@ async def create_child_session(
                 ),
             ),
             initial_turns=config.initial_turns,
+            initial_head=None,
+            root_session_id=child_ctx.root_session_id,
+            parent_session_id=child_ctx.parent_session_id,
+            trigger_renderers=child.trigger_renderers,
         )
     except BaseException as creation_error:
         await _cleanup_failed_session(child, creation_error)

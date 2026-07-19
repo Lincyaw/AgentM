@@ -1,14 +1,20 @@
-"""Postgres implementation of ``TrajectoryNodeStore``."""
+"""Postgres implementation of the unified trajectory store."""
 
 from __future__ import annotations
 
 import json
 import re
-import time
-from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, runtime_checkable
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from typing import Protocol, runtime_checkable
 
-from agentm.core.abi.store import TrajectoryNodeQuery
+from agentm.core.abi.codec import CodecRegistry
+from agentm.core.abi.store import (
+    SessionMeta,
+    TrajectoryCommit,
+    TrajectoryNodeQuery,
+)
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_HEAD_ID,
     ContentReplacementState,
@@ -22,18 +28,25 @@ from agentm.core.abi.trajectory import (
     TrajectoryIndexSpec,
     TrajectoryLeaf,
     TrajectoryNode,
-    TrajectoryProjectionStatus,
+    Turn,
+    TurnCheckpoint,
+    TurnRef,
+)
+from agentm.core.lib.trajectory_store import (
+    turn_prefix_cut,
+    validate_checkpoint_commit,
+    validate_turn_append,
+    validate_turn_checkpoint,
+    validate_turn_sequence,
 )
 from agentm.storage.serialization import (
     deserialize_content_state,
     deserialize_head,
     deserialize_node,
-    deserialize_projection_status,
     deserialize_prompt_cache_state,
     serialize_content_state,
     serialize_head,
     serialize_node,
-    serialize_projection_status,
     serialize_prompt_cache_state,
 )
 
@@ -62,8 +75,8 @@ class PostgresConnection(Protocol):
     def rollback(self) -> None: ...
 
 
-class PostgresTrajectoryNodeStore:
-    """Postgres-backed trajectory node/head store.
+class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
+    """Postgres-backed trajectory and message-index store.
 
     The tables use denormalized columns for the portable index contract and a
     JSONB payload for lossless ABI reconstruction. This adapter assumes a
@@ -76,17 +89,24 @@ class PostgresTrajectoryNodeStore:
         connection: PostgresConnection,
         *,
         schema: str = "public",
+        codec: CodecRegistry | None = None,
         create_schema: bool = True,
     ) -> None:
         if not isinstance(connection, PostgresConnection):
             raise TypeError(
-                "PostgresTrajectoryNodeStore requires a transaction-capable "
+                "PostgresTrajectoryStore requires a transaction-capable "
                 "PostgresConnection"
             )
         self._connection = connection
         self._schema = _validate_identifier(schema, label="Postgres schema")
+        self._codec = codec if codec is not None else CodecRegistry()
+        self._lock = threading.RLock()
         if create_schema:
             self.create_schema()
+
+    @property
+    def codec(self) -> CodecRegistry:
+        return self._codec
 
     @property
     def indexes(self) -> tuple[TrajectoryIndexSpec, ...]:
@@ -97,7 +117,45 @@ class PostgresTrajectoryNodeStore:
         return TRAJECTORY_HEAD_INDEXES
 
     def create_schema(self) -> None:
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self._table("trajectory_sessions")} (
+                    id text PRIMARY KEY,
+                    parent_id text,
+                    purpose text NOT NULL DEFAULT 'root',
+                    cwd text NOT NULL DEFAULT '',
+                    created_at double precision NOT NULL DEFAULT 0,
+                    meta_json jsonb NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self._table("trajectory_turns")} (
+                    session_id text NOT NULL
+                        REFERENCES {self._table("trajectory_sessions")}(id),
+                    turn_index integer NOT NULL,
+                    turn_id text NOT NULL,
+                    turn_json jsonb NOT NULL,
+                    PRIMARY KEY (session_id, turn_index),
+                    UNIQUE (session_id, turn_id)
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self._table("trajectory_checkpoints")} (
+                    session_id text PRIMARY KEY
+                        REFERENCES {self._table("trajectory_sessions")}(id),
+                    turn_index integer NOT NULL,
+                    turn_id text NOT NULL,
+                    updated_at double precision NOT NULL,
+                    checkpoint_json jsonb NOT NULL,
+                    UNIQUE (session_id, turn_id)
+                )
+                """
+            )
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self._table("trajectory_nodes")} (
@@ -151,14 +209,6 @@ class PostgresTrajectoryNodeStore:
             )
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {self._table("trajectory_projection_status")} (
-                    session_id text PRIMARY KEY,
-                    status_json jsonb NOT NULL
-                )
-                """
-            )
-            cur.execute(
-                f"""
                 CREATE TABLE IF NOT EXISTS {self._table("trajectory_content_states")} (
                     session_id text NOT NULL,
                     state_key text NOT NULL,
@@ -177,33 +227,268 @@ class PostgresTrajectoryNodeStore:
                 )
                 """
             )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {self._index("turns_session_idx")}
+                ON {self._table("trajectory_turns")} (session_id, turn_index)
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    {self._index("turns_session_turn_id_idx")}
+                ON {self._table("trajectory_turns")} (session_id, turn_id)
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {self._index("sessions_parent_idx")}
+                ON {self._table("trajectory_sessions")} (parent_id)
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {self._index("sessions_created_idx")}
+                ON {self._table("trajectory_sessions")} (created_at)
+                """
+            )
             for statement in _index_statements(self._schema):
                 cur.execute(statement)
-        _commit(self._connection)
 
-    def append_nodes(
+    def create_session(
+        self,
+        meta: SessionMeta,
+        *,
+        turns: Sequence[Turn] = (),
+        nodes: Sequence[TrajectoryNode] = (),
+        head: TrajectoryHead,
+    ) -> None:
+        copied_turns = tuple(turns)
+        copied_nodes = tuple(nodes)
+        validate_turn_sequence(copied_turns)
+        if head.session_id != meta.id:
+            raise ValueError("initial trajectory head must belong to the session")
+        turn_ids = {turn.id for turn in copied_turns}
+        if any(
+            node.session_id != meta.id or node.turn_id not in turn_ids
+            for node in copied_nodes
+        ):
+            raise ValueError(
+                "initial trajectory nodes must belong to the session's "
+                "initial committed turns"
+            )
+        if copied_nodes and head.node_id != copied_nodes[-1].id:
+            raise ValueError(
+                "initial trajectory head must point to the final initial node"
+            )
+        meta_json = _json_dumps(self._codec.serialize_session_meta(meta))
+        with self._transaction() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("trajectory_sessions")}
+                    (id, parent_id, purpose, cwd, created_at, meta_json)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    meta.id,
+                    meta.parent_id,
+                    meta.purpose,
+                    meta.cwd,
+                    meta.created_at,
+                    meta_json,
+                ),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(f"session already exists: {meta.id}")
+            for turn in copied_turns:
+                self._insert_turn(cur, meta.id, turn)
+            for node in copied_nodes:
+                self._insert_node(cur, node)
+            self._upsert_head(cur, head)
+
+    def save_checkpoint(
         self,
         session_id: str,
-        nodes: Sequence[TrajectoryNode],
-        *,
-        advance_head: TrajectoryHeadAdvance | None = None,
+        checkpoint: TurnCheckpoint,
     ) -> None:
-        if not nodes:
-            if advance_head is not None:
-                raise ValueError("cannot advance a trajectory head without nodes")
-            return
-        with _cursor(self._connection) as cur:
-            if advance_head is not None:
-                self._validate_head_advance(cur, session_id, advance_head, nodes)
-            for node in nodes:
-                self._insert_node(cur, node)
-            if advance_head is not None:
-                self._upsert_head(cur, advance_head.to_head())
-            self._upsert_projection_status(
-                cur,
-                self._projection_status_from_rows(cur, session_id),
+        checkpoint_json = _json_dumps(self._codec.serialize_turn_checkpoint(checkpoint))
+        with self._transaction() as cur:
+            committed = self._lock_session_turns(cur, session_id)
+            existing = self._select_checkpoint(cur, session_id)
+            validate_turn_checkpoint(
+                committed,
+                checkpoint,
+                existing=existing,
             )
-        _commit(self._connection)
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("trajectory_checkpoints")}
+                    (
+                        session_id,
+                        turn_index,
+                        turn_id,
+                        updated_at,
+                        checkpoint_json
+                    )
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (session_id)
+                DO UPDATE SET
+                    turn_index = EXCLUDED.turn_index,
+                    turn_id = EXCLUDED.turn_id,
+                    updated_at = EXCLUDED.updated_at,
+                    checkpoint_json = EXCLUDED.checkpoint_json
+                """,
+                (
+                    session_id,
+                    checkpoint.index,
+                    checkpoint.id,
+                    checkpoint.updated_at,
+                    checkpoint_json,
+                ),
+            )
+
+    def load_checkpoint(self, session_id: str) -> TurnCheckpoint | None:
+        with self._transaction() as cur:
+            cur.execute(
+                f"""
+                SELECT c.checkpoint_json
+                FROM {self._table("trajectory_sessions")} AS s
+                LEFT JOIN {self._table("trajectory_checkpoints")} AS c
+                    ON c.session_id = s.id
+                WHERE s.id = %s
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            if row[0] is None:
+                return None
+            return self._codec.deserialize_turn_checkpoint(  # type: ignore[arg-type]
+                dict(_json_mapping(row[0]))
+            )
+
+    def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
+        if any(node.session_id != session_id for node in commit.nodes):
+            raise ValueError("trajectory commit nodes must belong to the session")
+        with self._transaction() as cur:
+            committed = self._lock_session_turns(cur, session_id)
+            validate_turn_append(committed, commit.turn)
+            validate_checkpoint_commit(
+                self._select_checkpoint(cur, session_id),
+                commit.turn,
+            )
+            if commit.advance_head is not None:
+                self._validate_head_advance(
+                    cur,
+                    session_id,
+                    commit.advance_head,
+                    commit.nodes,
+                )
+            self._insert_turn(cur, session_id, commit.turn)
+            for node in commit.nodes:
+                self._insert_node(cur, node)
+            if commit.advance_head is not None:
+                self._upsert_head(cur, commit.advance_head.to_head())
+            cur.execute(
+                f"""
+                DELETE FROM {self._table("trajectory_checkpoints")}
+                WHERE session_id = %s
+                """,
+                (session_id,),
+            )
+
+    def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
+        with self._transaction() as cur:
+            cur.execute(
+                f"""
+                SELECT meta_json
+                FROM {self._table("trajectory_sessions")}
+                WHERE id = %s
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            meta = self._codec.deserialize_session_meta(  # type: ignore[arg-type]
+                dict(_json_mapping(row[0]))
+            )
+            if not isinstance(meta, SessionMeta):
+                raise TypeError(
+                    "trajectory session metadata codec returned invalid data"
+                )
+            cur.execute(
+                f"""
+                SELECT turn_json
+                FROM {self._table("trajectory_turns")}
+                WHERE session_id = %s
+                ORDER BY turn_index
+                """,
+                (session_id,),
+            )
+            turns = [
+                self._codec.deserialize_turn(  # type: ignore[arg-type]
+                    dict(_json_mapping(record[0]))
+                )
+                for record in cur.fetchall()
+            ]
+        return meta, turns
+
+    def load_prefix(
+        self,
+        session_id: str,
+        up_to: TurnRef,
+    ) -> tuple[SessionMeta, list[Turn]]:
+        meta, turns = self.load(session_id)
+        cut = turn_prefix_cut(turns, up_to)
+        return meta, turns[: cut + 1]
+
+    def session_children(self, session_id: str) -> list[str]:
+        with self._transaction() as cur:
+            cur.execute(
+                f"""
+                SELECT id
+                FROM {self._table("trajectory_sessions")}
+                WHERE parent_id = %s
+                ORDER BY created_at
+                """,
+                (session_id,),
+            )
+            return [_required_str(record[0], column="id") for record in cur.fetchall()]
+
+    def session_exists(self, session_id: str) -> bool:
+        with self._transaction() as cur:
+            cur.execute(
+                f"""
+                SELECT 1
+                FROM {self._table("trajectory_sessions")}
+                WHERE id = %s
+                """,
+                (session_id,),
+            )
+            return cur.fetchone() is not None
+
+    def list_sessions(self) -> list[SessionMeta]:
+        with self._transaction() as cur:
+            cur.execute(
+                f"""
+                SELECT meta_json
+                FROM {self._table("trajectory_sessions")}
+                ORDER BY created_at
+                """
+            )
+            metas = [
+                self._codec.deserialize_session_meta(  # type: ignore[arg-type]
+                    dict(_json_mapping(record[0]))
+                )
+                for record in cur.fetchall()
+            ]
+        if not all(isinstance(meta, SessionMeta) for meta in metas):
+            raise TypeError("trajectory session metadata codec returned invalid data")
+        return metas
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         where, params = _node_query_where(query)
@@ -214,7 +499,7 @@ class PostgresTrajectoryNodeStore:
                 raise ValueError("trajectory node query limit cannot be negative")
             limit = "LIMIT %s"
             params.append(query.limit)
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 SELECT node_json FROM {self._table("trajectory_nodes")}
@@ -236,7 +521,7 @@ class PostgresTrajectoryNodeStore:
         agent_id: str | None = None,
         is_sidechain: bool | None = None,
     ) -> TrajectoryHead | None:
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 SELECT head_json FROM {self._table("trajectory_heads")}
@@ -265,7 +550,7 @@ class PostgresTrajectoryNodeStore:
         is_sidechain: bool | None = None,
         include_inactive: bool = False,
     ) -> list[TrajectoryHead]:
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 SELECT head_json FROM {self._table("trajectory_heads")}
@@ -300,11 +585,9 @@ class PostgresTrajectoryNodeStore:
         )
         session_clause = "" if include_logical_parent else "AND node.session_id = %s"
         params: tuple[object, ...] = (
-            (leaf_node_id,)
-            if include_logical_parent
-            else (leaf_node_id, session_id)
+            (leaf_node_id,) if include_logical_parent else (leaf_node_id, session_id)
         )
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 WITH RECURSIVE chain AS (
@@ -335,7 +618,10 @@ class PostgresTrajectoryNodeStore:
         agent_id: str | None = None,
         is_sidechain: bool | None = None,
     ) -> list[TrajectoryLeaf]:
-        clauses = ["node.session_id = %s", "node.kind IN ('message', 'compact_boundary')"]
+        clauses = [
+            "node.session_id = %s",
+            "node.kind IN ('message', 'compact_boundary')",
+        ]
         params: list[object] = [session_id]
         if agent_id is not None:
             clauses.append("node.agent_id = %s")
@@ -365,7 +651,7 @@ class PostgresTrajectoryNodeStore:
                 """,
             )
         )
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 SELECT session_id, id, seq, branch_id, head_id, agent_id,
@@ -393,58 +679,12 @@ class PostgresTrajectoryNodeStore:
             for row in rows
         ]
 
-    def replace_session_projection(
-        self,
-        session_id: str,
-        nodes: Sequence[TrajectoryNode],
-        *,
-        heads: Sequence[TrajectoryHead] = (),
-        status: TrajectoryProjectionStatus | None = None,
-    ) -> None:
-        with _cursor(self._connection) as cur:
-            cur.execute(
-                f"DELETE FROM {self._table('trajectory_nodes')} WHERE session_id = %s",
-                (session_id,),
-            )
-            cur.execute(
-                f"DELETE FROM {self._table('trajectory_heads')} WHERE session_id = %s",
-                (session_id,),
-            )
-            cur.execute(
-                f"DELETE FROM {self._table('trajectory_projection_status')} WHERE session_id = %s",
-                (session_id,),
-            )
-            for node in nodes:
-                self._insert_node(cur, node)
-            for head in heads:
-                self._upsert_head(cur, head)
-            self._upsert_projection_status(
-                cur,
-                status if status is not None else _projection_status(session_id, nodes),
-            )
-        _commit(self._connection)
-
-    def projection_status(
-        self,
-        session_id: str,
-    ) -> TrajectoryProjectionStatus | None:
-        with _cursor(self._connection) as cur:
-            cur.execute(
-                f"""
-                SELECT status_json FROM {self._table("trajectory_projection_status")}
-                WHERE session_id = %s
-                """,
-                (session_id,),
-            )
-            row = cur.fetchone()
-        return None if row is None else deserialize_projection_status(_json_mapping(row[0]))
-
     def save_content_replacement_state(
         self,
         session_id: str,
         state: ContentReplacementState,
     ) -> None:
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 INSERT INTO {self._table("trajectory_content_states")}
@@ -453,16 +693,19 @@ class PostgresTrajectoryNodeStore:
                 ON CONFLICT (session_id, state_key)
                 DO UPDATE SET state_json = EXCLUDED.state_json
                 """,
-                (session_id, state.state_key, _json_dumps(serialize_content_state(state))),
+                (
+                    session_id,
+                    state.state_key,
+                    _json_dumps(serialize_content_state(state)),
+                ),
             )
-        _commit(self._connection)
 
     def load_content_replacement_state(
         self,
         session_id: str,
         state_key: str,
     ) -> ContentReplacementState | None:
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 SELECT state_json FROM {self._table("trajectory_content_states")}
@@ -500,7 +743,7 @@ class PostgresTrajectoryNodeStore:
         session_id: str,
         state: PromptCacheState,
     ) -> None:
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 INSERT INTO {self._table("trajectory_prompt_cache_states")}
@@ -509,16 +752,19 @@ class PostgresTrajectoryNodeStore:
                 ON CONFLICT (session_id, cache_key)
                 DO UPDATE SET state_json = EXCLUDED.state_json
                 """,
-                (session_id, state.cache_key, _json_dumps(serialize_prompt_cache_state(state))),
+                (
+                    session_id,
+                    state.cache_key,
+                    _json_dumps(serialize_prompt_cache_state(state)),
+                ),
             )
-        _commit(self._connection)
 
     def load_prompt_cache_state(
         self,
         session_id: str,
         cache_key: str,
     ) -> PromptCacheState | None:
-        with _cursor(self._connection) as cur:
+        with self._transaction() as cur:
             cur.execute(
                 f"""
                 SELECT state_json FROM {self._table("trajectory_prompt_cache_states")}
@@ -527,7 +773,11 @@ class PostgresTrajectoryNodeStore:
                 (session_id, cache_key),
             )
             row = cur.fetchone()
-        return None if row is None else deserialize_prompt_cache_state(_json_mapping(row[0]))
+        return (
+            None
+            if row is None
+            else deserialize_prompt_cache_state(_json_mapping(row[0]))
+        )
 
     def _insert_node(self, cur: PostgresCursor, node: TrajectoryNode) -> None:
         data = serialize_node(node)
@@ -614,20 +864,72 @@ class PostgresTrajectoryNodeStore:
             ),
         )
 
-    def _upsert_projection_status(
+    def _insert_turn(
         self,
         cur: PostgresCursor,
-        status: TrajectoryProjectionStatus,
+        session_id: str,
+        turn: Turn,
     ) -> None:
+        turn_json = _json_dumps(self._codec.serialize_turn(turn))
         cur.execute(
             f"""
-            INSERT INTO {self._table("trajectory_projection_status")}
-                (session_id, status_json)
-            VALUES (%s, %s::jsonb)
-            ON CONFLICT (session_id)
-            DO UPDATE SET status_json = EXCLUDED.status_json
+            INSERT INTO {self._table("trajectory_turns")}
+                (session_id, turn_index, turn_id, turn_json)
+            VALUES (%s, %s, %s, %s::jsonb)
             """,
-            (status.session_id, _json_dumps(serialize_projection_status(status))),
+            (session_id, turn.index, turn.id, turn_json),
+        )
+
+    def _lock_session_turns(
+        self,
+        cur: PostgresCursor,
+        session_id: str,
+    ) -> list[Turn]:
+        cur.execute(
+            f"""
+            SELECT 1
+            FROM {self._table("trajectory_sessions")}
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (session_id,),
+        )
+        if cur.fetchone() is None:
+            raise KeyError(session_id)
+        cur.execute(
+            f"""
+            SELECT turn_json
+            FROM {self._table("trajectory_turns")}
+            WHERE session_id = %s
+            ORDER BY turn_index
+            """,
+            (session_id,),
+        )
+        return [
+            self._codec.deserialize_turn(  # type: ignore[arg-type]
+                dict(_json_mapping(record[0]))
+            )
+            for record in cur.fetchall()
+        ]
+
+    def _select_checkpoint(
+        self,
+        cur: PostgresCursor,
+        session_id: str,
+    ) -> TurnCheckpoint | None:
+        cur.execute(
+            f"""
+            SELECT checkpoint_json
+            FROM {self._table("trajectory_checkpoints")}
+            WHERE session_id = %s
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._codec.deserialize_turn_checkpoint(  # type: ignore[arg-type]
+            dict(_json_mapping(row[0]))
         )
 
     def _validate_head_advance(
@@ -671,51 +973,18 @@ class PostgresTrajectoryNodeStore:
                 f"{current!r} != {advance.previous_node_id!r}"
             )
 
-    def _projection_status_from_rows(
-        self,
-        cur: PostgresCursor,
-        session_id: str,
-    ) -> TrajectoryProjectionStatus:
-        cur.execute(
-            f"""
-            SELECT node_json FROM {self._table("trajectory_nodes")}
-            WHERE session_id = %s
-            ORDER BY seq DESC
-            LIMIT 1
-            """,
-            (session_id,),
-        )
-        last_row = cur.fetchone()
-        cur.execute(
-            f"""
-            SELECT count(*) FROM {self._table("trajectory_nodes")}
-            WHERE session_id = %s
-            """,
-            (session_id,),
-        )
-        count_row = cur.fetchone()
-        last = (
-            deserialize_node(_json_mapping(last_row[0]))
-            if last_row is not None
-            else None
-        )
-        return TrajectoryProjectionStatus(
-            session_id=session_id,
-            state="current",
-            high_water_turn_id=last.turn_id if last is not None else None,
-            high_water_turn_index=(
-                last.turn_index if last is not None else None
-            ),
-            node_count=(
-                _required_int(count_row[0], column="count")
-                if count_row is not None
-                else 0
-            ),
-            updated_at=time.time(),
-        )
+    @contextmanager
+    def _transaction(self) -> Iterator[PostgresCursor]:
+        with self._lock:
+            with _cursor(self._connection) as cur:
+                yield cur
+            _commit(self._connection)
 
     def _table(self, table: str) -> str:
         return f'"{self._schema}"."agentm_{table}"'
+
+    def _index(self, name: str) -> str:
+        return f"agentm_trajectory_{name}"
 
 
 class _cursor:
@@ -738,21 +1007,6 @@ class _cursor:
             self._cursor.close()
         if exc_type is not None:
             _rollback(self._connection)
-
-
-def _projection_status(
-    session_id: str,
-    nodes: Sequence[TrajectoryNode],
-) -> TrajectoryProjectionStatus:
-    last = nodes[-1] if nodes else None
-    return TrajectoryProjectionStatus(
-        session_id=session_id,
-        state="current",
-        high_water_turn_id=last.turn_id if last is not None else None,
-        high_water_turn_index=last.turn_index if last is not None else None,
-        node_count=len(nodes),
-        updated_at=time.time(),
-    )
 
 
 def _index_statements(schema: str) -> tuple[str, ...]:
@@ -841,13 +1095,17 @@ def _validate_identifier(value: str, *, label: str) -> str:
     return value
 
 
-def _json_mapping(value: object) -> Mapping[str, Any]:
+def _json_mapping(value: object) -> Mapping[str, object]:
     if isinstance(value, Mapping):
-        return value
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("Postgres JSON object keys must be strings")
+        return {str(key): item for key, item in value.items()}
     if isinstance(value, str):
-        parsed = json.loads(value)
+        parsed: object = json.loads(value)
         if isinstance(parsed, Mapping):
-            return parsed
+            if not all(isinstance(key, str) for key in parsed):
+                raise ValueError("Postgres JSON object keys must be strings")
+            return {str(key): item for key, item in parsed.items()}
     raise ValueError("Postgres JSON column must contain an object")
 
 
@@ -894,5 +1152,5 @@ def _rollback(connection: PostgresConnection) -> None:
 __all__ = [
     "PostgresConnection",
     "PostgresCursor",
-    "PostgresTrajectoryNodeStore",
+    "PostgresTrajectoryStore",
 ]

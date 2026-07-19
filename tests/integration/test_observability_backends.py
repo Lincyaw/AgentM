@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from agentm import AgentSession, AgentSessionConfig, Model, TrajectoryStorage
+from agentm import AgentSession, AgentSessionConfig, Model
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -22,13 +22,12 @@ from agentm.core.abi.query import EventRecord, SpanRecord
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trigger import UserInput
-from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.storage.query import (
     ClickHouseObservabilityQueryStore,
     CompositeTraceQueryStore,
 )
-from agentm.storage.trajectory import JsonlTrajectoryNodeStore
+from agentm.storage.trajectory import JsonlTrajectoryStore
 
 _OBSERVABILITY = "agentm.extensions.builtin.observability"
 
@@ -99,10 +98,7 @@ async def test_sdk_composes_one_trajectory_store_with_otlp_clickhouse(
                 context_window=128_000,
                 max_output_tokens=4_096,
             ),
-            trajectory_storage=TrajectoryStorage(
-                turn_store=JsonlTrajectoryStore(store_path),
-                node_store=JsonlTrajectoryNodeStore(tmp_path / "trajectory-nodes"),
-            ),
+            trajectory_store=JsonlTrajectoryStore(store_path),
         )
     )
     try:

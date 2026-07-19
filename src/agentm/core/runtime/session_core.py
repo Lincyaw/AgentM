@@ -96,7 +96,7 @@ from agentm.core.abi.roles import (
     RESOURCE_WRITER_SERVICE,
     TOOL_EXECUTOR_SERVICE,
     TOOL_ORCHESTRATOR_SERVICE,
-    TRAJECTORY_NODE_STORE_SERVICE,
+    TRAJECTORY_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_SERVICE,
 )
 from agentm.core.abi.session_api import (
@@ -105,10 +105,7 @@ from agentm.core.abi.session_api import (
     ResolvedSessionSpec,
     SessionContext,
 )
-from agentm.core.abi.store import (
-    TrajectoryNodeStore,
-    TrajectoryStore,
-)
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import (
     Turn,
 )
@@ -150,7 +147,6 @@ class SessionRuntimeConfig:
     permission_policy: PermissionPolicy | None = None
     resource_reader: ResourceReader | None = None
     resource_store: ResourceStore | None = None
-    trajectory_node_store: TrajectoryNodeStore | None = None
     versioned_resource_store: VersionedResourceStore | None = None
     environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
     provider_identity: ProviderSessionIdentity | None = None
@@ -167,7 +163,6 @@ class _SessionLifecycle:
     register_permission_policy: Callable[..., None]
     register_resource_reader: Callable[..., None]
     register_resource_store: Callable[..., None]
-    register_trajectory_node_store: Callable[..., None]
     register_versioned_resource_store: Callable[..., None]
     _activate_provider: Callable[..., None]
     _freeze_provider_after_commits: Callable[..., None]
@@ -177,7 +172,6 @@ class _SessionLifecycle:
     get_tool_executor: Callable[..., ToolExecutor | None]
     get_tool_orchestrator: Callable[..., ToolOrchestrator | None]
     get_permission_policy: Callable[..., PermissionPolicy | None]
-    get_trajectory_node_store: Callable[..., TrajectoryNodeStore | None]
     _tool_allowlist: Callable[..., tuple[str, ...] | None]
 
     def __init__(self, config: SessionRuntimeConfig | None = None) -> None:
@@ -245,6 +239,22 @@ class _SessionLifecycle:
             store_codec if isinstance(store_codec, CodecRegistry) else CodecRegistry()
         )
         self.services = services or ServiceRegistry()
+        if store is not None:
+            selected_store = self.services.get(
+                TRAJECTORY_STORE_SERVICE,
+                cast(type[TrajectoryStore], TrajectoryStore),
+            )
+            if selected_store is None:
+                self.services.register(
+                    TRAJECTORY_STORE_SERVICE,
+                    store,
+                    cast(type[TrajectoryStore], TrajectoryStore),
+                    scope="tree",
+                )
+            elif selected_store is not store:
+                raise ValueError(
+                    "session services contain a different trajectory store"
+                )
 
         self._stream_fn = runtime.stream_fn
         self._model = runtime.model
@@ -296,11 +306,6 @@ class _SessionLifecycle:
             self.register_resource_reader(runtime.resource_reader, replace=True)
         if runtime.resource_store is not None:
             self.register_resource_store(runtime.resource_store, replace=True)
-        if runtime.trajectory_node_store is not None:
-            self.register_trajectory_node_store(
-                runtime.trajectory_node_store,
-                replace=True,
-            )
         if runtime.versioned_resource_store is not None:
             self.register_versioned_resource_store(
                 runtime.versioned_resource_store,
@@ -419,7 +424,6 @@ class _SessionLifecycle:
                     tool_executor=self.get_tool_executor(),
                     tool_orchestrator=self.get_tool_orchestrator(),
                     permission_policy=self.get_permission_policy(),
-                    trajectory_node_store=self.get_trajectory_node_store(),
                     max_turns=self._max_turns,
                     max_tool_calls=self._max_tool_calls,
                     tool_allowlist=self._tool_allowlist(),
@@ -1164,33 +1168,6 @@ class _SessionRuntimeServices(_SessionResourceServices):
         return self.services.get(
             PERMISSION_POLICY_SERVICE,
             cast(type[PermissionPolicy], PermissionPolicy),
-        )
-
-    def register_trajectory_node_store(
-        self,
-        store: TrajectoryNodeStore,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = TRAJECTORY_NODE_STORE_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("trajectory_node_store already registered")
-        self.services.register(
-            service_name,
-            store,
-            cast(type[TrajectoryNodeStore], TrajectoryNodeStore),
-            scope="tree",
-        )
-        self._emit_register_event(
-            "trajectory_node_store",
-            service_name,
-            {"service": store},
-        )
-
-    def get_trajectory_node_store(self) -> TrajectoryNodeStore | None:
-        return self.services.get(
-            TRAJECTORY_NODE_STORE_SERVICE,
-            cast(type[TrajectoryNodeStore], TrajectoryNodeStore),
         )
 
     def register_versioned_resource_store(

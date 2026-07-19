@@ -6,9 +6,9 @@ requirements:
       terminal queues, publish receipts only after durable trajectory and effect
       commits, and wait for synchronous store commits to reach a known outcome
       despite task cancellation. Effect snapshots must exclude SDK control-plane
-      persistence, unpublished world/resource rollback must be serialized, and
-      rebuildable node projection failures must not prevent effect commit after the
-      authoritative turn append. JSONL stores must recover torn tails without
+      persistence and unpublished world/resource rollback must be serialized.
+      Turn, message-index, and head publication must succeed or roll back as one
+      store mutation before resource/effect commit. JSONL stores must recover torn tails without
       corrupting framing, serialize competing appenders, and isolate codec
       registries. Spawn, fork, resume, and graph rebuild must preserve execution
       restrictions, avoid event-loop-blocking store calls, and reconstruct lineage
@@ -29,12 +29,14 @@ requirements:
       only an unexplained session header. Every materialized execution step
       must replace an explicit incomplete checkpoint in the selected
       trajectory store. Checkpoints remain queryable after a crash but are
-      excluded from resume, context replay, compaction, and node projection;
+      excluded from resume, context replay, compaction, and message-index queries;
       final append atomically supersedes the matching checkpoint.
-      Public SDK users select one trajectory backend containing both the
-      authoritative turn store and rebuildable node projection. A configured
-      DSN/path applies to both ports; core factories do not discover backends,
-      and resolver-owned resources remain alive across sharing descendants.
+      Public SDK users select one authoritative trajectory backend. The same
+      transaction owns checkpoints, committed turns, message indexes, heads,
+      and cache/compaction state; there is no separately selectable or
+      rebuildable node store. A configured DSN/path applies to that one port;
+      core factories do not discover backends, and resolver-owned resources
+      remain alive across sharing descendants.
     priority: P0
     status: tested
     confidence: confirmed
@@ -104,7 +106,6 @@ requirements:
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_meta.py
       - path: src/agentm/core/runtime/stores/query.py
-      - path: src/agentm/core/runtime/stores/jsonl.py
       - path: src/agentm/core/runtime/stores/memory.py
       - path: src/agentm/core/runtime/tool_orchestration.py
       - path: src/agentm/core/runtime/tree.py
@@ -160,7 +161,6 @@ requirements:
       - path: src/agentm/storage/trajectory/__init__.py
       - path: src/agentm/storage/trajectory/jsonl.py
       - path: src/agentm/storage/trajectory/postgres.py
-      - path: src/agentm/storage/trajectory/postgres_turns.py
       - path: src/agentm/storage/trajectory/psycopg.py
       - path: src/agentm/storage/trajectory/resolve.py
       - path: src/agentm_toolbox/__main__.py

@@ -47,7 +47,7 @@ class ProjectionInput:
     """Provider/context projection input with optional node-chain precision.
 
     ``turns`` is the authoritative committed turn prefix. ``nodes`` is an
-    optional message-level chain from ``TrajectoryNodeStore`` for projections
+    optional committed message chain from ``TrajectoryStore`` for projections
     that need exact mid-turn replay, compact-boundary traversal, sidechain
     filtering, prompt-cache identity, or content references.
     """

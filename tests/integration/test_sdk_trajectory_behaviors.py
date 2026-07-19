@@ -18,7 +18,6 @@ from agentm import (
     ExtensionSpec,
     Model,
     ProviderRequestFailed,
-    TrajectoryStorage,
 )
 from agentm.core.abi.cancel import CancelSignal, cancel_reason
 from agentm.core.abi.errors import ExtensionLoadError
@@ -33,14 +32,13 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.provider import ProviderPromptCacheRequest
 from agentm.core.abi.store import (
     TrajectoryNodeQuery,
-    TrajectoryNodeStore,
     TrajectoryStore,
 )
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi.tool_executor import ToolExecutionRequirements
 from agentm.core.abi.trajectory import PromptCacheState
 from agentm.core.abi.trigger import UserInput
-from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.extensions.builtin.llm_openai import (
     OpenAIPromptCacheAdapter,
     OpenAIStreamFn,
@@ -48,11 +46,7 @@ from agentm.extensions.builtin.llm_openai import (
 from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
 from agentm.scenarios import builtin_scenario_loader
 from agentm.storage.resources import LocalResourceStore
-from agentm.storage.trajectory import (
-    JsonlTrajectoryNodeStore,
-    PostgresTrajectoryNodeStore,
-    PostgresTrajectoryStore,
-)
+from agentm.storage.trajectory import JsonlTrajectoryStore, PostgresTrajectoryStore
 from tests.fixtures.custom_trigger import CustomTrigger
 
 _CONTEXT_PROJECTION = "agentm.extensions.builtin.context_projection"
@@ -73,24 +67,14 @@ _WAIT_FOR_CANCEL = object()
 
 @dataclass(frozen=True, slots=True)
 class _TrajectoryBackend:
-    open_turn_store: Callable[[], TrajectoryStore]
-    open_node_store: Callable[[], TrajectoryNodeStore]
+    open_store: Callable[[], TrajectoryStore]
 
-    def open_storage(self) -> TrajectoryStorage:
-        return TrajectoryStorage(
-            turn_store=self.open_turn_store(),
-            node_store=self.open_node_store(),
-        )
+    def connect(self) -> TrajectoryStore:
+        return self.open_store()
 
 
-def _jsonl_storage(
-    turn_root: Path,
-    node_root: Path,
-) -> TrajectoryStorage:
-    return TrajectoryStorage(
-        turn_store=JsonlTrajectoryStore(turn_root),
-        node_store=JsonlTrajectoryNodeStore(node_root),
-    )
+def _jsonl_store(root: Path) -> TrajectoryStore:
+    return JsonlTrajectoryStore(root)
 
 
 class _StubProvider:
@@ -163,11 +147,9 @@ def trajectory_backend(
     tmp_path: Path,
 ) -> Iterator[_TrajectoryBackend]:
     if request.param == "jsonl":
-        turn_root = tmp_path / "turns"
-        node_root = tmp_path / "trajectory-nodes"
+        root = tmp_path / "trajectory"
         yield _TrajectoryBackend(
-            open_turn_store=lambda: JsonlTrajectoryStore(turn_root),
-            open_node_store=lambda: JsonlTrajectoryNodeStore(node_root),
+            open_store=lambda: JsonlTrajectoryStore(root),
         )
         return
 
@@ -187,21 +169,13 @@ def trajectory_backend(
         cursor.execute(f'CREATE SCHEMA "{schema}"')
     admin.commit()
 
-    def open_turn_store() -> TrajectoryStore:
+    def open_store() -> TrajectoryStore:
         connection = connect_postgres(database_url)
         connections.append(connection)
         return PostgresTrajectoryStore(connection, schema=schema)
 
-    def open_node_store() -> TrajectoryNodeStore:
-        connection = connect_postgres(database_url)
-        connections.append(connection)
-        return PostgresTrajectoryNodeStore(connection, schema=schema)
-
     try:
-        yield _TrajectoryBackend(
-            open_turn_store=open_turn_store,
-            open_node_store=open_node_store,
-        )
+        yield _TrajectoryBackend(open_store=open_store)
     finally:
         for connection in connections:
             connection.close()
@@ -221,7 +195,7 @@ def _model() -> Model:
 
 
 @pytest.mark.asyncio
-async def test_sdk_dsn_selects_one_paired_postgres_backend(
+async def test_sdk_dsn_selects_one_postgres_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -256,21 +230,15 @@ async def test_sdk_dsn_selects_one_paired_postgres_backend(
         finally:
             await session.shutdown()
 
-        turn_connection = connect_postgres(database_url)
-        node_connection = connect_postgres(database_url)
+        connection = connect_postgres(database_url)
         try:
-            turn_store = PostgresTrajectoryStore(
-                turn_connection,
+            store = PostgresTrajectoryStore(
+                connection,
                 schema=schema,
                 create_schema=False,
             )
-            node_store = PostgresTrajectoryNodeStore(
-                node_connection,
-                schema=schema,
-                create_schema=False,
-            )
-            metadata, turns = turn_store.load(session_id)
-            nodes = node_store.query_nodes(
+            metadata, turns = store.load(session_id)
+            nodes = store.query_nodes(
                 TrajectoryNodeQuery(session_id=session_id)
             )
 
@@ -281,8 +249,7 @@ async def test_sdk_dsn_selects_one_paired_postgres_backend(
                 [node.message for node in nodes if node.message is not None]
             ) == ["dsn-question", "dsn-answer"]
         finally:
-            turn_connection.close()
-            node_connection.close()
+            connection.close()
     finally:
         with admin.cursor() as cursor:
             cursor.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
@@ -458,7 +425,7 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
             extensions=_trajectory_extensions(cache_key),
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=trajectory_backend.open_storage(),
+            trajectory_store=trajectory_backend.connect(),
         )
     )
     session_id = session.session_id
@@ -473,7 +440,7 @@ async def test_sdk_resume_replays_history_and_durable_cache_state(
     resumed_provider = _StubProvider("answer-three")
     resumed = await AgentSession.resume(
         session_id,
-        trajectory_backend.open_storage(),
+        trajectory_backend.connect(),
         config=AgentSessionConfig(
             extensions=_trajectory_extensions(cache_key),
             stream_fn=resumed_provider,
@@ -515,7 +482,7 @@ async def test_sdk_persists_provider_failure_without_replaying_it(
             ],
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=trajectory_backend.open_storage(),
+            trajectory_store=trajectory_backend.connect(),
         )
     )
     session_id = session.session_id
@@ -525,7 +492,7 @@ async def test_sdk_persists_provider_failure_without_replaying_it(
     finally:
         await session.shutdown()
 
-    _, failed_turns = trajectory_backend.open_turn_store().load(session_id)
+    _, failed_turns = trajectory_backend.connect().load(session_id)
     assert len(failed_turns) == 1
     failure = failed_turns[0].outcome.cause
     assert isinstance(failure, ProviderRequestFailed)
@@ -535,7 +502,7 @@ async def test_sdk_persists_provider_failure_without_replaying_it(
     resumed_provider = _StubProvider("recovered-answer")
     resumed = await AgentSession.resume(
         session_id,
-        trajectory_backend.open_storage(),
+        trajectory_backend.connect(),
         config=AgentSessionConfig(
             extensions=[
                 (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
@@ -562,7 +529,7 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
             extensions=_trajectory_extensions("fork-prefix"),
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=trajectory_backend.open_storage(),
+            trajectory_store=trajectory_backend.connect(),
         )
     )
     forked: AgentSession | None = None
@@ -627,10 +594,7 @@ async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
             ],
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=_jsonl_storage(
-                tmp_path / "environment-fork-turns",
-                tmp_path / "environment-fork-nodes",
-            ),
+            trajectory_store=_jsonl_store(tmp_path / "environment-fork"),
             resource_store=resources,
             resource_writer=resources,
             effect_scope=LocalSnapshotEffectScope(snapshotter=snapshots),
@@ -772,13 +736,16 @@ async def test_sdk_file_toolbox_transactions_share_behavior_and_protect_constitu
 
 
 @pytest.mark.asyncio
-async def test_sdk_interrupt_cancels_one_request_and_session_continues() -> None:
+async def test_sdk_interrupt_cancels_one_request_and_session_continues(
+    tmp_path: Path,
+) -> None:
     provider = _StubProvider(_WAIT_FOR_CANCEL, "continued-answer")
     session = await AgentSession.create(
         AgentSessionConfig(
             extensions=[(_MESSAGE_PATTERNS, {})],
             stream_fn=provider,
             model=_model(),
+            trajectory_store=_jsonl_store(tmp_path / "interrupt"),
         )
     )
     interrupted = asyncio.create_task(session.run("long-running-question"))
@@ -806,7 +773,9 @@ async def test_sdk_interrupt_cancels_one_request_and_session_continues() -> None
 
 
 @pytest.mark.asyncio
-async def test_sdk_background_tool_owns_cancellation_after_detach() -> None:
+async def test_sdk_background_tool_owns_cancellation_after_detach(
+    tmp_path: Path,
+) -> None:
     provider = _StubProvider(
         _tool_call("slow-call", "slow_tool", {}),
         _WAIT_FOR_CANCEL,
@@ -847,6 +816,7 @@ async def test_sdk_background_tool_owns_cancellation_after_detach() -> None:
             ],
             stream_fn=provider,
             model=_model(),
+            trajectory_store=_jsonl_store(tmp_path / "background"),
         )
     )
     interrupted = asyncio.create_task(session.run("detach-the-tool"))
@@ -1035,11 +1005,36 @@ async def test_sdk_background_child_has_an_independent_cancel_domain(
 async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
     trajectory_backend: _TrajectoryBackend,
 ) -> None:
-    storage = trajectory_backend.open_storage()
-    store = storage.turn_store
-    tool_response = _tool_call("blocking-call", "blocking_tool", {})
+    store = trajectory_backend.connect()
+    tool_response = AssistantMessage(
+        role="assistant",
+        content=(
+            ToolCallBlock(
+                type="tool_call",
+                id="fast-call",
+                name="fast_tool",
+                arguments={},
+            ),
+            ToolCallBlock(
+                type="tool_call",
+                id="blocking-call",
+                name="blocking_tool",
+                arguments={},
+            ),
+        ),
+        timestamp=0.0,
+        stop_reason="tool_use",
+    )
     provider = _StubProvider(tool_response)
     tool_started = asyncio.Event()
+    fast_completed = asyncio.Event()
+
+    async def fast_tool(args: dict[str, object]) -> ToolResult:
+        del args
+        fast_completed.set()
+        return ToolResult(
+            content=(TextContent(type="text", text="fast-result"),),
+        )
 
     async def blocking_tool(
         args: dict[str, object],
@@ -1061,13 +1056,25 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
             extensions=[],
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=storage,
+            trajectory_store=store,
             extra_tools=[
+                FunctionTool(
+                    name="fast_tool",
+                    description="Complete immediately.",
+                    parameters={"type": "object", "properties": {}},
+                    fn=fast_tool,
+                    execution_requirements=ToolExecutionRequirements(
+                        concurrency="parallel_safe"
+                    ),
+                ),
                 FunctionTool(
                     name="blocking_tool",
                     description="Wait for cancellation.",
                     parameters={"type": "object", "properties": {}},
                     fn=blocking_tool,
+                    execution_requirements=ToolExecutionRequirements(
+                        concurrency="parallel_safe"
+                    ),
                 )
             ],
         )
@@ -1075,13 +1082,31 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
     run_task = asyncio.create_task(session.run("checkpoint-question"))
     try:
         await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+        await asyncio.wait_for(fast_completed.wait(), timeout=2.0)
 
-        checkpoint = store.load_checkpoint(session.session_id)
+        checkpoint = None
+        for _attempt in range(200):
+            checkpoint = store.load_checkpoint(session.session_id)
+            if (
+                checkpoint is not None
+                and checkpoint.rounds
+                and checkpoint.rounds[0].tool_results
+            ):
+                break
+            await asyncio.sleep(0.01)
         assert checkpoint is not None
         assert checkpoint.index == 0
         assert len(checkpoint.rounds) == 1
         assert checkpoint.rounds[0].response == tool_response
-        assert checkpoint.rounds[0].tool_results == ()
+        assert [
+            record.call.id for record in checkpoint.rounds[0].tool_results
+        ] == ["fast-call"]
+        assert [
+            block.text
+            for record in checkpoint.rounds[0].tool_results
+            for block in record.result.content
+            if isinstance(block, TextContent)
+        ] == ["fast-result"]
         assert store.load(session.session_id)[1] == []
 
         session.interrupt("user_cancel")
@@ -1097,13 +1122,17 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
 
 
 @pytest.mark.asyncio
-async def test_sdk_child_cancellation_domain_is_explicit() -> None:
+async def test_sdk_child_cancellation_domain_is_explicit(
+    tmp_path: Path,
+) -> None:
     inherited_provider = _StubProvider(_WAIT_FOR_CANCEL)
+    store = _jsonl_store(tmp_path / "children")
     parent = await AgentSession.create(
         AgentSessionConfig(
             extensions=[],
             stream_fn=_StubProvider("unused"),
             model=_model(),
+            trajectory_store=store,
         )
     )
     inherited = await parent.spawn(
@@ -1130,6 +1159,7 @@ async def test_sdk_child_cancellation_domain_is_explicit() -> None:
             extensions=[],
             stream_fn=_StubProvider("unused"),
             model=_model(),
+            trajectory_store=store,
         )
     )
     independent = await parent.spawn(
@@ -1189,7 +1219,7 @@ async def test_sdk_compaction_persists_summary_across_resume(
             extensions=extensions,
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=trajectory_backend.open_storage(),
+            trajectory_store=trajectory_backend.connect(),
             resource_store=resources,
             resource_writer=resources,
         )
@@ -1220,7 +1250,7 @@ async def test_sdk_compaction_persists_summary_across_resume(
     resumed_resources = open_resources()
     resumed = await AgentSession.resume(
         session_id,
-        trajectory_backend.open_storage(),
+        trajectory_backend.connect(),
         config=AgentSessionConfig(
             extensions=extensions,
             stream_fn=resumed_provider,
@@ -1276,7 +1306,7 @@ async def test_sdk_fork_inherits_compaction_at_matching_logical_leaf(
             ],
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=trajectory_backend.open_storage(),
+            trajectory_store=trajectory_backend.connect(),
             resource_store=resources,
             resource_writer=resources,
         )
@@ -1335,10 +1365,7 @@ async def test_sdk_interrupt_cancels_compaction_and_session_continues(
             ],
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=_jsonl_storage(
-                tmp_path / "cancel-turns",
-                tmp_path / "cancel-nodes",
-            ),
+            trajectory_store=_jsonl_store(tmp_path / "cancel"),
             resource_store=resources,
             resource_writer=resources,
         )
@@ -1495,10 +1522,7 @@ async def test_sdk_trigger_envelope_is_routed_and_persisted(
             extensions=[],
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=_jsonl_storage(
-                store_path,
-                tmp_path / "trigger-envelope-nodes",
-            ),
+            trajectory_store=_jsonl_store(store_path),
         )
     )
     session.start()
@@ -1549,10 +1573,7 @@ async def test_sdk_resume_rehydrates_atom_defined_trigger(
             extensions=[(_CUSTOM_TRIGGER, {})],
             stream_fn=provider,
             model=_model(),
-            trajectory_storage=_jsonl_storage(
-                store_path,
-                tmp_path / "custom-trigger-nodes",
-            ),
+            trajectory_store=_jsonl_store(store_path),
         )
     )
     session.start()
@@ -1565,10 +1586,7 @@ async def test_sdk_resume_rehydrates_atom_defined_trigger(
     resumed_provider = _StubProvider("resumed-answer")
     resumed = await AgentSession.resume(
         session_id,
-        _jsonl_storage(
-            store_path,
-            tmp_path / "custom-trigger-nodes",
-        ),
+        _jsonl_store(store_path),
         config=AgentSessionConfig(
             extensions=[(_CUSTOM_TRIGGER, {})],
             stream_fn=resumed_provider,

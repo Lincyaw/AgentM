@@ -49,8 +49,8 @@ TOOL_ORCHESTRATOR_SERVICE: Final = "tool_orchestrator"
 PERMISSION_POLICY_SERVICE: Final = "permission_policy"
 """Service key for the host-provided permission decision boundary."""
 
-TRAJECTORY_NODE_STORE_SERVICE: Final = "trajectory_node_store"
-"""Service key for message-level trajectory node persistence/query."""
+TRAJECTORY_STORE_SERVICE: Final = "trajectory_store"
+"""Service key for the selected trajectory persistence/query backend."""
 
 TRAJECTORY_QUERY_STORE_SERVICE: Final = "trajectory_query_store"
 """Service key for session/turn trajectory query."""
@@ -120,7 +120,7 @@ __all__ = [
     "SESSION_SPEC_RESOLVER_SERVICE",
     "TOOL_EXECUTOR_SERVICE",
     "TOOL_ORCHESTRATOR_SERVICE",
-    "TRAJECTORY_NODE_STORE_SERVICE",
+    "TRAJECTORY_STORE_SERVICE",
     "TRAJECTORY_QUERY_STORE_SERVICE",
     "VERSIONED_RESOURCE_STORE_SERVICE",
 ]

@@ -72,10 +72,9 @@ from agentm.core.abi.session_api import (
 )
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.store import (
+    TrajectoryCommit,
     TrajectoryNodeQuery,
     TrajectoryNodeSort,
-    TrajectoryNodeStore,
-    TrajectoryStorage,
     TrajectoryStore,
 )
 from agentm.core.abi.termination import ProviderRequestFailed
@@ -151,11 +150,10 @@ __all__ = [
     "ToolExecutionRequirements",
     "ToolExecutor",
     "TraceQueryStore",
+    "TrajectoryCommit",
     "TrajectoryNodeQuery",
     "TrajectoryNodeSort",
-    "TrajectoryNodeStore",
     "TrajectoryQueryStore",
-    "TrajectoryStorage",
     "TrajectoryStore",
     "Trigger",
     "TriggerMetadata",

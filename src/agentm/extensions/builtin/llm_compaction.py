@@ -25,10 +25,10 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.resource import ResourceRef, ResourceStore
 from agentm.core.abi.roles import (
     RESOURCE_STORE_SERVICE,
-    TRAJECTORY_NODE_STORE_SERVICE,
+    TRAJECTORY_STORE_SERVICE,
 )
 from agentm.core.abi.session_api import AtomAPI
-from agentm.core.abi.store import TrajectoryNodeStore
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.stream import MessageEnd, Model, StreamFn, TextDelta
 from agentm.core.abi.trajectory import ContentReplacementState, Turn
 from agentm.core.abi.trigger import TriggerRenderer
@@ -56,7 +56,7 @@ MANIFEST = ExtensionManifest(
     config_schema=LlmCompactionConfig,
     requires=(
         "service:resource_store",
-        "service:trajectory_node_store",
+        "service:trajectory_store",
     ),
     priority=AtomInstallPriority.CONTEXT,
 )
@@ -70,7 +70,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
         self._session_id = ""
         self._parent_session_id: str | None = None
         self._resource_store: ResourceStore | None = None
-        self._node_store: TrajectoryNodeStore | None = None
+        self._trajectory_store: TrajectoryStore | None = None
         self._stream_fn: StreamFn | None = None
         self._model: Model | None = None
         self._renderers: dict[str, TriggerRenderer] = {}
@@ -85,9 +85,9 @@ class LlmCompactionPolicy(BindableContextPolicy):
         resource_candidate = services.get(RESOURCE_STORE_SERVICE)
         if isinstance(resource_candidate, ResourceStore):
             self._resource_store = resource_candidate
-        node_candidate = services.get(TRAJECTORY_NODE_STORE_SERVICE)
-        if isinstance(node_candidate, TrajectoryNodeStore):
-            self._node_store = node_candidate
+        trajectory_candidate = services.get(TRAJECTORY_STORE_SERVICE)
+        if isinstance(trajectory_candidate, TrajectoryStore):
+            self._trajectory_store = trajectory_candidate
         self._stream_fn = ctx.stream_fn
         self._model = ctx.model
         self._renderers = dict(ctx.trigger_renderers or {})
@@ -145,7 +145,9 @@ class LlmCompactionPolicy(BindableContextPolicy):
             )
             return messages
 
-        resource_store, node_store, stream_fn, model = self._require_dependencies()
+        resource_store, trajectory_store, stream_fn, model = (
+            self._require_dependencies()
+        )
         rendered = self._render_turns(turns)
         if rendered != messages:
             raise RuntimeError(
@@ -196,7 +198,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
             ),
         )
 
-        head = await asyncio.to_thread(node_store.get_head, self._session_id)
+        head = await asyncio.to_thread(trajectory_store.get_head, self._session_id)
         if head is None:
             raise RuntimeError(
                 "llm_compaction cannot persist state without an active trajectory head"
@@ -205,13 +207,9 @@ class LlmCompactionPolicy(BindableContextPolicy):
         replacements[f"through:{covered_turn.id}"] = ref.uri()
         persisted = ContentReplacementState(
             state_key=self._config.state_key,
-            seen_tool_call_ids=(
-                state.seen_tool_call_ids if state is not None else ()
-            ),
+            seen_tool_call_ids=(state.seen_tool_call_ids if state is not None else ()),
             replacements=replacements,
-            source_session_id=(
-                state.source_session_id if state is not None else None
-            ),
+            source_session_id=(state.source_session_id if state is not None else None),
             source_leaf_id=state.source_leaf_id if state is not None else None,
             leaf_node_id=head.node_id or head.logical_parent_id,
             branch_id=head.branch_id,
@@ -227,7 +225,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
             },
         )
         await asyncio.to_thread(
-            node_store.save_content_replacement_state,
+            trajectory_store.save_content_replacement_state,
             self._session_id,
             persisted,
         )
@@ -250,21 +248,24 @@ class LlmCompactionPolicy(BindableContextPolicy):
         self,
         turns: Sequence[Turn],
     ) -> ContentReplacementState | None:
-        if self._node_store is None or not self._session_id:
+        if self._trajectory_store is None or not self._session_id:
             return None
         state = await asyncio.to_thread(
-            self._node_store.load_content_replacement_state,
+            self._trajectory_store.load_content_replacement_state,
             self._session_id,
             self._config.state_key,
         )
         if state is not None or self._parent_session_id is None:
             return state
 
-        head = await asyncio.to_thread(self._node_store.get_head, self._session_id)
+        head = await asyncio.to_thread(
+            self._trajectory_store.get_head,
+            self._session_id,
+        )
         if head is None or head.logical_parent_id is None:
             return None
         parent_state = await asyncio.to_thread(
-            self._node_store.load_content_replacement_state,
+            self._trajectory_store.load_content_replacement_state,
             self._parent_session_id,
             self._config.state_key,
         )
@@ -275,7 +276,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
         ):
             return None
         return await asyncio.to_thread(
-            self._node_store.clone_content_replacement_state,
+            self._trajectory_store.clone_content_replacement_state,
             source_session_id=self._parent_session_id,
             target_session_id=self._session_id,
             state_key=self._config.state_key,
@@ -327,16 +328,16 @@ class LlmCompactionPolicy(BindableContextPolicy):
 
     def _require_dependencies(
         self,
-    ) -> tuple[ResourceStore, TrajectoryNodeStore, StreamFn, Model]:
+    ) -> tuple[ResourceStore, TrajectoryStore, StreamFn, Model]:
         if self._resource_store is None:
             raise RuntimeError("llm_compaction requires a registered ResourceStore")
-        if self._node_store is None:
-            raise RuntimeError("llm_compaction requires a TrajectoryNodeStore")
+        if self._trajectory_store is None:
+            raise RuntimeError("llm_compaction requires a TrajectoryStore")
         if self._stream_fn is None or self._model is None:
             raise RuntimeError("llm_compaction requires an active provider")
         return (
             self._resource_store,
-            self._node_store,
+            self._trajectory_store,
             self._stream_fn,
             self._model,
         )
@@ -383,9 +384,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
                 final = event.message
         text = (
             "".join(
-                block.text
-                for block in final.content
-                if isinstance(block, TextContent)
+                block.text for block in final.content if isinstance(block, TextContent)
             )
             if final is not None
             else "".join(deltas)
@@ -451,11 +450,7 @@ def _covered_position(
     if not isinstance(covered_turn_id, str):
         return None
     return next(
-        (
-            position
-            for position, turn in enumerate(turns)
-            if turn.id == covered_turn_id
-        ),
+        (position for position, turn in enumerate(turns) if turn.id == covered_turn_id),
         None,
     )
 

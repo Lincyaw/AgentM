@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from uuid import uuid4
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage
@@ -80,13 +81,24 @@ class Execution:
         *,
         trigger_metadata: TriggerMetadata | None = None,
         pending_response: AssistantMessage | None = None,
+        pending_tool_results: Sequence[ToolRecord] = (),
     ) -> TurnCheckpoint:
         """Snapshot materialized progress without ending the execution."""
         if not self._active:
             raise StateError("cannot checkpoint an inactive execution")
+        if pending_tool_results and pending_response is None:
+            raise StateError(
+                "pending tool results require their assistant response"
+            )
         rounds = tuple(self._rounds)
         if pending_response is not None:
-            rounds = (*rounds, Round(response=pending_response))
+            rounds = (
+                *rounds,
+                Round(
+                    response=pending_response,
+                    tool_results=tuple(pending_tool_results),
+                ),
+            )
         anchored = tuple(
             InjectedMessages(after_round=round_index, messages=tuple(messages))
             for round_index, messages in self._injected

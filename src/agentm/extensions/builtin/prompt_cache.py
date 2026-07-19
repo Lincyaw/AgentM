@@ -19,9 +19,9 @@ from agentm.core.abi.provider import (
 )
 from agentm.core.abi.roles import (
     PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
-    TRAJECTORY_NODE_STORE_SERVICE,
+    TRAJECTORY_STORE_SERVICE,
 )
-from agentm.core.abi.store import TrajectoryNodeStore
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import PromptCacheState, Turn
 from agentm.core.abi.session_api import AtomAPI
 from agentm.extensions import ExtensionManifest
@@ -53,15 +53,15 @@ class PromptCacheContextPolicy(BindableContextPolicy):
         self._config = config
         self._session_id = ""
         self._parent_session_id: str | None = None
-        self._store: TrajectoryNodeStore | None = None
+        self._store: TrajectoryStore | None = None
         self._last_report = ProjectionReport(metadata={"policy": "prompt_cache"})
 
     def bind(self, ctx: PolicyContext) -> None:
         self._session_id = ctx.session_id
         self._parent_session_id = ctx.parent_session_id
         services = ctx.services or {}
-        candidate = services.get(TRAJECTORY_NODE_STORE_SERVICE)
-        if isinstance(candidate, TrajectoryNodeStore):
+        candidate = services.get(TRAJECTORY_STORE_SERVICE)
+        if isinstance(candidate, TrajectoryStore):
             self._store = candidate
 
     async def transform(
@@ -125,7 +125,9 @@ class PromptCacheContextPolicy(BindableContextPolicy):
                     leaf_node_id=(
                         head.node_id
                         if head is not None
-                        else existing.leaf_node_id if existing is not None else None
+                        else existing.leaf_node_id
+                        if existing is not None
+                        else None
                     ),
                     content_replacement_state_key=(
                         self._config.content_replacement_state_key
@@ -138,12 +140,16 @@ class PromptCacheContextPolicy(BindableContextPolicy):
                     branch_id=(
                         head.branch_id
                         if head is not None
-                        else existing.branch_id if existing is not None else "main"
+                        else existing.branch_id
+                        if existing is not None
+                        else "main"
                     ),
                     head_id=(
                         head.head_id
                         if head is not None
-                        else existing.head_id if existing is not None else "main"
+                        else existing.head_id
+                        if existing is not None
+                        else "main"
                     ),
                     provider=(
                         self._config.provider

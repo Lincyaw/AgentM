@@ -69,8 +69,8 @@ from agentm.core.abi.resource import ResourceMutation, ResourceRef
 from agentm.core.abi.roles import TRAJECTORY_QUERY_STORE_SERVICE
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig
-from agentm.core.abi.store import SessionMeta, TrajectoryStorage
-from agentm.core.abi.trajectory import Outcome, Round, Turn, TurnMeta
+from agentm.core.abi.store import SessionMeta, TrajectoryCommit, TrajectoryStore
+from agentm.core.abi.trajectory import Outcome, Round, TrajectoryHead, Turn, TurnMeta
 from agentm.core.abi.trigger import (
     BackgroundCompletion,
     ContinueTrigger,
@@ -80,14 +80,13 @@ from agentm.core.abi.trigger import (
     UserInput,
 )
 from agentm.core.runtime.execution import Execution, StateError
-from agentm.core.lib.trajectory_nodes import InMemoryTrajectoryNodeStore
 from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.session_meta import ResumeIdentityError
-from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
+from agentm.storage.trajectory import JsonlTrajectoryStore
 from agentm.core.runtime.trigger_queue import TriggerTerminated
 from agentm.core.runtime.tree import InMemorySessionGraph
 from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
@@ -97,13 +96,12 @@ from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
 # ---------------------------------------------------------------------------
 
 
-def _memory_storage(
-    turn_store: InMemoryTrajectoryStore,
-) -> TrajectoryStorage:
-    return TrajectoryStorage(
-        turn_store=turn_store,
-        node_store=InMemoryTrajectoryNodeStore(),
-    )
+def _memory_store(store: InMemoryTrajectoryStore) -> TrajectoryStore:
+    return store
+
+
+def _empty_head(session_id: str) -> TrajectoryHead:
+    return TrajectoryHead(session_id=session_id, root_session_id=session_id)
 
 
 class MockStreamFn:
@@ -537,7 +535,7 @@ async def test_store_persistence() -> None:
     mock2.enqueue(text_response("second"))
     session2 = await Session.resume(
         session.id,
-        _memory_storage(store),
+        _memory_store(store),
         AgentSessionConfig(
             extensions=[],
             stream_fn=mock2,
@@ -558,7 +556,10 @@ async def test_store_persistence() -> None:
     assert any(m.id == session.id for m in sessions)
 
     with pytest.raises(ValueError):
-        store.create_session(SessionMeta(id=session.id))
+        store.create_session(
+            SessionMeta(id=session.id),
+            head=_empty_head(session.id),
+        )
 
 
 @pytest.mark.asyncio
@@ -585,7 +586,7 @@ async def test_session_resume() -> None:
     mock2.enqueue(text_response("turn-2"))
     resumed = await Session.resume(
         session.id,
-        _memory_storage(store),
+        _memory_store(store),
         AgentSessionConfig(
             extensions=[],
             stream_fn=mock2,
@@ -624,9 +625,10 @@ async def test_resume_rejects_unversioned_session_metadata() -> None:
     await session.shutdown()
 
     legacy_store = InMemoryTrajectoryStore()
-    legacy_store.create_session_with_turns(
+    legacy_store.create_session(
         SessionMeta(id="legacy-session"),
-        session.trajectory.turns,
+        turns=session.trajectory.turns,
+        head=_empty_head("legacy-session"),
     )
     with pytest.raises(
         ResumeIdentityError,
@@ -634,7 +636,7 @@ async def test_resume_rejects_unversioned_session_metadata() -> None:
     ):
         await Session.resume(
             "legacy-session",
-            _memory_storage(legacy_store),
+            _memory_store(legacy_store),
             AgentSessionConfig(
                 extensions=[],
                 stream_fn=MockStreamFn(),
@@ -648,7 +650,7 @@ def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
 ) -> None:
     store = JsonlTrajectoryStore(tmp_path)
     meta = SessionMeta(id="session")
-    store.create_session(meta)
+    store.create_session(meta, head=_empty_head(meta.id))
     turn = Turn(
         index=0,
         id="turn-0",
@@ -657,7 +659,7 @@ def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=1.0,
     )
-    store.append(meta.id, turn)
+    store.commit_turn(meta.id, TrajectoryCommit(turn, (), None))
     path = store.file_path(meta.id)
     with path.open("ab") as fh:
         fh.write(b'{"index":1')
@@ -671,13 +673,13 @@ def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=2.0,
     )
-    store.append(meta.id, next_turn)
+    store.commit_turn(meta.id, TrajectoryCommit(next_turn, (), None))
     assert store.load(meta.id)[1] == [turn, next_turn]
 
     lines = path.read_text(encoding="utf-8").splitlines()
     lines.insert(2, "not-json")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="corrupt record 3"):
+    with pytest.raises(ValueError, match="corrupt trajectory record 3"):
         store.load(meta.id)
 
 
@@ -693,7 +695,11 @@ def test_jsonl_create_with_turns_has_no_partial_session(tmp_path: Path) -> None:
         timestamp=0.0,
     )
     with pytest.raises(ValueError, match="expected 0"):
-        store.create_session_with_turns(meta, [bad_turn])
+        store.create_session(
+            meta,
+            turns=[bad_turn],
+            head=_empty_head(meta.id),
+        )
     assert not store.session_exists(meta.id)
 
 
@@ -715,16 +721,17 @@ def test_trajectory_query_store_adapter_filters_sessions_and_turns() -> None:
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=2.0,
     )
-    store.create_session_with_turns(
+    store.create_session(
         SessionMeta(
             id="root",
             purpose="root",
             created_at=10.0,
             config={"root_session_id": "root", "depth": 0},
         ),
-        [root_turn],
+        turns=[root_turn],
+        head=_empty_head("root"),
     )
-    store.create_session_with_turns(
+    store.create_session(
         SessionMeta(
             id="child",
             parent_id="root",
@@ -732,7 +739,8 @@ def test_trajectory_query_store_adapter_filters_sessions_and_turns() -> None:
             created_at=20.0,
             config={"root_session_id": "root", "depth": 1},
         ),
-        [child_turn],
+        turns=[child_turn],
+        head=_empty_head("child"),
     )
 
     query = TrajectoryStoreQueryAdapter(store)
@@ -1490,11 +1498,15 @@ async def test_store_append_failure_is_fail_stop() -> None:
     fail_count = {"n": 0}
 
     class FailingStore(InMemoryTrajectoryStore):
-        def append(self, session_id: str, turn: Turn) -> None:
+        def commit_turn(
+            self,
+            session_id: str,
+            commit: TrajectoryCommit,
+        ) -> None:
             fail_count["n"] += 1
             if fail_count["n"] == 1:
                 raise IOError("store write failed")
-            super().append(session_id, turn)
+            super().commit_turn(session_id, commit)
 
     store = FailingStore()
     mock = MockStreamFn()
@@ -1503,7 +1515,10 @@ async def test_store_append_failure_is_fail_stop() -> None:
     session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test", store=store,
     ))
-    store.create_session(SessionMeta(id=session.id, purpose="root"))
+    store.create_session(
+        SessionMeta(id=session.id, purpose="root"),
+        head=_empty_head(session.id),
+    )
     session.start()
     receipt = await session.prompt("go")
     with pytest.raises(OSError, match="store write failed"):
@@ -1572,7 +1587,10 @@ async def test_durable_round_persist_failure() -> None:
     session = Session(SessionRuntimeConfig(
         stream_fn=mock, model=make_model(), system="test", store=store,
     ))
-    store.create_session(SessionMeta(id=session.id, purpose="root"))
+    store.create_session(
+        SessionMeta(id=session.id, purpose="root"),
+        head=_empty_head(session.id),
+    )
     session.start()
     await session.prompt("go")
     await _wait_turn(session)

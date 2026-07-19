@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 
@@ -29,7 +28,6 @@ from agentm.core.abi.trajectory import (
     TrajectoryIndexSpec,
     TrajectoryLeaf,
     TrajectoryNode,
-    TrajectoryProjectionStatus,
     Turn,
 )
 from agentm.core.abi.trigger import TriggerRenderer
@@ -325,14 +323,13 @@ def leaf_nodes(nodes: Iterable[TrajectoryNode]) -> list[TrajectoryLeaf]:
     ]
 
 
-class InMemoryTrajectoryNodeStore:
-    """Reference in-memory implementation of ``TrajectoryNodeStore``."""
+class TrajectoryIndexState:
+    """Backend-neutral in-memory state machine for trajectory node indexes."""
 
     def __init__(self) -> None:
         self._nodes: dict[str, list[TrajectoryNode]] = {}
         self._node_ids: set[str] = set()
         self._heads: dict[tuple[str, str], TrajectoryHead] = {}
-        self._projection_status: dict[str, TrajectoryProjectionStatus] = {}
         self._content_states: dict[tuple[str, str], ContentReplacementState] = {}
         self._prompt_cache_states: dict[tuple[str, str], PromptCacheState] = {}
 
@@ -344,7 +341,7 @@ class InMemoryTrajectoryNodeStore:
     def head_indexes(self) -> tuple[TrajectoryIndexSpec, ...]:
         return TRAJECTORY_HEAD_INDEXES
 
-    def append_nodes(
+    def _commit_nodes(
         self,
         session_id: str,
         nodes: Sequence[TrajectoryNode],
@@ -374,10 +371,6 @@ class InMemoryTrajectoryNodeStore:
             self._heads[(session_id, advance_head.head_id)] = (
                 advance_head.to_head()
             )
-        self._projection_status[session_id] = _projection_status(
-            session_id,
-            self._nodes[session_id],
-        )
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         if query.session_id:
@@ -545,20 +538,24 @@ class InMemoryTrajectoryNodeStore:
         )
         return leaf_nodes(nodes)
 
-    def replace_session_projection(
+    def _initialize_index(
         self,
         session_id: str,
         nodes: Sequence[TrajectoryNode],
         *,
-        heads: Sequence[TrajectoryHead] = (),
-        status: TrajectoryProjectionStatus | None = None,
+        head: TrajectoryHead,
     ) -> None:
+        if session_id in self._nodes or any(
+            head_session_id == session_id
+            for head_session_id, _head_id in self._heads
+        ):
+            raise ValueError(f"trajectory index already exists: {session_id}")
         copied = list(nodes)
         expected = 0
         batch_ids: set[str] = set()
         for node in copied:
             if node.session_id != session_id:
-                raise ValueError("node session_id does not match projection session")
+                raise ValueError("node session_id does not match index session")
             if node.seq != expected:
                 raise ValueError(f"node seq {node.seq} does not follow {expected - 1}")
             if node.id in batch_ids:
@@ -566,32 +563,15 @@ class InMemoryTrajectoryNodeStore:
             batch_ids.add(node.id)
             expected += 1
 
-        old_ids = {node.id for node in self._nodes.get(session_id, ())}
-        foreign_duplicates = batch_ids & (self._node_ids - old_ids)
-        if foreign_duplicates:
-            duplicate = sorted(foreign_duplicates)[0]
+        duplicates = batch_ids & self._node_ids
+        if duplicates:
+            duplicate = sorted(duplicates)[0]
             raise ValueError(f"duplicate trajectory node id: {duplicate}")
+        if head.session_id != session_id:
+            raise ValueError("head session_id does not match index session")
         self._nodes[session_id] = copied
-        self._node_ids.difference_update(old_ids)
         self._node_ids.update(batch_ids)
-        self._heads = {
-            key: head
-            for key, head in self._heads.items()
-            if key[0] != session_id
-        }
-        for head in heads:
-            if head.session_id != session_id:
-                raise ValueError("head session_id does not match projection session")
-            self._heads[(session_id, head.head_id)] = head
-        self._projection_status[session_id] = (
-            status if status is not None else _projection_status(session_id, copied)
-        )
-
-    def projection_status(
-        self,
-        session_id: str,
-    ) -> TrajectoryProjectionStatus | None:
-        return self._projection_status.get(session_id)
+        self._heads[(session_id, head.head_id)] = head
 
     def save_content_replacement_state(
         self,
@@ -670,24 +650,8 @@ class InMemoryTrajectoryNodeStore:
                     f"{advance.previous_node_id}"
                 )
 
-
-def _projection_status(
-    session_id: str,
-    nodes: Sequence[TrajectoryNode],
-) -> TrajectoryProjectionStatus:
-    last = nodes[-1] if nodes else None
-    return TrajectoryProjectionStatus(
-        session_id=session_id,
-        state="current",
-        high_water_turn_id=last.turn_id if last is not None else None,
-        high_water_turn_index=last.turn_index if last is not None else None,
-        node_count=len(nodes),
-        updated_at=time.time(),
-    )
-
-
 __all__ = [
-    "InMemoryTrajectoryNodeStore",
+    "TrajectoryIndexState",
     "build_chain",
     "leaf_nodes",
     "messages_to_nodes",

@@ -4,7 +4,7 @@ This compose stack provides two independent data planes for development:
 
 | Service | Role | Data ownership |
 | --- | --- | --- |
-| PostgreSQL | Optional authoritative `TrajectoryStore` and `TrajectoryNodeStore` backend | Complete resumable sessions, turns, nodes, heads, cache, and compaction state |
+| PostgreSQL | Optional authoritative `TrajectoryStore` backend | Complete resumable sessions, checkpoints, turns, nodes, heads, cache, and compaction state behind one transaction boundary |
 | OTel collector | OTLP transport | No durable AgentM ownership; forwards diagnostic logs and spans |
 | ClickHouse | Collector-managed observability query backend | Standard `otel_logs` and `otel_traces` only |
 

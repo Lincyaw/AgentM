@@ -41,8 +41,6 @@ from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.store import (
-    TrajectoryNodeStore,
-    TrajectoryStorage,
     TrajectoryStore,
 )
 from agentm.core.abi.trajectory import Turn
@@ -257,7 +255,7 @@ class AgentSessionConfig:
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
-    trajectory_storage: TrajectoryStorage | None = None
+    trajectory_store: TrajectoryStore | None = None
     initial_turns: list[Turn] = field(default_factory=list)
     tool_allowlist: list[str] | None = None
     purpose: str = "subagent"
@@ -473,19 +471,6 @@ class AtomAPI(Protocol):
 
     def get_permission_policy(self) -> PermissionPolicy | None:
         """Return the permission policy, when registered."""
-        ...
-
-    def register_trajectory_node_store(
-        self,
-        store: TrajectoryNodeStore,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the message-level trajectory persistence/query boundary."""
-        ...
-
-    def get_trajectory_node_store(self) -> TrajectoryNodeStore | None:
-        """Return the message-level trajectory store, when registered."""
         ...
 
     def register_effect_scope(

@@ -48,7 +48,7 @@ from agentm.core.abi.roles import (
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig, ResolvedSessionSpec
-from agentm.core.abi.store import TrajectoryStorage
+from agentm.core.abi.store import TrajectoryCommit
 from agentm.core.abi.stream import MessageEnd, Model, TextDelta
 from agentm.core.abi.tool import ToolOutcome, ToolResult, ToolTerminate
 from agentm.core.abi.tool_executor import (
@@ -62,10 +62,6 @@ from agentm.core.abi.tool_orchestration import (
     ToolWorkItem,
 )
 from agentm.core.abi.trajectory import (
-    TrajectoryHead,
-    TrajectoryHeadAdvance,
-    TrajectoryNode,
-    TrajectoryProjectionStatus,
     Turn,
     TurnRef,
 )
@@ -75,13 +71,11 @@ from agentm.core.runtime.session_factory import (
     create_from_config,
     create_session,
 )
-from agentm.core.lib.trajectory_nodes import InMemoryTrajectoryNodeStore
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.tool_orchestration import DefaultToolOrchestrator
 from agentm.config import DefaultSessionSpecResolver
 from agentm.environments import LocalBashOperations, LocalEnvironmentOperations
 from agentm.execution import ProcessToolExecutor, SandboxToolExecutor
-from agentm.storage.trajectory import JsonlTrajectoryNodeStore
 
 
 def _model() -> Model:
@@ -572,38 +566,13 @@ class _TransactionalWriter:
 
 
 class _FailingAppendStore(InMemoryTrajectoryStore):
-    def append(self, session_id: str, turn: Turn) -> None:
-        del session_id, turn
+    def commit_turn(
+        self,
+        session_id: str,
+        commit: TrajectoryCommit,
+    ) -> None:
+        del session_id, commit
         raise RuntimeError("authoritative append failed")
-
-
-class _FailingNodeStore(JsonlTrajectoryNodeStore):
-    def append_nodes(
-        self,
-        session_id: str,
-        nodes: Sequence[TrajectoryNode],
-        *,
-        advance_head: TrajectoryHeadAdvance | None = None,
-    ) -> None:
-        del session_id, nodes, advance_head
-        raise RuntimeError("projection append failed")
-
-    def replace_session_projection(
-        self,
-        session_id: str,
-        nodes: Sequence[TrajectoryNode],
-        *,
-        heads: Sequence[TrajectoryHead] = (),
-        status: TrajectoryProjectionStatus | None = None,
-    ) -> None:
-        if nodes:
-            raise RuntimeError("projection rebuild failed")
-        super().replace_session_projection(
-            session_id,
-            nodes,
-            heads=heads,
-            status=status,
-        )
 
 
 class _OrderedEffectScope(_RecordingEffectScope):
@@ -685,10 +654,7 @@ async def test_effect_scope_fork_and_resume() -> None:
     resume_scope = _RecordingEffectScope()
     resumed = await Session.resume(
         session.id,
-        TrajectoryStorage(
-            turn_store=store,
-            node_store=InMemoryTrajectoryNodeStore(),
-        ),
+        store,
         AgentSessionConfig(
             extensions=[],
             stream_fn=_StaticStream("resumed"),
@@ -725,35 +691,6 @@ async def test_unpublished_turn_rolls_back_effect_before_resource() -> None:
     assert writer.txns[0].applied
     assert writer.txns[0].abandoned
     assert len(session.trajectory) == 0
-
-
-@pytest.mark.asyncio
-async def test_effect_commit_precedes_rebuildable_projection_failure(
-    tmp_path: Path,
-) -> None:
-    store = InMemoryTrajectoryStore()
-    scope = _RecordingEffectScope()
-    session = await create_session(SessionBuildConfig(
-        extensions=[],
-        stream_fn=_StaticStream(),
-        model=_model(),
-        store=store,
-        trajectory_node_store=_FailingNodeStore(tmp_path / "nodes"),
-        effect_scope=scope,
-    ))
-
-    session.start()
-    receipt = await session.prompt("go")
-    with pytest.raises(
-        ExceptionGroup,
-        match="trajectory projection append and rebuild failed",
-    ):
-        await receipt.wait()
-    await session.shutdown()
-
-    assert [event[0] for event in scope.events] == ["begin", "prepare", "commit"]
-    assert len(session.trajectory) == 1
-    assert len(store.load(session.id)[1]) == 1
 
 
 @pytest.mark.asyncio
@@ -1080,16 +1017,18 @@ async def test_tool_orchestrator_propagates_caller_cancellation() -> None:
         )
         for index, name in enumerate(("first", "second"))
     )
-    task = asyncio.create_task(
-        DefaultToolOrchestrator().execute_batch(
+    async def consume_results() -> None:
+        async for _result in DefaultToolOrchestrator().stream_batch(
             ToolOrchestrationRequest(
                 items=items,
                 session_id="session",
                 turn_id="turn",
                 turn_index=0,
             )
-        )
-    )
+        ):
+            pass
+
+    task = asyncio.create_task(consume_results())
     await asyncio.wait_for(started.wait(), timeout=1.0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1227,10 +1166,7 @@ async def test_session_spec_resolver_records_resolved_spec() -> None:
             spec_resolver=_Resolver(),
             stream_fn=_StaticStream(),
             model=_model(),
-            trajectory_storage=TrajectoryStorage(
-                turn_store=store,
-                node_store=InMemoryTrajectoryNodeStore(),
-            ),
+            trajectory_store=store,
         )
     )
 

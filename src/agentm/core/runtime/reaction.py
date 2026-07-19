@@ -88,9 +88,7 @@ from agentm.core.abi.events import (
     ToolResultEvent,
     TurnObservation,
 )
-from agentm.core.abi.store import (
-    TrajectoryNodeStore,
-)
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.termination import (
     Aborted,
     BudgetExhausted,
@@ -291,11 +289,7 @@ def _assemble_assistant_message(
     for ev in events:
         if isinstance(ev, TextDelta):
             text_buf.append(ev.text)
-    content = (
-        [TextContent(type="text", text="".join(text_buf))]
-        if text_buf
-        else []
-    )
+    content = [TextContent(type="text", text="".join(text_buf))] if text_buf else []
     return AssistantMessage(
         role="assistant",
         content=content,
@@ -465,6 +459,33 @@ async def _orchestration_failure_outcome(
     )
 
 
+async def _finalize_tool_outcome(
+    *,
+    bus: EventBus,
+    call: ToolCallBlock,
+    outcome: ToolOutcome,
+) -> tuple[ToolRecord, ToolOutcome]:
+    result = _outcome_result(outcome)
+    returns = await bus.emit(
+        ToolResultEvent.CHANNEL,
+        ToolResultEvent(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            result=result,
+        ),
+    )
+    replacement = _last_of(returns, ToolResult)
+    final_result = replacement if replacement is not None else result
+    final_outcome = _replace_outcome_result(outcome, final_result)
+    return (
+        ToolRecord(
+            call=call,
+            result=_tool_result_block(call.id, final_result),
+        ),
+        final_outcome,
+    )
+
+
 def _meta(
     inp: int,
     out: int,
@@ -488,6 +509,7 @@ async def _save_execution_checkpoint(
     meta: TurnMeta,
     *,
     pending_response: AssistantMessage | None = None,
+    pending_tool_results: Sequence[ToolRecord] = (),
 ) -> None:
     if request.checkpoint is None:
         return
@@ -496,6 +518,7 @@ async def _save_execution_checkpoint(
             meta,
             trigger_metadata=request.trigger_metadata,
             pending_response=pending_response,
+            pending_tool_results=pending_tool_results,
         )
     )
 
@@ -552,7 +575,7 @@ async def _history_messages(
     trigger_renderers: dict[str, TriggerRenderer] | None,
     projection: ContextProjection | None,
     budget: ContextBudget,
-    trajectory_node_store: TrajectoryNodeStore | None,
+    trajectory_store: TrajectoryStore | None,
     session_id: str,
     root_session_id: str | None,
     parent_session_id: str | None,
@@ -568,7 +591,7 @@ async def _history_messages(
     projection_input = await _projection_input(
         turns=turns,
         projection=projection,
-        trajectory_node_store=trajectory_node_store,
+        trajectory_store=trajectory_store,
         session_id=session_id,
         root_session_id=root_session_id,
         parent_session_id=parent_session_id,
@@ -595,7 +618,7 @@ async def _apply_provider_prompt_cache(
     messages: Sequence[AgentMessage],
     model: Model,
     adapter: ProviderPromptCacheAdapter | None,
-    store: TrajectoryNodeStore | None,
+    store: TrajectoryStore | None,
     session_id: str,
 ) -> list[AgentMessage]:
     if adapter is None:
@@ -636,7 +659,7 @@ async def _projection_input(
     *,
     turns: Sequence[Turn],
     projection: ContextProjection,
-    trajectory_node_store: TrajectoryNodeStore | None,
+    trajectory_store: TrajectoryStore | None,
     session_id: str,
     root_session_id: str | None,
     parent_session_id: str | None,
@@ -650,12 +673,10 @@ async def _projection_input(
         )
     if projection.source != "node_chain":
         raise ValueError(f"unsupported context projection source {projection.source!r}")
-    if trajectory_node_store is None:
-        raise RuntimeError(
-            "node-chain ContextProjection requires a trajectory_node_store"
-        )
+    if trajectory_store is None:
+        raise RuntimeError("node-chain ContextProjection requires a trajectory store")
     head = await asyncio.to_thread(
-        trajectory_node_store.get_head,
+        trajectory_store.get_head,
         session_id,
         head_id=DEFAULT_TRAJECTORY_HEAD_ID,
         branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
@@ -677,7 +698,7 @@ async def _projection_input(
     nodes: list[TrajectoryNode] = []
     if leaf_node_id is not None:
         nodes = await asyncio.to_thread(
-            trajectory_node_store.load_chain,
+            trajectory_store.load_chain,
             session_id,
             leaf_node_id,
             include_logical_parent=True,
@@ -731,7 +752,7 @@ async def react(
     tool_executor = config.tool_executor
     tool_orchestrator = config.tool_orchestrator
     permission_policy = config.permission_policy
-    trajectory_node_store = config.trajectory_node_store
+    trajectory_store = config.store
     session_id = config.session_id
     root_session_id = config.root_session_id
     parent_session_id = config.parent_session_id
@@ -763,7 +784,7 @@ async def react(
             trigger_renderers=trigger_renderers,
             projection=context_projection,
             budget=context_budget,
-            trajectory_node_store=trajectory_node_store,
+            trajectory_store=trajectory_store,
             session_id=session_id,
             root_session_id=root_session_id,
             parent_session_id=parent_session_id,
@@ -823,7 +844,7 @@ async def react(
                     trigger_renderers=trigger_renderers,
                     projection=context_projection,
                     budget=context_budget,
-                    trajectory_node_store=trajectory_node_store,
+                    trajectory_store=trajectory_store,
                     session_id=session_id,
                     root_session_id=root_session_id,
                     parent_session_id=parent_session_id,
@@ -901,7 +922,7 @@ async def react(
             messages=messages,
             model=effective_model,
             adapter=prompt_cache_adapter,
-            store=trajectory_node_store,
+            store=trajectory_store,
             session_id=session_id,
         )
 
@@ -1048,16 +1069,17 @@ async def react(
         tool_calls = _extract_tool_calls(response)
         tool_records: list[ToolRecord] = []
         paired_outcomes: list[tuple[str, ToolOutcome]] = []
+        checkpoint_meta = _meta(
+            total_input,
+            total_output,
+            start_ns,
+            effective_model,
+            cache_read=total_cache_read,
+            cache_write=total_cache_write,
+        )
         await _save_execution_checkpoint(
             request,
-            _meta(
-                total_input,
-                total_output,
-                start_ns,
-                effective_model,
-                cache_read=total_cache_read,
-                cache_write=total_cache_write,
-            ),
+            checkpoint_meta,
             pending_response=response,
         )
 
@@ -1067,14 +1089,6 @@ async def react(
                 records=tool_records,
                 reason=cancel_reason(turn_signal) or "unknown",
                 policy=interruption_policy,
-            )
-            checkpoint_meta = _meta(
-                total_input,
-                total_output,
-                start_ns,
-                effective_model,
-                cache_read=total_cache_read,
-                cache_write=total_cache_write,
             )
             await _record_round(
                 request,
@@ -1112,14 +1126,12 @@ async def react(
                             ),
                         )
                     )
-                checkpoint_meta = _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    effective_model,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
-                )
+                    await _save_execution_checkpoint(
+                        request,
+                        checkpoint_meta,
+                        pending_response=response,
+                        pending_tool_results=tool_records,
+                    )
                 await _record_round(
                     request,
                     response,
@@ -1132,25 +1144,45 @@ async def react(
                     tool_calls_used,
                 )
 
-            result_blocks: list[ToolResultBlock] = []
-            immediate_outcomes: dict[int, ToolOutcome] = {}
+            outcomes_by_index: dict[int, ToolOutcome] = {}
+            records_by_index: dict[int, ToolRecord] = {}
             work_items: list[ToolWorkItem] = []
+
+            async def materialize_tool_outcome(
+                index: int,
+                outcome: ToolOutcome,
+            ) -> None:
+                nonlocal tool_calls_used
+                if index in outcomes_by_index:
+                    raise RuntimeError(
+                        f"tool orchestrator produced duplicate result index {index}"
+                    )
+                record, final_outcome = await _finalize_tool_outcome(
+                    bus=bus,
+                    call=tool_calls[index],
+                    outcome=outcome,
+                )
+                outcomes_by_index[index] = final_outcome
+                records_by_index[index] = record
+                tool_calls_used += 1
+                materialized_records = [
+                    records_by_index[record_index]
+                    for record_index in sorted(records_by_index)
+                ]
+                await _save_execution_checkpoint(
+                    request,
+                    checkpoint_meta,
+                    pending_response=response,
+                    pending_tool_results=materialized_records,
+                )
+
             for index, tc in enumerate(tool_calls):
                 if turn_signal.is_set():
                     tool_records = _cancelled_tool_records(
                         calls=tool_calls,
-                        outcomes=immediate_outcomes,
+                        outcomes=outcomes_by_index,
                         reason=cancel_reason(turn_signal) or "unknown",
                         policy=interruption_policy,
-                    )
-                    tool_calls_used += len(immediate_outcomes)
-                    checkpoint_meta = _meta(
-                        total_input,
-                        total_output,
-                        start_ns,
-                        effective_model,
-                        cache_read=total_cache_read,
-                        cache_write=total_cache_write,
                     )
                     await _record_round(
                         request,
@@ -1182,12 +1214,18 @@ async def react(
                     ):
                         raise TypeError("ToolCallEvent reason must be a string")
                     reason = returned_reason or "blocked"
-                    immediate_outcomes[index] = ToolContinue(
-                        result=ToolResult(
-                            content=[
-                                TextContent(type="text", text=f"blocked: {reason}")
-                            ],
-                            is_error=True,
+                    await materialize_tool_outcome(
+                        index,
+                        ToolContinue(
+                            result=ToolResult(
+                                content=[
+                                    TextContent(
+                                        type="text",
+                                        text=f"blocked: {reason}",
+                                    )
+                                ],
+                                is_error=True,
+                            )
                         )
                     )
                     continue
@@ -1202,29 +1240,36 @@ async def react(
                         raise TypeError("ToolCallEvent rewrite must be an object")
                     args.update(frozen_rewrite)
                 if allowed_tool_names is not None and tc.name not in allowed_tool_names:
-                    immediate_outcomes[index] = ToolContinue(
-                        result=ToolResult(
-                            content=[
-                                TextContent(
-                                    type="text",
-                                    text=f"blocked by tool_allowlist: {tc.name}",
-                                )
-                            ],
-                            is_error=True,
+                    await materialize_tool_outcome(
+                        index,
+                        ToolContinue(
+                            result=ToolResult(
+                                content=[
+                                    TextContent(
+                                        type="text",
+                                        text=f"blocked by tool_allowlist: {tc.name}",
+                                    )
+                                ],
+                                is_error=True,
+                            )
                         )
                     )
                     continue
 
                 tool = tool_index.get(tc.name)
                 if tool is None:
-                    immediate_outcomes[index] = ToolContinue(
-                        result=ToolResult(
-                            content=[
-                                TextContent(
-                                    type="text", text=f"unknown tool: {tc.name}"
-                                )
-                            ],
-                            is_error=True,
+                    await materialize_tool_outcome(
+                        index,
+                        ToolContinue(
+                            result=ToolResult(
+                                content=[
+                                    TextContent(
+                                        type="text",
+                                        text=f"unknown tool: {tc.name}",
+                                    )
+                                ],
+                                is_error=True,
+                            )
                         )
                     )
                     continue
@@ -1243,18 +1288,9 @@ async def react(
                 if turn_signal.is_set():
                     tool_records = _cancelled_tool_records(
                         calls=tool_calls,
-                        outcomes=immediate_outcomes,
+                        outcomes=outcomes_by_index,
                         reason=cancel_reason(turn_signal) or "unknown",
                         policy=interruption_policy,
-                    )
-                    tool_calls_used += len(immediate_outcomes)
-                    checkpoint_meta = _meta(
-                        total_input,
-                        total_output,
-                        start_ns,
-                        effective_model,
-                        cache_read=total_cache_read,
-                        cache_write=total_cache_write,
                     )
                     await _record_round(
                         request,
@@ -1268,7 +1304,7 @@ async def react(
                         tool_calls_used,
                     )
                 if permission_outcome is not None:
-                    immediate_outcomes[index] = permission_outcome
+                    await materialize_tool_outcome(index, permission_outcome)
                     continue
 
                 work_items.append(
@@ -1282,10 +1318,10 @@ async def react(
                     )
                 )
 
-            outcomes_by_index: dict[int, ToolOutcome] = dict(immediate_outcomes)
             if work_items:
                 orchestrator = tool_orchestrator or default_tool_orchestrator()
-                orchestration_results = await orchestrator.execute_batch(
+                requested_items = {item.index: item for item in work_items}
+                async for orch_result in orchestrator.stream_batch(
                     ToolOrchestrationRequest(
                         items=tuple(work_items),
                         session_id=session_id,
@@ -1294,8 +1330,13 @@ async def react(
                     ),
                     signal=turn_signal,
                     executor=tool_executor,
-                )
-                for orch_result in orchestration_results:
+                ):
+                    expected_item = requested_items.get(orch_result.item.index)
+                    if expected_item is None or orch_result.item is not expected_item:
+                        raise RuntimeError(
+                            "tool orchestrator returned a result that does not "
+                            "reference its original request item"
+                        )
                     if turn_signal.is_set() and orch_result.status in {
                         "cancelled",
                         "skipped",
@@ -1305,16 +1346,16 @@ async def react(
                         orch_result.status == "completed"
                         and orch_result.output is not None
                     ):
-                        outcomes_by_index[orch_result.item.index] = (
-                            _normalize_tool_output(orch_result.output)
-                        )
+                        outcome = _normalize_tool_output(orch_result.output)
                     else:
-                        outcomes_by_index[
-                            orch_result.item.index
-                        ] = await _orchestration_failure_outcome(
+                        outcome = await _orchestration_failure_outcome(
                             result=orch_result,
                             bus=bus,
                         )
+                    await materialize_tool_outcome(
+                        orch_result.item.index,
+                        outcome,
+                    )
 
             if turn_signal.is_set() and len(outcomes_by_index) < len(tool_calls):
                 tool_records = _cancelled_tool_records(
@@ -1322,15 +1363,6 @@ async def react(
                     outcomes=outcomes_by_index,
                     reason=cancel_reason(turn_signal) or "unknown",
                     policy=interruption_policy,
-                )
-                tool_calls_used += len(outcomes_by_index)
-                checkpoint_meta = _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    effective_model,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
                 )
                 await _record_round(
                     request,
@@ -1344,28 +1376,21 @@ async def react(
                     tool_calls_used,
                 )
 
-            for index, tc in enumerate(tool_calls):
-                outcome = outcomes_by_index.get(index)
-                if outcome is None:
-                    continue
-                result = _outcome_result(outcome)
-                res_returns = await bus.emit(
-                    ToolResultEvent.CHANNEL,
-                    ToolResultEvent(
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        result=result,
-                    ),
+            missing_indexes = set(range(len(tool_calls))) - outcomes_by_index.keys()
+            if missing_indexes:
+                raise RuntimeError(
+                    "tool orchestrator omitted terminal results for indexes "
+                    f"{sorted(missing_indexes)}"
                 )
-                replaced = _last_of(res_returns, ToolResult)
-                final_result = replaced if replaced is not None else result
-                final_outcome = _replace_outcome_result(outcome, final_result)
 
-                result_block = _tool_result_block(tc.id, final_result)
-                result_blocks.append(result_block)
-                tool_records.append(ToolRecord(call=tc, result=result_block))
-                paired_outcomes.append((tc.name, final_outcome))
-                tool_calls_used += 1
+            tool_records = [
+                records_by_index[index] for index in range(len(tool_calls))
+            ]
+            paired_outcomes = [
+                (tool_calls[index].name, outcomes_by_index[index])
+                for index in range(len(tool_calls))
+            ]
+            result_blocks = [record.result for record in tool_records]
 
             if result_blocks:
                 messages.append(

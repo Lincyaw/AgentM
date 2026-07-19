@@ -218,7 +218,7 @@ from .roles import (
     SESSION_SPEC_RESOLVER_SERVICE,
     TOOL_EXECUTOR_SERVICE,
     TOOL_ORCHESTRATOR_SERVICE,
-    TRAJECTORY_NODE_STORE_SERVICE,
+    TRAJECTORY_STORE_SERVICE,
     TRAJECTORY_QUERY_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_SERVICE,
 )
@@ -246,10 +246,9 @@ from .session_api import (
 )
 from .store import (
     SessionMeta,
+    TrajectoryCommit,
     TrajectoryNodeQuery,
     TrajectoryNodeSort,
-    TrajectoryNodeStore,
-    TrajectoryStorage,
     TrajectoryStore,
 )
 from .stream import (
@@ -340,8 +339,6 @@ from .trajectory import (
     TrajectoryNodeKind,
     TrajectoryNodeRef,
     TrajectoryNodeRole,
-    TrajectoryProjectionState,
-    TrajectoryProjectionStatus,
     Turn,
     TurnCheckpoint,
     TurnMeta,
@@ -591,7 +588,7 @@ __all__ = [
     "TOOL_ORCHESTRATOR_SERVICE",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
-    "TRAJECTORY_NODE_STORE_SERVICE",
+    "TRAJECTORY_STORE_SERVICE",
     "TRAJECTORY_QUERY_STORE_SERVICE",
     "Tool",
     "ToolCallArgsDelta",
@@ -625,6 +622,7 @@ __all__ = [
     "TraceQueryStore",
     "ToolWorkItem",
     "TransactionalResourceWriter",
+    "TrajectoryCommit",
     "TrajectoryIndexField",
     "TrajectoryIndexSpec",
     "TrajectoryBranchId",
@@ -640,11 +638,7 @@ __all__ = [
     "TrajectoryNodeRef",
     "TrajectoryNodeRole",
     "TrajectoryNodeSort",
-    "TrajectoryNodeStore",
-    "TrajectoryProjectionState",
-    "TrajectoryProjectionStatus",
     "TrajectoryQueryStore",
-    "TrajectoryStorage",
     "TrajectoryStore",
     "Trigger",
     "TriggerCodec",

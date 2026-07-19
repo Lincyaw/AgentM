@@ -5,8 +5,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from agentm.core.abi.store import SessionMeta
-from agentm.core.abi.trajectory import Turn, TurnCheckpoint, TurnRef
+from agentm.core.abi.store import (
+    SessionMeta,
+    TrajectoryCommit,
+)
+from agentm.core.abi.trajectory import (
+    TrajectoryHead,
+    TrajectoryNode,
+    Turn,
+    TurnCheckpoint,
+    TurnRef,
+)
+from agentm.core.lib.trajectory_nodes import TrajectoryIndexState
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
     validate_checkpoint_commit,
@@ -16,7 +26,7 @@ from agentm.core.lib.trajectory_store import (
 )
 
 
-class InMemoryTrajectoryStore:
+class InMemoryTrajectoryStore(TrajectoryIndexState):
     """A ``TrajectoryStore`` backed by a plain dict.
 
     Non-persistent: all state is lost on process exit.  Returns shallow
@@ -25,22 +35,35 @@ class InMemoryTrajectoryStore:
     and shared between copies.
     """
 
-    __slots__ = ("_checkpoints", "_sessions")
-
     def __init__(self) -> None:
+        super().__init__()
         self._sessions: dict[str, tuple[SessionMeta, list[Turn]]] = {}
         self._checkpoints: dict[str, TurnCheckpoint] = {}
 
-    def create_session(self, meta: SessionMeta) -> None:
-        self.create_session_with_turns(meta, ())
-
-    def create_session_with_turns(
-        self, meta: SessionMeta, turns: Sequence[Turn]
+    def create_session(
+        self,
+        meta: SessionMeta,
+        *,
+        turns: Sequence[Turn] = (),
+        nodes: Sequence[TrajectoryNode] = (),
+        head: TrajectoryHead,
     ) -> None:
         if meta.id in self._sessions:
             raise ValueError(f"session already exists: {meta.id}")
         copied = list(turns)
         validate_turn_sequence(copied)
+        if head.session_id != meta.id:
+            raise ValueError("initial trajectory head must belong to the session")
+        turn_ids = {turn.id for turn in copied}
+        if any(node.turn_id not in turn_ids for node in nodes):
+            raise ValueError(
+                "initial trajectory nodes must belong to an initial committed turn"
+            )
+        self._initialize_index(
+            meta.id,
+            nodes,
+            head=head,
+        )
         self._sessions[meta.id] = (meta, copied)
 
     def save_checkpoint(
@@ -60,12 +83,20 @@ class InMemoryTrajectoryStore:
             raise KeyError(session_id)
         return self._checkpoints.get(session_id)
 
-    def append(self, session_id: str, turn: Turn) -> None:
+    def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
         record = self._sessions.get(session_id)
         if record is None:
             raise KeyError(session_id)
+        turn = commit.turn
         validate_turn_append(record[1], turn)
         validate_checkpoint_commit(self._checkpoints.get(session_id), turn)
+        if any(node.session_id != session_id for node in commit.nodes):
+            raise ValueError("trajectory commit nodes must belong to the session")
+        self._commit_nodes(
+            session_id,
+            commit.nodes,
+            advance_head=commit.advance_head,
+        )
         record[1].append(turn)
         self._checkpoints.pop(session_id, None)
 
@@ -100,5 +131,6 @@ class InMemoryTrajectoryStore:
 
     def list_sessions(self) -> list[SessionMeta]:
         return [meta for meta, _ in self._sessions.values()]
+
 
 __all__ = ["InMemoryTrajectoryStore"]

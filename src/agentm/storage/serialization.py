@@ -23,8 +23,6 @@ from agentm.core.abi.trajectory import (
     TrajectoryNode,
     TrajectoryNodeKind,
     TrajectoryNodeRole,
-    TrajectoryProjectionState,
-    TrajectoryProjectionStatus,
 )
 
 
@@ -427,78 +425,6 @@ def deserialize_head(data: Mapping[str, Any]) -> TrajectoryHead:
     )
 
 
-def serialize_projection_status(status: TrajectoryProjectionStatus) -> JsonObject:
-    return {
-        "schema_version": STORAGE_RECORD_VERSION,
-        "session_id": status.session_id,
-        "state": status.state,
-        "high_water_turn_id": status.high_water_turn_id,
-        "high_water_turn_index": status.high_water_turn_index,
-        "node_count": status.node_count,
-        "updated_at": status.updated_at,
-        "error": status.error,
-        "metadata": json_safe(status.metadata),
-    }
-
-
-def deserialize_projection_status(data: Mapping[str, Any]) -> TrajectoryProjectionStatus:
-    _only_fields(
-        data,
-        {
-            "schema_version",
-            "session_id",
-            "state",
-            "high_water_turn_id",
-            "high_water_turn_index",
-            "node_count",
-            "updated_at",
-            "error",
-            "metadata",
-        },
-        "projection status",
-    )
-    _validate_version(data, "projection status")
-    metadata = json_restore(data.get("metadata", {}))
-    if not isinstance(metadata, Mapping):
-        raise ValueError("projection status metadata must be an object")
-    return TrajectoryProjectionStatus(
-        session_id=_required_str(data, "session_id", path="projection status"),
-        state=cast(
-            TrajectoryProjectionState,
-            _enum(
-                data,
-                "state",
-                path="projection status",
-                allowed={"current", "stale", "failed"},
-            ),
-        ),
-        high_water_turn_id=_optional_str(
-            data.get("high_water_turn_id"),
-            path="projection status.high_water_turn_id",
-        ),
-        high_water_turn_index=_optional_int(
-            data.get("high_water_turn_index"),
-            path="projection status.high_water_turn_index",
-        ),
-        node_count=_required_int(
-            data,
-            "node_count",
-            path="projection status",
-            minimum=0,
-        ),
-        updated_at=_required_number(
-            data,
-            "updated_at",
-            path="projection status",
-        ),
-        error=_optional_str(
-            data.get("error"),
-            path="projection status.error",
-        ),
-        metadata=dict(metadata),
-    )
-
-
 def serialize_content_state(state: ContentReplacementState) -> JsonObject:
     return {
         "schema_version": STORAGE_RECORD_VERSION,
@@ -862,7 +788,6 @@ __all__ = [
     "deserialize_content_state",
     "deserialize_head",
     "deserialize_node",
-    "deserialize_projection_status",
     "deserialize_prompt_cache_state",
     "deserialize_resource_version",
     "json_restore",
@@ -873,7 +798,6 @@ __all__ = [
     "serialize_content_state",
     "serialize_head",
     "serialize_node",
-    "serialize_projection_status",
     "serialize_prompt_cache_state",
     "serialize_resource_version",
 ]

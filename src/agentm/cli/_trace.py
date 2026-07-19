@@ -11,7 +11,7 @@ from typing import Literal, NotRequired, TypeVar, TypedDict
 import typer
 
 from agentm.cli._display import EXIT_NOT_FOUND, is_tty, stderr_console
-from agentm.cli._store import resolve_trajectory_storage
+from agentm.cli._store import resolve_trajectory_store
 from agentm.core.abi.messages import (
     ImageContent,
     TextContent,
@@ -87,9 +87,9 @@ def _get_query_store(ctx: typer.Context) -> TrajectoryQueryStore:
     if state is not None:
         raise TypeError("agentm trace received an unexpected command context")
 
-    resolved = resolve_trajectory_storage()
+    resolved = resolve_trajectory_store()
     if resolved is not None:
-        query = TrajectoryStoreQueryAdapter(resolved.storage.turn_store)
+        query = TrajectoryStoreQueryAdapter(resolved.store)
         ctx.obj = _TraceContext(query=query)
         ctx.call_on_close(resolved.close)
         return query

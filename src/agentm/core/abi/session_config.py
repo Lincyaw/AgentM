@@ -20,7 +20,7 @@ from agentm.core.abi.session_api import (
     SessionSpecResolver,
     normalize_extension_spec,
 )
-from agentm.core.abi.store import TrajectoryStorage
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.tool_executor import ToolExecutor
 from agentm.core.abi.tool_orchestration import ToolOrchestrator
 
@@ -48,7 +48,7 @@ __all__ = [
     "SessionSpecResolver",
     "ToolExecutor",
     "ToolOrchestrator",
-    "TrajectoryStorage",
+    "TrajectoryStore",
     "VersionedResourceStore",
     "normalize_extension_spec",
 ]

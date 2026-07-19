@@ -1,19 +1,17 @@
 """Trajectory storage backend implementations."""
 
-from agentm.storage.trajectory.jsonl import JsonlTrajectoryNodeStore
-from agentm.storage.trajectory.postgres import PostgresTrajectoryNodeStore
-from agentm.storage.trajectory.postgres_turns import PostgresTrajectoryStore
+from agentm.storage.trajectory.jsonl import JsonlTrajectoryStore
+from agentm.storage.trajectory.postgres import PostgresTrajectoryStore
 from agentm.storage.trajectory.resolve import (
-    ResolvedTrajectoryStorage,
-    resolve_trajectory_storage,
-    resolve_trajectory_storage_or_create,
+    ResolvedTrajectoryStore,
+    resolve_trajectory_store,
+    resolve_trajectory_store_or_create,
 )
 
 __all__ = [
-    "JsonlTrajectoryNodeStore",
-    "PostgresTrajectoryNodeStore",
+    "JsonlTrajectoryStore",
     "PostgresTrajectoryStore",
-    "ResolvedTrajectoryStorage",
-    "resolve_trajectory_storage",
-    "resolve_trajectory_storage_or_create",
+    "ResolvedTrajectoryStore",
+    "resolve_trajectory_store",
+    "resolve_trajectory_store_or_create",
 ]
