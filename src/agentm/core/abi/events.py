@@ -227,7 +227,6 @@ class ExtensionInstallEvent(Event):
     name: str = ""
     module_path: str = ""
     phase: str = ""
-    config: dict[str, Any] = field(default_factory=dict)
     duration_ns: int = 0
     trigger: str = "session_start"
     error: str | None = None

@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.tool import ToolOutcome, ToolResult
+from agentm.core.abi.tool import ToolMetadataProvider, ToolOutcome, ToolResult
 from agentm.core.abi.tool_executor import (
     ToolExecutionCapabilities,
     ToolExecutionRequest,
@@ -51,7 +51,10 @@ class ProcessToolExecutor:
             tmp_dir = Path(tmp_dir_text)
             args_path = tmp_dir / "args.json"
             result_path = tmp_dir / "result.pickle"
-            args_path.write_text(json.dumps(dict(request.args), default=repr), encoding="utf-8")
+            args_path.write_text(
+                json.dumps(dict(request.args), allow_nan=False),
+                encoding="utf-8",
+            )
             env = dict(os.environ)
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -103,8 +106,12 @@ class ProcessToolExecutor:
 
 
 def _process_entrypoint(request: ToolExecutionRequest) -> str:
-    metadata = getattr(request.tool, "metadata", None)
-    entrypoint = metadata.get(PROCESS_ENTRYPOINT_METADATA_KEY) if isinstance(metadata, dict) else None
+    metadata = (
+        request.tool.metadata
+        if isinstance(request.tool, ToolMetadataProvider)
+        else {}
+    )
+    entrypoint = metadata.get(PROCESS_ENTRYPOINT_METADATA_KEY)
     if not isinstance(entrypoint, str) or ":" not in entrypoint:
         raise RuntimeError(
             "process-isolated tools must declare metadata['process_entrypoint'] "

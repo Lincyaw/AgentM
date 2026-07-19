@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+import math
 from typing import Any
 
 from agentm.core.abi.catalog import ActiveSetFingerprint
@@ -130,45 +131,43 @@ def provider_identity_from_session_meta(
     )
 
 
-def _config_str(config: dict[str, MetaConfigValue], key: str) -> str | None:
+def _config_str(config: Mapping[str, MetaConfigValue], key: str) -> str | None:
     value = config.get(key)
-    return value if isinstance(value, str) and value else None
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ResumeIdentityError(f"stored session config {key!r} must be a string")
+    return value
 
 
 def _config_int(
-    config: dict[str, MetaConfigValue],
+    config: Mapping[str, MetaConfigValue],
     key: str,
     *,
     default: int,
 ) -> int:
     value = config.get(key)
-    if isinstance(value, bool):
+    if value is None:
         return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return default
-    return default
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ResumeIdentityError(
+            f"stored session config {key!r} must be a non-negative integer"
+        )
+    return value
 
 
 def _config_int_optional(
-    config: dict[str, MetaConfigValue],
+    config: Mapping[str, MetaConfigValue],
     key: str,
 ) -> int | None:
     value = config.get(key)
-    if isinstance(value, bool):
+    if value is None:
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ResumeIdentityError(
+            f"stored session config {key!r} must be a non-negative integer"
+        )
+    return value
 
 
 def resolved_spec_digest(spec: ResolvedSessionSpec) -> str:
@@ -219,10 +218,14 @@ def _provenance_record(spec: ResolvedSessionSpec) -> list[dict[str, Any]]:
 
 def _metadata_record(value: object, *, path: str) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{path} must contain finite numbers")
         return value
     if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError(f"{path} must use string object keys")
         return {
-            str(key): _metadata_record(item, path=f"{path}.{key}")
+            key: _metadata_record(item, path=f"{path}.{key}")
             for key, item in value.items()
         }
     if isinstance(value, Sequence) and not isinstance(
@@ -250,6 +253,7 @@ def _stable_json(value: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        allow_nan=False,
     )
 
 

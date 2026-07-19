@@ -315,7 +315,6 @@ def _diagnostic_to_otel(event: DiagnosticEvent, telemetry: Any) -> None:
 def _extension_install_to_otel(event: ExtensionInstallEvent, telemetry: Any) -> None:
     telemetry.emit_log(
         "agentm.extension.install",
-        body={"config": to_jsonable(event.config)},
         attributes=_attrs(
             telemetry,
             **{

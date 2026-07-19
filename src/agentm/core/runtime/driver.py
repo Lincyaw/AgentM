@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
 from loguru import logger
 
@@ -171,6 +171,7 @@ ThinkingLevel = Literal["off", "low", "medium", "high"]
 # --- Helpers ----------------------------------------------------------------
 
 _INTERRUPTED_TOOL_TEXT = "Tool execution interrupted"
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,6 +620,19 @@ async def _append_turn(
             cancelled = True
     task.result()
     return cancelled
+
+
+async def _await_known_outcome(awaitable: Awaitable[_T]) -> tuple[_T, bool]:
+    """Wait for a state transition without letting caller cancellation race it."""
+
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    return task.result(), cancelled
 
 
 async def _abandon_effect_turn(
@@ -1234,34 +1248,42 @@ async def drive(
 
         _interrupt.clear()
 
-        execution = trajectory.begin(trigger)
-        await bus.emit(TurnBeginEvent.CHANNEL, TurnBeginEvent(
-            index=execution.index,
-            turn_index=execution.index,
-            turn_id=execution.id,
-            trigger=trigger,
-        ))
-
         effect_txn: EffectTxn | None = None
         resource_txn: ResourceTxn | None = None
         resource_txn_committed = False
         durable_turn_appended = False
         turn_published = False
         try:
-            effect_txn = await _begin_effect_turn(
-                effect_scope,
-                bus=bus,
-                session_id=session_id,
-                turn_id=execution.id,
+            execution = trajectory.begin(trigger)
+            await bus.emit(TurnBeginEvent.CHANNEL, TurnBeginEvent(
+                index=execution.index,
                 turn_index=execution.index,
-            )
-            resource_txn = await _begin_resource_txn(
-                resource_writer,
-                services,
-                session_id=session_id,
                 turn_id=execution.id,
-                turn_index=execution.index,
+                trigger=trigger,
+            ))
+
+            effect_txn, cancelled_during_effect_begin = await _await_known_outcome(
+                _begin_effect_turn(
+                    effect_scope,
+                    bus=bus,
+                    session_id=session_id,
+                    turn_id=execution.id,
+                    turn_index=execution.index,
+                )
             )
+            if cancelled_during_effect_begin:
+                raise asyncio.CancelledError
+            resource_txn, cancelled_during_resource_begin = await _await_known_outcome(
+                _begin_resource_txn(
+                    resource_writer,
+                    services,
+                    session_id=session_id,
+                    turn_id=execution.id,
+                    turn_index=execution.index,
+                )
+            )
+            if cancelled_during_resource_begin:
+                raise asyncio.CancelledError
             outcome, meta, tool_calls_used = await _react_loop(
                 execution=execution,
                 trajectory=trajectory,
@@ -1307,7 +1329,12 @@ async def drive(
                 trajectory.prepare_commit(outcome, meta),
                 trigger_metadata=envelope.metadata,
             )
-            resource_mutations = await _prepare_resource_txn(resource_txn)
+            (
+                resource_mutations,
+                cancelled_during_resource_prepare,
+            ) = await _await_known_outcome(_prepare_resource_txn(resource_txn))
+            if cancelled_during_resource_prepare:
+                raise asyncio.CancelledError
             if resource_mutations:
                 turn = replace(
                     turn,
@@ -1316,29 +1343,47 @@ async def drive(
                         resource_mutations=resource_mutations,
                     ),
                 )
-            await _apply_resource_txn(resource_txn)
-            await _prepare_effect_turn(
-                effect_scope,
-                effect_txn,
-                turn,
-                bus=bus,
+            _, cancelled_during_resource_apply = await _await_known_outcome(
+                _apply_resource_txn(resource_txn)
             )
+            if cancelled_during_resource_apply:
+                raise asyncio.CancelledError
+            _, cancelled_during_effect_prepare = await _await_known_outcome(
+                _prepare_effect_turn(
+                    effect_scope,
+                    effect_txn,
+                    turn,
+                    bus=bus,
+                )
+            )
+            if cancelled_during_effect_prepare:
+                raise asyncio.CancelledError
             node_append_position: _NodeAppendPosition | None = None
             if trajectory_node_store is not None:
-                node_append_position = await _node_append_position(
-                    trajectory_node_store,
-                    session_id,
-                    committed_turns=trajectory.turns,
-                    root_session_id=root_session_id,
-                    parent_session_id=parent_session_id,
-                    trigger_renderers=trigger_renderers,
+                (
+                    node_append_position,
+                    cancelled_during_node_position,
+                ) = await _await_known_outcome(
+                    _node_append_position(
+                        trajectory_node_store,
+                        session_id,
+                        committed_turns=trajectory.turns,
+                        root_session_id=root_session_id,
+                        parent_session_id=parent_session_id,
+                        trigger_renderers=trigger_renderers,
+                    )
                 )
+                if cancelled_during_node_position:
+                    raise asyncio.CancelledError
             cancelled_during_append = False
             if store is not None:
                 cancelled_during_append = await _append_turn(store, session_id, turn)
                 durable_turn_appended = True
             try:
-                await _commit_resource_txn(resource_txn)
+                (
+                    _,
+                    cancelled_during_resource_commit,
+                ) = await _await_known_outcome(_commit_resource_txn(resource_txn))
                 resource_txn_committed = resource_txn is not None
             except Exception:
                 if durable_turn_appended:
@@ -1374,26 +1419,43 @@ async def drive(
                         parent_session_id=parent_session_id,
                         updated_at=time.time(),
                     )
-                    await _append_or_rebuild_nodes(
-                        store=trajectory_node_store,
-                        session_id=session_id,
-                        nodes=nodes,
-                        advance_head=advance_head,
-                        committed_turns=(*trajectory.turns, turn),
-                        root_session_id=root_session_id,
-                        parent_session_id=parent_session_id,
-                        trigger_renderers=trigger_renderers,
+                    _, cancelled_during_node_append = await _await_known_outcome(
+                        _append_or_rebuild_nodes(
+                            store=trajectory_node_store,
+                            session_id=session_id,
+                            nodes=nodes,
+                            advance_head=advance_head,
+                            committed_turns=trajectory.turns,
+                            root_session_id=root_session_id,
+                            parent_session_id=parent_session_id,
+                            trigger_renderers=trigger_renderers,
+                        )
                     )
-            await _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
+                else:
+                    cancelled_during_node_append = False
+            else:
+                cancelled_during_node_append = False
+            _, cancelled_during_effect_commit = await _await_known_outcome(
+                _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
+            )
             triggers.complete(turn)
+            cancelled_during_event = False
             try:
                 await bus.emit(TurnCommittedEvent.CHANNEL, TurnCommittedEvent(turn=turn))
             except asyncio.CancelledError:
-                logger.debug("TurnCommittedEvent emit interrupted by cancellation")
+                cancelled_during_event = True
             turns_run += 1
             tool_calls_run += tool_calls_used
 
-            if cancelled_during_append:
+            if any(
+                (
+                    cancelled_during_append,
+                    cancelled_during_resource_commit,
+                    cancelled_during_node_append,
+                    cancelled_during_effect_commit,
+                    cancelled_during_event,
+                )
+            ):
                 triggers.terminate(TriggerTerminated("driver cancelled after commit"))
                 raise asyncio.CancelledError
 

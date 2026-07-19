@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import math
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
@@ -29,13 +30,33 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 
 
+def _require_string(value: object, label: str, *, allow_empty: bool = True) -> None:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise TypeError(f"{label} must be a string")
+
+
+def _require_timestamp(value: object, label: str) -> None:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+    ):
+        raise ValueError(f"{label} must be a finite number")
+
+
 def freeze_json(value: Any) -> JsonValue:
     """Defensively copy a JSON value into immutable containers."""
 
     if value is None or isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
         return value
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): freeze_json(item) for key, item in value.items()})
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("JSON object keys must be strings")
+        return MappingProxyType(
+            {key: freeze_json(item) for key, item in value.items()}
+        )
     if isinstance(value, (list, tuple)):
         return tuple(freeze_json(item) for item in value)
     raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
@@ -65,6 +86,27 @@ class MessageMeta:
     tags: Mapping[str, JsonValue] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
+        if not isinstance(self.synthetic, bool):
+            raise TypeError("synthetic must be a bool")
+        if not isinstance(self.no_response_requested, bool):
+            raise TypeError("no_response_requested must be a bool")
+        for label, value in (
+            ("synthetic_kind", self.synthetic_kind),
+            ("origin", self.origin),
+            ("target_session_id", self.target_session_id),
+            ("target_agent_id", self.target_agent_id),
+            ("mode", self.mode),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{label} must be a string or None")
+        if self.visibility not in {"visible", "hidden", "replay_only"}:
+            raise ValueError(f"invalid message visibility: {self.visibility!r}")
+        if self.token_accounting not in {"normal", "exclude", "metadata_only"}:
+            raise ValueError(
+                f"invalid message token accounting: {self.token_accounting!r}"
+            )
+        if self.replay not in {"include", "skip", "metadata_only"}:
+            raise ValueError(f"invalid message replay policy: {self.replay!r}")
         object.__setattr__(self, "tags", freeze_json(self.tags))
 
 
@@ -78,6 +120,11 @@ class TextContent:
     type: Literal["text"]
     text: str
 
+    def __post_init__(self) -> None:
+        if self.type != "text":
+            raise ValueError(f"invalid text content type: {self.type!r}")
+        _require_string(self.text, "text content")
+
 
 @dataclass(slots=True, frozen=True)
 class ImageContent:
@@ -86,6 +133,13 @@ class ImageContent:
     type: Literal["image"]
     data: bytes
     mime_type: str
+
+    def __post_init__(self) -> None:
+        if self.type != "image":
+            raise ValueError(f"invalid image content type: {self.type!r}")
+        if not isinstance(self.data, bytes):
+            raise TypeError("image content data must be bytes")
+        _require_string(self.mime_type, "image MIME type", allow_empty=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,6 +153,13 @@ class ThinkingBlock:
     type: Literal["thinking"]
     text: str
     signature: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type != "thinking":
+            raise ValueError(f"invalid thinking block type: {self.type!r}")
+        _require_string(self.text, "thinking text")
+        if self.signature is not None:
+            _require_string(self.signature, "thinking signature")
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,7 +176,16 @@ class ToolCallBlock:
     arguments: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "arguments", freeze_json(self.arguments))
+        if self.type != "tool_call":
+            raise ValueError(f"invalid tool call block type: {self.type!r}")
+        _require_string(self.id, "tool call id", allow_empty=False)
+        _require_string(self.name, "tool call name", allow_empty=False)
+        if not isinstance(self.arguments, Mapping):
+            raise TypeError("tool call arguments must be an object")
+        frozen = freeze_json(self.arguments)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("tool call arguments must be an object")
+        object.__setattr__(self, "arguments", frozen)
 
 
 @dataclass(slots=True, frozen=True)
@@ -130,7 +200,17 @@ class ToolResultBlock:
     extras: JsonValue = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "content", tuple(self.content))
+        if self.type != "tool_result":
+            raise ValueError(f"invalid tool result block type: {self.type!r}")
+        _require_string(self.tool_call_id, "tool result call id", allow_empty=False)
+        if not isinstance(self.is_error, bool):
+            raise TypeError("tool result is_error must be a bool")
+        if not isinstance(self.deterministic, bool):
+            raise TypeError("tool result deterministic must be a bool")
+        content = tuple(self.content)
+        if not all(isinstance(item, (TextContent, ImageContent)) for item in content):
+            raise TypeError("tool result content must contain text or image blocks")
+        object.__setattr__(self, "content", content)
         object.__setattr__(self, "extras", freeze_json(self.extras))
 
 
@@ -149,6 +229,16 @@ class Usage:
     cache_read: int = 0
     cache_write: int = 0
 
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("cache_read", self.cache_read),
+            ("cache_write", self.cache_write),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{label} must be a non-negative integer")
+
 
 @dataclass(slots=True, frozen=True)
 class UserMessage:
@@ -160,7 +250,15 @@ class UserMessage:
     meta: MessageMeta = field(default_factory=MessageMeta)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "content", tuple(self.content))
+        if self.role != "user":
+            raise ValueError(f"invalid user message role: {self.role!r}")
+        content = tuple(self.content)
+        if not all(isinstance(item, (TextContent, ImageContent)) for item in content):
+            raise TypeError("user message content must contain text or image blocks")
+        _require_timestamp(self.timestamp, "user message timestamp")
+        if not isinstance(self.meta, MessageMeta):
+            raise TypeError("user message meta must be MessageMeta")
+        object.__setattr__(self, "content", content)
 
 
 @dataclass(slots=True, frozen=True)
@@ -186,7 +284,24 @@ class AssistantMessage:
     meta: MessageMeta = field(default_factory=MessageMeta)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "content", tuple(self.content))
+        if self.role != "assistant":
+            raise ValueError(f"invalid assistant message role: {self.role!r}")
+        content = tuple(self.content)
+        if not all(
+            isinstance(item, (TextContent, ToolCallBlock, ThinkingBlock))
+            for item in content
+        ):
+            raise TypeError(
+                "assistant message content must contain text, thinking, or tool calls"
+            )
+        _require_timestamp(self.timestamp, "assistant message timestamp")
+        if self.stop_reason is not None:
+            _require_string(self.stop_reason, "assistant stop_reason")
+        if self.usage is not None and not isinstance(self.usage, Usage):
+            raise TypeError("assistant usage must be Usage or None")
+        if not isinstance(self.meta, MessageMeta):
+            raise TypeError("assistant message meta must be MessageMeta")
+        object.__setattr__(self, "content", content)
 
 
 @dataclass(slots=True, frozen=True)
@@ -203,7 +318,15 @@ class ToolResultMessage:
     meta: MessageMeta = field(default_factory=MessageMeta)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "content", tuple(self.content))
+        if self.role != "tool_result":
+            raise ValueError(f"invalid tool result message role: {self.role!r}")
+        content = tuple(self.content)
+        if not all(isinstance(item, ToolResultBlock) for item in content):
+            raise TypeError("tool result message content must contain tool result blocks")
+        _require_timestamp(self.timestamp, "tool result message timestamp")
+        if not isinstance(self.meta, MessageMeta):
+            raise TypeError("tool result message meta must be MessageMeta")
+        object.__setattr__(self, "content", content)
 
 
 # Discriminated union of every message kind the agent loop manipulates.

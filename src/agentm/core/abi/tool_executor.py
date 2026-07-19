@@ -81,7 +81,9 @@ class ToolExecutor(Protocol):
 def tool_execution_requirements(tool: Tool) -> ToolExecutionRequirements | None:
     """Return typed requirements declared by a tool, if any."""
 
-    candidate = getattr(tool, "execution_requirements", None)
+    if not isinstance(tool, ToolExecutionRequirementsProvider):
+        return None
+    candidate = tool.execution_requirements
     if isinstance(candidate, ToolExecutionRequirements):
         return candidate
     return None

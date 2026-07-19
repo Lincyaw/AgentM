@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import json
+import math
 import re
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from agentm.core.abi.codec import DEFAULT_CODEC
 from agentm.core.abi.query import (
@@ -18,15 +19,44 @@ from agentm.core.abi.query import (
 from agentm.core.abi.trajectory import Turn
 
 
+@runtime_checkable
+class ClickHouseQueryResult(Protocol):
+    """Result surface returned by clickhouse-connect."""
+
+    result_rows: Sequence[Sequence[Any]]
+
+
+@runtime_checkable
+class ClickHouseQueryClient(Protocol):
+    """Minimal clickhouse-connect query client contract."""
+
+    def query(
+        self,
+        query: str,
+        *,
+        parameters: dict[str, object] | None = None,
+    ) -> ClickHouseQueryResult: ...
+
+
 class ClickHouseTraceQueryStore:
     """Trace query store over a ClickHouse client.
 
-    The client is expected to expose ``query(sql, parameters=...)`` or
-    ``execute(sql, params)``. This adapter is read-only: ClickHouse is a query
-    mirror and never owns current trajectory heads.
+    The client follows the ``clickhouse-connect`` query contract. This adapter
+    is read-only: ClickHouse is a query mirror and never owns current
+    trajectory heads. Other client libraries should supply a small adapter
+    implementing :class:`ClickHouseQueryClient`.
     """
 
-    def __init__(self, client: object, *, database: str = "agentm") -> None:
+    def __init__(
+        self,
+        client: ClickHouseQueryClient,
+        *,
+        database: str = "agentm",
+    ) -> None:
+        if not isinstance(client, ClickHouseQueryClient):
+            raise TypeError(
+                "ClickHouseTraceQueryStore requires a ClickHouseQueryClient"
+            )
         self._client = client
         self._database = _validate_identifier(
             database,
@@ -50,12 +80,26 @@ class ClickHouseTraceQueryStore:
         )
         return [
             SessionIdentity(
-                id=str(row[0]),
-                parent_session_id=_optional_str(row[1]),
-                root_session_id=_optional_str(row[2]),
-                purpose=str(row[3] or "root"),
-                cwd=str(row[4] or ""),
-                created_at=float(row[5] or 0.0),
+                id=_required_str(row[0], column="id"),
+                parent_session_id=_optional_str(
+                    row[1],
+                    column="parent_session_id",
+                ),
+                root_session_id=_optional_str(
+                    row[2],
+                    column="root_session_id",
+                ),
+                purpose=_nullable_str(
+                    row[3],
+                    column="purpose",
+                    default="root",
+                ),
+                cwd=_nullable_str(row[4], column="cwd", default=""),
+                created_at=_finite_float(
+                    row[5],
+                    column="created_at",
+                    default=0.0,
+                ),
                 config=_json_mapping(row[6]),
             )
             for row in rows
@@ -86,8 +130,12 @@ class ClickHouseTraceQueryStore:
         return [
             EventRecord(
                 session_id=session_id,
-                name=str(row[0]),
-                timestamp=float(row[1] or 0.0),
+                name=_required_str(row[0], column="name"),
+                timestamp=_finite_float(
+                    row[1],
+                    column="timestamp",
+                    default=0.0,
+                ),
                 payload=_json_mapping(row[2]),
                 meta=QueryMeta(attributes=_json_mapping(row[3])),
             )
@@ -107,26 +155,36 @@ class ClickHouseTraceQueryStore:
         return [
             SpanRecord(
                 session_id=session_id,
-                name=str(row[0]),
-                span_id=str(row[1] or ""),
-                parent_span_id=_optional_str(row[2]),
-                start_time=float(row[3] or 0.0),
-                end_time=float(row[4]) if row[4] is not None else None,
+                name=_required_str(row[0], column="name"),
+                span_id=_nullable_str(
+                    row[1],
+                    column="span_id",
+                    default="",
+                ),
+                parent_span_id=_optional_str(
+                    row[2],
+                    column="parent_span_id",
+                ),
+                start_time=_finite_float(
+                    row[3],
+                    column="start_time",
+                    default=0.0,
+                ),
+                end_time=(
+                    _finite_float(row[4], column="end_time")
+                    if row[4] is not None
+                    else None
+                ),
                 attributes=_json_mapping(row[5]),
             )
             for row in rows
         ]
 
     def _query(self, sql: str, params: dict[str, object]) -> Sequence[Sequence[Any]]:
-        query = getattr(self._client, "query", None)
-        if callable(query):
-            result = query(sql, parameters=params)
-            rows = getattr(result, "result_rows", result)
-            return list(rows)
-        execute = getattr(self._client, "execute", None)
-        if callable(execute):
-            return list(execute(sql, params))
-        raise TypeError("ClickHouse client must expose query() or execute()")
+        result = self._client.query(sql, parameters=params)
+        if not isinstance(result, ClickHouseQueryResult):
+            raise TypeError("ClickHouseQueryClient.query() returned an invalid result")
+        return list(result.result_rows)
 
 
 def _session_where(filter: SessionFilter | None) -> tuple[str, dict[str, object]]:
@@ -166,8 +224,42 @@ def _json_mapping(value: object) -> dict[str, object]:
     raise ValueError("ClickHouse JSON column must contain an object")
 
 
-def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
+def _required_str(value: object, *, column: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"ClickHouse column {column!r} must contain a non-empty string")
+    return value
+
+
+def _optional_str(value: object, *, column: str) -> str | None:
+    if value is None or value == "":
+        return None
+    return _required_str(value, column=column)
+
+
+def _nullable_str(value: object, *, column: str, default: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"ClickHouse column {column!r} must contain a string or NULL")
+    return value
+
+
+def _finite_float(
+    value: object,
+    *,
+    column: str,
+    default: float | None = None,
+) -> float:
+    if value is None:
+        if default is None:
+            raise ValueError(f"ClickHouse column {column!r} must contain a number")
+        return default
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"ClickHouse column {column!r} must contain a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"ClickHouse column {column!r} must contain a finite number")
+    return number
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -179,4 +271,8 @@ def _validate_identifier(value: str, *, label: str) -> str:
     return value
 
 
-__all__ = ["ClickHouseTraceQueryStore"]
+__all__ = [
+    "ClickHouseQueryClient",
+    "ClickHouseQueryResult",
+    "ClickHouseTraceQueryStore",
+]

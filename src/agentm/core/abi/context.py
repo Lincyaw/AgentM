@@ -141,9 +141,13 @@ def render_trigger(
 ) -> list[AgentMessage]:
     """Convert a Trigger into AgentMessages using registered renderers."""
 
-    source = getattr(trigger, "source", "unknown")
+    if not isinstance(trigger, Trigger):
+        raise TypeError("trigger must implement the Trigger protocol")
+    source = trigger.source
+    if not isinstance(source, str) or not source:
+        raise ValueError("trigger source must be a non-empty string")
     if renderers and source in renderers:
-        return renderers[source].render(trigger)  # type: ignore[arg-type]
+        return renderers[source].render(trigger)
 
     if isinstance(trigger, UserInput):
         return _render_user_input(trigger)
@@ -163,7 +167,9 @@ def render_trigger(
     if isinstance(trigger, SubagentResult):
         return _render_system_reminder("subagent", trigger.payload)
 
-    return _render_system_reminder(source, str(trigger))
+    raise LookupError(
+        f"trigger source {source!r} has no registered TriggerRenderer"
+    )
 
 
 # --- Turn → messages --------------------------------------------------------

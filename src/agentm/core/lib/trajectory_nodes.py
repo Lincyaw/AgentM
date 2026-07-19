@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
-from typing import cast
 
 from agentm.core.abi.context import render_trigger
 from agentm.core.abi.messages import (
@@ -30,7 +29,6 @@ from agentm.core.abi.trajectory import (
     TrajectoryIndexSpec,
     TrajectoryLeaf,
     TrajectoryNode,
-    TrajectoryNodeRole,
     TrajectoryProjectionStatus,
     Turn,
 )
@@ -62,12 +60,6 @@ def messages_to_nodes(
     nodes: list[TrajectoryNode] = []
     parent = parent_node_id
     for offset, message in enumerate(messages):
-        msg_role = getattr(message, "role", "control")
-        role = (
-            cast(TrajectoryNodeRole, msg_role)
-            if msg_role in {"user", "assistant", "tool_result"}
-            else "control"
-        )
         tool_call_ids, tool_names, cache_key, content_ref = _message_indexes(message)
         node = TrajectoryNode(
             id=f"{node_id_prefix}:{offset}",
@@ -78,7 +70,7 @@ def messages_to_nodes(
             parent_session_id=parent_session_id,
             branch_id=branch_id,
             head_id=head_id,
-            role=role,
+            role=message.role,
             parent_id=parent,
             logical_parent_id=logical_parent_id if offset == 0 else None,
             turn_id=turn_id,
@@ -95,7 +87,7 @@ def messages_to_nodes(
             tool_names=tool_names,
             cache_key=cache_key,
             content_ref=content_ref,
-            visibility=getattr(message.meta, "visibility", "visible"),
+            visibility=message.meta.visibility,
             message=message,
             timestamp=timestamp,
         )
@@ -244,7 +236,7 @@ def _message_indexes(
     elif isinstance(message, ToolResultMessage):
         tool_call_ids.extend(block.tool_call_id for block in message.content)
 
-    tags = getattr(message.meta, "tags", {})
+    tags = message.meta.tags
     cache_key = tags.get("cache_key")
     content_ref = tags.get("content_ref")
     return (

@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import time
 import traceback
-from pathlib import Path
 from typing import Any, Literal
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     AtomAPI,
@@ -72,6 +71,8 @@ _TO_OTEL_CHANNELS: tuple[str, ...] = (
 
 
 class ObservabilityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     include_handler_records: bool = True
     exclude_channels: list[str] | None = None
     redact_prompts: bool = True
@@ -102,8 +103,12 @@ MANIFEST = ExtensionManifest(
 
 
 def _handler_label(handler: Handler) -> str:
-    module = getattr(handler, "__module__", None) or "<unknown>"
-    qualname = getattr(handler, "__qualname__", None) or repr(handler)
+    module = getattr(handler, "__module__", None)
+    qualname = getattr(handler, "__qualname__", None)
+    if not isinstance(module, str):
+        module = type(handler).__module__
+    if not isinstance(qualname, str):
+        qualname = type(handler).__qualname__
     return f"{module}.{qualname}"
 
 
@@ -201,8 +206,14 @@ class _ObservabilityObserver(EventBusObserver):
         try:
             payload = to_jsonable(event)
         except Exception as exc:
-            logger.debug("observability: event payload serialization failed: {}", exc)
-            return None
+            logger.debug(
+                "observability: event payload serialization failed with {}",
+                type(exc).__name__,
+            )
+            return {
+                "type": "serialization_error",
+                "error_type": type(exc).__name__,
+            }
         if channel == BeforeSendEvent.CHANNEL and isinstance(payload, dict):
             payload.pop("messages", None)
         if self._redact_prompts and channel in _REDACTED_CHANNELS:
@@ -216,8 +227,6 @@ class _ObservabilityRuntime:
         self._config = config
         self._telemetry = setup_session_telemetry(
             session.ctx.session_id,
-            Path(session.ctx.cwd or "."),
-            scenario_name=session.ctx.scenario,
             export_mode=config.export,
         )
         user_excludes = config.exclude_channels

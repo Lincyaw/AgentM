@@ -137,6 +137,13 @@ class Tool(Protocol):
     ) -> ToolResult | ToolOutcome: ...
 
 
+@runtime_checkable
+class ToolMetadataProvider(Protocol):
+    """Optional typed capability for tool classification metadata."""
+
+    metadata: dict[str, Any]
+
+
 @dataclass(slots=True)
 class FunctionTool:
     """Concrete ``Tool`` adapter wrapping an async callable.
@@ -219,6 +226,7 @@ __all__ = [
     "TOOL_RESULT_FORMAT_METADATA_KEY",
     "Tool",
     "ToolContinue",
+    "ToolMetadataProvider",
     "ToolOutcome",
     "ToolResult",
     "ToolTerminate",

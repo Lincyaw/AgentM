@@ -41,9 +41,9 @@ class Trigger(Protocol):
 class TriggerRenderer(Protocol):
     """Convert a Trigger into AgentMessages for context reconstruction.
 
-    Registered per ``source`` string.  If no renderer is registered for
-    a trigger's source, the default renderer wraps ``str(trigger)`` in
-    a system-reminder UserMessage.
+    Registered per ``source`` string. Custom trigger sources must install a
+    renderer; the runtime never derives durable prompt content from object
+    ``str`` or ``repr`` output.
     """
 
     def render(self, trigger: Trigger) -> list[AgentMessage]: ...
@@ -90,7 +90,7 @@ class TriggerEnvelope:
 
     @property
     def source(self) -> str:
-        return getattr(self.trigger, "source", "unknown")
+        return self.trigger.source
 
     @property
     def priority(self) -> TriggerPriority:

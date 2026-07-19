@@ -49,7 +49,6 @@ async def install_extension(
             name=name,
             module_path=module_path,
             phase="start",
-            config=resolved_config,
             trigger=trigger,
         ),
     )
@@ -71,7 +70,6 @@ async def install_extension(
                 name=name,
                 module_path=module_path,
                 phase="error" if error else "end",
-                config=resolved_config,
                 duration_ns=time.perf_counter_ns() - started_ns,
                 trigger=trigger,
                 error=error,

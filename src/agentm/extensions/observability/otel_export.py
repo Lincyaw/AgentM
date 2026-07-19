@@ -802,7 +802,12 @@ class SessionTelemetry:
             return value
         if isinstance(value, (str, int, float)):
             return value
-        return json.dumps(to_jsonable(value), default=str, ensure_ascii=False)
+        return json.dumps(
+            to_jsonable(value),
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
 
     def emit_log(
         self,
@@ -848,8 +853,6 @@ class SessionTelemetry:
 
 def setup_session_telemetry(
     session_id: str,
-    cwd: Path,
-    scenario_name: str | None = None,
     *,
     max_queue_size: int = 100_000,
     schedule_delay_millis: int = 200,
@@ -868,13 +871,7 @@ def setup_session_telemetry(
 
     The output path defaults to ``$AGENTM_HOME/observability/<session_id>.jsonl``.
     Callers that already know the absolute path (e.g. the trajectory store
-    direct-write callers) may override via ``file_path``; the ``cwd``
-    argument is then only used as a hint for resolving the default.
-
-    ``scenario_name`` is accepted for API compatibility but is **not**
-    stamped onto the resource — atoms that want to record it should
-    emit it as a span / log attribute (the observability atom does
-    via ``agentm.session.scenario``).
+    direct-write callers) may override via ``file_path``.
 
     The same file holds both spans and logs interleaved — the OTLP shape
     per line is what disambiguates them on read.
@@ -884,8 +881,6 @@ def setup_session_telemetry(
     ``max_queue_size`` is hit is to drop; we set queue size large enough
     that overflow is rare, and tests assert no drops at this size).
     """
-    del scenario_name  # No longer on the resource; observability atom emits as attribute.
-
     if export_mode not in {"auto", "local_file", "otlp"}:
         raise ValueError(f"unsupported observability export mode: {export_mode!r}")
 
@@ -919,7 +914,7 @@ def setup_session_telemetry(
         if file_path is not None:
             resolved_path = Path(file_path)
         else:
-            resolved_path = resolve_observability_dir(cwd) / f"{session_id}.jsonl"
+            resolved_path = resolve_observability_dir() / f"{session_id}.jsonl"
 
         effective_batch_size = (
             max_export_batch_size

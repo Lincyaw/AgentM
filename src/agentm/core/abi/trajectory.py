@@ -18,14 +18,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import math
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Union
 
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
+    JsonValue,
     MessageVisibility,
     ToolCallBlock,
     ToolResultBlock,
+    ToolResultMessage,
+    UserMessage,
+    freeze_json,
 )
 from agentm.core.abi.resource import ResourceMutation
 from agentm.core.abi.termination import TerminationCause
@@ -76,6 +82,49 @@ TrajectoryIndexField = Literal[
 ]
 
 
+def _require_string(value: object, label: str, *, optional: bool = False) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+
+
+def _require_index(value: object, label: str, *, optional: bool = False) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+
+
+def _require_finite(value: object, label: str) -> None:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+    ):
+        raise ValueError(f"{label} must be a finite number")
+
+
+def _freeze_metadata(
+    value: Mapping[str, object],
+    label: str,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be an object")
+    frozen = freeze_json(value)
+    if not isinstance(frozen, Mapping):
+        raise TypeError(f"{label} must be an object")
+    return frozen
+
+
+def _string_tuple(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, tuple) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise ValueError(f"{label} must be a tuple of non-empty strings")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class TrajectoryIndexSpec:
     """Backend-neutral index declaration for trajectory node stores."""
@@ -84,6 +133,15 @@ class TrajectoryIndexSpec:
     fields: tuple[TrajectoryIndexField, ...]
     unique: bool = False
     purpose: str = ""
+
+    def __post_init__(self) -> None:
+        _require_string(self.name, "trajectory index name")
+        if not self.fields:
+            raise ValueError("trajectory index fields cannot be empty")
+        if not isinstance(self.unique, bool):
+            raise TypeError("trajectory index unique must be a bool")
+        if not isinstance(self.purpose, str):
+            raise TypeError("trajectory index purpose must be a string")
 
 
 TRAJECTORY_NODE_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
@@ -186,6 +244,54 @@ class ContentReplacementState:
     head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID
     metadata: Mapping[str, object] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        _require_string(self.state_key, "content replacement state key")
+        object.__setattr__(
+            self,
+            "seen_tool_call_ids",
+            _string_tuple(
+                self.seen_tool_call_ids,
+                "content replacement seen tool call ids",
+            ),
+        )
+        if not isinstance(self.replacements, Mapping) or not all(
+            isinstance(key, str)
+            and key
+            and isinstance(value, str)
+            and value
+            for key, value in self.replacements.items()
+        ):
+            raise ValueError(
+                "content replacements must map non-empty strings to non-empty strings"
+            )
+        object.__setattr__(
+            self,
+            "replacements",
+            MappingProxyType(dict(self.replacements)),
+        )
+        _require_string(
+            self.source_session_id,
+            "content replacement source_session_id",
+            optional=True,
+        )
+        _require_string(
+            self.source_leaf_id,
+            "content replacement source_leaf_id",
+            optional=True,
+        )
+        _require_string(
+            self.leaf_node_id,
+            "content replacement leaf_node_id",
+            optional=True,
+        )
+        _require_string(self.branch_id, "content replacement branch_id")
+        _require_string(self.head_id, "content replacement head_id")
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "content replacement metadata"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PromptCacheState:
@@ -198,6 +304,27 @@ class PromptCacheState:
     head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID
     provider: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_string(self.cache_key, "prompt cache key")
+        _require_string(
+            self.leaf_node_id,
+            "prompt cache leaf_node_id",
+            optional=True,
+        )
+        _require_string(
+            self.content_replacement_state_key,
+            "prompt cache content_replacement_state_key",
+            optional=True,
+        )
+        _require_string(self.branch_id, "prompt cache branch_id")
+        _require_string(self.head_id, "prompt cache head_id")
+        _require_string(self.provider, "prompt cache provider", optional=True)
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "prompt cache metadata"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +352,27 @@ class TrajectoryHead:
     updated_at: float = 0.0
     metadata: Mapping[str, object] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        _validate_head_fields(
+            session_id=self.session_id,
+            head_id=self.head_id,
+            branch_id=self.branch_id,
+            node_id=self.node_id,
+            seq=self.seq,
+            root_session_id=self.root_session_id,
+            parent_session_id=self.parent_session_id,
+            logical_parent_id=self.logical_parent_id,
+            agent_id=self.agent_id,
+            is_sidechain=self.is_sidechain,
+            status=self.status,
+            updated_at=self.updated_at,
+        )
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "trajectory head metadata"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryHeadAdvance:
@@ -244,6 +392,32 @@ class TrajectoryHeadAdvance:
     status: TrajectoryHeadStatus = "active"
     updated_at: float = 0.0
     metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _validate_head_fields(
+            session_id=self.session_id,
+            head_id=self.head_id,
+            branch_id=self.branch_id,
+            node_id=self.node_id,
+            seq=self.seq,
+            root_session_id=self.root_session_id,
+            parent_session_id=self.parent_session_id,
+            logical_parent_id=self.logical_parent_id,
+            agent_id=self.agent_id,
+            is_sidechain=self.is_sidechain,
+            status=self.status,
+            updated_at=self.updated_at,
+        )
+        _require_string(
+            self.previous_node_id,
+            "trajectory head previous_node_id",
+            optional=True,
+        )
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "trajectory head advance metadata"),
+        )
 
     def to_head(self) -> TrajectoryHead:
         """Materialize the head record after the append succeeds."""
@@ -280,6 +454,33 @@ class TrajectoryForkPoint:
     branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID
     include_logical_parent: bool = True
 
+    def __post_init__(self) -> None:
+        _require_string(self.session_id, "trajectory fork session_id")
+        anchors = sum(
+            anchor is not None
+            for anchor in (self.turn_ref, self.node_id, self.head_id)
+        )
+        if anchors != 1:
+            raise ValueError(
+                "trajectory fork point must set exactly one of turn_ref, node_id, "
+                "or head_id"
+            )
+        if self.turn_ref is not None:
+            if isinstance(self.turn_ref, bool) or not isinstance(
+                self.turn_ref,
+                (str, int),
+            ):
+                raise TypeError("trajectory fork turn_ref must be a string or integer")
+            if isinstance(self.turn_ref, str):
+                _require_string(self.turn_ref, "trajectory fork turn_ref")
+            else:
+                _require_index(self.turn_ref, "trajectory fork turn_ref")
+        _require_string(self.node_id, "trajectory fork node_id", optional=True)
+        _require_string(self.head_id, "trajectory fork head_id", optional=True)
+        _require_string(self.branch_id, "trajectory fork branch_id")
+        if not isinstance(self.include_logical_parent, bool):
+            raise TypeError("trajectory fork include_logical_parent must be a bool")
+
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryProjectionStatus:
@@ -293,6 +494,36 @@ class TrajectoryProjectionStatus:
     updated_at: float = 0.0
     error: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_string(self.session_id, "projection status session_id")
+        if self.state not in {"current", "stale", "failed"}:
+            raise ValueError(f"invalid projection state: {self.state!r}")
+        _require_string(
+            self.high_water_turn_id,
+            "projection high_water_turn_id",
+            optional=True,
+        )
+        _require_index(
+            self.high_water_turn_index,
+            "projection high_water_turn_index",
+            optional=True,
+        )
+        if (self.high_water_turn_id is None) != (
+            self.high_water_turn_index is None
+        ):
+            raise ValueError(
+                "projection high-water turn id and index must be set together"
+            )
+        _require_index(self.node_count, "projection node_count")
+        _require_finite(self.updated_at, "projection updated_at")
+        if self.error is not None and not isinstance(self.error, str):
+            raise TypeError("projection error must be a string or None")
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "projection status metadata"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +562,87 @@ class TrajectoryNode:
     removed_node_ids: tuple[str, ...] = ()
     timestamp: float = 0.0
 
+    def __post_init__(self) -> None:
+        _require_string(self.id, "trajectory node id")
+        _require_string(self.session_id, "trajectory node session_id")
+        _require_index(self.seq, "trajectory node seq")
+        if self.kind not in {
+            "message",
+            "compact_boundary",
+            "content_replacement",
+            "snip",
+            "checkpoint",
+        }:
+            raise ValueError(f"invalid trajectory node kind: {self.kind!r}")
+        for label, string_value in (
+            ("root_session_id", self.root_session_id),
+            ("parent_session_id", self.parent_session_id),
+            ("parent_id", self.parent_id),
+            ("logical_parent_id", self.logical_parent_id),
+            ("turn_id", self.turn_id),
+            ("agent_id", self.agent_id),
+            ("cache_key", self.cache_key),
+            ("content_ref", self.content_ref),
+        ):
+            _require_string(
+                string_value,
+                f"trajectory node {label}",
+                optional=True,
+            )
+        _require_string(self.branch_id, "trajectory node branch_id")
+        _require_string(self.head_id, "trajectory node head_id")
+        if self.role not in {"user", "assistant", "tool_result", "control"}:
+            raise ValueError(f"invalid trajectory node role: {self.role!r}")
+        for label, index_value in (
+            ("turn_index", self.turn_index),
+            ("round_index", self.round_index),
+            ("message_index", self.message_index),
+        ):
+            _require_index(
+                index_value,
+                f"trajectory node {label}",
+                optional=True,
+            )
+        if not isinstance(self.is_sidechain, bool):
+            raise TypeError("trajectory node is_sidechain must be a bool")
+        object.__setattr__(
+            self,
+            "tool_call_ids",
+            _string_tuple(self.tool_call_ids, "trajectory node tool_call_ids"),
+        )
+        object.__setattr__(
+            self,
+            "tool_names",
+            _string_tuple(self.tool_names, "trajectory node tool_names"),
+        )
+        if self.visibility not in {"visible", "hidden", "replay_only"}:
+            raise ValueError(
+                f"invalid trajectory node visibility: {self.visibility!r}"
+            )
+        if self.kind == "message":
+            if self.message is None:
+                raise ValueError("message trajectory nodes require a message")
+            if self.message.role != self.role:
+                raise ValueError(
+                    "trajectory node role must match its message role"
+                )
+        elif self.message is not None:
+            raise ValueError("control trajectory nodes cannot carry a message")
+        object.__setattr__(
+            self,
+            "payload",
+            _freeze_metadata(self.payload, "trajectory node payload"),
+        )
+        object.__setattr__(
+            self,
+            "removed_node_ids",
+            _string_tuple(
+                self.removed_node_ids,
+                "trajectory node removed_node_ids",
+            ),
+        )
+        _require_finite(self.timestamp, "trajectory node timestamp")
+
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryLeaf:
@@ -345,6 +657,18 @@ class TrajectoryLeaf:
     is_sidechain: bool = False
     status: TrajectoryHeadStatus = "active"
 
+    def __post_init__(self) -> None:
+        _require_string(self.session_id, "trajectory leaf session_id")
+        _require_string(self.node_id, "trajectory leaf node_id")
+        _require_index(self.seq, "trajectory leaf seq")
+        _require_string(self.branch_id, "trajectory leaf branch_id")
+        _require_string(self.head_id, "trajectory leaf head_id")
+        _require_string(self.agent_id, "trajectory leaf agent_id", optional=True)
+        if not isinstance(self.is_sidechain, bool):
+            raise TypeError("trajectory leaf is_sidechain must be a bool")
+        if self.status not in {"active", "dead", "archived"}:
+            raise ValueError(f"invalid trajectory leaf status: {self.status!r}")
+
 
 @dataclass(frozen=True, slots=True)
 class TurnMeta:
@@ -358,6 +682,24 @@ class TurnMeta:
     model_id: str | None = None
     resource_mutations: tuple[ResourceMutation, ...] = ()
 
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("total_input_tokens", self.total_input_tokens),
+            ("total_output_tokens", self.total_output_tokens),
+            ("cache_read_tokens", self.cache_read_tokens),
+            ("cache_write_tokens", self.cache_write_tokens),
+            ("duration_ns", self.duration_ns),
+        ):
+            _require_index(value, f"turn meta {label}")
+        _require_string(self.model_id, "turn meta model_id", optional=True)
+        if not isinstance(self.resource_mutations, tuple) or not all(
+            isinstance(item, ResourceMutation)
+            for item in self.resource_mutations
+        ):
+            raise TypeError(
+                "turn meta resource_mutations must be a tuple of ResourceMutation"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class ToolRecord:
@@ -367,6 +709,16 @@ class ToolRecord:
     result: ToolResultBlock
     backgrounded: bool = False
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.call, ToolCallBlock):
+            raise TypeError("tool record call must be ToolCallBlock")
+        if not isinstance(self.result, ToolResultBlock):
+            raise TypeError("tool record result must be ToolResultBlock")
+        if self.result.tool_call_id != self.call.id:
+            raise ValueError("tool record result must reference its call id")
+        if not isinstance(self.backgrounded, bool):
+            raise TypeError("tool record backgrounded must be a bool")
+
 
 @dataclass(frozen=True, slots=True)
 class Round:
@@ -374,6 +726,26 @@ class Round:
 
     response: AssistantMessage
     tool_results: tuple[ToolRecord, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.response, AssistantMessage):
+            raise TypeError("round response must be AssistantMessage")
+        if not isinstance(self.tool_results, tuple) or not all(
+            isinstance(item, ToolRecord) for item in self.tool_results
+        ):
+            raise TypeError("round tool_results must be a tuple of ToolRecord")
+        call_ids = {
+            block.id
+            for block in self.response.content
+            if isinstance(block, ToolCallBlock)
+        }
+        result_ids = [record.call.id for record in self.tool_results]
+        if len(result_ids) != len(set(result_ids)):
+            raise ValueError("round tool results contain duplicate call ids")
+        if not set(result_ids).issubset(call_ids):
+            raise ValueError(
+                "round tool results must reference calls from the response"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +755,19 @@ class InjectedMessages:
     after_round: int
     messages: tuple[AgentMessage, ...] = ()
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.after_round, int)
+            or isinstance(self.after_round, bool)
+            or self.after_round < -1
+        ):
+            raise ValueError("injected after_round must be -1 or a round index")
+        if not isinstance(self.messages, tuple) or not all(
+            isinstance(item, (UserMessage, AssistantMessage, ToolResultMessage))
+            for item in self.messages
+        ):
+            raise TypeError("injected messages must be a tuple of AgentMessage")
+
 
 @dataclass(frozen=True, slots=True)
 class Outcome:
@@ -390,6 +775,14 @@ class Outcome:
 
     cause: TerminationCause
     injected: tuple[InjectedMessages, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.cause, TerminationCause):
+            raise TypeError("outcome cause must be a TerminationCause")
+        if not isinstance(self.injected, tuple) or not all(
+            isinstance(item, InjectedMessages) for item in self.injected
+        ):
+            raise TypeError("outcome injected must be a tuple of InjectedMessages")
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,6 +797,70 @@ class Turn:
     timestamp: float
     meta: TurnMeta = field(default_factory=TurnMeta)
     trigger_metadata: TriggerMetadata | None = None
+
+    def __post_init__(self) -> None:
+        from agentm.core.abi.trigger import Trigger, TriggerMetadata
+
+        _require_index(self.index, "turn index")
+        _require_string(self.id, "turn id")
+        if not isinstance(self.trigger, Trigger):
+            raise TypeError("turn trigger must implement Trigger")
+        _require_string(self.trigger.source, "turn trigger source")
+        if not isinstance(self.rounds, tuple) or not all(
+            isinstance(item, Round) for item in self.rounds
+        ):
+            raise TypeError("turn rounds must be a tuple of Round")
+        if not isinstance(self.outcome, Outcome):
+            raise TypeError("turn outcome must be Outcome")
+        for injection in self.outcome.injected:
+            if injection.after_round >= len(self.rounds):
+                raise ValueError(
+                    "injected message anchor must reference a completed round"
+                )
+        _require_finite(self.timestamp, "turn timestamp")
+        if not isinstance(self.meta, TurnMeta):
+            raise TypeError("turn meta must be TurnMeta")
+        if self.trigger_metadata is not None and not isinstance(
+            self.trigger_metadata,
+            TriggerMetadata,
+        ):
+            raise TypeError("turn trigger_metadata must be TriggerMetadata or None")
+
+
+def _validate_head_fields(
+    *,
+    session_id: str,
+    head_id: str,
+    branch_id: str,
+    node_id: str | None,
+    seq: int | None,
+    root_session_id: str | None,
+    parent_session_id: str | None,
+    logical_parent_id: str | None,
+    agent_id: str | None,
+    is_sidechain: bool,
+    status: TrajectoryHeadStatus,
+    updated_at: float,
+) -> None:
+    _require_string(session_id, "trajectory head session_id")
+    _require_string(head_id, "trajectory head head_id")
+    _require_string(branch_id, "trajectory head branch_id")
+    _require_string(node_id, "trajectory head node_id", optional=True)
+    _require_index(seq, "trajectory head seq", optional=True)
+    if (node_id is None) != (seq is None):
+        raise ValueError("trajectory head node_id and seq must be set together")
+    for label, value in (
+        ("root_session_id", root_session_id),
+        ("parent_session_id", parent_session_id),
+        ("logical_parent_id", logical_parent_id),
+        ("agent_id", agent_id),
+    ):
+        _require_string(value, f"trajectory head {label}", optional=True)
+    if not isinstance(is_sidechain, bool):
+        raise TypeError("trajectory head is_sidechain must be a bool")
+    if status not in {"active", "dead", "archived"}:
+        raise ValueError(f"invalid trajectory head status: {status!r}")
+    _require_finite(updated_at, "trajectory head updated_at")
 
 
 __all__ = [

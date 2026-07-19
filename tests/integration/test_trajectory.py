@@ -1090,8 +1090,8 @@ def test_render_trigger_all_types() -> None:
         source = "custom"
 
     unk = UnknownTrigger()
-    msgs = render_trigger(unk)
-    assert len(msgs) == 1
+    with pytest.raises(LookupError, match="no registered TriggerRenderer"):
+        render_trigger(unk)
 
 
 # ---------------------------------------------------------------------------

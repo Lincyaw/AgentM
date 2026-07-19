@@ -6,7 +6,7 @@ import json
 import re
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from agentm.core.abi.store import TrajectoryNodeQuery
 from agentm.core.abi.trajectory import (
@@ -38,6 +38,30 @@ from agentm.storage.serialization import (
 )
 
 
+@runtime_checkable
+class PostgresCursor(Protocol):
+    """Minimal synchronous cursor contract used by the Postgres adapter."""
+
+    def execute(self, query: str, params: object | None = None) -> object: ...
+
+    def fetchone(self) -> Sequence[object] | None: ...
+
+    def fetchall(self) -> Sequence[Sequence[object]]: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class PostgresConnection(Protocol):
+    """Minimal transaction-capable connection contract."""
+
+    def cursor(self) -> PostgresCursor: ...
+
+    def commit(self) -> None: ...
+
+    def rollback(self) -> None: ...
+
+
 class PostgresTrajectoryNodeStore:
     """Postgres-backed trajectory node/head store.
 
@@ -49,11 +73,16 @@ class PostgresTrajectoryNodeStore:
 
     def __init__(
         self,
-        connection: object,
+        connection: PostgresConnection,
         *,
         schema: str = "public",
         create_schema: bool = True,
     ) -> None:
+        if not isinstance(connection, PostgresConnection):
+            raise TypeError(
+                "PostgresTrajectoryNodeStore requires a transaction-capable "
+                "PostgresConnection"
+            )
         self._connection = connection
         self._schema = _validate_identifier(schema, label="Postgres schema")
         if create_schema:
@@ -160,23 +189,21 @@ class PostgresTrajectoryNodeStore:
         advance_head: TrajectoryHeadAdvance | None = None,
     ) -> None:
         if not nodes:
+            if advance_head is not None:
+                raise ValueError("cannot advance a trajectory head without nodes")
             return
-        try:
-            with _cursor(self._connection) as cur:
-                if advance_head is not None:
-                    self._validate_head_advance(cur, session_id, advance_head, nodes)
-                for node in nodes:
-                    self._insert_node(cur, node)
-                if advance_head is not None:
-                    self._upsert_head(cur, advance_head.to_head())
-                self._upsert_projection_status(
-                    cur,
-                    self._projection_status_from_rows(cur, session_id),
-                )
-            _commit(self._connection)
-        except Exception:
-            _rollback(self._connection)
-            raise
+        with _cursor(self._connection) as cur:
+            if advance_head is not None:
+                self._validate_head_advance(cur, session_id, advance_head, nodes)
+            for node in nodes:
+                self._insert_node(cur, node)
+            if advance_head is not None:
+                self._upsert_head(cur, advance_head.to_head())
+            self._upsert_projection_status(
+                cur,
+                self._projection_status_from_rows(cur, session_id),
+            )
+        _commit(self._connection)
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         where, params = _node_query_where(query)
@@ -352,13 +379,16 @@ class PostgresTrajectoryNodeStore:
             rows = cur.fetchall()
         return [
             TrajectoryLeaf(
-                session_id=str(row[0]),
-                node_id=str(row[1]),
-                seq=int(row[2]),
-                branch_id=str(row[3]),
-                head_id=str(row[4]),
-                agent_id=row[5] if isinstance(row[5], str) else None,
-                is_sidechain=bool(row[6]),
+                session_id=_required_str(row[0], column="session_id"),
+                node_id=_required_str(row[1], column="id"),
+                seq=_required_int(row[2], column="seq"),
+                branch_id=_required_str(row[3], column="branch_id"),
+                head_id=_required_str(row[4], column="head_id"),
+                agent_id=_optional_str(row[5], column="agent_id"),
+                is_sidechain=_required_bool(
+                    row[6],
+                    column="is_sidechain",
+                ),
             )
             for row in rows
         ]
@@ -371,32 +401,28 @@ class PostgresTrajectoryNodeStore:
         heads: Sequence[TrajectoryHead] = (),
         status: TrajectoryProjectionStatus | None = None,
     ) -> None:
-        try:
-            with _cursor(self._connection) as cur:
-                cur.execute(
-                    f"DELETE FROM {self._table('trajectory_nodes')} WHERE session_id = %s",
-                    (session_id,),
-                )
-                cur.execute(
-                    f"DELETE FROM {self._table('trajectory_heads')} WHERE session_id = %s",
-                    (session_id,),
-                )
-                cur.execute(
-                    f"DELETE FROM {self._table('trajectory_projection_status')} WHERE session_id = %s",
-                    (session_id,),
-                )
-                for node in nodes:
-                    self._insert_node(cur, node)
-                for head in heads:
-                    self._upsert_head(cur, head)
-                self._upsert_projection_status(
-                    cur,
-                    status if status is not None else _projection_status(session_id, nodes),
-                )
-            _commit(self._connection)
-        except Exception:
-            _rollback(self._connection)
-            raise
+        with _cursor(self._connection) as cur:
+            cur.execute(
+                f"DELETE FROM {self._table('trajectory_nodes')} WHERE session_id = %s",
+                (session_id,),
+            )
+            cur.execute(
+                f"DELETE FROM {self._table('trajectory_heads')} WHERE session_id = %s",
+                (session_id,),
+            )
+            cur.execute(
+                f"DELETE FROM {self._table('trajectory_projection_status')} WHERE session_id = %s",
+                (session_id,),
+            )
+            for node in nodes:
+                self._insert_node(cur, node)
+            for head in heads:
+                self._upsert_head(cur, head)
+            self._upsert_projection_status(
+                cur,
+                status if status is not None else _projection_status(session_id, nodes),
+            )
+        _commit(self._connection)
 
     def projection_status(
         self,
@@ -503,7 +529,7 @@ class PostgresTrajectoryNodeStore:
             row = cur.fetchone()
         return None if row is None else deserialize_prompt_cache_state(_json_mapping(row[0]))
 
-    def _insert_node(self, cur: Any, node: TrajectoryNode) -> None:
+    def _insert_node(self, cur: PostgresCursor, node: TrajectoryNode) -> None:
         data = serialize_node(node)
         cur.execute(
             f"""
@@ -550,7 +576,7 @@ class PostgresTrajectoryNodeStore:
             ),
         )
 
-    def _upsert_head(self, cur: Any, head: TrajectoryHead) -> None:
+    def _upsert_head(self, cur: PostgresCursor, head: TrajectoryHead) -> None:
         cur.execute(
             f"""
             INSERT INTO {self._table("trajectory_heads")} (
@@ -590,7 +616,7 @@ class PostgresTrajectoryNodeStore:
 
     def _upsert_projection_status(
         self,
-        cur: Any,
+        cur: PostgresCursor,
         status: TrajectoryProjectionStatus,
     ) -> None:
         cur.execute(
@@ -606,7 +632,7 @@ class PostgresTrajectoryNodeStore:
 
     def _validate_head_advance(
         self,
-        cur: Any,
+        cur: PostgresCursor,
         session_id: str,
         advance: TrajectoryHeadAdvance,
         nodes: Sequence[TrajectoryNode],
@@ -647,7 +673,7 @@ class PostgresTrajectoryNodeStore:
 
     def _projection_status_from_rows(
         self,
-        cur: Any,
+        cur: PostgresCursor,
         session_id: str,
     ) -> TrajectoryProjectionStatus:
         cur.execute(
@@ -680,7 +706,11 @@ class PostgresTrajectoryNodeStore:
             high_water_turn_index=(
                 last.turn_index if last is not None else None
             ),
-            node_count=int(count_row[0]) if count_row is not None else 0,
+            node_count=(
+                _required_int(count_row[0], column="count")
+                if count_row is not None
+                else 0
+            ),
             updated_at=time.time(),
         )
 
@@ -689,12 +719,12 @@ class PostgresTrajectoryNodeStore:
 
 
 class _cursor:
-    def __init__(self, connection: object) -> None:
+    def __init__(self, connection: PostgresConnection) -> None:
         self._connection = connection
-        self._cursor: Any | None = None
+        self._cursor: PostgresCursor | None = None
 
-    def __enter__(self) -> Any:
-        cursor = getattr(self._connection, "cursor")()
+    def __enter__(self) -> PostgresCursor:
+        cursor = self._connection.cursor()
         self._cursor = cursor
         return cursor
 
@@ -705,9 +735,7 @@ class _cursor:
         _traceback: object,
     ) -> None:
         if self._cursor is not None:
-            close = getattr(self._cursor, "close", None)
-            if callable(close):
-                close()
+            self._cursor.close()
         if exc_type is not None:
             _rollback(self._connection)
 
@@ -824,23 +852,47 @@ def _json_mapping(value: object) -> Mapping[str, Any]:
 
 
 def _json_dumps(value: object) -> str:
-    return json.dumps(value, sort_keys=True)
+    return json.dumps(value, sort_keys=True, allow_nan=False)
 
 
-def _commit(connection: object) -> None:
-    commit = getattr(connection, "commit", None)
-    if callable(commit):
-        try:
-            commit()
-        except Exception:
-            _rollback(connection)
-            raise
+def _required_str(value: object, *, column: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Postgres column {column!r} must contain a non-empty string")
+    return value
 
 
-def _rollback(connection: object) -> None:
-    rollback = getattr(connection, "rollback", None)
-    if callable(rollback):
-        rollback()
+def _optional_str(value: object, *, column: str) -> str | None:
+    if value is None:
+        return None
+    return _required_str(value, column=column)
 
 
-__all__ = ["PostgresTrajectoryNodeStore"]
+def _required_int(value: object, *, column: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"Postgres column {column!r} must contain an integer")
+    return value
+
+
+def _required_bool(value: object, *, column: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"Postgres column {column!r} must contain a boolean")
+    return value
+
+
+def _commit(connection: PostgresConnection) -> None:
+    try:
+        connection.commit()
+    except Exception:
+        _rollback(connection)
+        raise
+
+
+def _rollback(connection: PostgresConnection) -> None:
+    connection.rollback()
+
+
+__all__ = [
+    "PostgresConnection",
+    "PostgresCursor",
+    "PostgresTrajectoryNodeStore",
+]

@@ -78,13 +78,7 @@ def _message_text_chars(content: Any) -> int:
                 total += len(text)
         elif btype == "tool_call":
             args = block.get("arguments")
-            # ``arguments`` is a dict — count the JSON-serialized form so
-            # tool-input payloads (which often carry the leaked secret) are
-            # represented by their textual size, not a misleading 0.
-            try:
-                total += len(json.dumps(args, sort_keys=True, default=str))
-            except (TypeError, ValueError):
-                total += len(repr(args))
+            total += len(_stable_serialize(args))
         elif btype == "tool_result":
             total += _message_text_chars(block.get("content"))
         elif btype == "image":
@@ -101,17 +95,19 @@ def _stable_serialize(value: Any) -> str:
     """Deterministic string form for hashing. ``sort_keys=True`` so
     structurally-equal payloads hash identically across runs."""
 
-    try:
-        return json.dumps(value, sort_keys=True, default=str, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return repr(value)
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def _redact_message(message: Any) -> dict[str, Any]:
     """Turn one serialized message dict into a {role, chars, sha256_prefix} stub.
 
-    Non-dict inputs are wrapped so the redactor never raises; corrupted
-    upstream serialization should degrade the trace, not crash the agent.
+    Non-dict inputs are represented by a stable hash of their encoded shape.
     """
 
     if not isinstance(message, Mapping):

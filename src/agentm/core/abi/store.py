@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+import math
+from types import MappingProxyType
 from typing import Literal, Protocol, Sequence, runtime_checkable
 
 from agentm.core.abi.trajectory import (
@@ -40,7 +43,51 @@ class SessionMeta:
     purpose: str = "root"
     cwd: str = ""
     created_at: float = 0.0
-    config: dict[str, str | int | float | bool | None] = field(default_factory=dict)
+    config: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("session metadata id must be a non-empty string")
+        if self.parent_id is not None and (
+            not isinstance(self.parent_id, str) or not self.parent_id
+        ):
+            raise ValueError("session metadata parent_id must be a non-empty string")
+        if self.fork_point is not None:
+            if isinstance(self.fork_point, bool) or not isinstance(
+                self.fork_point,
+                (str, int),
+            ):
+                raise TypeError("session metadata fork_point must be a string or integer")
+            if isinstance(self.fork_point, str) and not self.fork_point:
+                raise ValueError("session metadata fork_point cannot be empty")
+            if isinstance(self.fork_point, int) and self.fork_point < 0:
+                raise ValueError("session metadata fork_point cannot be negative")
+        if not isinstance(self.purpose, str) or not self.purpose:
+            raise ValueError("session metadata purpose must be a non-empty string")
+        if not isinstance(self.cwd, str):
+            raise TypeError("session metadata cwd must be a string")
+        if (
+            not isinstance(self.created_at, (int, float))
+            or isinstance(self.created_at, bool)
+            or not math.isfinite(self.created_at)
+        ):
+            raise ValueError("session metadata created_at must be a finite number")
+        copied_config: dict[str, str | int | float | bool | None] = {}
+        for key, value in self.config.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError("session metadata config keys must be non-empty strings")
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                raise TypeError(
+                    f"session metadata config value {key!r} is not a scalar"
+                )
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(
+                    f"session metadata config value {key!r} must be finite"
+                )
+            copied_config[key] = value
+        object.__setattr__(self, "config", MappingProxyType(copied_config))
 
 
 @runtime_checkable

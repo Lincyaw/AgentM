@@ -24,13 +24,18 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import asdict
-from typing import Any, Protocol, runtime_checkable
+import math
+from types import MappingProxyType
+from typing import Any, Protocol, cast, runtime_checkable
 
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
     ImageContent,
     MessageMeta,
+    MessageReplayPolicy,
+    MessageTokenAccounting,
+    MessageVisibility,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -65,8 +70,12 @@ from agentm.core.abi.trigger import (
     SubagentResult,
     Trigger,
     TriggerMetadata,
+    TriggerPriority,
     UserInput,
 )
+
+
+TRAJECTORY_CODEC_VERSION = 1
 
 
 @runtime_checkable
@@ -79,10 +88,81 @@ class TriggerCodec(Protocol):
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RawTrigger:
-    """Fallback for triggers whose codec is not registered at load time."""
+    """Deferred trigger record whose atom codec is not registered yet."""
 
     source: str = "unknown"
-    data: dict[str, Any] = dataclasses.field(default_factory=dict)
+    data: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source:
+            raise ValueError("raw trigger source must be a non-empty string")
+        if not isinstance(self.data, Mapping):
+            raise TypeError("raw trigger data must be an object")
+        safe = _json_safe(self.data)
+        if not isinstance(safe, dict):
+            raise TypeError("raw trigger data must be an object")
+        object.__setattr__(self, "data", MappingProxyType(safe))
+
+
+def _object(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    return value
+
+
+def _array(value: Any, path: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be a list")
+    return value
+
+
+def _string(value: Any, path: str, *, allow_empty: bool = True) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise ValueError(f"{path} must be a string")
+    return value
+
+
+def _optional_string(value: Any, path: str) -> str | None:
+    if value is None:
+        return None
+    return _string(value, path)
+
+
+def _boolean(value: Any, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{path} must be a bool")
+    return value
+
+
+def _integer(value: Any, path: str, *, minimum: int | None = None) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{path} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{path} must be >= {minimum}")
+    return value
+
+
+def _number(value: Any, path: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+    ):
+        raise ValueError(f"{path} must be a finite number")
+    return float(value)
+
+
+def _literal(value: Any, path: str, allowed: set[str]) -> str:
+    text = _string(value, path)
+    if text not in allowed:
+        raise ValueError(f"{path} has invalid value {text!r}")
+    return text
+
+
+def _only_fields(data: Mapping[str, Any], allowed: set[str], path: str) -> None:
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValueError(f"{path} has unknown fields: {sorted(unknown)}")
 
 
 # --- Message serialization --------------------------------------------------
@@ -109,32 +189,88 @@ def _serialize_message_meta(meta: MessageMeta) -> dict[str, Any]:
 
 
 def _deserialize_message_meta(data: dict[str, Any] | None) -> MessageMeta:
-    if not isinstance(data, dict):
+    if data is None:
         return MessageMeta()
+    data = _object(data, "message.meta")
+    _only_fields(
+        data,
+        {
+            "synthetic",
+            "synthetic_kind",
+            "origin",
+            "visibility",
+            "no_response_requested",
+            "token_accounting",
+            "replay",
+            "target_session_id",
+            "target_agent_id",
+            "mode",
+            "tags",
+        },
+        "message.meta",
+    )
     tags = _json_restore(data.get("tags", {}))
     if not isinstance(tags, dict):
-        tags = {}
+        raise ValueError("message.meta.tags must be an object")
     return MessageMeta(
-        synthetic=bool(data.get("synthetic", False)),
-        synthetic_kind=data.get("synthetic_kind"),
-        origin=data.get("origin"),
-        visibility=data.get("visibility", "visible"),
-        no_response_requested=bool(data.get("no_response_requested", False)),
-        token_accounting=data.get("token_accounting", "normal"),
-        replay=data.get("replay", "include"),
-        target_session_id=data.get("target_session_id"),
-        target_agent_id=data.get("target_agent_id"),
-        mode=data.get("mode"),
+        synthetic=_boolean(data.get("synthetic", False), "message.meta.synthetic"),
+        synthetic_kind=_optional_string(
+            data.get("synthetic_kind"),
+            "message.meta.synthetic_kind",
+        ),
+        origin=_optional_string(data.get("origin"), "message.meta.origin"),
+        visibility=cast(
+            MessageVisibility,
+            _literal(
+                data.get("visibility", "visible"),
+                "message.meta.visibility",
+                {"visible", "hidden", "replay_only"},
+            ),
+        ),
+        no_response_requested=_boolean(
+            data.get("no_response_requested", False),
+            "message.meta.no_response_requested",
+        ),
+        token_accounting=cast(
+            MessageTokenAccounting,
+            _literal(
+                data.get("token_accounting", "normal"),
+                "message.meta.token_accounting",
+                {"normal", "exclude", "metadata_only"},
+            ),
+        ),
+        replay=cast(
+            MessageReplayPolicy,
+            _literal(
+                data.get("replay", "include"),
+                "message.meta.replay",
+                {"include", "skip", "metadata_only"},
+            ),
+        ),
+        target_session_id=_optional_string(
+            data.get("target_session_id"),
+            "message.meta.target_session_id",
+        ),
+        target_agent_id=_optional_string(
+            data.get("target_agent_id"),
+            "message.meta.target_agent_id",
+        ),
+        mode=_optional_string(data.get("mode"), "message.meta.mode"),
         tags=tags,
     )
 
+
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
         return value
     if isinstance(value, bytes):
         return {"__bytes_hex__": value.hex()}
     if isinstance(value, Mapping):
-        return {str(k): _json_safe(v) for k, v in value.items()}
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("JSON object keys must be strings")
+        return {key: _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -149,7 +285,9 @@ def _json_restore(value: Any) -> Any:
                 return bytes.fromhex(value["__bytes_hex__"])
             except ValueError as exc:
                 raise ValueError("invalid encoded bytes value") from exc
-        return {k: _json_restore(v) for k, v in value.items()}
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("encoded JSON object keys must be strings")
+        return {key: _json_restore(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_json_restore(v) for v in value]
     return value
@@ -192,35 +330,102 @@ def _serialize_content_block(block: Any) -> dict[str, Any]:
 
 
 def _deserialize_content_block(data: dict[str, Any]) -> Any:
+    data = _object(data, "content block")
     t = data.get("type")
     if t == "text":
-        return TextContent(type="text", text=data["text"])
+        _only_fields(data, {"type", "text"}, "text content")
+        return TextContent(
+            type="text",
+            text=_string(data.get("text"), "text content.text"),
+        )
     if t == "image":
+        _only_fields(data, {"type", "data", "mime_type"}, "image content")
+        encoded = _string(data.get("data"), "image content.data")
+        try:
+            image_data = bytes.fromhex(encoded)
+        except ValueError as exc:
+            raise ValueError("image content.data is not valid hex") from exc
         return ImageContent(
             type="image",
-            data=bytes.fromhex(data["data"]),
-            mime_type=data["mime_type"],
+            data=image_data,
+            mime_type=_string(
+                data.get("mime_type"),
+                "image content.mime_type",
+                allow_empty=False,
+            ),
         )
     if t == "thinking":
+        _only_fields(
+            data,
+            {"type", "text", "signature"},
+            "thinking content",
+        )
         return ThinkingBlock(
             type="thinking",
-            text=data["text"],
-            signature=data.get("signature"),
+            text=_string(data.get("text"), "thinking content.text"),
+            signature=_optional_string(
+                data.get("signature"),
+                "thinking content.signature",
+            ),
         )
     if t == "tool_call":
+        _only_fields(
+            data,
+            {"type", "id", "name", "arguments"},
+            "tool_call content",
+        )
+        arguments = _json_restore(data.get("arguments"))
+        if not isinstance(arguments, dict):
+            raise ValueError("tool_call content.arguments must be an object")
         return ToolCallBlock(
             type="tool_call",
-            id=data["id"],
-            name=data["name"],
-            arguments=data["arguments"],
+            id=_string(
+                data.get("id"),
+                "tool_call content.id",
+                allow_empty=False,
+            ),
+            name=_string(
+                data.get("name"),
+                "tool_call content.name",
+                allow_empty=False,
+            ),
+            arguments=arguments,
         )
     if t == "tool_result":
+        _only_fields(
+            data,
+            {
+                "type",
+                "tool_call_id",
+                "content",
+                "is_error",
+                "deterministic",
+                "extras",
+            },
+            "tool_result content",
+        )
+        content = _array(data.get("content", []), "tool_result content.content")
         return ToolResultBlock(
             type="tool_result",
-            tool_call_id=data["tool_call_id"],
-            content=[_deserialize_content_block(c) for c in data.get("content", [])],
-            is_error=data.get("is_error", False),
-            deterministic=data.get("deterministic", True),
+            tool_call_id=_string(
+                data.get("tool_call_id"),
+                "tool_result content.tool_call_id",
+                allow_empty=False,
+            ),
+            content=[
+                _deserialize_content_block(
+                    _object(item, f"tool_result content.content[{index}]")
+                )
+                for index, item in enumerate(content)
+            ],
+            is_error=_boolean(
+                data.get("is_error", False),
+                "tool_result content.is_error",
+            ),
+            deterministic=_boolean(
+                data.get("deterministic", True),
+                "tool_result content.deterministic",
+            ),
             extras=_json_restore(data.get("extras")),
         )
     raise ValueError(f"unknown content block type: {t!r}")
@@ -270,24 +475,67 @@ def serialize_message(msg: AgentMessage) -> dict[str, Any]:
 
 def deserialize_message(data: dict[str, Any]) -> AgentMessage:
     """Reconstruct an AgentMessage from a dict."""
+    data = _object(data, "message")
     role = data.get("role")
-    ts = data.get("timestamp", 0.0)
+    ts = _number(data.get("timestamp"), "message.timestamp")
     if role == "user":
+        _only_fields(data, {"role", "content", "timestamp", "meta"}, "user message")
+        content = _array(data.get("content"), "user message.content")
         return UserMessage(
             role="user",
-            content=[_deserialize_content_block(b) for b in data.get("content", [])],
+            content=[
+                _deserialize_content_block(
+                    _object(item, f"user message.content[{index}]")
+                )
+                for index, item in enumerate(content)
+            ],
             timestamp=ts,
             meta=_deserialize_message_meta(data.get("meta")),
         )
     if role == "assistant":
+        _only_fields(
+            data,
+            {
+                "role",
+                "content",
+                "timestamp",
+                "stop_reason",
+                "usage",
+                "termination",
+                "meta",
+            },
+            "assistant message",
+        )
+        content = _array(data.get("content"), "assistant message.content")
         usage = None
         if "usage" in data and data["usage"] is not None:
-            u = data["usage"]
+            u = _object(data["usage"], "assistant message.usage")
+            _only_fields(
+                u,
+                {"input_tokens", "output_tokens", "cache_read", "cache_write"},
+                "assistant message.usage",
+            )
             usage = Usage(
-                input_tokens=u.get("input_tokens", 0),
-                output_tokens=u.get("output_tokens", 0),
-                cache_read=u.get("cache_read", 0),
-                cache_write=u.get("cache_write", 0),
+                input_tokens=_integer(
+                    u.get("input_tokens"),
+                    "assistant message.usage.input_tokens",
+                    minimum=0,
+                ),
+                output_tokens=_integer(
+                    u.get("output_tokens"),
+                    "assistant message.usage.output_tokens",
+                    minimum=0,
+                ),
+                cache_read=_integer(
+                    u.get("cache_read"),
+                    "assistant message.usage.cache_read",
+                    minimum=0,
+                ),
+                cache_write=_integer(
+                    u.get("cache_write"),
+                    "assistant message.usage.cache_write",
+                    minimum=0,
+                ),
             )
         termination = None
         term_data = data.get("termination")
@@ -315,6 +563,14 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
                 raise ValueError(
                     f"unknown assistant termination type: {term_type_name}"
                 )
+            allowed_fields = {
+                field.name for field in dataclasses.fields(term_cls)
+            } | {"__type__"}
+            _only_fields(
+                term_data,
+                allowed_fields,
+                "assistant message.termination",
+            )
             try:
                 termination = term_cls(
                     **{
@@ -329,17 +585,36 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
                 ) from exc
         return AssistantMessage(
             role="assistant",
-            content=[_deserialize_content_block(b) for b in data.get("content", [])],
+            content=[
+                _deserialize_content_block(
+                    _object(item, f"assistant message.content[{index}]")
+                )
+                for index, item in enumerate(content)
+            ],
             timestamp=ts,
-            stop_reason=data.get("stop_reason"),
+            stop_reason=_optional_string(
+                data.get("stop_reason"),
+                "assistant message.stop_reason",
+            ),
             usage=usage,
             termination=termination,
             meta=_deserialize_message_meta(data.get("meta")),
         )
     if role == "tool_result":
+        _only_fields(
+            data,
+            {"role", "content", "timestamp", "meta"},
+            "tool result message",
+        )
+        content = _array(data.get("content"), "tool result message.content")
         return ToolResultMessage(
             role="tool_result",
-            content=[_deserialize_content_block(b) for b in data.get("content", [])],
+            content=[
+                _deserialize_content_block(
+                    _object(item, f"tool result message.content[{index}]")
+                )
+                for index, item in enumerate(content)
+            ],
             timestamp=ts,
             meta=_deserialize_message_meta(data.get("meta")),
         )
@@ -351,8 +626,9 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
 class _DataclassTriggerCodec:
     """Generic codec for frozen dataclass triggers."""
 
-    def __init__(self, cls: type) -> None:
+    def __init__(self, cls: type, source: str) -> None:
         self._cls = cls
+        self._source = source
 
     def serialize(self, trigger: Any) -> dict[str, Any]:
         d = asdict(trigger)
@@ -361,8 +637,18 @@ class _DataclassTriggerCodec:
 
     def deserialize(self, data: dict[str, Any]) -> Any:
         data = dict(data)
-        data.pop("__source__", None)
+        encoded_source = data.pop("__source__", None)
+        if encoded_source != self._source:
+            raise ValueError(
+                f"{self._cls.__name__} source must be {self._source!r}"
+            )
+        field_source = data.pop("source", self._source)
+        if field_source != self._source:
+            raise ValueError(
+                f"{self._cls.__name__} source field must be {self._source!r}"
+            )
         fields = {f.name for f in dataclasses.fields(self._cls)}
+        fields.discard("source")
         unknown = set(data) - fields
         if unknown:
             raise ValueError(
@@ -379,8 +665,15 @@ class _UserInputCodec:
         }
 
     def deserialize(self, data: dict[str, Any]) -> UserInput:
+        _only_fields(data, {"__source__", "content"}, "user trigger")
+        if data.get("__source__") != "user":
+            raise ValueError("user trigger source must be 'user'")
+        raw_content = _array(data.get("content"), "user trigger.content")
         content = tuple(
-            _deserialize_content_block(b) for b in data.get("content", [])
+            _deserialize_content_block(
+                _object(item, f"user trigger.content[{index}]")
+            )
+            for index, item in enumerate(raw_content)
         )
         return UserInput(content=content)
 
@@ -393,18 +686,25 @@ class _InjectionCodec:
         }
 
     def deserialize(self, data: dict[str, Any]) -> Injection:
+        _only_fields(data, {"__source__", "messages"}, "injection trigger")
+        if data.get("__source__") != "injection":
+            raise ValueError("injection trigger source must be 'injection'")
+        raw_messages = _array(data.get("messages"), "injection trigger.messages")
         messages = tuple(
-            deserialize_message(m) for m in data.get("messages", [])
+            deserialize_message(
+                _object(item, f"injection trigger.messages[{index}]")
+            )
+            for index, item in enumerate(raw_messages)
         )
         return Injection(messages=messages)
 
 
 _BUILTIN_CODECS: dict[str, TriggerCodec] = {
     "user": _UserInputCodec(),
-    "background": _DataclassTriggerCodec(BackgroundCompletion),
-    "monitor": _DataclassTriggerCodec(MonitorFire),
-    "subagent": _DataclassTriggerCodec(SubagentResult),
-    "continue": _DataclassTriggerCodec(ContinueTrigger),
+    "background": _DataclassTriggerCodec(BackgroundCompletion, "background"),
+    "monitor": _DataclassTriggerCodec(MonitorFire, "monitor"),
+    "subagent": _DataclassTriggerCodec(SubagentResult, "subagent"),
+    "continue": _DataclassTriggerCodec(ContinueTrigger, "continue"),
     "injection": _InjectionCodec(),
 }
 
@@ -434,13 +734,20 @@ class CodecRegistry:
 
     def register_trigger_codec(self, source: str, codec: TriggerCodec) -> None:
         """Register a codec for a custom trigger source."""
+        if not isinstance(source, str) or not source:
+            raise ValueError("trigger codec source must be a non-empty string")
+        if source in self._trigger_codecs:
+            raise ValueError(f"trigger codec already registered for {source!r}")
         self._trigger_codecs[source] = codec
 
     def register_cause_type(self, cls: type[TerminationCause]) -> None:
         """Register a custom TerminationCause subclass for deserialization."""
         if not issubclass(cls, TerminationCause):
             raise TypeError("cause type must subclass TerminationCause")
-        self._cause_types[cls.__qualname__] = cls
+        name = cls.__qualname__
+        if name in self._cause_types:
+            raise ValueError(f"termination cause type already registered: {name}")
+        self._cause_types[name] = cls
 
     def copy(self) -> "CodecRegistry":
         """Return an independent registry with the same codec registrations."""
@@ -466,23 +773,38 @@ class CodecRegistry:
 
     def serialize_trigger(self, trigger: Any) -> dict[str, Any]:
         if isinstance(trigger, RawTrigger):
-            result = dict(trigger.data) if isinstance(trigger.data, dict) else {"data": trigger.data}
+            result = dict(trigger.data)
             result["__source__"] = trigger.source
-            return result
-        source = getattr(trigger, "source", "unknown")
+            return _json_safe(result)
+        if not isinstance(trigger, Trigger):
+            raise TypeError("trigger must implement the Trigger protocol")
+        source = _string(trigger.source, "trigger.source", allow_empty=False)
         codec = self._trigger_codecs.get(source)
         if codec is not None:
-            return codec.serialize(trigger)
+            encoded = codec.serialize(trigger)
+            if not isinstance(encoded, dict):
+                raise TypeError("TriggerCodec.serialize must return an object")
+            encoded = _json_safe(encoded)
+            if encoded.get("__source__") != source:
+                raise ValueError(
+                    f"TriggerCodec for {source!r} emitted a different source"
+                )
+            return encoded
         raise ValueError(
             f"trigger source {source!r} has no registered TriggerCodec"
         )
 
     def deserialize_trigger(self, data: dict[str, Any]) -> Any:
-        source = data.get("__source__", data.get("source", "unknown"))
+        data = _object(data, "trigger")
+        source = _string(
+            data.get("__source__"),
+            "trigger.__source__",
+            allow_empty=False,
+        )
         codec = self._trigger_codecs.get(source)
         if codec is not None:
             return codec.deserialize(data)
-        return RawTrigger(source=source, data=data)
+        return RawTrigger(source=source, data=dict(data))
 
     # --- ToolRecord ---
 
@@ -494,12 +816,29 @@ class CodecRegistry:
         }
 
     def _deserialize_tool_record(self, data: dict[str, Any]) -> ToolRecord:
-        call = _deserialize_content_block(data["call"])
-        result = _deserialize_content_block(data["result"])
+        data = _object(data, "tool record")
+        _only_fields(
+            data,
+            {"call", "result", "backgrounded"},
+            "tool record",
+        )
+        call = _deserialize_content_block(
+            _object(data.get("call"), "tool record.call")
+        )
+        result = _deserialize_content_block(
+            _object(data.get("result"), "tool record.result")
+        )
+        if not isinstance(call, ToolCallBlock):
+            raise ValueError("tool record.call must be a tool_call block")
+        if not isinstance(result, ToolResultBlock):
+            raise ValueError("tool record.result must be a tool_result block")
         return ToolRecord(
             call=call,
             result=result,
-            backgrounded=data.get("backgrounded", False),
+            backgrounded=_boolean(
+                data.get("backgrounded", False),
+                "tool record.backgrounded",
+            ),
         )
 
     # --- Round ---
@@ -511,14 +850,19 @@ class CodecRegistry:
         }
 
     def _deserialize_round(self, data: dict[str, Any]) -> Round:
-        response = deserialize_message(data["response"])
+        data = _object(data, "round")
+        _only_fields(data, {"response", "tool_results"}, "round")
+        response = deserialize_message(_object(data.get("response"), "round.response"))
         if not isinstance(response, AssistantMessage):
             raise ValueError(
                 "serialized round response must be an assistant message"
             )
+        raw_results = _array(data.get("tool_results"), "round.tool_results")
         tool_results = tuple(
-            self._deserialize_tool_record(tr)
-            for tr in data.get("tool_results", [])
+            self._deserialize_tool_record(
+                _object(item, f"round.tool_results[{index}]")
+            )
+            for index, item in enumerate(raw_results)
         )
         return Round(response=response, tool_results=tool_results)
 
@@ -551,16 +895,41 @@ class CodecRegistry:
         return d
 
     def _deserialize_outcome(self, data: dict[str, Any]) -> Outcome:
-        injected = tuple(
-            InjectedMessages(
-                after_round=entry["after_round"],
-                messages=tuple(
-                    deserialize_message(message)
-                    for message in entry.get("messages", [])
-                ),
+        data = _object(data, "outcome")
+        _only_fields(data, {"cause", "injected"}, "outcome")
+        raw_injected = _array(data.get("injected", []), "outcome.injected")
+        injected_records: list[InjectedMessages] = []
+        for index, raw_entry in enumerate(raw_injected):
+            entry = _object(raw_entry, f"outcome.injected[{index}]")
+            _only_fields(
+                entry,
+                {"after_round", "messages"},
+                f"outcome.injected[{index}]",
             )
-            for entry in data.get("injected", [])
-        )
+            raw_messages = _array(
+                entry.get("messages"),
+                f"outcome.injected[{index}].messages",
+            )
+            injected_records.append(
+                InjectedMessages(
+                    after_round=_integer(
+                        entry.get("after_round"),
+                        f"outcome.injected[{index}].after_round",
+                        minimum=0,
+                    ),
+                    messages=tuple(
+                        deserialize_message(
+                            _object(
+                                message,
+                                f"outcome.injected[{index}].messages"
+                                f"[{message_index}]",
+                            )
+                        )
+                        for message_index, message in enumerate(raw_messages)
+                    ),
+                )
+            )
+        injected = tuple(injected_records)
         if "cause" not in data:
             raise ValueError("serialized Outcome is missing cause")
         raw_cause = data["cause"]
@@ -574,9 +943,18 @@ class CodecRegistry:
             if cls is None:
                 raise ValueError(f"unknown termination cause type: {type_name}")
             fields = {field.name for field in dataclasses.fields(cls)}
-            filtered = {key: value for key, value in raw_cause.items() if key in fields}
+            _only_fields(
+                raw_cause,
+                fields | {"__type__"},
+                "outcome.cause",
+            )
+            cause_fields = {
+                key: value
+                for key, value in raw_cause.items()
+                if key != "__type__"
+            }
             try:
-                cause = cls(**filtered)
+                cause = cls(**cause_fields)
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     f"invalid serialized termination cause: {type_name}"
@@ -640,17 +1018,42 @@ class CodecRegistry:
                 raise ValueError(
                     f"resource_mutations[{index}].metadata must be an object"
                 )
+            transaction_id = _optional_string(
+                item.get("transaction_id"),
+                f"resource_mutations[{index}].transaction_id",
+            )
+            before_version = _optional_string(
+                item.get("before_version"),
+                f"resource_mutations[{index}].before_version",
+            )
+            after_version = _optional_string(
+                item.get("after_version"),
+                f"resource_mutations[{index}].after_version",
+            )
+            _only_fields(
+                item,
+                {
+                    "ref",
+                    "op",
+                    "transaction_id",
+                    "before_version",
+                    "after_version",
+                    "metadata",
+                },
+                f"resource_mutations[{index}]",
+            )
+            _only_fields(
+                ref_data,
+                {"namespace", "path"},
+                f"resource_mutations[{index}].ref",
+            )
             mutations.append(
                 ResourceMutation(
                     ref=ResourceRef(namespace=namespace, path=path),
                     op=op,
-                    transaction_id=(
-                        item.get("transaction_id")
-                        if isinstance(item.get("transaction_id"), str)
-                        else None
-                    ),
-                    before_version=item.get("before_version"),
-                    after_version=item.get("after_version"),
+                    transaction_id=transaction_id,
+                    before_version=before_version,
+                    after_version=after_version,
                     metadata=metadata,
                 )
             )
@@ -658,13 +1061,47 @@ class CodecRegistry:
 
     @staticmethod
     def _deserialize_meta(data: dict[str, Any]) -> TurnMeta:
+        data = _object(data, "turn.meta")
+        _only_fields(
+            data,
+            {
+                "total_input_tokens",
+                "total_output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "duration_ns",
+                "model_id",
+                "resource_mutations",
+            },
+            "turn.meta",
+        )
         return TurnMeta(
-            total_input_tokens=data.get("total_input_tokens", 0),
-            total_output_tokens=data.get("total_output_tokens", 0),
-            cache_read_tokens=data.get("cache_read_tokens", 0),
-            cache_write_tokens=data.get("cache_write_tokens", 0),
-            duration_ns=data.get("duration_ns", 0),
-            model_id=data.get("model_id"),
+            total_input_tokens=_integer(
+                data.get("total_input_tokens"),
+                "turn.meta.total_input_tokens",
+                minimum=0,
+            ),
+            total_output_tokens=_integer(
+                data.get("total_output_tokens"),
+                "turn.meta.total_output_tokens",
+                minimum=0,
+            ),
+            cache_read_tokens=_integer(
+                data.get("cache_read_tokens"),
+                "turn.meta.cache_read_tokens",
+                minimum=0,
+            ),
+            cache_write_tokens=_integer(
+                data.get("cache_write_tokens"),
+                "turn.meta.cache_write_tokens",
+                minimum=0,
+            ),
+            duration_ns=_integer(
+                data.get("duration_ns"),
+                "turn.meta.duration_ns",
+                minimum=0,
+            ),
+            model_id=_optional_string(data.get("model_id"), "turn.meta.model_id"),
             resource_mutations=CodecRegistry._deserialize_resource_mutations(
                 data.get("resource_mutations", [])
             ),
@@ -675,6 +1112,7 @@ class CodecRegistry:
     def serialize_turn(self, turn: Turn) -> dict[str, Any]:
         """Convert a Turn to a JSON-safe dict for storage."""
         return {
+            "schema_version": TRAJECTORY_CODEC_VERSION,
             "index": turn.index,
             "id": turn.id,
             "trigger": self.serialize_trigger(turn.trigger),
@@ -700,16 +1138,45 @@ class CodecRegistry:
 
     def deserialize_turn(self, data: dict[str, Any]) -> Turn:
         """Reconstruct a Turn from a dict."""
+        data = _object(data, "turn")
+        _only_fields(
+            data,
+            {
+                "schema_version",
+                "index",
+                "id",
+                "trigger",
+                "rounds",
+                "outcome",
+                "timestamp",
+                "meta",
+                "trigger_metadata",
+            },
+            "turn",
+        )
+        version = _integer(data.get("schema_version"), "turn.schema_version")
+        if version != TRAJECTORY_CODEC_VERSION:
+            raise ValueError(f"unsupported turn schema version: {version}")
+        raw_rounds = _array(data.get("rounds"), "turn.rounds")
         return Turn(
-            index=data["index"],
-            id=data["id"],
-            trigger=self.deserialize_trigger(data.get("trigger", {})),
-            rounds=tuple(
-                self._deserialize_round(r) for r in data.get("rounds", [])
+            index=_integer(data.get("index"), "turn.index", minimum=0),
+            id=_string(data.get("id"), "turn.id", allow_empty=False),
+            trigger=self.deserialize_trigger(
+                _object(data.get("trigger"), "turn.trigger")
             ),
-            outcome=self._deserialize_outcome(data.get("outcome", {})),
-            timestamp=data.get("timestamp", 0.0),
-            meta=self._deserialize_meta(data.get("meta", {})),
+            rounds=tuple(
+                self._deserialize_round(
+                    _object(item, f"turn.rounds[{index}]")
+                )
+                for index, item in enumerate(raw_rounds)
+            ),
+            outcome=self._deserialize_outcome(
+                _object(data.get("outcome"), "turn.outcome")
+            ),
+            timestamp=_number(data.get("timestamp"), "turn.timestamp"),
+            meta=self._deserialize_meta(
+                _object(data.get("meta"), "turn.meta")
+            ),
             trigger_metadata=self._deserialize_trigger_metadata(
                 data.get("trigger_metadata")
             ),
@@ -724,14 +1191,54 @@ class CodecRegistry:
         meta = data.get("meta", {})
         if not isinstance(meta, dict):
             raise ValueError("turn trigger_metadata.meta must be an object")
+        _only_fields(
+            data,
+            {
+                "priority",
+                "target_session_id",
+                "target_agent_id",
+                "origin",
+                "mode",
+                "is_meta",
+                "skip_commands",
+                "meta",
+            },
+            "turn trigger_metadata",
+        )
         return TriggerMetadata(
-            priority=data.get("priority", "next"),
-            target_session_id=data.get("target_session_id"),
-            target_agent_id=data.get("target_agent_id"),
-            origin=data.get("origin"),
-            mode=data.get("mode", "prompt"),
-            is_meta=bool(data.get("is_meta", False)),
-            skip_commands=bool(data.get("skip_commands", False)),
+            priority=cast(
+                TriggerPriority,
+                _literal(
+                    data.get("priority"),
+                    "turn trigger_metadata.priority",
+                    {"now", "next", "later"},
+                ),
+            ),
+            target_session_id=_optional_string(
+                data.get("target_session_id"),
+                "turn trigger_metadata.target_session_id",
+            ),
+            target_agent_id=_optional_string(
+                data.get("target_agent_id"),
+                "turn trigger_metadata.target_agent_id",
+            ),
+            origin=_optional_string(
+                data.get("origin"),
+                "turn trigger_metadata.origin",
+            ),
+            mode=_string(
+                data.get("mode"),
+                "turn trigger_metadata.mode",
+                allow_empty=False,
+            ),
+            is_meta=_boolean(
+                data.get("is_meta"),
+                "turn trigger_metadata.is_meta",
+            ),
+            skip_commands=_boolean(
+                data.get("skip_commands"),
+                "turn trigger_metadata.skip_commands",
+            ),
             meta=meta,
         )
 
@@ -739,20 +1246,86 @@ class CodecRegistry:
 
     @staticmethod
     def serialize_session_meta(meta: Any) -> dict[str, Any]:
-        return asdict(meta)
+        return {
+            "schema_version": TRAJECTORY_CODEC_VERSION,
+            "id": meta.id,
+            "parent_id": meta.parent_id,
+            "fork_point": meta.fork_point,
+            "purpose": meta.purpose,
+            "cwd": meta.cwd,
+            "created_at": meta.created_at,
+            "config": dict(meta.config),
+        }
 
     @staticmethod
     def deserialize_session_meta(data: dict[str, Any]) -> Any:
         from agentm.core.abi.store import SessionMeta
-        return SessionMeta(
-            id=data["id"],
-            parent_id=data.get("parent_id"),
-            fork_point=data.get("fork_point"),
-            purpose=data.get("purpose", "root"),
-            cwd=data.get("cwd", ""),
-            created_at=data.get("created_at", 0.0),
-            config=data.get("config", {}),
+        data = _object(data, "session metadata")
+        _only_fields(
+            data,
+            {
+                "schema_version",
+                "id",
+                "parent_id",
+                "fork_point",
+                "purpose",
+                "cwd",
+                "created_at",
+                "config",
+            },
+            "session metadata",
         )
+        version = _integer(
+            data.get("schema_version"),
+            "session metadata.schema_version",
+        )
+        if version != TRAJECTORY_CODEC_VERSION:
+            raise ValueError(
+                f"unsupported session metadata schema version: {version}"
+            )
+        fork_point = data.get("fork_point")
+        if fork_point is not None and (
+            not isinstance(fork_point, (str, int)) or isinstance(fork_point, bool)
+        ):
+            raise ValueError("session metadata.fork_point must be a string or integer")
+        config = _object(data.get("config"), "session metadata.config")
+        if not all(
+            isinstance(key, str)
+            and (
+                value is None
+                or isinstance(value, (str, int, float, bool))
+            )
+            and (not isinstance(value, float) or math.isfinite(value))
+            for key, value in config.items()
+        ):
+            raise ValueError("session metadata.config is invalid")
+        return SessionMeta(
+            id=_string(data.get("id"), "session metadata.id", allow_empty=False),
+            parent_id=_optional_string(
+                data.get("parent_id"),
+                "session metadata.parent_id",
+            ),
+            fork_point=fork_point,
+            purpose=_string(
+                data.get("purpose"),
+                "session metadata.purpose",
+                allow_empty=False,
+            ),
+            cwd=_string(data.get("cwd"), "session metadata.cwd"),
+            created_at=_number(
+                data.get("created_at"),
+                "session metadata.created_at",
+            ),
+            config=dict(config),
+        )
+
+
+@runtime_checkable
+class CodecBackedTrajectoryStore(Protocol):
+    """Optional store capability exposing its authoritative turn codec."""
+
+    @property
+    def codec(self) -> CodecRegistry: ...
 
 
 # Module-level default registry
@@ -760,6 +1333,7 @@ DEFAULT_CODEC = CodecRegistry()
 
 
 __all__ = [
+    "CodecBackedTrajectoryStore",
     "CodecRegistry",
     "DEFAULT_CODEC",
     "RawTrigger",

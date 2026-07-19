@@ -24,7 +24,12 @@ from agentm.core.abi.cancel import (
     CompositeCancelSignal,
     EventCancelSource,
 )
-from agentm.core.abi.codec import CodecRegistry, RawTrigger, TriggerCodec
+from agentm.core.abi.codec import (
+    CodecBackedTrajectoryStore,
+    CodecRegistry,
+    RawTrigger,
+    TriggerCodec,
+)
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomCatalog,
@@ -57,6 +62,7 @@ from agentm.core.abi.resource import (
     TransactionalResourceWriter,
 )
 from agentm.core.abi.stream import Model, StreamFn
+from agentm.core.abi.telemetry import SessionTelemetry
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
 from agentm.core.abi.tool_orchestration import ToolOrchestrator
@@ -429,12 +435,19 @@ class Session:
         self._context_policy_owners: dict[int, str | None] = {
             id(policy): None for policy in self.context_policies
         }
+        self._context_policy_priorities: dict[int, int] = {
+            id(policy): 500 for policy in self.context_policies
+        }
         self.trigger_renderers: dict[str, TriggerRenderer] = dict(trigger_renderers or {})
         self._trigger_renderer_owners: dict[str, str | None] = {
             source: None for source in self.trigger_renderers
         }
         self._trigger_codec_owners: dict[str, str | None] = {}
-        store_codec = getattr(store, "codec", None)
+        store_codec = (
+            store.codec
+            if isinstance(store, CodecBackedTrajectoryStore)
+            else None
+        )
         self.codec = codec or (
             store_codec if isinstance(store_codec, CodecRegistry) else CodecRegistry()
         )
@@ -524,7 +537,7 @@ class Session:
     def start(self) -> None:
         if self._driver_task is not None:
             return
-        self._activate_provider(fallback=self._active_provider_name)
+        self._activate_provider(preferred=self._active_provider_name)
         if self._stream_fn is None:
             raise RuntimeError("cannot start: no stream_fn")
         if self._model is None:
@@ -644,11 +657,13 @@ class Session:
                 await environment.close()
             except BaseException as exc:
                 cleanup_errors.append(exc)
-        telemetry = self.services.get("session_telemetry")
-        telemetry_shutdown = getattr(telemetry, "shutdown", None)
-        if callable(telemetry_shutdown):
+        telemetry = self.services.get(
+            "session_telemetry",
+            cast(type[SessionTelemetry], SessionTelemetry),
+        )
+        if telemetry is not None:
             try:
-                telemetry_shutdown()
+                telemetry.shutdown()
             except BaseException as exc:
                 cleanup_errors.append(exc)
         self.bus._force_clear()
@@ -803,12 +818,14 @@ class Session:
     def register_context_policy(self, policy: ContextPolicy, *, priority: int = 500) -> None:
         from agentm.core.runtime.extension import current_installing_extension
 
-        policy._priority = priority  # type: ignore[attr-defined]
         self.context_policies.append(policy)
+        self._context_policy_priorities[id(policy)] = priority
         self._context_policy_owners[id(policy)] = (
             current_installing_extension() or None
         )
-        self.context_policies.sort(key=lambda p: getattr(p, "_priority", 500))
+        self.context_policies.sort(
+            key=lambda item: self._context_policy_priorities[id(item)]
+        )
         self._emit_register_event(
             "context_policy",
             type(policy).__name__,
@@ -858,7 +875,7 @@ class Session:
         from agentm.core.runtime.extension import current_installing_extension
 
         self._provider_owners[name] = current_installing_extension() or None
-        self._activate_provider(fallback=name)
+        self._activate_provider(preferred=name)
         self._emit_register_event("provider", name, {"provider": config})
 
     def has_provider(self, name: str) -> bool:
@@ -866,7 +883,7 @@ class Session:
 
     def get_provider(self, name: str | None = None) -> ProviderConfig | None:
         if name is None:
-            self._activate_provider(fallback=self._active_provider_name)
+            self._activate_provider(preferred=self._active_provider_name)
         provider_name = name or self._active_provider_name
         if provider_name is None:
             return None
@@ -894,23 +911,21 @@ class Session:
 
     def _provider_resolver(self) -> ProviderResolver | None:
         candidate = self.services.get(PROVIDER_RESOLVER_SERVICE)
-        if callable(getattr(candidate, "resolve_provider", None)):
-            return cast(ProviderResolver, candidate)
-        return None
+        return candidate if isinstance(candidate, ProviderResolver) else None
 
-    def _activate_provider(self, *, fallback: str | None) -> None:
+    def _activate_provider(self, *, preferred: str | None) -> None:
         providers = self._provider_configs()
         if not providers:
             if (
                 self._provider_identity is not None
                 and self._model is not None
                 and self._provider_identity.model_id is not None
-                and getattr(self._model, "id", None) != self._provider_identity.model_id
+                and self._model.id != self._provider_identity.model_id
             ):
                 raise RuntimeError(
                     "cannot activate provider: session is bound to model "
                     f"{self._provider_identity.model_id!r}, got "
-                    f"{getattr(self._model, 'id', None)!r}"
+                    f"{self._model.id!r}"
                 )
             return
         self._freeze_provider_after_commits()
@@ -923,7 +938,7 @@ class Session:
                     "cannot activate provider: session is bound to provider "
                     f"{self._provider_identity.name!r}, but it is not registered"
                 )
-            model_id = getattr(provider.model, "id", None)
+            model_id = provider.model.id
             if (
                 self._provider_identity.model_id is not None
                 and model_id != self._provider_identity.model_id
@@ -936,7 +951,7 @@ class Session:
             self._stream_fn = provider.stream_fn
             self._model = provider.model
             return
-        selected = self._resolve_provider_name(providers, fallback=fallback)
+        selected = self._resolve_provider_name(providers, preferred=preferred)
         if selected is None:
             return
         provider = providers[selected]
@@ -963,7 +978,7 @@ class Session:
             self._set_provider_identity(
                 ProviderSessionIdentity(
                     name=self._active_provider_name or "direct",
-                    model_id=first_model_id or getattr(self._model, "id", None),
+                    model_id=first_model_id or self._model.id,
                     active_set_digest=(
                         active_set.digest if active_set is not None else None
                     ),
@@ -978,7 +993,7 @@ class Session:
                     name
                     for name, config in providers.items()
                     if first_model_id is not None
-                    and getattr(config.model, "id", None) == first_model_id
+                    and config.model.id == first_model_id
                 ),
                 next(reversed(providers)),
             )
@@ -987,7 +1002,7 @@ class Session:
         self._set_provider_identity(
             ProviderSessionIdentity(
                 name=provider_name,
-                model_id=first_model_id or getattr(provider.model, "id", None),
+                model_id=first_model_id or provider.model.id,
                 active_set_digest=active_set.digest if active_set is not None else None,
                 frozen_after_turn_index=self.trajectory.turns[0].index,
             )
@@ -1009,13 +1024,13 @@ class Session:
         if self._provider_identity is not None:
             return self._provider_identity
         if self._active_provider_name is None:
-            self._activate_provider(fallback=None)
+            self._activate_provider(preferred=None)
         if self._model is None:
             return None
         active_set = self._active_set_fingerprint()
         return ProviderSessionIdentity(
             name=self._active_provider_name or "direct",
-            model_id=getattr(self._model, "id", None),
+            model_id=self._model.id,
             active_set_digest=active_set.digest if active_set is not None else None,
         )
 
@@ -1045,7 +1060,7 @@ class Session:
         self,
         providers: dict[str, ProviderConfig],
         *,
-        fallback: str | None,
+        preferred: str | None,
     ) -> str | None:
         resolver = self._provider_resolver()
         if resolver is not None:
@@ -1056,8 +1071,8 @@ class Session:
                         f"provider resolver selected unregistered provider {selected!r}"
                     )
                 return selected
-        if fallback is not None and fallback in providers:
-            return fallback
+        if preferred is not None and preferred in providers:
+            return preferred
         if (
             self._active_provider_name is not None
             and self._active_provider_name in providers
@@ -1412,9 +1427,16 @@ class Session:
         if raw is None:
             return None
         if isinstance(raw, str):
+            if not raw:
+                raise ValueError("tool_allowlist entries must be non-empty strings")
             return (raw,)
         if isinstance(raw, Sequence):
-            return tuple(str(item) for item in raw)
+            items = tuple(raw)
+            if not all(isinstance(item, str) and item for item in items):
+                raise TypeError(
+                    "tool_allowlist service must contain non-empty strings"
+                )
+            return items
         raise TypeError(
             "tool_allowlist service must be a string or sequence, got "
             f"{type(raw).__name__}"
