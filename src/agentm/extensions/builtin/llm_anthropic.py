@@ -95,6 +95,7 @@ MANIFEST = ExtensionManifest(
     description="Register an Anthropic Messages API LLM stream provider.",
     registers=("provider:anthropic",),
     config_schema=LlmAnthropicConfig,
+    sensitive_config_fields=("api_key", "default_headers"),
     requires=(),
     priority=AtomInstallPriority.PROVIDER,
 )

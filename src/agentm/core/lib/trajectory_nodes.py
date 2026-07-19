@@ -1,4 +1,4 @@
-"""Runtime helpers for message-level trajectory nodes."""
+"""Backend-neutral helpers and reference storage for trajectory nodes."""
 
 from __future__ import annotations
 
@@ -201,6 +201,7 @@ def _turn_indexed_messages(
         injected_by_round.setdefault(injection.after_round, []).extend(
             injection.messages
         )
+    messages.extend((message, None) for message in injected_by_round.get(-1, ()))
     for round_index, rnd in enumerate(turn.rounds):
         messages.append((rnd.response, round_index))
         if rnd.tool_results:
@@ -438,6 +439,16 @@ class InMemoryTrajectoryNodeStore:
             nodes = [node for node in nodes if node.seq > query.after_seq]
         if query.before_seq is not None:
             nodes = [node for node in nodes if node.seq < query.before_seq]
+        if query.since_timestamp is not None:
+            nodes = [
+                node for node in nodes
+                if node.timestamp >= query.since_timestamp
+            ]
+        if query.until_timestamp is not None:
+            nodes = [
+                node for node in nodes
+                if node.timestamp <= query.until_timestamp
+            ]
         nodes.sort(key=lambda node: node.seq, reverse=query.sort == "desc")
         if query.limit is not None:
             nodes = nodes[: query.limit]

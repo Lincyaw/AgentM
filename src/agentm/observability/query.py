@@ -10,12 +10,8 @@ from typing import Any
 from agentm.core.abi.query import (
     EventRecord,
     QueryMeta,
-    SessionFilter,
-    SessionIdentity,
     SpanRecord,
-    TrajectoryQueryStore,
 )
-from agentm.core.abi.trajectory import Turn
 from agentm.extensions.observability.otlp import (
     iter_log_records,
     iter_spans,
@@ -24,29 +20,14 @@ from agentm.extensions.observability.otlp import (
 
 
 class OtlpJsonlQueryStore:
-    """Query events/spans from OTLP JSONL files and delegate trajectory rows."""
+    """Query events and spans from local OTLP JSONL files."""
 
     def __init__(
         self,
         *,
         root: str | Path,
-        trajectory: TrajectoryQueryStore | None = None,
     ) -> None:
         self._root = Path(root)
-        self._trajectory = trajectory
-
-    def sessions(
-        self,
-        filter: SessionFilter | None = None,
-    ) -> Iterable[SessionIdentity]:
-        if self._trajectory is None:
-            return []
-        return self._trajectory.sessions(filter)
-
-    def turns(self, session_id: str) -> Iterable[Turn]:
-        if self._trajectory is None:
-            return []
-        return self._trajectory.turns(session_id)
 
     def events(self, session_id: str) -> Iterable[EventRecord]:
         return [
@@ -106,6 +87,7 @@ class OtlpJsonlQueryStore:
         return records
 
     def _path(self, session_id: str) -> Path:
+        _validate_session_id(session_id)
         return self._root / f"{session_id}.jsonl"
 
 
@@ -113,25 +95,48 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    content = path.read_bytes()
+    lines = content.splitlines(keepends=True)
+    for line_no, raw_line in enumerate(lines, start=1):
+        if not raw_line.strip():
             continue
-        value = json.loads(line)
-        if isinstance(value, dict):
-            rows.append(value)
+        complete = raw_line.endswith((b"\n", b"\r"))
+        if line_no == len(lines) and not complete:
+            break
+        try:
+            value = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(f"{path}:{line_no} is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"{path}:{line_no} is not a JSON object")
+        rows.append(value)
     return rows
+
+
+def _validate_session_id(session_id: str) -> None:
+    if (
+        not session_id
+        or session_id in {".", ".."}
+        or Path(session_id).name != session_id
+        or "\\" in session_id
+        or "\x00" in session_id
+    ):
+        raise ValueError(f"session_id is not a valid path token: {session_id!r}")
 
 
 def _attributes(raw: object) -> dict[str, object]:
     attrs: dict[str, object] = {}
-    if not isinstance(raw, list):
+    if raw in (None, (), []):
         return attrs
+    if not isinstance(raw, list):
+        raise ValueError("OTLP attributes must be a list")
     for item in raw:
         if not isinstance(item, dict):
-            continue
+            raise ValueError("OTLP attribute must be an object")
         key = item.get("key")
-        if isinstance(key, str):
-            attrs[key] = otlp_unwrap(item.get("value"))
+        if not isinstance(key, str) or not key:
+            raise ValueError("OTLP attribute has no key")
+        attrs[key] = otlp_unwrap(item.get("value"))
     return attrs
 
 
@@ -149,11 +154,11 @@ def _time_unix_nano_or_none(value: object) -> float | None:
     if value is None:
         return None
     if not isinstance(value, (str, bytes, bytearray, int, float)):
-        return None
+        raise ValueError("OTLP timestamp must be numeric")
     try:
         return int(value) / 1_000_000_000
-    except (TypeError, ValueError):
-        return None
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OTLP timestamp must be numeric") from exc
 
 
 def _optional_str(value: object) -> str | None:

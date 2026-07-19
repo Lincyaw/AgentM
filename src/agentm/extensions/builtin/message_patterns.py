@@ -12,18 +12,20 @@ from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.manifest import AtomInstallPriority
 from agentm.core.abi.messages import (
     AgentMessage,
+    InterruptionMessagePolicy,
     MessageMeta,
     TextContent,
     ToolResultBlock,
     ToolResultMessage,
     UserMessage,
 )
+from agentm.core.abi.roles import INTERRUPTION_MESSAGE_POLICY_SERVICE
 from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.session_api import AtomAPI
 from agentm.extensions import ExtensionManifest
 
 
-MESSAGE_PATTERNS_SERVICE = "message_patterns"
+MESSAGE_PATTERNS_SERVICE = INTERRUPTION_MESSAGE_POLICY_SERVICE
 INTERRUPT_MESSAGE = "[Request interrupted by user]"
 INTERRUPT_MESSAGE_FOR_TOOL_USE = "[Request interrupted by user for tool use]"
 TOOL_INTERRUPTED = "Interrupted by user"
@@ -72,21 +74,42 @@ MANIFEST = ExtensionManifest(
 class MessagePatternFactory:
     """Factory for provider-facing synthetic/user-side control messages."""
 
-    def interrupt(self, *, for_tool_use: bool = False) -> UserMessage:
+    def interruption_message(
+        self,
+        reason: str,
+        *,
+        for_tool_use: bool = False,
+    ) -> UserMessage | None:
+        if reason == "submit_interrupt":
+            return None
         text = INTERRUPT_MESSAGE_FOR_TOOL_USE if for_tool_use else INTERRUPT_MESSAGE
         return _synthetic(text, kind="interrupt", origin="runtime")
+
+    def interrupt(self, *, for_tool_use: bool = False) -> UserMessage:
+        message = self.interruption_message(
+            "user_cancel",
+            for_tool_use=for_tool_use,
+        )
+        assert message is not None
+        return message
+
+    def interrupted_tool_result(
+        self,
+        tool_call_id: str,
+        reason: str,
+    ) -> ToolResultBlock:
+        del reason
+        return ToolResultBlock(
+            type="tool_result",
+            tool_call_id=tool_call_id,
+            content=[TextContent(type="text", text=TOOL_INTERRUPTED)],
+            is_error=True,
+        )
 
     def missing_tool_result(self, tool_call_id: str) -> ToolResultMessage:
         return ToolResultMessage(
             role="tool_result",
-            content=[
-                ToolResultBlock(
-                    type="tool_result",
-                    tool_call_id=tool_call_id,
-                    content=[TextContent(type="text", text=TOOL_INTERRUPTED)],
-                    is_error=True,
-                )
-            ],
+            content=[self.interrupted_tool_result(tool_call_id, "user_cancel")],
             timestamp=time.time(),
             meta=MessageMeta(
                 synthetic=True,
@@ -292,7 +315,7 @@ def install(api: AtomAPI, config: MessagePatternsConfig) -> None:
     api.services.register(
         MESSAGE_PATTERNS_SERVICE,
         factory,
-        MessagePatternFactory,
+        InterruptionMessagePolicy,
         scope="tree",
     )
     if config.attachments or config.memory_reminders or config.budget_nudge:

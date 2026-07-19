@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from .termination import TerminationHint
 
@@ -210,6 +210,26 @@ class ToolResultMessage:
 AgentMessage = UserMessage | AssistantMessage | ToolResultMessage
 
 
+@runtime_checkable
+class InterruptionMessagePolicy(Protocol):
+    """Policy-owned provider messages used to close an interrupted turn."""
+
+    def interruption_message(
+        self,
+        reason: str,
+        *,
+        for_tool_use: bool = False,
+    ) -> UserMessage | None:
+        ...
+
+    def interrupted_tool_result(
+        self,
+        tool_call_id: str,
+        reason: str,
+    ) -> ToolResultBlock:
+        ...
+
+
 # --- Helper constructors ----------------------------------------------------
 
 
@@ -284,6 +304,7 @@ __all__ = [
     "AssistantContent",
     "AssistantMessage",
     "ImageContent",
+    "InterruptionMessagePolicy",
     "JsonValue",
     "DEFAULT_MESSAGE_META",
     "TerminationHint",

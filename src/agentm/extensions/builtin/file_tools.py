@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agentm.core.abi import (
     AtomInstallPriority,
+    BASH_OPERATIONS_SERVICE,
     BashOperations,
     EnvironmentOperations,
     ENVIRONMENT_OPERATIONS_SERVICE,
@@ -38,15 +39,14 @@ _ALL_TOOLS: Final[frozenset[str]] = frozenset({"read", "write", "edit"})
 
 
 class FileToolsConfig(BaseModel):
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     tools: list[str] | None = None
     allow_globs: list[str] | None = None
     deny_globs: list[str] | None = None
-    max_size_bytes: int = 262_144
+    max_size_bytes: int = Field(default=262_144, gt=0)
     require_read: bool = True
-    default_limit: int = 250
-    verify_readback: bool = False
+    default_limit: int = Field(default=250, gt=0)
     toolbox_command: str = "python3 -m agentm_toolbox"
     toolbox_state_file: str | None = None
 
@@ -71,7 +71,7 @@ MANIFEST = ExtensionManifest(
     description="Register the read, write, and edit tools for guarded file I/O.",
     registers=("tool:read", "tool:write", "tool:edit"),
     config_schema=FileToolsConfig,
-    requires=(),
+    requires=("service:resource_writer",),
     priority=AtomInstallPriority.TOOL,
 )
 
@@ -90,10 +90,6 @@ def _error(text: str) -> ToolResult:
 
 def _toolbox_to_tool_result(r: ToolboxResult) -> ToolResult:
     return _error(r.text) if r.is_error else _ok(r.text)
-
-
-def _write_result_text(path: str, verb: str) -> str:
-    return f"{verb}: {path}"
 
 
 _PATH_ALIASES: Final[tuple[str, ...]] = ("file_path",)
@@ -141,30 +137,24 @@ def _required_string_arg(
     return value, None
 
 
-def _coerce_globs(value: Any, cwd: str) -> tuple[str, ...]:
-    if not isinstance(value, list):
+def _resolve_globs(value: list[str] | None, cwd: str) -> tuple[str, ...]:
+    if value is None:
         return ()
-    out: list[str] = []
+    resolved: list[str] = []
     for raw in value:
-        if not isinstance(raw, str) or not raw:
-            continue
+        if not raw:
+            raise ValueError("file tool glob patterns must not be empty")
         if os.path.isabs(raw):
-            out.append(raw)
+            resolved.append(raw)
         else:
-            out.append(os.path.normpath(os.path.join(cwd, raw)))
-    return tuple(out)
+            resolved.append(os.path.normpath(os.path.join(cwd, raw)))
+    return tuple(resolved)
 
 
 def _resolved(path: str, cwd: str) -> str:
-    try:
-        raw = Path(path).expanduser()
-        candidate = raw if raw.is_absolute() else Path(cwd) / raw
-        return str(candidate.resolve(strict=False))
-    except (OSError, RuntimeError):
-        raw_text = os.path.expanduser(path)
-        if os.path.isabs(raw_text):
-            return os.path.abspath(raw_text)
-        return os.path.abspath(os.path.join(cwd, raw_text))
+    raw = Path(path).expanduser()
+    candidate = raw if raw.is_absolute() else Path(cwd) / raw
+    return str(candidate.resolve(strict=False))
 
 
 def _matches_any(path: str, patterns: tuple[str, ...]) -> bool:
@@ -187,62 +177,6 @@ def _check_path_allowed(
     if deny and _matches_any(resolved, deny):
         return f"Access denied: {path!r} matches a configured deny_glob ({list(deny)})."
     return None
-
-
-def _apply_text_edit(
-    old_text: str,
-    args: dict[str, Any],
-    new_string: str,
-) -> str | ToolResult:
-    old_string = args.get("old_string")
-    start_line = args.get("start_line")
-    end_line = args.get("end_line")
-    has_string_mode = old_string is not None
-    has_line_mode = start_line is not None or end_line is not None
-    if has_string_mode and has_line_mode:
-        return _error(
-            "Invalid edit call: old_string mode is mutually exclusive with "
-            "start_line/end_line mode."
-        )
-    if has_string_mode:
-        if not isinstance(old_string, str) or old_string == "":
-            return _error("Invalid edit call: old_string must be a non-empty string.")
-        count = old_text.count(old_string)
-        replace_all = bool(args.get("replace_all", False))
-        if count == 0:
-            return _error("Edit failed: old_string was not found.")
-        if not replace_all and count != 1:
-            return _error(
-                f"Edit failed: old_string matched {count} times; set replace_all "
-                "or provide a more specific string."
-            )
-        return old_text.replace(
-            old_string,
-            new_string,
-            -1 if replace_all else 1,
-        )
-    if has_line_mode:
-        if not isinstance(start_line, int) or not isinstance(end_line, int):
-            return _error(
-                "Invalid edit call: start_line and end_line must both be integers."
-            )
-        lines = old_text.splitlines(keepends=True)
-        if start_line < 1 or end_line < start_line or end_line > len(lines):
-            return _error(
-                "Invalid edit call: line range must be 1-based, inclusive, "
-                "and within the current resource."
-            )
-        replacement = new_string
-        if (
-            replacement
-            and not replacement.endswith("\n")
-            and lines[end_line - 1].endswith("\n")
-        ):
-            replacement += "\n"
-        return "".join(lines[: start_line - 1] + [replacement] + lines[end_line:])
-    return _error(
-        "Invalid edit call: provide either old_string or start_line/end_line."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +262,7 @@ def _enabled_tools(configured: list[str] | None) -> frozenset[str]:
 
 
 def _coerce_bash_ops(session: Any) -> BashOperations | None:
-    service = session.services.get("operations:bash")
+    service = session.services.get(BASH_OPERATIONS_SERVICE)
     if isinstance(service, BashOperations):
         return service
     return None
@@ -349,8 +283,8 @@ class _FileToolsRuntime:
         self._session = session
         self._config = config
         self._enabled_tools = _enabled_tools(config.tools)
-        self._allow_globs = _coerce_globs(config.allow_globs, session.ctx.cwd)
-        self._deny_globs = _coerce_globs(config.deny_globs, session.ctx.cwd)
+        self._allow_globs = _resolve_globs(config.allow_globs, session.ctx.cwd)
+        self._deny_globs = _resolve_globs(config.deny_globs, session.ctx.cwd)
         self._max_size_bytes = config.max_size_bytes
         self._bash_ops = _coerce_bash_ops(session)
         self._environment_id = _coerce_environment_id(session)
@@ -379,18 +313,48 @@ class _FileToolsRuntime:
         return fn(**args)
 
     def _resource_writer(self) -> ResourceWriter | None:
-        getter = getattr(self._session, "get_resource_writer", None)
-        if not callable(getter):
-            return None
-        writer = getter()
+        writer = self._session.get_resource_writer()
         return writer if isinstance(writer, ResourceWriter) else None
 
     def _resource_txn(self) -> ResourceTxn | None:
-        getter = getattr(self._session, "get_resource_txn", None)
-        if not callable(getter):
-            return None
-        txn = getter()
+        txn = self._session.get_resource_txn()
         return txn if isinstance(txn, ResourceTxn) else None
+
+    async def _resource_view(
+        self,
+        path: str,
+    ) -> tuple[ResourceTxn | ResourceWriter | None, bytes | None]:
+        ref = ResourceRef(namespace="workspace", path=path)
+        txn = self._resource_txn()
+        if txn is not None:
+            return txn, await txn.read(ref)
+        writer = self._resource_writer()
+        if writer is None:
+            return None, None
+        if not await writer.exists(path):
+            return writer, None
+        return writer, await writer.read(path)
+
+    async def _resource_read(
+        self,
+        path: str,
+        *,
+        offset: int | None,
+        limit: int | None,
+    ) -> ToolResult | None:
+        authority, current = await self._resource_view(path)
+        if authority is None:
+            return None
+        if current is None:
+            return _error(f"Failed to read {path!r}: file does not exist")
+        return _toolbox_to_tool_result(
+            self._toolbox.read_bytes(
+                path,
+                current,
+                offset=offset,
+                limit=limit,
+            )
+        )
 
     async def _resource_write(
         self,
@@ -398,21 +362,39 @@ class _FileToolsRuntime:
         content: str,
         *,
         rationale: str,
-    ) -> ToolResult | None:
-        writer = self._resource_writer()
-        txn = self._resource_txn()
-        if writer is None and txn is None:
-            return None
-        data = content.encode("utf-8")
+    ) -> ToolResult:
+        authority, current = await self._resource_view(path)
+        if authority is None:
+            return _error("write requires a ResourceWriter service")
+        result, data = self._toolbox.plan_write(path, current, content)
+        if result.is_error or data is None:
+            return _toolbox_to_tool_result(result)
         ref = ResourceRef(namespace="workspace", path=path)
-        if txn is not None:
-            mutation = await txn.write(ref, data, rationale=rationale)
-            return _ok(_write_result_text(mutation.ref.path, "queued write"))
-        assert writer is not None
-        result = await writer.write(path, data, rationale=rationale)
-        if result.error is not None:
-            return _error(result.error)
-        return _ok(_write_result_text(result.path, "wrote"))
+        if isinstance(authority, ResourceTxn):
+            if current is None:
+                await authority.create(ref, data, rationale=rationale)
+            else:
+                await authority.replace(
+                    ref,
+                    current,
+                    data,
+                    rationale=rationale,
+                )
+        elif current is None:
+            write_result = await authority.write(path, data, rationale=rationale)
+            if write_result.error is not None:
+                return _error(write_result.error)
+        else:
+            write_result = await authority.replace(
+                path,
+                current,
+                data,
+                rationale=rationale,
+            )
+            if write_result.error is not None:
+                return _error(write_result.error)
+        self._toolbox.accept_content(path, data)
+        return _toolbox_to_tool_result(result)
 
     async def _resource_edit(
         self,
@@ -421,38 +403,42 @@ class _FileToolsRuntime:
         *,
         new_string: str,
         rationale: str,
-    ) -> ToolResult | None:
-        writer = self._resource_writer()
-        txn = self._resource_txn()
-        if writer is None and txn is None:
-            return None
-        if writer is None:
-            return _error("edit requires a ResourceWriter for reading current content")
-        try:
-            old_bytes = await writer.read(path)
-        except Exception as exc:  # noqa: BLE001
-            return _error(f"read before edit failed: {exc}")
-        try:
-            old_text = old_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            return _error(f"edit only supports UTF-8 text resources: {exc}")
-        edited = _apply_text_edit(old_text, args, new_string)
-        if isinstance(edited, ToolResult):
-            return edited
-        new_bytes = edited.encode("utf-8")
+    ) -> ToolResult:
+        authority, current = await self._resource_view(path)
+        if authority is None:
+            return _error("edit requires a ResourceWriter service")
+        result, new_bytes = self._toolbox.plan_edit(
+            path,
+            current,
+            old_string=args.get("old_string"),
+            new_string=new_string,
+            start_line=args.get("start_line"),
+            end_line=args.get("end_line"),
+            replace_all=bool(args.get("replace_all", False)),
+        )
+        if result.is_error or new_bytes is None:
+            return _toolbox_to_tool_result(result)
+        if current is None:
+            return _error(f"Failed to read {path!r}: file does not exist")
         ref = ResourceRef(namespace="workspace", path=path)
-        if txn is not None:
-            mutation = await txn.replace(
+        if isinstance(authority, ResourceTxn):
+            await authority.replace(
                 ref,
-                old_bytes,
+                current,
                 new_bytes,
                 rationale=rationale,
             )
-            return _ok(_write_result_text(mutation.ref.path, "queued edit"))
-        result = await writer.replace(path, old_bytes, new_bytes, rationale=rationale)
-        if result.error is not None:
-            return _error(result.error)
-        return _ok(_write_result_text(result.path, "edited"))
+        else:
+            write_result = await authority.replace(
+                path,
+                current,
+                new_bytes,
+                rationale=rationale,
+            )
+            if write_result.error is not None:
+                return _error(write_result.error)
+        self._toolbox.accept_content(path, new_bytes)
+        return _toolbox_to_tool_result(result)
 
     async def _exec_toolbox(
         self, tool_name: str, args: dict[str, Any]
@@ -562,6 +548,14 @@ class _FileToolsRuntime:
         if gate_error is not None:
             return _error(gate_error)
 
+        resource_result = await self._resource_read(
+            path,
+            offset=args.get("offset"),
+            limit=args.get("limit"),
+        )
+        if resource_result is not None:
+            return resource_result
+
         result = await self._dispatch("read", {
             "path": path,
             "offset": args.get("offset"),
@@ -619,13 +613,7 @@ class _FileToolsRuntime:
             content,
             rationale=rationale,
         )
-        if resource_result is not None:
-            return resource_result
-
-        result = await self._dispatch("write", {
-            "path": path, "content": content,
-        })
-        return _toolbox_to_tool_result(result)
+        return resource_result
 
     # -- edit ---------------------------------------------------------------
 
@@ -686,15 +674,4 @@ class _FileToolsRuntime:
             new_string=new_string,
             rationale=rationale,
         )
-        if resource_result is not None:
-            return resource_result
-
-        result = await self._dispatch("edit", {
-            "path": path,
-            "old_string": args.get("old_string"),
-            "new_string": new_string,
-            "start_line": args.get("start_line"),
-            "end_line": args.get("end_line"),
-            "replace_all": bool(args.get("replace_all", False)),
-        })
-        return _toolbox_to_tool_result(result)
+        return resource_result

@@ -17,7 +17,7 @@ from agentm.core.abi.tool_orchestration import (
     ToolWorkItem,
 )
 from agentm.core.abi.tool_executor import ToolExecutor
-from agentm.core.runtime.tool_executor import execute_tool_call
+from agentm.core.lib.tool_executor import execute_tool_call
 
 
 class _CombinedCancelSignal:

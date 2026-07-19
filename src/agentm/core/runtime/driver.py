@@ -29,19 +29,19 @@ from agentm.core.abi.compaction import (
     ContextBudget,
     ContextProjection,
     ProjectionInput,
-    project_context,
-    supports_node_chain_projection,
 )
 from agentm.core.abi.lifecycle import EffectScope, EffectTxn
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
+    InterruptionMessagePolicy,
     TextContent,
     ToolCallBlock,
     ToolResultBlock,
     ToolResultMessage,
 )
 from agentm.core.abi.permission import (
+    PermissionAudience,
     PermissionPolicy,
     PermissionRequest,
     permission_denial_result,
@@ -59,6 +59,7 @@ from agentm.core.abi.resource import (
 )
 from agentm.core.abi.roles import (
     CONTEXT_PROJECTION_SERVICE,
+    INTERRUPTION_MESSAGE_POLICY_SERVICE,
     PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
     RESOURCE_TXN_SERVICE,
 )
@@ -92,9 +93,11 @@ from agentm.core.abi.bus import EventBus
 from agentm.core.abi.context import (
     ContextPolicy,
     ContextTransformCancelled,
+    apply_trigger_metadata,
     apply_context_policies,
     build_context,
     render_trigger,
+    route_messages,
 )
 from agentm.core.abi.events import (
     BeforeRunEvent,
@@ -149,12 +152,13 @@ from agentm.core.abi.trigger import (
     BackgroundCompletion,
     SubagentResult,
     Trigger,
+    TriggerMetadata,
     TriggerRenderer,
 )
 from agentm.core.runtime.execution import Execution
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
-from agentm.core.runtime.trajectory_nodes import turn_to_nodes, turns_to_nodes
+from agentm.core.lib.trajectory_nodes import turn_to_nodes, turns_to_nodes
 from agentm.core.runtime.trigger_queue import (
     QueueClosed,
     TriggerQueue,
@@ -166,7 +170,7 @@ ThinkingLevel = Literal["off", "low", "medium", "high"]
 
 # --- Helpers ----------------------------------------------------------------
 
-_INTERRUPTED_BY_USER = "Interrupted by user"
+_INTERRUPTED_TOOL_TEXT = "Tool execution interrupted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,15 +267,25 @@ def _extract_tool_calls(msg: AssistantMessage) -> list[ToolCallBlock]:
     return [b for b in msg.content if isinstance(b, ToolCallBlock)]
 
 
-def _interrupted_tool_record(call: ToolCallBlock) -> ToolRecord:
-    return ToolRecord(
-        call=call,
-        result=ToolResultBlock(
+def _interrupted_tool_record(
+    call: ToolCallBlock,
+    *,
+    reason: str,
+    policy: InterruptionMessagePolicy | None,
+) -> ToolRecord:
+    result = (
+        policy.interrupted_tool_result(call.id, reason)
+        if policy is not None
+        else ToolResultBlock(
             type="tool_result",
             tool_call_id=call.id,
-            content=[TextContent(type="text", text=_INTERRUPTED_BY_USER)],
+            content=[TextContent(type="text", text=_INTERRUPTED_TOOL_TEXT)],
             is_error=True,
-        ),
+        )
+    )
+    return ToolRecord(
+        call=call,
+        result=result,
     )
 
 
@@ -280,12 +294,67 @@ def _append_interrupted_tool_records(
     calls: list[ToolCallBlock],
     records: list[ToolRecord],
     result_blocks: list[ToolResultBlock] | None = None,
+    reason: str,
+    policy: InterruptionMessagePolicy | None,
 ) -> None:
     for call in calls:
-        record = _interrupted_tool_record(call)
+        record = _interrupted_tool_record(call, reason=reason, policy=policy)
         records.append(record)
         if result_blocks is not None:
             result_blocks.append(record.result)
+
+
+def _cancelled_tool_records(
+    *,
+    calls: Sequence[ToolCallBlock],
+    outcomes: Mapping[int, ToolOutcome],
+    reason: str,
+    policy: InterruptionMessagePolicy | None,
+) -> list[ToolRecord]:
+    """Close every tool call, preserving results completed before cancel."""
+
+    records: list[ToolRecord] = []
+    for index, call in enumerate(calls):
+        outcome = outcomes.get(index)
+        if outcome is None:
+            records.append(
+                _interrupted_tool_record(
+                    call,
+                    reason=reason,
+                    policy=policy,
+                )
+            )
+            continue
+        records.append(
+            ToolRecord(
+                call=call,
+                result=_tool_result_block(call.id, _outcome_result(outcome)),
+            )
+        )
+    return records
+
+
+def _record_interruption_message(
+    execution: Execution,
+    outcome: Outcome,
+    policy: InterruptionMessagePolicy | None,
+) -> None:
+    """Append a policy message after the interrupted request, when required."""
+
+    cause = outcome.cause
+    if not isinstance(cause, SignalAborted) or policy is None:
+        return
+    reason = cause.reason or "unknown"
+    for_tool_use = any(
+        _extract_tool_calls(round_.response)
+        for round_ in execution.rounds
+    )
+    message = policy.interruption_message(
+        reason,
+        for_tool_use=for_tool_use,
+    )
+    if message is not None:
+        execution.add_injected([message])
 
 
 def _assemble_assistant_message(
@@ -386,6 +455,7 @@ def _permission_request(
     args: Mapping[str, object],
     session_id: str,
     execution: Execution,
+    audience: PermissionAudience,
 ) -> PermissionRequest:
     return PermissionRequest(
         action="tool_call",
@@ -395,7 +465,7 @@ def _permission_request(
         tool_call_id=tc.id,
         tool_name=tc.name,
         args=args,
-        audience="subagent" if session_id and ":" in session_id else "user",
+        audience=audience,
     )
 
 
@@ -447,6 +517,7 @@ async def _orchestration_failure_outcome(
 async def _emit_lifecycle_diagnostic(
     bus: EventBus,
     *,
+    boundary: str,
     action: str,
     exc: BaseException,
 ) -> None:
@@ -454,7 +525,7 @@ async def _emit_lifecycle_diagnostic(
         await bus.emit(DiagnosticEvent.CHANNEL, DiagnosticEvent(
             level="error",
             source="lifecycle",
-            message=f"effect scope {action} failed: {type(exc).__name__}: {exc}",
+            message=f"{boundary} {action} failed: {type(exc).__name__}: {exc}",
         ))
     except Exception:
         logger.debug("diagnostic emit failed after lifecycle {}; non-fatal", action)
@@ -478,7 +549,12 @@ async def _begin_effect_turn(
         )
     except Exception as exc:
         logger.exception("effect_scope.begin_turn failed")
-        await _emit_lifecycle_diagnostic(bus, action="begin_turn", exc=exc)
+        await _emit_lifecycle_diagnostic(
+            bus,
+            boundary="effect scope",
+            action="begin_turn",
+            exc=exc,
+        )
         raise
 
 
@@ -495,7 +571,34 @@ async def _commit_effect_turn(
         await effect_scope.commit_turn(txn, turn)
     except Exception as exc:
         logger.exception("effect_scope.commit_turn failed")
-        await _emit_lifecycle_diagnostic(bus, action="commit_turn", exc=exc)
+        await _emit_lifecycle_diagnostic(
+            bus,
+            boundary="effect scope",
+            action="commit_turn",
+            exc=exc,
+        )
+        raise
+
+
+async def _prepare_effect_turn(
+    effect_scope: EffectScope | None,
+    txn: EffectTxn | None,
+    turn: Turn,
+    *,
+    bus: EventBus,
+) -> None:
+    if effect_scope is None or txn is None:
+        return
+    try:
+        await effect_scope.prepare_turn(txn, turn)
+    except Exception as exc:
+        logger.exception("effect_scope.prepare_turn failed")
+        await _emit_lifecycle_diagnostic(
+            bus,
+            boundary="effect scope",
+            action="prepare_turn",
+            exc=exc,
+        )
         raise
 
 
@@ -530,7 +633,13 @@ async def _abandon_effect_turn(
         await effect_scope.abandon_turn(txn)
     except Exception as exc:
         logger.exception("effect_scope.abandon_turn failed")
-        await _emit_lifecycle_diagnostic(bus, action="abandon_turn", exc=exc)
+        await _emit_lifecycle_diagnostic(
+            bus,
+            boundary="effect scope",
+            action="abandon_turn",
+            exc=exc,
+        )
+        raise
 
 
 async def _begin_resource_txn(
@@ -561,17 +670,65 @@ async def _begin_resource_txn(
     return txn
 
 
-async def _commit_resource_txn(
+async def _prepare_resource_txn(
     txn: ResourceTxn | None,
 ) -> tuple[ResourceMutation, ...]:
     if txn is None:
         return ()
-    return tuple(await txn.commit())
+    return tuple(await txn.prepare())
 
 
-async def _abandon_resource_txn(txn: ResourceTxn | None) -> None:
+async def _apply_resource_txn(txn: ResourceTxn | None) -> None:
     if txn is not None:
+        await txn.apply()
+
+
+async def _commit_resource_txn(txn: ResourceTxn | None) -> None:
+    if txn is not None:
+        await txn.commit()
+
+
+async def _abandon_resource_txn(
+    txn: ResourceTxn | None,
+    *,
+    bus: EventBus,
+) -> None:
+    if txn is None:
+        return
+    try:
         await txn.abandon()
+    except Exception as exc:
+        logger.exception("resource_txn.abandon failed")
+        await _emit_lifecycle_diagnostic(
+            bus,
+            boundary="resource transaction",
+            action="abandon",
+            exc=exc,
+        )
+        raise
+
+
+async def _rollback_unpublished_turn(
+    *,
+    resource_txn: ResourceTxn | None,
+    abandon_resource: bool,
+    effect_scope: EffectScope | None,
+    effect_txn: EffectTxn | None,
+    bus: EventBus,
+) -> tuple[BaseException, ...]:
+    cleanup: list[Any] = []
+    if abandon_resource:
+        cleanup.append(_abandon_resource_txn(resource_txn, bus=bus))
+    if effect_scope is not None and effect_txn is not None:
+        cleanup.append(_abandon_effect_turn(effect_scope, effect_txn, bus=bus))
+    if not cleanup:
+        return ()
+    results = await asyncio.gather(*cleanup, return_exceptions=True)
+    return tuple(
+        result
+        for result in results
+        if isinstance(result, BaseException)
+    )
 
 
 async def _node_append_position(
@@ -746,7 +903,7 @@ async def _append_or_rebuild_nodes(
     parent_session_id: str | None,
     trigger_renderers: dict[str, TriggerRenderer] | None,
 ) -> None:
-    """Update the non-authoritative node projection without failing turn commit."""
+    """Update or rebuild the projection; surface a failed recovery attempt."""
 
     try:
         await asyncio.to_thread(
@@ -755,7 +912,7 @@ async def _append_or_rebuild_nodes(
             nodes,
             advance_head=advance_head,
         )
-    except Exception:
+    except Exception as append_error:
         logger.exception(
             "trajectory node projection append failed; rebuilding session {}",
             session_id,
@@ -769,11 +926,11 @@ async def _append_or_rebuild_nodes(
                 parent_session_id=parent_session_id,
                 trigger_renderers=trigger_renderers,
             )
-        except Exception:
-            logger.exception(
-                "trajectory node projection rebuild failed for session {}",
-                session_id,
-            )
+        except Exception as rebuild_error:
+            raise ExceptionGroup(
+                f"trajectory projection append and rebuild failed for {session_id}",
+                [append_error, rebuild_error],
+            ) from rebuild_error
 
 
 def _clear_resource_txn(services: ServiceRegistry | None) -> None:
@@ -850,7 +1007,7 @@ async def _history_messages(
         root_session_id=root_session_id,
         parent_session_id=parent_session_id,
     )
-    messages = list(project_context(projection, projection_input, budget))
+    messages = list(projection.project(projection_input, budget))
     return await apply_context_policies(
         messages,
         turns,
@@ -918,13 +1075,15 @@ async def _projection_input(
     root_session_id: str | None,
     parent_session_id: str | None,
 ) -> ProjectionInput:
-    if not supports_node_chain_projection(projection):
+    if projection.source == "turns":
         return ProjectionInput(
             turns=turns,
             session_id=session_id,
             root_session_id=root_session_id,
             parent_session_id=parent_session_id,
         )
+    if projection.source != "node_chain":
+        raise ValueError(f"unsupported context projection source {projection.source!r}")
     if trajectory_node_store is None:
         raise RuntimeError(
             "node-chain ContextProjection requires a trajectory_node_store"
@@ -993,6 +1152,7 @@ async def drive(
     session_id: str = "",
     root_session_id: str | None = None,
     parent_session_id: str | None = None,
+    permission_audience: PermissionAudience = "user",
     system: str | None = None,
     context_policies: list[ContextPolicy] | None = None,
     prompt_cache_adapter: ProviderPromptCacheAdapter | None = None,
@@ -1038,6 +1198,14 @@ async def drive(
             PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
             cast(type[ProviderPromptCacheAdapter], ProviderPromptCacheAdapter),
         )
+    interruption_policy = (
+        services.get(
+            INTERRUPTION_MESSAGE_POLICY_SERVICE,
+            cast(type[InterruptionMessagePolicy], InterruptionMessagePolicy),
+        )
+        if services is not None
+        else None
+    )
     turns_run = 0
     tool_calls_run = 0
 
@@ -1057,7 +1225,8 @@ async def drive(
             return
 
         try:
-            trigger = await triggers.wait()
+            envelope = await triggers.wait_envelope()
+            trigger = envelope.trigger
         except QueueClosed:
             triggers.terminate(TriggerTerminated("trigger queue closed"))
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
@@ -1076,6 +1245,7 @@ async def drive(
         effect_txn: EffectTxn | None = None
         resource_txn: ResourceTxn | None = None
         resource_txn_committed = False
+        durable_turn_appended = False
         turn_published = False
         try:
             effect_txn = await _begin_effect_turn(
@@ -1096,6 +1266,7 @@ async def drive(
                 execution=execution,
                 trajectory=trajectory,
                 trigger=trigger,
+                trigger_metadata=envelope.metadata,
                 bus=bus,
                 stream_fn=stream_fn,
                 model=model,
@@ -1117,6 +1288,8 @@ async def drive(
                 session_id=session_id,
                 root_session_id=root_session_id,
                 parent_session_id=parent_session_id,
+                permission_audience=permission_audience,
+                interruption_policy=interruption_policy,
                 tool_calls_remaining=(
                     None
                     if max_tool_calls is None
@@ -1125,9 +1298,16 @@ async def drive(
                 tool_allowlist=tool_allowlist,
             )
 
-            turn = trajectory.prepare_commit(outcome, meta)
-            resource_mutations = await _commit_resource_txn(resource_txn)
-            resource_txn_committed = resource_txn is not None
+            _record_interruption_message(
+                execution,
+                outcome,
+                interruption_policy,
+            )
+            turn = replace(
+                trajectory.prepare_commit(outcome, meta),
+                trigger_metadata=envelope.metadata,
+            )
+            resource_mutations = await _prepare_resource_txn(resource_txn)
             if resource_mutations:
                 turn = replace(
                     turn,
@@ -1136,6 +1316,13 @@ async def drive(
                         resource_mutations=resource_mutations,
                     ),
                 )
+            await _apply_resource_txn(resource_txn)
+            await _prepare_effect_turn(
+                effect_scope,
+                effect_txn,
+                turn,
+                bus=bus,
+            )
             node_append_position: _NodeAppendPosition | None = None
             if trajectory_node_store is not None:
                 node_append_position = await _node_append_position(
@@ -1149,6 +1336,19 @@ async def drive(
             cancelled_during_append = False
             if store is not None:
                 cancelled_during_append = await _append_turn(store, session_id, turn)
+                durable_turn_appended = True
+            try:
+                await _commit_resource_txn(resource_txn)
+                resource_txn_committed = resource_txn is not None
+            except Exception:
+                if durable_turn_appended:
+                    trajectory.finalize_commit(turn)
+                    turn_published = True
+                raise
+            trajectory.finalize_commit(turn)
+            turn_published = True
+            _clear_resource_txn(services)
+
             if trajectory_node_store is not None and node_append_position is not None:
                 nodes = turn_to_nodes(
                     turn,
@@ -1184,10 +1384,6 @@ async def drive(
                         parent_session_id=parent_session_id,
                         trigger_renderers=trigger_renderers,
                     )
-            trajectory.finalize_commit(turn)
-            turn_published = True
-            _clear_resource_txn(services)
-
             await _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
             triggers.complete(turn)
             try:
@@ -1209,28 +1405,61 @@ async def drive(
                 return
 
         except asyncio.CancelledError as exc:
+            cancel_error: BaseException = exc
             if not turn_published:
-                if not resource_txn_committed:
-                    await _abandon_resource_txn(resource_txn)
-                await _abandon_effect_turn(effect_scope, effect_txn, bus=bus)
-                trajectory.abandon()
+                cleanup_errors = await _rollback_unpublished_turn(
+                    resource_txn=resource_txn,
+                    abandon_resource=not resource_txn_committed,
+                    effect_scope=effect_scope,
+                    effect_txn=effect_txn,
+                    bus=bus,
+                )
+                try:
+                    trajectory.abandon()
+                except BaseException as cleanup_exc:
+                    cleanup_errors = (*cleanup_errors, cleanup_exc)
+                if cleanup_errors:
+                    cancel_error = BaseExceptionGroup(
+                        "turn cancellation and rollback failed",
+                        [exc, *cleanup_errors],
+                    )
             _clear_resource_txn(services)
-            triggers.terminate(exc)
-            raise
+            triggers.terminate(cancel_error)
+            if cancel_error is exc:
+                raise
+            raise cancel_error
         except Exception as exc:
+            execution_error: BaseException = exc
             if not turn_published:
-                if not resource_txn_committed:
-                    await _abandon_resource_txn(resource_txn)
-                await _abandon_effect_turn(effect_scope, effect_txn, bus=bus)
-                trajectory.abandon()
+                cleanup_errors = await _rollback_unpublished_turn(
+                    resource_txn=resource_txn,
+                    abandon_resource=not resource_txn_committed,
+                    effect_scope=effect_scope,
+                    effect_txn=effect_txn,
+                    bus=bus,
+                )
+                try:
+                    trajectory.abandon()
+                except BaseException as cleanup_exc:
+                    cleanup_errors = (*cleanup_errors, cleanup_exc)
+                if cleanup_errors:
+                    execution_error = BaseExceptionGroup(
+                        "turn execution and rollback failed",
+                        [exc, *cleanup_errors],
+                    )
             _clear_resource_txn(services)
-            triggers.terminate(exc)
-            logger.exception("driver: round raised; abandoning turn")
+            triggers.terminate(execution_error)
+            diagnostic_message = (
+                "driver stopped after a committed turn"
+                if turn_published
+                else "turn abandoned: trigger dropped due to internal error"
+            )
+            logger.exception("driver: {}", diagnostic_message)
             try:
                 await bus.emit(DiagnosticEvent.CHANNEL, DiagnosticEvent(
                     level="error",
                     source="driver",
-                    message="turn abandoned: trigger dropped due to internal error",
+                    message=diagnostic_message,
                 ))
             except Exception:
                 logger.debug("diagnostic emit failed after turn abandon; non-fatal")
@@ -1242,6 +1471,7 @@ async def _react_loop(
     execution: Execution,
     trajectory: Trajectory,
     trigger: Trigger,
+    trigger_metadata: TriggerMetadata,
     bus: EventBus,
     stream_fn: StreamFn,
     model: Model,
@@ -1263,6 +1493,8 @@ async def _react_loop(
     session_id: str,
     root_session_id: str | None,
     parent_session_id: str | None,
+    permission_audience: PermissionAudience,
+    interruption_policy: InterruptionMessagePolicy | None,
     tool_calls_remaining: int | None,
     tool_allowlist: tuple[str, ...] | None,
 ) -> tuple[Outcome, TurnMeta, int]:
@@ -1274,7 +1506,10 @@ async def _react_loop(
     total_cache_write = 0
     tool_calls_used = 0
     start_ns = time.perf_counter_ns()
-    trigger_messages = render_trigger(trigger, trigger_renderers)
+    trigger_messages = apply_trigger_metadata(
+        render_trigger(trigger, trigger_renderers),
+        trigger_metadata,
+    )
     context_budget = _context_budget(model)
     turn_signal = _TurnCancelSignal(
         interrupt=interrupt,
@@ -1378,6 +1613,7 @@ async def _react_loop(
                 if "tools" in ret and isinstance(ret["tools"], list):
                     effective_tools = ret["tools"]
 
+        messages = route_messages(messages, session_id=session_id)
         messages = await _apply_provider_prompt_cache(
             messages=messages,
             model=effective_model,
@@ -1433,8 +1669,13 @@ async def _react_loop(
             )
             if turn_signal.is_set():
                 response = _assemble_assistant_message(stream_events)
+                reason = cancel_reason(turn_signal) or "unknown"
                 interrupted_records = [
-                    _interrupted_tool_record(call)
+                    _interrupted_tool_record(
+                        call,
+                        reason=reason,
+                        policy=interruption_policy,
+                    )
                     for call in _extract_tool_calls(response)
                 ]
                 execution.add_round(response, interrupted_records)
@@ -1467,7 +1708,12 @@ async def _react_loop(
         paired_outcomes: list[tuple[str, ToolOutcome]] = []
 
         if turn_signal.is_set() or isinstance(response.termination, Aborted):
-            _append_interrupted_tool_records(calls=tool_calls, records=tool_records)
+            _append_interrupted_tool_records(
+                calls=tool_calls,
+                records=tool_records,
+                reason=cancel_reason(turn_signal) or "unknown",
+                policy=interruption_policy,
+            )
             execution.add_round(response, tool_records)
             return Outcome(cause=_signal_aborted(turn_signal)), _meta(
                 total_input, total_output, start_ns, effective_model,
@@ -1475,35 +1721,58 @@ async def _react_loop(
             ), tool_calls_used
 
         if tool_calls:
+            if (
+                tool_calls_remaining is not None
+                and len(tool_calls)
+                > max(0, tool_calls_remaining - tool_calls_used)
+            ):
+                for call in tool_calls:
+                    tool_records.append(
+                        ToolRecord(
+                            call=call,
+                            result=ToolResultBlock(
+                                type="tool_result",
+                                tool_call_id=call.id,
+                                content=[
+                                    TextContent(
+                                        type="text",
+                                        text=(
+                                            "Tool call skipped: max_tool_calls "
+                                            "exhausted"
+                                        ),
+                                    )
+                                ],
+                                is_error=True,
+                            ),
+                        )
+                    )
+                execution.add_round(response, tool_records)
+                return Outcome(cause=BudgetExhausted(
+                    detail="max_tool_calls exhausted"
+                )), _meta(
+                    total_input,
+                    total_output,
+                    start_ns,
+                    effective_model,
+                    cache_read=total_cache_read,
+                    cache_write=total_cache_write,
+                ), tool_calls_used
+
             result_blocks: list[ToolResultBlock] = []
             immediate_outcomes: dict[int, ToolOutcome] = {}
             work_items: list[ToolWorkItem] = []
             for index, tc in enumerate(tool_calls):
                 if turn_signal.is_set():
-                    _append_interrupted_tool_records(
-                        calls=tool_calls[index:],
-                        records=tool_records,
-                        result_blocks=result_blocks,
+                    tool_records = _cancelled_tool_records(
+                        calls=tool_calls,
+                        outcomes=immediate_outcomes,
+                        reason=cancel_reason(turn_signal) or "unknown",
+                        policy=interruption_policy,
                     )
+                    tool_calls_used += len(immediate_outcomes)
                     execution.add_round(response, tool_records)
                     return Outcome(cause=_signal_aborted(turn_signal)), _meta(
                         total_input, total_output, start_ns,
-                        cache_read=total_cache_read, cache_write=total_cache_write,
-                    ), tool_calls_used
-
-                if (
-                    tool_calls_remaining is not None
-                    and (
-                        tool_calls_used
-                        + len(immediate_outcomes)
-                        + len(work_items)
-                    ) >= tool_calls_remaining
-                ):
-                    execution.add_round(response, tool_records)
-                    return Outcome(cause=BudgetExhausted(
-                        detail="max_tool_calls exhausted"
-                    )), _meta(
-                        total_input, total_output, start_ns, effective_model,
                         cache_read=total_cache_read, cache_write=total_cache_write,
                     ), tool_calls_used
 
@@ -1549,15 +1818,18 @@ async def _react_loop(
                         args=args,
                         session_id=session_id,
                         execution=execution,
+                        audience=permission_audience,
                     ),
                     signal=turn_signal,
                 )
                 if turn_signal.is_set():
-                    _append_interrupted_tool_records(
-                        calls=tool_calls[index:],
-                        records=tool_records,
-                        result_blocks=result_blocks,
+                    tool_records = _cancelled_tool_records(
+                        calls=tool_calls,
+                        outcomes=immediate_outcomes,
+                        reason=cancel_reason(turn_signal) or "unknown",
+                        policy=interruption_policy,
                     )
+                    tool_calls_used += len(immediate_outcomes)
                     execution.add_round(response, tool_records)
                     return Outcome(cause=_signal_aborted(turn_signal)), _meta(
                         total_input, total_output, start_ns,
@@ -1611,16 +1883,13 @@ async def _react_loop(
                         )
 
             if turn_signal.is_set() and len(outcomes_by_index) < len(tool_calls):
-                missing = [
-                    call
-                    for index, call in enumerate(tool_calls)
-                    if index not in outcomes_by_index
-                ]
-                _append_interrupted_tool_records(
-                    calls=missing,
-                    records=tool_records,
-                    result_blocks=result_blocks,
+                tool_records = _cancelled_tool_records(
+                    calls=tool_calls,
+                    outcomes=outcomes_by_index,
+                    reason=cancel_reason(turn_signal) or "unknown",
+                    policy=interruption_policy,
                 )
+                tool_calls_used += len(outcomes_by_index)
                 execution.add_round(response, tool_records)
                 return Outcome(cause=_signal_aborted(turn_signal)), _meta(
                     total_input, total_output, start_ns,

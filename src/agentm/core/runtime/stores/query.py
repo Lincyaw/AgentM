@@ -5,10 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from agentm.core.abi.query import (
-    EventRecord,
     SessionFilter,
     SessionIdentity,
-    SpanRecord,
 )
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import Turn
@@ -37,17 +35,6 @@ class TrajectoryStoreQueryAdapter:
     def turns(self, session_id: str) -> Iterable[Turn]:
         _, turns = self._store.load(session_id)
         return turns
-
-    def events(self, session_id: str) -> Iterable[EventRecord]:
-        raise NotImplementedError(
-            "the trajectory store does not persist observability events"
-        )
-
-    def spans(self, session_id: str) -> Iterable[SpanRecord]:
-        raise NotImplementedError(
-            "the trajectory store does not persist observability spans"
-        )
-
 
 def _session_matches(row: SessionIdentity, filter: SessionFilter) -> bool:
     if filter.session_id is not None and row.id != filter.session_id:

@@ -10,7 +10,7 @@ from agentm.core.abi.tool_executor import (
     ToolExecutionCapabilities,
     ToolExecutionRequest,
 )
-from agentm.core.runtime.tool_executor import DirectToolExecutor
+from agentm.core.lib.tool_executor import DirectToolExecutor
 
 
 class SandboxToolExecutor:

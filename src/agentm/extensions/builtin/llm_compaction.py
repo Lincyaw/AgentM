@@ -301,7 +301,19 @@ class LlmCompactionPolicy(BindableContextPolicy):
             raise RuntimeError(
                 f"llm_compaction summary resource is missing: {ref.uri()}"
             )
-        summary_text = (await resource_store.read_ref(ref)).decode("utf-8")
+        summary_bytes = await resource_store.read_ref(ref)
+        expected_sha256 = state.metadata.get("summary_sha256")
+        if not isinstance(expected_sha256, str) or not expected_sha256:
+            raise RuntimeError(
+                "llm_compaction state has no summary_sha256 integrity record"
+            )
+        actual_sha256 = hashlib.sha256(summary_bytes).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                "llm_compaction summary integrity check failed: "
+                f"{actual_sha256} != {expected_sha256}"
+            )
+        summary_text = summary_bytes.decode("utf-8")
         return (
             covered_position,
             _summary_message(

@@ -20,6 +20,9 @@ from typing import TYPE_CHECKING, Any
 
 from agentm.core.abi.bus import EventBus
 from agentm.core.abi.cancel import CancelSignal
+from agentm.core.abi.cancel import CompositeCancelSignal
+from agentm.core.abi.codec import CodecRegistry
+from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
@@ -30,12 +33,13 @@ from agentm.core.abi.catalog import (
     VersionedResourceStore,
 )
 from agentm.core.abi.errors import ExtensionLoadError
-from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestorePolicy
+from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
+from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.manifest import (
     AtomInstallPriority,
     ExtensionManifest,
     provided_capability_keys,
-    requirement_keys,
+    requirement_key,
 )
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.provider import ProviderResolver
@@ -47,7 +51,7 @@ from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_SERVICE,
     ATOM_CATALOG_SERVICE,
     CATALOG_QUERY_SERVICE,
-    ENVIRONMENT_RESTORE_POLICY_SERVICE,
+    ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
     LOOP_BUDGET_SERVICE,
     PROVIDER_RESOLVER_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
@@ -66,13 +70,18 @@ from agentm.core.abi.session_api import (
 )
 from agentm.core.abi.store import SessionMeta, TrajectoryNodeStore, TrajectoryStore
 from agentm.core.abi.stream import Model, StreamFn
+from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.trajectory import TurnRef
+from agentm.core.abi.tree import SessionGraphProtocol
+from agentm.core.abi.trigger import TriggerRenderer
 from agentm.core.runtime.catalog import (
     InMemoryAtomCatalog,
     InMemoryVersionedResourceStore,
     build_atom_identity_payload,
     normalize_atom_config,
 )
+from agentm.core.runtime.driver import ThinkingLevel
 from agentm.core.runtime.extension import install_extension, validate_extension_source
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_meta import session_meta_config
@@ -221,10 +230,8 @@ def _extension_plan(
     missing: dict[str, list[str]] = {}
     for item in items:
         for requirement in item.requires:
-            if not any(
-                key in available or key in plan_capabilities
-                for key in requirement_keys(requirement)
-            ):
+            key = requirement_key(requirement)
+            if key not in available and key not in plan_capabilities:
                 missing.setdefault(item.name, []).append(requirement)
     if missing:
         detail = "; ".join(
@@ -241,7 +248,7 @@ def _extension_plan(
             item
             for item in remaining.values()
             if all(
-                any(key in provided for key in requirement_keys(requirement))
+                requirement_key(requirement) in provided
                 for requirement in item.requires
             )
         ]
@@ -332,14 +339,11 @@ def _resolved_atom_config(
 def _config_fingerprint(config: Any) -> str | None:
     if not config:
         return None
-    try:
-        payload = json.dumps(
-            config,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except TypeError:
-        return None
+    payload = json.dumps(
+        config,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
@@ -375,9 +379,8 @@ def _atom_activation(
         requires=tuple(item.requires),
         registers=tuple(item.registers),
         required_capabilities=tuple(
-            key
+            requirement_key(requirement)
             for requirement in item.requires
-            for key in requirement_keys(requirement)
         ),
         provided_capabilities=tuple(item.provides),
         config_fingerprint=_config_fingerprint(
@@ -434,12 +437,18 @@ async def create_session(
     cwd: str = "",
     purpose: str = "root",
     store: TrajectoryStore | None = None,
+    graph: SessionGraphProtocol | None = None,
     session_context: SessionContext | None = None,
     session_id: str | None = None,
     root_session_id: str | None = None,
     parent_session_id: str | None = None,
     bus: EventBus | None = None,
     initial_turns: list[Turn] | None = None,
+    fork_point: TurnRef | None = None,
+    tools: list[Tool] | None = None,
+    context_policies: list[ContextPolicy] | None = None,
+    trigger_renderers: dict[str, TriggerRenderer] | None = None,
+    codec: CodecRegistry | None = None,
     extensions: list[ExtensionSpec] | None = None,
     extra_extensions: Sequence[ExtensionSpec] = (),
     provider: ExtensionSpec | None = None,
@@ -453,7 +462,10 @@ async def create_session(
     permission_policy: PermissionPolicy | None = None,
     trajectory_node_store: TrajectoryNodeStore | None = None,
     effect_scope: EffectScope | None = None,
-    environment_restore_policy: EnvironmentRestorePolicy | None = None,
+    environment_operations: EnvironmentOperations | None = None,
+    environment_restore_failure_handler: (
+        EnvironmentRestoreFailureHandler | None
+    ) = None,
     versioned_resource_store: VersionedResourceStore | None = None,
     atom_catalog: AtomCatalog | None = None,
     atom_configs: dict[str, dict[str, Any]] | None = None,
@@ -463,6 +475,7 @@ async def create_session(
     max_turns: int | None = None,
     max_tool_calls: int | None = None,
     tool_allowlist: list[str] | None = None,
+    thinking: ThinkingLevel = "off",
     cancel_signal: CancelSignal | None = None,
 ) -> Session:
     """Create a root SDK session."""
@@ -514,9 +527,15 @@ async def create_session(
         model=model,
         system=system,
         store=store,
+        graph=graph,
+        tools=tools,
+        context_policies=context_policies,
+        trigger_renderers=trigger_renderers,
+        codec=codec,
         max_turns=max_turns,
         max_tool_calls=max_tool_calls,
         tool_allowlist=tool_allowlist,
+        thinking=thinking,
         cancel_signal=cancel_signal,
         tool_executor=tool_executor,
         tool_orchestrator=tool_orchestrator,
@@ -525,7 +544,7 @@ async def create_session(
         resource_store=resource_store,
         trajectory_node_store=trajectory_node_store,
         versioned_resource_store=versioned_resource_store,
-        environment_restore_policy=environment_restore_policy,
+        environment_restore_failure_handler=environment_restore_failure_handler,
         provider_identity=provider_identity,
         services=resolved_services,
         cwd=cwd,
@@ -535,6 +554,11 @@ async def create_session(
         session.register_resource_writer(resource_writer, replace=True)
     if effect_scope is not None:
         session.register_effect_scope(effect_scope, replace=True)
+    if environment_operations is not None:
+        session.register_operations(
+            environment=environment_operations,
+            bash=environment_operations.bash,
+        )
     if atom_catalog is not None:
         session.register_atom_catalog(atom_catalog, replace=True)
 
@@ -554,6 +578,7 @@ async def create_session(
         meta=SessionMeta(
             id=session.id,
             parent_id=ctx.parent_session_id,
+            fork_point=fork_point,
             purpose=ctx.purpose,
             cwd=ctx.cwd,
             created_at=created_at,
@@ -595,12 +620,12 @@ async def create_from_config(
             config.spec_resolver,
             scope="host",
         )
-    if config.environment_restore_policy is not None:
+    if config.environment_restore_failure_handler is not None:
         services.register(
-            ENVIRONMENT_RESTORE_POLICY_SERVICE,
-            config.environment_restore_policy,
-            EnvironmentRestorePolicy,
-            scope="session",
+            ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
+            config.environment_restore_failure_handler,
+            EnvironmentRestoreFailureHandler,
+            scope="host",
         )
     resolved_spec = _resolve_session_spec(config)
     if resolved_spec is not None and restored_provider_identity is not None:
@@ -649,7 +674,9 @@ async def create_from_config(
         permission_policy=config.permission_policy,
         trajectory_node_store=config.trajectory_node_store,
         effect_scope=config.effect_scope,
-        environment_restore_policy=config.environment_restore_policy,
+        environment_restore_failure_handler=(
+            config.environment_restore_failure_handler
+        ),
         versioned_resource_store=config.versioned_resource_store,
         atom_catalog=config.atom_catalog,
         atom_configs=_resolved_atom_config(resolved_spec, config.atom_config_overrides),
@@ -708,12 +735,12 @@ async def create_child_session(
             config.provider_resolver,
             scope="host",
         )
-    if config.environment_restore_policy is not None:
+    if config.environment_restore_failure_handler is not None:
         child_services.register(
-            ENVIRONMENT_RESTORE_POLICY_SERVICE,
-            config.environment_restore_policy,
-            EnvironmentRestorePolicy,
-            scope="session",
+            ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
+            config.environment_restore_failure_handler,
+            EnvironmentRestoreFailureHandler,
+            scope="host",
         )
     resolved_spec = _resolve_session_spec(config)
     if resolved_spec is not None:
@@ -740,23 +767,39 @@ async def create_child_session(
             )
 
     scenario_loader = config.scenario_loader or _get_scenario_loader(child_services)
+    inherit_parent_composition = (
+        resolved_spec is None
+        and config.scenario is None
+        and config.extensions is None
+    )
     if resolved_spec is not None:
         scenario = resolved_spec.scenario
     elif config.scenario is not None:
         scenario = config.scenario
     else:
         scenario = parent.ctx.scenario
+    requested_extensions = (
+        list(resolved_spec.extensions)
+        if resolved_spec is not None
+        else parent._composition_extensions(
+            include_provider_atoms=(
+                config.provider is None
+                and config.stream_fn is None
+                and config.model is None
+            )
+        )
+        if inherit_parent_composition
+        else config.extensions
+    )
     extensions, scenario_dir, scenario_name = _resolve_extensions(
         scenario=scenario,
-        extensions=(
-            list(resolved_spec.extensions)
-            if resolved_spec is not None
-            else config.extensions
-        ),
+        extensions=requested_extensions,
         extra_extensions=() if resolved_spec is not None else config.extra_extensions,
         atom_configs=_resolved_atom_config(resolved_spec, config.atom_config_overrides),
         scenario_loader=scenario_loader,
     )
+    if inherit_parent_composition:
+        scenario_dir = parent.ctx.scenario_dir
 
     child_id = config.session_id or uuid.uuid4().hex[:16]
     child_store = config.store if config.store is not None else parent.store
@@ -776,6 +819,25 @@ async def create_child_session(
         config.loop_config.max_tool_calls if config.loop_config else None
     )
 
+    if config.parent_cancellation not in {"inherit", "independent"}:
+        raise ValueError(
+            "parent_cancellation must be 'inherit' or 'independent'"
+        )
+    parent_signal = (
+        CompositeCancelSignal(
+            parent._interrupt,
+            parent._shutdown,
+            parent._parent_cancel_signal,
+        )
+        if config.parent_cancellation == "inherit"
+        else None
+    )
+    child_cancel_signal = (
+        CompositeCancelSignal(parent_signal, config.cancel_signal)
+        if parent_signal is not None and config.cancel_signal is not None
+        else config.cancel_signal if config.cancel_signal is not None else parent_signal
+    )
+
     child = Session(
         ctx=child_ctx,
         trajectory=Trajectory(turns=config.initial_turns),
@@ -788,8 +850,10 @@ async def create_child_session(
         max_turns=max_turns,
         max_tool_calls=max_tool_calls,
         tool_allowlist=config.tool_allowlist,
-        cancel_signal=config.cancel_signal,
-        environment_restore_policy=config.environment_restore_policy,
+        cancel_signal=child_cancel_signal,
+        environment_restore_failure_handler=(
+            config.environment_restore_failure_handler
+        ),
         provider_identity=(
             resolved_spec.provider_identity
             if resolved_spec is not None

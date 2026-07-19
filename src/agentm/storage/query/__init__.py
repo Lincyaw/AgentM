@@ -1,5 +1,5 @@
 """Read/query storage backend implementations."""
 
-from agentm.storage.query.clickhouse import ClickHouseTrajectoryQueryStore
+from agentm.storage.query.clickhouse import ClickHouseTraceQueryStore
 
-__all__ = ["ClickHouseTrajectoryQueryStore"]
+__all__ = ["ClickHouseTraceQueryStore"]

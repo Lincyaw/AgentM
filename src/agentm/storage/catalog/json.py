@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import hashlib
 import json
+import os
+import tempfile
+import threading
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
@@ -35,11 +41,15 @@ class JsonCatalogStore:
         self._aliases_path = self._root / "aliases.json"
         self._active_sets_path = self._root / "active_sets.json"
         self._content_root = self._root / "content"
+        self._lock_path = self._root / ".lock"
+        self._process_lock = threading.RLock()
         self._root.mkdir(parents=True, exist_ok=True)
         self._content_root.mkdir(parents=True, exist_ok=True)
-        self._versions = self._load_versions()
-        self._aliases = self._load_aliases()
-        self._records = self._load_records()
+        self._versions: dict[str, list[ResourceVersion]] = {}
+        self._aliases: dict[str, ResourceVersion] = {}
+        self._records: dict[str, CatalogActiveSetRecord] = {}
+        with self._guard():
+            self._reload_unlocked()
 
     async def put(
         self,
@@ -48,6 +58,21 @@ class JsonCatalogStore:
         content: bytes,
         media_type: str | None = None,
         metadata: CatalogMeta | None = None,
+    ) -> ResourceVersion:
+        return await asyncio.to_thread(
+            self._put,
+            resource_id,
+            content,
+            media_type,
+            metadata,
+        )
+
+    def _put(
+        self,
+        resource_id: str,
+        content: bytes,
+        media_type: str | None,
+        metadata: CatalogMeta | None,
     ) -> ResourceVersion:
         digest = _digest_bytes(content)
         version = ResourceVersion(
@@ -58,18 +83,34 @@ class JsonCatalogStore:
             size_bytes=len(content),
             metadata=dict(metadata or {}),
         )
-        key = (resource_id, version.version_id)
-        if not self._content_path(version).exists():
+        with self._guard():
+            self._reload_unlocked()
+            existing = next(
+                (
+                    item
+                    for item in self._versions.get(resource_id, ())
+                    if item.version_id == version.version_id
+                ),
+                None,
+            )
+            if existing is not None and existing != version:
+                raise ValueError(
+                    "content-addressed resource version metadata changed for "
+                    f"{resource_id}:{version.version_id}"
+                )
             path = self._content_path(version)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_bytes(path, bytes(content))
-        if key not in {
-            (item.resource_id, item.version_id)
-            for item in self._versions.get(resource_id, ())
-        }:
-            self._versions.setdefault(resource_id, []).append(version)
-            self._persist_versions()
-        return version
+            if path.exists():
+                stored = path.read_bytes()
+                if stored != content:
+                    raise ValueError(
+                        f"catalog content digest collision at {path}"
+                    )
+            else:
+                _atomic_write_bytes(path, bytes(content))
+            if existing is None:
+                self._versions.setdefault(resource_id, []).append(version)
+                self._persist_versions()
+            return existing or version
 
     async def resolve(
         self,
@@ -77,30 +118,89 @@ class JsonCatalogStore:
         *,
         version_id: str | None = None,
     ) -> ResourceVersion | None:
-        versions = self._versions.get(resource_id, ())
-        if not versions:
-            return None
-        if version_id is None:
-            return versions[-1]
-        for version in versions:
-            if version.version_id == version_id:
-                return version
-        return None
+        return await asyncio.to_thread(self._resolve, resource_id, version_id)
+
+    def _resolve(
+        self,
+        resource_id: str,
+        version_id: str | None,
+    ) -> ResourceVersion | None:
+        with self._guard():
+            self._reload_unlocked()
+            versions = self._versions.get(resource_id, ())
+            if not versions:
+                return None
+            if version_id is None:
+                return versions[-1]
+            return next(
+                (
+                    version
+                    for version in versions
+                    if version.version_id == version_id
+                ),
+                None,
+            )
 
     async def read(self, version: ResourceVersion) -> bytes:
-        return self._content_path(version).read_bytes()
+        return await asyncio.to_thread(self._read, version)
+
+    def _read(self, version: ResourceVersion) -> bytes:
+        with self._guard():
+            self._reload_unlocked()
+            known = any(
+                item.version_id == version.version_id
+                for item in self._versions.get(version.resource_id, ())
+            )
+            if not known:
+                raise KeyError((version.resource_id, version.version_id))
+            content = self._content_path(version).read_bytes()
+            if _digest_bytes(content) != version.digest:
+                raise ValueError(
+                    f"catalog content digest mismatch for {version.resource_id}"
+                )
+            if len(content) != version.size_bytes:
+                raise ValueError(
+                    f"catalog content size mismatch for {version.resource_id}"
+                )
+            return content
 
     async def alias(self, alias: str, version: ResourceVersion) -> None:
-        self._aliases[alias] = version
-        self._persist_aliases()
+        await asyncio.to_thread(self._alias, alias, version)
+
+    def _alias(self, alias: str, version: ResourceVersion) -> None:
+        with self._guard():
+            self._reload_unlocked()
+            if not any(
+                item.version_id == version.version_id
+                for item in self._versions.get(version.resource_id, ())
+            ):
+                raise KeyError((version.resource_id, version.version_id))
+            self._aliases[alias] = version
+            self._persist_aliases()
 
     async def resolve_alias(self, alias: str) -> ResourceVersion | None:
-        return self._aliases.get(alias)
+        return await asyncio.to_thread(self._resolve_alias, alias)
+
+    def _resolve_alias(self, alias: str) -> ResourceVersion | None:
+        with self._guard():
+            self._reload_unlocked()
+            return self._aliases.get(alias)
 
     async def list_versions(self, resource_id: str) -> list[ResourceVersion]:
-        return list(self._versions.get(resource_id, ()))
+        return await asyncio.to_thread(self._list_versions, resource_id)
+
+    def _list_versions(self, resource_id: str) -> list[ResourceVersion]:
+        with self._guard():
+            self._reload_unlocked()
+            return list(self._versions.get(resource_id, ()))
 
     async def record_active_set(
+        self,
+        active_set: CatalogActiveSetInput,
+    ) -> ActiveSetFingerprint:
+        return await asyncio.to_thread(self._record_active_set, active_set)
+
+    def _record_active_set(
         self,
         active_set: CatalogActiveSetInput,
     ) -> ActiveSetFingerprint:
@@ -111,28 +211,45 @@ class JsonCatalogStore:
             atoms=captured,
             metadata={"atom_count": len(captured)},
         )
-        self._records[active_set.session_id] = CatalogActiveSetRecord(
-            session_id=active_set.session_id,
-            fingerprint=fingerprint,
-            root_session_id=active_set.root_session_id,
-            parent_session_id=active_set.parent_session_id,
-            scenario=active_set.scenario,
-            provider=active_set.provider,
-            created_at=active_set.created_at,
-            metadata=active_set.metadata,
-        )
-        self._persist_records()
-        return fingerprint
+        with self._guard():
+            self._reload_unlocked()
+            self._records[active_set.session_id] = CatalogActiveSetRecord(
+                session_id=active_set.session_id,
+                fingerprint=fingerprint,
+                root_session_id=active_set.root_session_id,
+                parent_session_id=active_set.parent_session_id,
+                scenario=active_set.scenario,
+                provider=active_set.provider,
+                created_at=active_set.created_at,
+                metadata=active_set.metadata,
+            )
+            self._persist_records()
+            return fingerprint
 
     async def get_active_set(self, session_id: str) -> ActiveSetFingerprint | None:
-        record = self._records.get(session_id)
-        return record.fingerprint if record is not None else None
+        return await asyncio.to_thread(self._get_active_set, session_id)
+
+    def _get_active_set(self, session_id: str) -> ActiveSetFingerprint | None:
+        with self._guard():
+            self._reload_unlocked()
+            record = self._records.get(session_id)
+            return record.fingerprint if record is not None else None
 
     async def query_active_sets(
         self,
         query: CatalogQuery,
     ) -> list[CatalogActiveSetRecord]:
-        records = list(self._records.values())
+        return await asyncio.to_thread(self._query_active_sets, query)
+
+    def _query_active_sets(
+        self,
+        query: CatalogQuery,
+    ) -> list[CatalogActiveSetRecord]:
+        if query.limit is not None and query.limit < 0:
+            raise ValueError("catalog query limit cannot be negative")
+        with self._guard():
+            self._reload_unlocked()
+            records = list(self._records.values())
         if query.session_id is not None:
             records = [record for record in records if record.session_id == query.session_id]
         if query.root_session_id is not None:
@@ -205,6 +322,30 @@ class JsonCatalogStore:
             records = records[: query.limit]
         return records
 
+    @contextmanager
+    def _guard(self) -> Iterator[None]:
+        with self._process_lock:
+            self._root.mkdir(parents=True, exist_ok=True)
+            with self._lock_path.open("a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _reload_unlocked(self) -> None:
+        self._versions = self._load_versions()
+        self._aliases = self._load_aliases()
+        self._records = self._load_records()
+        known_versions = {
+            (version.resource_id, version.version_id)
+            for versions in self._versions.values()
+            for version in versions
+        }
+        for alias, version in self._aliases.items():
+            if (version.resource_id, version.version_id) not in known_versions:
+                raise ValueError(f"catalog alias {alias!r} references an unknown version")
+
     def _load_versions(self) -> dict[str, list[ResourceVersion]]:
         rows = _read_json_array(self._versions_path)
         versions: dict[str, list[ResourceVersion]] = {}
@@ -227,8 +368,11 @@ class JsonCatalogStore:
         for item in rows:
             alias = item.get("alias")
             version_data = item.get("version")
-            if isinstance(alias, str) and isinstance(version_data, Mapping):
-                aliases[alias] = deserialize_resource_version(version_data)
+            if not isinstance(alias, str) or not alias:
+                raise ValueError("catalog alias row has no alias")
+            if not isinstance(version_data, Mapping):
+                raise ValueError(f"catalog alias {alias!r} has no version")
+            aliases[alias] = deserialize_resource_version(version_data)
         return aliases
 
     def _persist_aliases(self) -> None:
@@ -316,7 +460,9 @@ def _read_json_array(path: Path) -> list[Mapping[str, Any]]:
     value = json.loads(text)
     if not isinstance(value, list):
         raise ValueError(f"{path} must contain a JSON array")
-    return [item for item in value if isinstance(item, Mapping)]
+    if not all(isinstance(item, Mapping) for item in value):
+        raise ValueError(f"{path} must contain only JSON objects")
+    return list(value)
 
 
 def _atomic_write_json_array(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -324,17 +470,35 @@ def _atomic_write_json_array(path: Path, rows: Sequence[Mapping[str, Any]]) -> N
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    _atomic_write_bytes(path, text.encode("utf-8"))
 
 
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(content)
-    tmp.replace(path)
+    descriptor, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 __all__ = ["JsonCatalogStore"]

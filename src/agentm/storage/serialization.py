@@ -43,7 +43,7 @@ def json_safe(value: Any) -> Any:
         return [json_safe(item) for item in value]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return json_safe(dataclasses.asdict(value))
-    return repr(value)
+    raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
 
 
 def json_restore(value: Any) -> Any:
@@ -53,8 +53,8 @@ def json_restore(value: Any) -> Any:
         if set(value) == {"__bytes_hex__"} and isinstance(value["__bytes_hex__"], str):
             try:
                 return bytes.fromhex(value["__bytes_hex__"])
-            except ValueError:
-                return value
+            except ValueError as exc:
+                raise ValueError("invalid encoded bytes value") from exc
         return {str(key): json_restore(item) for key, item in value.items()}
     if isinstance(value, list):
         return [json_restore(item) for item in value]
@@ -96,12 +96,16 @@ def serialize_node(node: TrajectoryNode) -> JsonObject:
 
 def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
     message_data = data.get("message")
+    if message_data is not None and not isinstance(message_data, Mapping):
+        raise ValueError("trajectory node message must be an object")
     message: AgentMessage | None = (
-        deserialize_message(dict(message_data)) if isinstance(message_data, Mapping) else None
+        deserialize_message(dict(message_data))
+        if isinstance(message_data, Mapping)
+        else None
     )
     payload = json_restore(data.get("payload", {}))
     if not isinstance(payload, Mapping):
-        payload = {}
+        raise ValueError("trajectory node payload must be an object")
     return TrajectoryNode(
         id=str(data["id"]),
         session_id=str(data["session_id"]),
@@ -120,14 +124,14 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
         message_index=_optional_int(data.get("message_index")),
         agent_id=_optional_str(data.get("agent_id")),
         is_sidechain=bool(data.get("is_sidechain", False)),
-        tool_call_ids=tuple(str(item) for item in data.get("tool_call_ids", ())),
-        tool_names=tuple(str(item) for item in data.get("tool_names", ())),
+        tool_call_ids=_string_tuple(data, "tool_call_ids"),
+        tool_names=_string_tuple(data, "tool_names"),
         cache_key=_optional_str(data.get("cache_key")),
         content_ref=_optional_str(data.get("content_ref")),
         visibility=cast(MessageVisibility, data.get("visibility", "visible")),
         message=message,
         payload=dict(payload),
-        removed_node_ids=tuple(str(item) for item in data.get("removed_node_ids", ())),
+        removed_node_ids=_string_tuple(data, "removed_node_ids"),
         timestamp=float(data.get("timestamp", 0.0)),
     )
 
@@ -153,7 +157,7 @@ def serialize_head(head: TrajectoryHead) -> JsonObject:
 def deserialize_head(data: Mapping[str, Any]) -> TrajectoryHead:
     metadata = json_restore(data.get("metadata", {}))
     if not isinstance(metadata, Mapping):
-        metadata = {}
+        raise ValueError("trajectory head metadata must be an object")
     return TrajectoryHead(
         session_id=str(data["session_id"]),
         head_id=str(data.get("head_id", "main")),
@@ -187,7 +191,7 @@ def serialize_projection_status(status: TrajectoryProjectionStatus) -> JsonObjec
 def deserialize_projection_status(data: Mapping[str, Any]) -> TrajectoryProjectionStatus:
     metadata = json_restore(data.get("metadata", {}))
     if not isinstance(metadata, Mapping):
-        metadata = {}
+        raise ValueError("projection status metadata must be an object")
     return TrajectoryProjectionStatus(
         session_id=str(data["session_id"]),
         state=cast(TrajectoryProjectionState, data.get("state", "current")),
@@ -218,13 +222,15 @@ def deserialize_content_state(data: Mapping[str, Any]) -> ContentReplacementStat
     replacements = json_restore(data.get("replacements", {}))
     metadata = json_restore(data.get("metadata", {}))
     if not isinstance(replacements, Mapping):
-        replacements = {}
+        raise ValueError("content replacement state must contain an object")
     if not isinstance(metadata, Mapping):
-        metadata = {}
+        raise ValueError("content replacement metadata must be an object")
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in replacements.items()):
+        raise ValueError("content replacements must map strings to strings")
     return ContentReplacementState(
         state_key=str(data["state_key"]),
-        seen_tool_call_ids=tuple(str(item) for item in data.get("seen_tool_call_ids", ())),
-        replacements={str(key): str(value) for key, value in replacements.items()},
+        seen_tool_call_ids=_string_tuple(data, "seen_tool_call_ids"),
+        replacements=dict(replacements),
         source_session_id=_optional_str(data.get("source_session_id")),
         source_leaf_id=_optional_str(data.get("source_leaf_id")),
         leaf_node_id=_optional_str(data.get("leaf_node_id")),
@@ -249,7 +255,7 @@ def serialize_prompt_cache_state(state: PromptCacheState) -> JsonObject:
 def deserialize_prompt_cache_state(data: Mapping[str, Any]) -> PromptCacheState:
     metadata = json_restore(data.get("metadata", {}))
     if not isinstance(metadata, Mapping):
-        metadata = {}
+        raise ValueError("prompt cache metadata must be an object")
     return PromptCacheState(
         cache_key=str(data["cache_key"]),
         leaf_node_id=_optional_str(data.get("leaf_node_id")),
@@ -277,7 +283,7 @@ def serialize_resource_version(version: ResourceVersion) -> JsonObject:
 def deserialize_resource_version(data: Mapping[str, Any]) -> ResourceVersion:
     metadata = json_restore(data.get("metadata", {}))
     if not isinstance(metadata, Mapping):
-        metadata = {}
+        raise ValueError("resource version metadata must be an object")
     return ResourceVersion(
         resource_id=str(data["resource_id"]),
         version_id=str(data["version_id"]),
@@ -306,6 +312,8 @@ def serialize_atom_activation(atom: AtomActivation) -> JsonObject:
 
 def deserialize_atom_activation(data: Mapping[str, Any]) -> AtomActivation:
     version_data = data.get("version")
+    if version_data is not None and not isinstance(version_data, Mapping):
+        raise ValueError("atom activation version must be an object")
     return AtomActivation(
         name=str(data["name"]),
         module_path=str(data["module_path"]),
@@ -315,14 +323,10 @@ def deserialize_atom_activation(data: Mapping[str, Any]) -> AtomActivation:
             else None
         ),
         priority=int(data.get("priority", 500)),
-        requires=tuple(str(item) for item in data.get("requires", ())),
-        registers=tuple(str(item) for item in data.get("registers", ())),
-        required_capabilities=tuple(
-            str(item) for item in data.get("required_capabilities", ())
-        ),
-        provided_capabilities=tuple(
-            str(item) for item in data.get("provided_capabilities", ())
-        ),
+        requires=_string_tuple(data, "requires"),
+        registers=_string_tuple(data, "registers"),
+        required_capabilities=_string_tuple(data, "required_capabilities"),
+        provided_capabilities=_string_tuple(data, "provided_capabilities"),
         config_fingerprint=_optional_str(data.get("config_fingerprint")),
     )
 
@@ -343,14 +347,18 @@ def deserialize_active_set_fingerprint(
 ) -> ActiveSetFingerprint:
     metadata = json_restore(data.get("metadata", {}))
     if not isinstance(metadata, Mapping):
-        metadata = {}
+        raise ValueError("active-set metadata must be an object")
+    atoms = data.get("atoms", ())
+    if not isinstance(atoms, (list, tuple)) or not all(
+        isinstance(item, Mapping) for item in atoms
+    ):
+        raise ValueError("active-set atoms must be a list of objects")
     return ActiveSetFingerprint(
         algorithm=str(data["algorithm"]),
         digest=str(data["digest"]),
         atoms=tuple(
             deserialize_atom_activation(item)
-            for item in data.get("atoms", ())
-            if isinstance(item, Mapping)
+            for item in atoms
         ),
         metadata=dict(metadata),
     )
@@ -372,7 +380,7 @@ def serialize_catalog_record(record: CatalogActiveSetRecord) -> JsonObject:
 def deserialize_catalog_record(data: Mapping[str, Any]) -> CatalogActiveSetRecord:
     metadata = json_restore(data.get("metadata", {}))
     if not isinstance(metadata, Mapping):
-        metadata = {}
+        raise ValueError("catalog record metadata must be an object")
     fingerprint_data = data.get("fingerprint")
     if not isinstance(fingerprint_data, Mapping):
         raise ValueError("catalog record is missing fingerprint")
@@ -396,6 +404,15 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _string_tuple(data: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    value = data.get(key, ())
+    if not isinstance(value, (list, tuple)) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ValueError(f"{key} must be a list of strings")
+    return tuple(value)
 
 
 __all__ = [

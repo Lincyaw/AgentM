@@ -58,7 +58,11 @@ from agentm.core.abi.termination import (
     SignalAborted,
     ToolTerminated,
 )
-from agentm.core.abi.query import SessionFilter, TrajectoryQueryStore
+from agentm.core.abi.query import (
+    ObservabilityQueryStore,
+    SessionFilter,
+    TrajectoryQueryStore,
+)
 from agentm.core.abi.resource import ResourceMutation, ResourceRef
 from agentm.core.abi.roles import TRAJECTORY_QUERY_STORE_SERVICE
 from agentm.core.abi.services import ServiceRegistry
@@ -688,10 +692,8 @@ def test_trajectory_query_store_adapter_filters_sessions_and_turns() -> None:
         session.id
         for session in query.sessions(SessionFilter(since=15.0, limit=1))
     ] == ["child"]
-    with pytest.raises(NotImplementedError, match="observability events"):
-        list(query.events("root"))
-    with pytest.raises(NotImplementedError, match="observability spans"):
-        list(query.spans("root"))
+    assert isinstance(query, TrajectoryQueryStore)
+    assert not isinstance(query, ObservabilityQueryStore)
     with pytest.raises(KeyError):
         list(query.turns("missing"))
 

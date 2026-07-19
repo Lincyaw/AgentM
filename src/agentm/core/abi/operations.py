@@ -1,8 +1,4 @@
-"""Shell operation Protocol (stable ABI).
-
-Operations are a constitution-level port: the ``tool_bash`` atom consumes
-``BashOperations`` exposed by the session services.
-"""
+"""Execution-environment operation Protocols."""
 
 from __future__ import annotations
 
@@ -77,26 +73,10 @@ class EnvironmentOperations(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
-class Operations:
-    """Compatibility bundle exposing the active environment operations."""
-
-    environment: EnvironmentOperations
-
-    @property
-    def ref(self) -> EnvironmentRef:
-        return self.environment.ref
-
-    @property
-    def bash(self) -> BashOperations:
-        return self.environment.bash
-
-
 __all__ = [
     "BashOperations",
     "EnvironmentKind",
     "EnvironmentOperations",
     "EnvironmentRef",
     "ExecResult",
-    "Operations",
 ]

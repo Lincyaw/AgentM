@@ -15,7 +15,9 @@ from typing import Literal, Protocol, runtime_checkable
 from agentm.core.abi.messages import (
     AgentMessage,
     ImageContent,
+    JsonValue,
     TextContent,
+    freeze_json,
 )
 
 TriggerPriority = Literal["now", "next", "later"]
@@ -48,16 +50,9 @@ class TriggerRenderer(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class TriggerEnvelope:
-    """Control-plane metadata for a queued trigger.
+class TriggerMetadata:
+    """Durable queue and routing metadata attached to a turn."""
 
-    The wrapped ``trigger`` is the durable input stored on a Turn. Everything
-    else describes queueing and routing policy: priority, target, origin, and
-    presenter/system metadata. Hosts may keep their own process-level queues;
-    this envelope is the SDK boundary they map into a session.
-    """
-
-    trigger: Trigger
     priority: TriggerPriority = "next"
     target_session_id: str | None = None
     target_agent_id: str | None = None
@@ -65,11 +60,41 @@ class TriggerEnvelope:
     mode: str = "prompt"
     is_meta: bool = False
     skip_commands: bool = False
-    meta: Mapping[str, object] = field(default_factory=dict)
+    meta: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.priority not in _TRIGGER_PRIORITY_RANK:
+            raise ValueError(f"invalid trigger priority: {self.priority!r}")
+        for label, value in (
+            ("target_session_id", self.target_session_id),
+            ("target_agent_id", self.target_agent_id),
+            ("origin", self.origin),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{label} must be a string or None")
+        if not isinstance(self.mode, str) or not self.mode:
+            raise ValueError("trigger mode must be a non-empty string")
+        object.__setattr__(self, "meta", freeze_json(self.meta))
+
+
+@dataclass(frozen=True, slots=True)
+class TriggerEnvelope:
+    """One queued trigger plus metadata that survives durable commit.
+
+    Hosts route to a concrete session before pushing an envelope. A session
+    queue is intentionally not a hidden process-global router.
+    """
+
+    trigger: Trigger
+    metadata: TriggerMetadata = field(default_factory=TriggerMetadata)
 
     @property
     def source(self) -> str:
         return getattr(self.trigger, "source", "unknown")
+
+    @property
+    def priority(self) -> TriggerPriority:
+        return self.metadata.priority
 
 
 def trigger_priority_rank(priority: TriggerPriority) -> int:
@@ -141,6 +166,7 @@ __all__ = [
     "SubagentResult",
     "Trigger",
     "TriggerEnvelope",
+    "TriggerMetadata",
     "TriggerPriority",
     "TriggerRenderer",
     "UserInput",

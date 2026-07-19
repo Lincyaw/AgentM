@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import json
+import re
 from typing import Any
 
 from agentm.core.abi.codec import DEFAULT_CODEC
@@ -17,8 +18,8 @@ from agentm.core.abi.query import (
 from agentm.core.abi.trajectory import Turn
 
 
-class ClickHouseTrajectoryQueryStore:
-    """Trajectory/observability query store over a ClickHouse client.
+class ClickHouseTraceQueryStore:
+    """Trace query store over a ClickHouse client.
 
     The client is expected to expose ``query(sql, parameters=...)`` or
     ``execute(sql, params)``. This adapter is read-only: ClickHouse is a query
@@ -27,7 +28,10 @@ class ClickHouseTrajectoryQueryStore:
 
     def __init__(self, client: object, *, database: str = "agentm") -> None:
         self._client = client
-        self._database = database
+        self._database = _validate_identifier(
+            database,
+            label="ClickHouse database",
+        )
 
     def sessions(
         self,
@@ -128,6 +132,8 @@ class ClickHouseTrajectoryQueryStore:
 def _session_where(filter: SessionFilter | None) -> tuple[str, dict[str, object]]:
     if filter is None:
         return "", {}
+    if filter.limit is not None and filter.limit < 0:
+        raise ValueError("session query limit cannot be negative")
     clauses: list[str] = []
     params: dict[str, object] = {}
     for attr, column in (
@@ -154,16 +160,23 @@ def _json_mapping(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return dict(value)
     if isinstance(value, (str, bytes, bytearray)):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-        return dict(parsed) if isinstance(parsed, dict) else {}
-    return {}
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return dict(parsed)
+    raise ValueError("ClickHouse JSON column must contain an object")
 
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-__all__ = ["ClickHouseTrajectoryQueryStore"]
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(value: str, *, label: str) -> str:
+    if not _IDENTIFIER.fullmatch(value):
+        raise ValueError(f"{label} is not a valid SQL identifier: {value!r}")
+    return value
+
+
+__all__ = ["ClickHouseTraceQueryStore"]

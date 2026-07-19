@@ -1,4 +1,4 @@
-"""Runtime-owned tool execution boundary."""
+"""Backend-neutral direct tool execution helpers."""
 
 from __future__ import annotations
 

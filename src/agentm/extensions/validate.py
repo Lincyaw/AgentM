@@ -118,10 +118,7 @@ def extension_helper_imports(path: str | Path) -> list[str]:
     """Return extension helper modules imported by one atom source file."""
 
     src_path = Path(path)
-    try:
-        tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
-    except (OSError, SyntaxError):
-        return []
+    tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
     modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -139,33 +136,19 @@ def validate_manifest_requirements(
     manifest: ExtensionManifest,
     *,
     path: str = "",
-    allow_bare_compatibility: bool = True,
 ) -> list[ValidationIssue]:
     """Return authoring feedback for capability-oriented dependencies."""
 
     issues: list[ValidationIssue] = []
     for requirement in manifest.requires:
-        ref = parse_capability_ref(requirement)
-        if ":" not in requirement:
-            severity: Severity = "warning" if allow_bare_compatibility else "error"
+        try:
+            parse_capability_ref(requirement)
+        except ValueError as exc:
             issues.append(
                 ValidationIssue(
-                    severity=severity,
-                    rule="bare-requirement",
-                    message=(
-                        f"manifest requirement {requirement!r} is a compatibility "
-                        f"alias for {ref.key!r}; prefer explicit capability keys "
-                        "such as 'service:operations' or 'tool:bash'"
-                    ),
-                    path=path,
-                )
-            )
-        elif ref.kind == "unknown":
-            issues.append(
-                ValidationIssue(
-                    severity="warning",
-                    rule="unknown-capability-kind",
-                    message=f"manifest requirement {requirement!r} uses an unknown capability kind",
+                    severity="error",
+                    rule="invalid-capability",
+                    message=str(exc),
                     path=path,
                 )
             )

@@ -8,6 +8,7 @@ how it is audited, or which paths are protected.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
@@ -15,7 +16,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 WriterAuthor = Literal["agent", "human", "indexer"]
 PathClass = Literal["managed", "unmanaged", "constitution"]
-ResourceMutationOp = Literal["write", "replace", "delete"]
+ResourceMutationOp = Literal["create", "write", "replace", "delete"]
 ResourceNamespace = Literal[
     "workspace",
     "artifact",
@@ -48,6 +49,12 @@ class ResourceRef:
     namespace: str
     path: str
 
+    def __post_init__(self) -> None:
+        if not self.namespace or ":" in self.namespace or "\0" in self.namespace:
+            raise ValueError(f"invalid resource namespace: {self.namespace!r}")
+        if not self.path or "\0" in self.path:
+            raise ValueError(f"invalid resource path: {self.path!r}")
+
     def uri(self) -> str:
         """Return a compact, stable ``namespace:path`` representation."""
 
@@ -69,6 +76,7 @@ class ResourceMutation:
 
     ref: ResourceRef
     op: ResourceMutationOp
+    transaction_id: str | None = None
     before_version: str | None = None
     after_version: str | None = None
     metadata: ResourceMeta = field(default_factory=dict)
@@ -83,6 +91,14 @@ class ResourceTxnContext:
     turn_index: int
     rationale: str = ""
     author: WriterAuthor = "agent"
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceRecoveryContext:
+    """Committed transaction identities used to recover one session."""
+
+    session_id: str
+    committed_transaction_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +124,9 @@ class BatchHandle(Protocol):
 class ResourceReader(Protocol):
     """Backend-neutral read authority for logical ``ResourceRef`` values.
 
-    Existing file-oriented code may still read through ``Operations`` or the
-    compatibility methods on ``ResourceWriter``. New code that needs to
-    dereference trajectory ``content_ref`` values should use this Protocol.
+    Workspace tools use ``ResourceWriter`` because its path surface carries
+    workspace authority. Code that dereferences trajectory ``content_ref``
+    values uses this logical-resource Protocol instead.
     """
 
     async def read_ref(self, ref: ResourceRef) -> bytes: ...
@@ -159,9 +175,22 @@ class ResourceStore(ResourceReader, Protocol):
 
 @runtime_checkable
 class ResourceTxn(Protocol):
-    """Turn-scoped resource mutation transaction."""
+    """Recoverable turn-scoped resource mutation transaction.
 
-    async def write(
+    ``prepare`` durably stages and validates mutations without making them
+    visible. ``apply`` makes them visible but still reversible so the effect
+    backend can snapshot the resulting world. The caller then records the
+    returned mutations in the authoritative Turn and calls ``commit`` after
+    its append. Recovery commits applied transactions referenced by durable
+    Turns and abandons every other prepared/applied transaction.
+    """
+
+    async def read(self, ref: ResourceRef) -> bytes | None:
+        """Read the transaction's current staged view."""
+
+        ...
+
+    async def create(
         self,
         ref: ResourceRef,
         content: bytes,
@@ -169,6 +198,8 @@ class ResourceTxn(Protocol):
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> ResourceMutation:
+        """Create a resource and fail if it already exists."""
+
         ...
 
     async def replace(
@@ -191,7 +222,13 @@ class ResourceTxn(Protocol):
     ) -> ResourceMutation:
         ...
 
-    async def commit(self) -> list[ResourceMutation]:
+    async def prepare(self) -> Sequence[ResourceMutation]:
+        ...
+
+    async def apply(self) -> None:
+        ...
+
+    async def commit(self) -> None:
         ...
 
     async def abandon(self) -> None:
@@ -200,12 +237,7 @@ class ResourceTxn(Protocol):
 
 @runtime_checkable
 class ResourceWriter(Protocol):
-    """Host-provided resource mutation boundary.
-
-    The path-based read helpers remain for compatibility with existing file
-    tools. Backend-neutral content dereference should use ``ResourceReader`` or
-    environment ``Operations`` according to caller authority.
-    """
+    """Host-provided workspace mutation and read-before-write boundary."""
 
     async def read(self, path: str) -> bytes: ...
 
@@ -257,8 +289,26 @@ class TransactionalResourceWriter(ResourceWriter, Protocol):
     async def begin_txn(self, context: ResourceTxnContext) -> ResourceTxn:
         ...
 
+    async def recover(self, context: ResourceRecoveryContext) -> None:
+        """Finalize committed prepared txns and discard uncommitted staging."""
+        ...
+
+
+@runtime_checkable
+class EnvironmentForkableResourceWriter(Protocol):
+    """Workspace writer that can rebind itself to a forked environment."""
+
+    async def fork_for_environment(
+        self,
+        *,
+        workspace_root: str,
+        child_session_id: str,
+    ) -> ResourceWriter:
+        ...
+
 
 __all__ = [
+    "EnvironmentForkableResourceWriter",
     "BatchHandle",
     "PathClass",
     "RESOURCE_NAMESPACE_ARTIFACT",
@@ -274,6 +324,7 @@ __all__ = [
     "ResourceMutationOp",
     "ResourceNamespace",
     "ResourceReader",
+    "ResourceRecoveryContext",
     "ResourceRef",
     "ResourceStore",
     "ResourceTxn",

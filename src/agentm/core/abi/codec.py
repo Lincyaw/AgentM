@@ -64,6 +64,7 @@ from agentm.core.abi.trigger import (
     MonitorFire,
     SubagentResult,
     Trigger,
+    TriggerMetadata,
     UserInput,
 )
 
@@ -138,7 +139,7 @@ def _json_safe(value: Any) -> Any:
         return [_json_safe(v) for v in value]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _json_safe(asdict(value))
-    return repr(value)
+    raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
 
 
 def _json_restore(value: Any) -> Any:
@@ -146,8 +147,8 @@ def _json_restore(value: Any) -> Any:
         if set(value) == {"__bytes_hex__"} and isinstance(value["__bytes_hex__"], str):
             try:
                 return bytes.fromhex(value["__bytes_hex__"])
-            except ValueError:
-                return value
+            except ValueError as exc:
+                raise ValueError("invalid encoded bytes value") from exc
         return {k: _json_restore(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_json_restore(v) for v in value]
@@ -187,9 +188,7 @@ def _serialize_content_block(block: Any) -> dict[str, Any]:
         if block.extras is not None:
             d["extras"] = _json_safe(block.extras)
         return d
-    if dataclasses.is_dataclass(block) and not isinstance(block, type):
-        return asdict(block)
-    return {"type": "unknown", "repr": repr(block)[:500]}
+    raise TypeError(f"unsupported content block: {type(block).__name__}")
 
 
 def _deserialize_content_block(data: dict[str, Any]) -> Any:
@@ -224,10 +223,7 @@ def _deserialize_content_block(data: dict[str, Any]) -> Any:
             deterministic=data.get("deterministic", True),
             extras=_json_restore(data.get("extras")),
         )
-    import json
-    import logging
-    logging.getLogger(__name__).warning("Unknown content block type %r, preserving as JSON text", t)
-    return TextContent(type="text", text=json.dumps(data, default=str))
+    raise ValueError(f"unknown content block type: {t!r}")
 
 
 def serialize_message(msg: AgentMessage) -> dict[str, Any]:
@@ -269,7 +265,7 @@ def serialize_message(msg: AgentMessage) -> dict[str, Any]:
         if not _message_meta_is_default(msg.meta):
             data["meta"] = _serialize_message_meta(msg.meta)
         return data
-    return {"role": "unknown", "repr": repr(msg)[:500]}
+    raise TypeError(f"unsupported message type: {type(msg).__name__}")
 
 
 def deserialize_message(data: dict[str, Any]) -> AgentMessage:
@@ -309,13 +305,28 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
                 cls.__qualname__: cls
                 for cls in [EndTurn, ToolUseExpected, MaxTokens, PauseTurn, ProviderError, Aborted, VendorSpecific]
             }
+            if not isinstance(term_data, dict):
+                raise ValueError("assistant termination must be an object")
             term_type_name = term_data.get("__type__")
-            term_cls = _term_types.get(term_type_name) if term_type_name else None
-            if term_cls is not None:
-                try:
-                    termination = term_cls(**{k: v for k, v in term_data.items() if k != "__type__"})
-                except (TypeError, ValueError):
-                    pass
+            if not isinstance(term_type_name, str):
+                raise ValueError("assistant termination is missing __type__")
+            term_cls = _term_types.get(term_type_name)
+            if term_cls is None:
+                raise ValueError(
+                    f"unknown assistant termination type: {term_type_name}"
+                )
+            try:
+                termination = term_cls(
+                    **{
+                        key: value
+                        for key, value in term_data.items()
+                        if key != "__type__"
+                    }
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid assistant termination: {term_type_name}"
+                ) from exc
         return AssistantMessage(
             role="assistant",
             content=[_deserialize_content_block(b) for b in data.get("content", [])],
@@ -332,17 +343,7 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
             timestamp=ts,
             meta=_deserialize_message_meta(data.get("meta")),
         )
-    return UserMessage(
-        role="user",
-        content=[TextContent(type="text", text=repr(data)[:200])],
-        timestamp=ts,
-        meta=MessageMeta(
-            synthetic=True,
-            synthetic_kind="codec_unknown",
-            visibility="hidden",
-            replay="metadata_only",
-        ),
-    )
+    raise ValueError(f"unknown message role: {role!r}")
 
 
 # --- Built-in trigger codecs -----------------------------------------------
@@ -362,8 +363,12 @@ class _DataclassTriggerCodec:
         data = dict(data)
         data.pop("__source__", None)
         fields = {f.name for f in dataclasses.fields(self._cls)}
-        filtered = {k: v for k, v in data.items() if k in fields}
-        return self._cls(**filtered)
+        unknown = set(data) - fields
+        if unknown:
+            raise ValueError(
+                f"unknown {self._cls.__name__} fields: {sorted(unknown)}"
+            )
+        return self._cls(**data)
 
 
 class _UserInputCodec:
@@ -437,6 +442,26 @@ class CodecRegistry:
             raise TypeError("cause type must subclass TerminationCause")
         self._cause_types[cls.__qualname__] = cls
 
+    def copy(self) -> "CodecRegistry":
+        """Return an independent registry with the same codec registrations."""
+
+        copied = CodecRegistry()
+        copied._trigger_codecs = dict(self._trigger_codecs)
+        copied._cause_types = dict(self._cause_types)
+        return copied
+
+    def copy_without_trigger_sources(
+        self,
+        sources: set[str],
+    ) -> "CodecRegistry":
+        """Copy the registry while leaving selected atom-owned codecs out."""
+
+        copied = self.copy()
+        for source in sources:
+            if source not in _BUILTIN_CODECS:
+                copied._trigger_codecs.pop(source, None)
+        return copied
+
     # --- Trigger ---
 
     def serialize_trigger(self, trigger: Any) -> dict[str, Any]:
@@ -448,11 +473,9 @@ class CodecRegistry:
         codec = self._trigger_codecs.get(source)
         if codec is not None:
             return codec.serialize(trigger)
-        if dataclasses.is_dataclass(trigger) and not isinstance(trigger, type):
-            d = asdict(trigger)
-            d["__source__"] = source
-            return d
-        return {"__source__": source, "repr": repr(trigger)[:500]}
+        raise ValueError(
+            f"trigger source {source!r} has no registered TriggerCodec"
+        )
 
     def deserialize_trigger(self, data: dict[str, Any]) -> Any:
         source = data.get("__source__", data.get("source", "unknown"))
@@ -490,8 +513,8 @@ class CodecRegistry:
     def _deserialize_round(self, data: dict[str, Any]) -> Round:
         response = deserialize_message(data["response"])
         if not isinstance(response, AssistantMessage):
-            response = AssistantMessage(
-                role="assistant", content=[], timestamp=0.0,
+            raise ValueError(
+                "serialized round response must be an assistant message"
             )
         tool_results = tuple(
             self._deserialize_tool_record(tr)
@@ -575,6 +598,7 @@ class CodecRegistry:
                     "path": mutation.ref.path,
                 },
                 "op": mutation.op,
+                "transaction_id": mutation.transaction_id,
                 "before_version": mutation.before_version,
                 "after_version": mutation.after_version,
                 "metadata": _json_safe(mutation.metadata),
@@ -588,28 +612,43 @@ class CodecRegistry:
         data: Any,
     ) -> tuple[ResourceMutation, ...]:
         if not isinstance(data, list):
-            return ()
+            raise ValueError("resource_mutations must be a list")
         mutations: list[ResourceMutation] = []
-        for item in data:
+        for index, item in enumerate(data):
             if not isinstance(item, dict):
-                continue
+                raise ValueError(
+                    f"resource_mutations[{index}] must be an object"
+                )
             ref_data = item.get("ref")
             if not isinstance(ref_data, dict):
-                continue
+                raise ValueError(
+                    f"resource_mutations[{index}].ref must be an object"
+                )
             namespace = ref_data.get("namespace")
             path = ref_data.get("path")
             op = item.get("op")
             if not isinstance(namespace, str) or not isinstance(path, str):
-                continue
-            if op not in {"write", "replace", "delete"}:
-                continue
+                raise ValueError(
+                    f"resource_mutations[{index}].ref is invalid"
+                )
+            if op not in {"create", "write", "replace", "delete"}:
+                raise ValueError(
+                    f"resource_mutations[{index}].op is invalid"
+                )
             metadata = _json_restore(item.get("metadata", {}))
             if not isinstance(metadata, dict):
-                metadata = {}
+                raise ValueError(
+                    f"resource_mutations[{index}].metadata must be an object"
+                )
             mutations.append(
                 ResourceMutation(
                     ref=ResourceRef(namespace=namespace, path=path),
                     op=op,
+                    transaction_id=(
+                        item.get("transaction_id")
+                        if isinstance(item.get("transaction_id"), str)
+                        else None
+                    ),
                     before_version=item.get("before_version"),
                     after_version=item.get("after_version"),
                     metadata=metadata,
@@ -643,6 +682,20 @@ class CodecRegistry:
             "outcome": self._serialize_outcome(turn.outcome),
             "timestamp": turn.timestamp,
             "meta": self._serialize_meta(turn.meta),
+            "trigger_metadata": (
+                {
+                    "priority": turn.trigger_metadata.priority,
+                    "target_session_id": turn.trigger_metadata.target_session_id,
+                    "target_agent_id": turn.trigger_metadata.target_agent_id,
+                    "origin": turn.trigger_metadata.origin,
+                    "mode": turn.trigger_metadata.mode,
+                    "is_meta": turn.trigger_metadata.is_meta,
+                    "skip_commands": turn.trigger_metadata.skip_commands,
+                    "meta": _json_safe(turn.trigger_metadata.meta),
+                }
+                if turn.trigger_metadata is not None
+                else None
+            ),
         }
 
     def deserialize_turn(self, data: dict[str, Any]) -> Turn:
@@ -657,6 +710,29 @@ class CodecRegistry:
             outcome=self._deserialize_outcome(data.get("outcome", {})),
             timestamp=data.get("timestamp", 0.0),
             meta=self._deserialize_meta(data.get("meta", {})),
+            trigger_metadata=self._deserialize_trigger_metadata(
+                data.get("trigger_metadata")
+            ),
+        )
+
+    @staticmethod
+    def _deserialize_trigger_metadata(data: object) -> TriggerMetadata | None:
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise ValueError("turn trigger_metadata must be an object")
+        meta = data.get("meta", {})
+        if not isinstance(meta, dict):
+            raise ValueError("turn trigger_metadata.meta must be an object")
+        return TriggerMetadata(
+            priority=data.get("priority", "next"),
+            target_session_id=data.get("target_session_id"),
+            target_agent_id=data.get("target_agent_id"),
+            origin=data.get("origin"),
+            mode=data.get("mode", "prompt"),
+            is_meta=bool(data.get("is_meta", False)),
+            skip_commands=bool(data.get("skip_commands", False)),
+            meta=meta,
         )
 
     # --- SessionMeta ---

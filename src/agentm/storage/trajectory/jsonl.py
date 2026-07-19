@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -26,7 +27,7 @@ from agentm.core.abi.trajectory import (
     TrajectoryNode,
     TrajectoryProjectionStatus,
 )
-from agentm.core.runtime.trajectory_nodes import InMemoryTrajectoryNodeStore
+from agentm.core.lib.trajectory_nodes import InMemoryTrajectoryNodeStore
 from agentm.storage.serialization import (
     deserialize_content_state,
     deserialize_head,
@@ -44,27 +45,15 @@ from agentm.storage.serialization import (
 class JsonlTrajectoryNodeStore:
     """Durable local sidecar store for trajectory nodes and append heads.
 
-    The physical storage is intentionally simple:
-
-    - ``nodes.jsonl`` stores one serialized node per line.
-    - ``heads.json`` stores explicit append heads.
-    - ``projection_status.json`` stores projection health.
-    - ``content_replacement_states.json`` and ``prompt_cache_states.json`` store
-      deterministic fork/resume/cache policy state.
-
-    Mutations reload under a file lock, apply the same in-memory reference
-    consistency rules, then atomically rewrite the sidecar. This keeps the
-    local backend behavior aligned with the SDK-level protocol before SQL
-    backends optimize the same schema with indexes.
+    Every line in ``projection-journal.jsonl`` is an atomic snapshot of one
+    session's nodes, heads, projection status, and cache/compaction state.
+    Reload replays the latest complete record per session. A torn final line
+    is ignored; corruption in any complete record fails startup.
     """
 
     def __init__(self, root: str | Path) -> None:
         self._root = Path(root)
-        self._nodes_path = self._root / "nodes.jsonl"
-        self._heads_path = self._root / "heads.json"
-        self._projection_status_path = self._root / "projection_status.json"
-        self._content_states_path = self._root / "content_replacement_states.json"
-        self._prompt_cache_states_path = self._root / "prompt_cache_states.json"
+        self._journal_path = self._root / "projection-journal.jsonl"
         self._lock_path = self._root / ".lock"
         self._process_lock = threading.RLock()
         self._store = InMemoryTrajectoryNodeStore()
@@ -100,7 +89,7 @@ class JsonlTrajectoryNodeStore:
                 advance_head=advance_head,
             )
             self._known_sessions.add(session_id)
-            self._persist_unlocked()
+            self._persist_unlocked(session_id)
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         with self._guard():
@@ -192,7 +181,7 @@ class JsonlTrajectoryNodeStore:
                 status=status,
             )
             self._known_sessions.add(session_id)
-            self._persist_unlocked()
+            self._persist_unlocked(session_id)
 
     def projection_status(
         self,
@@ -212,7 +201,7 @@ class JsonlTrajectoryNodeStore:
             self._store.save_content_replacement_state(session_id, state)
             self._content_states[(session_id, state.state_key)] = state
             self._known_sessions.add(session_id)
-            self._persist_unlocked()
+            self._persist_unlocked(session_id)
 
     def load_content_replacement_state(
         self,
@@ -248,7 +237,7 @@ class JsonlTrajectoryNodeStore:
             self._store.save_content_replacement_state(target_session_id, cloned)
             self._content_states[(target_session_id, cloned.state_key)] = cloned
             self._known_sessions.add(target_session_id)
-            self._persist_unlocked()
+            self._persist_unlocked(target_session_id)
             return cloned
 
     def save_prompt_cache_state(
@@ -261,7 +250,7 @@ class JsonlTrajectoryNodeStore:
             self._store.save_prompt_cache_state(session_id, state)
             self._prompt_cache_states[(session_id, state.cache_key)] = state
             self._known_sessions.add(session_id)
-            self._persist_unlocked()
+            self._persist_unlocked(session_id)
 
     def load_prompt_cache_state(
         self,
@@ -282,110 +271,88 @@ class JsonlTrajectoryNodeStore:
     def _reload_unlocked(self) -> None:
         store = InMemoryTrajectoryNodeStore()
         known_sessions: set[str] = set()
-        nodes_by_session: dict[str, list[TrajectoryNode]] = {}
-        for item in _read_jsonl(self._nodes_path):
-            node = deserialize_node(item)
-            nodes_by_session.setdefault(node.session_id, []).append(node)
-            known_sessions.add(node.session_id)
-
-        heads_by_session: dict[str, list[TrajectoryHead]] = {}
-        for item in _read_json_array(self._heads_path):
-            head = deserialize_head(item)
-            heads_by_session.setdefault(head.session_id, []).append(head)
-            known_sessions.add(head.session_id)
-
-        statuses: dict[str, TrajectoryProjectionStatus] = {}
-        for item in _read_json_array(self._projection_status_path):
-            status = deserialize_projection_status(item)
-            statuses[status.session_id] = status
-            known_sessions.add(status.session_id)
-
-        for session_id in sorted(known_sessions):
-            nodes = sorted(nodes_by_session.get(session_id, ()), key=lambda node: node.seq)
+        latest = _read_latest_session_records(self._journal_path)
+        content_states: dict[tuple[str, str], ContentReplacementState] = {}
+        prompt_cache_states: dict[tuple[str, str], PromptCacheState] = {}
+        for session_id, record in sorted(latest.items()):
+            nodes = [
+                deserialize_node(item)
+                for item in _mapping_list(record, "nodes")
+            ]
+            heads = [
+                deserialize_head(item)
+                for item in _mapping_list(record, "heads")
+            ]
+            raw_status = record.get("status")
+            status = (
+                deserialize_projection_status(raw_status)
+                if isinstance(raw_status, Mapping)
+                else None
+            )
             store.replace_session_projection(
                 session_id,
                 nodes,
-                heads=heads_by_session.get(session_id, ()),
-                status=statuses.get(session_id),
+                heads=heads,
+                status=status,
             )
-
-        content_states: dict[tuple[str, str], ContentReplacementState] = {}
-        for item in _read_json_array(self._content_states_path):
-            content_session_id = item.get("session_id")
-            state_data = item.get("state")
-            if not isinstance(content_session_id, str) or not isinstance(state_data, Mapping):
-                continue
-            content_state = deserialize_content_state(state_data)
-            store.save_content_replacement_state(content_session_id, content_state)
-            content_states[(content_session_id, content_state.state_key)] = content_state
-            known_sessions.add(content_session_id)
-
-        prompt_cache_states: dict[tuple[str, str], PromptCacheState] = {}
-        for item in _read_json_array(self._prompt_cache_states_path):
-            cache_session_id = item.get("session_id")
-            cache_state_data = item.get("state")
-            if not isinstance(cache_session_id, str) or not isinstance(cache_state_data, Mapping):
-                continue
-            cache_state = deserialize_prompt_cache_state(cache_state_data)
-            store.save_prompt_cache_state(cache_session_id, cache_state)
-            prompt_cache_states[(cache_session_id, cache_state.cache_key)] = cache_state
-            known_sessions.add(cache_session_id)
+            known_sessions.add(session_id)
+            for item in _mapping_list(record, "content_states"):
+                content_state = deserialize_content_state(item)
+                store.save_content_replacement_state(session_id, content_state)
+                content_states[(session_id, content_state.state_key)] = (
+                    content_state
+                )
+            for item in _mapping_list(record, "prompt_cache_states"):
+                cache_state = deserialize_prompt_cache_state(item)
+                store.save_prompt_cache_state(session_id, cache_state)
+                prompt_cache_states[(session_id, cache_state.cache_key)] = (
+                    cache_state
+                )
 
         self._store = store
         self._known_sessions = known_sessions
         self._content_states = content_states
         self._prompt_cache_states = prompt_cache_states
 
-    def _persist_unlocked(self) -> None:
-        nodes = sorted(
-            self._store.query_nodes(TrajectoryNodeQuery()),
-            key=lambda node: (node.session_id, node.seq),
-        )
-        _atomic_write_text(
-            self._nodes_path,
-            "".join(
-                json.dumps(serialize_node(node), sort_keys=True) + "\n"
-                for node in nodes
+    def _persist_unlocked(self, session_id: str) -> None:
+        status = self._store.projection_status(session_id)
+        record: dict[str, object] = {
+            "version": 1,
+            "session_id": session_id,
+            "nodes": [
+                serialize_node(node)
+                for node in self._store.query_nodes(
+                    TrajectoryNodeQuery(session_id=session_id)
+                )
+            ],
+            "heads": [
+                serialize_head(head)
+                for head in self._store.list_heads(
+                    session_id,
+                    include_inactive=True,
+                )
+            ],
+            "status": (
+                serialize_projection_status(status)
+                if status is not None
+                else None
             ),
-        )
-        heads = [
-            head
-            for session_id in sorted(self._known_sessions)
-            for head in self._store.list_heads(session_id, include_inactive=True)
-        ]
-        _atomic_write_json_array(
-            self._heads_path,
-            [serialize_head(head) for head in heads],
-        )
-        statuses = [
-            status
-            for session_id in sorted(self._known_sessions)
-            if (status := self._store.projection_status(session_id)) is not None
-        ]
-        _atomic_write_json_array(
-            self._projection_status_path,
-            [serialize_projection_status(status) for status in statuses],
-        )
-        _atomic_write_json_array(
-            self._content_states_path,
-            [
-                {
-                    "session_id": session_id,
-                    "state": serialize_content_state(state),
-                }
-                for (session_id, _), state in sorted(self._content_states.items())
+            "content_states": [
+                serialize_content_state(state)
+                for (state_session_id, _), state in sorted(
+                    self._content_states.items()
+                )
+                if state_session_id == session_id
             ],
-        )
-        _atomic_write_json_array(
-            self._prompt_cache_states_path,
-            [
-                {
-                    "session_id": session_id,
-                    "state": serialize_prompt_cache_state(state),
-                }
-                for (session_id, _), state in sorted(self._prompt_cache_states.items())
+            "prompt_cache_states": [
+                serialize_prompt_cache_state(state)
+                for (state_session_id, _), state in sorted(
+                    self._prompt_cache_states.items()
+                )
+                if state_session_id == session_id
             ],
-        )
+        }
+        _append_jsonl_record(self._journal_path, record)
 
 
 class _FileLock:
@@ -398,8 +365,12 @@ class _FileLock:
         self._handle = self._path.open("a+b")
         try:
             import fcntl
-        except ImportError:
-            return
+        except ImportError as exc:
+            self._handle.close()
+            self._handle = None
+            raise RuntimeError(
+                "JsonlTrajectoryNodeStore requires OS file locking"
+            ) from exc
         fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
 
     def __exit__(self, *_exc: object) -> None:
@@ -408,10 +379,12 @@ class _FileLock:
             return
         try:
             import fcntl
-        except ImportError:
+        except ImportError as exc:
             handle.close()
             self._handle = None
-            return
+            raise RuntimeError(
+                "JsonlTrajectoryNodeStore lost OS file locking support"
+            ) from exc
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
@@ -419,44 +392,56 @@ class _FileLock:
             self._handle = None
 
 
-def _read_jsonl(path: Path) -> list[Mapping[str, Any]]:
+def _read_latest_session_records(
+    path: Path,
+) -> dict[str, Mapping[str, Any]]:
     if not path.exists():
-        return []
-    rows: list[Mapping[str, Any]] = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
+        return {}
+    content = path.read_bytes()
+    lines = content.splitlines(keepends=True)
+    latest: dict[str, Mapping[str, Any]] = {}
+    for line_no, raw_line in enumerate(lines, start=1):
+        if not raw_line.strip():
             continue
-        item = json.loads(line)
+        complete = raw_line.endswith((b"\n", b"\r"))
+        if line_no == len(lines) and not complete:
+            break
+        try:
+            item = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise ValueError(f"{path}:{line_no} is not valid JSON") from None
         if not isinstance(item, Mapping):
             raise ValueError(f"{path}:{line_no} is not a JSON object")
-        rows.append(item)
-    return rows
+        if item.get("version") != 1:
+            raise ValueError(f"{path}:{line_no} has unsupported journal version")
+        session_id = item.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError(f"{path}:{line_no} has no session_id")
+        latest[session_id] = item
+    return latest
 
 
-def _read_json_array(path: Path) -> list[Mapping[str, Any]]:
-    if not path.exists():
-        return []
-    text = path.read_text(encoding="utf-8")
-    if not text.strip():
-        return []
-    value = json.loads(text)
+def _mapping_list(
+    record: Mapping[str, Any],
+    key: str,
+) -> list[Mapping[str, Any]]:
+    value = record.get(key)
     if not isinstance(value, list):
-        raise ValueError(f"{path} must contain a JSON array")
-    return [item for item in value if isinstance(item, Mapping)]
+        raise ValueError(f"trajectory journal record has invalid {key!r}")
+    if not all(isinstance(item, Mapping) for item in value):
+        raise ValueError(f"trajectory journal record has invalid {key!r} item")
+    return list(value)
 
 
-def _atomic_write_json_array(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    _atomic_write_text(
-        path,
-        json.dumps(list(rows), sort_keys=True, indent=2) + "\n",
-    )
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
+def _append_jsonl_record(path: Path, record: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    payload = (
+        json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    with path.open("ab") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 __all__ = ["JsonlTrajectoryNodeStore"]

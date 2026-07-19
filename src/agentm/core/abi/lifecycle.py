@@ -12,11 +12,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
+from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.trajectory import Turn, TurnRef
 
 
 LifecycleMeta = Mapping[str, str | int | float | bool | None]
-RestoreFailureMode = Literal["fail", "degraded_readonly"]
+EnvironmentRestoreState = Literal["restored", "degraded_readonly"]
+EnvironmentCheckpoint = Literal["before_turn", "after_turn", "fork"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,24 +43,12 @@ class EnvironmentSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class EnvironmentRestorePolicy:
-    """Host policy for resume-time environment restore failures.
-
-    The SDK default is ``fail`` because continuing after a failed restore can
-    detach the committed trajectory from the external world state. Hosts that
-    can enforce read-only/degraded behavior may opt into ``degraded_readonly``.
-    """
-
-    on_failure: RestoreFailureMode = "fail"
-
-
-@dataclass(frozen=True, slots=True)
 class EnvironmentRestoreStatus:
     """Recorded result of a resume-time environment restore attempt."""
 
     session_id: str
     restored: bool
-    mode: RestoreFailureMode = "fail"
+    state: EnvironmentRestoreState
     error: str | None = None
     metadata: LifecycleMeta = field(default_factory=dict)
 
@@ -68,12 +58,24 @@ class EnvironmentRestoreError(RuntimeError):
 
 
 @runtime_checkable
+class EnvironmentRestoreFailureHandler(Protocol):
+    """Host enforcement required before a failed restore may continue."""
+
+    async def activate_degraded_readonly(
+        self,
+        status: EnvironmentRestoreStatus,
+    ) -> None:
+        """Make the resumed session unable to mutate its external world."""
+
+
+@runtime_checkable
 class EffectScope(Protocol):
     """Turn-scoped lifecycle for external effects.
 
     ``begin_turn`` starts an effect transaction for the active turn,
-    ``commit_turn`` finalizes it after durable commit, and ``abandon_turn``
-    discards it when execution fails or is cancelled.
+    ``prepare_turn`` durably captures the resulting world before the
+    authoritative Turn append, ``commit_turn`` confirms it after append, and
+    ``abandon_turn`` restores the pre-turn world when execution fails.
     """
 
     async def begin_turn(
@@ -88,6 +90,9 @@ class EffectScope(Protocol):
     async def commit_turn(self, txn: EffectTxn, turn: Turn) -> None:
         ...
 
+    async def prepare_turn(self, txn: EffectTxn, turn: Turn) -> None:
+        ...
+
     async def abandon_turn(self, txn: EffectTxn) -> None:
         ...
 
@@ -97,7 +102,7 @@ class EffectScope(Protocol):
         *,
         source_session_id: str,
         child_session_id: str,
-    ) -> "EffectScope":
+    ) -> "EnvironmentFork":
         ...
 
     async def restore(
@@ -109,6 +114,22 @@ class EffectScope(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class EnvironmentFork:
+    """Backend-produced bindings for an isolated trajectory branch.
+
+    A fork is more than an ``EffectScope`` clone. The child must execute
+    against the same world represented by that scope, so the backend also
+    returns the child's cwd and, when it owns one, its operations bundle.
+    Workspace resource writers are rebound separately through
+    ``EnvironmentForkableResourceWriter``.
+    """
+
+    effect_scope: EffectScope
+    cwd: str
+    operations: EnvironmentOperations | None = None
+
+
 @runtime_checkable
 class EnvironmentSnapshotter(Protocol):
     """Backend-owned snapshot/restore boundary for execution environments."""
@@ -118,6 +139,7 @@ class EnvironmentSnapshotter(Protocol):
         *,
         session_id: str,
         ref: TurnRef,
+        metadata: LifecycleMeta | None = None,
     ) -> EnvironmentSnapshot:
         ...
 
@@ -126,21 +148,35 @@ class EnvironmentSnapshotter(Protocol):
         snapshot: EnvironmentSnapshot,
         *,
         child_session_id: str,
-    ) -> EnvironmentSnapshot | None:
+    ) -> EnvironmentFork | None:
         ...
 
     async def restore_to(self, snapshot: EnvironmentSnapshot) -> None:
+        ...
+
+    async def find_snapshot(
+        self,
+        *,
+        session_id: str,
+        ref: TurnRef | None = None,
+        checkpoint: EnvironmentCheckpoint,
+    ) -> EnvironmentSnapshot | None:
+        ...
+
+    async def discard(self, snapshot: EnvironmentSnapshot) -> None:
         ...
 
 
 __all__ = [
     "EffectScope",
     "EffectTxn",
+    "EnvironmentFork",
     "EnvironmentRestoreError",
-    "EnvironmentRestorePolicy",
+    "EnvironmentRestoreFailureHandler",
     "EnvironmentRestoreStatus",
+    "EnvironmentRestoreState",
+    "EnvironmentCheckpoint",
     "EnvironmentSnapshot",
     "EnvironmentSnapshotter",
     "LifecycleMeta",
-    "RestoreFailureMode",
 ]

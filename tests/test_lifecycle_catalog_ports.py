@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -12,18 +12,24 @@ from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     CatalogActiveSetInput,
 )
-from agentm.core.abi.compaction import ContextBudget, ContextProjection, ProjectionReport
-from agentm.core.abi.lifecycle import EffectTxn
+from agentm.core.abi.compaction import (
+    ContextBudget,
+    ContextProjection,
+    ProjectionInput,
+    ProjectionReport,
+)
+from agentm.core.abi.lifecycle import EffectTxn, EnvironmentFork
 from agentm.core.abi.messages import (
     AssistantMessage,
     TextContent,
     ToolCallBlock,
     UserMessage,
 )
-from agentm.core.abi.operations import EnvironmentOperations, Operations
+from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.resource import (
     PathClass,
     ResourceMutation,
+    ResourceRecoveryContext,
     ResourceRef,
     ResourceTxnContext,
     WriteResult,
@@ -33,7 +39,6 @@ from agentm.core.abi.roles import (
     BASH_OPERATIONS_SERVICE,
     CONTEXT_PROJECTION_SERVICE,
     ENVIRONMENT_OPERATIONS_SERVICE,
-    OPERATIONS_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
 )
 from agentm.core.abi.services import ServiceRegistry
@@ -148,14 +153,18 @@ class _FailingStream:
 
 class _RecordingProjection:
     def __init__(self) -> None:
-        self.calls: list[tuple[tuple[Turn, ...], ContextBudget]] = []
+        self.calls: list[tuple[ProjectionInput, ContextBudget]] = []
+
+    @property
+    def source(self) -> Literal["turns"]:
+        return "turns"
 
     def project(
         self,
-        turns: Sequence[Turn],
+        projection_input: ProjectionInput,
         budget: ContextBudget,
     ) -> Sequence[UserMessage]:
-        self.calls.append((tuple(turns), budget))
+        self.calls.append((projection_input, budget))
         return [
             UserMessage(
                 role="user",
@@ -201,6 +210,9 @@ class _RecordingEffectScope:
     async def commit_turn(self, txn: EffectTxn, turn: Turn) -> None:
         self.events.append(("commit", txn.session_id, turn.index))
 
+    async def prepare_turn(self, txn: EffectTxn, turn: Turn) -> None:
+        self.events.append(("prepare", txn.session_id, turn.index))
+
     async def abandon_turn(self, txn: EffectTxn) -> None:
         self.events.append(("abandon", txn.session_id, txn.turn_index))
 
@@ -210,12 +222,12 @@ class _RecordingEffectScope:
         *,
         source_session_id: str,
         child_session_id: str,
-    ) -> "_RecordingEffectScope":
+    ) -> EnvironmentFork:
         child = _RecordingEffectScope()
         self.children.append(child)
         self.events.append(("fork", source_session_id, child_session_id))
         del ref
-        return child
+        return EnvironmentFork(effect_scope=child, cwd="")
 
     async def restore(self, *, session_id: str, turns: Sequence[Turn]) -> None:
         self.events.append(("restore", session_id, len(turns)))
@@ -325,10 +337,17 @@ class _RecordingResourceTxn:
         self.replacements: list[tuple[ResourceRef, bytes, bytes, str]] = []
         self.deletes: list[tuple[ResourceRef, str]] = []
         self.mutations: list[ResourceMutation] = []
+        self.applied = False
         self.committed = False
         self.abandoned = False
 
-    async def write(
+    async def read(self, ref: ResourceRef) -> bytes | None:
+        for pending_ref, content, _rationale in reversed(self.writes):
+            if pending_ref == ref:
+                return content
+        return None
+
+    async def create(
         self,
         ref: ResourceRef,
         content: bytes,
@@ -338,7 +357,7 @@ class _RecordingResourceTxn:
     ) -> ResourceMutation:
         del author
         self.writes.append((ref, content, rationale))
-        mutation = ResourceMutation(ref=ref, op="write", after_version="txn-write")
+        mutation = ResourceMutation(ref=ref, op="create", after_version="txn-write")
         self.mutations.append(mutation)
         return mutation
 
@@ -375,9 +394,14 @@ class _RecordingResourceTxn:
         self.mutations.append(mutation)
         return mutation
 
-    async def commit(self) -> list[ResourceMutation]:
-        self.committed = True
+    async def prepare(self) -> list[ResourceMutation]:
         return list(self.mutations)
+
+    async def apply(self) -> None:
+        self.applied = True
+
+    async def commit(self) -> None:
+        self.committed = True
 
     async def abandon(self) -> None:
         self.abandoned = True
@@ -392,6 +416,9 @@ class _TransactionalWriter:
         txn = _RecordingResourceTxn(context)
         self.txns.append(txn)
         return txn
+
+    async def recover(self, context: ResourceRecoveryContext) -> None:
+        del context
 
     async def read(self, path: str) -> bytes:
         return self.storage[path]
@@ -468,6 +495,7 @@ async def test_effect_scope_wraps_committed_turns() -> None:
 
     assert scope.events == [
         ("begin", session.id, 0),
+        ("prepare", session.id, 0),
         ("commit", session.id, 0),
     ]
 
@@ -686,14 +714,10 @@ async def test_operations_atom_registers_environment_backend_and_bash_alias() ->
         ENVIRONMENT_OPERATIONS_SERVICE,
         EnvironmentOperations,
     )
-    operations = session.services.get(OPERATIONS_SERVICE, Operations)
     bash = session.services.get(BASH_OPERATIONS_SERVICE)
 
     assert isinstance(environment, EnvironmentOperations)
-    assert isinstance(operations, Operations)
-    assert operations is session.get_operations()
-    assert operations.environment is environment
-    assert operations.bash is bash
+    assert environment.bash is bash
     assert environment.ref.kind == "local"
     assert environment.ref.id.startswith("local:")
     assert isinstance(environment.ref.metadata["cwd"], str)
@@ -722,8 +746,9 @@ async def test_context_projection_service_projects_committed_history() -> None:
     await session.shutdown()
 
     assert len(projection.calls) == 1
-    turns, budget = projection.calls[0]
-    assert turns == ()
+    projection_input, budget = projection.calls[0]
+    assert projection_input.turns == ()
+    assert projection_input.source == "turns"
     assert budget.max_input_tokens == _model().context_window
     assert stream.calls[0][0].content[0].text == "projected history"
     assert stream.calls[0][1].content[0].text == "go"

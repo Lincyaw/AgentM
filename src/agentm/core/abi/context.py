@@ -26,7 +26,7 @@ bus handlers transform the live tail.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -48,6 +48,7 @@ from agentm.core.abi.trigger import (
     MonitorFire,
     SubagentResult,
     Trigger,
+    TriggerMetadata,
     TriggerRenderer,
     UserInput,
 )
@@ -175,13 +176,19 @@ def turn_to_messages(
     """Extract the AgentMessages that a committed Turn contributes to context."""
 
     messages: list[AgentMessage] = []
-    messages.extend(render_trigger(turn.trigger, renderers))
+    messages.extend(
+        apply_trigger_metadata(
+            render_trigger(turn.trigger, renderers),
+            turn.trigger_metadata,
+        )
+    )
 
     injected_by_round: dict[int, list[AgentMessage]] = {}
     for injection in turn.outcome.injected:
         injected_by_round.setdefault(injection.after_round, []).extend(
             injection.messages
         )
+    messages.extend(injected_by_round.get(-1, ()))
     for round_index, rnd in enumerate(turn.rounds):
         messages.append(rnd.response)
         if rnd.tool_results:
@@ -206,6 +213,60 @@ def turn_to_messages(
         messages.extend(injected_by_round.get(round_index, ()))
 
     return messages
+
+
+def apply_trigger_metadata(
+    messages: Sequence[AgentMessage],
+    metadata: TriggerMetadata | None,
+) -> list[AgentMessage]:
+    """Project durable trigger controls onto provider-facing messages."""
+
+    if metadata is None:
+        return list(messages)
+    projected: list[AgentMessage] = []
+    for message in messages:
+        tags = dict(message.meta.tags)
+        tags.update(metadata.meta)
+        projected.append(
+            replace(
+                message,
+                meta=replace(
+                    message.meta,
+                    origin=metadata.origin or message.meta.origin,
+                    visibility=(
+                        "hidden" if metadata.is_meta else message.meta.visibility
+                    ),
+                    target_session_id=(
+                        metadata.target_session_id
+                        or message.meta.target_session_id
+                    ),
+                    target_agent_id=(
+                        metadata.target_agent_id
+                        or message.meta.target_agent_id
+                    ),
+                    mode=metadata.mode or message.meta.mode,
+                    tags=tags,
+                ),
+            )
+        )
+    return projected
+
+
+def route_messages(
+    messages: Sequence[AgentMessage],
+    *,
+    session_id: str,
+    agent_id: str | None = None,
+) -> list[AgentMessage]:
+    """Keep unaddressed messages and messages addressed to this session."""
+
+    effective_agent_id = agent_id or session_id
+    return [
+        message
+        for message in messages
+        if message.meta.target_session_id in (None, session_id)
+        and message.meta.target_agent_id in (None, effective_agent_id)
+    ]
 
 
 # --- build_context ----------------------------------------------------------
@@ -282,9 +343,11 @@ __all__ = [
     "ContextPolicy",
     "ContextTransformCancelled",
     "PolicyContext",
+    "apply_trigger_metadata",
     "apply_context_policies",
     "build_context",
     "build_context_sync",
     "render_trigger",
+    "route_messages",
     "turn_to_messages",
 ]

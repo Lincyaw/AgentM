@@ -125,6 +125,8 @@ class InMemoryAtomCatalog:
         self,
         query: CatalogQuery,
     ) -> list[CatalogActiveSetRecord]:
+        if query.limit is not None and query.limit < 0:
+            raise ValueError("catalog query limit cannot be negative")
         records = list(self._records.values())
         if query.session_id is not None:
             records = [r for r in records if r.session_id == query.session_id]
@@ -212,7 +214,7 @@ def build_atom_identity_payload(
         for path, content in files
     ]
     manifest_record = _manifest_record(manifest)
-    config_record = _json_safe(normalize_atom_config(manifest, config))
+    config_record = normalize_atom_config(manifest, config)
     payload = {
         "module_path": module_path,
         "manifest": manifest_record,
@@ -233,7 +235,7 @@ def build_atom_identity_payload(
 def _module_source_files(module_path: str) -> list[tuple[str, bytes]]:
     spec = importlib.util.find_spec(module_path)
     if spec is None:
-        return []
+        raise ModuleNotFoundError(module_path)
     if spec.submodule_search_locations:
         files: list[tuple[str, bytes]] = []
         for root_text in spec.submodule_search_locations:
@@ -241,20 +243,18 @@ def _module_source_files(module_path: str) -> list[tuple[str, bytes]]:
             for path in sorted(root.rglob("*.py")):
                 if "__pycache__" in path.parts:
                     continue
-                try:
-                    files.append((str(path.relative_to(root)), path.read_bytes()))
-                except OSError:
-                    continue
+                files.append((str(path.relative_to(root)), path.read_bytes()))
+        if not files:
+            raise RuntimeError(f"atom package {module_path!r} has no Python source files")
         return files
     if spec.origin is None:
-        return []
+        raise RuntimeError(f"atom module {module_path!r} has no source origin")
     path = Path(spec.origin)
     if path.suffix != ".py":
-        return []
-    try:
-        return [(path.name, path.read_bytes())]
-    except OSError:
-        return []
+        raise RuntimeError(
+            f"atom module {module_path!r} is not backed by Python source"
+        )
+    return [(path.name, path.read_bytes())]
 
 
 def _manifest_record(manifest: ExtensionManifest | None) -> dict[str, Any] | None:
@@ -269,6 +269,7 @@ def _manifest_record(manifest: ExtensionManifest | None) -> dict[str, Any] | Non
         "requires": list(manifest.requires),
         "priority": manifest.priority,
         "config_schema": schema_name,
+        "sensitive_config_fields": list(manifest.sensitive_config_fields),
     }
 
 
@@ -292,7 +293,10 @@ def normalize_atom_config(
 ) -> Any:
     """Return the config shape used for atom identity fingerprints."""
 
-    return _normalized_config(manifest, config)
+    normalized = _json_value(_normalized_config(manifest, config), path="config")
+    if manifest is None or not manifest.sensitive_config_fields:
+        return normalized
+    return _redact_config_fields(normalized, manifest.sensitive_config_fields)
 
 
 def _activation_record(atom: AtomActivation) -> dict[str, Any]:
@@ -339,14 +343,45 @@ def _stable_json(value: Any) -> str:
     )
 
 
-def _json_safe(value: Any) -> Any:
+def _json_value(value: Any, *, path: str) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        return {
+            str(key): _json_value(item, path=f"{path}.{key}")
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return repr(value)
+        return [
+            _json_value(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(
+        f"{path} is not JSON-safe: {type(value).__name__}; "
+        "atom identity config must be deterministic"
+    )
+
+
+def _redact_config_fields(value: Any, fields: tuple[str, ...]) -> Any:
+    if not isinstance(value, dict):
+        return value
+    redacted = dict(value)
+    for field_path in fields:
+        parts = tuple(part for part in field_path.split(".") if part)
+        if not parts:
+            continue
+        current: dict[str, Any] = redacted
+        for part in parts[:-1]:
+            child = current.get(part)
+            if not isinstance(child, dict):
+                break
+            copied = dict(child)
+            current[part] = copied
+            current = copied
+        else:
+            if parts[-1] in current:
+                current[parts[-1]] = "<redacted>"
+    return redacted
 
 
 __all__ = [

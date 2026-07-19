@@ -18,27 +18,37 @@ from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
     TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
     text_message,
 )
 from agentm.core.abi.provider import ProviderPromptCacheRequest
 from agentm.core.abi.store import TrajectoryNodeStore
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.trajectory import PromptCacheState
+from agentm.core.abi.trigger import UserInput
 from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.extensions.builtin.llm_openai import (
     OpenAIPromptCacheAdapter,
     OpenAIStreamFn,
 )
+from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import (
     JsonlTrajectoryNodeStore,
     PostgresTrajectoryNodeStore,
 )
+from tests.fixtures.custom_trigger import CustomTrigger
 
 _CONTEXT_PROJECTION = "agentm.extensions.builtin.context_projection"
 _LLM_COMPACTION = "agentm.extensions.builtin.llm_compaction"
+_MESSAGE_PATTERNS = "agentm.extensions.builtin.message_patterns"
 _PROMPT_CACHE = "agentm.extensions.builtin.prompt_cache"
 _OBSERVABLE_CACHE_ADAPTER = "tests.fixtures.prompt_cache_adapter"
+_CUSTOM_TRIGGER = "tests.fixtures.custom_trigger"
+_FILE_TOOLS = "agentm.extensions.builtin.file_tools"
+_LOCAL_RESOURCES = "agentm.extensions.builtin.local_resources"
+_OPERATIONS = "agentm.extensions.builtin.operations"
 _WAIT_FOR_CANCEL = object()
 
 
@@ -50,7 +60,7 @@ class _NodeStoreBackend:
 class _StubProvider:
     """Deterministic provider double at the public StreamFn boundary."""
 
-    def __init__(self, *actions: str | object) -> None:
+    def __init__(self, *actions: str | AssistantMessage | object) -> None:
         self._actions = list(actions)
         self.requests: list[tuple[AgentMessage, ...]] = []
         self.stream_started = asyncio.Event()
@@ -78,6 +88,9 @@ class _StubProvider:
             await signal.wait()
             self.observed_cancel_reason = cancel_reason(signal)
             raise RuntimeError("provider request cancelled")
+        if isinstance(action, AssistantMessage):
+            yield MessageEnd(message=action)
+            return
         if not isinstance(action, str):
             raise TypeError(f"unsupported provider action: {action!r}")
         response = AssistantMessage(
@@ -88,6 +101,22 @@ class _StubProvider:
         )
         yield TextDelta(text=action)
         yield MessageEnd(message=response)
+
+
+def _tool_call(call_id: str, name: str, arguments: dict[str, object]) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=(
+            ToolCallBlock(
+                type="tool_call",
+                id=call_id,
+                name=name,
+                arguments=arguments,
+            ),
+        ),
+        timestamp=0.0,
+        stop_reason="tool_use",
+    )
 
 
 @pytest.fixture(params=("jsonl", "postgres"))
@@ -272,11 +301,159 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
 
 
 @pytest.mark.asyncio
+async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    snapshots = LocalSnapshotStore(
+        workspace_root=workspace,
+        snapshot_root=tmp_path / "snapshots",
+    )
+    resources = LocalResourceStore(
+        workspace_root=workspace,
+        root=tmp_path / "resources",
+    )
+    provider = _StubProvider(
+        _tool_call(
+            "write-parent",
+            "write",
+            {"path": "parent.txt", "content": "parent"},
+        ),
+        "parent-written",
+        _tool_call(
+            "write-branch",
+            "write",
+            {"path": "branch.txt", "content": "branch"},
+        ),
+        "branch-written",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(workspace),
+            extensions=[
+                (_OPERATIONS, {}),
+                (_FILE_TOOLS, {"tools": ["write"]}),
+            ],
+            stream_fn=provider,
+            model=_model(),
+            store=JsonlTrajectoryStore(tmp_path / "environment-fork-turns"),
+            resource_store=resources,
+            resource_writer=resources,
+            effect_scope=LocalSnapshotEffectScope(snapshotter=snapshots),
+        )
+    )
+    forked: AgentSession | None = None
+    try:
+        await session.run("write the parent file")
+        forked = await AgentSession.fork(session, at=0, purpose="isolated")
+        await forked.run("write the branch file")
+
+        child_workspace = Path(forked.cwd)
+        assert child_workspace != workspace
+        assert (child_workspace / "parent.txt").read_text() == "parent"
+        assert (child_workspace / "branch.txt").read_text() == "branch"
+        assert (workspace / "parent.txt").read_text() == "parent"
+        assert not (workspace / "branch.txt").exists()
+    finally:
+        if forked is not None:
+            await forked.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sdk_file_toolbox_transactions_share_behavior_and_protect_constitution(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    protected = workspace / "src" / "agentm" / "core" / "abi"
+    protected.mkdir(parents=True)
+    (workspace / "core-manifest.yaml").write_text(
+        "\n".join(
+            (
+                "version: 1",
+                "constitution:",
+                "  paths:",
+                "    - src/agentm/core/**",
+                "    - core-manifest.yaml",
+                "managed:",
+                "  globs: []",
+                "",
+            )
+        )
+    )
+    (workspace / "note.txt").write_text("hello\n")
+    provider = _StubProvider(
+        _tool_call("read-note", "read", {"path": "note.txt"}),
+        _tool_call(
+            "edit-note-1",
+            "edit",
+            {
+                "path": "note.txt",
+                "old_string": "hello",
+                "new_string": "world",
+            },
+        ),
+        _tool_call(
+            "edit-note-2",
+            "edit",
+            {
+                "path": "note.txt",
+                "old_string": "world",
+                "new_string": "done",
+            },
+        ),
+        "file-updated",
+        _tool_call(
+            "write-kernel",
+            "write",
+            {
+                "path": "src/agentm/core/abi/hacked.py",
+                "content": "unsafe",
+            },
+        ),
+        "write-refused",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(workspace),
+            extensions=[
+                (_LOCAL_RESOURCES, {}),
+                (_FILE_TOOLS, {}),
+            ],
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    try:
+        await session.run("update the note twice")
+        await session.run("modify the SDK kernel")
+    finally:
+        await session.shutdown()
+
+    assert (workspace / "note.txt").read_text() == "done\n"
+    assert not (protected / "hacked.py").exists()
+    protected_results = [
+        block
+        for message in provider.requests[-1]
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+        and block.tool_call_id == "write-kernel"
+    ]
+    assert protected_results[0].is_error
+    assert "constitution" in " ".join(
+        content.text
+        for content in protected_results[0].content
+        if isinstance(content, TextContent)
+    ).lower()
+
+
+@pytest.mark.asyncio
 async def test_sdk_interrupt_cancels_one_request_and_session_continues() -> None:
     provider = _StubProvider(_WAIT_FOR_CANCEL, "continued-answer")
     session = await AgentSession.create(
         AgentSessionConfig(
-            extensions=[],
+            extensions=[(_MESSAGE_PATTERNS, {})],
             stream_fn=provider,
             model=_model(),
         )
@@ -293,12 +470,74 @@ async def test_sdk_interrupt_cancels_one_request_and_session_continues() -> None
         await session.shutdown()
 
     assert provider.observed_cancel_reason == "user_cancel"
-    assert _text(provider.requests[1])[-1] == "question-after-interrupt"
+    assert _text(provider.requests[1]) == [
+        "long-running-question",
+        "[Request interrupted by user]",
+        "question-after-interrupt",
+    ]
     assert _text(transcript)[-2:] == [
         "question-after-interrupt",
         "continued-answer",
     ]
     assert session.status()["phase"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_sdk_child_cancellation_domain_is_explicit() -> None:
+    inherited_provider = _StubProvider(_WAIT_FOR_CANCEL)
+    parent = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=_StubProvider("unused"),
+            model=_model(),
+        )
+    )
+    inherited = await parent.spawn(
+        stream_fn=inherited_provider,
+        model=_model(),
+        parent_cancellation="inherit",
+    )
+    inherited_run = asyncio.create_task(inherited.run("foreground-work"))
+    try:
+        await asyncio.wait_for(
+            inherited_provider.stream_started.wait(),
+            timeout=2.0,
+        )
+        parent.interrupt("user_cancel")
+        await asyncio.wait_for(inherited_run, timeout=2.0)
+    finally:
+        await inherited.shutdown()
+        await parent.shutdown()
+    assert inherited_provider.observed_cancel_reason == "user_cancel"
+
+    independent_provider = _StubProvider(_WAIT_FOR_CANCEL)
+    parent = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=_StubProvider("unused"),
+            model=_model(),
+        )
+    )
+    independent = await parent.spawn(
+        stream_fn=independent_provider,
+        model=_model(),
+        parent_cancellation="independent",
+    )
+    independent_run = asyncio.create_task(independent.run("background-work"))
+    try:
+        await asyncio.wait_for(
+            independent_provider.stream_started.wait(),
+            timeout=2.0,
+        )
+        parent.interrupt("user_cancel")
+        await asyncio.sleep(0)
+        assert not independent_run.done()
+        independent.interrupt("task_stop")
+        await asyncio.wait_for(independent_run, timeout=2.0)
+    finally:
+        await independent.shutdown()
+        await parent.shutdown()
+    assert independent_provider.observed_cancel_reason == "task_stop"
 
 
 @pytest.mark.asyncio
@@ -579,3 +818,97 @@ async def test_openai_provider_materializes_prompt_cache_request_fields() -> Non
         "stable-sdk-session"
     )
     assert client.completions.requests[0]["prompt_cache_retention"] == "24h"
+
+
+@pytest.mark.asyncio
+async def test_sdk_trigger_envelope_is_routed_and_persisted(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "trigger-envelope-turns"
+    provider = _StubProvider("envelope-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            store=JsonlTrajectoryStore(store_path),
+        )
+    )
+    session.start()
+    try:
+        receipt = session.push_trigger(
+            UserInput(
+                content=(TextContent(type="text", text="enveloped-question"),)
+            ),
+            target_session_id=session.session_id,
+            target_agent_id=session.session_id,
+            origin="channel",
+            mode="task-notification",
+            is_meta=True,
+            meta={"request_id": "request-1"},
+        )
+        await receipt.wait()
+        with pytest.raises(ValueError, match="route to the target session"):
+            session.push_trigger(
+                UserInput(
+                    content=(TextContent(type="text", text="misrouted"),)
+                ),
+                target_session_id="another-session",
+            )
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    request_message = provider.requests[0][0]
+    assert request_message.meta.origin == "channel"
+    assert request_message.meta.mode == "task-notification"
+    assert request_message.meta.visibility == "hidden"
+    assert request_message.meta.tags["request_id"] == "request-1"
+
+    _, turns = JsonlTrajectoryStore(store_path).load(session_id)
+    assert turns[0].trigger_metadata is not None
+    assert turns[0].trigger_metadata.target_session_id == session_id
+    assert turns[0].trigger_metadata.meta["request_id"] == "request-1"
+
+
+@pytest.mark.asyncio
+async def test_sdk_resume_rehydrates_atom_defined_trigger(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "custom-trigger-turns"
+    provider = _StubProvider("custom-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[(_CUSTOM_TRIGGER, {})],
+            stream_fn=provider,
+            model=_model(),
+            store=JsonlTrajectoryStore(store_path),
+        )
+    )
+    session.start()
+    try:
+        await session.push_trigger(CustomTrigger("first")).wait()
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    resumed_provider = _StubProvider("resumed-answer")
+    resumed = await AgentSession.resume(
+        session_id,
+        JsonlTrajectoryStore(store_path),
+        config=AgentSessionConfig(
+            extensions=[(_CUSTOM_TRIGGER, {})],
+            stream_fn=resumed_provider,
+            model=_model(),
+        ),
+    )
+    try:
+        await resumed.run("after-resume")
+    finally:
+        await resumed.shutdown()
+
+    assert _text(resumed_provider.requests[0]) == [
+        "custom:first",
+        "custom-answer",
+        "after-resume",
+    ]

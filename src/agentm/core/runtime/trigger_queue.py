@@ -6,10 +6,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
+from agentm.core.abi.messages import JsonValue
 from agentm.core.abi.trigger import (
     ContinueTrigger,
     Trigger,
     TriggerEnvelope,
+    TriggerMetadata,
     TriggerPriority,
     trigger_priority_rank,
 )
@@ -87,18 +89,20 @@ class TriggerQueue:
         mode: str = "prompt",
         is_meta: bool = False,
         skip_commands: bool = False,
-        meta: dict[str, object] | None = None,
+        meta: dict[str, JsonValue] | None = None,
     ) -> TriggerReceipt[object]:
         envelope = TriggerEnvelope(
             trigger=trigger,
-            priority=priority,
-            target_session_id=target_session_id,
-            target_agent_id=target_agent_id,
-            origin=origin,
-            mode=mode,
-            is_meta=is_meta,
-            skip_commands=skip_commands,
-            meta=meta or {},
+            metadata=TriggerMetadata(
+                priority=priority,
+                target_session_id=target_session_id,
+                target_agent_id=target_agent_id,
+                origin=origin,
+                mode=mode,
+                is_meta=is_meta,
+                skip_commands=skip_commands,
+                meta=meta or {},
+            ),
         )
         return self.push_envelope(envelope)
 

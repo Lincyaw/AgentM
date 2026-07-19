@@ -9,6 +9,7 @@ controller.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Literal, Protocol, runtime_checkable
 
 CancelReason = Literal[
@@ -38,8 +39,8 @@ class CancelSignal(Protocol):
 class CancelSource(CancelSignal, Protocol):
     """Mutable cancellation source owned by the component that can abort work."""
 
-    def set(self) -> None:
-        """Request cancellation."""
+    def set(self, reason: CancelReason | str | None = "unknown") -> None:
+        """Request cancellation and preserve the cause across boundaries."""
         ...
 
 
@@ -78,6 +79,45 @@ class EventCancelSource:
         self._event.clear()
 
 
+class CompositeCancelSignal:
+    """Read-only cancellation signal composed from independent owners."""
+
+    def __init__(self, *signals: CancelSignal | None) -> None:
+        self._signals: tuple[CancelSignal, ...] = tuple(
+            signal for signal in signals if signal is not None
+        )
+
+    @property
+    def reason(self) -> CancelReason | str | None:
+        for signal in self._signals:
+            if signal.is_set():
+                return cancel_reason(signal) or "unknown"
+        return None
+
+    @property
+    def signals(self) -> Sequence[CancelSignal]:
+        return self._signals
+
+    def is_set(self) -> bool:
+        return any(signal.is_set() for signal in self._signals)
+
+    async def wait(self) -> object:
+        if self.is_set() or not self._signals:
+            return None
+        waiters = [
+            asyncio.create_task(signal.wait())
+            for signal in self._signals
+        ]
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+        return None
+
+
 def cancel_reason(signal: CancelSignal | None) -> CancelReason | str | None:
     """Return a signal's reason when the implementation exposes one."""
 
@@ -98,6 +138,7 @@ __all__ = [
     "CancelReason",
     "CancelSignal",
     "CancelSource",
+    "CompositeCancelSignal",
     "EventCancelSource",
     "ResettableCancelSource",
     "cancel_reason",

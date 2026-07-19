@@ -89,15 +89,17 @@ class ProjectionReport:
 
 @runtime_checkable
 class ContextProjection(Protocol):
-    """Project committed turns into provider-bound messages.
+    """Project one explicitly selected trajectory view into model context."""
 
-    This turn-only method is the compatibility floor. Projections that need
-    exact node-chain replay should also implement ``NodeChainContextProjection``.
-    """
+    @property
+    def source(self) -> ProjectionSource:
+        """Trajectory view the runtime must materialize for this projection."""
+
+        ...
 
     def project(
         self,
-        turns: Sequence[Turn],
+        projection_input: ProjectionInput,
         budget: ContextBudget,
     ) -> Sequence[AgentMessage]:
         ...
@@ -106,44 +108,11 @@ class ContextProjection(Protocol):
         ...
 
 
-@runtime_checkable
-class NodeChainContextProjection(Protocol):
-    """Optional exact-replay projection over ``ProjectionInput.nodes``."""
-
-    def project_chain(
-        self,
-        projection_input: ProjectionInput,
-        budget: ContextBudget,
-    ) -> Sequence[AgentMessage]:
-        ...
-
-
-def supports_node_chain_projection(projection: object) -> bool:
-    """Return whether a projection consumes message-level trajectory chains."""
-
-    return callable(getattr(projection, "project_chain", None))
-
-
-def project_context(
-    projection: ContextProjection,
-    projection_input: ProjectionInput,
-    budget: ContextBudget,
-) -> Sequence[AgentMessage]:
-    """Run a projection through the most precise protocol it implements."""
-
-    if isinstance(projection, NodeChainContextProjection):
-        return projection.project_chain(projection_input, budget)
-    return projection.project(projection_input.turns, budget)
-
-
 __all__ = [
     "ContextBudget",
     "ContextProjection",
-    "NodeChainContextProjection",
     "ProjectionInput",
     "ProjectionReport",
     "ProjectionSource",
-    "project_context",
-    "supports_node_chain_projection",
     "TurnRange",
 ]

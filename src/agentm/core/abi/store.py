@@ -103,6 +103,8 @@ class TrajectoryNodeQuery:
     visibility: str | None = None
     after_seq: int | None = None
     before_seq: int | None = None
+    since_timestamp: float | None = None
+    until_timestamp: float | None = None
     limit: int | None = None
     sort: TrajectoryNodeSort = "asc"
 

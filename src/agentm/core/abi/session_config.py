@@ -1,7 +1,7 @@
 """Public import path for session configuration ABI."""
 
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
-from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestorePolicy
+from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.provider import ProviderResolver, ProviderSessionIdentity
 from agentm.core.abi.resource import ResourceReader, ResourceStore, ResourceWriter
@@ -27,7 +27,7 @@ __all__ = [
     "ConfigSource",
     "ConfigValueProvenance",
     "EffectScope",
-    "EnvironmentRestorePolicy",
+    "EnvironmentRestoreFailureHandler",
     "ExtensionSpec",
     "LoopConfig",
     "PermissionPolicy",

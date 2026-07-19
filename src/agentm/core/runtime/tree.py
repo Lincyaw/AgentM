@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from typing import Any
-
+from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.tree import (
     EdgeKind,
     SessionEdge,
@@ -121,25 +120,19 @@ class InMemorySessionGraph:
     def all_nodes(self) -> dict[str, SessionNode]:
         return dict(self._nodes)
 
-    def rebuild_from_store(self, store: Any) -> None:
+    def rebuild_from_store(self, store: TrajectoryStore) -> None:
         """Reconstruct the graph from a TrajectoryStore's session metadata.
 
         Called after a process restart to populate the in-memory graph
         from persisted session records.
         """
-        if not hasattr(store, "list_sessions"):
-            return
-        try:
-            metas = store.list_sessions()
-        except Exception:
-            return
-        for meta in metas:
+        for meta in store.list_sessions():
             self.register(
                 meta.id,
                 parent_id=meta.parent_id,
-                fork_point=getattr(meta, "fork_point", None),
-                purpose=getattr(meta, "purpose", "root"),
-                edge_kind="forked" if getattr(meta, "fork_point", None) is not None else "spawned",
+                fork_point=meta.fork_point,
+                purpose=meta.purpose,
+                edge_kind="forked" if meta.fork_point is not None else "spawned",
             )
 
 

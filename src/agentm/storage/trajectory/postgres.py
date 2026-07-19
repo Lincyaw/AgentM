@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -22,11 +23,6 @@ from agentm.core.abi.trajectory import (
     TrajectoryLeaf,
     TrajectoryNode,
     TrajectoryProjectionStatus,
-)
-from agentm.core.runtime.trajectory_nodes import (
-    InMemoryTrajectoryNodeStore,
-    build_chain,
-    leaf_nodes,
 )
 from agentm.storage.serialization import (
     deserialize_content_state,
@@ -59,7 +55,7 @@ class PostgresTrajectoryNodeStore:
         create_schema: bool = True,
     ) -> None:
         self._connection = connection
-        self._schema = schema
+        self._schema = _validate_identifier(schema, label="Postgres schema")
         if create_schema:
             self.create_schema()
 
@@ -175,7 +171,7 @@ class PostgresTrajectoryNodeStore:
                     self._upsert_head(cur, advance_head.to_head())
                 self._upsert_projection_status(
                     cur,
-                    _projection_status(session_id, self.query_nodes(TrajectoryNodeQuery(session_id=session_id))),
+                    self._projection_status_from_rows(cur, session_id),
                 )
             _commit(self._connection)
         except Exception:
@@ -183,15 +179,26 @@ class PostgresTrajectoryNodeStore:
             raise
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
-        nodes = self._load_nodes(session_id=query.session_id or None)
-        store = InMemoryTrajectoryNodeStore()
-        for session_id in sorted({node.session_id for node in nodes}):
-            session_nodes = sorted(
-                [node for node in nodes if node.session_id == session_id],
-                key=lambda node: node.seq,
+        where, params = _node_query_where(query)
+        order = "DESC" if query.sort == "desc" else "ASC"
+        limit = ""
+        if query.limit is not None:
+            if query.limit < 0:
+                raise ValueError("trajectory node query limit cannot be negative")
+            limit = "LIMIT %s"
+            params.append(query.limit)
+        with _cursor(self._connection) as cur:
+            cur.execute(
+                f"""
+                SELECT node_json FROM {self._table("trajectory_nodes")}
+                {where}
+                ORDER BY seq {order}
+                {limit}
+                """,
+                tuple(params),
             )
-            store.replace_session_projection(session_id, session_nodes)
-        return store.query_nodes(query)
+            rows = cur.fetchall()
+        return [deserialize_node(_json_mapping(row[0])) for row in rows]
 
     def get_head(
         self,
@@ -259,12 +266,40 @@ class PostgresTrajectoryNodeStore:
         *,
         include_logical_parent: bool = False,
     ) -> list[TrajectoryNode]:
-        nodes = self._load_nodes(session_id=None if include_logical_parent else session_id)
-        return build_chain(
-            nodes,
-            leaf_node_id,
-            include_logical_parent=include_logical_parent,
+        parent_expression = (
+            "COALESCE(chain.parent_id, chain.logical_parent_id)"
+            if include_logical_parent
+            else "chain.parent_id"
         )
+        session_clause = "" if include_logical_parent else "AND node.session_id = %s"
+        params: tuple[object, ...] = (
+            (leaf_node_id,)
+            if include_logical_parent
+            else (leaf_node_id, session_id)
+        )
+        with _cursor(self._connection) as cur:
+            cur.execute(
+                f"""
+                WITH RECURSIVE chain AS (
+                    SELECT node.id, node.parent_id, node.logical_parent_id,
+                           node.kind, node.node_json, 0 AS depth
+                    FROM {self._table("trajectory_nodes")} AS node
+                    WHERE node.id = %s {session_clause}
+                    UNION ALL
+                    SELECT parent.id, parent.parent_id, parent.logical_parent_id,
+                           parent.kind, parent.node_json, chain.depth + 1
+                    FROM {self._table("trajectory_nodes")} AS parent
+                    JOIN chain ON parent.id = {parent_expression}
+                    WHERE %s OR chain.kind <> 'compact_boundary'
+                )
+                SELECT node_json FROM chain ORDER BY depth DESC
+                """,
+                (*params, include_logical_parent),
+            )
+            rows = cur.fetchall()
+        if not rows:
+            raise ValueError(f"unknown trajectory leaf node: {leaf_node_id}")
+        return [deserialize_node(_json_mapping(row[0])) for row in rows]
 
     def leaves(
         self,
@@ -273,14 +308,60 @@ class PostgresTrajectoryNodeStore:
         agent_id: str | None = None,
         is_sidechain: bool | None = None,
     ) -> list[TrajectoryLeaf]:
-        nodes = self.query_nodes(
-            TrajectoryNodeQuery(
-                session_id=session_id,
-                agent_id=agent_id,
-                is_sidechain=is_sidechain,
+        clauses = ["node.session_id = %s", "node.kind IN ('message', 'compact_boundary')"]
+        params: list[object] = [session_id]
+        if agent_id is not None:
+            clauses.append("node.agent_id = %s")
+            params.append(agent_id)
+        if is_sidechain is not None:
+            clauses.append("node.is_sidechain = %s")
+            params.append(is_sidechain)
+        clauses.extend(
+            (
+                f"""
+                NOT EXISTS (
+                    SELECT 1 FROM {self._table("trajectory_nodes")} AS snip
+                    WHERE snip.kind = 'snip'
+                      AND snip.node_json->'removed_node_ids' ? node.id
+                )
+                """,
+                f"""
+                NOT EXISTS (
+                    SELECT 1 FROM {self._table("trajectory_nodes")} AS child
+                    WHERE child.parent_id = node.id
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {self._table("trajectory_nodes")} AS snip
+                          WHERE snip.kind = 'snip'
+                            AND snip.node_json->'removed_node_ids' ? child.id
+                      )
+                )
+                """,
             )
         )
-        return leaf_nodes(nodes)
+        with _cursor(self._connection) as cur:
+            cur.execute(
+                f"""
+                SELECT session_id, id, seq, branch_id, head_id, agent_id,
+                       is_sidechain
+                FROM {self._table("trajectory_nodes")} AS node
+                WHERE {" AND ".join(clauses)}
+                ORDER BY seq
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+        return [
+            TrajectoryLeaf(
+                session_id=str(row[0]),
+                node_id=str(row[1]),
+                seq=int(row[2]),
+                branch_id=str(row[3]),
+                head_id=str(row[4]),
+                agent_id=row[5] if isinstance(row[5], str) else None,
+                is_sidechain=bool(row[6]),
+            )
+            for row in rows
+        ]
 
     def replace_session_projection(
         self,
@@ -564,29 +645,47 @@ class PostgresTrajectoryNodeStore:
                 f"{current!r} != {advance.previous_node_id!r}"
             )
 
-    def _load_nodes(self, *, session_id: str | None) -> list[TrajectoryNode]:
-        with _cursor(self._connection) as cur:
-            if session_id is None:
-                cur.execute(
-                    f"""
-                    SELECT node_json FROM {self._table("trajectory_nodes")}
-                    ORDER BY session_id, seq
-                    """
-                )
-            else:
-                cur.execute(
-                    f"""
-                    SELECT node_json FROM {self._table("trajectory_nodes")}
-                    WHERE session_id = %s
-                    ORDER BY seq
-                    """,
-                    (session_id,),
-                )
-            rows = cur.fetchall()
-        return [deserialize_node(_json_mapping(row[0])) for row in rows]
+    def _projection_status_from_rows(
+        self,
+        cur: Any,
+        session_id: str,
+    ) -> TrajectoryProjectionStatus:
+        cur.execute(
+            f"""
+            SELECT node_json FROM {self._table("trajectory_nodes")}
+            WHERE session_id = %s
+            ORDER BY seq DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        )
+        last_row = cur.fetchone()
+        cur.execute(
+            f"""
+            SELECT count(*) FROM {self._table("trajectory_nodes")}
+            WHERE session_id = %s
+            """,
+            (session_id,),
+        )
+        count_row = cur.fetchone()
+        last = (
+            deserialize_node(_json_mapping(last_row[0]))
+            if last_row is not None
+            else None
+        )
+        return TrajectoryProjectionStatus(
+            session_id=session_id,
+            state="current",
+            high_water_turn_id=last.turn_id if last is not None else None,
+            high_water_turn_index=(
+                last.turn_index if last is not None else None
+            ),
+            node_count=int(count_row[0]) if count_row is not None else 0,
+            updated_at=time.time(),
+        )
 
     def _table(self, table: str) -> str:
-        return f"{self._schema}.agentm_{table}"
+        return f'"{self._schema}"."agentm_{table}"'
 
 
 class _cursor:
@@ -599,11 +698,18 @@ class _cursor:
         self._cursor = cursor
         return cursor
 
-    def __exit__(self, *_exc: object) -> None:
+    def __exit__(
+        self,
+        exc_type: object,
+        _exc: object,
+        _traceback: object,
+    ) -> None:
         if self._cursor is not None:
             close = getattr(self._cursor, "close", None)
             if callable(close):
                 close()
+        if exc_type is not None:
+            _rollback(self._connection)
 
 
 def _projection_status(
@@ -622,8 +728,8 @@ def _projection_status(
 
 
 def _index_statements(schema: str) -> tuple[str, ...]:
-    prefix = f"{schema}.agentm_trajectory_nodes"
-    heads = f"{schema}.agentm_trajectory_heads"
+    prefix = f'"{schema}"."agentm_trajectory_nodes"'
+    heads = f'"{schema}"."agentm_trajectory_heads"'
     return (
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_parent_idx ON {prefix} (session_id, parent_id)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_branch_seq_idx ON {prefix} (session_id, branch_id, head_id, seq)",
@@ -633,8 +739,78 @@ def _index_statements(schema: str) -> tuple[str, ...]:
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_turn_idx ON {prefix} (session_id, turn_index, round_index, message_index, turn_id)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_tool_call_idx ON {prefix} USING gin (tool_call_ids)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_cache_idx ON {prefix} (root_session_id, cache_key, session_id, seq)",
+        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_session_timestamp_idx ON {prefix} (session_id, timestamp, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_heads_branch_idx ON {heads} (root_session_id, session_id, branch_id, agent_id, is_sidechain)",
     )
+
+
+def _node_query_where(
+    query: TrajectoryNodeQuery,
+) -> tuple[str, list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+
+    def equal(column: str, value: object | None) -> None:
+        if value is not None and value != "":
+            clauses.append(f"{column} = %s")
+            params.append(value)
+
+    equal("session_id", query.session_id)
+    equal("id", query.node_id)
+    equal("root_session_id", query.root_session_id)
+    equal("parent_session_id", query.parent_session_id)
+    equal("branch_id", query.branch_id)
+    equal("head_id", query.head_id)
+    equal("agent_id", query.agent_id)
+    if query.is_sidechain is not None:
+        equal("is_sidechain", query.is_sidechain)
+    if query.kinds:
+        clauses.append("kind = ANY(%s)")
+        params.append(list(query.kinds))
+    equal("role", query.role)
+    equal("parent_id", query.parent_id)
+    equal("logical_parent_id", query.logical_parent_id)
+    equal("turn_id", query.turn_id)
+    if query.turn_index is not None:
+        equal("turn_index", query.turn_index)
+    if query.round_index is not None:
+        equal("round_index", query.round_index)
+    if query.message_index is not None:
+        equal("message_index", query.message_index)
+    if query.tool_call_id is not None:
+        clauses.append("tool_call_ids ? %s")
+        params.append(query.tool_call_id)
+    if query.tool_name is not None:
+        clauses.append("tool_names ? %s")
+        params.append(query.tool_name)
+    equal("cache_key", query.cache_key)
+    equal("content_ref", query.content_ref)
+    equal("visibility", query.visibility)
+    if query.after_seq is not None:
+        clauses.append("seq > %s")
+        params.append(query.after_seq)
+    if query.before_seq is not None:
+        clauses.append("seq < %s")
+        params.append(query.before_seq)
+    if query.since_timestamp is not None:
+        clauses.append("timestamp >= %s")
+        params.append(query.since_timestamp)
+    if query.until_timestamp is not None:
+        clauses.append("timestamp <= %s")
+        params.append(query.until_timestamp)
+    return (
+        "WHERE " + " AND ".join(clauses) if clauses else "",
+        params,
+    )
+
+
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(value: str, *, label: str) -> str:
+    if not _IDENTIFIER.fullmatch(value):
+        raise ValueError(f"{label} is not a valid SQL identifier: {value!r}")
+    return value
 
 
 def _json_mapping(value: object) -> Mapping[str, Any]:
@@ -644,7 +820,7 @@ def _json_mapping(value: object) -> Mapping[str, Any]:
         parsed = json.loads(value)
         if isinstance(parsed, Mapping):
             return parsed
-    return {}
+    raise ValueError("Postgres JSON column must contain an object")
 
 
 def _json_dumps(value: object) -> str:
@@ -654,7 +830,11 @@ def _json_dumps(value: object) -> str:
 def _commit(connection: object) -> None:
     commit = getattr(connection, "commit", None)
     if callable(commit):
-        commit()
+        try:
+            commit()
+        except Exception:
+            _rollback(connection)
+            raise
 
 
 def _rollback(connection: object) -> None:

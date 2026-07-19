@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict
+import fcntl
 import hashlib
 import json
 import os
@@ -27,11 +28,6 @@ from agentm_toolbox._file_ops import FileToolbox
 from agentm_toolbox._state import ReadStateStore
 
 _STATE_DIR = "/tmp/.agentm-toolbox"
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Unix-only best effort.
-    fcntl = None  # type: ignore[assignment]
 
 
 def _state_file(
@@ -57,18 +53,14 @@ def _locked_state(path: str) -> Iterator[None]:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     lock_path = f"{path}.lock"
     with open(lock_path, "a") as lock_file:
-        locked = False
-        if fcntl is not None:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                locked = True
-            except OSError:
-                locked = False
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise RuntimeError(f"cannot lock toolbox state {path!r}") from exc
         try:
             yield
         finally:
-            if locked and fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def main() -> None:
@@ -92,6 +84,9 @@ def main() -> None:
     except json.JSONDecodeError as exc:
         print(json.dumps({"text": f"invalid JSON args: {exc}", "is_error": True}))
         sys.exit(1)
+    if not isinstance(args, dict):
+        print(json.dumps({"text": "tool args must be a JSON object", "is_error": True}))
+        sys.exit(1)
 
     state_file = args.pop("_state_file", os.environ.get("AGENTM_TOOLBOX_STATE_FILE"))
     state_namespace = args.pop("_state_namespace", None)
@@ -105,22 +100,19 @@ def main() -> None:
     if tool_name == "write" and "content_file" in args:
         cf = args.pop("content_file")
         try:
-            args["content"] = open(cf).read()
-        except Exception as exc:
+            with open(cf, encoding="utf-8") as handle:
+                args["content"] = handle.read()
+            os.unlink(cf)
+        except (OSError, UnicodeError) as exc:
             print(
                 json.dumps(
                     {
-                        "text": f"Failed to read content_file {cf!r}: {exc}",
+                        "text": f"Failed to consume content_file {cf!r}: {exc}",
                         "is_error": True,
                     }
                 )
             )
             sys.exit(1)
-        finally:
-            try:
-                os.unlink(cf)
-            except OSError:
-                pass
 
     with _locked_state(state_path):
         state = ReadStateStore.load_from(state_path)

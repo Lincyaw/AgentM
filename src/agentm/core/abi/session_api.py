@@ -16,9 +16,8 @@ from typing import Any, Callable, Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.cancel import CancelReason, CancelSignal
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
-from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestorePolicy
-from agentm.core.abi.messages import AgentMessage
-from agentm.core.abi.operations import Operations
+from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
+from agentm.core.abi.messages import AgentMessage, JsonValue
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
@@ -45,6 +44,7 @@ from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer
 
 Unsubscribe = Callable[[], None]
 ExtensionSpec = tuple[str, dict[str, Any]]
+ChildCancellationMode = Literal["inherit", "independent"]
 ConfigSource = Literal[
     "explicit",
     "atom_override",
@@ -128,7 +128,7 @@ class AgentSessionConfig:
     tool_orchestrator: ToolOrchestrator | None = None
     permission_policy: PermissionPolicy | None = None
     effect_scope: EffectScope | None = None
-    environment_restore_policy: EnvironmentRestorePolicy | None = None
+    environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
@@ -143,6 +143,7 @@ class AgentSessionConfig:
     root_session_id: str | None = None
     parent_session_id: str | None = None
     cancel_signal: CancelSignal | None = None
+    parent_cancellation: ChildCancellationMode = "inherit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,9 +210,9 @@ class SessionContext:
             root_session_id=self.root_session_id,
             parent_session_id=self.session_id,
             depth=self.depth + 1,
-            cwd=cwd or self.cwd,
+            cwd=self.cwd if cwd is None else cwd,
             purpose=purpose,
-            scenario=scenario or self.scenario,
+            scenario=self.scenario if scenario is None else scenario,
             scenario_dir=scenario_dir if scenario_dir is not None else self.scenario_dir,
         )
 
@@ -266,10 +267,6 @@ class AtomAPI(Protocol):
 
     def register_operations(self, **kwargs: object) -> None:
         """Register named operation services, such as ``bash``."""
-        ...
-
-    def get_operations(self) -> Operations | None:
-        """Return the active operations bundle, if an environment registered one."""
         ...
 
     def register_resource_writer(
@@ -437,7 +434,7 @@ class AtomAPI(Protocol):
         mode: str = "prompt",
         is_meta: bool = False,
         skip_commands: bool = False,
-        meta: dict[str, object] | None = None,
+        meta: dict[str, JsonValue] | None = None,
     ) -> object:
         """Push a trigger into the session's queue."""
         ...
@@ -480,6 +477,7 @@ class AtomAPI(Protocol):
         max_turns: int | None = None,
         extra_services: ServiceRegistry | None = None,
         cancel_signal: CancelSignal | None = None,
+        parent_cancellation: ChildCancellationMode = "inherit",
     ) -> "SpawnedSession":
         """Spawn a lightweight child inheriting parent's config.
 
@@ -540,7 +538,7 @@ class SpawnedSession(Protocol):
         mode: str = "prompt",
         is_meta: bool = False,
         skip_commands: bool = False,
-        meta: dict[str, object] | None = None,
+        meta: dict[str, JsonValue] | None = None,
     ) -> object: ...
 
     def interrupt(self, reason: CancelReason | str = "user_cancel") -> None: ...
@@ -558,6 +556,7 @@ __all__ = [
     "AgentSessionConfig",
     "AtomAPI",
     "ConfigSource",
+    "ChildCancellationMode",
     "ConfigValueProvenance",
     "ExtensionSpec",
     "LoopConfig",

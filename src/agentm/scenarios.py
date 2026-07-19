@@ -11,6 +11,7 @@ _PACKAGED_SCENARIOS: dict[str, ScenarioSpec] = {
         extensions=(
             ("agentm.extensions.builtin.observability", {}),
             ("agentm.extensions.builtin.operations", {}),
+            ("agentm.extensions.builtin.local_resources", {}),
             ("agentm.extensions.builtin.retry_policy", {}),
             ("agentm.extensions.builtin.tool_result_cap", {}),
             ("agentm.extensions.builtin.tool_error_messages", {}),

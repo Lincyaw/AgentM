@@ -2,21 +2,178 @@
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
+import hashlib
 import json
+import os
 import shutil
+import tempfile
 import time
+import uuid
+from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Sequence
+from signal import SIGKILL
+from typing import IO, Iterator
 
+from loguru import logger
+
+from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.lifecycle import (
     EffectScope,
     EffectTxn,
+    EnvironmentCheckpoint,
+    EnvironmentFork,
     EnvironmentSnapshot,
     EnvironmentSnapshotter,
+    LifecycleMeta,
 )
-from agentm.core.abi.operations import EnvironmentRef
+from agentm.core.abi.operations import EnvironmentRef, ExecResult
 from agentm.core.abi.trajectory import Turn, TurnRef
-from agentm.extensions.builtin.operations import LocalBashOperations
+
+
+class LocalBashOperations:
+    """Local shell implementation backed by asyncio subprocesses."""
+
+    async def exec(
+        self,
+        cmd: str,
+        *,
+        cwd: str,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+        stdin: bytes | None = None,
+        on_data: Callable[[bytes], None] | None = None,
+        signal: CancelSignal | None = None,
+        log_path: str | None = None,
+    ) -> ExecResult:
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        assert process.stdout is not None
+        assert process.stderr is not None
+
+        log_file: IO[bytes] | None = None
+        if log_path is not None:
+            try:
+                resolved = Path(log_path)
+                if not resolved.is_absolute():
+                    resolved = Path(cwd) / resolved
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                log_file = resolved.open("ab")
+            except OSError as exc:
+                logger.debug("local bash: cannot open log {}: {}", log_path, exc)
+
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        timed_out = False
+
+        async def read_stream(
+            stream: asyncio.StreamReader,
+            sink: list[bytes],
+            callback: Callable[[bytes], None] | None = None,
+        ) -> None:
+            while chunk := await stream.read(65536):
+                sink.append(chunk)
+                if log_file is not None:
+                    try:
+                        log_file.write(chunk)
+                        log_file.flush()
+                    except OSError as exc:
+                        logger.debug(
+                            "local bash: cannot append log {}: {}",
+                            log_path,
+                            exc,
+                        )
+                if callback is not None:
+                    callback(chunk)
+
+        stdout_task = asyncio.create_task(
+            read_stream(process.stdout, stdout_chunks, on_data)
+        )
+        stderr_task = asyncio.create_task(
+            read_stream(process.stderr, stderr_chunks)
+        )
+        stdin_task = (
+            asyncio.create_task(_write_stdin(process.stdin, stdin))
+            if stdin is not None and process.stdin is not None
+            else None
+        )
+        signal_task = (
+            asyncio.create_task(signal.wait()) if signal is not None else None
+        )
+        wait_task = asyncio.create_task(process.wait())
+        try:
+            done, _ = await asyncio.wait(
+                [task for task in (wait_task, signal_task) if task is not None],
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if wait_task not in done:
+                timed_out = signal_task not in done
+                await self._terminate_process_group(process)
+            await wait_task
+        finally:
+            if signal_task is not None and not signal_task.done():
+                signal_task.cancel()
+                await asyncio.gather(signal_task, return_exceptions=True)
+            if stdin_task is not None:
+                await asyncio.gather(stdin_task, return_exceptions=True)
+            await asyncio.gather(stdout_task, stderr_task)
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except OSError as exc:
+                    logger.debug("local bash: cannot close log {}: {}", log_path, exc)
+
+        return ExecResult(
+            stdout=b"".join(stdout_chunks),
+            stderr=b"".join(stderr_chunks),
+            exit_code=(
+                process.returncode
+                if process.returncode is not None
+                else -SIGKILL
+            ),
+            timed_out=timed_out,
+        )
+
+    async def _terminate_process_group(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        if process.returncode is not None:
+            return
+        if process.pid is None:
+            process.kill()
+            return
+        try:
+            os.killpg(process.pid, SIGKILL)
+        except ProcessLookupError:
+            return
+
+
+async def _write_stdin(
+    writer: asyncio.StreamWriter,
+    payload: bytes,
+) -> None:
+    try:
+        writer.write(payload)
+        await writer.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (BrokenPipeError, ConnectionResetError, RuntimeError):
+            pass
 
 
 class LocalEnvironmentOperations:
@@ -29,10 +186,13 @@ class LocalEnvironmentOperations:
         environment_id: str | None = None,
         bash: LocalBashOperations | None = None,
         snapshotter: EnvironmentSnapshotter | None = None,
+        close_callback: Callable[[], None] | None = None,
     ) -> None:
         self._cwd = Path(cwd)
         self._bash = bash or LocalBashOperations()
         self._snapshotter = snapshotter
+        self._close_callback = close_callback
+        self._closed = False
         self._ref = EnvironmentRef(
             id=environment_id or f"local:{_real_path(self._cwd)}",
             kind="local",
@@ -53,11 +213,16 @@ class LocalEnvironmentOperations:
         snapshot = await self._snapshotter.snapshot(
             session_id=self._ref.id,
             ref=str(time.time()),
+            metadata={"checkpoint": "fork"},
         )
         return snapshot.id
 
     async def close(self) -> None:
-        return None
+        if self._closed:
+            return
+        self._closed = True
+        if self._close_callback is not None:
+            await asyncio.to_thread(self._close_callback)
 
 
 class LocalSnapshotStore(EnvironmentSnapshotter):
@@ -68,70 +233,280 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
         *,
         workspace_root: str | Path,
         snapshot_root: str | Path,
+        excluded_names: Sequence[str] = (),
     ) -> None:
         self._workspace_root = Path(workspace_root)
         self._snapshot_root = Path(snapshot_root)
+        self._excluded_names = _validate_excluded_names(excluded_names)
+        self._copy_policy_id = _copy_policy_id(self._excluded_names)
+        self._lock_path = self._snapshot_root / "snapshot.lock"
+        workspace_real = _real_path(self._workspace_root)
+        snapshot_real = _real_path(self._snapshot_root)
+        if snapshot_real == workspace_real or workspace_real in snapshot_real.parents:
+            raise ValueError(
+                "snapshot_root must be outside workspace_root so restore cannot "
+                "delete its own checkpoint data"
+            )
         self._snapshot_root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def snapshot_root(self) -> Path:
+        return self._snapshot_root
 
     async def snapshot(
         self,
         *,
         session_id: str,
         ref: TurnRef,
+        metadata: LifecycleMeta | None = None,
     ) -> EnvironmentSnapshot:
-        snapshot_id = f"{session_id}-{_ref_token(ref)}-{int(time.time() * 1000)}"
-        target = self._snapshot_root / snapshot_id / "workspace"
-        _copytree(self._workspace_root, target)
-        snapshot = EnvironmentSnapshot(
-            id=snapshot_id,
-            session_id=session_id,
-            ref=ref,
-            metadata={
-                "kind": "local_copy",
-                "path": str(target),
-                "created_at": time.time(),
-            },
+        return await asyncio.to_thread(
+            self._snapshot,
+            session_id,
+            ref,
+            metadata,
         )
-        _write_manifest(self._snapshot_root / snapshot_id / "snapshot.json", snapshot)
-        return snapshot
+
+    def _snapshot(
+        self,
+        session_id: str,
+        ref: TurnRef,
+        metadata: LifecycleMeta | None,
+    ) -> EnvironmentSnapshot:
+        with self._locked():
+            snapshot_id = (
+                f"{_ref_token(session_id)}-{_ref_token(ref)}-{uuid.uuid4().hex}"
+            )
+            target = self._snapshot_dir(snapshot_id) / "workspace"
+            _copytree(
+                self._workspace_root,
+                target,
+                excluded_names=self._excluded_names,
+            )
+            snapshot = EnvironmentSnapshot(
+                id=snapshot_id,
+                session_id=session_id,
+                ref=ref,
+                metadata={
+                    "kind": "local_copy",
+                    "path": str(target),
+                    "created_at": time.time(),
+                    "copy_policy_id": self._copy_policy_id,
+                    **dict(metadata or {}),
+                },
+            )
+            _write_manifest(
+                self._snapshot_dir(snapshot_id) / "snapshot.json",
+                snapshot,
+            )
+            return snapshot
 
     async def fork_from(
         self,
         snapshot: EnvironmentSnapshot,
         *,
         child_session_id: str,
-    ) -> EnvironmentSnapshot | None:
-        source = _snapshot_path(snapshot)
-        if source is None or not source.exists():
-            return None
-        snapshot_id = f"{child_session_id}-fork-{int(time.time() * 1000)}"
-        target = self._snapshot_root / snapshot_id / "workspace"
-        _copytree(source, target)
-        forked = EnvironmentSnapshot(
-            id=snapshot_id,
-            session_id=child_session_id,
-            ref=snapshot.ref,
-            metadata={
-                "kind": "local_copy",
-                "path": str(target),
-                "source_snapshot_id": snapshot.id,
-                "created_at": time.time(),
-            },
+    ) -> EnvironmentFork | None:
+        fork_data = await asyncio.to_thread(
+            self._prepare_fork,
+            snapshot,
+            child_session_id,
         )
-        _write_manifest(self._snapshot_root / snapshot_id / "snapshot.json", forked)
-        return forked
+        if fork_data is None:
+            return None
+        forked_snapshot, child_workspace = fork_data
+        if forked_snapshot.ref is None:
+            raise RuntimeError(
+                f"forked snapshot {forked_snapshot.id!r} has no trajectory ref"
+            )
+        child_snapshotter = LocalSnapshotStore(
+            workspace_root=child_workspace,
+            snapshot_root=self._snapshot_root,
+            excluded_names=tuple(self._excluded_names),
+        )
+        child_scope = LocalSnapshotEffectScope(
+            snapshotter=child_snapshotter,
+            session_id=child_session_id,
+            snapshots={forked_snapshot.ref: forked_snapshot},
+        )
+        bash = LocalBashOperations()
+        return EnvironmentFork(
+            effect_scope=child_scope,
+            cwd=str(child_workspace),
+            operations=LocalEnvironmentOperations(
+                cwd=child_workspace,
+                bash=bash,
+                snapshotter=child_snapshotter,
+                close_callback=lambda: _rmtree_and_fsync(child_workspace),
+            ),
+        )
+
+    def _prepare_fork(
+        self,
+        snapshot: EnvironmentSnapshot,
+        child_session_id: str,
+    ) -> tuple[EnvironmentSnapshot, Path] | None:
+        with self._locked():
+            source = self._snapshot_source(snapshot)
+            if not source.exists():
+                return None
+            snapshot_id = f"{_ref_token(child_session_id)}-fork-{uuid.uuid4().hex}"
+            target = self._snapshot_dir(snapshot_id) / "workspace"
+            _copytree(
+                source,
+                target,
+                excluded_names=self._excluded_names,
+            )
+            forked = EnvironmentSnapshot(
+                id=snapshot_id,
+                session_id=child_session_id,
+                ref=snapshot.ref,
+                metadata={
+                    "kind": "local_copy",
+                    "path": str(target),
+                    "source_snapshot_id": snapshot.id,
+                    "created_at": time.time(),
+                    "checkpoint": "fork",
+                    "copy_policy_id": self._copy_policy_id,
+                },
+            )
+            _write_manifest(
+                self._snapshot_dir(snapshot_id) / "snapshot.json",
+                forked,
+            )
+            workspace = self._materialize_workspace(forked, child_session_id)
+            return forked, workspace
 
     async def restore_to(self, snapshot: EnvironmentSnapshot) -> None:
-        source = _snapshot_path(snapshot)
-        if source is None:
-            raise ValueError("snapshot does not contain a local path")
+        await asyncio.to_thread(self._restore_to, snapshot)
+
+    def _restore_to(self, snapshot: EnvironmentSnapshot) -> None:
+        with self._locked():
+            source = self._snapshot_source(snapshot)
+            if not source.exists():
+                raise FileNotFoundError(source)
+            _restore_tree(
+                source,
+                self._workspace_root,
+                excluded_names=self._excluded_names,
+            )
+
+    async def find_snapshot(
+        self,
+        *,
+        session_id: str,
+        ref: TurnRef | None = None,
+        checkpoint: EnvironmentCheckpoint,
+    ) -> EnvironmentSnapshot | None:
+        return await asyncio.to_thread(
+            self._find_snapshot,
+            session_id,
+            ref,
+            checkpoint,
+        )
+
+    def _find_snapshot(
+        self,
+        session_id: str,
+        ref: TurnRef | None,
+        checkpoint: EnvironmentCheckpoint,
+    ) -> EnvironmentSnapshot | None:
+        with self._locked():
+            matches: list[EnvironmentSnapshot] = []
+            for manifest_path in self._snapshot_root.glob("*/snapshot.json"):
+                snapshot = _read_snapshot_manifest(manifest_path)
+                if snapshot.id != manifest_path.parent.name:
+                    raise ValueError(
+                        f"snapshot identity does not match directory: {manifest_path}"
+                    )
+                self._snapshot_source(snapshot)
+                if snapshot.session_id != session_id:
+                    continue
+                if snapshot.metadata.get("checkpoint") != checkpoint:
+                    continue
+                turn_id = snapshot.metadata.get("turn_id")
+                if ref is not None and snapshot.ref != ref and turn_id != ref:
+                    continue
+                matches.append(snapshot)
+            return max(
+                matches,
+                key=_snapshot_created_at,
+                default=None,
+            )
+
+    async def discard(self, snapshot: EnvironmentSnapshot) -> None:
+        await asyncio.to_thread(self._discard, snapshot)
+
+    def _discard(self, snapshot: EnvironmentSnapshot) -> None:
+        with self._locked():
+            snapshot_dir = self._snapshot_dir(snapshot.id)
+            if not snapshot_dir.exists():
+                raise FileNotFoundError(snapshot_dir)
+            _rmtree_and_fsync(snapshot_dir)
+
+    def _materialize_workspace(
+        self,
+        snapshot: EnvironmentSnapshot,
+        child_session_id: str,
+    ) -> Path:
+        source = self._snapshot_source(snapshot)
         if not source.exists():
-            raise FileNotFoundError(source)
-        _copytree(source, self._workspace_root)
+            raise RuntimeError(f"snapshot {snapshot.id!r} has no materializable world")
+        workspace = (
+            self._snapshot_root
+            / "forked_workspaces"
+            / f"{_ref_token(child_session_id)}-{uuid.uuid4().hex}"
+        )
+        _copytree(
+            source,
+            workspace,
+            excluded_names=self._excluded_names,
+        )
+        return workspace
+
+    def _snapshot_source(self, snapshot: EnvironmentSnapshot) -> Path:
+        policy_id = snapshot.metadata.get("copy_policy_id")
+        if policy_id != self._copy_policy_id:
+            raise ValueError(
+                f"snapshot {snapshot.id!r} uses a different copy policy"
+            )
+        path = snapshot.metadata.get("path")
+        if not isinstance(path, str):
+            raise ValueError(f"snapshot {snapshot.id!r} has no local path")
+        source = _real_path(Path(path))
+        expected = _real_path(self._snapshot_dir(snapshot.id) / "workspace")
+        if source != expected:
+            raise ValueError(
+                f"snapshot {snapshot.id!r} points outside its snapshot directory"
+            )
+        return source
+
+    def _snapshot_dir(self, snapshot_id: str) -> Path:
+        if (
+            not snapshot_id
+            or snapshot_id in {".", ".."}
+            or "/" in snapshot_id
+            or "\0" in snapshot_id
+        ):
+            raise ValueError(f"invalid snapshot id: {snapshot_id!r}")
+        return self._snapshot_root / snapshot_id
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock_path.open("a+b") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            except OSError as exc:
+                raise RuntimeError("snapshot store file locking failed") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class LocalSnapshotEffectScope(EffectScope):
-    """Effect scope that snapshots local workspace state after committed turns."""
+    """Recoverable serial effect scope for a local workspace."""
 
     def __init__(
         self,
@@ -143,6 +518,10 @@ class LocalSnapshotEffectScope(EffectScope):
         self._snapshotter = snapshotter
         self._session_id = session_id
         self._snapshots = dict(snapshots or {})
+        self._before_by_token: dict[str, EnvironmentSnapshot] = {}
+        self._after_by_token: dict[str, EnvironmentSnapshot] = {}
+        self._turn_lock = asyncio.Lock()
+        self._active_tokens: set[str] = set()
 
     async def begin_turn(
         self,
@@ -151,24 +530,85 @@ class LocalSnapshotEffectScope(EffectScope):
         turn_id: str,
         turn_index: int,
     ) -> EffectTxn:
-        self._session_id = session_id
+        await self._turn_lock.acquire()
+        try:
+            self._session_id = session_id
+            token = f"{session_id}:{turn_id}"
+            before = await self._snapshotter.snapshot(
+                session_id=session_id,
+                ref=turn_index,
+                metadata={
+                    "checkpoint": "before_turn",
+                    "turn_id": turn_id,
+                },
+            )
+        except BaseException:
+            self._turn_lock.release()
+            raise
+        self._before_by_token[token] = before
+        self._active_tokens.add(token)
         return EffectTxn(
             session_id=session_id,
             turn_id=turn_id,
             turn_index=turn_index,
-            token=f"{session_id}:{turn_id}",
+            token=token,
         )
 
-    async def commit_turn(self, txn: EffectTxn, turn: Turn) -> None:
+    async def prepare_turn(self, txn: EffectTxn, turn: Turn) -> None:
+        self._require_active(txn)
         snapshot = await self._snapshotter.snapshot(
             session_id=txn.session_id,
             ref=turn.index,
+            metadata={
+                "checkpoint": "after_turn",
+                "turn_id": turn.id,
+            },
         )
-        self._snapshots[turn.index] = snapshot
-        self._snapshots[turn.id] = snapshot
+        self._after_by_token[txn.token] = snapshot
+
+    async def commit_turn(self, txn: EffectTxn, turn: Turn) -> None:
+        self._require_active(txn)
+        try:
+            snapshot = self._after_by_token.pop(txn.token, None)
+            if snapshot is None:
+                snapshot = await self._snapshotter.find_snapshot(
+                    session_id=txn.session_id,
+                    ref=turn.id,
+                    checkpoint="after_turn",
+                )
+            if snapshot is None:
+                raise RuntimeError(
+                    f"effect transaction {txn.token} has no prepared snapshot"
+                )
+            self._snapshots[turn.index] = snapshot
+            self._snapshots[turn.id] = snapshot
+            before = self._before_by_token.pop(txn.token, None)
+            if before is not None:
+                await self._snapshotter.discard(before)
+        finally:
+            self._release_turn(txn.token)
 
     async def abandon_turn(self, txn: EffectTxn) -> None:
-        del txn
+        self._require_active(txn)
+        try:
+            before = self._before_by_token.pop(txn.token, None)
+            if before is None:
+                before = await self._snapshotter.find_snapshot(
+                    session_id=txn.session_id,
+                    ref=txn.turn_id,
+                    checkpoint="before_turn",
+                )
+            if before is None:
+                raise RuntimeError(
+                    f"effect transaction {txn.token} has no rollback snapshot"
+                )
+            await self._snapshotter.restore_to(before)
+            after = self._after_by_token.pop(txn.token, None)
+            if after is not None:
+                await self._snapshotter.discard(after)
+            await self._snapshotter.discard(before)
+        finally:
+            self._release_turn(txn.token)
 
     async def fork_at(
         self,
@@ -176,22 +616,28 @@ class LocalSnapshotEffectScope(EffectScope):
         *,
         source_session_id: str,
         child_session_id: str,
-    ) -> "LocalSnapshotEffectScope":
-        del source_session_id
-        snapshot = self._snapshots.get(ref)
-        forked_snapshot = (
-            await self._snapshotter.fork_from(
+    ) -> EnvironmentFork:
+        async with self._turn_lock:
+            snapshot = self._snapshots.get(ref)
+            if snapshot is None:
+                snapshot = await self._snapshotter.find_snapshot(
+                    session_id=source_session_id,
+                    ref=ref,
+                    checkpoint="after_turn",
+                )
+            if snapshot is None:
+                raise RuntimeError(
+                    f"no committed environment snapshot for {source_session_id}:{ref}"
+                )
+            environment_fork = await self._snapshotter.fork_from(
                 snapshot,
                 child_session_id=child_session_id,
             )
-            if snapshot is not None
-            else None
-        )
-        return LocalSnapshotEffectScope(
-            snapshotter=self._snapshotter,
-            session_id=child_session_id,
-            snapshots={ref: forked_snapshot} if forked_snapshot is not None else {},
-        )
+        if environment_fork is None:
+            raise RuntimeError(
+                f"environment backend cannot fork snapshot {snapshot.id}"
+            )
+        return environment_fork
 
     async def restore(
         self,
@@ -199,24 +645,92 @@ class LocalSnapshotEffectScope(EffectScope):
         session_id: str,
         turns: Sequence[Turn],
     ) -> None:
-        del session_id
-        if not turns:
-            return
-        snapshot = self._snapshots.get(turns[-1].index) or self._snapshots.get(turns[-1].id)
-        if snapshot is not None:
+        async with self._turn_lock:
+            if not turns:
+                rollback = await self._snapshotter.find_snapshot(
+                    session_id=session_id,
+                    checkpoint="before_turn",
+                )
+                if rollback is not None:
+                    await self._snapshotter.restore_to(rollback)
+                return
+            last = turns[-1]
+            snapshot = self._snapshots.get(last.index) or self._snapshots.get(last.id)
+            if snapshot is None:
+                snapshot = await self._snapshotter.find_snapshot(
+                    session_id=session_id,
+                    ref=last.id,
+                    checkpoint="after_turn",
+                )
+            if snapshot is None:
+                raise RuntimeError(
+                    f"no environment snapshot for committed turn {last.id}"
+                )
             await self._snapshotter.restore_to(snapshot)
 
+    def _require_active(self, txn: EffectTxn) -> None:
+        if txn.token not in self._active_tokens:
+            raise RuntimeError(f"effect transaction {txn.token!r} is not active")
 
-def _copytree(source: Path, target: Path) -> None:
+    def _release_turn(self, token: str) -> None:
+        self._active_tokens.discard(token)
+        if self._turn_lock.locked():
+            self._turn_lock.release()
+
+
+def _copytree(
+    source: Path,
+    target: Path,
+    *,
+    excluded_names: frozenset[str],
+) -> None:
     if target.exists():
-        shutil.rmtree(target)
-    ignore = shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules")
+        raise FileExistsError(target)
+    ignore = shutil.ignore_patterns(*excluded_names) if excluded_names else None
     shutil.copytree(source, target, ignore=ignore)
 
 
-def _snapshot_path(snapshot: EnvironmentSnapshot) -> Path | None:
-    path = snapshot.metadata.get("path")
-    return Path(path) if isinstance(path, str) else None
+def _restore_tree(
+    source: Path,
+    target: Path,
+    *,
+    excluded_names: frozenset[str],
+) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    source_names = {child.name for child in source.iterdir()}
+    for child in target.iterdir():
+        if child.name in excluded_names or child.name in source_names:
+            continue
+        _remove_path(child)
+    for source_child in source.iterdir():
+        if source_child.name in excluded_names:
+            continue
+        target_child = target / source_child.name
+        if source_child.is_dir():
+            if target_child.exists() and not target_child.is_dir():
+                _remove_path(target_child)
+            _restore_tree(
+                source_child,
+                target_child,
+                excluded_names=excluded_names,
+            )
+        else:
+            if target_child.exists() and target_child.is_dir():
+                _remove_path(target_child)
+            target_child.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_child, target_child)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _snapshot_created_at(snapshot: EnvironmentSnapshot) -> float:
+    value = snapshot.metadata.get("created_at")
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 def _write_manifest(path: Path, snapshot: EnvironmentSnapshot) -> None:
@@ -227,20 +741,98 @@ def _write_manifest(path: Path, snapshot: EnvironmentSnapshot) -> None:
         "ref": snapshot.ref,
         "metadata": dict(snapshot.metadata),
     }
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    descriptor, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _read_snapshot_manifest(path: Path) -> EnvironmentSnapshot:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"snapshot manifest must be an object: {path}")
+    snapshot_id = payload.get("id")
+    session_id = payload.get("session_id")
+    ref = payload.get("ref")
+    metadata = payload.get("metadata")
+    if not isinstance(snapshot_id, str) or not isinstance(session_id, str):
+        raise ValueError(f"snapshot manifest has invalid identity: {path}")
+    if ref is not None and not isinstance(ref, (str, int)):
+        raise ValueError(f"snapshot manifest has invalid turn ref: {path}")
+    if not isinstance(metadata, dict):
+        raise ValueError(f"snapshot manifest has invalid metadata: {path}")
+    typed_metadata: dict[str, str | int | float | bool | None] = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not (
+            value is None or isinstance(value, (str, int, float, bool))
+        ):
+            raise ValueError(f"snapshot manifest has invalid metadata: {path}")
+        typed_metadata[key] = value
+    return EnvironmentSnapshot(
+        id=snapshot_id,
+        session_id=session_id,
+        ref=ref,
+        metadata=typed_metadata,
+    )
 
 
 def _ref_token(ref: TurnRef) -> str:
-    return str(ref).replace("/", "_").replace(":", "_")
+    return hashlib.sha256(str(ref).encode("utf-8")).hexdigest()[:24]
+
+
+def _validate_excluded_names(value: Sequence[str]) -> frozenset[str]:
+    names: set[str] = set()
+    for name in value:
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in {".", ".."}
+            or "/" in name
+            or "\0" in name
+        ):
+            raise ValueError(f"invalid snapshot exclusion name: {name!r}")
+        names.add(name)
+    return frozenset(names)
+
+
+def _copy_policy_id(excluded_names: frozenset[str]) -> str:
+    payload = json.dumps(sorted(excluded_names), separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _rmtree_and_fsync(path: Path) -> None:
+    parent = path.parent
+    shutil.rmtree(path)
+    _fsync_directory(parent)
 
 
 def _real_path(path: Path) -> Path:
     return path.expanduser().resolve()
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 __all__ = [
+    "LocalBashOperations",
     "LocalEnvironmentOperations",
     "LocalSnapshotEffectScope",
     "LocalSnapshotStore",

@@ -34,6 +34,7 @@ class JsonlTrajectoryStore:
         return self._codec
 
     def _path(self, session_id: str) -> Path:
+        _validate_session_id(session_id)
         return self._dir / f"{session_id}.jsonl"
 
     def file_path(self, session_id: str) -> Path:
@@ -115,7 +116,10 @@ class JsonlTrajectoryStore:
         return self._path(session_id).exists()
 
     def list_sessions(self) -> list[SessionMeta]:
-        return [self._read_meta(path) for path in self._dir.glob("*.jsonl")]
+        return [
+            self._read_meta(path)
+            for path in sorted(self._dir.glob("*.jsonl"))
+        ]
 
     def _read(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         path = self._path(session_id)
@@ -179,7 +183,7 @@ class JsonlTrajectoryStore:
     @staticmethod
     def _encode_record(record: object) -> bytes:
         return (
-            json.dumps(record, default=str, separators=(",", ":")) + "\n"
+            json.dumps(record, separators=(",", ":")) + "\n"
         ).encode("utf-8")
 
     def _fsync_directory(self) -> None:
@@ -188,6 +192,17 @@ class JsonlTrajectoryStore:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+
+def _validate_session_id(session_id: str) -> None:
+    if (
+        not session_id
+        or session_id in {".", ".."}
+        or Path(session_id).name != session_id
+        or "\\" in session_id
+        or "\x00" in session_id
+    ):
+        raise ValueError(f"session_id is not a valid path token: {session_id!r}")
 
 
 __all__ = ["JsonlTrajectoryStore"]

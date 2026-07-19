@@ -15,21 +15,14 @@ and converting the resulting protobuf message via ``MessageToDict``. This is
 the same path the collector exporters use, so the field names
 (``traceId``, ``startTimeUnixNano``, ...) match the OTLP/JSON spec exactly.
 
-**Process-level providers (PR-H).** The OTel ecosystem assumes one process =
-one ``service.name``, so there is exactly **one** ``TracerProvider`` and one
-``LoggerProvider`` per Python process. The resource attached to those
-providers carries only ``service.name=agentm`` and ``service.version=<pkg>``.
-Per-session isolation is achieved by attaching a **per-session
-SpanProcessor + LogRecordProcessor** to the shared globals; each processor
-forwards exclusively to its own per-session file exporter, so writes never
-cross sessions. ``agentm.session.id`` lives as a span/log **attribute**
-stamped by the observability atom on every record it emits — never on the
-resource block.
+OTLP export uses one process-level ``TracerProvider`` and ``LoggerProvider``.
+Local-file export instead creates providers owned by one session, avoiding
+private OpenTelemetry processor-removal APIs and cross-session file routing.
+``agentm.session.id`` remains a span/log attribute in both modes.
 
-``setup_session_telemetry`` returns a :class:`SessionTelemetry` handle whose
-``shutdown()`` drains and removes that session's processors from the global
-providers, leaving the providers themselves intact for other concurrent
-sessions. Global teardown is deferred to ``atexit``.
+``setup_session_telemetry`` returns a :class:`SessionTelemetry` handle.
+Shutting down a local-file handle drains its session-owned providers; shutting
+down an OTLP handle leaves process providers alive until process teardown.
 """
 
 from __future__ import annotations
@@ -105,9 +98,8 @@ from agentm.extensions.observability.otlp import (  # noqa: E402
 class _SessionFilterMixin:
     """Adds session_id_filter to batch processors.
 
-    The queue is sized generously (default 100k) so overflow-drops are
-    rare. If drops do occur the SDK silently evicts the oldest record —
-    acceptable given the queue headroom.
+    OpenTelemetry's batch processor owns queue and overflow behavior; this
+    mixin only enforces session routing.
     """
 
     _session_id_filter: str | None
@@ -423,10 +415,9 @@ class OtlpSink:
 class LocalFileSink:
     """Per-session file sink: OTLP-shaped ndjson lines on local disk.
 
-    Wraps a :class:`FileSpanExporter` / :class:`FileLogExporter` pair behind
-    session-filtered blocking batch processors. :meth:`shutdown` drains the
-    processors, detaches them from the shared providers (other sessions in
-    the process keep emitting), and closes the file handles. Idempotent.
+    The sink is attached only to session-owned providers. This avoids relying
+    on private OpenTelemetry SDK attributes to detach processors from shared
+    process providers.
     """
 
     def __init__(
@@ -445,8 +436,6 @@ class LocalFileSink:
         self._schedule_delay_millis = schedule_delay_millis
         self._export_timeout_millis = export_timeout_millis
         self._max_export_batch_size = max_export_batch_size
-        self._tp: TracerProvider | None = None
-        self._lp: LoggerProvider | None = None
         self._span_processor: BlockingBatchSpanProcessor | None = None
         self._log_processor: BlockingBatchLogRecordProcessor | None = None
         self._span_exporter: FileSpanExporter | None = None
@@ -454,8 +443,6 @@ class LocalFileSink:
         self._shutdown = False
 
     def attach(self, tp: TracerProvider, lp: LoggerProvider) -> bool:
-        self._tp = tp
-        self._lp = lp
         self._span_exporter = FileSpanExporter(self.path)
         self._log_exporter = FileLogExporter(self.path)
         self._span_processor = BlockingBatchSpanProcessor(
@@ -487,15 +474,11 @@ class LocalFileSink:
                 self._span_processor.shutdown()
             except Exception as exc:  # pragma: no cover
                 logger.debug("otel_export: span processor shutdown failed: {}", exc)
-            if self._tp is not None:
-                _remove_span_processor(self._tp, self._span_processor)
         if self._log_processor is not None:
             try:
                 self._log_processor.shutdown()
             except Exception as exc:  # pragma: no cover
                 logger.debug("otel_export: log processor shutdown failed: {}", exc)
-            if self._lp is not None:
-                _remove_log_processor(self._lp, self._log_processor)
         if self._span_exporter is not None:
             self._span_exporter.shutdown()
         if self._log_exporter is not None:
@@ -677,62 +660,6 @@ def shutdown_process_telemetry() -> None:
             logger.debug("otel_export: logger provider shutdown failed: {}", exc)
 
 
-def _remove_span_processor(
-    provider: TracerProvider, processor: BlockingBatchSpanProcessor
-) -> None:
-    """Remove a span processor from a provider's internal multi-processor.
-
-    The ``SynchronousMultiSpanProcessor`` stores its children in a tuple;
-    there is no public ``remove`` method. We rebuild the tuple under its
-    lock. Best-effort — if the SDK rearranges this private attribute in a
-    future release the processor stays attached but its underlying exporter
-    is shut down, so it would only log to a closed handle.
-    """
-    multi = getattr(provider, "_active_span_processor", None)
-    if multi is None:
-        return
-    lock = getattr(multi, "_lock", None)
-    span_processors_attr = "_span_processors"
-    if lock is None or not hasattr(multi, span_processors_attr):
-        return
-    with lock:
-        current = getattr(multi, span_processors_attr)
-        if processor in current:
-            setattr(
-                multi,
-                span_processors_attr,
-                tuple(p for p in current if p is not processor),
-            )
-
-
-def _remove_log_processor(
-    provider: LoggerProvider, processor: BlockingBatchLogRecordProcessor
-) -> None:
-    """Symmetric helper for :class:`LoggerProvider`'s multi-processor."""
-    multi = getattr(provider, "_multi_log_record_processor", None)
-    if multi is None:
-        return
-    lock = getattr(multi, "_lock", None)
-    attr_name = "_log_record_processors"
-    if lock is None or not hasattr(multi, attr_name):
-        return
-    with lock:
-        current = getattr(multi, attr_name)
-        if isinstance(current, tuple):
-            if processor in current:
-                setattr(
-                    multi,
-                    attr_name,
-                    tuple(p for p in current if p is not processor),
-                )
-        elif isinstance(current, list):
-            try:
-                current.remove(processor)
-            except ValueError:
-                # Processor already detached — expected when shutdown races.
-                logger.debug("otel_export: processor already removed from provider")
-
-
 @dataclass(slots=True)
 class SessionTelemetry:
     """Handle bundling per-session telemetry plumbing.
@@ -771,6 +698,7 @@ class SessionTelemetry:
     tracer_provider: TracerProvider
     logger_provider: LoggerProvider
     file_sink: LocalFileSink | None
+    owns_providers: bool = False
     # --- Observability-atom-populated context ------------------------------
     # The observability atom stamps these in its install() so each
     # per-event translator has session-scoped metadata without re-reaching
@@ -913,10 +841,9 @@ class SessionTelemetry:
         if self._shutdown:
             return
         self._shutdown = True
-        # Drain + detach the per-session file sink so other sessions still
-        # running in the same process keep emitting. Provider lives on.
-        if self.file_sink is not None:
-            self.file_sink.shutdown()
+        if self.owns_providers:
+            self.tracer_provider.shutdown()
+            self.logger_provider.shutdown()
 
 
 def setup_session_telemetry(
@@ -959,25 +886,36 @@ def setup_session_telemetry(
     """
     del scenario_name  # No longer on the resource; observability atom emits as attribute.
 
-    tracer_provider, logger_provider = setup_process_telemetry(
-        enable_otlp=export_mode != "local_file",
-    )
+    if export_mode not in {"auto", "local_file", "otlp"}:
+        raise ValueError(f"unsupported observability export mode: {export_mode!r}")
 
-    # File export is now an explicit observability-atom policy. ``auto`` keeps
-    # the historical local-file fallback, but the fallback no longer lives in
-    # core and is not hidden from configuration.
-    write_files = (
-        export_mode == "local_file"
-        or file_path is not None
-        or (
+    explicit_file = export_mode == "local_file" or file_path is not None
+    tracer_provider: TracerProvider
+    logger_provider: LoggerProvider
+    if explicit_file:
+        write_files = True
+    else:
+        tracer_provider, logger_provider = setup_process_telemetry(
+            enable_otlp=True,
+        )
+        write_files = (
             export_mode == "auto"
             and (file_export_requested() or not otlp_is_active())
         )
-    )
     resolved_path: Path | None = None
     file_sink: LocalFileSink | None = None
+    owns_providers = False
 
     if write_files:
+        resource = Resource.create(
+            {
+                "service.name": "agentm",
+                "service.version": _agentm_version(),
+            }
+        )
+        tracer_provider = TracerProvider(resource=resource)
+        logger_provider = LoggerProvider(resource=resource)
+        owns_providers = True
         if file_path is not None:
             resolved_path = Path(file_path)
         else:
@@ -1012,4 +950,5 @@ def setup_session_telemetry(
         tracer_provider=tracer_provider,
         logger_provider=logger_provider,
         file_sink=file_sink,
+        owns_providers=owns_providers,
     )

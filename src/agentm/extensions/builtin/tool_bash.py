@@ -117,7 +117,7 @@ MANIFEST = ExtensionManifest(
     description="Register the bash tool backed by BashOperations.",
     registers=("tool:bash",),
     config_schema=ToolBashConfig,
-    requires=("service:operations",),
+    requires=("service:operations:bash",),
     priority=AtomInstallPriority.TOOL,
 )
 

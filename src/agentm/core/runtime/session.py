@@ -14,12 +14,17 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, cast
+from typing import Any, Iterator, cast
 
 from loguru import logger
 
-from agentm.core.abi.cancel import CancelReason, CancelSignal, EventCancelSource
-from agentm.core.abi.codec import CodecRegistry, TriggerCodec
+from agentm.core.abi.cancel import (
+    CancelReason,
+    CancelSignal,
+    CompositeCancelSignal,
+    EventCancelSource,
+)
+from agentm.core.abi.codec import CodecRegistry, RawTrigger, TriggerCodec
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomCatalog,
@@ -28,23 +33,28 @@ from agentm.core.abi.catalog import (
 )
 from agentm.core.abi.lifecycle import (
     EffectScope,
+    EnvironmentFork,
     EnvironmentRestoreError,
-    EnvironmentRestorePolicy,
+    EnvironmentRestoreFailureHandler,
     EnvironmentRestoreStatus,
 )
-from agentm.core.abi.messages import AgentMessage, ImageContent, TextContent
+from agentm.core.abi.messages import AgentMessage, ImageContent, JsonValue, TextContent
 from agentm.core.abi.permission import PermissionPolicy
-from agentm.core.abi.operations import EnvironmentOperations, Operations
+from agentm.core.abi.permission import PermissionAudience
+from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.provider import (
     ProviderConfig,
     ProviderResolver,
     ProviderSessionIdentity,
 )
 from agentm.core.abi.resource import (
+    EnvironmentForkableResourceWriter,
     ResourceReader,
+    ResourceRecoveryContext,
     ResourceStore,
     ResourceTxn,
     ResourceWriter,
+    TransactionalResourceWriter,
 )
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
@@ -72,10 +82,9 @@ from agentm.core.abi.roles import (
     CATALOG_QUERY_SERVICE,
     BASH_OPERATIONS_SERVICE,
     EFFECT_SCOPE_SERVICE,
-    ENVIRONMENT_RESTORE_POLICY_SERVICE,
+    ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
     ENVIRONMENT_RESTORE_STATUS_SERVICE,
     ENVIRONMENT_OPERATIONS_SERVICE,
-    OPERATIONS_SERVICE,
     PERMISSION_POLICY_SERVICE,
     PROVIDER_RESOLVER_SERVICE,
     PROVIDER_SESSION_IDENTITY_SERVICE,
@@ -91,6 +100,7 @@ from agentm.core.abi.roles import (
 )
 from agentm.core.abi.session_api import (
     AgentSessionConfig,
+    ChildCancellationMode,
     ResolvedSessionSpec,
     SessionContext,
 )
@@ -117,9 +127,10 @@ from agentm.core.runtime.session_meta import (
     context_from_session_meta,
     provider_identity_from_session_meta,
     session_meta_config,
+    validate_resume_identity,
 )
 from agentm.core.runtime.trajectory import Trajectory
-from agentm.core.runtime.trajectory_nodes import turns_to_nodes
+from agentm.core.lib.trajectory_nodes import turns_to_nodes
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
 
 
@@ -190,6 +201,27 @@ async def _replace_node_projection_for_turns(
         heads=(head,),
         status=_projection_status_for_nodes(session_id, nodes),
     )
+
+
+def _rehydrate_turn_triggers(
+    turns: Sequence[Turn],
+    codec: CodecRegistry,
+) -> list[Turn]:
+    """Restore custom triggers after resume-time extensions register codecs."""
+
+    restored: list[Turn] = []
+    for turn in turns:
+        trigger = turn.trigger
+        if isinstance(trigger, RawTrigger):
+            hydrated = codec.deserialize_trigger(dict(trigger.data))
+            if isinstance(hydrated, RawTrigger):
+                raise ValueError(
+                    f"no TriggerCodec registered for persisted source "
+                    f"{trigger.source!r}"
+                )
+            turn = replace(turn, trigger=hydrated)
+        restored.append(turn)
+    return restored
 
 
 async def _fork_node_projection(
@@ -354,7 +386,9 @@ class Session:
         resource_store: ResourceStore | None = None,
         trajectory_node_store: TrajectoryNodeStore | None = None,
         versioned_resource_store: VersionedResourceStore | None = None,
-        environment_restore_policy: EnvironmentRestorePolicy | None = None,
+        environment_restore_failure_handler: (
+            EnvironmentRestoreFailureHandler | None
+        ) = None,
         provider_identity: ProviderSessionIdentity | None = None,
         services: ServiceRegistry | None = None,
         cwd: str = "",
@@ -387,9 +421,19 @@ class Session:
         self.graph = graph
         self.triggers = TriggerQueue()
         self.tools: list[Tool] = list(tools or [])
+        self._tool_owners: dict[int, str | None] = {
+            id(tool): None for tool in self.tools
+        }
         self.system = system
         self.context_policies: list[ContextPolicy] = list(context_policies or [])
+        self._context_policy_owners: dict[int, str | None] = {
+            id(policy): None for policy in self.context_policies
+        }
         self.trigger_renderers: dict[str, TriggerRenderer] = dict(trigger_renderers or {})
+        self._trigger_renderer_owners: dict[str, str | None] = {
+            source: None for source in self.trigger_renderers
+        }
+        self._trigger_codec_owners: dict[str, str | None] = {}
         store_codec = getattr(store, "codec", None)
         self.codec = codec or (
             store_codec if isinstance(store_codec, CodecRegistry) else CodecRegistry()
@@ -408,7 +452,9 @@ class Session:
         self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
         self.installed_extensions: list[str] = []
+        self._installed_extension_specs: list[tuple[str, dict[str, object]]] = []
         self._active_provider_name: str | None = None
+        self._provider_owners: dict[str, str | None] = {}
         inherited_provider_identity = self.services.get(
             PROVIDER_SESSION_IDENTITY_SERVICE,
             ProviderSessionIdentity,
@@ -450,12 +496,12 @@ class Session:
                 versioned_resource_store,
                 replace=True,
             )
-        if environment_restore_policy is not None:
+        if environment_restore_failure_handler is not None:
             self.services.register(
-                ENVIRONMENT_RESTORE_POLICY_SERVICE,
-                environment_restore_policy,
-                EnvironmentRestorePolicy,
-                scope="session",
+                ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
+                environment_restore_failure_handler,
+                EnvironmentRestoreFailureHandler,
+                scope="host",
             )
         if tool_allowlist is not None:
             self.services.register("tool_allowlist", tuple(tool_allowlist), scope="session")
@@ -536,6 +582,10 @@ class Session:
                 session_id=self.id,
                 root_session_id=self.ctx.root_session_id,
                 parent_session_id=self.ctx.parent_session_id,
+                permission_audience=cast(
+                    PermissionAudience,
+                    "user" if self.ctx.depth == 0 else "subagent",
+                ),
                 system=self.system,
                 context_policies=self.context_policies,
                 prompt_cache_adapter=(
@@ -580,12 +630,30 @@ class Session:
                     logger.debug("driver post-cancel cleanup")
             except asyncio.CancelledError:
                 pass
-        await self.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent())
+        cleanup_errors: list[BaseException] = []
+        try:
+            await self.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent())
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        environment = self.services.get(
+            ENVIRONMENT_OPERATIONS_SERVICE,
+            cast(type[EnvironmentOperations], EnvironmentOperations),
+        )
+        if environment is not None:
+            try:
+                await environment.close()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         telemetry = self.services.get("session_telemetry")
-        shutdown = getattr(telemetry, "shutdown", None)
-        if callable(shutdown):
-            shutdown()
+        telemetry_shutdown = getattr(telemetry, "shutdown", None)
+        if callable(telemetry_shutdown):
+            try:
+                telemetry_shutdown()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         self.bus._force_clear()
+        if cleanup_errors:
+            raise BaseExceptionGroup("session shutdown cleanup failed", cleanup_errors)
 
     # --- Input ---
 
@@ -621,8 +689,17 @@ class Session:
         mode: str = "prompt",
         is_meta: bool = False,
         skip_commands: bool = False,
-        meta: dict[str, object] | None = None,
+        meta: dict[str, JsonValue] | None = None,
     ) -> TriggerReceipt[object]:
+        for label, target in (
+            ("target_session_id", target_session_id),
+            ("target_agent_id", target_agent_id),
+        ):
+            if target is not None and target != self.id:
+                raise ValueError(
+                    f"{label}={target!r} does not address session {self.id!r}; "
+                    "route to the target session before pushing"
+                )
         receipt = self.triggers.push(
             trigger,
             priority=priority,
@@ -714,15 +791,23 @@ class Session:
     # --- Registration ---
 
     def register_tool(self, tool: Tool) -> None:
+        from agentm.core.runtime.extension import current_installing_extension
+
         existing = {t.name for t in self.tools}
         if tool.name in existing:
             raise ValueError(f"duplicate tool: {tool.name}")
         self.tools.append(tool)
+        self._tool_owners[id(tool)] = current_installing_extension() or None
         self._emit_register_event("tool", tool.name, {"tool": tool})
 
     def register_context_policy(self, policy: ContextPolicy, *, priority: int = 500) -> None:
+        from agentm.core.runtime.extension import current_installing_extension
+
         policy._priority = priority  # type: ignore[attr-defined]
         self.context_policies.append(policy)
+        self._context_policy_owners[id(policy)] = (
+            current_installing_extension() or None
+        )
         self.context_policies.sort(key=lambda p: getattr(p, "_priority", 500))
         self._emit_register_event(
             "context_policy",
@@ -731,7 +816,12 @@ class Session:
         )
 
     def register_trigger_renderer(self, source: str, renderer: TriggerRenderer) -> None:
+        from agentm.core.runtime.extension import current_installing_extension
+
         self.trigger_renderers[source] = renderer
+        self._trigger_renderer_owners[source] = (
+            current_installing_extension() or None
+        )
         self._emit_register_event(
             "trigger_renderer",
             source,
@@ -739,9 +829,14 @@ class Session:
         )
 
     def register_trigger_codec(self, source: str, codec: object) -> None:
+        from agentm.core.runtime.extension import current_installing_extension
+
         if not isinstance(codec, TriggerCodec):
             raise TypeError("trigger codec must implement serialize and deserialize")
         self.codec.register_trigger_codec(source, codec)
+        self._trigger_codec_owners[source] = (
+            current_installing_extension() or None
+        )
         self._emit_register_event(
             "trigger_codec",
             source,
@@ -760,6 +855,9 @@ class Session:
         if self.services.get(key) is not None and not replace:
             raise ValueError(f"provider {name!r} already registered")
         self.services.register(key, config, scope="session")
+        from agentm.core.runtime.extension import current_installing_extension
+
+        self._provider_owners[name] = current_installing_extension() or None
         self._activate_provider(fallback=name)
         self._emit_register_event("provider", name, {"provider": config})
 
@@ -921,14 +1019,16 @@ class Session:
             active_set_digest=active_set.digest if active_set is not None else None,
         )
 
-    def _environment_restore_policy(self) -> EnvironmentRestorePolicy:
-        policy = self.services.get(
-            ENVIRONMENT_RESTORE_POLICY_SERVICE,
-            EnvironmentRestorePolicy,
+    def _environment_restore_failure_handler(
+        self,
+    ) -> EnvironmentRestoreFailureHandler | None:
+        return self.services.get(
+            ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
+            cast(
+                type[EnvironmentRestoreFailureHandler],
+                EnvironmentRestoreFailureHandler,
+            ),
         )
-        if isinstance(policy, EnvironmentRestorePolicy):
-            return policy
-        return EnvironmentRestorePolicy()
 
     def _record_environment_restore_status(
         self,
@@ -950,7 +1050,11 @@ class Session:
         resolver = self._provider_resolver()
         if resolver is not None:
             selected = resolver.resolve_provider(providers)
-            if selected is not None and selected in providers:
+            if selected is not None:
+                if selected not in providers:
+                    raise LookupError(
+                        f"provider resolver selected unregistered provider {selected!r}"
+                    )
                 return selected
         if fallback is not None and fallback in providers:
             return fallback
@@ -976,12 +1080,10 @@ class Session:
         service_names = {
             "bash": BASH_OPERATIONS_SERVICE,
             "environment": ENVIRONMENT_OPERATIONS_SERVICE,
-            "operations": OPERATIONS_SERVICE,
         }
         protocols = {
             "bash": BashOperations,
             "environment": EnvironmentOperations,
-            "operations": Operations,
         }
         for key, value in kwargs.items():
             service_name = service_names.get(key, f"operations:{key}")
@@ -998,26 +1100,6 @@ class Session:
                 key,
                 {"service_name": service_name, "service": value},
             )
-            if key == "environment":
-                self.services.register(
-                    OPERATIONS_SERVICE,
-                    Operations(value),  # type: ignore[arg-type]
-                    Operations,
-                    scope="session",
-                )
-
-    def get_operations(self) -> Operations | None:
-        operations = self.services.get(OPERATIONS_SERVICE, Operations)
-        if isinstance(operations, Operations):
-            return operations
-        environment = self.services.get(
-            ENVIRONMENT_OPERATIONS_SERVICE,
-            cast(type[EnvironmentOperations], EnvironmentOperations),
-        )
-        if environment is None:
-            return None
-        return Operations(environment)
-
     def register_resource_writer(
         self,
         writer: ResourceWriter,
@@ -1333,8 +1415,10 @@ class Session:
             return (raw,)
         if isinstance(raw, Sequence):
             return tuple(str(item) for item in raw)
-        logger.warning("tool_allowlist service has unsupported type {}", type(raw).__name__)
-        return None
+        raise TypeError(
+            "tool_allowlist service must be a string or sequence, got "
+            f"{type(raw).__name__}"
+        )
 
     def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
         """Register a bus observer for session-scoped instrumentation."""
@@ -1351,6 +1435,62 @@ class Session:
         from agentm.core.runtime.extension import install_extension
 
         await install_extension(self, module_path, config or {}, trigger=trigger)
+
+    def _record_installed_extension(
+        self,
+        module_path: str,
+        config: dict[str, object],
+    ) -> None:
+        self.installed_extensions.append(module_path)
+        self._installed_extension_specs.append((module_path, dict(config)))
+
+    def _external_tools(self) -> list[Tool]:
+        return [
+            tool for tool in self.tools if self._tool_owners.get(id(tool)) is None
+        ]
+
+    def _external_context_policies(self) -> list[ContextPolicy]:
+        return [
+            policy
+            for policy in self.context_policies
+            if self._context_policy_owners.get(id(policy)) is None
+        ]
+
+    def _external_trigger_renderers(self) -> dict[str, TriggerRenderer]:
+        return {
+            source: renderer
+            for source, renderer in self.trigger_renderers.items()
+            if self._trigger_renderer_owners.get(source) is None
+        }
+
+    def _composition_codec(self) -> CodecRegistry:
+        return self.codec.copy_without_trigger_sources(
+            {
+                source
+                for source, owner in self._trigger_codec_owners.items()
+                if owner is not None
+            }
+        )
+
+    def _composition_extensions(
+        self,
+        *,
+        include_provider_atoms: bool,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        excluded = (
+            set()
+            if include_provider_atoms
+            else {
+                owner
+                for owner in self._provider_owners.values()
+                if owner is not None
+            }
+        )
+        return [
+            (module_path, dict(config))
+            for module_path, config in self._installed_extension_specs
+            if module_path not in excluded
+        ]
 
     @property
     def cwd(self) -> str:
@@ -1397,11 +1537,9 @@ class Session:
         max_turns: int | None = None,
         extra_services: ServiceRegistry | None = None,
         cancel_signal: CancelSignal | None = None,
+        parent_cancellation: ChildCancellationMode = "inherit",
     ) -> "Session":
-        """Spawn a lightweight child inheriting parent config.
-
-        Only specify what you want to override.
-        """
+        """Spawn a child by reinstalling the parent's atom composition."""
 
         child_ctx = self.ctx.child(
             session_id=uuid.uuid4().hex[:16],
@@ -1413,34 +1551,72 @@ class Session:
         child_services.inherit_from(self.services)
         if extra_services is not None:
             child_services.update_from(extra_services)
-        if stream_fn is None and model is None:
-            inherited_provider = self.get_provider()
-            if inherited_provider is not None:
-                child_services.register(
-                    f"provider:{inherited_provider.name}",
-                    inherited_provider,
-                    scope="session",
-                )
 
-        child = Session(
-            ctx=child_ctx,
-            trajectory=Trajectory(),
-            bus=EventBus(),
+        if parent_cancellation not in {"inherit", "independent"}:
+            raise ValueError(
+                "parent_cancellation must be 'inherit' or 'independent'"
+            )
+        inherited_cancel = (
+            CompositeCancelSignal(
+                self._interrupt,
+                self._shutdown,
+                self._parent_cancel_signal,
+            )
+            if parent_cancellation == "inherit"
+            else None
+        )
+        child_cancel_signal = (
+            CompositeCancelSignal(inherited_cancel, cancel_signal)
+            if inherited_cancel is not None and cancel_signal is not None
+            else cancel_signal if cancel_signal is not None else inherited_cancel
+        )
+
+        direct_provider_override = stream_fn is not None or model is not None
+        if scenario is not None and direct_provider_override:
+            raise ValueError(
+                "spawn cannot combine a scenario change with direct stream/model "
+                "overrides; use spawn_child_session with an explicit provider"
+            )
+        extension_specs = (
+            None
+            if scenario is not None
+            else self._composition_extensions(
+                include_provider_atoms=not direct_provider_override,
+            )
+        )
+        from agentm.core.runtime.session_factory import create_session
+
+        source_tool_allowlist = self._tool_allowlist()
+        child = await create_session(
+            scenario=child_ctx.scenario,
+            extensions=extension_specs,
+            session_context=child_ctx,
+            services=child_services,
             store=self.store,
             graph=self.graph,
             stream_fn=stream_fn or self._stream_fn,
             model=model or self._model,
-            tools=tools if tools is not None else list(self.tools),
+            tools=(
+                list(tools)
+                if tools is not None
+                else list(self._external_tools())
+            ),
             system=system if system is not None else self.system,
-            context_policies=[copy.copy(p) for p in self.context_policies],
-            trigger_renderers=dict(self.trigger_renderers),
-            codec=self.codec,
+            context_policies=[
+                copy.copy(policy)
+                for policy in self._external_context_policies()
+            ],
+            trigger_renderers=self._external_trigger_renderers(),
+            codec=self._composition_codec(),
             max_turns=self._max_turns if max_turns is None else max_turns,
             max_tool_calls=self._max_tool_calls,
-            tool_allowlist=self._tool_allowlist(),
+            tool_allowlist=(
+                list(source_tool_allowlist)
+                if source_tool_allowlist is not None
+                else None
+            ),
             thinking=self._thinking,
-            cancel_signal=cancel_signal,
-            services=child_services,
+            cancel_signal=child_cancel_signal,
         )
 
         await self._register_child(child, purpose=purpose)
@@ -1476,7 +1652,10 @@ class Session:
 
         child.bus.on(SessionShutdownEvent.CHANNEL, _on_child_shutdown)
 
-        if child.store is not None:
+        if child.store is not None and not await asyncio.to_thread(
+            child.store.session_exists,
+            child.id,
+        ):
             await asyncio.to_thread(
                 child.store.create_session,
                 SessionMeta(
@@ -1526,83 +1705,132 @@ class Session:
         )
         provider_identity = source.provider_session_identity()
 
-        if source.store is not None:
-            await asyncio.to_thread(
-                source.store.create_session_with_turns,
-                SessionMeta(
-                    id=child_ctx.session_id,
-                    parent_id=source.id,
-                    fork_point=turn_ref,
-                    purpose=purpose,
-                    cwd=source.ctx.cwd,
-                    created_at=time.time(),
-                    config=session_meta_config(
-                        child_ctx,
-                        resolved_spec=source._resolved_session_spec(),
-                        active_set=source._active_set_fingerprint(),
-                        provider_identity=provider_identity,
-                    ),
-                ),
-                prefix.turns,
+        source_resource_writer = source.get_resource_writer()
+        if (
+            source.get_effect_scope() is not None
+            and source_resource_writer is not None
+            and not isinstance(
+                source_resource_writer,
+                EnvironmentForkableResourceWriter,
+            )
+        ):
+            raise TypeError(
+                "forking an isolated environment requires its ResourceWriter "
+                "to implement EnvironmentForkableResourceWriter"
             )
 
-        child_services = ServiceRegistry()
-        child_services.inherit_from(source.services)
-        inherited_provider = source.get_provider()
-        if inherited_provider is not None:
-            child_services.register(
-                f"provider:{inherited_provider.name}",
-                inherited_provider,
-                scope="session",
-            )
+        environment_fork: EnvironmentFork | None = None
         effect_scope = source.get_effect_scope()
         if effect_scope is not None:
-            child_effect_scope = await effect_scope.fork_at(
+            environment_fork = await effect_scope.fork_at(
                 turn_ref,
                 source_session_id=source.id,
                 child_session_id=child_ctx.session_id,
             )
+            if not isinstance(environment_fork, EnvironmentFork):
+                raise TypeError(
+                    "EffectScope.fork_at() must return an EnvironmentFork"
+                )
+            child_ctx = replace(child_ctx, cwd=environment_fork.cwd)
+
+        child_services = ServiceRegistry()
+        child_services.inherit_from(source.services)
+        resolved_spec = source._resolved_session_spec()
+        if resolved_spec is not None:
             child_services.register(
-                EFFECT_SCOPE_SERVICE,
-                child_effect_scope,
-                cast(type[EffectScope], EffectScope),
-                scope="tree",
-            )
-        active_set = source._active_set_fingerprint()
-        if active_set is not None:
-            child_services.register(
-                ACTIVE_SET_FINGERPRINT_SERVICE,
-                active_set,
-                ActiveSetFingerprint,
-                scope="session",
-            )
-        if provider_identity is not None:
-            child_services.register(
-                PROVIDER_SESSION_IDENTITY_SERVICE,
-                provider_identity,
-                ProviderSessionIdentity,
+                RESOLVED_SESSION_SPEC_SERVICE,
+                resolved_spec,
+                ResolvedSessionSpec,
                 scope="session",
             )
 
-        forked = cls(
-            ctx=child_ctx,
-            trajectory=prefix,
-            bus=EventBus(),
-            store=source.store,
-            graph=source.graph,
+        child_resource_writer = source_resource_writer
+        child_resource_reader = source.get_resource_reader()
+        child_resource_store = source.get_resource_store()
+        if environment_fork is not None and source_resource_writer is not None:
+            forkable_writer = cast(
+                EnvironmentForkableResourceWriter,
+                source_resource_writer,
+            )
+            child_resource_writer = (
+                await forkable_writer.fork_for_environment(
+                    workspace_root=environment_fork.cwd,
+                    child_session_id=child_ctx.session_id,
+                )
+            )
+            if child_resource_store is source_resource_writer:
+                if not isinstance(child_resource_writer, ResourceStore):
+                    raise TypeError(
+                        "forked ResourceWriter must preserve ResourceStore when "
+                        "the source service implemented both contracts"
+                    )
+                child_resource_store = child_resource_writer
+            if child_resource_reader is source_resource_writer:
+                if not isinstance(child_resource_writer, ResourceReader):
+                    raise TypeError(
+                        "forked ResourceWriter must preserve ResourceReader when "
+                        "the source service implemented both contracts"
+                    )
+                child_resource_reader = child_resource_writer
+
+        from agentm.core.runtime.session_factory import create_session
+
+        source_tool_allowlist = source._tool_allowlist()
+        forked = await create_session(
+            extensions=[
+                (module_path, dict(config))
+                for module_path, config in source._composition_extensions(
+                    include_provider_atoms=True,
+                )
+            ],
             stream_fn=source._stream_fn,
             model=source._model,
-            tools=list(source.tools),
             system=source.system,
-            context_policies=[copy.copy(p) for p in source.context_policies],
-            trigger_renderers=dict(source.trigger_renderers),
-            codec=source.codec,
+            cwd=child_ctx.cwd,
+            purpose=purpose,
+            store=source.store,
+            graph=source.graph,
+            session_context=child_ctx,
+            initial_turns=list(prefix.turns),
+            fork_point=turn_ref,
+            tools=list(source._external_tools()),
+            context_policies=[
+                copy.copy(policy)
+                for policy in source._external_context_policies()
+            ],
+            trigger_renderers=source._external_trigger_renderers(),
+            codec=source._composition_codec(),
+            provider_identity=provider_identity,
+            resource_reader=child_resource_reader,
+            resource_store=child_resource_store,
+            resource_writer=child_resource_writer,
+            tool_executor=source.get_tool_executor(),
+            tool_orchestrator=source.get_tool_orchestrator(),
+            permission_policy=source.get_permission_policy(),
+            trajectory_node_store=source.get_trajectory_node_store(),
+            effect_scope=(
+                environment_fork.effect_scope
+                if environment_fork is not None
+                else None
+            ),
+            environment_operations=(
+                environment_fork.operations
+                if environment_fork is not None
+                else None
+            ),
+            environment_restore_failure_handler=(
+                source._environment_restore_failure_handler()
+            ),
+            services=child_services,
+            resolved_spec=resolved_spec,
             max_turns=source._max_turns,
             max_tool_calls=source._max_tool_calls,
-            tool_allowlist=source._tool_allowlist(),
+            tool_allowlist=(
+                list(source_tool_allowlist)
+                if source_tool_allowlist is not None
+                else None
+            ),
             thinking=source._thinking,
-            provider_identity=provider_identity,
-            services=child_services,
         )
 
         if forked.graph is not None:
@@ -1614,20 +1842,13 @@ class Session:
 
         node_store = source.get_trajectory_node_store()
         if node_store is not None:
-            try:
-                await _fork_node_projection(
-                    store=node_store,
-                    source=source,
-                    target_session_id=forked.id,
-                    target_parent_session_id=source.id,
-                    turns=prefix.turns,
-                )
-            except Exception:
-                logger.exception(
-                    "trajectory node projection rebuild failed for forked "
-                    "session {}",
-                    forked.id,
-                )
+            await _fork_node_projection(
+                store=node_store,
+                source=source,
+                target_session_id=forked.id,
+                target_parent_session_id=source.id,
+                turns=prefix.turns,
+            )
 
         return forked
 
@@ -1662,6 +1883,31 @@ class Session:
             restored_context=ctx,
             restored_provider_identity=provider_identity,
         )
+        restored_turns = _rehydrate_turn_triggers(turns, session.codec)
+        if restored_turns != turns:
+            session.trajectory = Trajectory(restored_turns)
+            turns = restored_turns
+        validate_resume_identity(
+            meta,
+            resolved_spec=session._resolved_session_spec(),
+            active_set=session._active_set_fingerprint(),
+        )
+        resource_writer = session.get_resource_writer()
+        if isinstance(resource_writer, TransactionalResourceWriter):
+            transaction_ids = tuple(
+                dict.fromkeys(
+                    mutation.transaction_id
+                    for turn in turns
+                    for mutation in turn.meta.resource_mutations
+                    if mutation.transaction_id is not None
+                )
+            )
+            await resource_writer.recover(
+                ResourceRecoveryContext(
+                    session_id=session.id,
+                    committed_transaction_ids=transaction_ids,
+                )
+            )
         effect_scope = session.get_effect_scope()
         if effect_scope is not None:
             try:
@@ -1670,50 +1916,46 @@ class Session:
                     EnvironmentRestoreStatus(
                         session_id=session.id,
                         restored=True,
-                        mode=session._environment_restore_policy().on_failure,
+                        state="restored",
                     )
                 )
             except Exception as exc:
-                policy = session._environment_restore_policy()
+                handler = session._environment_restore_failure_handler()
                 restore_status = EnvironmentRestoreStatus(
                     session_id=session.id,
                     restored=False,
-                    mode=policy.on_failure,
+                    state="degraded_readonly",
                     error=f"{type(exc).__name__}: {exc}",
                 )
-                session._record_environment_restore_status(restore_status)
-                if policy.on_failure != "degraded_readonly":
+                if handler is None:
                     raise EnvironmentRestoreError(
                         f"environment restore failed for session {session.id}"
                     ) from exc
-                logger.exception(
-                    "environment restore failed for session {}; continuing "
-                    "in degraded_readonly mode",
-                    session.id,
-                )
+                try:
+                    await handler.activate_degraded_readonly(restore_status)
+                except Exception as handler_exc:
+                    raise ExceptionGroup(
+                        f"environment restore and degraded-mode activation "
+                        f"failed for session {session.id}",
+                        [exc, handler_exc],
+                    ) from handler_exc
+                session._record_environment_restore_status(restore_status)
 
         node_store = session.get_trajectory_node_store()
         if node_store is not None:
-            try:
-                status = await asyncio.to_thread(
-                    node_store.projection_status,
-                    session.id,
-                )
-                last_turn_index = turns[-1].index if turns else None
-                if status is None or status.high_water_turn_index != last_turn_index:
-                    await _replace_node_projection_for_turns(
-                        store=node_store,
-                        session_id=session.id,
-                        root_session_id=session.ctx.root_session_id,
-                        parent_session_id=session.ctx.parent_session_id,
-                        turns=turns,
-                        renderers=session.trigger_renderers,
-                    )
-            except Exception:
-                logger.exception(
-                    "trajectory node projection refresh failed during resume "
-                    "for session {}",
-                    session.id,
+            status = await asyncio.to_thread(
+                node_store.projection_status,
+                session.id,
+            )
+            last_turn_index = turns[-1].index if turns else None
+            if status is None or status.high_water_turn_index != last_turn_index:
+                await _replace_node_projection_for_turns(
+                    store=node_store,
+                    session_id=session.id,
+                    root_session_id=session.ctx.root_session_id,
+                    parent_session_id=session.ctx.parent_session_id,
+                    turns=turns,
+                    renderers=session.trigger_renderers,
                 )
 
         return session

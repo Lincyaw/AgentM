@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from pydantic import BaseModel as PydanticBaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.events import ExtensionInstallEvent
@@ -56,9 +58,7 @@ async def install_extension(
         result = load_extension(module_path, api, resolved_config)
         if inspect.isawaitable(result):
             await result
-        installed = getattr(api, "installed_extensions", None)
-        if isinstance(installed, list):
-            installed.append(module_path)
+        api._record_installed_extension(module_path, resolved_config)
         logger.debug("installed atom: {}", module_path)
     except Exception as exc:
         error = str(exc)
@@ -110,26 +110,22 @@ def load_extension(
             AttributeError(f"module {module_path!r} has no callable 'install' symbol"),
         )
 
-    # Auto-validate config via MANIFEST.config_schema (Pydantic model class).
+    # Validate config via the schema declared by the atom manifest.
     resolved_config: Any = config
     manifest = getattr(module, "MANIFEST", None)
     if manifest is not None:
         schema_cls = getattr(manifest, "config_schema", None)
-        if schema_cls is not None:
+        if isinstance(schema_cls, type) and issubclass(
+            schema_cls,
+            PydanticBaseModel,
+        ):
             try:
-                from pydantic import BaseModel as _PydanticBase
-                from pydantic import ValidationError as _PydanticValidationError
-
-                if isinstance(schema_cls, type) and issubclass(schema_cls, _PydanticBase):
-                    try:
-                        resolved_config = schema_cls.model_validate(config)
-                    except _PydanticValidationError as exc:
-                        raise ExtensionLoadError(
-                            module_path,
-                            ValueError(_format_config_validation_error(schema_cls, exc)),
-                        ) from exc
-            except ImportError:
-                pass
+                resolved_config = schema_cls.model_validate(config)
+            except PydanticValidationError as exc:
+                raise ExtensionLoadError(
+                    module_path,
+                    ValueError(_format_config_validation_error(schema_cls, exc)),
+                ) from exc
 
     token = _INSTALLING_EXTENSION.set(module_path)
     try:
@@ -195,7 +191,10 @@ def validate_extension_source(module_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         raise ExtensionLoadError(module_path, exc) from exc
     if spec is None:
-        return
+        raise ExtensionLoadError(
+            module_path,
+            ModuleNotFoundError(f"cannot resolve extension module {module_path!r}"),
+        )
 
     issues = []
     visited: set[str] = {module_path}
@@ -251,14 +250,13 @@ def _validate_extension_helper_source(
     try:
         spec = importlib.util.find_spec(module_path)
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "extension validator could not inspect helper {!r}: {}",
-            module_path,
-            exc,
-        )
-        return []
+        raise RuntimeError(
+            f"extension validator cannot inspect helper {module_path!r}"
+        ) from exc
     if spec is None:
-        return []
+        raise ModuleNotFoundError(
+            f"extension validator cannot resolve helper {module_path!r}"
+        )
 
     issues: list[Any] = []
     if spec.submodule_search_locations:

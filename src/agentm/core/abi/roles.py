@@ -19,6 +19,9 @@ PROVIDER_SESSION_IDENTITY_SERVICE: Final = "provider_session_identity"
 PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE: Final = "provider_prompt_cache_adapter"
 """Service key for provider-specific prompt-cache materialization."""
 
+INTERRUPTION_MESSAGE_POLICY_SERVICE: Final = "interruption_message_policy"
+"""Service key for provider-facing interrupted-turn message construction."""
+
 RESOURCE_WRITER_SERVICE: Final = "resource_writer"
 """Service key for the host-provided resource mutation port."""
 
@@ -30,9 +33,6 @@ RESOURCE_STORE_SERVICE: Final = "resource_store"
 
 RESOURCE_TXN_SERVICE: Final = "resource_txn"
 """Service key for the active turn-scoped resource transaction."""
-
-OPERATIONS_SERVICE: Final = "operations"
-"""Service key for the active Operations bundle."""
 
 ENVIRONMENT_OPERATIONS_SERVICE: Final = "operations:environment"
 """Service key for the active environment operations backend."""
@@ -53,7 +53,10 @@ TRAJECTORY_NODE_STORE_SERVICE: Final = "trajectory_node_store"
 """Service key for message-level trajectory node persistence/query."""
 
 TRAJECTORY_QUERY_STORE_SERVICE: Final = "trajectory_query_store"
-"""Service key for session/turn/span/event trajectory query."""
+"""Service key for session/turn trajectory query."""
+
+OBSERVABILITY_QUERY_STORE_SERVICE: Final = "observability_query_store"
+"""Service key for event/span observability query."""
 
 CATALOG_QUERY_SERVICE: Final = "catalog_query"
 """Service key for indexed catalog active-set query."""
@@ -70,8 +73,10 @@ CONTEXT_PROJECTION_SERVICE: Final = "context_projection"
 EFFECT_SCOPE_SERVICE: Final = "effect_scope"
 """Service key for the host-provided world-effect lifecycle port."""
 
-ENVIRONMENT_RESTORE_POLICY_SERVICE: Final = "environment_restore_policy"
-"""Service key for resume-time environment restore failure policy."""
+ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE: Final = (
+    "environment_restore_failure_handler"
+)
+"""Service key for host-enforced degraded read-only restore handling."""
 
 ENVIRONMENT_RESTORE_STATUS_SERVICE: Final = "environment_restore_status"
 """Service key for the last resume-time environment restore status."""
@@ -95,11 +100,12 @@ __all__ = [
     "CATALOG_QUERY_SERVICE",
     "CONTEXT_PROJECTION_SERVICE",
     "EFFECT_SCOPE_SERVICE",
-    "ENVIRONMENT_RESTORE_POLICY_SERVICE",
+    "ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE",
     "ENVIRONMENT_RESTORE_STATUS_SERVICE",
     "ENVIRONMENT_OPERATIONS_SERVICE",
+    "INTERRUPTION_MESSAGE_POLICY_SERVICE",
     "LOOP_BUDGET_SERVICE",
-    "OPERATIONS_SERVICE",
+    "OBSERVABILITY_QUERY_STORE_SERVICE",
     "PERMISSION_POLICY_SERVICE",
     "PROVIDER_RESOLVER_SERVICE",
     "PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE",

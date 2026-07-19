@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Literal
 
@@ -25,7 +25,7 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.roles import CONTEXT_PROJECTION_SERVICE
 from agentm.core.abi.session_api import AtomAPI
-from agentm.core.abi.trajectory import TrajectoryNode, Turn
+from agentm.core.abi.trajectory import TrajectoryNode
 from agentm.extensions import ExtensionManifest
 
 
@@ -51,6 +51,8 @@ MANIFEST = ExtensionManifest(
 class ExactNodeChainProjection(ContextProjection):
     """Replay provider context from the exact trajectory node chain."""
 
+    source: Literal["node_chain"] = "node_chain"
+
     def __init__(
         self,
         *,
@@ -69,33 +71,18 @@ class ExactNodeChainProjection(ContextProjection):
 
     def project(
         self,
-        turns: Sequence[Turn],
-        budget: ContextBudget,
-    ) -> Sequence[AgentMessage]:
-        messages: list[AgentMessage] = []
-        for turn in turns:
-            messages.extend(turn_to_messages(turn))
-        limited, dropped = _limit_messages(
-            messages,
-            self._max_messages if self._max_messages is not None else budget.max_messages,
-        )
-        self._report = ProjectionReport(
-            source="turns",
-            kept=_turn_range(turns) if not dropped else (),
-            dropped=_turn_range(turns) if dropped else (),
-            metadata={"message_count": len(limited)},
-        )
-        return limited
-
-    def project_chain(
-        self,
         projection_input: ProjectionInput,
         budget: ContextBudget,
     ) -> Sequence[AgentMessage]:
-        messages: list[AgentMessage] = []
+        if projection_input.source != self.source:
+            raise ValueError(
+                f"exact node-chain projection requires source {self.source!r}, "
+                f"got {projection_input.source!r}"
+            )
+        groups: list[tuple[int, list[AgentMessage]]] = []
+        group_keys: list[tuple[str, str | None, int]] = []
         content_refs: list[str] = []
         cache_keys: list[str] = []
-        synthetic_count = 0
         for node in projection_input.nodes:
             if node.is_sidechain and not self._include_sidechain:
                 continue
@@ -111,25 +98,28 @@ class ExactNodeChainProjection(ContextProjection):
             )
             if message is None:
                 continue
-            if message.meta.synthetic:
-                synthetic_count += 1
-            messages.append(message)
+            turn_index = node.turn_index if node.turn_index is not None else -1
+            group_key = (node.session_id, node.turn_id, turn_index)
+            if not group_keys or group_keys[-1] != group_key:
+                group_keys.append(group_key)
+                groups.append((turn_index, []))
+            groups[-1][1].append(message)
 
         limit = self._max_messages if self._max_messages is not None else budget.max_messages
-        limited, dropped = _limit_messages(messages, limit)
+        limited, kept_indexes, dropped_indexes = _limit_message_groups(groups, limit)
         self._report = ProjectionReport(
             source="node_chain",
             session_id=projection_input.session_id,
             branch_id=projection_input.branch_id,
             head_id=projection_input.head_id,
             leaf_node_id=projection_input.leaf_node_id,
-            kept=_turn_ranges_from_nodes(projection_input.nodes),
-            dropped=tuple(
-                TurnRange(start=-1, end=-1) for _ in range(1 if dropped else 0)
-            ),
+            kept=_turn_ranges(index for index in kept_indexes if index >= 0),
+            dropped=_turn_ranges(index for index in dropped_indexes if index >= 0),
             content_refs=tuple(dict.fromkeys(content_refs)),
             cache_keys=tuple(dict.fromkeys(cache_keys)),
-            synthetic_message_count=synthetic_count,
+            synthetic_message_count=sum(
+                1 for message in limited if message.meta.synthetic
+            ),
             metadata={
                 "message_count": len(limited),
                 "node_count": len(projection_input.nodes),
@@ -142,7 +132,9 @@ class ExactNodeChainProjection(ContextProjection):
 
 
 class TailContextProjection(ContextProjection):
-    """Turn-compatible tail projection with explainable truncation."""
+    """Tail projection over authoritative committed turns."""
+
+    source: Literal["turns"] = "turns"
 
     def __init__(self, *, max_messages: int | None = None) -> None:
         self._max_messages = max_messages
@@ -150,20 +142,25 @@ class TailContextProjection(ContextProjection):
 
     def project(
         self,
-        turns: Sequence[Turn],
+        projection_input: ProjectionInput,
         budget: ContextBudget,
     ) -> Sequence[AgentMessage]:
-        messages: list[AgentMessage] = []
-        for turn in turns:
-            messages.extend(turn_to_messages(turn))
-        limited, dropped = _limit_messages(
-            messages,
+        if projection_input.source != self.source:
+            raise ValueError(
+                f"tail projection requires source {self.source!r}, "
+                f"got {projection_input.source!r}"
+            )
+        limited, kept_indexes, dropped_indexes = _limit_message_groups(
+            [
+                (turn.index, list(turn_to_messages(turn)))
+                for turn in projection_input.turns
+            ],
             self._max_messages if self._max_messages is not None else budget.max_messages,
         )
         self._report = ProjectionReport(
             source="turns",
-            kept=_turn_range(turns) if not dropped else (),
-            dropped=_turn_range(turns) if dropped else (),
+            kept=_turn_ranges(kept_indexes),
+            dropped=_turn_ranges(dropped_indexes),
             metadata={"message_count": len(limited)},
         )
         return limited
@@ -241,26 +238,53 @@ def _node_message(
     )
 
 
-def _limit_messages(
-    messages: list[AgentMessage],
+def _limit_message_groups(
+    groups: Sequence[tuple[int, list[AgentMessage]]],
     limit: int | None,
-) -> tuple[list[AgentMessage], bool]:
-    if limit is None or limit <= 0 or len(messages) <= limit:
-        return messages, False
-    return messages[-limit:], True
+) -> tuple[list[AgentMessage], tuple[int, ...], tuple[int, ...]]:
+    """Apply a soft message limit without splitting a committed turn."""
+
+    total = sum(len(messages) for _, messages in groups)
+    if limit is None or limit <= 0 or total <= limit:
+        return (
+            [message for _, messages in groups for message in messages],
+            tuple(index for index, _ in groups),
+            (),
+        )
+
+    start = len(groups)
+    kept_count = 0
+    for position in range(len(groups) - 1, -1, -1):
+        group_size = len(groups[position][1])
+        if kept_count and kept_count + group_size > limit:
+            break
+        start = position
+        kept_count += group_size
+        if kept_count >= limit:
+            break
+
+    kept_groups = groups[start:]
+    dropped_groups = groups[:start]
+    return (
+        [message for _, messages in kept_groups for message in messages],
+        tuple(index for index, _ in kept_groups),
+        tuple(index for index, _ in dropped_groups),
+    )
 
 
-def _turn_range(turns: Sequence[Turn]) -> tuple[TurnRange, ...]:
-    if not turns:
+def _turn_ranges(indexes: Iterable[int]) -> tuple[TurnRange, ...]:
+    ordered = sorted(set(indexes))
+    if not ordered:
         return ()
-    return (TurnRange(start=turns[0].index, end=turns[-1].index),)
-
-
-def _turn_ranges_from_nodes(nodes: Sequence[TrajectoryNode]) -> tuple[TurnRange, ...]:
-    indexes = [node.turn_index for node in nodes if node.turn_index is not None]
-    if not indexes:
-        return ()
-    return (TurnRange(start=min(indexes), end=max(indexes)),)
+    ranges: list[TurnRange] = []
+    start = previous = ordered[0]
+    for index in ordered[1:]:
+        if index != previous + 1:
+            ranges.append(TurnRange(start=start, end=previous))
+            start = index
+        previous = index
+    ranges.append(TurnRange(start=start, end=previous))
+    return tuple(ranges)
 
 
 __all__ = [

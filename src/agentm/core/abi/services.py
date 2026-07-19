@@ -10,8 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, TypeVar, overload
 
-from loguru import logger
-
 T = TypeVar("T")
 ServiceScope = Literal["session", "tree", "host", "process", "resource"]
 _INHERITED_SCOPES: frozenset[ServiceScope] = frozenset(
@@ -86,9 +84,9 @@ class ServiceRegistry:
     def get(self, name: str, protocol: type | None = None) -> object | None:
         """Look up a service.  Returns None if not found.
 
-        When ``protocol`` is given, validates the stored service
-        against it — a mismatch logs a warning and returns None rather
-        than handing back a wrong-typed object.
+        When ``protocol`` is given, validates the stored service against it.
+        A registered service with the wrong type is a broken composition, not
+        an absent optional capability, so it raises ``ServiceTypeMismatch``.
         """
 
         entry = self._services.get(name)
@@ -96,13 +94,10 @@ class ServiceRegistry:
             return None
         service = entry.service
         if protocol is not None and not isinstance(service, protocol):
-            logger.warning(
-                "service {!r}: expected {}, got {}",
-                name,
-                protocol.__name__,
-                type(service).__name__,
+            raise ServiceTypeMismatch(
+                f"service {name!r}: expected {protocol.__name__}, got "
+                f"{type(service).__name__}"
             )
-            return None
         return service
 
     def require(self, name: str, protocol: type[T]) -> T:

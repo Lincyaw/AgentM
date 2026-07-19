@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agentm.core.abi.catalog import ActiveSetFingerprint
@@ -12,6 +13,10 @@ from agentm.core.abi.session_api import ResolvedSessionSpec, SessionContext
 from agentm.core.abi.store import SessionMeta
 
 MetaConfigValue = str | int | float | bool | None
+
+
+class ResumeIdentityError(RuntimeError):
+    """Raised when resume resolves a different executable session identity."""
 
 
 def session_meta_config(
@@ -32,10 +37,9 @@ def session_meta_config(
     if ctx.scenario_dir is not None:
         config["scenario_dir"] = ctx.scenario_dir
     if resolved_spec is not None:
-        spec_record = _resolved_spec_record(resolved_spec)
-        config["resolved_spec_digest"] = _digest_json(spec_record)
+        config["resolved_spec_digest"] = resolved_spec_digest(resolved_spec)
         config["resolved_spec_provenance_json"] = _stable_json(
-            _json_safe(resolved_spec.provenance)
+            _metadata_record(resolved_spec.provenance, path="provenance")
         )
     if active_set is not None:
         config["active_set_algorithm"] = active_set.algorithm
@@ -54,6 +58,40 @@ def session_meta_config(
                 provider_identity.frozen_after_turn_index
             )
     return config
+
+
+def validate_resume_identity(
+    meta: SessionMeta,
+    *,
+    resolved_spec: ResolvedSessionSpec | None,
+    active_set: ActiveSetFingerprint | None,
+) -> None:
+    """Fail if current resolution does not match the stored session identity."""
+
+    expected_spec = _config_str(meta.config, "resolved_spec_digest")
+    if expected_spec is not None:
+        if resolved_spec is None:
+            raise ResumeIdentityError(
+                "session was created from a resolved spec but resume did not resolve one"
+            )
+        actual_spec = resolved_spec_digest(resolved_spec)
+        if actual_spec != expected_spec:
+            raise ResumeIdentityError(
+                "resolved session spec changed since creation: "
+                f"{actual_spec} != {expected_spec}"
+            )
+
+    expected_active_set = _config_str(meta.config, "active_set_digest")
+    if expected_active_set is not None:
+        if active_set is None:
+            raise ResumeIdentityError(
+                "session has a stored active-set identity but resume produced none"
+            )
+        if active_set.digest != expected_active_set:
+            raise ResumeIdentityError(
+                "active atom set changed since session creation: "
+                f"{active_set.digest} != {expected_active_set}"
+            )
 
 
 def context_from_session_meta(session_id: str, meta: SessionMeta) -> SessionContext:
@@ -133,23 +171,22 @@ def _config_int_optional(
     return None
 
 
+def resolved_spec_digest(spec: ResolvedSessionSpec) -> str:
+    """Fingerprint resolver structure without persisting credential material."""
+
+    return _digest_json(_resolved_spec_record(spec))
+
+
 def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, Any]:
     return {
         "scenario": spec.scenario,
-        "extensions": [
-            {"module": module, "config": _json_safe(config)}
-            for module, config in spec.extensions
-        ],
-        "atom_config": {
-            module: _json_safe(config)
-            for module, config in sorted(spec.atom_config.items())
-        },
+        "extensions": [module for module, _config in spec.extensions],
+        "atom_config_modules": sorted(spec.atom_config),
         "provider": (
             None
             if spec.provider is None
             else {
                 "module": spec.provider[0],
-                "config": _json_safe(spec.provider[1]),
             }
         ),
         "provider_identity": (
@@ -162,20 +199,44 @@ def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, Any]:
                 "frozen_after_turn_index": (
                     spec.provider_identity.frozen_after_turn_index
                 ),
-                "metadata": _json_safe(spec.provider_identity.metadata),
             }
         ),
-        "value_provenance": [
-            {
-                "path": item.path,
-                "source": item.source,
-                "source_ref": item.source_ref,
-                "value_fingerprint": item.value_fingerprint,
-            }
-            for item in spec.value_provenance
-        ],
-        "provenance": _json_safe(spec.provenance),
+        "value_provenance": _provenance_record(spec),
+        "provenance": _metadata_record(spec.provenance, path="provenance"),
     }
+
+
+def _provenance_record(spec: ResolvedSessionSpec) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": item.path,
+            "source": item.source,
+            "source_ref": item.source_ref,
+        }
+        for item in spec.value_provenance
+    ]
+
+
+def _metadata_record(value: object, *, path: str) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _metadata_record(item, path=f"{path}.{key}")
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return [
+            _metadata_record(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(
+        f"{path} is not JSON-safe: {type(value).__name__}; "
+        "resolver provenance must contain source metadata, not runtime objects"
+    )
 
 
 def _digest_json(value: Any) -> str:
@@ -192,18 +253,11 @@ def _stable_json(value: Any) -> str:
     )
 
 
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return repr(value)
-
-
 __all__ = [
+    "ResumeIdentityError",
     "context_from_session_meta",
     "provider_identity_from_session_meta",
+    "resolved_spec_digest",
     "session_meta_config",
+    "validate_resume_identity",
 ]

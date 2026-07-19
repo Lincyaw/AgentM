@@ -110,12 +110,14 @@ class LlmOpenaiConfig(BaseModel):
     prompt_cache_retention: Literal["in_memory", "24h"] = "in_memory"
     azure_endpoint: str | None = None
     api_version: str | None = None
+    tool_schema_mode: Literal["strict", "compatible"] = "strict"
 
 MANIFEST = ExtensionManifest(
     name="llm_openai",
     description="Register an OpenAI Chat Completions API LLM stream provider.",
     registers=("provider:openai",),
     config_schema=LlmOpenaiConfig,
+    sensitive_config_fields=("api_key", "default_headers", "default_query"),
     requires=(),
     priority=AtomInstallPriority.PROVIDER,
 )
@@ -227,21 +229,6 @@ def _is_openai_retryable(exc: BaseException) -> bool:
     # raw httpx exceptions (ReadTimeout, ReadError, etc.) escape.
     if isinstance(exc, httpx.TransportError):
         return True
-    # Doubao / LiteLLM XGrammar JIT compiles the tool schema for
-    # constrained decoding. The compile is non-deterministic: identical
-    # payloads succeed most of the time and fail ~10-30% with a 400
-    # carrying ``Invalid decoding guidance syntax`` (the error string
-    # also contains ``json_schema_converter``). Retrying the same
-    # request typically succeeds. This is a backend issue we can't fix
-    # client-side, but we can stop it from killing whole rollouts.
-    bad_request = getattr(openai, "BadRequestError", None)
-    if isinstance(bad_request, type) and isinstance(exc, bad_request):
-        message = str(exc)
-        if (
-            "Invalid decoding guidance syntax" in message
-            or "json_schema_converter" in message
-        ):
-            return True
     return False
 
 # Keywords that XGrammar-based constrained-decoding engines (Volcengine Ark,
@@ -596,6 +583,7 @@ class OpenAIStreamFn:
     events: EventBus | None = None
     azure_endpoint: str | None = None
     api_version: str | None = None
+    tool_schema_mode: Literal["strict", "compatible"] = "strict"
     _reported_thinking_drop: bool = field(default=False, init=False)
     _reported_reasoning_skip: bool = field(default=False, init=False)
 
@@ -604,6 +592,10 @@ class OpenAIStreamFn:
             raise ValueError(
                 "OpenAIStreamFn thinking_round_trip must be one of "
                 "'drop', 'system_note', or 'raise'."
+            )
+        if self.tool_schema_mode not in {"strict", "compatible"}:
+            raise ValueError(
+                "OpenAIStreamFn tool_schema_mode must be 'strict' or 'compatible'."
             )
 
     def _emit_thinking_drop_diagnostic(self) -> None:
@@ -730,8 +722,10 @@ class OpenAIStreamFn:
             "stream_options": {"include_usage": True},
         }
         if tools:
-            strict = self.base_url is None
-            body["tools"] = _to_openai_tools(tools, strict=strict)
+            body["tools"] = _to_openai_tools(
+                tools,
+                strict=self.tool_schema_mode == "strict",
+            )
 
         extra = dict(self.extra_body or {})
         prompt_cache_key = extra.pop("prompt_cache_key", prompt_cache_key)
@@ -1027,6 +1021,7 @@ class _OpenAIProviderRuntime:
             events=getattr(self._session, "events", None),
             azure_endpoint=self._config.azure_endpoint,
             api_version=self._config.api_version,
+            tool_schema_mode=self._config.tool_schema_mode,
         )
 
     def _model_kwargs(self) -> dict[str, int]:

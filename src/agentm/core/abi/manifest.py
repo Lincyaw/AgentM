@@ -59,17 +59,15 @@ class CapabilityRef:
 
 
 def parse_capability_ref(value: str) -> CapabilityRef:
-    """Parse a manifest capability string into a stable key.
-
-    Strings with a prefix, such as ``tool:bash`` or ``service:operations``,
-    keep that prefix. Bare values are interpreted as service capabilities; the
-    factory also accepts ``atom:<name>`` for compatibility while manifests move
-    toward capability-oriented dependencies.
-    """
+    """Parse one explicit ``kind:name`` capability reference."""
 
     kind, separator, name = value.partition(":")
     if not separator:
-        return CapabilityRef(kind="service", name=value)
+        raise ValueError(
+            f"capability reference must use an explicit kind:name key: {value!r}"
+        )
+    if not name:
+        raise ValueError(f"capability reference has an empty name: {value!r}")
     if kind in {
         "atom",
         "service",
@@ -90,16 +88,13 @@ def parse_capability_ref(value: str) -> CapabilityRef:
         "query",
     }:
         return CapabilityRef(kind=cast(CapabilityKind, kind), name=name)
-    return CapabilityRef(kind="unknown", name=value)
+    raise ValueError(f"unknown capability kind {kind!r} in {value!r}")
 
 
-def requirement_keys(value: str) -> tuple[str, ...]:
-    """Return acceptable provider keys for one manifest requirement."""
+def requirement_key(value: str) -> str:
+    """Return the normalized key for one manifest requirement."""
 
-    ref = parse_capability_ref(value)
-    if ":" not in value:
-        return (ref.key, f"atom:{value}")
-    return (ref.key,)
+    return parse_capability_ref(value).key
 
 
 def provided_capability_keys(
@@ -129,6 +124,7 @@ class ExtensionManifest(BaseModel):
     description: str
     registers: tuple[str, ...] = ()
     config_schema: type[BaseModel] | None = None
+    sensitive_config_fields: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
     priority: int = AtomInstallPriority.NORMAL
 
@@ -140,5 +136,5 @@ __all__ = [
     "ExtensionManifest",
     "parse_capability_ref",
     "provided_capability_keys",
-    "requirement_keys",
+    "requirement_key",
 ]

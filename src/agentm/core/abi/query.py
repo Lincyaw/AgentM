@@ -83,11 +83,12 @@ class SpanRecord:
 
 @runtime_checkable
 class TrajectoryQueryStore(Protocol):
-    """Read-side trajectory/observability query view.
+    """Read-side session and turn query view.
 
-    Implementations may query the local ``TrajectoryStore``, Postgres,
-    ClickHouse, or another backend. The query view is replaceable and does not
-    own the durable Turn commit boundary.
+    Implementations may query a local ``TrajectoryStore``, Postgres,
+    ClickHouse, or another backend. Observability events and spans are a
+    separate port because many authoritative trajectory stores do not own
+    telemetry data.
     """
 
     def sessions(
@@ -99,6 +100,11 @@ class TrajectoryQueryStore(Protocol):
     def turns(self, session_id: str) -> Iterable[Turn]:
         ...
 
+
+@runtime_checkable
+class ObservabilityQueryStore(Protocol):
+    """Read-side event/span query view."""
+
     def events(self, session_id: str) -> Iterable[EventRecord]:
         ...
 
@@ -106,11 +112,18 @@ class TrajectoryQueryStore(Protocol):
         ...
 
 
+@runtime_checkable
+class TraceQueryStore(TrajectoryQueryStore, ObservabilityQueryStore, Protocol):
+    """Combined query view implemented by backends that own both datasets."""
+
+
 __all__ = [
     "EventRecord",
+    "ObservabilityQueryStore",
     "QueryMeta",
     "SessionFilter",
     "SessionIdentity",
     "SpanRecord",
+    "TraceQueryStore",
     "TrajectoryQueryStore",
 ]

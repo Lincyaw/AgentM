@@ -31,7 +31,7 @@ from agentm.core.abi.resource import ResourceMutation
 from agentm.core.abi.termination import TerminationCause
 
 if TYPE_CHECKING:
-    from agentm.core.abi.trigger import Trigger
+    from agentm.core.abi.trigger import Trigger, TriggerMetadata
 
 TurnRef = Union[int, str]
 TrajectoryNodeRef = str
@@ -43,7 +43,6 @@ TrajectoryNodeKind = Literal[
     "message",
     "compact_boundary",
     "content_replacement",
-    "config_change",
     "snip",
     "checkpoint",
 ]
@@ -145,6 +144,11 @@ TRAJECTORY_NODE_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
         name="trajectory_nodes_cache",
         fields=("root_session_id", "cache_key", "session_id", "seq"),
         purpose="prompt-cache/content-replacement prefix lookup",
+    ),
+    TrajectoryIndexSpec(
+        name="trajectory_nodes_session_timestamp",
+        fields=("session_id", "timestamp", "seq"),
+        purpose="time-range trajectory scans",
     ),
 )
 
@@ -278,22 +282,6 @@ class TrajectoryForkPoint:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionConfigChange:
-    """Explicit session config/provider change represented as a control node."""
-
-    change_id: str
-    session_id: str
-    key: str
-    before: str | None = None
-    after: str | None = None
-    turn_id: str | None = None
-    turn_index: int | None = None
-    node_id: str | None = None
-    reason: str = ""
-    metadata: Mapping[str, object] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
 class TrajectoryProjectionStatus:
     """Projection health for rebuildable message-node stores."""
 
@@ -415,6 +403,7 @@ class Turn:
     outcome: Outcome
     timestamp: float
     meta: TurnMeta = field(default_factory=TurnMeta)
+    trigger_metadata: TriggerMetadata | None = None
 
 
 __all__ = [
@@ -425,7 +414,6 @@ __all__ = [
     "Outcome",
     "PromptCacheState",
     "Round",
-    "SessionConfigChange",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
     "ToolRecord",

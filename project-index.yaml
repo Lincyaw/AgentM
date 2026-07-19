@@ -20,9 +20,9 @@ requirements:
       - path: src/agentm/authoring/__init__.py
       - path: src/agentm/authoring/artifacts.py
       - path: src/agentm/config/__init__.py
-      - path: src/agentm/config/provider_change.py
       - path: src/agentm/config/resolver.py
       - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/cancel.py
       - path: src/agentm/core/abi/catalog.py
       - path: src/agentm/core/abi/codec.py
       - path: src/agentm/core/abi/compaction.py
@@ -36,6 +36,7 @@ requirements:
       - path: src/agentm/core/abi/query.py
       - path: src/agentm/core/abi/resource.py
       - path: src/agentm/core/abi/roles.py
+      - path: src/agentm/core/abi/services.py
       - path: src/agentm/core/abi/session_api.py
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/core/abi/store.py
@@ -44,9 +45,13 @@ requirements:
       - path: src/agentm/core/abi/tool_executor.py
       - path: src/agentm/core/abi/tool_orchestration.py
       - path: src/agentm/core/abi/trajectory.py
+      - path: src/agentm/core/abi/trigger.py
       - path: src/agentm/core/lib/__init__.py
       - path: src/agentm/core/lib/async_cancel.py
       - path: src/agentm/core/lib/redact.py
+      - path: src/agentm/core/lib/tool_executor.py
+      - path: src/agentm/core/lib/tool_schema.py
+      - path: src/agentm/core/lib/trajectory_nodes.py
       - path: src/agentm/core/runtime/catalog.py
       - path: src/agentm/core/runtime/driver.py
       - path: src/agentm/core/runtime/extension.py
@@ -55,10 +60,8 @@ requirements:
       - path: src/agentm/core/runtime/session_meta.py
       - path: src/agentm/core/runtime/stores/query.py
       - path: src/agentm/core/runtime/stores/jsonl.py
-      - path: src/agentm/core/runtime/tool_executor.py
       - path: src/agentm/core/runtime/tool_orchestration.py
       - path: src/agentm/core/runtime/tree.py
-      - path: src/agentm/core/runtime/trajectory_nodes.py
       - path: src/agentm/core/runtime/trigger_queue.py
       - path: src/agentm/environments/__init__.py
       - path: src/agentm/environments/local.py
@@ -71,6 +74,7 @@ requirements:
       - path: src/agentm/extensions/builtin/llm_anthropic.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: src/agentm/extensions/builtin/llm_openai.py
+      - path: src/agentm/extensions/builtin/local_resources.py
       - path: src/agentm/extensions/builtin/message_patterns.py
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/operations.py
@@ -103,10 +107,12 @@ requirements:
       - path: src/agentm/storage/trajectory/jsonl.py
       - path: src/agentm/storage/trajectory/postgres.py
       - path: src/agentm_toolbox/__main__.py
+      - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py
       - path: tools/otel/docker-compose.yaml
     tests:
       - path: tests/fixtures/__init__.py
+      - path: tests/fixtures/custom_trigger.py
       - path: tests/fixtures/prompt_cache_adapter.py
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
