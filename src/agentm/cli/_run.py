@@ -24,6 +24,7 @@ from agentm.cli._display import (
     SessionStats,
     stderr_console,
 )
+from agentm.cli._store import resolve_trajectory_store_or_create
 
 
 async def _execute(
@@ -47,6 +48,7 @@ async def _execute(
         project_config=project_config,
         user_config=user_config,
     )
+    store = resolve_trajectory_store_or_create()
     config = AgentSessionConfig(
         cwd=str(Path.cwd()),
         scenario=scenario,
@@ -54,6 +56,7 @@ async def _execute(
         spec_resolver=resolver,
         extra_extensions=[(mod, {}) for mod in extensions],
         system=system_prompt,
+        store=store,
     )
 
     try:
