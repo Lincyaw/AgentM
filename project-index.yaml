@@ -127,7 +127,6 @@ requirements:
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/prompt_cache.py
       - path: src/agentm/extensions/builtin/retry_policy.py
-      - path: src/agentm/extensions/builtin/structured_output.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/validate.py
