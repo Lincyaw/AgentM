@@ -148,10 +148,12 @@ def _resolve_extensions(
 
     resolved.extend(_copy_extension_specs(extra_extensions))
     if atom_configs:
-        resolved = [
-            (module, {**config, **atom_configs.get(module, {})})
-            for module, config in resolved
-        ]
+        configured: list[ExtensionSpec] = []
+        for module, config in resolved:
+            manifest = _load_manifest(module)
+            atom_name = manifest.name if manifest is not None else module
+            configured.append((module, {**config, **atom_configs.get(atom_name, {})}))
+        resolved = configured
     return resolved, base_dir, scenario_name
 
 
@@ -642,6 +644,10 @@ async def create_child_session(
     )
 
     child_id = config.session_id or uuid.uuid4().hex[:16]
+    child_store = config.store if config.store is not None else parent.store
+    if child_store is not parent.store:
+        child_services.unregister(TRAJECTORY_QUERY_STORE_SERVICE)
+        _register_default_query_store(child_services, child_store)
     child_ctx = parent.ctx.child(
         session_id=child_id,
         purpose=config.purpose,
@@ -657,9 +663,11 @@ async def create_child_session(
 
     child = Session(
         ctx=child_ctx,
+        trajectory=Trajectory(turns=config.initial_turns),
+        bus=config.bus,
         stream_fn=config.stream_fn or parent._stream_fn,
         model=config.model or parent._model,
-        store=parent.store,
+        store=child_store,
         graph=parent.graph,
         max_turns=max_turns,
         max_tool_calls=max_tool_calls,
@@ -705,7 +713,23 @@ async def create_child_session(
     for tool in config.extra_tools:
         child.register_tool(tool)
 
-    await _record_active_set(child, plan)
+    active_set = await _record_active_set(child, plan)
+    await _ensure_store_session(
+        child_store,
+        meta=SessionMeta(
+            id=child.id,
+            parent_id=parent.id,
+            purpose=config.purpose,
+            cwd=child_ctx.cwd,
+            created_at=time.time(),
+            config=session_meta_config(
+                child_ctx,
+                resolved_spec=resolved_spec,
+                active_set=active_set,
+            ),
+        ),
+        initial_turns=config.initial_turns,
+    )
 
     return child
 

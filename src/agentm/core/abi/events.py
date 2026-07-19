@@ -19,67 +19,11 @@ from typing import Any, ClassVar, Literal
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage
 from agentm.core.abi.stream import AssistantStreamEvent, Model
+from agentm.core.abi.termination import ModelEndTurn, TerminationCause
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
 from agentm.core.abi.bus import Event
 from agentm.core.abi.trajectory import Outcome, Turn, TurnMeta
 from agentm.core.abi.trigger import Trigger
-
-
-# --- Termination causes -----------------------------------------------------
-# Each cause carries two ClassVar flags:
-#   overridable  — can a DecideEvent handler override this Stop to Step/Inject?
-#   session_terminal — should the driver exit the persistent loop?
-
-@dataclass(frozen=True, slots=True)
-class TerminationCause:
-    overridable: ClassVar[bool] = True
-    session_terminal: ClassVar[bool] = False
-
-
-@dataclass(frozen=True, slots=True)
-class ModelEndTurn(TerminationCause):
-    """LLM chose to stop responding — turn done, session continues."""
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class ToolTerminated(TerminationCause):
-    """A tool explicitly terminated the session."""
-    overridable: ClassVar[bool] = False
-    session_terminal: ClassVar[bool] = True
-    tool_name: str = ""
-    reason: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class MaxTurnsExhausted(TerminationCause):
-    overridable: ClassVar[bool] = False
-    session_terminal: ClassVar[bool] = True
-
-
-@dataclass(frozen=True, slots=True)
-class SignalAborted(TerminationCause):
-    """Turn was interrupted — not session-terminal."""
-    overridable: ClassVar[bool] = False
-    session_terminal: ClassVar[bool] = False
-    reason: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderTruncated(TerminationCause):
-    kind: Literal["max_tokens", "error"] = "max_tokens"
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetExhausted(TerminationCause):
-    overridable: ClassVar[bool] = False
-    session_terminal: ClassVar[bool] = True
-    detail: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class NoPendingInput(TerminationCause):
-    pass
 
 
 # --- Loop actions -----------------------------------------------------------
@@ -293,10 +237,7 @@ class ExtensionInstallEvent(Event):
 class ExtensionReloadEvent(Event):
     CHANNEL: ClassVar[str] = "extension_reload"
     name: str = ""
-    old_hash: str | None = None
-    new_hash: str = ""
     trigger: str = ""
-    tier: int = 0
     error: str | None = None
 
 
@@ -306,8 +247,14 @@ class ExtensionUnloadEvent(Event):
     name: str = ""
     module_path: str = ""
     trigger: str = ""
-    tier: int = 0
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcesDiscoverEvent(Event):
+    CHANNEL: ClassVar[str] = "resources_discover"
+    cwd: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,15 +269,8 @@ class ApiRegisterEvent(Event):
 @dataclass(frozen=True, slots=True)
 class ApiSendUserMessageEvent(Event):
     CHANNEL: ClassVar[str] = "api_send_user_message"
-    extension: str = ""
     content: Any = None
-
-
-@dataclass(frozen=True, slots=True)
-class ResourcesDiscoverEvent(Event):
-    CHANNEL: ClassVar[str] = "resources_discover"
-    cwd: str = ""
-    reason: str = ""
+    extension: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,7 +300,6 @@ __all__ = [
     "ApiSendUserMessageEvent",
     "BeforeRunEvent",
     "BeforeSendEvent",
-    "BudgetExhausted",
     "ChildSessionEndEvent",
     "ChildSessionStartEvent",
     "ContextEvent",
@@ -373,23 +312,16 @@ __all__ = [
     "LlmRequestEndEvent",
     "LlmRequestStartEvent",
     "LoopAction",
-    "MaxTurnsExhausted",
-    "ModelEndTurn",
-    "NoPendingInput",
-    "ProviderTruncated",
     "ResourcesDiscoverEvent",
     "RunEndEvent",
     "SessionReadyEvent",
     "SessionShutdownEvent",
-    "SignalAborted",
     "Step",
     "Stop",
     "StreamDeltaEvent",
-    "TerminationCause",
     "ToolCallEvent",
     "ToolErrorEvent",
     "ToolResultEvent",
-    "ToolTerminated",
     "TurnBeginEvent",
     "TurnCommittedEvent",
     "TurnObservation",

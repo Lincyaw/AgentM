@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,34 +33,34 @@ from agentm.core.abi.bus import BusPriority, EventBus
 from agentm.core.abi.codec import CodecRegistry, RawTrigger
 from agentm.core.abi.context import (
     PolicyContext,
+    build_context_sync,
     render_trigger,
 )
 from agentm.core.abi.events import (
     BeforeRunEvent,
     BeforeSendEvent,
-    BudgetExhausted,
     ContextEvent,
     DecideEvent,
     Inject,
     LoopAction,
-    ModelEndTurn,
-    SignalAborted,
     Step,
     Stop,
     StreamDeltaEvent,
     ToolCallEvent,
     ToolErrorEvent,
     ToolResultEvent,
-    ToolTerminated,
     TurnBeginEvent,
     TurnCommittedEvent,
 )
-from agentm.core.abi.lifecycle import (
-    AbandonEvent,
-    ForkEvent,
-    LifecycleHookRegistry,
-    ResumeEvent,
+from agentm.core.abi.termination import (
+    BudgetExhausted,
+    ModelEndTurn,
+    SignalAborted,
+    ToolTerminated,
 )
+from agentm.core.abi.query import SessionFilter, TrajectoryQueryStore
+from agentm.core.abi.resource import ResourceMutation, ResourceRef
+from agentm.core.abi.roles import TRAJECTORY_QUERY_STORE_SERVICE
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Outcome, Round, Turn, TurnMeta
@@ -73,7 +74,10 @@ from agentm.core.abi.trigger import (
 )
 from agentm.core.runtime.execution import Execution, StateError
 from agentm.core.runtime.session import Session
+from agentm.core.runtime.session_factory import create_session
+from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
+from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.tree import InMemorySessionGraph
 from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
@@ -87,6 +91,7 @@ class MockStreamFn:
     def __init__(self) -> None:
         self._responses: list[AssistantMessage] = []
         self._call_count = 0
+        self.calls: list[dict[str, Any]] = []
 
     def enqueue(self, *responses: AssistantMessage) -> None:
         self._responses.extend(responses)
@@ -106,6 +111,7 @@ class MockStreamFn:
         thinking: Any = "off",
     ) -> AsyncIterator[TextDelta | MessageEnd]:
         self._call_count += 1
+        self.calls.append({"messages": list(messages)})
         if not self._responses:
             raise RuntimeError("MockStreamFn: no more responses")
         resp = self._responses.pop(0)
@@ -501,9 +507,12 @@ async def test_store_persistence() -> None:
     # Create a new session for the second turn
     mock2 = MockStreamFn()
     mock2.enqueue(text_response("second"))
-    session2 = Session(
-        stream_fn=mock2, model=make_model(), system="test",
-        store=store, session_id=session.id,
+    session2 = await Session.resume(
+        session.id,
+        store,
+        stream_fn=mock2,
+        model=make_model(),
+        system="test",
     )
     # Session reuses ID but store already has it, so we don't re-create
     session2.start()
@@ -556,6 +565,144 @@ async def test_session_resume() -> None:
     await resumed.shutdown()
     assert len(resumed.trajectory) == 2
     assert resumed.trajectory.turns[1].index == 1
+
+
+def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
+    tmp_path: Path,
+) -> None:
+    store = JsonlTrajectoryStore(tmp_path)
+    meta = SessionMeta(id="session")
+    store.create_session(meta)
+    turn = Turn(
+        index=0,
+        id="turn-0",
+        trigger=UserInput(content=(TextContent(type="text", text="one"),)),
+        rounds=(Round(response=text_response("done")),),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=1.0,
+    )
+    store.append(meta.id, turn)
+    path = store.file_path(meta.id)
+    with path.open("ab") as fh:
+        fh.write(b'{"index":1')
+
+    assert store.load(meta.id)[1] == [turn]
+    next_turn = Turn(
+        index=1,
+        id="turn-1",
+        trigger=UserInput(content=(TextContent(type="text", text="two"),)),
+        rounds=(Round(response=text_response("done again")),),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=2.0,
+    )
+    store.append(meta.id, next_turn)
+    assert store.load(meta.id)[1] == [turn, next_turn]
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    lines.insert(2, "not-json")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrupt record 3"):
+        store.load(meta.id)
+
+
+def test_jsonl_create_with_turns_has_no_partial_session(tmp_path: Path) -> None:
+    store = JsonlTrajectoryStore(tmp_path)
+    meta = SessionMeta(id="fork")
+    bad_turn = Turn(
+        index=1,
+        id="bad",
+        trigger=ContinueTrigger(),
+        rounds=(),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=0.0,
+    )
+    with pytest.raises(ValueError, match="expected 0"):
+        store.create_session_with_turns(meta, [bad_turn])
+    assert not store.session_exists(meta.id)
+
+
+def test_trajectory_query_store_adapter_filters_sessions_and_turns() -> None:
+    store = InMemoryTrajectoryStore()
+    root_turn = Turn(
+        index=0,
+        id="root-turn",
+        trigger=UserInput(content=(TextContent(type="text", text="root"),)),
+        rounds=(Round(response=text_response("root done")),),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=1.0,
+    )
+    child_turn = Turn(
+        index=0,
+        id="child-turn",
+        trigger=UserInput(content=(TextContent(type="text", text="child"),)),
+        rounds=(Round(response=text_response("child done")),),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=2.0,
+    )
+    store.create_session_with_turns(
+        SessionMeta(
+            id="root",
+            purpose="root",
+            created_at=10.0,
+            config={"root_session_id": "root", "depth": 0},
+        ),
+        [root_turn],
+    )
+    store.create_session_with_turns(
+        SessionMeta(
+            id="child",
+            parent_id="root",
+            purpose="worker",
+            created_at=20.0,
+            config={"root_session_id": "root", "depth": 1},
+        ),
+        [child_turn],
+    )
+
+    query = TrajectoryStoreQueryAdapter(store)
+
+    assert [session.id for session in query.sessions()] == ["root", "child"]
+    assert [turn.id for turn in query.turns("child")] == ["child-turn"]
+    assert [
+        session.id
+        for session in query.sessions(SessionFilter(parent_session_id="root"))
+    ] == ["child"]
+    assert [
+        session.id
+        for session in query.sessions(SessionFilter(root_session_id="root"))
+    ] == ["root", "child"]
+    assert [
+        session.id for session in query.sessions(SessionFilter(purpose="worker"))
+    ] == ["child"]
+    assert [
+        session.id
+        for session in query.sessions(SessionFilter(since=15.0, limit=1))
+    ] == ["child"]
+    with pytest.raises(NotImplementedError, match="observability events"):
+        list(query.events("root"))
+    with pytest.raises(NotImplementedError, match="observability spans"):
+        list(query.spans("root"))
+    with pytest.raises(KeyError):
+        list(query.turns("missing"))
+
+
+@pytest.mark.asyncio
+async def test_session_factory_registers_default_trajectory_query_store() -> None:
+    store = InMemoryTrajectoryStore()
+    session = await create_session(
+        extensions=[],
+        stream_fn=MockStreamFn(),
+        model=make_model(),
+        store=store,
+    )
+
+    query = session.services.get(
+        TRAJECTORY_QUERY_STORE_SERVICE,
+        TrajectoryQueryStore,
+    )
+
+    assert isinstance(query, TrajectoryQueryStore)
+    assert [entry.id for entry in query.sessions()] == [session.id]
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +772,7 @@ async def test_fork_lifecycle() -> None:
     forked = await Session.fork(session, at=0, purpose="fork-test")
     assert len(forked.trajectory) == 1
     assert forked.ctx.parent_session_id == session.id
+    assert [tool.name for tool in forked.tools] == [tool.name for tool in session.tools]
 
     edges = graph.edges(session.id)
     fork_edges = [e for e in edges if e.kind == "forked"]
@@ -711,6 +859,10 @@ async def test_inject_inline() -> None:
     assert len(session.trajectory) == 1
     turn = session.trajectory.turns[0]
     assert len(turn.rounds) == 2
+    live_messages = list(mock.calls[1]["messages"])
+    cold_messages = build_context_sync(session.trajectory.turns)
+    assert cold_messages[:-1] == live_messages
+    assert cold_messages[-1] == turn.rounds[-1].response
 
 
 @pytest.mark.asyncio
@@ -853,16 +1005,35 @@ async def test_tool_result_replaced() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_waits_for_its_receipt_while_idle_tracks_background() -> None:
+    mock = MockStreamFn()
+    mock.enqueue(text_response("done"))
+    session = Session(stream_fn=mock, model=make_model(), system="test")
+    session.triggers.note_work_started()
+    try:
+        messages = await asyncio.wait_for(session.run("go"), timeout=1.0)
+        assert messages[-1].content[0].text == "done"  # type: ignore[union-attr]
+        assert not await session.idle(timeout=0.01)
+    finally:
+        session.triggers.note_work_finished()
+        await session.shutdown()
+    assert await session.idle(timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_trigger_queue_lifecycle() -> None:
     tq = TriggerQueue()
     trigger = UserInput(content=(TextContent(type="text", text="hi"),))
-    tq.push(trigger)
+    receipt = tq.push(trigger)
     got = await tq.wait()
     assert got is trigger
+    tq.complete("done")
+    assert await receipt.wait() == "done"
 
     tq.kick()
     got = await tq.wait()
     assert isinstance(got, ContinueTrigger)
+    tq.complete("kicked")
 
     tq.close()
     with pytest.raises(QueueClosed):
@@ -930,6 +1101,14 @@ def test_codec_round_trip() -> None:
     meta = TurnMeta(
         total_input_tokens=100, total_output_tokens=50,
         model_id="mock-model",
+        resource_mutations=(
+            ResourceMutation(
+                ref=ResourceRef(namespace="workspace", path="out.txt"),
+                op="write",
+                after_version="v1",
+                metadata={"tool": "write"},
+            ),
+        ),
     )
     turn = Turn(
         index=0, id="turn-abc", trigger=trigger,
@@ -947,6 +1126,7 @@ def test_codec_round_trip() -> None:
     assert isinstance(restored.outcome.cause, ModelEndTurn)
     assert restored.meta.total_input_tokens == 100
     assert restored.meta.model_id == "mock-model"
+    assert restored.meta.resource_mutations == meta.resource_mutations
     assert isinstance(restored.trigger, UserInput)
     assert len(restored.rounds) == 1
     assert restored.rounds[0].response.content[0].text == "response text"  # type: ignore[union-attr]
@@ -1164,15 +1344,13 @@ async def test_stream_fn_exception_abandons_turn() -> None:
 
     session = Session(stream_fn=failing, model=make_model(), system="test")  # type: ignore[arg-type]
     session.start()
-    await session.prompt("will fail")
-    await asyncio.sleep(0.3)
-    await session.prompt("will succeed")
-    await _wait_turn(session)
+    receipt = await session.prompt("will fail")
+    with pytest.raises(ConnectionError, match="stream failure"):
+        await receipt.wait()
+    assert await session.idle(timeout=1.0)
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
-    turn = session.trajectory.turns[0]
-    assert turn.rounds[0].response.content[0].text == "ok after failure"  # type: ignore[union-attr]
+    assert len(session.trajectory) == 0
 
 
 @pytest.mark.asyncio
@@ -1199,17 +1377,16 @@ async def test_policy_exception_abandons_turn() -> None:
         context_policies=[FailOncePolicy()],  # type: ignore[list-item]
     )
     session.start()
-    await session.prompt("will fail due to policy")
-    await asyncio.sleep(0.3)
-    await session.prompt("will succeed")
-    await _wait_turn(session)
+    receipt = await session.prompt("will fail due to policy")
+    with pytest.raises(RuntimeError, match="policy exploded"):
+        await receipt.wait()
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
+    assert len(session.trajectory) == 0
 
 
 @pytest.mark.asyncio
-async def test_store_append_failure_non_fatal() -> None:
+async def test_store_append_failure_is_fail_stop() -> None:
     fail_count = {"n": 0}
 
     class FailingStore(InMemoryTrajectoryStore):
@@ -1228,12 +1405,13 @@ async def test_store_append_failure_non_fatal() -> None:
     )
     store.create_session(SessionMeta(id=session.id, purpose="root"))
     session.start()
-    await session.prompt("go")
-    await _wait_turn(session)
+    receipt = await session.prompt("go")
+    with pytest.raises(OSError, match="store write failed"):
+        await receipt.wait()
     await session.shutdown()
 
-    # Turn is committed to in-memory trajectory even if store.append failed
-    assert len(session.trajectory) == 1
+    assert len(session.trajectory) == 0
+    assert store.load(session.id)[1] == []
 
 
 @pytest.mark.asyncio
@@ -1255,30 +1433,6 @@ async def test_bus_handler_exception_suppressed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_hook_failure_non_fatal() -> None:
-    class FailingHook:
-        async def on_fork(self, event: ForkEvent) -> None:
-            pass
-
-        async def on_resume(self, event: ResumeEvent) -> None:
-            pass
-
-        async def on_replay(self, event: Any) -> None:
-            pass
-
-        async def on_abandon(self, event: AbandonEvent) -> None:
-            raise RuntimeError("abandon hook exploded")
-
-    registry = LifecycleHookRegistry()
-    registry.register(FailingHook())  # type: ignore[arg-type]
-
-    await registry.fire_abandon(AbandonEvent(
-        session_id="test", turn_index=0, completed_rounds=(),
-    ))
-    # No exception propagated
-
-
-@pytest.mark.asyncio
 async def test_consecutive_stream_failures() -> None:
     delegate = MockStreamFn()
     delegate.enqueue(text_response("success"))
@@ -1286,16 +1440,13 @@ async def test_consecutive_stream_failures() -> None:
 
     session = Session(stream_fn=failing, model=make_model(), system="test")  # type: ignore[arg-type]
     session.start()
-    await session.prompt("fail-1")
-    await asyncio.sleep(0.2)
-    await session.prompt("fail-2")
-    await asyncio.sleep(0.2)
-    await session.prompt("succeed")
-    await _wait_turn(session)
+    receipt = await session.prompt("fail-1")
+    with pytest.raises(ConnectionError, match="stream failure"):
+        await receipt.wait()
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
-    assert failing.call_count == 3
+    assert len(session.trajectory) == 0
+    assert failing.call_count == 1
 
 
 @pytest.mark.asyncio

@@ -1,102 +1,226 @@
-"""Unified ``operations`` atom — registers the Operations bundle (file I/O + shell).
-
-Backend selected by ``config["backend"]``:
-
-- ``"local"`` (default) — local-FS / asyncio-subprocess, suitable for CLI
-  and most scenarios.
-- ``"agent_env"`` — ARL sandbox-backed, for Kubernetes-isolated execution.
-
-Implementations live in ``bash/`` (local BashOperations), ``writer/``
-(agent-env ResourceWriter), and ``_agent_env.py`` (shared ARL helpers +
-agent-env install entry point).  The bootstrap local ResourceWriter lives in
-``core.runtime`` because the extension loader needs it before atoms install.
-"""
+"""Local operations atom — registers shell execution services."""
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import asyncio
+import os
+from collections.abc import Callable
+from pathlib import Path
+from signal import SIGKILL
+from typing import IO, Any
+
+from loguru import logger
 
 from pydantic import BaseModel
 
+from agentm.core.abi import (
+    AtomInstallPriority,
+    CancelSignal,
+    EnvironmentRef,
+    ExecResult,
+)
 from agentm.extensions import ExtensionManifest
 
 
 class OperationsConfig(BaseModel):
-    backend: Literal["local", "agent_env"] = "local"
-    # agent_env-specific properties (ignored when backend=local)
-    image: str | None = None
-    experiment_id: str | None = None
-    attach_session: str | None = None
-    gateway_url: str | None = None
-    api_key: str | None = None
-    profile: str | None = None
-    config_env: dict[str, object] | None = None
-    work_dir: str | None = None
-    timeout: float | None = None
-    idle_timeout_seconds: int | None = None
-    create_timeout: float | None = None
-    cpu_request: str | None = None
-    cpu_limit: str | None = None
-    memory_request: str | None = None
-    memory_limit: str | None = None
-    delete_on_shutdown: bool | None = None
-    private_containers: list[dict[str, Any]] | None = None
+    """Configuration placeholder for the local operations backend."""
 
 
 MANIFEST = ExtensionManifest(
     name="operations",
-    description=(
-        "Registers the Operations bundle (file I/O + shell). "
-        "Backend selected by config: 'local' (default) or 'agent_env'."
-    ),
+    description="Registers local shell operations for SDK sessions.",
     registers=(),
     config_schema=OperationsConfig,
     requires=(),
-    api_version=1,
-    tier=1,
+    priority=AtomInstallPriority.SERVICE,
 )
 
 
-class _OperationsRuntime:
-    """Install-time backend dispatcher for the unified operations atom."""
+class LocalBashOperations:
+    """Default shell implementation backed by ``asyncio`` subprocesses."""
 
-    def __init__(self, session: Any, config: OperationsConfig) -> None:
-        self._session = session
-        self._config = config
+    async def exec(
+        self,
+        cmd: str,
+        *,
+        cwd: str,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+        stdin: bytes | None = None,
+        on_data: Callable[[bytes], None] | None = None,
+        signal: CancelSignal | None = None,
+        log_path: str | None = None,
+    ) -> ExecResult:
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        assert process.stdout is not None
+        assert process.stderr is not None
 
-    async def install(self) -> None:
-        if self._config.backend == "local":
-            self._install_local()
-            return
-        if self._config.backend == "agent_env":
-            await self._install_agent_env()
-            return
-        raise ValueError(f"Unknown operations backend: {self._config.backend!r}")
+        log_file: IO[bytes] | None = None
+        if log_path is not None:
+            try:
+                resolved = Path(log_path)
+                if not resolved.is_absolute():
+                    resolved = Path(cwd) / resolved
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                log_file = resolved.open("ab")
+            except OSError as exc:
+                logger.debug("local bash: cannot open log {}: {}", log_path, exc)
+                log_file = None
 
-    def _install_local(self) -> None:
-        # Sub-installers expect a plain dict; forward the full model dump.
-        from agentm.extensions.builtin.bash.local import install_local
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        timed_out = False
 
-        install_local(self._session, self._config.model_dump())
+        async def _read_stream(
+            stream: asyncio.StreamReader,
+            sink: list[bytes],
+            callback: Callable[[bytes], None] | None = None,
+        ) -> None:
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    return
+                sink.append(chunk)
+                if log_file is not None:
+                    try:
+                        log_file.write(chunk)
+                        log_file.flush()
+                    except OSError:
+                        pass
+                if callback is not None:
+                    callback(chunk)
 
-    async def _install_agent_env(self) -> None:
-        from agentm.extensions.builtin._agent_env import (
-            AgentEnvConfig,
-            install_agent_env,
+        stdout_task = asyncio.create_task(
+            _read_stream(process.stdout, stdout_chunks, on_data)
+        )
+        stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_chunks))
+        stdin_task: asyncio.Task[None] | None = None
+        if stdin is not None:
+            assert process.stdin is not None
+            stdin_task = asyncio.create_task(_write_stdin(process.stdin, stdin))
+
+        signal_task: asyncio.Task[object] | None = None
+        if signal is not None:
+            signal_task = asyncio.create_task(signal.wait())
+
+        wait_task = asyncio.create_task(process.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                [task for task in (wait_task, signal_task) if task is not None],
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if wait_task in done:
+                await wait_task
+            else:
+                timed_out = (
+                    timeout is not None
+                    and signal_task not in done
+                    and wait_task not in done
+                )
+                await self._terminate_process_group(process)
+                await wait_task
+        finally:
+            if signal_task is not None and not signal_task.done():
+                signal_task.cancel()
+                await asyncio.gather(signal_task, return_exceptions=True)
+            if stdin_task is not None:
+                await asyncio.gather(stdin_task, return_exceptions=True)
+            await asyncio.gather(stdout_task, stderr_task)
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except OSError:
+                    pass
+
+        return ExecResult(
+            stdout=b"".join(stdout_chunks),
+            stderr=b"".join(stderr_chunks),
+            exit_code=process.returncode if process.returncode is not None else -SIGKILL,
+            timed_out=timed_out,
         )
 
-        await install_agent_env(
-            self._session,
-            AgentEnvConfig.model_validate(self._config.model_dump(exclude={"backend"})),
+    async def _terminate_process_group(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        if process.returncode is not None:
+            return
+
+        pgid = process.pid
+        if pgid is None:
+            process.kill()
+            return
+
+        try:
+            os.killpg(pgid, SIGKILL)
+        except ProcessLookupError:
+            return
+
+
+class LocalEnvironmentOperations:
+    """Default local process environment backend."""
+
+    __slots__ = ("_bash", "_ref")
+
+    def __init__(self, *, cwd: str, bash: LocalBashOperations | None = None) -> None:
+        resolved_cwd = str(Path(cwd or os.getcwd()).resolve())
+        self._bash = bash if bash is not None else LocalBashOperations()
+        self._ref = EnvironmentRef(
+            id=f"local:{resolved_cwd}",
+            kind="local",
+            metadata={"cwd": resolved_cwd},
         )
 
+    @property
+    def ref(self) -> EnvironmentRef:
+        return self._ref
 
-async def install(session: Any, config: OperationsConfig) -> None:
-    await _OperationsRuntime(session, config).install()
+    @property
+    def bash(self) -> LocalBashOperations:
+        return self._bash
+
+    async def snapshot(self) -> str | None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+async def _write_stdin(writer: asyncio.StreamWriter, payload: bytes) -> None:
+    try:
+        writer.write(payload)
+        await writer.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (BrokenPipeError, ConnectionResetError, RuntimeError):
+            pass
+
+
+def install(session: Any, config: OperationsConfig) -> None:
+    del config
+    bash = LocalBashOperations()
+    cwd = getattr(getattr(session, "ctx", None), "cwd", "") or os.getcwd()
+    environment = LocalEnvironmentOperations(cwd=cwd, bash=bash)
+    session.register_operations(environment=environment, bash=bash)
 
 
 __all__ = (
     "MANIFEST",
+    "LocalEnvironmentOperations",
     "OperationsConfig",
     "install",
 )

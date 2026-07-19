@@ -277,8 +277,6 @@ from .trigger import (
     trigger_priority_rank,
 )
 
-ExtensionAPI = AtomAPI
-
 __all__ = [
     "Aborted",
     "ActiveSetFingerprint",
@@ -336,7 +334,6 @@ __all__ = [
     "EventCancelSource",
     "EventRecord",
     "ExecResult",
-    "ExtensionAPI",
     "ExtensionInstallEvent",
     "ExtensionLoadError",
     "ExtensionManifest",

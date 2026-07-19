@@ -6,10 +6,11 @@ Operations are a constitution-level port: the ``tool_bash`` atom consumes
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Protocol
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Literal, Protocol, runtime_checkable
+
+from .cancel import CancelSignal
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,7 @@ class ExecResult:
     timed_out: bool
 
 
+@runtime_checkable
 class BashOperations(Protocol):
     async def exec(
         self,
@@ -28,8 +30,9 @@ class BashOperations(Protocol):
         cwd: str,
         timeout: float | None = None,
         env: dict[str, str] | None = None,
+        stdin: bytes | None = None,
         on_data: Callable[[bytes], None] | None = None,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
         log_path: str | None = None,
     ) -> ExecResult:
         """Run *cmd*; when ``log_path`` is set, the backend also appends the
@@ -41,8 +44,59 @@ class BashOperations(Protocol):
         ...
 
 
+EnvironmentKind = Literal["local", "sandbox", "remote", "host"]
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentRef:
+    """Stable identity for the execution environment a session targets."""
+
+    id: str
+    kind: EnvironmentKind = "local"
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+
+@runtime_checkable
+class EnvironmentOperations(Protocol):
+    """Typed backend bundle for world-effect operations."""
+
+    @property
+    def ref(self) -> EnvironmentRef:
+        ...
+
+    @property
+    def bash(self) -> BashOperations:
+        ...
+
+    async def snapshot(self) -> str | None:
+        ...
+
+    async def close(self) -> None:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class Operations:
-    """Bundle returned by the session services."""
+    """Compatibility bundle exposing the active environment operations."""
 
-    bash: BashOperations
+    environment: EnvironmentOperations
+
+    @property
+    def ref(self) -> EnvironmentRef:
+        return self.environment.ref
+
+    @property
+    def bash(self) -> BashOperations:
+        return self.environment.bash
+
+
+__all__ = [
+    "BashOperations",
+    "EnvironmentKind",
+    "EnvironmentOperations",
+    "EnvironmentRef",
+    "ExecResult",
+    "Operations",
+]

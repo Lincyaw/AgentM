@@ -603,7 +603,7 @@ class Session:
             return operations
         environment = self.services.get(
             ENVIRONMENT_OPERATIONS_SERVICE,
-            EnvironmentOperations,
+            cast(type[EnvironmentOperations], EnvironmentOperations),
         )
         if environment is None:
             return None
@@ -1118,6 +1118,4 @@ class Session:
         return session
 
 
-AgentSession = Session
-
-__all__ = ["AgentSession", "Session"]
+__all__ = ["Session"]

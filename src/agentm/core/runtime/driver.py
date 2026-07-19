@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from loguru import logger
 
@@ -24,6 +25,7 @@ from agentm.core.abi.cancel import (
     ResettableCancelSource,
     cancel_reason,
 )
+from agentm.core.abi.compaction import ContextBudget, ContextProjection
 from agentm.core.abi.lifecycle import EffectScope, EffectTxn
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -45,7 +47,7 @@ from agentm.core.abi.resource import (
     ResourceWriter,
     TransactionalResourceWriter,
 )
-from agentm.core.abi.roles import RESOURCE_TXN_SERVICE
+from agentm.core.abi.roles import CONTEXT_PROJECTION_SERVICE, RESOURCE_TXN_SERVICE
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.stream import (
     AssistantStreamEvent,
@@ -345,7 +347,7 @@ def _tool_result_block(tool_call_id: str, result: ToolResult) -> ToolResultBlock
 def _permission_request(
     *,
     tc: ToolCallBlock,
-    args: dict[str, object],
+    args: Mapping[str, object],
     session_id: str,
     execution: Execution,
 ) -> PermissionRequest:
@@ -536,11 +538,20 @@ async def _abandon_resource_txn(txn: ResourceTxn | None) -> None:
         await txn.abandon()
 
 
-def _next_node_seq(store: TrajectoryNodeStore, session_id: str) -> int:
+def _node_append_position(
+    store: TrajectoryNodeStore,
+    session_id: str,
+) -> tuple[int, str | None]:
     latest = store.query_nodes(
         TrajectoryNodeQuery(session_id=session_id, sort="desc", limit=1)
     )
-    return latest[0].seq + 1 if latest else 0
+    leaves = store.leaves(session_id, is_sidechain=False)
+    if len(leaves) > 1:
+        raise RuntimeError(
+            f"ambiguous main trajectory leaves for session {session_id}: "
+            f"{sorted(leaf.node_id for leaf in leaves)}"
+        )
+    return (latest[0].seq + 1 if latest else 0, leaves[0].node_id if leaves else None)
 
 
 def _clear_resource_txn(services: ServiceRegistry | None) -> None:
@@ -589,6 +600,29 @@ def _execution_to_messages(
     return messages
 
 
+async def _history_messages(
+    *,
+    turns: Sequence[Turn],
+    policies: list[ContextPolicy],
+    trigger_renderers: dict[str, TriggerRenderer] | None,
+    projection: ContextProjection | None,
+    budget: ContextBudget,
+) -> list[AgentMessage]:
+    if projection is None:
+        return await build_context(turns, policies, trigger_renderers)
+    messages = list(projection.project(turns, budget))
+    for policy in policies:
+        messages = await policy.transform(messages, turns)
+    return messages
+
+
+def _context_budget(model: Model) -> ContextBudget:
+    return ContextBudget(
+        max_input_tokens=model.context_window,
+        reserved_output_tokens=model.max_output_tokens,
+    )
+
+
 # --- Main driver ------------------------------------------------------------
 
 
@@ -635,6 +669,14 @@ async def drive(
     _interrupt = interrupt or EventCancelSource()
     _shutdown = shutdown or EventCancelSource()
     policies = context_policies or []
+    context_projection = (
+        services.get(
+            CONTEXT_PROJECTION_SERVICE,
+            cast(type[ContextProjection], ContextProjection),
+        )
+        if services is not None
+        else None
+    )
     turns_run = 0
     tool_calls_run = 0
 
@@ -699,6 +741,7 @@ async def drive(
                 tools=tools,
                 system=system,
                 policies=policies,
+                context_projection=context_projection,
                 trigger_renderers=trigger_renderers,
                 interrupt=_interrupt,
                 shutdown=_shutdown,
@@ -728,35 +771,35 @@ async def drive(
                         resource_mutations=resource_mutations,
                     ),
                 )
+            node_append_position: tuple[int, str | None] | None = None
+            if trajectory_node_store is not None:
+                node_append_position = _node_append_position(
+                    trajectory_node_store,
+                    session_id,
+                )
             cancelled_during_append = False
             if store is not None:
                 cancelled_during_append = await _append_turn(store, session_id, turn)
+            if trajectory_node_store is not None and node_append_position is not None:
+                start_seq, parent_node_id = node_append_position
+                nodes = turn_to_nodes(
+                    turn,
+                    session_id=session_id,
+                    start_seq=start_seq,
+                    root_session_id=root_session_id,
+                    parent_session_id=parent_session_id,
+                    parent_node_id=parent_node_id,
+                    renderers=trigger_renderers,
+                )
+                if nodes:
+                    await asyncio.to_thread(
+                        trajectory_node_store.append_nodes,
+                        session_id,
+                        nodes,
+                    )
             trajectory.finalize_commit(turn)
             turn_published = True
             _clear_resource_txn(services)
-            if trajectory_node_store is not None:
-                try:
-                    nodes = turn_to_nodes(
-                        turn,
-                        session_id=session_id,
-                        start_seq=_next_node_seq(trajectory_node_store, session_id),
-                        root_session_id=root_session_id,
-                        parent_session_id=parent_session_id,
-                        renderers=trigger_renderers,
-                    )
-                    if nodes:
-                        await asyncio.to_thread(
-                            trajectory_node_store.append_nodes,
-                            session_id,
-                            nodes,
-                        )
-                except Exception as exc:
-                    logger.exception("trajectory node projection failed")
-                    await _emit_lifecycle_diagnostic(
-                        bus,
-                        action="trajectory_node_projection",
-                        exc=exc,
-                    )
 
             await _commit_effect_turn(effect_scope, effect_txn, turn, bus=bus)
             triggers.complete(turn)
@@ -818,6 +861,7 @@ async def _react_loop(
     tools: list[Tool],
     system: str | None,
     policies: list[ContextPolicy],
+    context_projection: ContextProjection | None,
     trigger_renderers: dict[str, TriggerRenderer] | None,
     interrupt: ResettableCancelSource,
     shutdown: ResettableCancelSource,
@@ -840,8 +884,15 @@ async def _react_loop(
     tool_calls_used = 0
     start_ns = time.perf_counter_ns()
     trigger_messages = render_trigger(trigger, trigger_renderers)
+    context_budget = _context_budget(model)
 
-    history_messages = await build_context(trajectory.turns, policies, trigger_renderers)
+    history_messages = await _history_messages(
+        turns=trajectory.turns,
+        policies=policies,
+        trigger_renderers=trigger_renderers,
+        projection=context_projection,
+        budget=context_budget,
+    )
     messages = list(history_messages) + list(trigger_messages)
     turn_signal = _TurnCancelSignal(
         interrupt=interrupt,
@@ -871,7 +922,13 @@ async def _react_loop(
             ), tool_calls_used
 
         if round_index > 0:
-            history_messages = await build_context(trajectory.turns, policies, trigger_renderers)
+            history_messages = await _history_messages(
+                turns=trajectory.turns,
+                policies=policies,
+                trigger_renderers=trigger_renderers,
+                projection=context_projection,
+                budget=context_budget,
+            )
             round_messages = _execution_to_messages(execution, trigger_messages)
             messages = list(history_messages) + round_messages
 

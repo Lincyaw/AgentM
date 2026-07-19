@@ -39,10 +39,14 @@ class TrajectoryStoreQueryAdapter:
         return turns
 
     def events(self, session_id: str) -> Iterable[EventRecord]:
-        return ()
+        raise NotImplementedError(
+            "the trajectory store does not persist observability events"
+        )
 
     def spans(self, session_id: str) -> Iterable[SpanRecord]:
-        return ()
+        raise NotImplementedError(
+            "the trajectory store does not persist observability spans"
+        )
 
 
 def _session_matches(row: SessionIdentity, filter: SessionFilter) -> bool:

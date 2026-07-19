@@ -1,116 +1,68 @@
-"""Compaction subsystem types — shared contract between compaction atoms.
+"""Context projection ABI.
 
-Two atoms collaborate on context-window management:
-
-- ``compaction_prompts`` — provides prompt bodies and entry materializers
-- ``llm_compaction`` — owns the compaction engine and scheduling
-
-Both import these types from ``agentm.core.abi``; the §11 contract
-forbids atom-to-atom imports, so shared types live here.
+Trajectory is the durable source of truth. Projection decides which messages
+derived from committed turns are sent to the model under a context budget.
+Compaction is one projection strategy, not a replacement history model.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Protocol, runtime_checkable
 
-
-# -- Entry types -------------------------------------------------------------
-
-ENTRY_TYPE_MESSAGE = "message"
-ENTRY_TYPE_COMPACTION = "compaction"
-ENTRY_TYPE_BRANCH_SUMMARY = "branch_summary"
-
-ENTRY_MATERIALIZERS: dict[str, Any] = {}
-
-
-@dataclass(slots=True)
-class SessionEntry:
-    """A single entry in the session history branch.
-
-    The session tree is append-only: compaction adds entries but never
-    removes originals.
-    """
-
-    type: str = ""
-    payload: Any = None
-    timestamp: str = ""
-    id: str = ""
-    parent_id: str = ""
-
-
-# -- Prompt key constants ----------------------------------------------------
-
-PROMPT_SUMMARIZATION = "summarization"
-PROMPT_SUMMARIZATION_SYSTEM = "summarization_system"
-PROMPT_UPDATE_SUMMARIZATION = "update_summarization"
-PROMPT_BRANCH_SUMMARY = "branch_summary"
-PROMPT_BRANCH_SUMMARY_PREAMBLE = "branch_summary_preamble"
-
-
-# -- Compaction prompts and settings -----------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class CompactionPrompts:
-    """Prompt bodies threaded into the compaction engine."""
-
-    summarization_system: str = ""
-    update_summarization: str = ""
+from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.trajectory import Turn
 
 
 @dataclass(frozen=True, slots=True)
-class CompactionSettings:
-    """Per-session compaction configuration."""
+class ContextBudget:
+    """Provider-facing budget available to a context projection."""
 
-    enabled: bool = True
-    reserve_tokens: int = 0
-    tool_result_max_tokens: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class CompactionDetails:
-    """File-operation detail attached to a compaction result."""
-
-    read_files: list[str] = field(default_factory=list)
-    modified_files: list[str] = field(default_factory=list)
+    max_messages: int | None = None
+    max_input_tokens: int | None = None
+    reserved_output_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class CompactionResult:
-    """Outcome of a full-compress pass."""
+class TurnRange:
+    """Inclusive turn-index range represented in a projection decision."""
 
-    summary: str = ""
-    covered_through_turn: int = 0
-    tokens_before: int = 0
-    measured_tokens_before: int = 0
-    estimated_trailing_tokens_before: int = 0
-    details: CompactionDetails = field(default_factory=CompactionDetails)
+    start: int
+    end: int
 
 
 @dataclass(frozen=True, slots=True)
-class ContextUsageSnapshot:
-    """Point-in-time snapshot of context-window token usage."""
+class ProjectionReport:
+    """Explainable metadata for the last projection decision."""
 
-    tokens: int = 0
-    measured_tokens: int = 0
-    estimated_trailing_tokens: int = 0
-    last_usage_index: int | None = None
+    kept: tuple[TurnRange, ...] = ()
+    summarized: tuple[TurnRange, ...] = ()
+    dropped: tuple[TurnRange, ...] = ()
+    synthetic_message_count: int = 0
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+
+@runtime_checkable
+class ContextProjection(Protocol):
+    """Project committed turns into provider-bound messages."""
+
+    def project(
+        self,
+        turns: Sequence[Turn],
+        budget: ContextBudget,
+    ) -> Sequence[AgentMessage]:
+        ...
+
+    def explain(self) -> ProjectionReport:
+        ...
 
 
 __all__ = [
-    "ENTRY_MATERIALIZERS",
-    "ENTRY_TYPE_BRANCH_SUMMARY",
-    "ENTRY_TYPE_COMPACTION",
-    "ENTRY_TYPE_MESSAGE",
-    "CompactionDetails",
-    "CompactionPrompts",
-    "CompactionResult",
-    "CompactionSettings",
-    "ContextUsageSnapshot",
-    "PROMPT_BRANCH_SUMMARY",
-    "PROMPT_BRANCH_SUMMARY_PREAMBLE",
-    "PROMPT_SUMMARIZATION",
-    "PROMPT_SUMMARIZATION_SYSTEM",
-    "PROMPT_UPDATE_SUMMARIZATION",
-    "SessionEntry",
+    "ContextBudget",
+    "ContextProjection",
+    "ProjectionReport",
+    "TurnRange",
 ]
