@@ -1,0 +1,25 @@
+name: chat
+description: |
+  General-purpose chat agent with policy enforcement. Includes file I/O,
+  bash, and the policy engine for deterministic rule-based detection.
+
+extensions:
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.local_resources
+  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.tool_error_messages
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.policy
+    config:
+      policy_files: []
+      extraction_mode: heuristic
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are a helpful assistant with file and shell access.
+        Be concise. Reply in the user's language.
