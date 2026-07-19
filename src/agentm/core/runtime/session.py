@@ -208,6 +208,18 @@ class Session:
     async def idle(self, timeout: float | None = None) -> bool:
         return await self.triggers.wait_quiescent(timeout)
 
+    async def run(self, text: str) -> list[AgentMessage]:
+        """Start driver (if needed), prompt, wait for completion, return messages.
+
+        Blocking convenience for child sessions — the "give it a prompt
+        and get the answer" pattern used by sub_agent, workflow, and goal.
+        """
+        if self._driver_task is None:
+            self.start()
+        await self.prompt(text)
+        await self.idle()
+        return self.get_messages()
+
     @contextmanager
     def track_background(self) -> Iterator[None]:
         self.triggers.note_work_started()

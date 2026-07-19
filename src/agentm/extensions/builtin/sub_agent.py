@@ -528,14 +528,17 @@ class _ChildTaskManager:
     ) -> list[Any] | None:
         next_prompt: str | None = initial_prompt
         final_messages: list[Any] | None = None
+
+        async def _abort_monitor() -> None:
+            await state.abort_signal.wait()
+            await state.session.shutdown()
+
+        monitor = asyncio.create_task(_abort_monitor())
         try:
             while True:
                 if next_prompt is None:
                     break
-                final_messages = await state.session.prompt(
-                    next_prompt,
-                    signal=state.abort_signal,
-                )
+                final_messages = await state.session.run(next_prompt)
                 if state.abort_signal.is_set():
                     raise _ChildAborted()
                 next_prompt = await self._drain_instructions(state)
@@ -567,6 +570,8 @@ class _ChildTaskManager:
                 error=str(exc) or exc.__class__.__name__,
             )
             return state.final_messages
+        finally:
+            monitor.cancel()
 
     async def dispatch(self, args: dict[str, Any]) -> ToolResult:
         purpose = str(args.get("purpose", "subagent"))

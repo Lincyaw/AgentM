@@ -88,7 +88,7 @@ class _ChildSession(Protocol):
     bus: EventBus
     session_id: str
 
-    async def prompt(self, message: str) -> list[AgentMessage]: ...
+    async def run(self, text: str) -> list[AgentMessage]: ...
     async def shutdown(self) -> None: ...
 
 
@@ -845,7 +845,7 @@ class _WorkflowRun:
                 # gateway). Same service-by-name contract sub_agent uses.
                 _forward_child_to_wire(self.api, child)
                 try:
-                    messages = await child.prompt(prompt)
+                    messages = await child.run(prompt)
                     output = _final_session_output(messages)
                     if not output:
                         return json.dumps(_build_agent_error_info(messages))

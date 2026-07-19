@@ -370,7 +370,7 @@ async def _prompt_child_session_messages(
         return None
 
     try:
-        return await child.prompt(prompt)
+        return await child.run(prompt)
     except Exception as exc:  # noqa: BLE001
         logger.warning("goal: {} failed: {}", purpose, exc)
         return None
