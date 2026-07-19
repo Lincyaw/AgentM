@@ -87,11 +87,13 @@ async def _run_item(
             output=output,
         )
     except asyncio.CancelledError as exc:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise
         return ToolOrchestrationResult(
             item=item,
             status="cancelled",
-            error=exc,
-            cancel_reason=cancel_reason(signal),
+            cancel_reason=cancel_reason(signal) or str(exc) or "tool_cancelled",
         )
     except Exception as exc:
         return ToolOrchestrationResult(
@@ -142,17 +144,24 @@ class DefaultToolOrchestrator:
         }
         pending = set(tasks)
         results: list[ToolOrchestrationResult] = []
-        while pending:
-            done, pending = await asyncio.wait(
-                pending,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in done:
-                result = task.result()
-                results.append(result)
-                if result.status == "failed" and not sibling.is_set():
-                    sibling.set("sibling_error")
-        return results
+        try:
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    result = task.result()
+                    results.append(result)
+                    if result.status == "failed" and not sibling.is_set():
+                        sibling.set("sibling_error")
+            return results
+        finally:
+            unfinished = [task for task in tasks if not task.done()]
+            for task in unfinished:
+                task.cancel()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
 
 
 _DEFAULT_ORCHESTRATOR = DefaultToolOrchestrator()

@@ -103,8 +103,16 @@ MANIFEST = ExtensionManifest(
 
 
 def _handler_label(handler: Handler) -> str:
-    module = getattr(handler, "__module__", None)
-    qualname = getattr(handler, "__qualname__", None)
+    module = getattr(  # code-health: ignore[AM021] -- callable label reflection
+        handler,
+        "__module__",
+        None,
+    )
+    qualname = getattr(  # code-health: ignore[AM021] -- callable label reflection
+        handler,
+        "__qualname__",
+        None,
+    )
     if not isinstance(module, str):
         module = type(handler).__module__
     if not isinstance(qualname, str):
@@ -264,7 +272,9 @@ class _ObservabilityRuntime:
         )
         self._telemetry.obs_purpose = self._session.ctx.purpose
         self._telemetry.obs_scenario = self._session.ctx.scenario or ""
-        self._telemetry.obs_provider_name = getattr(provider, "name", "") or ""
+        self._telemetry.obs_provider_name = (
+            provider.name if provider is not None else ""
+        )
         self._telemetry.obs_cwd = self._session.ctx.cwd
         self._telemetry.obs_redact_prompts = self._config.redact_prompts
         self._telemetry.obs_session_start_ns = time.time_ns()

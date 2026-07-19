@@ -25,9 +25,9 @@ bus handlers transform the live tail.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from agentm.core.abi.stream import Model, StreamFn
@@ -59,8 +59,8 @@ class PolicyContext:
 
     session_id: str = ""
     parent_session_id: str | None = None
-    services: dict[str, Any] | None = None
-    store: Any | None = None
+    services: Mapping[str, object] | None = None
+    store: object | None = None
     model: "Model | None" = None
     stream_fn: "StreamFn | None" = None
     trigger_renderers: dict[str, TriggerRenderer] | None = None

@@ -26,6 +26,7 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.stream import MessageEnd, Model, TextDelta
 from agentm.core.abi.tool import (
     FunctionTool,
+    ToolContinue,
     ToolResult,
     ToolTerminate,
 )
@@ -986,6 +987,7 @@ async def test_tool_result_replaced() -> None:
         content=[TextContent(type="text", text="replaced")],
         is_error=False,
     )
+    observed_outcomes: list[ToolResult] = []
 
     mock = MockStreamFn()
     mock.enqueue(
@@ -1000,7 +1002,13 @@ async def test_tool_result_replaced() -> None:
     def replace_handler(event: ToolResultEvent) -> ToolResult:
         return replacement
 
+    def observe_decision(event: DecideEvent) -> None:
+        for _name, outcome in event.observation.tool_outcomes:
+            if isinstance(outcome, (ToolContinue, ToolTerminate)):
+                observed_outcomes.append(outcome.result)
+
     session.bus.on(ToolResultEvent.CHANNEL, replace_handler)
+    session.bus.on(DecideEvent.CHANNEL, observe_decision)
     session.start()
     await session.prompt("go")
     await _wait_turn(session)
@@ -1009,6 +1017,7 @@ async def test_tool_result_replaced() -> None:
     turn = session.trajectory.turns[0]
     tr = turn.rounds[0].tool_results[0]
     assert tr.result.content[0].text == "replaced"  # type: ignore[union-attr]
+    assert observed_outcomes == [replacement]
 
 
 # ---------------------------------------------------------------------------

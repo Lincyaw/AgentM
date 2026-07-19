@@ -15,9 +15,9 @@ All events are frozen.  Handlers express intent through return values:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal
+from typing import ClassVar, Literal
 
-from agentm.core.abi.messages import AgentMessage, AssistantMessage
+from agentm.core.abi.messages import AgentMessage, AssistantMessage, JsonValue
 from agentm.core.abi.stream import AssistantStreamEvent, Model
 from agentm.core.abi.termination import ModelEndTurn, TerminationCause
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
@@ -109,7 +109,7 @@ class ToolCallEvent(Event):
     CHANNEL: ClassVar[str] = "tool_call"
     tool_call_id: str = ""
     tool_name: str = ""
-    args: dict[str, Any] = field(default_factory=dict)
+    args: dict[str, JsonValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,13 +262,13 @@ class ApiRegisterEvent(Event):
     kind: str = ""
     name: str = ""
     extension: str = ""
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ApiSendUserMessageEvent(Event):
     CHANNEL: ClassVar[str] = "api_send_user_message"
-    content: Any = None
+    content: object = None
     extension: str = ""
 
 

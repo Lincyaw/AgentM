@@ -9,6 +9,8 @@ from agentm.core.abi.session_api import (
     AgentSessionConfig,
     ConfigSource,
     ConfigValueProvenance,
+    ExtensionInput,
+    ExtensionSource,
     ExtensionSpec,
     LoopConfig,
     ResolvedSessionSpec,
@@ -16,6 +18,7 @@ from agentm.core.abi.session_api import (
     ScenarioSpec,
     SESSION_CONFIG_PRECEDENCE,
     SessionSpecResolver,
+    normalize_extension_spec,
 )
 from agentm.core.abi.store import TrajectoryNodeStore
 from agentm.core.abi.tool_executor import ToolExecutor
@@ -28,6 +31,8 @@ __all__ = [
     "ConfigValueProvenance",
     "EffectScope",
     "EnvironmentRestoreFailureHandler",
+    "ExtensionInput",
+    "ExtensionSource",
     "ExtensionSpec",
     "LoopConfig",
     "PermissionPolicy",
@@ -45,4 +50,5 @@ __all__ = [
     "ToolOrchestrator",
     "TrajectoryNodeStore",
     "VersionedResourceStore",
+    "normalize_extension_spec",
 ]

@@ -10,7 +10,11 @@ from typing import Any
 
 from agentm.core.abi.catalog import ActiveSetFingerprint
 from agentm.core.abi.provider import ProviderSessionIdentity
-from agentm.core.abi.session_api import ResolvedSessionSpec, SessionContext
+from agentm.core.abi.session_api import (
+    ExtensionSpec,
+    ResolvedSessionSpec,
+    SessionContext,
+)
 from agentm.core.abi.store import SessionMeta
 
 MetaConfigValue = str | int | float | bool | None
@@ -179,14 +183,15 @@ def resolved_spec_digest(spec: ResolvedSessionSpec) -> str:
 def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, Any]:
     return {
         "scenario": spec.scenario,
-        "extensions": [module for module, _config in spec.extensions],
+        "extensions": [
+            _extension_identity_record(extension)
+            for extension in spec.extensions
+        ],
         "atom_config_modules": sorted(spec.atom_config),
         "provider": (
             None
             if spec.provider is None
-            else {
-                "module": spec.provider[0],
-            }
+            else _extension_identity_record(spec.provider)
         ),
         "provider_identity": (
             None
@@ -202,6 +207,17 @@ def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, Any]:
         ),
         "value_provenance": _provenance_record(spec),
         "provenance": _metadata_record(spec.provenance, path="provenance"),
+    }
+
+
+def _extension_identity_record(spec: ExtensionSpec) -> dict[str, Any]:
+    return {
+        "source": {
+            "kind": spec.source.kind,
+            "location": spec.source.location,
+            "digest": spec.source.digest,
+        },
+        "config_keys": sorted(spec.config),
     }
 
 

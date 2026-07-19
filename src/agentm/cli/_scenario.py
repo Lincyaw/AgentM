@@ -7,7 +7,12 @@ import sys
 
 import typer
 
-from agentm.core.abi.session_api import ScenarioSpec
+from agentm.core.abi.session_api import (
+    ExtensionSpec,
+    ScenarioSpec,
+    normalize_extension_spec,
+)
+from agentm.core.lib.redact import redact_config
 from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
 
 from agentm.cli._display import EXIT_NOT_FOUND, stderr_console
@@ -70,13 +75,21 @@ def show_scenario(
         stderr_console.print(f"[red]error: {exc}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
 
-    extensions = spec.extensions if isinstance(spec, ScenarioSpec) else spec
+    extensions = tuple(
+        normalize_extension_spec(extension)
+        for extension in (
+            spec.extensions
+            if isinstance(spec, ScenarioSpec)
+            else spec
+        )
+    )
 
     result = {
         "name": name,
         "base_dir": spec.base_dir if isinstance(spec, ScenarioSpec) else None,
         "extensions": [
-            {"module": mod, "config": cfg} for mod, cfg in extensions
+            _extension_record(extension)
+            for extension in extensions
         ],
     }
 
@@ -96,7 +109,24 @@ def show_scenario(
     table.add_column("#", justify="right", style="dim")
     table.add_column("Module", style="cyan")
     table.add_column("Config")
-    for i, (mod, cfg) in enumerate(extensions, 1):
+    for i, extension in enumerate(extensions, 1):
+        cfg = redact_config(extension.config)
         cfg_str = json.dumps(cfg, ensure_ascii=False) if cfg else ""
-        table.add_row(str(i), mod, cfg_str)
+        table.add_row(str(i), _extension_label(extension), cfg_str)
     console.print(table)
+
+
+def _extension_record(extension: ExtensionSpec) -> dict[str, object]:
+    return {
+        "kind": extension.source.kind,
+        "location": extension.source.location,
+        "digest": extension.source.digest,
+        "module": extension.module_path,
+        "config": redact_config(extension.config),
+    }
+
+
+def _extension_label(extension: ExtensionSpec) -> str:
+    if extension.source.kind == "module":
+        return extension.source.location
+    return f"{extension.source.location} ({extension.source.digest})"

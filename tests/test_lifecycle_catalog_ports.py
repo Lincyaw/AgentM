@@ -56,6 +56,10 @@ from agentm.core.abi.tool_executor import (
     ToolExecutionRequest,
     ToolExecutionRequirements,
 )
+from agentm.core.abi.tool_orchestration import (
+    ToolOrchestrationRequest,
+    ToolWorkItem,
+)
 from agentm.core.abi.trajectory import (
     TrajectoryHead,
     TrajectoryHeadAdvance,
@@ -67,6 +71,7 @@ from agentm.core.abi.trajectory import (
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_factory import create_from_config, create_session
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
+from agentm.core.runtime.tool_orchestration import DefaultToolOrchestrator
 from agentm.config import DefaultSessionSpecResolver
 from agentm.environments import LocalBashOperations, LocalEnvironmentOperations
 from agentm.execution import ProcessToolExecutor, SandboxToolExecutor
@@ -835,9 +840,12 @@ def test_session_spec_provider_precedence_is_source_accurate(
     ).resolve(AgentSessionConfig())
 
     assert resolved.provider is not None
-    module, config = resolved.provider
-    assert module == "agentm.extensions.builtin.llm_openai"
-    assert config == {
+    assert resolved.provider.source.kind == "module"
+    assert (
+        resolved.provider.source.location
+        == "agentm.extensions.builtin.llm_openai"
+    )
+    assert dict(resolved.provider.config) == {
         "api_key": "secret",
         "base_url": "https://project.example/v1",
         "model": "env-model",
@@ -994,7 +1002,7 @@ async def test_process_executor_uses_strict_json_result_wire() -> None:
     assert result.content[0].text == "from child"
     assert isinstance(result.content[1], ImageContent)
     assert result.content[1].data == b"\x00\x01"
-    assert result.extras == {"nested": [3, True, None]}
+    assert result.extras == {"nested": (3, True, None)}
 
     terminating = await executor.execute(
         ToolExecutionRequest(
@@ -1006,6 +1014,72 @@ async def test_process_executor_uses_strict_json_result_wire() -> None:
     assert isinstance(terminating, ToolTerminate)
     assert terminating.reason == "test:complete"
     assert terminating.result.content[0].text == "complete"
+
+
+@pytest.mark.asyncio
+async def test_tool_orchestrator_propagates_caller_cancellation() -> None:
+    started = asyncio.Event()
+    finalized: list[str] = []
+    started_count = 0
+
+    class _WaitingTool:
+        description = "wait"
+        parameters: dict[str, Any] = {"type": "object"}
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def execute(
+            self,
+            args: dict[str, Any],
+            *,
+            signal: CancelSignal | None = None,
+        ) -> ToolResult:
+            nonlocal started_count
+            del args, signal
+            started_count += 1
+            if started_count == 2:
+                started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.append(self.name)
+            raise AssertionError("unreachable")
+
+    requirements = ToolExecutionRequirements(
+        concurrency="parallel_safe",
+        interrupt="cancel",
+    )
+    items = tuple(
+        ToolWorkItem(
+            index=index,
+            call=ToolCallBlock(
+                type="tool_call",
+                id=f"call-{index}",
+                name=name,
+                arguments={},
+            ),
+            tool=_WaitingTool(name),
+            args={},
+            requirements=requirements,
+        )
+        for index, name in enumerate(("first", "second"))
+    )
+    task = asyncio.create_task(
+        DefaultToolOrchestrator().execute_batch(
+            ToolOrchestrationRequest(
+                items=items,
+                session_id="session",
+                turn_id="turn",
+                turn_index=0,
+            )
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+    assert sorted(finalized) == ["first", "second"]
 
 
 @pytest.mark.asyncio

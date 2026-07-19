@@ -194,15 +194,13 @@ def _session_where(filter: SessionFilter | None) -> tuple[str, dict[str, object]
         raise ValueError("session query limit cannot be negative")
     clauses: list[str] = []
     params: dict[str, object] = {}
-    for attr, column in (
-        ("session_id", "id"),
-        ("parent_session_id", "parent_session_id"),
-        ("root_session_id", "root_session_id"),
-        ("purpose", "purpose"),
+    for key, column, value in (
+        ("session_id", "id", filter.session_id),
+        ("parent_session_id", "parent_session_id", filter.parent_session_id),
+        ("root_session_id", "root_session_id", filter.root_session_id),
+        ("purpose", "purpose", filter.purpose),
     ):
-        value = getattr(filter, attr)
         if value is not None:
-            key = attr
             clauses.append(f"{column} = %({key})s")
             params[key] = value
     if filter.since is not None:

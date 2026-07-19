@@ -18,7 +18,6 @@ import time
 from loguru import logger
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 from agentm.core.abi.bus import EventBus
@@ -65,11 +64,13 @@ from agentm.core.abi.roles import (
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import (
+    ExtensionInput,
     ExtensionSpec,
     ResolvedSessionSpec,
     ScenarioLoader,
     ScenarioSpec,
     SessionContext,
+    normalize_extension_spec,
 )
 from agentm.core.abi.store import SessionMeta, TrajectoryNodeStore, TrajectoryStore
 from agentm.core.abi.stream import Model, StreamFn
@@ -85,7 +86,10 @@ from agentm.core.runtime.catalog import (
     normalize_atom_config,
 )
 from agentm.core.runtime.driver import ThinkingLevel
-from agentm.core.runtime.extension import install_extension, validate_extension_source
+from agentm.core.runtime.extension import (
+    install_extension,
+    load_extension_module,
+)
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_meta import session_meta_config
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
@@ -97,6 +101,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class _ExtensionPlanItem:
+    spec: ExtensionSpec
     module_path: str
     config: dict[str, Any]
     index: int
@@ -108,12 +113,12 @@ class _ExtensionPlanItem:
     provides: tuple[str, ...]
 
 
-def _copy_extension_specs(specs: Sequence[ExtensionSpec]) -> list[ExtensionSpec]:
-    return [(module, dict(config)) for module, config in specs]
+def _copy_extension_specs(specs: Sequence[ExtensionInput]) -> list[ExtensionSpec]:
+    return [normalize_extension_spec(spec) for spec in specs]
 
 
 def _normalize_scenario_result(
-    result: ScenarioSpec | Sequence[ExtensionSpec],
+    result: ScenarioSpec | Sequence[ExtensionInput],
 ) -> tuple[list[ExtensionSpec], str | None]:
     if isinstance(result, ScenarioSpec):
         return _copy_extension_specs(result.extensions), result.base_dir
@@ -132,28 +137,11 @@ def _resolve_scenario(
     )
 
 
-_FLOOR_ATOMS: tuple[str, ...] = (
-    "agentm.extensions.builtin.observability",
-    "agentm.extensions.builtin.retry_policy",
-    "agentm.extensions.builtin.tool_result_cap",
-    "agentm.extensions.builtin.tool_error_messages",
-    "agentm.extensions.builtin.system_prompt",
-)
-
-
-def _ensure_floor_atoms(resolved: list[ExtensionSpec]) -> None:
-    """Append floor atoms that aren't already declared."""
-    existing = {module for module, _ in resolved}
-    for module in _FLOOR_ATOMS:
-        if module not in existing:
-            resolved.append((module, {}))
-
-
 def _resolve_extensions(
     *,
     scenario: str | None,
-    extensions: list[ExtensionSpec] | None,
-    extra_extensions: Sequence[ExtensionSpec],
+    extensions: Sequence[ExtensionInput] | None,
+    extra_extensions: Sequence[ExtensionInput],
     atom_configs: dict[str, dict[str, Any]] | None,
     scenario_loader: ScenarioLoader | None,
 ) -> tuple[list[ExtensionSpec], str | None, str | None]:
@@ -169,24 +157,31 @@ def _resolve_extensions(
         base_dir = None
 
     resolved.extend(_copy_extension_specs(extra_extensions))
-    _ensure_floor_atoms(resolved)
     if atom_configs:
         configured: list[ExtensionSpec] = []
-        for module, config in resolved:
-            manifest = _load_manifest(module)
-            atom_name = manifest.name if manifest is not None else module
-            configured.append((module, {**config, **atom_configs.get(atom_name, {})}))
+        for spec in resolved:
+            manifest = _load_manifest(spec)
+            atom_name = (
+                manifest.name
+                if manifest is not None
+                else spec.module_path
+            )
+            configured.append(
+                spec.with_config(
+                    {
+                        **spec.config,
+                        **atom_configs.get(atom_name, {}),
+                    }
+                )
+            )
         resolved = configured
     return resolved, base_dir, scenario_name
 
 
-def _load_manifest(module_path: str) -> ExtensionManifest | None:
-    validate_extension_source(module_path)
-    try:
-        module = import_module(module_path)
-    except Exception as exc:  # noqa: BLE001
-        raise ExtensionLoadError(module_path, exc) from exc
-    manifest = getattr(module, "MANIFEST", None)
+def _load_manifest(spec: ExtensionSpec) -> ExtensionManifest | None:
+    module_path = spec.module_path
+    module = load_extension_module(spec)
+    manifest = module.__dict__.get("MANIFEST")
     if manifest is None:
         return None
     if not isinstance(manifest, ExtensionManifest):
@@ -210,14 +205,14 @@ def _extension_plan(
 ) -> list[_ExtensionPlanItem]:
     items: list[_ExtensionPlanItem] = []
     by_name: dict[str, _ExtensionPlanItem] = {}
-    for index, (module_path, config) in enumerate(specs):
-        if not module_path:
-            continue
-        manifest = _load_manifest(module_path)
+    for index, spec in enumerate(specs):
+        module_path = spec.module_path
+        manifest = _load_manifest(spec)
         name = manifest.name if manifest is not None else module_path
         item = _ExtensionPlanItem(
+            spec=spec,
             module_path=module_path,
-            config=dict(config),
+            config=dict(spec.config),
             index=index,
             name=name,
             manifest=manifest,
@@ -396,7 +391,7 @@ async def _freeze_atom_version(
     item: _ExtensionPlanItem,
 ) -> ResourceVersion:
     content, metadata = build_atom_identity_payload(
-        module_path=item.module_path,
+        source=item.spec.source,
         manifest=item.manifest,
         config=item.config,
     )
@@ -493,9 +488,9 @@ async def create_session(
     context_policies: list[ContextPolicy] | None = None,
     trigger_renderers: dict[str, TriggerRenderer] | None = None,
     codec: CodecRegistry | None = None,
-    extensions: list[ExtensionSpec] | None = None,
-    extra_extensions: Sequence[ExtensionSpec] = (),
-    provider: ExtensionSpec | None = None,
+    extensions: Sequence[ExtensionInput] | None = None,
+    extra_extensions: Sequence[ExtensionInput] = (),
+    provider: ExtensionInput | None = None,
     provider_resolver: ProviderResolver | None = None,
     provider_identity: ProviderSessionIdentity | None = None,
     resource_reader: ResourceReader | None = None,
@@ -610,13 +605,13 @@ async def create_session(
 
     plan_specs = list(extension_specs)
     if provider is not None:
-        plan_specs.append(provider)
+        plan_specs.append(normalize_extension_spec(provider))
     plan = _extension_plan(
         plan_specs,
         available_capabilities=_service_capabilities(resolved_services),
     )
     for item in plan:
-        await install_extension(session, item.module_path, item.config)
+        await install_extension(session, item.spec)
     created_at = time.time()
     active_set = await _record_active_set(session, plan, created_at=created_at)
     await _ensure_store_session(
@@ -935,7 +930,7 @@ async def create_child_session(
 
     plan_specs = list(extensions)
     if provider_spec is not None:
-        plan_specs.append(provider_spec)
+        plan_specs.append(normalize_extension_spec(provider_spec))
     plan = _extension_plan(
         plan_specs,
         available_capabilities=_service_capabilities(child_services),
@@ -943,8 +938,7 @@ async def create_child_session(
     for item in plan:
         await install_extension(
             child,
-            item.module_path,
-            item.config,
+            item.spec,
             trigger="child_session_start",
         )
 

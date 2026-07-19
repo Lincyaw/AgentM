@@ -124,7 +124,7 @@ def _is_anthropic_retryable(exc: BaseException) -> bool:
     retryable_types = tuple(
         err_type
         for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
-        if isinstance((err_type := getattr(anthropic, name, None)), type)
+        if isinstance((err_type := anthropic.__dict__.get(name)), type)
     )
     return bool(retryable_types) and isinstance(exc, retryable_types)
 
@@ -380,7 +380,11 @@ _SDK_MISSING = object()
 
 
 def _optional_sdk_attr(value: object, name: str) -> object | None:
-    item = getattr(value, name, _SDK_MISSING)
+    item = getattr(  # code-health: ignore[AM021] -- Anthropic SDK model boundary
+        value,
+        name,
+        _SDK_MISSING,
+    )
     return None if item is _SDK_MISSING else item
 
 

@@ -97,7 +97,7 @@ class ExternalAgentMAgent(BaseAgent):
         tool_calls = sum(
             len(m.content)
             for m in messages
-            if getattr(m, "role", "") == "tool_result"
+            if m.role == "tool_result"
         )
         logger.info(
             "agentm-external: session {} done, {} tool calls",

@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 import math
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 from .termination import TerminationHint
 
@@ -44,7 +44,7 @@ def _require_timestamp(value: object, label: str) -> None:
         raise ValueError(f"{label} must be a finite number")
 
 
-def freeze_json(value: Any) -> JsonValue:
+def freeze_json(value: object) -> JsonValue:
     """Defensively copy a JSON value into immutable containers."""
 
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -407,7 +407,7 @@ def tool_result(
     text: str,
     *,
     is_error: bool = False,
-    extras: Any = None,
+    extras: object = None,
     timestamp: float = 0.0,
 ) -> ToolResultMessage:
     """Build a ``ToolResultMessage`` wrapping a single text-only result block."""
@@ -417,7 +417,7 @@ def tool_result(
         tool_call_id=tool_call_id,
         content=[TextContent(type="text", text=text)],
         is_error=is_error,
-        extras=extras,
+        extras=freeze_json(extras),
     )
     return ToolResultMessage(role="tool_result", content=[block], timestamp=timestamp)
 

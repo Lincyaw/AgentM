@@ -17,9 +17,7 @@ from agentm.core.abi.messages import TextContent
 from agentm.scenarios import builtin_scenario_loader
 
 from agentm.cli._display import (
-    EXIT_CANCELLED,
     EXIT_ERROR,
-    EXIT_OK,
     EXIT_USAGE,
     SessionStats,
     stderr_console,

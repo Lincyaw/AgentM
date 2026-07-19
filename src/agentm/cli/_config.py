@@ -12,9 +12,11 @@ from loguru import logger
 
 from agentm import AgentSessionConfig
 from agentm.config.resolver import DefaultSessionSpecResolver
+from agentm.core.abi.session_api import ExtensionSpec
+from agentm.core.lib.redact import redact_config
 from agentm.scenarios import builtin_scenario_loader
 
-from agentm.cli._display import EXIT_ERROR, EXIT_NOT_FOUND, stderr_console
+from agentm.cli._display import EXIT_ERROR, stderr_console
 
 config_app = typer.Typer(
     name="config",
@@ -73,10 +75,15 @@ def show(
         "provider": {
             "name": spec.provider_identity.name if spec.provider_identity else None,
             "model": spec.provider_identity.model_id if spec.provider_identity else None,
-            "module": spec.provider[0] if spec.provider else None,
+            "source": (
+                _extension_record(spec.provider)
+                if spec.provider is not None
+                else None
+            ),
         },
         "extensions": [
-            {"module": mod, "config": cfg} for mod, cfg in spec.extensions
+            _extension_record(extension)
+            for extension in spec.extensions
         ],
         "atom_config": dict(spec.atom_config),
         "provenance": [
@@ -112,17 +119,21 @@ def show(
         table = Table(title="Extensions", show_lines=False)
         table.add_column("Module", style="cyan")
         table.add_column("Config")
-        for mod, cfg in spec.extensions:
+        for extension in spec.extensions:
+            cfg = redact_config(extension.config)
             cfg_str = json.dumps(cfg, ensure_ascii=False) if cfg else ""
-            table.add_row(mod, cfg_str)
+            table.add_row(_extension_label(extension), cfg_str)
         console.print(table)
 
     if spec.atom_config:
         table = Table(title="Atom Config", show_lines=False)
         table.add_column("Atom", style="cyan")
         table.add_column("Config")
-        for name, cfg in spec.atom_config.items():
-            table.add_row(name, json.dumps(dict(cfg), ensure_ascii=False))
+        for name, atom_config in spec.atom_config.items():
+            table.add_row(
+                name,
+                json.dumps(dict(atom_config), ensure_ascii=False),
+            )
         console.print(table)
 
     if spec.value_provenance:
@@ -178,3 +189,19 @@ def init(
 """
     target.write_text(template, encoding="utf-8")
     stderr_console.print(f"[green]created {target}[/green]")
+
+
+def _extension_record(extension: ExtensionSpec) -> dict[str, object]:
+    return {
+        "kind": extension.source.kind,
+        "location": extension.source.location,
+        "digest": extension.source.digest,
+        "module": extension.module_path,
+        "config": redact_config(extension.config),
+    }
+
+
+def _extension_label(extension: ExtensionSpec) -> str:
+    if extension.source.kind == "module":
+        return extension.source.location
+    return f"{extension.source.location} ({extension.source.digest})"

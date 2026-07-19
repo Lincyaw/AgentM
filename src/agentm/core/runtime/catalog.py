@@ -21,6 +21,7 @@ from agentm.core.abi.catalog import (
     ResourceVersion,
 )
 from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.session_api import ExtensionSource
 
 
 class InMemoryVersionedResourceStore:
@@ -198,13 +199,14 @@ class InMemoryAtomCatalog:
 
 def build_atom_identity_payload(
     *,
-    module_path: str,
+    source: ExtensionSource,
     manifest: ExtensionManifest | None,
     config: dict[str, Any],
 ) -> tuple[bytes, CatalogMeta]:
     """Build an auditable atom identity payload and flat metadata."""
 
-    files = _module_source_files(module_path)
+    module_path = source.module_name
+    files = _extension_source_files(source)
     source_record = [
         {
             "path": path,
@@ -217,6 +219,11 @@ def build_atom_identity_payload(
     config_record = normalize_atom_config(manifest, config)
     payload = {
         "module_path": module_path,
+        "extension_source": {
+            "kind": source.kind,
+            "location": source.location,
+            "digest": source.digest,
+        },
         "manifest": manifest_record,
         "config": config_record,
         "source": source_record,
@@ -225,6 +232,9 @@ def build_atom_identity_payload(
     return content, {
         "module_path": module_path,
         "atom_name": _atom_name(module_path, manifest),
+        "source_kind": source.kind,
+        "source_location": source.location,
+        "source_declared_digest": source.digest,
         "source_digest": _digest_json(source_record),
         "manifest_digest": _digest_json(manifest_record),
         "config_digest": _digest_json(config_record),
@@ -232,7 +242,18 @@ def build_atom_identity_payload(
     }
 
 
-def _module_source_files(module_path: str) -> list[tuple[str, bytes]]:
+def _extension_source_files(source: ExtensionSource) -> list[tuple[str, bytes]]:
+    if source.kind == "file":
+        path = Path(source.location)
+        content = path.read_bytes()
+        actual = _digest_bytes(content)
+        if actual != source.digest:
+            raise RuntimeError(
+                f"extension source digest changed: {actual} != {source.digest}"
+            )
+        return [(path.name, content)]
+
+    module_path = source.location
     spec = importlib.util.find_spec(module_path)
     if spec is None:
         raise ModuleNotFoundError(module_path)

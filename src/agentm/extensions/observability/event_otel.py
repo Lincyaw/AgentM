@@ -190,7 +190,7 @@ def _tool_call_to_otel(event: ToolCallEvent, telemetry: Any) -> None:
 
 
 def _tool_result_to_otel(event: ToolResultEvent, telemetry: Any) -> None:
-    is_error = bool(getattr(event.result, "is_error", False))
+    is_error = event.result.is_error if event.result is not None else False
     if is_error:
         telemetry.turn_state["current_tool_errors"] += 1
     span = telemetry.pop_span(_SPAN_TOOL, event.tool_call_id)

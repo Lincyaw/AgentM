@@ -18,6 +18,7 @@ Usage::
     data = registry.serialize_turn(turn)     # -> JSON-safe dict
     turn = registry.deserialize_turn(data)   # -> Turn
 """
+# code-health: ignore-file[AM022] -- validates untyped persisted JSON at the wire boundary
 
 from __future__ import annotations
 
@@ -453,10 +454,9 @@ def serialize_message(msg: AgentMessage) -> dict[str, Any]:
         if msg.usage is not None:
             d["usage"] = asdict(msg.usage)
         if msg.termination is not None:
-            from dataclasses import fields as dc_fields
             d["termination"] = {
                 "__type__": type(msg.termination).__qualname__,
-                **{f.name: getattr(msg.termination, f.name) for f in dc_fields(msg.termination) if not f.name.startswith("_")},
+                **asdict(msg.termination),
             }
         if not _message_meta_is_default(msg.meta):
             d["meta"] = _serialize_message_meta(msg.meta)

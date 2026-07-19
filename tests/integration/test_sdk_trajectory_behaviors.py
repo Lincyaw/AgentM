@@ -14,6 +14,7 @@ import pytest
 
 from agentm import AgentSession, AgentSessionConfig, Model
 from agentm.core.abi.cancel import CancelSignal, cancel_reason
+from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
@@ -33,6 +34,7 @@ from agentm.extensions.builtin.llm_openai import (
     OpenAIStreamFn,
 )
 from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
+from agentm.scenarios import builtin_scenario_loader
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import (
     JsonlTrajectoryNodeStore,
@@ -198,6 +200,128 @@ def _cache_markers(messages: Sequence[AgentMessage]) -> set[str]:
             str,
         )
     }
+
+
+def _write_local_scenario(root: Path, name: str) -> Path:
+    scenario_dir = root / "contrib" / "scenarios" / name
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "manifest.yaml").write_text(
+        "\n".join(
+            (
+                f"name: {name}",
+                "extensions:",
+                "  - local: local_echo",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    source = scenario_dir / "local_echo.py"
+    source.write_text(
+        '''\
+from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.messages import TextContent
+from agentm.core.abi.tool import ToolResult
+
+
+MANIFEST = ExtensionManifest(
+    name="local_echo",
+    description="Behavior-test local echo tool.",
+    registers=("tool:local_echo",),
+)
+
+
+class LocalEcho:
+    name = "local_echo"
+    description = "Echo one value."
+    parameters = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    }
+
+    async def execute(self, args, *, signal=None):
+        del signal
+        return ToolResult(
+            content=(TextContent(type="text", text=f"local:{args['value']}"),),
+        )
+
+
+def install(api, config):
+    del config
+    api.register_tool(LocalEcho())
+''',
+        encoding="utf-8",
+    )
+    return source
+
+
+@pytest.mark.asyncio
+async def test_sdk_scenario_local_extension_survives_fork(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_local_scenario(tmp_path, "local_source")
+    monkeypatch.chdir(tmp_path)
+    provider = _StubProvider(
+        "parent-answer",
+        _tool_call("local-call", "local_echo", {"value": "fork"}),
+        "fork-answer",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            scenario="local_source",
+            scenario_loader=builtin_scenario_loader,
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    forked: AgentSession | None = None
+    try:
+        await session.run("seed")
+        forked = await AgentSession.fork(session, at=0, purpose="local-source-fork")
+        await forked.run("use the local tool")
+    finally:
+        if forked is not None:
+            await forked.shutdown()
+        await session.shutdown()
+
+    local_results = [
+        block
+        for message in provider.requests[-1]
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+        and block.tool_call_id == "local-call"
+    ]
+    assert len(local_results) == 1
+    assert [
+        content.text
+        for content in local_results[0].content
+        if isinstance(content, TextContent)
+    ] == ["local:fork"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_rejects_changed_scenario_local_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_local_scenario(tmp_path, "tampered_source")
+    monkeypatch.chdir(tmp_path)
+    spec = builtin_scenario_loader("tampered_source")
+    source.write_text(
+        source.read_text(encoding="utf-8") + "\n# changed after resolution\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ExtensionLoadError, match="source digest changed"):
+        await AgentSession.create(
+            AgentSessionConfig(
+                extensions=list(spec.extensions),
+                stream_fn=_StubProvider("unused"),
+                model=_model(),
+            )
+        )
 
 
 @pytest.mark.asyncio

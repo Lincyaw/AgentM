@@ -20,12 +20,12 @@ would have to compete with ``is_error`` for meaning.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .cancel import CancelSignal
-from .messages import ImageContent, TextContent
+from .messages import ImageContent, JsonValue, TextContent, freeze_json
 
 if TYPE_CHECKING:
     from .tool_executor import ToolExecutionRequirements
@@ -44,19 +44,33 @@ FILE_OP_EDIT = "edit"
 TOOL_RESULT_FORMAT_METADATA_KEY = "result_format"
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True, init=False)
 class ToolResult:
     """The result of one tool execution.
 
     ``content`` is the user-visible payload (text and/or images) that becomes
-    a ``ToolResultBlock``. ``extras`` is opaque structured data the runtime
-    or extensions may use (e.g. for richer rendering); the kernel never reads
-    it.
+    a ``ToolResultBlock``. ``extras`` is immutable JSON data so results remain
+    portable across process, event-bus, and trajectory persistence boundaries.
     """
 
-    content: list[TextContent | ImageContent]
-    is_error: bool = False
-    extras: Any = None
+    content: tuple[TextContent | ImageContent, ...]
+    is_error: bool
+    extras: JsonValue
+
+    def __init__(
+        self,
+        content: Sequence[TextContent | ImageContent],
+        is_error: bool = False,
+        extras: object = None,
+    ) -> None:
+        blocks = tuple(content)
+        if not all(isinstance(item, (TextContent, ImageContent)) for item in blocks):
+            raise TypeError("tool result content must contain text or image blocks")
+        if not isinstance(is_error, bool):
+            raise TypeError("tool result is_error must be a bool")
+        object.__setattr__(self, "content", blocks)
+        object.__setattr__(self, "is_error", is_error)
+        object.__setattr__(self, "extras", freeze_json(extras))
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,12 +86,20 @@ class ToolOutcome:
     it to ``ToolContinue(result)`` so existing tools keep working.
     """
 
+    def __post_init__(self) -> None:
+        if type(self) is ToolOutcome:
+            raise TypeError("ToolOutcome is abstract; use ToolContinue or ToolTerminate")
+
 
 @dataclass(slots=True, frozen=True)
 class ToolContinue(ToolOutcome):
     """Normal tool execution — the loop should keep running."""
 
     result: ToolResult
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, ToolResult):
+            raise TypeError("ToolContinue result must be a ToolResult")
 
 
 @dataclass(slots=True, frozen=True)
@@ -100,6 +122,12 @@ class ToolTerminate(ToolOutcome):
 
     result: ToolResult
     reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, ToolResult):
+            raise TypeError("ToolTerminate result must be a ToolResult")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise TypeError("ToolTerminate reason must be a non-empty string")
 
 
 @runtime_checkable
@@ -127,11 +155,11 @@ class Tool(Protocol):
 
     name: str
     description: str
-    parameters: dict[str, Any]
+    parameters: dict[str, object]
 
     async def execute(
         self,
-        args: dict[str, Any],
+        args: dict[str, object],
         *,
         signal: CancelSignal | None = None,
     ) -> ToolResult | ToolOutcome: ...
@@ -141,7 +169,7 @@ class Tool(Protocol):
 class ToolMetadataProvider(Protocol):
     """Optional typed capability for tool classification metadata."""
 
-    metadata: dict[str, Any]
+    metadata: dict[str, object]
 
 
 @dataclass(slots=True)
@@ -167,9 +195,9 @@ class FunctionTool:
 
     name: str
     description: str
-    parameters: dict[str, Any]
+    parameters: dict[str, object]
     fn: Callable[..., Awaitable[ToolResult | ToolOutcome]]
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
     execution_requirements: "ToolExecutionRequirements | None" = None
     _accepts_signal: bool = False
 
@@ -178,9 +206,9 @@ class FunctionTool:
         *,
         name: str,
         description: str,
-        parameters: dict[str, Any] | type,
+        parameters: dict[str, object] | type,
         fn: Callable[..., Awaitable[ToolResult | ToolOutcome]],
-        metadata: dict[str, Any] | None = None,
+        metadata: dict[str, object] | None = None,
         execution_requirements: "ToolExecutionRequirements | None" = None,
     ) -> None:
         self.name = name
@@ -198,7 +226,7 @@ class FunctionTool:
 
     async def execute(
         self,
-        args: dict[str, Any],
+        args: dict[str, object],
         *,
         signal: CancelSignal | None = None,
     ) -> ToolResult | ToolOutcome:

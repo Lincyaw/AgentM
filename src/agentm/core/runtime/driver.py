@@ -400,7 +400,7 @@ def _default_action(
 
 
 def _resolve_action(default: LoopAction, returns: list[Any]) -> LoopAction:
-    if isinstance(default, Stop) and not getattr(default.cause, "overridable", True):
+    if isinstance(default, Stop) and not default.cause.overridable:
         return default
     overrides = [r for r in returns if isinstance(r, LoopAction)]
     inject_msgs: list[AgentMessage] = []
@@ -433,7 +433,18 @@ def _trigger_carries_terminal(trigger: Trigger) -> TerminationCause | None:
 def _outcome_result(outcome: ToolOutcome) -> ToolResult:
     if isinstance(outcome, (ToolContinue, ToolTerminate)):
         return outcome.result
-    return ToolResult(content=[], is_error=True)
+    raise TypeError(f"unsupported tool outcome: {type(outcome).__name__}")
+
+
+def _replace_outcome_result(
+    outcome: ToolOutcome,
+    result: ToolResult,
+) -> ToolOutcome:
+    if isinstance(outcome, ToolContinue):
+        return ToolContinue(result=result)
+    if isinstance(outcome, ToolTerminate):
+        return ToolTerminate(result=result, reason=outcome.reason)
+    raise TypeError(f"unsupported tool outcome: {type(outcome).__name__}")
 
 
 def _normalize_tool_output(output: ToolResult | ToolOutcome) -> ToolOutcome:
@@ -958,13 +969,13 @@ def _clear_resource_txn(services: ServiceRegistry | None) -> None:
         services.unregister(RESOURCE_TXN_SERVICE)
 
 
-def _meta(inp: int, out: int, start_ns: int, model: Any = None,
+def _meta(inp: int, out: int, start_ns: int, model: Model | None = None,
           cache_read: int = 0, cache_write: int = 0) -> TurnMeta:
     return TurnMeta(
         total_input_tokens=inp, total_output_tokens=out,
         cache_read_tokens=cache_read, cache_write_tokens=cache_write,
         duration_ns=time.perf_counter_ns() - start_ns,
-        model_id=getattr(model, "id", None),
+        model_id=model.id if model is not None else None,
     )
 
 
@@ -1465,7 +1476,7 @@ async def drive(
                 triggers.terminate(TriggerTerminated("driver cancelled after commit"))
                 raise asyncio.CancelledError
 
-            if getattr(outcome.cause, "session_terminal", False):
+            if outcome.cause.session_terminal:
                 triggers.terminate(TriggerTerminated(outcome.cause))
                 await bus.emit(RunEndEvent.CHANNEL, RunEndEvent(
                     outcome=turn.outcome, meta=turn.meta,
@@ -1707,7 +1718,7 @@ async def _react_loop(
             LlmRequestStartEvent(
                 turn_index=execution.index,
                 turn_id=execution.id,
-                model_id=getattr(effective_model, "id", "unknown"),
+                model_id=effective_model.id,
                 message_count=len(messages),
                 tool_count=len(effective_tools),
                 system_chars=len(system_text),
@@ -1975,11 +1986,12 @@ async def _react_loop(
                 ))
                 replaced = _last_of(res_returns, ToolResult)
                 final_result = replaced if replaced is not None else result
+                final_outcome = _replace_outcome_result(outcome, final_result)
 
                 result_block = _tool_result_block(tc.id, final_result)
                 result_blocks.append(result_block)
                 tool_records.append(ToolRecord(call=tc, result=result_block))
-                paired_outcomes.append((tc.name, outcome))
+                paired_outcomes.append((tc.name, final_outcome))
                 tool_calls_used += 1
 
             if result_blocks:

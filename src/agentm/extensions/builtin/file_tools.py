@@ -309,8 +309,13 @@ class _FileToolsRuntime:
     ) -> ToolboxResult:
         if self._bash_ops is not None:
             return await self._exec_toolbox(tool_name, args)
-        fn = getattr(self._toolbox, tool_name)
-        return fn(**args)
+        if tool_name == "read":
+            return self._toolbox.read(**args)
+        if tool_name == "write":
+            return self._toolbox.write(**args)
+        if tool_name == "edit":
+            return self._toolbox.edit(**args)
+        raise ValueError(f"unsupported file tool: {tool_name}")
 
     def _resource_writer(self) -> ResourceWriter | None:
         writer = self._session.get_resource_writer()

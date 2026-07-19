@@ -6,7 +6,7 @@ import asyncio
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Final, TypeVar
+from typing import Any, Final, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel as PydanticBaseModel
 
@@ -157,12 +157,16 @@ class _RetryingStreamFn:
 
 
 def _is_generic_retryable(exc: BaseException) -> bool:
-    status_code = getattr(exc, "status_code", None)
-    if status_code == 429:
+    if isinstance(exc, _StatusCodeError) and exc.status_code == 429:
         return True
     if httpx is not None and isinstance(exc, httpx.TransportError):
         return True
     return False
+
+
+@runtime_checkable
+class _StatusCodeError(Protocol):
+    status_code: int
 
 
 def _wrap_provider(

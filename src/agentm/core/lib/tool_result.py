@@ -42,21 +42,25 @@ _TOOL_NOTE_SOURCE = "tool"
 def with_model_note(
     result: ToolResult, note: str, *, source: str = _TOOL_NOTE_SOURCE
 ) -> ToolResult:
-    """Append a model-visible ``<system-reminder>`` note to *result* in place.
+    """Return *result* with a model-visible ``<system-reminder>`` note.
 
     Use inside an ``except`` block that recovers from an error the model
     should still be aware of. The note is wrapped as
     ``<system-reminder source="{source}">...</system-reminder>`` and appended
-    to ``result.content`` so it rides back to the model as part of the tool
-    result. Returns the same ``result`` for call-site chaining.
+    to the returned content so it rides back to the model as part of the tool
+    result. The input remains unchanged.
     """
-    result.content.append(
-        TextContent(
-            type="text",
-            text=f'<system-reminder source="{source}">\n{note}\n</system-reminder>',
-        )
+    return ToolResult(
+        content=(
+            *result.content,
+            TextContent(
+                type="text",
+                text=f'<system-reminder source="{source}">\n{note}\n</system-reminder>',
+            ),
+        ),
+        is_error=result.is_error,
+        extras=result.extras,
     )
-    return result
 
 
 __all__ = ["with_model_note"]

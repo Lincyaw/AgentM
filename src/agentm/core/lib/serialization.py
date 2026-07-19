@@ -49,8 +49,16 @@ def _encode(obj: Any, *, depth: int, seen: frozenset[int]) -> Any:
     if isinstance(obj, Path):
         return str(obj)
     if callable(obj):
-        module = getattr(obj, "__module__", None)
-        qualname = getattr(obj, "__qualname__", None)
+        module = getattr(  # code-health: ignore[AM021] -- callable reflection boundary
+            obj,
+            "__module__",
+            None,
+        )
+        qualname = getattr(  # code-health: ignore[AM021] -- callable reflection boundary
+            obj,
+            "__qualname__",
+            None,
+        )
         return {
             "type": "callable",
             "module": module if isinstance(module, str) else type(obj).__module__,
@@ -73,7 +81,10 @@ def _encode(obj: Any, *, depth: int, seen: frozenset[int]) -> Any:
     if is_dataclass(obj) and not isinstance(obj, type):
         return {
             field.name: _encode(
-                getattr(obj, field.name),
+                getattr(  # code-health: ignore[AM021] -- dataclass reflection boundary
+                    obj,
+                    field.name,
+                ),
                 depth=depth + 1,
                 seen=child_seen,
             )

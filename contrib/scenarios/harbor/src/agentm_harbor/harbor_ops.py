@@ -41,7 +41,11 @@ if TYPE_CHECKING:
 # Thread-local environment holder
 # ---------------------------------------------------------------------------
 
-_holder: threading.local = threading.local()
+class _EnvironmentHolder(threading.local):
+    environment: "BaseEnvironment | None" = None
+
+
+_holder = _EnvironmentHolder()
 
 
 def set_harbor_environment(env: "BaseEnvironment") -> None:
@@ -54,7 +58,7 @@ def set_harbor_environment(env: "BaseEnvironment") -> None:
 
 
 def _get_environment() -> "BaseEnvironment":
-    env = getattr(_holder, "environment", None)
+    env = _holder.environment
     if env is None:
         raise RuntimeError(
             "Harbor environment not set — call set_harbor_environment() "

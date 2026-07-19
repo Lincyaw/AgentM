@@ -123,8 +123,13 @@ def main() -> None:
             default_limit=args.pop("_default_limit", 250),
             state=state,
         )
-        fn = getattr(toolbox, tool_name, None)
-        if fn is None:
+        if tool_name == "read":
+            result = toolbox.read(**args)
+        elif tool_name == "write":
+            result = toolbox.write(**args)
+        elif tool_name == "edit":
+            result = toolbox.edit(**args)
+        else:
             print(
                 json.dumps(
                     {"text": f"unknown tool: {tool_name!r}", "is_error": True}
@@ -132,7 +137,6 @@ def main() -> None:
             )
             sys.exit(1)
 
-        result = fn(**args)
         toolbox.state.save_to(state_path)
     print(json.dumps(asdict(result)))
 

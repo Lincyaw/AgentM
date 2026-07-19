@@ -15,6 +15,12 @@ requirements:
       independently of metadata enumeration order. Process and environment tool
       executors must use explicit typed adapters, safe portable wire data, and
       terminate-and-reap subprocesses on both signal and caller cancellation.
+      Tool results and orchestration states must be immutable, JSON-portable,
+      internally consistent, and propagate caller cancellation without detached
+      work or stale post-hook observations. Project-specific AST checks must
+      prevent runtime composition policy, legacy extension shapes, dynamic
+      attribute probing, and untyped ABI contracts from re-entering the SDK,
+      while allowing precise documented ignores at genuine dynamic boundaries.
     priority: P0
     status: tested
     confidence: confirmed
@@ -22,17 +28,27 @@ requirements:
       - path: pyproject.toml
       - path: uv.lock
       - path: src/agentm/__init__.py
-      - path: src/agentm/cli.py
+      - path: src/agentm/__main__.py
+      - path: src/agentm/cli/__init__.py
+      - path: src/agentm/cli/_app.py
+      - path: src/agentm/cli/_chat.py
+      - path: src/agentm/cli/_config.py
+      - path: src/agentm/cli/_display.py
+      - path: src/agentm/cli/_run.py
+      - path: src/agentm/cli/_scenario.py
+      - path: src/agentm/code_health.py
       - path: src/agentm/authoring/__init__.py
       - path: src/agentm/authoring/artifacts.py
       - path: src/agentm/config/__init__.py
       - path: src/agentm/config/resolver.py
       - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/bus.py
       - path: src/agentm/core/abi/cancel.py
       - path: src/agentm/core/abi/catalog.py
       - path: src/agentm/core/abi/codec.py
       - path: src/agentm/core/abi/compaction.py
       - path: src/agentm/core/abi/context.py
+      - path: src/agentm/core/abi/events.py
       - path: src/agentm/core/abi/lifecycle.py
       - path: src/agentm/core/abi/manifest.py
       - path: src/agentm/core/abi/messages.py
@@ -55,7 +71,9 @@ requirements:
       - path: src/agentm/core/lib/__init__.py
       - path: src/agentm/core/lib/async_cancel.py
       - path: src/agentm/core/lib/redact.py
+      - path: src/agentm/core/lib/serialization.py
       - path: src/agentm/core/lib/tool_executor.py
+      - path: src/agentm/core/lib/tool_result.py
       - path: src/agentm/core/lib/tool_schema.py
       - path: src/agentm/core/lib/trajectory_nodes.py
       - path: src/agentm/core/runtime/catalog.py
@@ -86,6 +104,7 @@ requirements:
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/prompt_cache.py
+      - path: src/agentm/extensions/builtin/retry_policy.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/validate.py
@@ -116,6 +135,8 @@ requirements:
       - path: src/agentm_toolbox/__main__.py
       - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py
+      - path: contrib/scenarios/harbor/src/agentm_harbor/external_agent.py
+      - path: contrib/scenarios/harbor/src/agentm_harbor/harbor_ops.py
       - path: tools/otel/docker-compose.yaml
     tests:
       - path: tests/fixtures/__init__.py
@@ -124,6 +145,7 @@ requirements:
       - path: tests/fixtures/prompt_cache_adapter.py
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
+      - path: tests/test_code_health.py
       - path: tests/test_lifecycle_catalog_ports.py
     docs:
       - path: .claude/index.yaml

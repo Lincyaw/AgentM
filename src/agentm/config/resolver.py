@@ -18,6 +18,7 @@ from agentm.core.abi.session_api import (
     ExtensionSpec,
     ResolvedSessionSpec,
     ScenarioSpec,
+    normalize_extension_spec,
 )
 
 
@@ -109,21 +110,39 @@ class DefaultSessionSpecResolver:
         provenance: list[ConfigValueProvenance],
     ) -> list[ExtensionSpec]:
         if request.extensions is not None:
+            extensions = [
+                normalize_extension_spec(item)
+                for item in request.extensions
+            ]
             provenance.append(
-                _provenance("extensions", "explicit", "AgentSessionConfig.extensions", request.extensions)
+                _provenance(
+                    "extensions",
+                    "explicit",
+                    "AgentSessionConfig.extensions",
+                    _extension_records(extensions),
+                )
             )
-            return [(module, dict(config)) for module, config in request.extensions]
+            return extensions
         if isinstance(scenario, str) and request.scenario_loader is not None:
             loaded = request.scenario_loader(scenario)
-            extensions = (
+            raw_extensions = (
                 loaded.extensions
                 if isinstance(loaded, ScenarioSpec)
                 else loaded
             )
+            extensions = [
+                normalize_extension_spec(item)
+                for item in raw_extensions
+            ]
             provenance.append(
-                _provenance("extensions", "scenario_default", scenario, extensions)
+                _provenance(
+                    "extensions",
+                    "scenario_default",
+                    scenario,
+                    _extension_records(extensions),
+                )
             )
-            return [(module, dict(config)) for module, config in extensions]
+            return extensions
         return []
 
     def _resolve_atom_config(
@@ -171,14 +190,16 @@ class DefaultSessionSpecResolver:
         provenance: list[ConfigValueProvenance],
     ) -> tuple[ExtensionSpec | None, ProviderSessionIdentity | None]:
         if request.provider is not None:
-            module, config = request.provider
-            if not isinstance(module, str) or not module:
-                raise ValueError(
-                    "AgentSessionConfig.provider module must be a "
-                    "non-empty string"
-                )
+            provider_spec = normalize_extension_spec(request.provider)
+            module = provider_spec.module_path
+            config = provider_spec.config
             provenance.append(
-                _provenance("provider", "explicit", "AgentSessionConfig.provider", request.provider)
+                _provenance(
+                    "provider",
+                    "explicit",
+                    "AgentSessionConfig.provider",
+                    _extension_record(provider_spec),
+                )
             )
             raw_name = config.get("name")
             name = (
@@ -187,7 +208,10 @@ class DefaultSessionSpecResolver:
                 else _required_nonempty_str(raw_name, "provider.name")
             )
             model_id = _optional_str(config.get("model"))
-            return (module, dict(config)), ProviderSessionIdentity(name=name, model_id=model_id)
+            return provider_spec, ProviderSessionIdentity(
+                name=name,
+                model_id=model_id,
+            )
 
         provider_name = _choose(
             ("env", self._env.get("AGENTM_PROVIDER"), "AGENTM_PROVIDER"),
@@ -268,9 +292,19 @@ class DefaultSessionSpecResolver:
         provenance.append(
             _provenance("provider", provider_name.source or "provider_default", provider_name.ref, provider)
         )
-        provider_type = _optional_str(project_profile.get("provider")) or _optional_str(user_profile.get("provider")) or provider
+        provider_type = (
+            _optional_str(project_profile.get("provider"))
+            or _optional_str(user_profile.get("provider"))
+            or provider
+        )
         module = _provider_module(provider_type)
-        return (module, provider_config), ProviderSessionIdentity(name=provider, model_id=_optional_str(provider_config.get("model")))
+        return ExtensionSpec.from_module(
+            module,
+            provider_config,
+        ), ProviderSessionIdentity(
+            name=provider,
+            model_id=_optional_str(provider_config.get("model")),
+        )
 
 
 class _Choice:
@@ -416,6 +450,23 @@ def _fingerprint(value: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _extension_record(spec: ExtensionSpec) -> dict[str, object]:
+    return {
+        "source": {
+            "kind": spec.source.kind,
+            "location": spec.source.location,
+            "digest": spec.source.digest,
+        },
+        "config_keys": sorted(spec.config),
+    }
+
+
+def _extension_records(
+    specs: list[ExtensionSpec],
+) -> list[dict[str, object]]:
+    return [_extension_record(spec) for spec in specs]
 
 
 __all__ = ["DefaultSessionSpecResolver"]

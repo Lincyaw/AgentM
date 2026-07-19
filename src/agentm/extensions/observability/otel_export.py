@@ -28,6 +28,7 @@ down an OTLP handle leaves process providers alive until process teardown.
 from __future__ import annotations
 
 import atexit
+from collections.abc import Mapping
 import json
 import os
 import sys
@@ -127,7 +128,12 @@ class BlockingBatchLogRecordProcessor(_SessionFilterMixin, BatchLogRecordProcess
     """Batch log processor with session filtering."""
 
     def on_emit(self, log_record):  # type: ignore[override, no-untyped-def]
-        if self._should_drop(getattr(log_record, "log_record", log_record).attributes):
+        record = getattr(  # code-health: ignore[AM021] -- OTel SDK version boundary
+            log_record,
+            "log_record",
+            log_record,
+        )
+        if self._should_drop(record.attributes):
             return
         super().on_emit(log_record)
 
@@ -573,13 +579,17 @@ def _severity_number(severity: TelemetrySeverity | SeverityNumber) -> SeverityNu
 
 # Reentrancy guard: the OTel export path itself logs via loguru, so without
 # this a failing exporter could recurse through the sink indefinitely.
-_loguru_otel_reentry = threading.local()
+class _OtelReentry(threading.local):
+    active: bool = False
+
+
+_loguru_otel_reentry = _OtelReentry()
 
 
 def _emit_loguru_record_to_otel(message: Any) -> None:
     """loguru sink: forward one operational log record to the process OTel
     ``LoggerProvider`` (and thus the network exporter, when configured)."""
-    if getattr(_loguru_otel_reentry, "active", False):
+    if _loguru_otel_reentry.active:
         return
     lp = _global_logger_provider
     if lp is None:
@@ -813,8 +823,8 @@ class SessionTelemetry:
         self,
         event_name: str,
         *,
-        body: Any = None,
-        attributes: dict[str, Any] | None = None,
+        body: object = None,
+        attributes: Mapping[str, object] | None = None,
         severity: TelemetrySeverity | SeverityNumber = "info",
     ) -> None:
         """Emit one log record through this session's OTel ``Logger``.

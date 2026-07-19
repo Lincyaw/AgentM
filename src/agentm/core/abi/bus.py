@@ -6,6 +6,7 @@ object itself is never written to.
 
 No readonly-field snapshot/restore machinery needed.
 """
+# code-health: ignore-file[AM022] -- heterogeneous event dispatch boundary
 
 from __future__ import annotations
 
@@ -169,7 +170,7 @@ class EventBus:
             try:
                 value = sub.handler(event)
                 if inspect.isawaitable(value):
-                    if hasattr(value, "close"):
+                    if inspect.iscoroutine(value):
                         value.close()
                     logger.warning(
                         "async handler on {!r} skipped during emit_sync",

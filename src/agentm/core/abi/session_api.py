@@ -12,12 +12,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Protocol, runtime_checkable
+import hashlib
+from pathlib import Path
+import re
+from typing import Callable, Literal, Protocol, TypeAlias, runtime_checkable
 
 from agentm.core.abi.cancel import CancelReason, CancelSignal
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
 from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
-from agentm.core.abi.messages import AgentMessage, JsonValue
+from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
@@ -43,7 +46,123 @@ from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer
 
 Unsubscribe = Callable[[], None]
-ExtensionSpec = tuple[str, dict[str, Any]]
+ExtensionSourceKind = Literal["module", "file"]
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionSource:
+    """Portable identity for executable extension code."""
+
+    kind: ExtensionSourceKind
+    location: str
+    digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"module", "file"}:
+            raise ValueError(f"invalid extension source kind: {self.kind!r}")
+        if not isinstance(self.location, str) or not self.location:
+            raise TypeError("extension source location must be non-empty")
+        if self.kind == "module":
+            if self.digest is not None:
+                raise ValueError("module extension source cannot carry a digest")
+            return
+        if not Path(self.location).is_absolute():
+            raise ValueError("file extension source location must be absolute")
+        if not isinstance(self.digest, str) or _SHA256_RE.fullmatch(self.digest) is None:
+            raise ValueError(
+                "file extension source digest must be sha256:<64 lowercase hex>"
+            )
+
+    @property
+    def module_name(self) -> str:
+        """Return the stable Python module identity used by the loader."""
+
+        if self.kind == "module":
+            return self.location
+        assert self.digest is not None
+        identity = hashlib.sha256(
+            f"{self.location}\0{self.digest}".encode("utf-8")
+        ).hexdigest()
+        return f"_agentm_source_{identity}"
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionSpec:
+    """Canonical extension source plus immutable JSON configuration."""
+
+    source: ExtensionSource
+    config: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, ExtensionSource):
+            raise TypeError("extension spec source must be an ExtensionSource")
+        if not isinstance(self.config, Mapping):
+            raise TypeError("extension spec config must be a mapping")
+        if not all(isinstance(key, str) for key in self.config):
+            raise TypeError("extension spec config keys must be strings")
+        frozen = freeze_json(self.config)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("extension spec config must be an object")
+        object.__setattr__(self, "config", frozen)
+
+    @classmethod
+    def from_module(
+        cls,
+        module: str,
+        config: Mapping[str, JsonValue] | None = None,
+    ) -> "ExtensionSpec":
+        return cls(
+            source=ExtensionSource(kind="module", location=module),
+            config={} if config is None else config,
+        )
+
+    @classmethod
+    def from_file(
+        cls,
+        path: str,
+        *,
+        digest: str,
+        config: Mapping[str, JsonValue] | None = None,
+    ) -> "ExtensionSpec":
+        return cls(
+            source=ExtensionSource(
+                kind="file",
+                location=path,
+                digest=digest,
+            ),
+            config={} if config is None else config,
+        )
+
+    @property
+    def module_path(self) -> str:
+        return self.source.module_name
+
+    def with_config(self, config: Mapping[str, JsonValue]) -> "ExtensionSpec":
+        return ExtensionSpec(source=self.source, config=config)
+
+
+ExtensionShorthand: TypeAlias = tuple[str, Mapping[str, JsonValue]]
+ExtensionInput: TypeAlias = ExtensionSpec | ExtensionShorthand
+
+
+def normalize_extension_spec(value: ExtensionInput) -> ExtensionSpec:
+    """Normalize the public module tuple shorthand into a canonical spec."""
+
+    if isinstance(value, ExtensionSpec):
+        return ExtensionSpec(source=value.source, config=value.config)
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or not isinstance(value[0], str)
+        or not isinstance(value[1], Mapping)
+    ):
+        raise TypeError(
+            "extension must be ExtensionSpec or (module, config) tuple"
+        )
+    return ExtensionSpec.from_module(value[0], value[1])
+
+
 ChildCancellationMode = Literal["inherit", "independent"]
 ConfigSource = Literal[
     "explicit",
@@ -82,7 +201,7 @@ class ScenarioSpec:
     ``system_prompt.prompt_file``.
     """
 
-    extensions: Sequence[ExtensionSpec]
+    extensions: Sequence[ExtensionInput]
     base_dir: str | None = None
 
 
@@ -95,7 +214,7 @@ class ScenarioLoader(Protocol):
     storage locations.
     """
 
-    def __call__(self, scenario: str) -> ScenarioSpec | Sequence[ExtensionSpec]:
+    def __call__(self, scenario: str) -> ScenarioSpec | Sequence[ExtensionInput]:
         ...
 
 
@@ -112,11 +231,13 @@ class AgentSessionConfig:
     scenario: str | None = None
     scenario_loader: ScenarioLoader | None = None
     spec_resolver: SessionSpecResolver | None = None
-    extensions: list[ExtensionSpec] | None = None
-    extra_extensions: list[ExtensionSpec] = field(default_factory=list)
+    extensions: list[ExtensionInput] | None = None
+    extra_extensions: list[ExtensionInput] = field(default_factory=list)
     extra_tools: list[Tool] = field(default_factory=list)
-    atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
-    provider: tuple[str, dict[str, Any]] | None = None
+    atom_config_overrides: dict[str, dict[str, JsonValue]] = field(
+        default_factory=dict
+    )
+    provider: ExtensionInput | None = None
     provider_resolver: ProviderResolver | None = None
     stream_fn: StreamFn | None = None
     model: Model | None = None
@@ -138,7 +259,7 @@ class AgentSessionConfig:
     tool_allowlist: list[str] | None = None
     purpose: str = "subagent"
     loop_config: LoopConfig | None = None
-    experiment: dict[str, Any] | None = None
+    experiment: dict[str, JsonValue] | None = None
     session_id: str | None = None
     root_session_id: str | None = None
     parent_session_id: str | None = None
@@ -504,7 +625,7 @@ class AtomAPI(Protocol):
     def model(self) -> Model | None: ...
 
     @property
-    def experiment(self) -> dict[str, Any] | None: ...
+    def experiment(self) -> dict[str, JsonValue] | None: ...
 
 
 @runtime_checkable
@@ -558,6 +679,9 @@ __all__ = [
     "ConfigSource",
     "ChildCancellationMode",
     "ConfigValueProvenance",
+    "ExtensionInput",
+    "ExtensionSource",
+    "ExtensionSourceKind",
     "ExtensionSpec",
     "LoopConfig",
     "ResolvedSessionSpec",
@@ -568,4 +692,5 @@ __all__ = [
     "SessionContext",
     "SpawnedSession",
     "Unsubscribe",
+    "normalize_extension_spec",
 ]

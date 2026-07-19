@@ -63,9 +63,12 @@ from agentm.core.abi.session_config import (
 )
 from agentm.core.abi.session_api import (
     ChildCancellationMode,
+    ExtensionInput,
+    ExtensionSource,
     ExtensionSpec,
     ScenarioLoader,
     ScenarioSpec,
+    normalize_extension_spec,
 )
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.store import (
@@ -114,6 +117,8 @@ __all__ = [
     "EnvironmentRestoreStatus",
     "EnvironmentSnapshot",
     "EnvironmentSnapshotter",
+    "ExtensionInput",
+    "ExtensionSource",
     "ExtensionSpec",
     "InterruptionMessagePolicy",
     "JsonValue",
@@ -161,5 +166,6 @@ __all__ = [
     "TransactionalResourceWriter",
     "WriteResult",
     "builtin_scenario_loader",
+    "normalize_extension_spec",
     "packaged_scenario_names",
 ]

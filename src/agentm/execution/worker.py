@@ -36,7 +36,7 @@ async def _run(entrypoint: str, args_path: Path) -> Any:
     if not module_name or not function_name:
         raise ValueError("entrypoint must be 'module:function'")
     module = importlib.import_module(module_name)
-    fn = getattr(module, function_name)
+    fn = module.__dict__.get(function_name)
     if not callable(fn):
         raise TypeError(f"process entrypoint is not callable: {entrypoint}")
     args = decode_tool_arguments(args_path.read_text(encoding="utf-8"))

@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any, Iterator, cast
+from typing import Iterator, cast
 
 from loguru import logger
 
@@ -107,6 +107,7 @@ from agentm.core.abi.roles import (
 from agentm.core.abi.session_api import (
     AgentSessionConfig,
     ChildCancellationMode,
+    ExtensionSpec,
     ResolvedSessionSpec,
     SessionContext,
 )
@@ -465,7 +466,7 @@ class Session:
         self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
         self.installed_extensions: list[str] = []
-        self._installed_extension_specs: list[tuple[str, dict[str, object]]] = []
+        self._installed_extension_specs: list[ExtensionSpec] = []
         self._active_provider_name: str | None = None
         self._provider_owners: dict[str, str | None] = {}
         inherited_provider_identity = self.services.get(
@@ -1495,7 +1496,7 @@ class Session:
 
     async def install_extension(
         self,
-        module_path: str,
+        extension: ExtensionSpec | str,
         config: dict[str, object] | None = None,
         *,
         trigger: str = "runtime",
@@ -1503,15 +1504,23 @@ class Session:
         """Install an extension through the standard lifecycle path."""
         from agentm.core.runtime.extension import install_extension
 
-        await install_extension(self, module_path, config or {}, trigger=trigger)
+        await install_extension(
+            self,
+            extension,
+            None if isinstance(extension, ExtensionSpec) else config or {},
+            trigger=trigger,
+        )
 
     def _record_installed_extension(
         self,
-        module_path: str,
-        config: dict[str, object],
+        spec: ExtensionSpec,
     ) -> None:
-        self.installed_extensions.append(module_path)
-        self._installed_extension_specs.append((module_path, dict(config)))
+        if not isinstance(spec, ExtensionSpec):
+            raise TypeError("installed extension record requires ExtensionSpec")
+        self.installed_extensions.append(spec.module_path)
+        self._installed_extension_specs.append(
+            ExtensionSpec(source=spec.source, config=spec.config)
+        )
 
     def _external_tools(self) -> list[Tool]:
         return [
@@ -1545,7 +1554,7 @@ class Session:
         self,
         *,
         include_provider_atoms: bool,
-    ) -> list[tuple[str, dict[str, Any]]]:
+    ) -> list[ExtensionSpec]:
         excluded = (
             set()
             if include_provider_atoms
@@ -1556,9 +1565,9 @@ class Session:
             }
         )
         return [
-            (module_path, dict(config))
-            for module_path, config in self._installed_extension_specs
-            if module_path not in excluded
+            ExtensionSpec(source=spec.source, config=spec.config)
+            for spec in self._installed_extension_specs
+            if spec.module_path not in excluded
         ]
 
     @property
@@ -1846,12 +1855,7 @@ class Session:
 
         source_tool_allowlist = source._tool_allowlist()
         forked = await create_session(
-            extensions=[
-                (module_path, dict(config))
-                for module_path, config in source._composition_extensions(
-                    include_provider_atoms=True,
-                )
-            ],
+            extensions=source._composition_extensions(include_provider_atoms=True),
             stream_fn=source._stream_fn,
             model=source._model,
             system=source.system,

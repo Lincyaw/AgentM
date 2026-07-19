@@ -7,7 +7,8 @@ outside the core substrate.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import Literal, Protocol, runtime_checkable
 
 TelemetrySeverity = Literal["trace", "debug", "info", "warning", "error", "fatal"]
 
@@ -35,8 +36,8 @@ class SessionTelemetry(Protocol):
         self,
         event_name: str,
         *,
-        body: Any = None,
-        attributes: dict[str, Any] | None = None,
+        body: object = None,
+        attributes: Mapping[str, object] | None = None,
         severity: TelemetrySeverity = "info",
     ) -> None: ...
 

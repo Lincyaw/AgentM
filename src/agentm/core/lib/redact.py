@@ -26,7 +26,12 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-__all__ = ["redact_messages", "redact_headers", "SENSITIVE_HEADER_NAMES"]
+__all__ = [
+    "SENSITIVE_HEADER_NAMES",
+    "redact_config",
+    "redact_headers",
+    "redact_messages",
+]
 
 
 # Case-insensitive set of header names whose values must be replaced with
@@ -40,6 +45,24 @@ SENSITIVE_HEADER_NAMES: frozenset[str] = frozenset(
         "x-auth-token",
         "cookie",
     }
+)
+_SENSITIVE_CONFIG_NAMES: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "client_secret",
+        "cookie",
+        "password",
+        "secret",
+        "token",
+    }
+)
+_SENSITIVE_CONFIG_SUFFIXES: tuple[str, ...] = (
+    "_api_key",
+    "_auth_token",
+    "_access_token",
+    "_client_secret",
+    "_password",
 )
 
 
@@ -202,3 +225,27 @@ def redact_headers(headers: Any) -> Any:
         else:
             out[key] = value
     return out
+
+
+def redact_config(value: Any) -> Any:
+    """Recursively redact credentials from user-visible config data."""
+
+    if isinstance(value, Mapping):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized = key.lower() if isinstance(key, str) else ""
+            if (
+                normalized in _SENSITIVE_CONFIG_NAMES
+                or normalized.endswith(_SENSITIVE_CONFIG_SUFFIXES)
+            ):
+                redacted[key] = "***"
+            elif normalized.endswith("headers"):
+                redacted[key] = redact_config(redact_headers(item))
+            else:
+                redacted[key] = redact_config(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_config(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_config(item) for item in value)
+    return value

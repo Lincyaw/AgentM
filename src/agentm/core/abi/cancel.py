@@ -26,6 +26,11 @@ CancelReason = Literal[
 class CancelSignal(Protocol):
     """Cooperative cancellation signal shared across SDK boundaries."""
 
+    @property
+    def reason(self) -> CancelReason | str | None:
+        """Return the durable cancellation reason, when cancelled."""
+        ...
+
     def is_set(self) -> bool:
         """Return whether cancellation has been requested."""
         ...
@@ -119,19 +124,11 @@ class CompositeCancelSignal:
 
 
 def cancel_reason(signal: CancelSignal | None) -> CancelReason | str | None:
-    """Return a signal's reason when the implementation exposes one."""
+    """Return a signal's typed cancellation reason."""
 
     if signal is None:
         return None
-    reason = getattr(signal, "reason", None)
-    if callable(reason):
-        try:
-            value = reason()
-        except TypeError:
-            return None
-    else:
-        value = reason
-    return value if isinstance(value, str) else None
+    return signal.reason
 
 
 __all__ = [
