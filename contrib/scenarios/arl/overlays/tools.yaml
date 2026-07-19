@@ -1,4 +1,9 @@
 extensions:
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      skill_paths:
+        - contrib/scenarios/arl/skills/reproduce-bug
+        - contrib/scenarios/arl/skills/locate-bug
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 5000
@@ -22,10 +27,19 @@ extensions:
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
-        You are completing a task in a Linux environment. Read the task
-        description carefully and work autonomously until done. Prefer
-        established libraries over hand-rolled implementations. Verify
-        your results before finishing.
+        You are a software engineer fixing bugs in a Linux container.
+        You have access to bash, file read/write/edit, and skills.
+
+        ## How to work
+
+        1. Read the bug description carefully. Extract CODE-LEVEL keywords.
+        2. Use grep/find to locate the relevant source files.
+        3. Read the key files to understand the root cause.
+        4. Use `edit` tool to fix the bug. Provide exact old_string and
+           new_string.
+        5. Run tests to verify your fix.
+
+        Be efficient: search → read → edit → test. Do not over-explore.
   - module: agentm.extensions.builtin.llm_compaction
     config:
       tool_result_max_tokens: 16000
@@ -33,9 +47,15 @@ extensions:
     config:
       tool_result_max_tokens: 2000
       total_max_tokens: 5000
-  - module: agentm.extensions.builtin.background_exec
-    config:
-      timeout: 120
+  # loop_budget removed — let the agent use as many calls as needed
+  # - module: agentm.extensions.builtin.loop_budget
+  #   config:
+  #     max_tool_calls: 40
+  # phased_budget disabled — counterproductive for both flash and pro
+  # - module: agentm.extensions.builtin.phased_budget
+  #   config:
+  #     explore_budget: 12
+  - module: agentm.extensions.builtin.turn_reminder
   - module: agentm.extensions.builtin.tool_purpose
   - module: agentm.extensions.builtin.completion_guard
     config:

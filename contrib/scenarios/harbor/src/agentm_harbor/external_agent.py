@@ -37,6 +37,7 @@ class ExternalAgentMAgent(BaseAgent):
 
     def __init__(self, logs_dir: Path, *args: Any, **kwargs: Any) -> None:
         self._reasoning_effort: str | None = kwargs.pop("reasoning_effort", None)
+        # Harbor git main removed extra_env; env vars are read directly.
         super().__init__(logs_dir, *args, **kwargs)
 
     @staticmethod
@@ -60,22 +61,20 @@ class ExternalAgentMAgent(BaseAgent):
 
         set_harbor_environment(environment)
 
-        env_patch = dict(self.extra_env)
-        api_key = env_patch.get("AGENTM_API_KEY", os.environ.get("AGENTM_API_KEY", ""))
-        if api_key:
-            env_patch.setdefault("OPENAI_API_KEY", api_key)
-        base_url = env_patch.get("AGENTM_BASE_URL", os.environ.get("AGENTM_BASE_URL", ""))
-        if base_url:
-            env_patch.setdefault("OPENAI_BASE_URL", base_url)
-        if self._reasoning_effort:
-            env_patch.setdefault("AGENTM_REASONING_EFFORT", self._reasoning_effort)
-
+        api_key = os.environ.get("AGENTM_API_KEY", "")
+        base_url = os.environ.get("AGENTM_BASE_URL", "")
         saved: dict[str, str | None] = {}
-        for key, val in env_patch.items():
-            saved[key] = os.environ.get(key)
-            os.environ[key] = val
+        if api_key:
+            saved["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = api_key
+        if base_url:
+            saved["OPENAI_BASE_URL"] = os.environ.get("OPENAI_BASE_URL")
+            os.environ["OPENAI_BASE_URL"] = base_url
+        if self._reasoning_effort:
+            saved["AGENTM_REASONING_EFFORT"] = os.environ.get("AGENTM_REASONING_EFFORT")
+            os.environ["AGENTM_REASONING_EFFORT"] = self._reasoning_effort
 
-        model = self.model_name or env_patch.get("AGENTM_MODEL") or os.environ.get("AGENTM_MODEL")
+        model = self.model_name or os.environ.get("AGENTM_MODEL")
         config = AgentSessionConfig(
             cwd=os.getcwd(),
             model=model,

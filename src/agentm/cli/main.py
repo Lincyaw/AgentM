@@ -1439,6 +1439,20 @@ def send_cmd(
         sock.close()
 
 
+@app.command(name="dashboard")
+def dashboard_cmd(
+    session: str = typer.Argument(help="Session ID to monitor."),
+) -> None:
+    """Live TUI dashboard for monitoring and steering a running session."""
+    try:
+        from agentm.cli.dashboard import Dashboard
+    except ImportError:
+        typer.echo("Dashboard requires 'textual' — install with: pip install textual", err=True)
+        raise typer.Exit(1)
+    dash = Dashboard(session)
+    dash.run()
+
+
 def main() -> None:
     """Entry point for the ``agentm`` console script."""
     os.environ.setdefault("GRPC_VERBOSITY", "ERROR")

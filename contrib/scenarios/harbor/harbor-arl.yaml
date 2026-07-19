@@ -1,0 +1,10 @@
+agent:
+  import_path: "agentm_harbor:ExternalAgentMAgent"
+
+environment:
+  import_path: "arl.harbor:ArlEnvironment"
+  kwargs:
+    gateway_url: "http://118.145.253.105:8080"
+    image_registry: "pair-cn-guangzhou.cr.volces.com/opspai"
+    image_prefix: "ssb"
+    image_tag: "v1"

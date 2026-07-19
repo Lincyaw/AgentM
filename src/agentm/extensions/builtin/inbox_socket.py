@@ -7,15 +7,14 @@ session shutdown.
 
 Delivery modes (controlled by the first line of the payload):
 
-* ``!interrupt\\n<message>`` — abort the current tool execution, then
-  deliver the message immediately.  The interrupted tool returns an error
-  so the model knows the previous action was cancelled.
-* ``!wait\\n<message>`` (default) — queue the message and deliver it at
+* ``!interrupt\n<message>`` — block the NEXT tool call with the message
+  (like Claude Code's "[Request interrupted by user]"), then inject the
+  message as a user turn.  The model sees its tool call rejected and is
+  forced to respond to the supervisor guidance.
+* ``!wait\n<message>`` (default) — queue the message and deliver it at
   the next turn boundary, after the current tool finishes naturally.
-  This avoids the "backgrounded tool result competes with injected
-  message" problem.
-* ``!now\\n<message>`` — deliver immediately (original behavior).  The
-  current tool gets backgrounded.
+* ``!now\n<message>`` — deliver immediately into the inbox.  Picked up
+  at the next ContextEvent (before next LLM call).
 
 External usage::
 
@@ -24,7 +23,8 @@ External usage::
 
 Or manually::
 
-    echo "focus on the fix now" | socat - UNIX-CONNECT:~/.agentm/live/<id>.sock
+    echo '!interrupt
+    focus on the fix now' | socat - UNIX-CONNECT:~/.agentm/live/<id>.sock
 """
 
 from __future__ import annotations
@@ -37,7 +37,12 @@ from pathlib import Path
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import ExtensionAPI, SessionShutdownEvent, TurnEndEvent
+from agentm.core.abi import (
+    ExtensionAPI,
+    SessionShutdownEvent,
+    ToolCallEvent,
+    TurnEndEvent,
+)
 from agentm.core.lib import agentm_home_dir
 from agentm.extensions import ExtensionManifest
 
@@ -65,10 +70,14 @@ def _socket_path(session_id: str) -> Path:
     return _socket_dir() / f"{session_id}.sock"
 
 
+def _supervised_path(session_id: str) -> Path:
+    return _socket_dir() / f"{session_id}.supervised"
+
+
 class _InboxSocketRuntime:
     __slots__ = (
         "_api", "_session_id", "_server", "_sock_path",
-        "_shutdown", "_pending",
+        "_shutdown", "_pending", "_interrupt_message",
     )
 
     def __init__(self, api: ExtensionAPI, session_id: str) -> None:
@@ -78,6 +87,7 @@ class _InboxSocketRuntime:
         self._server: asyncio.AbstractServer | None = None
         self._shutdown = False
         self._pending: deque[str] = deque()
+        self._interrupt_message: str | None = None
 
     async def start(self) -> None:
         sock_dir = _socket_dir()
@@ -123,15 +133,18 @@ class _InboxSocketRuntime:
                 logger.info("inbox_socket: injected {} chars (now)", len(message))
 
             elif mode == "interrupt":
-                self._api.post_inbox(source="user", payload=message)
-                session = self._api.get_service("_session")
-                if session is not None and hasattr(session, "interrupt"):
-                    session.interrupt()
-                    writer.write(b"ok:interrupted\n")
-                    logger.info("inbox_socket: injected {} chars + interrupt", len(message))
-                else:
-                    writer.write(b"ok:now (interrupt unavailable)\n")
-                    logger.info("inbox_socket: injected {} chars (interrupt unavailable)", len(message))
+                # Store the message to block the next tool call.
+                # Do NOT post_inbox — the guidance is delivered via the
+                # tool-call block reason. A stray inbox item would keep
+                # the loop alive after the agent naturally stops.
+                self._interrupt_message = message
+                _supervised_path(self._session_id).touch()
+                writer.write(b"ok:interrupted\n")
+                logger.info(
+                    "inbox_socket: armed interrupt ({} chars) — "
+                    "next tool call will be blocked",
+                    len(message),
+                )
 
             else:
                 self._pending.append(message)
@@ -143,6 +156,27 @@ class _InboxSocketRuntime:
             logger.debug("inbox_socket: client error: {}", exc)
         finally:
             writer.close()
+
+    async def _on_tool_call(self, event: ToolCallEvent) -> dict | None:
+        """Block the next tool call when an interrupt is pending."""
+        if self._interrupt_message is None:
+            return None
+
+        message = self._interrupt_message
+        self._interrupt_message = None
+
+        logger.info(
+            "inbox_socket: blocking tool '{}' with supervisor interrupt",
+            event.tool_name,
+        )
+        return {
+            "block": True,
+            "reason": (
+                f"[Supervisor interrupted] Your action was cancelled. "
+                f"The supervisor says:\n\n{message}\n\n"
+                f"Follow the supervisor's instructions immediately."
+            ),
+        }
 
     async def _on_turn_end(self, _event: TurnEndEvent) -> None:
         """Drain queued messages at the turn boundary."""
@@ -162,6 +196,12 @@ class _InboxSocketRuntime:
                 self._sock_path.unlink()
             except OSError:
                 pass
+        sup = _supervised_path(self._session_id)
+        if sup.exists():
+            try:
+                sup.unlink()
+            except OSError:
+                pass
         logger.debug("inbox_socket: stopped")
 
 
@@ -170,5 +210,6 @@ async def install(api: ExtensionAPI, config: InboxSocketConfig) -> None:
     runtime = _InboxSocketRuntime(api, session_id)
     await runtime.start()
 
+    api.on(ToolCallEvent.CHANNEL, runtime._on_tool_call)
     api.on("turn_end", runtime._on_turn_end)
     api.on("session_shutdown", runtime.stop)

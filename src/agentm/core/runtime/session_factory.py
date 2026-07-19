@@ -606,6 +606,7 @@ async def create_agent_session(
         parent_session_id=config.parent_session_id,
         eval_sandbox=eval_sandbox,
     )
+    services["session_interrupt"] = instance.interrupt
 
     await bus.emit(
         SessionReadyEvent.CHANNEL,

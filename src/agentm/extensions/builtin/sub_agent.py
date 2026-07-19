@@ -753,26 +753,23 @@ class _ChildTaskManager:
             self._run_child(state=state, initial_prompt=prompt)
         )
         await self._registry.register(state)
+
+        if superseded_state is not None:
+            superseded_state.superseded_by = task_id
+
+        await state.task
         payload: dict[str, Any] = {
             "task_id": task_id,
             "child_session_id": child.session_id,
-            "status": _RUNNING,
+            "status": state.status,
             "purpose": purpose,
         }
+        if state.summary:
+            payload["summary"] = state.summary
+        if state.error:
+            payload["error"] = state.error
         if superseded_state is not None:
-            # Mark only after the replacing dispatch is definitely live, so a
-            # failed spawn never falsely fences the old attempt. If the old
-            # attempt already finalized, its result was delivered as current
-            # before this dispatch existed — fencing protects pending
-            # deliveries only.
-            superseded_state.superseded_by = task_id
             payload["supersedes"] = superseded_state.task_id
-            if superseded_state.status != _RUNNING:
-                payload["note"] = (
-                    f"superseded task {superseded_state.task_id} had already "
-                    f"finished ({superseded_state.status}); its earlier "
-                    "result was delivered before this dispatch"
-                )
         return _tool_result(payload)
 
     async def inject_instruction(self, args: dict[str, Any]) -> ToolResult:
@@ -822,6 +819,28 @@ class _ChildTaskManager:
             state.abort_signal.set()
         return _tool_result({"task_id": task_id, "status": _ABORTED})
 
+    async def check_agent(self, args: dict[str, Any]) -> ToolResult:
+        task_id = str(args.get("task_id", ""))
+        async with self._registry.lock:
+            state = self._registry.get(task_id)
+        if state is None:
+            return _tool_result(
+                {"error": f"unknown task_id: {task_id}"}, is_error=True
+            )
+        child_sid = getattr(state.session, "session_id", None)
+        result: dict[str, Any] = {
+            "task_id": task_id,
+            "status": state.status,
+            "purpose": state.purpose,
+        }
+        if child_sid:
+            result["child_session_id"] = child_sid
+        if state.summary:
+            result["summary"] = state.summary
+        if state.error:
+            result["error"] = state.error
+        return _tool_result(result)
+
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
         self._parent_session_id = event.session_id
         self._root_session_id = event.root_session_id
@@ -867,7 +886,6 @@ class _ChildTaskManager:
 class _DispatchAgentParams(PydanticBaseModel):
     purpose: str
     prompt: str
-    subagent_type: str | None = None
     extensions: list[list[Any]] | None = PydanticField(
         default=None,
         description="Each element is a [module_path, config] pair.",
@@ -886,6 +904,9 @@ class _InjectInstructionParams(PydanticBaseModel):
     message: str
 
 class _AbortTaskParams(PydanticBaseModel):
+    task_id: str
+
+class _CheckAgentParams(PydanticBaseModel):
     task_id: str
 
 def _validate_available_inherited_configs(
@@ -1022,25 +1043,21 @@ class _SubAgentRuntime:
         self._api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
 
     def _register_tools(self, manager: _ChildTaskManager) -> None:
+        is_child = bool(getattr(self._api, "parent_session_id", None))
+        if is_child:
+            return
         self._api.register_tool(
             FunctionTool(
                 name="dispatch_agent",
                 description=(
-                    "Spawn a child AgentSession — returns {task_id, "
-                    'child_session_id, status: "running", purpose} '
-                    "immediately and the child runs in the background. Its "
-                    "result arrives later in your inbox as a "
-                    "<subagent_result> block containing the child's final "
-                    "summary and any artifacts it produced; you are notified "
-                    "automatically, so do not poll. subagent_type is "
-                    "optional: omit it to spawn a child inheriting the "
-                    "current scenario's atoms, or pass a known persona name "
-                    "(system prompt + tool allowlist; unknown names error). "
-                    "extensions optionally adds [module_path, config] atom "
-                    "pairs on top of the inherited set. Use "
-                    "inject_instruction to guide the child mid-run, "
-                    "abort_task to stop it. Fails if max_workers children "
-                    "are already running."
+                    "Spawn a child AgentSession and block until it "
+                    "finishes. Returns {task_id, child_session_id, "
+                    "status, purpose, summary}. subagent_type is "
+                    "optional: omit it to inherit the current scenario's "
+                    "atoms. extensions optionally adds [module_path, "
+                    "config] atom pairs. Use inject_instruction to guide "
+                    "the child mid-run, abort_task to stop it, "
+                    "check_agent to poll status."
                 ),
                 parameters=pydantic_to_tool_schema(_DispatchAgentParams),
                 fn=manager.dispatch,
@@ -1068,6 +1085,18 @@ class _SubAgentRuntime:
                 ),
                 parameters=pydantic_to_tool_schema(_AbortTaskParams),
                 fn=manager.abort,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="check_agent",
+                description=(
+                    "Check the status of a dispatched child agent by its "
+                    "task_id. Returns status (running/completed/aborted/error), "
+                    "purpose, child_session_id, and summary if available."
+                ),
+                parameters=pydantic_to_tool_schema(_CheckAgentParams),
+                fn=manager.check_agent,
             )
         )
 

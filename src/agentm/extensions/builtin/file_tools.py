@@ -266,6 +266,8 @@ async def _upload_toolbox(
     writer: ResourceWriter, bash_ops: BashOperations, work_dir: str
 ) -> None:
     """Upload the agentm_toolbox package into the sandbox container."""
+    import base64
+
     sources = _collect_toolbox_sources()
     pkg_target = f"{_TOOLBOX_CONTAINER_DIR}/{_TOOLBOX_PKG}"
     await bash_ops.exec(
@@ -275,7 +277,12 @@ async def _upload_toolbox(
     )
     for rel_path, content in sources.items():
         target = f"{_TOOLBOX_CONTAINER_DIR}/{rel_path}"
-        await writer.write(target, content, rationale="toolbox upload")
+        b64 = base64.b64encode(content).decode()
+        await bash_ops.exec(
+            f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(target)}",
+            cwd=work_dir,
+            timeout=10,
+        )
     logger.debug(
         "file_tools: uploaded {} toolbox files to container", len(sources)
     )

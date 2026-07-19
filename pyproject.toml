@@ -54,9 +54,6 @@ eval = [
     "rank_bm25>=0.2",
     "tenacity>=8.0",
 ]
-harbor = [
-    "agentm-harbor>=0.1.0",
-]
 llmharness = ["llmharness"]
 mcp = ["agentm-mcp-bridge"]
 all-contrib = [
@@ -92,7 +89,6 @@ members = [
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
     "contrib/extensions/trajectory_index",
-    "contrib/scenarios/harbor",
     "contrib/scenarios/rca",
     "contrib/gateway-peers/feishu",
     "contrib/gateway-peers/weixin",
@@ -102,7 +98,6 @@ members = [
 fpg = { git = "https://github.com/Lincyaw/fpg-convention" }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
-agentm-harbor = { workspace = true }
 rca-scenario = { workspace = true }
 trajectory-index = { workspace = true }
 agentm-eval = { workspace = true }
