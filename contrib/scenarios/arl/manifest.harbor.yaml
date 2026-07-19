@@ -1,8 +1,0 @@
-name: arl:harbor
-description: |
-  AgentM as Harbor external agent.
-  Agent runs locally; tool calls route through Harbor's BaseEnvironment.
-
-includes:
-  - overlays/harbor.yaml
-  - overlays/tools.yaml

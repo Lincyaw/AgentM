@@ -172,18 +172,12 @@ Session ID is logged at agent start:
 
 ## Scenario manifest
 
-Harbor uses the `arl:harbor` variant in `contrib/scenarios/arl/`. The
-tool overlay is shared with the default ARL scenario:
-
-```
-contrib/scenarios/arl/
-  overlays/base.yaml       # ARL operations atom (agent_env backend)
-  overlays/harbor.yaml     # Harbor operations atom (harbor_ops)
-  overlays/tools.yaml      # shared tool atoms (file_tools, bash, etc.)
-  manifest.yaml            # arl (default) = base + tools
-  manifest.harbor.yaml     # arl:harbor = harbor + tools
-  manifest.harness.yaml    # arl:harness = base + tools + llmharness
-```
+The adapter owns and packages
+`contrib/scenarios/harbor/scenario.yaml`. Harbor injects its
+`BaseEnvironment` before the SDK session is created, and that manifest selects
+the matching operations atom. It is intentionally separate from source-tree
+CLI scenarios: installing the Harbor extra must not change or shadow the
+default SDK composition.
 
 ## Components
 

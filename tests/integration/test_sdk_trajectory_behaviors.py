@@ -44,7 +44,7 @@ from agentm.extensions.builtin.llm_openai import (
     OpenAIStreamFn,
 )
 from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
-from agentm.scenarios import builtin_scenario_loader
+from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import JsonlTrajectoryStore, PostgresTrajectoryStore
 from tests.fixtures.custom_trigger import CustomTrigger
@@ -412,6 +412,30 @@ async def test_sdk_rejects_changed_scenario_local_source(
                 model=_model(),
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_sdk_all_packaged_scenarios_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENTM_HOME", str(tmp_path / "agentm-home"))
+
+    expected = {"chat", "empty", "interrupt_demo", "minimal"}
+    assert set(packaged_scenario_names()) == expected
+
+    for scenario in sorted(expected):
+        session = await AgentSession.create(
+            AgentSessionConfig(
+                cwd=str(tmp_path),
+                scenario=scenario,
+                scenario_loader=builtin_scenario_loader,
+                stream_fn=_StubProvider("unused"),
+                model=_model(),
+            )
+        )
+        await session.shutdown()
 
 
 @pytest.mark.asyncio

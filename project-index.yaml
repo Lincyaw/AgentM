@@ -166,6 +166,9 @@ requirements:
       - path: src/agentm_toolbox/__main__.py
       - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py
+      - path: contrib/scenarios/chat/manifest.yaml
+      - path: contrib/scenarios/interrupt_demo/manifest.yaml
+      - path: contrib/scenarios/harbor/scenario.yaml
       - path: contrib/scenarios/harbor/src/agentm_harbor/external_agent.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/harbor_ops.py
       - path: contrib/extensions/policy/src/policy_engine/evaluator.py
