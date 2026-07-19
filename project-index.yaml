@@ -165,6 +165,8 @@ requirements:
       - path: tests/test_lifecycle_catalog_ports.py
     docs:
       - path: .claude/index.yaml
+      - path: .claude/designs/observability.md
       - path: README.md
       - path: docs/refactor-abstract-inventory.md
+      - path: tools/otel/README.md
     depends_on: []

@@ -1,75 +1,78 @@
-# Local OTel collector for AgentM
+# Local persistence and observability services
 
-`agentm.extensions.builtin.otlp_export` ships AgentM's OTLP spans + logs
-to a remote collector in real time (in addition to the per-session
-ndjson file written by `observability`). This directory gives you a
-one-command collector + Jaeger UI to receive them locally.
+This compose stack provides two independent data planes for development:
+
+| Service | Role | Data ownership |
+| --- | --- | --- |
+| PostgreSQL | Optional authoritative `TrajectoryStore` and `TrajectoryNodeStore` backend | Complete resumable sessions, turns, nodes, heads, cache, and compaction state |
+| OTel collector | OTLP transport | No durable AgentM ownership; forwards diagnostic logs and spans |
+| ClickHouse | Collector-managed observability query backend | Standard `otel_logs` and `otel_traces` only |
+
+Deployments select one authoritative trajectory backend, such as JSONL or
+PostgreSQL. OTLP is optional and never substitutes for a failed trajectory
+write. ClickHouse does not contain an AgentM-specific trajectory mirror.
 
 ## Start
 
 ```bash
 docker compose -f tools/otel/docker-compose.yaml up -d
-uv run agentm --extension agentm.extensions.builtin.otlp_export "hello"
-open http://localhost:16686       # Jaeger UI, service = "agentm"
+docker compose -f tools/otel/docker-compose.yaml ps
 ```
 
-Stop with `docker compose -f tools/otel/docker-compose.yaml down`.
-
-After the first traces arrive, run the index init script once to add
-materialized columns and bloom filter indexes for fast session-level queries:
+For a CLI session whose scenario installs the `observability` atom:
 
 ```bash
-clickhouse-client --host localhost --query "$(cat tools/otel/init-db.sql)"
-# or via HTTP:
-curl http://localhost:8123/ --data-binary @tools/otel/init-db.sql
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+OTEL_EXPORTER_OTLP_INSECURE=true \
+uv run agentm run --scenario chat --message "hello"
 ```
 
-Without these indexes, `agentm trace export-dataset` and other
-session-filtered queries do full table scans on every call.
+Open `http://localhost:8123/play` to query ClickHouse. PostgreSQL is available
+at `postgresql://agentm:agentm@localhost:55432/agentm_test`.
 
-## What you get
+Stop the services without deleting their volumes:
 
-Span tree per session (GenAI semconv aligned):
-
-```
-invoke_agent <scenario>
-├── agentm.turn (index=0)
-│   ├── chat <model>            (gen_ai.* attributes)
-│   └── execute_tool <name>     (gen_ai.tool.call.{arguments,result})
-└── agentm.turn (index=1)
-    └── ...
+```bash
+docker compose -f tools/otel/docker-compose.yaml down
 ```
 
-Lifecycle events (`extension.install`, `atom.reload`, `api.register`,
-`api.send_user_message`, `agentm.session.start`, `agentm.session.end`,
-`agentm.message.appended`, `agentm.turn.summary`, `agentm.diagnostic`)
-are emitted as **log records** on the same OTel pipeline, not spans.
+## ClickHouse indexes
 
-## Cross-session linkage
+After the collector creates its standard tables, apply the idempotent
+session-id indexes:
 
-Sub-agent + cognitive-audit child sessions share the parent's
-`trace_id` (W3C TraceContext propagation). Each session's
-`invoke_agent` span additionally carries `agentm.session.root_id` and
-`agentm.session.parent_id` attributes for stable Lucene/SQL grouping
-when traces span processes.
+```bash
+docker exec -i agentm-clickhouse clickhouse-client --multiquery \
+  < tools/otel/init-db.sql
+```
 
-## Config knobs (all optional)
+The indexes accelerate filters on the shared `agentm.session.id` attribute.
+They do not create session or turn storage.
 
-| Env var | Atom config | Default |
-|---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `endpoint` | `http://localhost:4317` (gRPC) |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `protocol` | `grpc` (or `http/protobuf`) |
-| `OTEL_EXPORTER_OTLP_HEADERS` | `headers` | none |
-| `OTEL_EXPORTER_OTLP_INSECURE` | `insecure` | `true` (grpc only) |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `timeout` | `10` (seconds) |
+## Signals
 
-Send to a remote collector (Grafana Cloud / Honeycomb / etc.) by setting
-`OTEL_EXPORTER_OTLP_ENDPOINT` + `OTEL_EXPORTER_OTLP_HEADERS` — the
-docker-compose here is for local dev only.
+| Signal | Examples | Query source |
+| --- | --- | --- |
+| Lifecycle logs | `agentm.session.start`, `agentm.session.ready`, `agentm.session.end` | `otel.otel_logs` |
+| Runtime logs | `agentm.turn.committed`, `agentm.run.end`, `agentm.event.dispatch` | `otel.otel_logs` |
+| Spans | `agentm.session <purpose>`, `agentm.turn`, `chat <model>`, `execute_tool <name>` | `otel.otel_traces` |
 
-## Useful Jaeger queries
+All records carry `agentm.session.id`; session lifecycle records also carry
+root and parent ids. These ids correlate observability with the selected
+trajectory store without copying complete turns into OTLP.
 
-* `gen_ai.request.model = "<your-model>"` — every LLM call.
-* `gen_ai.tool.name = "submit_verdict"` — only cognitive-audit verdicts.
-* tag `agentm.session.root_id = <hex>` — every span in one agent tree
-  (parent + sub-agents + audit children).
+## Configuration
+
+| Setting | Meaning | Default |
+| --- | --- | --- |
+| observability atom `export` | `auto`, `local_file`, or `otlp` | `auto` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint | `http://localhost:4317` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` or `http/protobuf` | `grpc` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Remote collector headers | none |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Disable TLS for gRPC | inferred for local endpoint |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | Export timeout in seconds | `10` |
+
+`export=auto` uses OTLP when the collector is reachable and otherwise writes
+the local per-session OTLP JSONL diagnostic file. `export=otlp` does not turn
+OTLP into trajectory persistence; resume still requires the configured
+`TrajectoryStore`.
