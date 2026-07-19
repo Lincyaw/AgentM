@@ -193,6 +193,8 @@ class DefaultSessionSpecResolver:
             ("env", self._env.get("AGENTM_PROVIDER"), "AGENTM_PROVIDER"),
             ("project_config", _get_path(project_config, ("default_provider",)), str(self._project_config) if self._project_config is not None else None),
             ("user_config", _get_path(user_config, ("default_provider",)), str(self._user_config) if self._user_config is not None else None),
+            ("project_config", _get_path(project_config, ("default_model",)), str(self._project_config) if self._project_config is not None else None),
+            ("user_config", _get_path(user_config, ("default_model",)), str(self._user_config) if self._user_config is not None else None),
         )
         if provider_name.source is None:
             return None, None
@@ -225,6 +227,7 @@ class DefaultSessionSpecResolver:
             "base_url",
             "model",
             "name",
+            "provider",
         ):
             provider_config.pop(resolver_only_key, None)
         provider_config["name"] = provider
@@ -265,7 +268,8 @@ class DefaultSessionSpecResolver:
         provenance.append(
             _provenance("provider", provider_name.source or "provider_default", provider_name.ref, provider)
         )
-        module = _provider_module(provider)
+        provider_type = _optional_str(project_profile.get("provider")) or _optional_str(user_profile.get("provider")) or provider
+        module = _provider_module(provider_type)
         return (module, provider_config), ProviderSessionIdentity(name=provider, model_id=_optional_str(provider_config.get("model")))
 
 

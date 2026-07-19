@@ -129,6 +129,23 @@ def _resolve_scenario(
     )
 
 
+_FLOOR_ATOMS: tuple[str, ...] = (
+    "agentm.extensions.builtin.observability",
+    "agentm.extensions.builtin.retry_policy",
+    "agentm.extensions.builtin.tool_result_cap",
+    "agentm.extensions.builtin.tool_error_messages",
+    "agentm.extensions.builtin.system_prompt",
+)
+
+
+def _ensure_floor_atoms(resolved: list[ExtensionSpec]) -> None:
+    """Append floor atoms that aren't already declared."""
+    existing = {module for module, _ in resolved}
+    for module in _FLOOR_ATOMS:
+        if module not in existing:
+            resolved.append((module, {}))
+
+
 def _resolve_extensions(
     *,
     scenario: str | None,
@@ -149,6 +166,7 @@ def _resolve_extensions(
         base_dir = None
 
     resolved.extend(_copy_extension_specs(extra_extensions))
+    _ensure_floor_atoms(resolved)
     if atom_configs:
         configured: list[ExtensionSpec] = []
         for module, config in resolved:
@@ -651,7 +669,7 @@ async def create_from_config(
             if resolved_spec is not None
             else config.extensions
         ),
-        extra_extensions=() if resolved_spec is not None else config.extra_extensions,
+        extra_extensions=config.extra_extensions,
         provider=resolved_spec.provider if resolved_spec is not None else config.provider,
         provider_resolver=config.provider_resolver,
         provider_identity=(

@@ -1,0 +1,6 @@
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      idle_timeout_seconds: 7200
+      work_dir: /app

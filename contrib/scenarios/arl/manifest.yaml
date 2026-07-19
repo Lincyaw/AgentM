@@ -1,0 +1,6 @@
+name: arl
+description: General-purpose agent session with ARL sandbox backend.
+
+includes:
+  - overlays/base.yaml
+  - overlays/tools.yaml
