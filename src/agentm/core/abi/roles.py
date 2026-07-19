@@ -13,8 +13,17 @@ RETRY_POLICY_SERVICE: Final = "retry_policy"
 PROVIDER_RESOLVER_SERVICE: Final = "provider_resolver"
 """Service key for selecting the active provider registration."""
 
+PROVIDER_SESSION_IDENTITY_SERVICE: Final = "provider_session_identity"
+"""Service key for the provider/model identity bound to a session history."""
+
+PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE: Final = "provider_prompt_cache_adapter"
+"""Service key for provider-specific prompt-cache materialization."""
+
 RESOURCE_WRITER_SERVICE: Final = "resource_writer"
 """Service key for the host-provided resource mutation port."""
+
+RESOURCE_READER_SERVICE: Final = "resource_reader"
+"""Service key for backend-neutral ResourceRef reads."""
 
 RESOURCE_TXN_SERVICE: Final = "resource_txn"
 """Service key for the active turn-scoped resource transaction."""
@@ -43,6 +52,9 @@ TRAJECTORY_NODE_STORE_SERVICE: Final = "trajectory_node_store"
 TRAJECTORY_QUERY_STORE_SERVICE: Final = "trajectory_query_store"
 """Service key for session/turn/span/event trajectory query."""
 
+CATALOG_QUERY_SERVICE: Final = "catalog_query"
+"""Service key for indexed catalog active-set query."""
+
 SESSION_SPEC_RESOLVER_SERVICE: Final = "session_spec_resolver"
 """Service key for host-owned session config resolution."""
 
@@ -54,6 +66,12 @@ CONTEXT_PROJECTION_SERVICE: Final = "context_projection"
 
 EFFECT_SCOPE_SERVICE: Final = "effect_scope"
 """Service key for the host-provided world-effect lifecycle port."""
+
+ENVIRONMENT_RESTORE_POLICY_SERVICE: Final = "environment_restore_policy"
+"""Service key for resume-time environment restore failure policy."""
+
+ENVIRONMENT_RESTORE_STATUS_SERVICE: Final = "environment_restore_status"
+"""Service key for the last resume-time environment restore status."""
 
 VERSIONED_RESOURCE_STORE_SERVICE: Final = "versioned_resource_store"
 """Service key for versioned SDK resources such as atom identity payloads."""
@@ -71,14 +89,20 @@ __all__ = [
     "ACTIVE_SET_FINGERPRINT_SERVICE",
     "ATOM_CATALOG_SERVICE",
     "BASH_OPERATIONS_SERVICE",
+    "CATALOG_QUERY_SERVICE",
     "CONTEXT_PROJECTION_SERVICE",
     "EFFECT_SCOPE_SERVICE",
+    "ENVIRONMENT_RESTORE_POLICY_SERVICE",
+    "ENVIRONMENT_RESTORE_STATUS_SERVICE",
     "ENVIRONMENT_OPERATIONS_SERVICE",
     "LOOP_BUDGET_SERVICE",
     "OPERATIONS_SERVICE",
     "PERMISSION_POLICY_SERVICE",
     "PROVIDER_RESOLVER_SERVICE",
+    "PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE",
+    "PROVIDER_SESSION_IDENTITY_SERVICE",
     "RETRY_POLICY_SERVICE",
+    "RESOURCE_READER_SERVICE",
     "RESOURCE_WRITER_SERVICE",
     "RESOURCE_TXN_SERVICE",
     "RESOLVED_SESSION_SPEC_SERVICE",

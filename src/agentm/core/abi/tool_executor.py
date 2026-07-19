@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.cancel import CancelSignal
+from agentm.core.abi.operations import EnvironmentRef
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
 
 
@@ -26,12 +27,14 @@ class ToolExecutionRequirements:
     network: bool = False
     concurrency: ToolConcurrency = "exclusive"
     interrupt: ToolInterruptBehavior = "block"
+    environment_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionCapabilities:
     """Capabilities provided by a concrete tool executor backend."""
 
+    environment: EnvironmentRef | None = None
     isolation: tuple[IsolationLevel, ...] = ("none",)
     filesystem: tuple[FilesystemAccess, ...] = ("none",)
     killable: bool = False
@@ -47,6 +50,9 @@ class ToolExecutionRequest:
     tool: Tool
     args: Mapping[str, object]
     requirements: ToolExecutionRequirements | None = None
+    environment: EnvironmentRef | None = None
+    cwd: str | None = None
+    metadata: Mapping[str, str | int | float | bool | None] | None = None
 
 
 @runtime_checkable

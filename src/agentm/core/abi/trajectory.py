@@ -43,6 +43,7 @@ TrajectoryNodeKind = Literal[
     "message",
     "compact_boundary",
     "content_replacement",
+    "config_change",
     "snip",
     "checkpoint",
 ]
@@ -277,6 +278,22 @@ class TrajectoryForkPoint:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionConfigChange:
+    """Explicit session config/provider change represented as a control node."""
+
+    change_id: str
+    session_id: str
+    key: str
+    before: str | None = None
+    after: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    node_id: str | None = None
+    reason: str = ""
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class TrajectoryProjectionStatus:
     """Projection health for rebuildable message-node stores."""
 
@@ -408,6 +425,7 @@ __all__ = [
     "Outcome",
     "PromptCacheState",
     "Round",
+    "SessionConfigChange",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
     "ToolRecord",

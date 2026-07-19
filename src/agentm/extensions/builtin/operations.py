@@ -29,7 +29,11 @@ class OperationsConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="operations",
     description="Registers local shell operations for SDK sessions.",
-    registers=(),
+    registers=(
+        "service:operations",
+        "service:operations:bash",
+        "service:operations:environment",
+    ),
     config_schema=OperationsConfig,
     requires=(),
     priority=AtomInstallPriority.SERVICE,

@@ -16,20 +16,28 @@ requirements:
     code:
       - path: src/agentm/core/abi/catalog.py
       - path: src/agentm/core/abi/codec.py
+      - path: src/agentm/core/abi/compaction.py
       - path: src/agentm/core/abi/context.py
       - path: src/agentm/core/abi/lifecycle.py
+      - path: src/agentm/core/abi/manifest.py
       - path: src/agentm/core/abi/messages.py
+      - path: src/agentm/core/abi/operations.py
       - path: src/agentm/core/abi/permission.py
+      - path: src/agentm/core/abi/provider.py
       - path: src/agentm/core/abi/query.py
+      - path: src/agentm/core/abi/resource.py
+      - path: src/agentm/core/abi/roles.py
       - path: src/agentm/core/abi/session_api.py
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/core/abi/store.py
       - path: src/agentm/core/abi/tool_executor.py
       - path: src/agentm/core/abi/tool_orchestration.py
       - path: src/agentm/core/abi/trajectory.py
+      - path: src/agentm/core/runtime/catalog.py
       - path: src/agentm/core/runtime/driver.py
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/runtime/session_factory.py
+      - path: src/agentm/core/runtime/session_meta.py
       - path: src/agentm/core/runtime/stores/query.py
       - path: src/agentm/core/runtime/stores/jsonl.py
       - path: src/agentm/core/runtime/tool_executor.py
@@ -37,6 +45,8 @@ requirements:
       - path: src/agentm/core/runtime/tree.py
       - path: src/agentm/core/runtime/trajectory_nodes.py
       - path: src/agentm/core/runtime/trigger_queue.py
+      - path: src/agentm/extensions/builtin/operations.py
+      - path: src/agentm/extensions/builtin/tool_bash.py
     tests:
       - path: tests/integration/test_trajectory.py
       - path: tests/test_lifecycle_catalog_ports.py

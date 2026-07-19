@@ -25,7 +25,13 @@ from agentm.core.abi.cancel import (
     ResettableCancelSource,
     cancel_reason,
 )
-from agentm.core.abi.compaction import ContextBudget, ContextProjection
+from agentm.core.abi.compaction import (
+    ContextBudget,
+    ContextProjection,
+    ProjectionInput,
+    project_context,
+    supports_node_chain_projection,
+)
 from agentm.core.abi.lifecycle import EffectScope, EffectTxn
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -808,13 +814,87 @@ async def _history_messages(
     trigger_renderers: dict[str, TriggerRenderer] | None,
     projection: ContextProjection | None,
     budget: ContextBudget,
+    trajectory_node_store: TrajectoryNodeStore | None,
+    session_id: str,
+    root_session_id: str | None,
+    parent_session_id: str | None,
 ) -> list[AgentMessage]:
     if projection is None:
         return await build_context(turns, policies, trigger_renderers)
-    messages = list(projection.project(turns, budget))
+    projection_input = await _projection_input(
+        turns=turns,
+        projection=projection,
+        trajectory_node_store=trajectory_node_store,
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+    )
+    messages = list(project_context(projection, projection_input, budget))
     for policy in policies:
         messages = await policy.transform(messages, turns)
     return messages
+
+
+async def _projection_input(
+    *,
+    turns: Sequence[Turn],
+    projection: ContextProjection,
+    trajectory_node_store: TrajectoryNodeStore | None,
+    session_id: str,
+    root_session_id: str | None,
+    parent_session_id: str | None,
+) -> ProjectionInput:
+    if not supports_node_chain_projection(projection):
+        return ProjectionInput(
+            turns=turns,
+            session_id=session_id,
+            root_session_id=root_session_id,
+            parent_session_id=parent_session_id,
+        )
+    if trajectory_node_store is None:
+        raise RuntimeError(
+            "node-chain ContextProjection requires a trajectory_node_store"
+        )
+    head = await asyncio.to_thread(
+        trajectory_node_store.get_head,
+        session_id,
+        head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+        branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        is_sidechain=False,
+    )
+    if head is None:
+        if turns:
+            raise RuntimeError(
+                "node-chain ContextProjection requires an active trajectory head"
+            )
+        return ProjectionInput(
+            turns=turns,
+            source="node_chain",
+            session_id=session_id,
+            root_session_id=root_session_id,
+            parent_session_id=parent_session_id,
+        )
+    leaf_node_id = head.node_id or head.logical_parent_id
+    nodes: list[TrajectoryNode] = []
+    if leaf_node_id is not None:
+        nodes = await asyncio.to_thread(
+            trajectory_node_store.load_chain,
+            session_id,
+            leaf_node_id,
+            include_logical_parent=True,
+        )
+    return ProjectionInput(
+        turns=turns,
+        nodes=tuple(nodes),
+        source="node_chain",
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        branch_id=head.branch_id,
+        head_id=head.head_id,
+        leaf_node_id=leaf_node_id,
+        logical_parent_id=head.logical_parent_id,
+    )
 
 
 def _context_budget(model: Model) -> ContextBudget:
@@ -951,8 +1031,11 @@ async def drive(
                 tool_executor=tool_executor,
                 tool_orchestrator=tool_orchestrator,
                 permission_policy=permission_policy,
+                trajectory_node_store=trajectory_node_store,
                 store=store,
                 session_id=session_id,
+                root_session_id=root_session_id,
+                parent_session_id=parent_session_id,
                 tool_calls_remaining=(
                     None
                     if max_tool_calls is None
@@ -1093,8 +1176,11 @@ async def _react_loop(
     tool_executor: ToolExecutor | None,
     tool_orchestrator: ToolOrchestrator | None,
     permission_policy: PermissionPolicy | None,
+    trajectory_node_store: TrajectoryNodeStore | None,
     store: TrajectoryStore | None,
     session_id: str,
+    root_session_id: str | None,
+    parent_session_id: str | None,
     tool_calls_remaining: int | None,
     tool_allowlist: tuple[str, ...] | None,
 ) -> tuple[Outcome, TurnMeta, int]:
@@ -1115,6 +1201,10 @@ async def _react_loop(
         trigger_renderers=trigger_renderers,
         projection=context_projection,
         budget=context_budget,
+        trajectory_node_store=trajectory_node_store,
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
     )
     messages = list(history_messages) + list(trigger_messages)
     turn_signal = _TurnCancelSignal(
@@ -1151,6 +1241,10 @@ async def _react_loop(
                 trigger_renderers=trigger_renderers,
                 projection=context_projection,
                 budget=context_budget,
+                trajectory_node_store=trajectory_node_store,
+                session_id=session_id,
+                root_session_id=root_session_id,
+                parent_session_id=parent_session_id,
             )
             round_messages = _execution_to_messages(execution, trigger_messages)
             messages = list(history_messages) + round_messages

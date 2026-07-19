@@ -10,9 +10,20 @@ from agentm.core.abi.catalog import (
 from agentm.core.abi.lifecycle import (
     EffectScope,
     EffectTxn,
+    EnvironmentRestorePolicy,
+    EnvironmentRestoreStatus,
 )
-from agentm.core.abi.provider import ProviderConfig, ProviderRegistry, ProviderResolver
+from agentm.core.abi.provider import (
+    ProviderConfig,
+    ProviderPromptCacheAdapter,
+    ProviderPromptCacheRequest,
+    ProviderPromptCacheResult,
+    ProviderRegistry,
+    ProviderResolver,
+    ProviderSessionIdentity,
+)
 from agentm.core.abi.resource import (
+    ResourceReader,
     ResourceMutation,
     ResourceRef,
     ResourceTxn,
@@ -30,6 +41,7 @@ from agentm.core.abi.session_api import ExtensionSpec, ScenarioLoader, ScenarioS
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.tool_executor import ToolExecutionRequirements, ToolExecutor
+from agentm.core.abi.trajectory import SessionConfigChange
 from agentm.core.runtime.session import Session
 
 __all__ = [
@@ -39,20 +51,28 @@ __all__ = [
     "AtomCatalog",
     "EffectScope",
     "EffectTxn",
+    "EnvironmentRestorePolicy",
+    "EnvironmentRestoreStatus",
     "ExtensionSpec",
     "LoopConfig",
     "Model",
     "ProviderConfig",
+    "ProviderPromptCacheAdapter",
+    "ProviderPromptCacheRequest",
+    "ProviderPromptCacheResult",
     "ProviderRegistry",
     "ProviderResolver",
+    "ProviderSessionIdentity",
     "ResolvedSessionSpec",
     "ResourceWriter",
+    "ResourceReader",
     "ResourceMutation",
     "ResourceRef",
     "ResourceTxn",
     "ScenarioLoader",
     "ScenarioSpec",
     "Session",
+    "SessionConfigChange",
     "SessionSpecResolver",
     "StreamFn",
     "ToolExecutionRequirements",

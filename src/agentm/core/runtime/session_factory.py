@@ -24,20 +24,29 @@ from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
     AtomCatalog,
+    AtomCatalogQuery,
     ResourceVersion,
     VersionedResourceStore,
 )
 from agentm.core.abi.errors import ExtensionLoadError
-from agentm.core.abi.lifecycle import EffectScope
-from agentm.core.abi.manifest import AtomInstallPriority, ExtensionManifest
+from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestorePolicy
+from agentm.core.abi.manifest import (
+    AtomInstallPriority,
+    ExtensionManifest,
+    provided_capability_keys,
+    requirement_keys,
+)
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.provider import ProviderResolver
-from agentm.core.abi.resource import ResourceWriter
+from agentm.core.abi.provider import ProviderSessionIdentity
+from agentm.core.abi.resource import ResourceReader, ResourceWriter
 from agentm.core.abi.tool_executor import ToolExecutor
 from agentm.core.abi.tool_orchestration import ToolOrchestrator
 from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_SERVICE,
     ATOM_CATALOG_SERVICE,
+    CATALOG_QUERY_SERVICE,
+    ENVIRONMENT_RESTORE_POLICY_SERVICE,
     LOOP_BUDGET_SERVICE,
     PROVIDER_RESOLVER_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
@@ -102,6 +111,7 @@ class _ExtensionPlanItem:
     requires: tuple[str, ...]
     registers: tuple[str, ...]
     priority: int
+    provides: tuple[str, ...]
 
 
 def _copy_extension_specs(specs: Sequence[ExtensionSpec]) -> list[ExtensionSpec]:
@@ -174,7 +184,17 @@ def _load_manifest(module_path: str) -> ExtensionManifest | None:
     return manifest
 
 
-def _extension_plan(specs: Sequence[ExtensionSpec]) -> list[_ExtensionPlanItem]:
+def _service_capabilities(services: ServiceRegistry | None) -> set[str]:
+    if services is None:
+        return set()
+    return {f"service:{name}" for name in services.names()}
+
+
+def _extension_plan(
+    specs: Sequence[ExtensionSpec],
+    *,
+    available_capabilities: set[str] | None = None,
+) -> list[_ExtensionPlanItem]:
     items: list[_ExtensionPlanItem] = []
     by_name: dict[str, _ExtensionPlanItem] = {}
     for index, (module_path, config) in enumerate(specs):
@@ -195,6 +215,10 @@ def _extension_plan(specs: Sequence[ExtensionSpec]) -> list[_ExtensionPlanItem]:
                 if manifest is not None
                 else AtomInstallPriority.NORMAL
             ),
+            provides=provided_capability_keys(
+                atom_name=name,
+                registers=manifest.registers if manifest is not None else (),
+            ),
         )
         if name in by_name:
             previous = by_name[name]
@@ -205,11 +229,20 @@ def _extension_plan(specs: Sequence[ExtensionSpec]) -> list[_ExtensionPlanItem]:
         items.append(item)
         by_name[name] = item
 
+    available = set(available_capabilities or ())
+    plan_capabilities = {
+        capability
+        for item in items
+        for capability in item.provides
+    }
     missing: dict[str, list[str]] = {}
     for item in items:
-        for dep in item.requires:
-            if dep not in by_name:
-                missing.setdefault(item.name, []).append(dep)
+        for requirement in item.requires:
+            if not any(
+                key in available or key in plan_capabilities
+                for key in requirement_keys(requirement)
+            ):
+                missing.setdefault(item.name, []).append(requirement)
     if missing:
         detail = "; ".join(
             f"{name} requires {', '.join(deps)}"
@@ -219,11 +252,15 @@ def _extension_plan(specs: Sequence[ExtensionSpec]) -> list[_ExtensionPlanItem]:
 
     remaining = dict(by_name)
     ordered: list[_ExtensionPlanItem] = []
+    provided = set(available)
     while remaining:
         ready = [
             item
             for item in remaining.values()
-            if all(dep not in remaining for dep in item.requires)
+            if all(
+                any(key in provided for key in requirement_keys(requirement))
+                for requirement in item.requires
+            )
         ]
         if not ready:
             cycle = ", ".join(sorted(remaining))
@@ -231,6 +268,7 @@ def _extension_plan(specs: Sequence[ExtensionSpec]) -> list[_ExtensionPlanItem]:
         ready.sort(key=lambda item: (item.priority, item.index))
         chosen = ready[0]
         ordered.append(chosen)
+        provided.update(chosen.provides)
         del remaining[chosen.name]
     return ordered
 
@@ -264,10 +302,17 @@ def _register_default_catalog_services(services: ServiceRegistry) -> None:
             scope="host",
         )
     if not services.has(ATOM_CATALOG_SERVICE):
+        catalog = InMemoryAtomCatalog()
         services.register(
             ATOM_CATALOG_SERVICE,
-            InMemoryAtomCatalog(),
+            catalog,
             AtomCatalog,
+            scope="host",
+        )
+        services.register(
+            CATALOG_QUERY_SERVICE,
+            catalog,
+            AtomCatalogQuery,
             scope="host",
         )
 
@@ -346,6 +391,12 @@ def _atom_activation(
         priority=item.priority,
         requires=tuple(item.requires),
         registers=tuple(item.registers),
+        required_capabilities=tuple(
+            key
+            for requirement in item.requires
+            for key in requirement_keys(requirement)
+        ),
+        provided_capabilities=tuple(item.provides),
         config_fingerprint=_config_fingerprint(
             normalize_atom_config(item.manifest, item.config)
         ),
@@ -399,12 +450,15 @@ async def create_session(
     extra_extensions: Sequence[ExtensionSpec] = (),
     provider: ExtensionSpec | None = None,
     provider_resolver: ProviderResolver | None = None,
+    provider_identity: ProviderSessionIdentity | None = None,
+    resource_reader: ResourceReader | None = None,
     resource_writer: ResourceWriter | None = None,
     tool_executor: ToolExecutor | None = None,
     tool_orchestrator: ToolOrchestrator | None = None,
     permission_policy: PermissionPolicy | None = None,
     trajectory_node_store: TrajectoryNodeStore | None = None,
     effect_scope: EffectScope | None = None,
+    environment_restore_policy: EnvironmentRestorePolicy | None = None,
     versioned_resource_store: VersionedResourceStore | None = None,
     atom_catalog: AtomCatalog | None = None,
     atom_configs: dict[str, dict[str, Any]] | None = None,
@@ -469,8 +523,11 @@ async def create_session(
         tool_executor=tool_executor,
         tool_orchestrator=tool_orchestrator,
         permission_policy=permission_policy,
+        resource_reader=resource_reader,
         trajectory_node_store=trajectory_node_store,
         versioned_resource_store=versioned_resource_store,
+        environment_restore_policy=environment_restore_policy,
+        provider_identity=provider_identity,
         services=resolved_services,
         cwd=cwd,
         purpose=purpose,
@@ -485,7 +542,10 @@ async def create_session(
     plan_specs = list(extension_specs)
     if provider is not None:
         plan_specs.append(provider)
-    plan = _extension_plan(plan_specs)
+    plan = _extension_plan(
+        plan_specs,
+        available_capabilities=_service_capabilities(resolved_services),
+    )
     for item in plan:
         await install_extension(session, item.module_path, item.config)
     active_set = await _record_active_set(session, plan)
@@ -501,6 +561,7 @@ async def create_session(
                 ctx,
                 resolved_spec=resolved_spec,
                 active_set=active_set,
+                provider_identity=session.provider_session_identity(),
             ),
         ),
         initial_turns=initial_turns or (),
@@ -529,6 +590,13 @@ async def create_from_config(config: "AgentSessionConfig") -> Session:
             config.spec_resolver,
             scope="host",
         )
+    if config.environment_restore_policy is not None:
+        services.register(
+            ENVIRONMENT_RESTORE_POLICY_SERVICE,
+            config.environment_restore_policy,
+            EnvironmentRestorePolicy,
+            scope="session",
+        )
     resolved_spec = _resolve_session_spec(config)
     if resolved_spec is not None:
         services.register(
@@ -551,14 +619,21 @@ async def create_from_config(config: "AgentSessionConfig") -> Session:
         extra_extensions=() if resolved_spec is not None else config.extra_extensions,
         provider=resolved_spec.provider if resolved_spec is not None else config.provider,
         provider_resolver=config.provider_resolver,
+        provider_identity=(
+            resolved_spec.provider_identity
+            if resolved_spec is not None
+            else None
+        ),
         stream_fn=config.stream_fn,
         model=config.model,
+        resource_reader=config.resource_reader,
         resource_writer=config.resource_writer,
         tool_executor=config.tool_executor,
         tool_orchestrator=config.tool_orchestrator,
         permission_policy=config.permission_policy,
         trajectory_node_store=config.trajectory_node_store,
         effect_scope=config.effect_scope,
+        environment_restore_policy=config.environment_restore_policy,
         versioned_resource_store=config.versioned_resource_store,
         atom_catalog=config.atom_catalog,
         atom_configs=_resolved_atom_config(resolved_spec, config.atom_config_overrides),
@@ -615,6 +690,13 @@ async def create_child_session(
             PROVIDER_RESOLVER_SERVICE,
             config.provider_resolver,
             scope="host",
+        )
+    if config.environment_restore_policy is not None:
+        child_services.register(
+            ENVIRONMENT_RESTORE_POLICY_SERVICE,
+            config.environment_restore_policy,
+            EnvironmentRestorePolicy,
+            scope="session",
         )
     resolved_spec = _resolve_session_spec(config)
     if resolved_spec is not None:
@@ -673,12 +755,20 @@ async def create_child_session(
         max_tool_calls=max_tool_calls,
         tool_allowlist=config.tool_allowlist,
         cancel_signal=config.cancel_signal,
+        environment_restore_policy=config.environment_restore_policy,
+        provider_identity=(
+            resolved_spec.provider_identity
+            if resolved_spec is not None
+            else None
+        ),
         services=child_services,
         cwd=config.cwd or parent.ctx.cwd,
         purpose=config.purpose,
     )
     if config.resource_writer is not None:
         child.register_resource_writer(config.resource_writer, replace=True)
+    if config.resource_reader is not None:
+        child.register_resource_reader(config.resource_reader, replace=True)
     if config.tool_executor is not None:
         child.register_tool_executor(config.tool_executor, replace=True)
     if config.tool_orchestrator is not None:
@@ -701,7 +791,10 @@ async def create_child_session(
     provider_spec = resolved_spec.provider if resolved_spec is not None else config.provider
     if provider_spec is not None:
         plan_specs.append(provider_spec)
-    plan = _extension_plan(plan_specs)
+    plan = _extension_plan(
+        plan_specs,
+        available_capabilities=_service_capabilities(child_services),
+    )
     for item in plan:
         await install_extension(
             child,
@@ -726,6 +819,7 @@ async def create_child_session(
                 child_ctx,
                 resolved_spec=resolved_spec,
                 active_set=active_set,
+                provider_identity=child.provider_session_identity(),
             ),
         ),
         initial_turns=config.initial_turns,

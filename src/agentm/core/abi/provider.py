@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Protocol
 
+from .messages import AgentMessage
 from .stream import Model, StreamFn
+from .trajectory import PromptCacheState
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +25,62 @@ class ProviderConfig:
     name: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderSessionIdentity:
+    """Provider/model identity bound to a session history.
+
+    Once a session has committed a turn, this identity is frozen. Changing it
+    requires a fork/new session or an explicit future config-change control
+    node; silent mid-history provider drift is not allowed.
+    """
+
+    name: str
+    model_id: str | None = None
+    active_set_digest: str | None = None
+    frozen_after_turn_index: int | None = None
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+
 ProviderRegistry = Mapping[str, ProviderConfig]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPromptCacheRequest:
+    """Provider adapter input for prompt-cache materialization."""
+
+    messages: Sequence[AgentMessage]
+    model: Model
+    state: PromptCacheState
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPromptCacheResult:
+    """Provider adapter output after applying cache hints."""
+
+    messages: Sequence[AgentMessage]
+    state: PromptCacheState
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+
+class ProviderPromptCacheAdapter(Protocol):
+    """Provider-specific bridge for prompt-cache state.
+
+    Context policy owns when cache boundaries exist. Provider adapters own how
+    that boundary is represented for one model API. Core never embeds
+    provider-specific cache-control syntax.
+    """
+
+    def apply_prompt_cache(
+        self,
+        request: ProviderPromptCacheRequest,
+    ) -> ProviderPromptCacheResult: ...
 
 
 class ProviderResolver(Protocol):
@@ -32,4 +89,12 @@ class ProviderResolver(Protocol):
     def resolve_provider(self, providers: ProviderRegistry) -> str | None: ...
 
 
-__all__ = ["ProviderConfig", "ProviderRegistry", "ProviderResolver"]
+__all__ = [
+    "ProviderConfig",
+    "ProviderPromptCacheAdapter",
+    "ProviderPromptCacheRequest",
+    "ProviderPromptCacheResult",
+    "ProviderRegistry",
+    "ProviderResolver",
+    "ProviderSessionIdentity",
+]

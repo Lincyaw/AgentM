@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.trajectory import Turn, TurnRef
 
 
 LifecycleMeta = Mapping[str, str | int | float | bool | None]
+RestoreFailureMode = Literal["fail", "degraded_readonly"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,33 @@ class EnvironmentSnapshot:
     session_id: str = ""
     ref: TurnRef | None = None
     metadata: LifecycleMeta = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentRestorePolicy:
+    """Host policy for resume-time environment restore failures.
+
+    The SDK default is ``fail`` because continuing after a failed restore can
+    detach the committed trajectory from the external world state. Hosts that
+    can enforce read-only/degraded behavior may opt into ``degraded_readonly``.
+    """
+
+    on_failure: RestoreFailureMode = "fail"
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentRestoreStatus:
+    """Recorded result of a resume-time environment restore attempt."""
+
+    session_id: str
+    restored: bool
+    mode: RestoreFailureMode = "fail"
+    error: str | None = None
+    metadata: LifecycleMeta = field(default_factory=dict)
+
+
+class EnvironmentRestoreError(RuntimeError):
+    """Raised when resume cannot restore the external effect scope."""
 
 
 @runtime_checkable
@@ -108,7 +136,11 @@ class EnvironmentSnapshotter(Protocol):
 __all__ = [
     "EffectScope",
     "EffectTxn",
+    "EnvironmentRestoreError",
+    "EnvironmentRestorePolicy",
+    "EnvironmentRestoreStatus",
     "EnvironmentSnapshot",
     "EnvironmentSnapshotter",
     "LifecycleMeta",
+    "RestoreFailureMode",
 ]

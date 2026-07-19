@@ -12,11 +12,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.cancel import CancelReason, CancelSignal
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
-from agentm.core.abi.lifecycle import EffectScope
+from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestorePolicy
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.operations import Operations
 from agentm.core.abi.permission import PermissionPolicy
@@ -24,8 +24,12 @@ from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
 from agentm.core.abi.tool_orchestration import ToolOrchestrator
-from agentm.core.abi.provider import ProviderConfig, ProviderResolver
-from agentm.core.abi.resource import ResourceTxn, ResourceWriter
+from agentm.core.abi.provider import (
+    ProviderConfig,
+    ProviderResolver,
+    ProviderSessionIdentity,
+)
+from agentm.core.abi.resource import ResourceReader, ResourceTxn, ResourceWriter
 from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.services import ServiceRegistry
@@ -36,6 +40,24 @@ from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer
 
 Unsubscribe = Callable[[], None]
 ExtensionSpec = tuple[str, dict[str, Any]]
+ConfigSource = Literal[
+    "explicit",
+    "atom_override",
+    "env",
+    "project_config",
+    "user_config",
+    "scenario_default",
+    "provider_default",
+]
+SESSION_CONFIG_PRECEDENCE: tuple[ConfigSource, ...] = (
+    "explicit",
+    "atom_override",
+    "env",
+    "project_config",
+    "user_config",
+    "scenario_default",
+    "provider_default",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,11 +115,13 @@ class AgentSessionConfig:
     provider_resolver: ProviderResolver | None = None
     stream_fn: StreamFn | None = None
     model: Model | None = None
+    resource_reader: ResourceReader | None = None
     resource_writer: ResourceWriter | None = None
     tool_executor: ToolExecutor | None = None
     tool_orchestrator: ToolOrchestrator | None = None
     permission_policy: PermissionPolicy | None = None
     effect_scope: EffectScope | None = None
+    environment_restore_policy: EnvironmentRestorePolicy | None = None
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
@@ -115,6 +139,16 @@ class AgentSessionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigValueProvenance:
+    """Typed provenance for one resolved config value."""
+
+    path: str
+    source: ConfigSource
+    source_ref: str | None = None
+    value_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedSessionSpec:
     """Resolved session composition/config plus provenance."""
 
@@ -122,6 +156,8 @@ class ResolvedSessionSpec:
     extensions: tuple[ExtensionSpec, ...]
     atom_config: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     provider: ExtensionSpec | None = None
+    provider_identity: ProviderSessionIdentity | None = None
+    value_provenance: tuple[ConfigValueProvenance, ...] = ()
     provenance: Mapping[str, object] = field(default_factory=dict)
 
 
@@ -240,6 +276,19 @@ class AtomAPI(Protocol):
 
     def get_resource_writer(self) -> ResourceWriter | None:
         """Return the resource boundary, when the host or an atom registered one."""
+        ...
+
+    def register_resource_reader(
+        self,
+        reader: ResourceReader,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register the read-side ResourceRef dereference boundary."""
+        ...
+
+    def get_resource_reader(self) -> ResourceReader | None:
+        """Return the ResourceRef read boundary, when registered."""
         ...
 
     def get_resource_txn(self) -> ResourceTxn | None:
@@ -488,11 +537,14 @@ class SpawnedSession(Protocol):
 __all__ = [
     "AgentSessionConfig",
     "AtomAPI",
+    "ConfigSource",
+    "ConfigValueProvenance",
     "ExtensionSpec",
     "LoopConfig",
     "ResolvedSessionSpec",
     "ScenarioLoader",
     "ScenarioSpec",
+    "SESSION_CONFIG_PRECEDENCE",
     "SessionSpecResolver",
     "SessionContext",
     "SpawnedSession",

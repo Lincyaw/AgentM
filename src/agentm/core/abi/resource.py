@@ -16,15 +16,51 @@ from typing import Literal, Protocol, runtime_checkable
 WriterAuthor = Literal["agent", "human", "indexer"]
 PathClass = Literal["managed", "unmanaged", "constitution"]
 ResourceMutationOp = Literal["write", "replace", "delete"]
+ResourceNamespace = Literal[
+    "workspace",
+    "artifact",
+    "sandbox",
+    "summary",
+    "content",
+    "catalog",
+    "observability",
+    "environment",
+]
 ResourceMeta = dict[str, str | int | float | bool | None]
+RESOURCE_NAMESPACE_WORKSPACE = "workspace"
+RESOURCE_NAMESPACE_ARTIFACT = "artifact"
+RESOURCE_NAMESPACE_SANDBOX = "sandbox"
+RESOURCE_NAMESPACE_SUMMARY = "summary"
+RESOURCE_NAMESPACE_CONTENT = "content"
+RESOURCE_NAMESPACE_CATALOG = "catalog"
+RESOURCE_NAMESPACE_OBSERVABILITY = "observability"
+RESOURCE_NAMESPACE_ENVIRONMENT = "environment"
 
 
 @dataclass(frozen=True, slots=True)
 class ResourceRef:
-    """Stable identity for a mutable host resource."""
+    """Stable identity for a mutable host resource.
+
+    ``namespace`` is logical, not physical. Backends decide whether
+    ``content:foo`` is Postgres, S3, local disk, or an environment-local file.
+    """
 
     namespace: str
     path: str
+
+    def uri(self) -> str:
+        """Return a compact, stable ``namespace:path`` representation."""
+
+        return f"{self.namespace}:{self.path}"
+
+    @classmethod
+    def parse(cls, value: str) -> "ResourceRef":
+        """Parse ``namespace:path`` into a ``ResourceRef``."""
+
+        namespace, separator, path = value.partition(":")
+        if not separator or not namespace or not path:
+            raise ValueError(f"invalid ResourceRef URI: {value!r}")
+        return cls(namespace=namespace, path=path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +102,22 @@ class BatchHandle(Protocol):
     async def replace(self, path: str, old: bytes, new: bytes) -> None: ...
 
     async def delete(self, path: str) -> None: ...
+
+
+@runtime_checkable
+class ResourceReader(Protocol):
+    """Backend-neutral read authority for logical ``ResourceRef`` values.
+
+    Existing file-oriented code may still read through ``Operations`` or the
+    compatibility methods on ``ResourceWriter``. New code that needs to
+    dereference trajectory ``content_ref`` values should use this Protocol.
+    """
+
+    async def read_ref(self, ref: ResourceRef) -> bytes: ...
+
+    async def exists_ref(self, ref: ResourceRef) -> bool: ...
+
+    async def list_ref(self, ref: ResourceRef) -> list[ResourceRef]: ...
 
 
 @runtime_checkable
@@ -111,7 +163,12 @@ class ResourceTxn(Protocol):
 
 @runtime_checkable
 class ResourceWriter(Protocol):
-    """Host-provided resource access and mutation boundary."""
+    """Host-provided resource mutation boundary.
+
+    The path-based read helpers remain for compatibility with existing file
+    tools. Backend-neutral content dereference should use ``ResourceReader`` or
+    environment ``Operations`` according to caller authority.
+    """
 
     async def read(self, path: str) -> bytes: ...
 
@@ -167,9 +224,19 @@ class TransactionalResourceWriter(ResourceWriter, Protocol):
 __all__ = [
     "BatchHandle",
     "PathClass",
+    "RESOURCE_NAMESPACE_ARTIFACT",
+    "RESOURCE_NAMESPACE_CATALOG",
+    "RESOURCE_NAMESPACE_CONTENT",
+    "RESOURCE_NAMESPACE_ENVIRONMENT",
+    "RESOURCE_NAMESPACE_OBSERVABILITY",
+    "RESOURCE_NAMESPACE_SANDBOX",
+    "RESOURCE_NAMESPACE_SUMMARY",
+    "RESOURCE_NAMESPACE_WORKSPACE",
     "ResourceMeta",
     "ResourceMutation",
     "ResourceMutationOp",
+    "ResourceNamespace",
+    "ResourceReader",
     "ResourceRef",
     "ResourceTxn",
     "ResourceTxnContext",

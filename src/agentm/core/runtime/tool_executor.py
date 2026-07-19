@@ -98,6 +98,14 @@ def _validate_requirements(
         unsupported.append(f"concurrency={requirements.concurrency}")
     if requirements.interrupt not in capabilities.interrupt:
         unsupported.append(f"interrupt={requirements.interrupt}")
+    if (
+        requirements.environment_id is not None
+        and (
+            capabilities.environment is None
+            or capabilities.environment.id != requirements.environment_id
+        )
+    ):
+        unsupported.append(f"environment_id={requirements.environment_id}")
     if unsupported:
         raise RuntimeError(
             "tool executor does not satisfy requirements: " + ", ".join(unsupported)
@@ -117,13 +125,15 @@ async def execute_tool_call(
     resolved_requirements = (
         requirements if requirements is not None else tool_execution_requirements(tool)
     )
+    chosen = executor or _DIRECT_EXECUTOR
+    capabilities = chosen.capabilities()
+    _validate_requirements(resolved_requirements, capabilities)
     request = ToolExecutionRequest(
         tool=tool,
         args=args,
         requirements=resolved_requirements,
+        environment=capabilities.environment,
     )
-    chosen = executor or _DIRECT_EXECUTOR
-    _validate_requirements(resolved_requirements, chosen.capabilities())
     return await chosen.execute(request, signal=signal)
 
 

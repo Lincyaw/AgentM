@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.manifest import AtomInstallPriority
 
 
 CatalogMeta = Mapping[str, str | int | float | bool | None]
+CatalogQuerySort = Literal["asc", "desc"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,8 @@ class AtomActivation:
     priority: int = AtomInstallPriority.NORMAL
     requires: tuple[str, ...] = ()
     registers: tuple[str, ...] = ()
+    required_capabilities: tuple[str, ...] = ()
+    provided_capabilities: tuple[str, ...] = ()
     config_fingerprint: str | None = None
 
 
@@ -90,6 +93,43 @@ class ActiveSetFingerprint:
     digest: str
     atoms: tuple[AtomActivation, ...] = ()
     metadata: CatalogMeta = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogActiveSetRecord:
+    """One queryable active-set record.
+
+    The catalog query surface is intentionally separate from trajectory query:
+    it indexes SDK composition identity, not session event order.
+    """
+
+    session_id: str
+    fingerprint: ActiveSetFingerprint
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    scenario: str | None = None
+    provider: str | None = None
+    created_at: float = 0.0
+    metadata: CatalogMeta = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogQuery:
+    """Portable predicate shape for atom/catalog indexes."""
+
+    session_id: str | None = None
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    scenario: str | None = None
+    provider: str | None = None
+    atom_name: str | None = None
+    module_path: str | None = None
+    register: str | None = None
+    require: str | None = None
+    digest: str | None = None
+    version_id: str | None = None
+    limit: int | None = None
+    sort: CatalogQuerySort = "asc"
 
 
 @runtime_checkable
@@ -111,11 +151,26 @@ class AtomCatalog(Protocol):
         ...
 
 
+@runtime_checkable
+class AtomCatalogQuery(Protocol):
+    """Optional indexed query surface for active-set catalog records."""
+
+    async def query_active_sets(
+        self,
+        query: CatalogQuery,
+    ) -> list[CatalogActiveSetRecord]:
+        ...
+
+
 __all__ = [
     "ActiveSetFingerprint",
     "AtomActivation",
     "AtomCatalog",
+    "AtomCatalogQuery",
+    "CatalogActiveSetRecord",
     "CatalogMeta",
+    "CatalogQuery",
+    "CatalogQuerySort",
     "ResourceVersion",
     "VersionedResourceStore",
 ]

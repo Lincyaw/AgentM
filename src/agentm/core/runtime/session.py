@@ -23,14 +23,24 @@ from agentm.core.abi.codec import CodecRegistry, TriggerCodec
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomCatalog,
+    AtomCatalogQuery,
     VersionedResourceStore,
 )
-from agentm.core.abi.lifecycle import EffectScope
+from agentm.core.abi.lifecycle import (
+    EffectScope,
+    EnvironmentRestoreError,
+    EnvironmentRestorePolicy,
+    EnvironmentRestoreStatus,
+)
 from agentm.core.abi.messages import AgentMessage, ImageContent, TextContent
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.operations import EnvironmentOperations, Operations
-from agentm.core.abi.provider import ProviderConfig, ProviderResolver
-from agentm.core.abi.resource import ResourceTxn, ResourceWriter
+from agentm.core.abi.provider import (
+    ProviderConfig,
+    ProviderResolver,
+    ProviderSessionIdentity,
+)
+from agentm.core.abi.resource import ResourceReader, ResourceTxn, ResourceWriter
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
@@ -48,19 +58,25 @@ from agentm.core.abi.events import (
     ChildSessionStartEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
+    TurnCommittedEvent,
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.roles import (
     ATOM_CATALOG_SERVICE,
     ACTIVE_SET_FINGERPRINT_SERVICE,
+    CATALOG_QUERY_SERVICE,
     BASH_OPERATIONS_SERVICE,
     EFFECT_SCOPE_SERVICE,
+    ENVIRONMENT_RESTORE_POLICY_SERVICE,
+    ENVIRONMENT_RESTORE_STATUS_SERVICE,
     ENVIRONMENT_OPERATIONS_SERVICE,
     OPERATIONS_SERVICE,
     PERMISSION_POLICY_SERVICE,
     PROVIDER_RESOLVER_SERVICE,
+    PROVIDER_SESSION_IDENTITY_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
     RESOURCE_WRITER_SERVICE,
+    RESOURCE_READER_SERVICE,
     RESOURCE_TXN_SERVICE,
     TOOL_EXECUTOR_SERVICE,
     TOOL_ORCHESTRATOR_SERVICE,
@@ -93,6 +109,7 @@ from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, U
 from agentm.core.runtime.driver import ThinkingLevel, drive
 from agentm.core.runtime.session_meta import (
     context_from_session_meta,
+    provider_identity_from_session_meta,
     session_meta_config,
 )
 from agentm.core.runtime.trajectory import Trajectory
@@ -251,8 +268,11 @@ class Session:
         tool_executor: ToolExecutor | None = None,
         tool_orchestrator: ToolOrchestrator | None = None,
         permission_policy: PermissionPolicy | None = None,
+        resource_reader: ResourceReader | None = None,
         trajectory_node_store: TrajectoryNodeStore | None = None,
         versioned_resource_store: VersionedResourceStore | None = None,
+        environment_restore_policy: EnvironmentRestorePolicy | None = None,
+        provider_identity: ProviderSessionIdentity | None = None,
         services: ServiceRegistry | None = None,
         cwd: str = "",
         purpose: str = "root",
@@ -306,6 +326,24 @@ class Session:
         self._driver_task: asyncio.Task[None] | None = None
         self.installed_extensions: list[str] = []
         self._active_provider_name: str | None = None
+        inherited_provider_identity = self.services.get(
+            PROVIDER_SESSION_IDENTITY_SERVICE,
+            ProviderSessionIdentity,
+        )
+        self._provider_identity: ProviderSessionIdentity | None = (
+            provider_identity
+            if provider_identity is not None
+            else inherited_provider_identity
+            if isinstance(inherited_provider_identity, ProviderSessionIdentity)
+            else None
+        )
+        if self._provider_identity is not None:
+            self.services.register(
+                PROVIDER_SESSION_IDENTITY_SERVICE,
+                self._provider_identity,
+                ProviderSessionIdentity,
+                scope="session",
+            )
         if provider_resolver is not None:
             self.services.register(
                 PROVIDER_RESOLVER_SERVICE,
@@ -318,12 +356,21 @@ class Session:
             self.register_tool_orchestrator(tool_orchestrator, replace=True)
         if permission_policy is not None:
             self.register_permission_policy(permission_policy, replace=True)
+        if resource_reader is not None:
+            self.register_resource_reader(resource_reader, replace=True)
         if trajectory_node_store is not None:
             self.register_trajectory_node_store(trajectory_node_store, replace=True)
         if versioned_resource_store is not None:
             self.register_versioned_resource_store(
                 versioned_resource_store,
                 replace=True,
+            )
+        if environment_restore_policy is not None:
+            self.services.register(
+                ENVIRONMENT_RESTORE_POLICY_SERVICE,
+                environment_restore_policy,
+                EnvironmentRestorePolicy,
+                scope="session",
             )
         if tool_allowlist is not None:
             self.services.register("tool_allowlist", tuple(tool_allowlist), scope="session")
@@ -364,6 +411,11 @@ class Session:
             if isinstance(policy, BindableContextPolicy):
                 policy.bind(policy_ctx)
 
+        self.bus.on(
+            TurnCommittedEvent.CHANNEL,
+            self._freeze_provider_on_turn_commit,
+            owner="agentm.core.session",
+        )
         self.bus.freeze_clear()
         self._driver_task = asyncio.create_task(
             self._run_driver(),
@@ -378,6 +430,9 @@ class Session:
             extension_module_paths=tuple(self.installed_extensions),
             model=self._model,
         ))
+
+    def _freeze_provider_on_turn_commit(self, _: TurnCommittedEvent) -> None:
+        self._freeze_provider_after_commits()
 
     async def _run_driver(self) -> None:
         try:
@@ -658,6 +713,40 @@ class Session:
     def _activate_provider(self, *, fallback: str | None) -> None:
         providers = self._provider_configs()
         if not providers:
+            if (
+                self._provider_identity is not None
+                and self._model is not None
+                and self._provider_identity.model_id is not None
+                and getattr(self._model, "id", None) != self._provider_identity.model_id
+            ):
+                raise RuntimeError(
+                    "cannot activate provider: session is bound to model "
+                    f"{self._provider_identity.model_id!r}, got "
+                    f"{getattr(self._model, 'id', None)!r}"
+                )
+            return
+        self._freeze_provider_after_commits()
+        if self._provider_identity is not None:
+            provider = providers.get(self._provider_identity.name)
+            if provider is None:
+                if not self.trajectory.turns:
+                    return
+                raise RuntimeError(
+                    "cannot activate provider: session is bound to provider "
+                    f"{self._provider_identity.name!r}, but it is not registered"
+                )
+            model_id = getattr(provider.model, "id", None)
+            if (
+                self._provider_identity.model_id is not None
+                and model_id != self._provider_identity.model_id
+            ):
+                raise RuntimeError(
+                    "cannot activate provider: session is bound to model "
+                    f"{self._provider_identity.model_id!r}, got {model_id!r}"
+                )
+            self._active_provider_name = self._provider_identity.name
+            self._stream_fn = provider.stream_fn
+            self._model = provider.model
             return
         selected = self._resolve_provider_name(providers, fallback=fallback)
         if selected is None:
@@ -666,6 +755,101 @@ class Session:
         self._active_provider_name = selected
         self._stream_fn = provider.stream_fn
         self._model = provider.model
+
+    def _freeze_provider_after_commits(self) -> None:
+        if self._provider_identity is not None or not self.trajectory.turns:
+            return
+        providers = self._provider_configs()
+        first_model_id = next(
+            (
+                turn.meta.model_id
+                for turn in self.trajectory.turns
+                if turn.meta.model_id
+            ),
+            None,
+        )
+        if not providers:
+            if self._model is None:
+                return
+            active_set = self._active_set_fingerprint()
+            self._set_provider_identity(
+                ProviderSessionIdentity(
+                    name=self._active_provider_name or "direct",
+                    model_id=first_model_id or getattr(self._model, "id", None),
+                    active_set_digest=(
+                        active_set.digest if active_set is not None else None
+                    ),
+                    frozen_after_turn_index=self.trajectory.turns[0].index,
+                )
+            )
+            return
+        provider_name = self._active_provider_name
+        if provider_name is None or provider_name not in providers:
+            provider_name = next(
+                (
+                    name
+                    for name, config in providers.items()
+                    if first_model_id is not None
+                    and getattr(config.model, "id", None) == first_model_id
+                ),
+                next(reversed(providers)),
+            )
+        provider = providers[provider_name]
+        active_set = self._active_set_fingerprint()
+        self._set_provider_identity(
+            ProviderSessionIdentity(
+                name=provider_name,
+                model_id=first_model_id or getattr(provider.model, "id", None),
+                active_set_digest=active_set.digest if active_set is not None else None,
+                frozen_after_turn_index=self.trajectory.turns[0].index,
+            )
+        )
+
+    def _set_provider_identity(self, identity: ProviderSessionIdentity) -> None:
+        self._provider_identity = identity
+        self.services.register(
+            PROVIDER_SESSION_IDENTITY_SERVICE,
+            identity,
+            ProviderSessionIdentity,
+            scope="session",
+        )
+
+    def provider_session_identity(self) -> ProviderSessionIdentity | None:
+        """Return the provider/model identity bound to this session, if known."""
+
+        self._freeze_provider_after_commits()
+        if self._provider_identity is not None:
+            return self._provider_identity
+        if self._active_provider_name is None:
+            self._activate_provider(fallback=None)
+        if self._model is None:
+            return None
+        active_set = self._active_set_fingerprint()
+        return ProviderSessionIdentity(
+            name=self._active_provider_name or "direct",
+            model_id=getattr(self._model, "id", None),
+            active_set_digest=active_set.digest if active_set is not None else None,
+        )
+
+    def _environment_restore_policy(self) -> EnvironmentRestorePolicy:
+        policy = self.services.get(
+            ENVIRONMENT_RESTORE_POLICY_SERVICE,
+            EnvironmentRestorePolicy,
+        )
+        if isinstance(policy, EnvironmentRestorePolicy):
+            return policy
+        return EnvironmentRestorePolicy()
+
+    def _record_environment_restore_status(
+        self,
+        status: EnvironmentRestoreStatus,
+    ) -> None:
+        self.services.register(
+            ENVIRONMENT_RESTORE_STATUS_SERVICE,
+            status,
+            EnvironmentRestoreStatus,
+            scope="session",
+        )
 
     def _resolve_provider_name(
         self,
@@ -769,6 +953,33 @@ class Session:
         return self.services.get(
             RESOURCE_WRITER_SERVICE,
             cast(type[ResourceWriter], ResourceWriter),
+        )
+
+    def register_resource_reader(
+        self,
+        reader: ResourceReader,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = RESOURCE_READER_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("resource_reader already registered")
+        self.services.register(
+            service_name,
+            reader,
+            ResourceReader,
+            scope="resource",
+        )
+        self._emit_register_event(
+            "resource_reader",
+            service_name,
+            {"service": reader},
+        )
+
+    def get_resource_reader(self) -> ResourceReader | None:
+        return self.services.get(
+            RESOURCE_READER_SERVICE,
+            cast(type[ResourceReader], ResourceReader),
         )
 
     def get_resource_txn(self) -> ResourceTxn | None:
@@ -954,6 +1165,13 @@ class Session:
             cast(type[AtomCatalog], AtomCatalog),
             scope="host",
         )
+        if isinstance(catalog, AtomCatalogQuery):
+            self.services.register(
+                CATALOG_QUERY_SERVICE,
+                catalog,
+                AtomCatalogQuery,
+                scope="host",
+            )
         self._emit_register_event(
             "atom_catalog",
             service_name,
@@ -1140,6 +1358,7 @@ class Session:
                         child.ctx,
                         resolved_spec=child._resolved_session_spec(),
                         active_set=child._active_set_fingerprint(),
+                        provider_identity=child.provider_session_identity(),
                     ),
                 ),
             )
@@ -1174,6 +1393,7 @@ class Session:
             session_id=uuid.uuid4().hex[:16],
             purpose=purpose,
         )
+        provider_identity = source.provider_session_identity()
 
         if source.store is not None:
             await asyncio.to_thread(
@@ -1189,6 +1409,7 @@ class Session:
                         child_ctx,
                         resolved_spec=source._resolved_session_spec(),
                         active_set=source._active_set_fingerprint(),
+                        provider_identity=provider_identity,
                     ),
                 ),
                 prefix.turns,
@@ -1217,6 +1438,13 @@ class Session:
                 ActiveSetFingerprint,
                 scope="session",
             )
+        if provider_identity is not None:
+            child_services.register(
+                PROVIDER_SESSION_IDENTITY_SERVICE,
+                provider_identity,
+                ProviderSessionIdentity,
+                scope="session",
+            )
 
         forked = cls(
             ctx=child_ctx,
@@ -1235,6 +1463,7 @@ class Session:
             max_tool_calls=source._max_tool_calls,
             tool_allowlist=source._tool_allowlist(),
             thinking=source._thinking,
+            provider_identity=provider_identity,
             services=child_services,
         )
 
@@ -1270,10 +1499,39 @@ class Session:
         meta, turns = await asyncio.to_thread(store.load, session_id)
         trajectory = Trajectory(turns=turns)
         ctx = context_from_session_meta(session_id, meta)
+        provider_identity = provider_identity_from_session_meta(meta)
+        if provider_identity is not None and "provider_identity" not in kwargs:
+            kwargs["provider_identity"] = provider_identity
         session = cls(ctx=ctx, trajectory=trajectory, store=store, **kwargs)  # type: ignore[arg-type]
         effect_scope = session.get_effect_scope()
         if effect_scope is not None:
-            await effect_scope.restore(session_id=session.id, turns=tuple(turns))
+            try:
+                await effect_scope.restore(session_id=session.id, turns=tuple(turns))
+                session._record_environment_restore_status(
+                    EnvironmentRestoreStatus(
+                        session_id=session.id,
+                        restored=True,
+                        mode=session._environment_restore_policy().on_failure,
+                    )
+                )
+            except Exception as exc:
+                policy = session._environment_restore_policy()
+                restore_status = EnvironmentRestoreStatus(
+                    session_id=session.id,
+                    restored=False,
+                    mode=policy.on_failure,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                session._record_environment_restore_status(restore_status)
+                if policy.on_failure != "degraded_readonly":
+                    raise EnvironmentRestoreError(
+                        f"environment restore failed for session {session.id}"
+                    ) from exc
+                logger.exception(
+                    "environment restore failed for session {}; continuing "
+                    "in degraded_readonly mode",
+                    session.id,
+                )
 
         node_store = session.get_trajectory_node_store()
         if node_store is not None:

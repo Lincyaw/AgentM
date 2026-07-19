@@ -14,7 +14,9 @@ from pydantic import BaseModel
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
+    CatalogActiveSetRecord,
     CatalogMeta,
+    CatalogQuery,
     ResourceVersion,
 )
 from agentm.core.abi.manifest import ExtensionManifest
@@ -84,10 +86,11 @@ class InMemoryVersionedResourceStore:
 class InMemoryAtomCatalog:
     """In-memory active-set catalog with deterministic fingerprints."""
 
-    __slots__ = ("_active_sets",)
+    __slots__ = ("_active_sets", "_records")
 
     def __init__(self) -> None:
         self._active_sets: dict[str, ActiveSetFingerprint] = {}
+        self._records: dict[str, CatalogActiveSetRecord] = {}
 
     async def record_active_set(
         self,
@@ -104,10 +107,86 @@ class InMemoryAtomCatalog:
             metadata={"atom_count": len(captured)},
         )
         self._active_sets[session_id] = fingerprint
+        self._records[session_id] = CatalogActiveSetRecord(
+            session_id=session_id,
+            fingerprint=fingerprint,
+        )
         return fingerprint
 
     async def get_active_set(self, session_id: str) -> ActiveSetFingerprint | None:
         return self._active_sets.get(session_id)
+
+    async def query_active_sets(
+        self,
+        query: CatalogQuery,
+    ) -> list[CatalogActiveSetRecord]:
+        records = list(self._records.values())
+        if query.session_id is not None:
+            records = [r for r in records if r.session_id == query.session_id]
+        if query.root_session_id is not None:
+            records = [r for r in records if r.root_session_id == query.root_session_id]
+        if query.parent_session_id is not None:
+            records = [
+                r for r in records if r.parent_session_id == query.parent_session_id
+            ]
+        if query.scenario is not None:
+            records = [r for r in records if r.scenario == query.scenario]
+        if query.provider is not None:
+            records = [r for r in records if r.provider == query.provider]
+        if query.digest is not None:
+            records = [r for r in records if r.fingerprint.digest == query.digest]
+        if query.atom_name is not None:
+            records = [
+                r
+                for r in records
+                if any(atom.name == query.atom_name for atom in r.fingerprint.atoms)
+            ]
+        if query.module_path is not None:
+            records = [
+                r
+                for r in records
+                if any(
+                    atom.module_path == query.module_path
+                    for atom in r.fingerprint.atoms
+                )
+            ]
+        if query.register is not None:
+            records = [
+                r
+                for r in records
+                if any(
+                    query.register in atom.registers
+                    or query.register in atom.provided_capabilities
+                    for atom in r.fingerprint.atoms
+                )
+            ]
+        if query.require is not None:
+            records = [
+                r
+                for r in records
+                if any(
+                    query.require in atom.requires
+                    or query.require in atom.required_capabilities
+                    for atom in r.fingerprint.atoms
+                )
+            ]
+        if query.version_id is not None:
+            records = [
+                r
+                for r in records
+                if any(
+                    atom.version is not None
+                    and atom.version.version_id == query.version_id
+                    for atom in r.fingerprint.atoms
+                )
+            ]
+        records.sort(
+            key=lambda record: (record.created_at, record.session_id),
+            reverse=query.sort == "desc",
+        )
+        if query.limit is not None:
+            records = records[: query.limit]
+        return records
 
 
 def build_atom_identity_payload(
@@ -228,6 +307,8 @@ def _activation_record(atom: AtomActivation) -> dict[str, Any]:
         "priority": atom.priority,
         "requires": list(atom.requires),
         "registers": list(atom.registers),
+        "required_capabilities": list(atom.required_capabilities),
+        "provided_capabilities": list(atom.provided_capabilities),
         "config_fingerprint": atom.config_fingerprint,
     }
 
