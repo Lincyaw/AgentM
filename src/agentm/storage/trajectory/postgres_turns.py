@@ -7,9 +7,12 @@ from collections.abc import Sequence
 
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import SessionMeta
-from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint, TurnRef
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
+    validate_checkpoint_commit,
+    validate_turn_append,
+    validate_turn_checkpoint,
     validate_turn_sequence,
 )
 from agentm.storage.trajectory.postgres import (
@@ -25,9 +28,9 @@ from agentm.storage.trajectory.postgres import (
 class PostgresTrajectoryStore:
     """Turn-level trajectory store backed by Postgres.
 
-    Two tables: ``sessions`` (JSONB meta) and ``turns`` (JSONB per-turn,
-    TOAST-compressed by Postgres). Append is single-row INSERT with an
-    index check.
+    ``sessions`` owns metadata, ``checkpoints`` owns the latest incomplete
+    turn state, and ``turns`` owns committed JSONB records. Final append and
+    checkpoint removal share one Postgres transaction.
     """
 
     def __init__(
@@ -77,6 +80,19 @@ class PostgresTrajectoryStore:
             )
             cur.execute(
                 f"""
+                CREATE TABLE IF NOT EXISTS {self._table("checkpoints")} (
+                    session_id text PRIMARY KEY
+                        REFERENCES {self._table("sessions")}(id),
+                    turn_index integer NOT NULL,
+                    turn_id text NOT NULL,
+                    updated_at double precision NOT NULL,
+                    checkpoint_json jsonb NOT NULL,
+                    UNIQUE (session_id, turn_id)
+                )
+                """
+            )
+            cur.execute(
+                f"""
                 CREATE INDEX IF NOT EXISTS {self._index("turns_session_idx")}
                 ON {self._table("turns")} (session_id, turn_index)
                 """
@@ -101,6 +117,73 @@ class PostgresTrajectoryStore:
                 """
             )
         _commit(self._connection)
+
+    def save_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None:
+        checkpoint_json = json.dumps(
+            self._codec.serialize_turn_checkpoint(checkpoint),
+            sort_keys=True,
+            allow_nan=False,
+        )
+        with _cursor(self._connection) as cur:
+            committed = self._lock_session_turns(cur, session_id)
+            existing = self._select_checkpoint(cur, session_id)
+            validate_turn_checkpoint(
+                committed,
+                checkpoint,
+                existing=existing,
+            )
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("checkpoints")}
+                    (
+                        session_id,
+                        turn_index,
+                        turn_id,
+                        updated_at,
+                        checkpoint_json
+                    )
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (session_id)
+                DO UPDATE SET
+                    turn_index = EXCLUDED.turn_index,
+                    turn_id = EXCLUDED.turn_id,
+                    updated_at = EXCLUDED.updated_at,
+                    checkpoint_json = EXCLUDED.checkpoint_json
+                """,
+                (
+                    session_id,
+                    checkpoint.index,
+                    checkpoint.id,
+                    checkpoint.updated_at,
+                    checkpoint_json,
+                ),
+            )
+        _commit(self._connection)
+
+    def load_checkpoint(self, session_id: str) -> TurnCheckpoint | None:
+        with _cursor(self._connection) as cur:
+            cur.execute(
+                f"""
+                SELECT c.checkpoint_json
+                FROM {self._table("sessions")} AS s
+                LEFT JOIN {self._table("checkpoints")} AS c
+                    ON c.session_id = s.id
+                WHERE s.id = %s
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            if row[0] is None:
+                return None
+            return self._codec.deserialize_turn_checkpoint(
+                dict(_json_mapping(row[0]))
+            )
 
     def create_session(self, meta: SessionMeta) -> None:
         self.create_session_with_turns(meta, ())
@@ -141,45 +224,20 @@ class PostgresTrajectoryStore:
 
     def append(self, session_id: str, turn: Turn) -> None:
         with _cursor(self._connection) as cur:
-            cur.execute(
-                f"""
-                SELECT 1 FROM {self._table("sessions")}
-                WHERE id = %s
-                FOR UPDATE
-                """,
-                (session_id,),
+            committed = self._lock_session_turns(cur, session_id)
+            validate_turn_append(committed, turn)
+            validate_checkpoint_commit(
+                self._select_checkpoint(cur, session_id),
+                turn,
             )
-            if cur.fetchone() is None:
-                raise KeyError(session_id)
-            cur.execute(
-                f"SELECT MAX(turn_index) FROM {self._table('turns')} WHERE session_id = %s",
-                (session_id,),
-            )
-            row = cur.fetchone()
-            raw_max = row[0] if row is not None else None
-            if raw_max is None:
-                max_index = -1
-            elif isinstance(raw_max, int) and not isinstance(raw_max, bool):
-                max_index = raw_max
-            else:
-                raise ValueError("Postgres MAX(turn_index) returned a non-integer")
-            expected = max_index + 1
-            if turn.index != expected:
-                raise ValueError(
-                    f"turn index {turn.index} does not follow {max_index}"
-                )
-            cur.execute(
-                f"""
-                SELECT 1 FROM {self._table("turns")}
-                WHERE session_id = %s AND turn_id = %s
-                """,
-                (session_id, turn.id),
-            )
-            if cur.fetchone() is not None:
-                raise ValueError(
-                    f"duplicate turn id in session: {turn.id}"
-                )
             self._insert_turn(cur, session_id, turn)
+            cur.execute(
+                f"""
+                DELETE FROM {self._table("checkpoints")}
+                WHERE session_id = %s
+                """,
+                (session_id,),
+            )
         _commit(self._connection)
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
@@ -235,25 +293,6 @@ class PostgresTrajectoryStore:
                 for r in cur.fetchall()
             ]
 
-    def upsert_turn(self, session_id: str, turn: Turn) -> None:
-        turn_json = json.dumps(
-            self._codec.serialize_turn(turn),
-            sort_keys=True,
-            allow_nan=False,
-        )
-        with _cursor(self._connection) as cur:
-            cur.execute(
-                f"""
-                INSERT INTO {self._table("turns")}
-                    (session_id, turn_index, turn_id, turn_json)
-                VALUES (%s, %s, %s, %s::jsonb)
-                ON CONFLICT (session_id, turn_index)
-                DO UPDATE SET turn_json = EXCLUDED.turn_json
-                """,
-                (session_id, turn.index, turn.id, turn_json),
-            )
-        _commit(self._connection)
-
     def _insert_turn(
         self, cur: PostgresCursor, session_id: str, turn: Turn
     ) -> None:
@@ -269,6 +308,55 @@ class PostgresTrajectoryStore:
             VALUES (%s, %s, %s, %s::jsonb)
             """,
             (session_id, turn.index, turn.id, turn_json),
+        )
+
+    def _lock_session_turns(
+        self,
+        cur: PostgresCursor,
+        session_id: str,
+    ) -> list[Turn]:
+        cur.execute(
+            f"""
+            SELECT 1 FROM {self._table("sessions")}
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (session_id,),
+        )
+        if cur.fetchone() is None:
+            raise KeyError(session_id)
+        cur.execute(
+            f"""
+            SELECT turn_json
+            FROM {self._table("turns")}
+            WHERE session_id = %s
+            ORDER BY turn_index
+            """,
+            (session_id,),
+        )
+        return [
+            self._codec.deserialize_turn(dict(_json_mapping(row[0])))
+            for row in cur.fetchall()
+        ]
+
+    def _select_checkpoint(
+        self,
+        cur: PostgresCursor,
+        session_id: str,
+    ) -> TurnCheckpoint | None:
+        cur.execute(
+            f"""
+            SELECT checkpoint_json
+            FROM {self._table("checkpoints")}
+            WHERE session_id = %s
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._codec.deserialize_turn_checkpoint(
+            dict(_json_mapping(row[0]))
         )
 
     def _table(self, name: str) -> str:

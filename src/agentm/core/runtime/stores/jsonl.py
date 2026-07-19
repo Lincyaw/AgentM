@@ -11,12 +11,16 @@ from pathlib import Path
 
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import SessionMeta
-from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint, TurnRef
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
+    validate_checkpoint_commit,
     validate_turn_append,
+    validate_turn_checkpoint,
     validate_turn_sequence,
 )
+
+_CHECKPOINT_RECORD_TYPE = "turn_checkpoint"
 
 
 class JsonlTrajectoryStore:
@@ -71,36 +75,48 @@ class JsonlTrajectoryStore:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def upsert_turn(self, session_id: str, turn: Turn) -> None:
+    def save_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None:
         path = self._path(session_id)
         try:
             fh = path.open("r+b")
         except FileNotFoundError:
             raise KeyError(session_id) from None
-        record = self._encode_record(self._codec.serialize_turn(turn))
+        record = self._encode_record(
+            {
+                "record_type": _CHECKPOINT_RECORD_TYPE,
+                "checkpoint": self._codec.serialize_turn_checkpoint(checkpoint),
+            }
+        )
         with fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             raw = fh.read()
-            meta, turns, valid_bytes, terminated = self._decode_records(
+            _, turns, existing, valid_bytes, terminated = self._decode_records(
                 raw,
                 path,
                 allow_trailing_torn=True,
             )
-            existing_idx = next(
-                (i for i, t in enumerate(turns) if t.index == turn.index), None,
-            )
-            if existing_idx is not None:
-                turns[existing_idx] = turn
-            else:
-                turns.append(turn)
-            fh.seek(0)
-            fh.truncate(0)
-            fh.write(self._encode_record(self._codec.serialize_session_meta(meta)))
-            for t in turns:
+            validate_turn_checkpoint(turns, checkpoint, existing=existing)
+            fh.truncate(valid_bytes)
+            fh.seek(valid_bytes)
+            if not terminated:
                 fh.write(b"\n")
-                fh.write(self._encode_record(self._codec.serialize_turn(t)))
+            fh.write(record)
             fh.flush()
             os.fsync(fh.fileno())
+
+    def load_checkpoint(self, session_id: str) -> TurnCheckpoint | None:
+        path = self._path(session_id)
+        if not path.exists():
+            raise KeyError(session_id)
+        _, _, checkpoint, _, _ = self._read_records(
+            path,
+            allow_trailing_torn=True,
+        )
+        return checkpoint
 
     def append(self, session_id: str, turn: Turn) -> None:
         path = self._path(session_id)
@@ -112,12 +128,13 @@ class JsonlTrajectoryStore:
         with fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             raw = fh.read()
-            _, turns, valid_bytes, terminated = self._decode_records(
+            _, turns, checkpoint, valid_bytes, terminated = self._decode_records(
                 raw,
                 path,
                 allow_trailing_torn=True,
             )
             validate_turn_append(turns, turn)
+            validate_checkpoint_commit(checkpoint, turn)
             fh.truncate(valid_bytes)
             fh.seek(valid_bytes)
             if not terminated:
@@ -158,7 +175,10 @@ class JsonlTrajectoryStore:
         path = self._path(session_id)
         if not path.exists():
             raise KeyError(session_id)
-        meta, turns, _, _ = self._read_records(path, allow_trailing_torn=True)
+        meta, turns, _, _, _ = self._read_records(
+            path,
+            allow_trailing_torn=True,
+        )
         return meta, turns
 
     def _read_records(
@@ -166,7 +186,7 @@ class JsonlTrajectoryStore:
         path: Path,
         *,
         allow_trailing_torn: bool,
-    ) -> tuple[SessionMeta, list[Turn], int, bool]:
+    ) -> tuple[SessionMeta, list[Turn], TurnCheckpoint | None, int, bool]:
         return self._decode_records(
             path.read_bytes(),
             path,
@@ -179,12 +199,13 @@ class JsonlTrajectoryStore:
         path: Path,
         *,
         allow_trailing_torn: bool,
-    ) -> tuple[SessionMeta, list[Turn], int, bool]:
+    ) -> tuple[SessionMeta, list[Turn], TurnCheckpoint | None, int, bool]:
         if not raw:
             raise ValueError(f"corrupt empty session file: {path}")
         chunks = raw.splitlines(keepends=True)
         meta: SessionMeta | None = None
         turns: list[Turn] = []
+        checkpoint: TurnCheckpoint | None = None
         valid_bytes = 0
         valid_terminated = False
         for lineno, chunk in enumerate(chunks, start=1):
@@ -193,8 +214,30 @@ class JsonlTrajectoryStore:
                 data = json.loads(chunk)
                 if meta is None:
                     meta = self._codec.deserialize_session_meta(data)
+                elif (
+                    isinstance(data, dict)
+                    and data.get("record_type") == _CHECKPOINT_RECORD_TYPE
+                ):
+                    raw_checkpoint = data.get("checkpoint")
+                    if not isinstance(raw_checkpoint, dict):
+                        raise ValueError(
+                            "turn checkpoint record must contain an object"
+                        )
+                    candidate = self._codec.deserialize_turn_checkpoint(
+                        raw_checkpoint
+                    )
+                    validate_turn_checkpoint(
+                        turns,
+                        candidate,
+                        existing=checkpoint,
+                    )
+                    checkpoint = candidate
                 else:
-                    turns.append(self._codec.deserialize_turn(data))
+                    turn = self._codec.deserialize_turn(data)
+                    validate_turn_append(turns, turn)
+                    validate_checkpoint_commit(checkpoint, turn)
+                    turns.append(turn)
+                    checkpoint = None
             except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                 is_last = lineno == len(chunks)
                 if allow_trailing_torn and is_last and not terminated and meta is not None:
@@ -207,10 +250,13 @@ class JsonlTrajectoryStore:
         if meta is None:
             raise ValueError(f"corrupt session metadata in {path}")
         validate_turn_sequence(turns)
-        return meta, turns, valid_bytes, valid_terminated
+        return meta, turns, checkpoint, valid_bytes, valid_terminated
 
     def _read_meta(self, path: Path) -> SessionMeta:
-        meta, _, _, _ = self._read_records(path, allow_trailing_torn=True)
+        meta, _, _, _, _ = self._read_records(
+            path,
+            allow_trailing_torn=True,
+        )
         return meta
 
     @staticmethod

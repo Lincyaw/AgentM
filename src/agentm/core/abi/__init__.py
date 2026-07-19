@@ -342,6 +342,7 @@ from .trajectory import (
     TrajectoryProjectionState,
     TrajectoryProjectionStatus,
     Turn,
+    TurnCheckpoint,
     TurnMeta,
     TurnRef,
 )
@@ -651,6 +652,7 @@ __all__ = [
     "TriggerRenderer",
     "Turn",
     "TurnBeginEvent",
+    "TurnCheckpoint",
     "TurnCommittedEvent",
     "TurnMeta",
     "TurnObservation",

@@ -4,7 +4,7 @@
 
 | Concern | Decision |
 | --- | --- |
-| Source of truth | Exactly one selected `TrajectoryStore` owns complete resumable session and turn state. |
+| Source of truth | Exactly one selected `TrajectoryStore` owns incomplete checkpoints and complete resumable turns. |
 | Diagnostic plane | `SessionTelemetry` emits logs and spans independently of trajectory persistence. |
 | Recovery | Resume, fork, cache, and compaction never read OTLP or ClickHouse observability tables. |
 | Correlation | Both planes carry stable session, root, parent, and turn ids where applicable. |
@@ -15,8 +15,8 @@
 
 | Port | Responsibility | Implementations |
 | --- | --- | --- |
-| `TrajectoryStore` | Atomic authoritative session/turn persistence | Memory, JSONL, PostgreSQL |
-| `TrajectoryQueryStore` | Read complete sessions and turns from the selected trajectory backend | `TrajectoryStoreQueryAdapter` |
+| `TrajectoryStore` | Durable incomplete checkpoints plus atomic committed session/turn persistence; resume loads committed turns only | Memory, JSONL, PostgreSQL |
+| `TrajectoryQueryStore` | Read sessions, committed turns, and diagnostic incomplete checkpoints from the selected trajectory backend | `TrajectoryStoreQueryAdapter` |
 | `SessionTelemetry` | Atom-facing diagnostic emission | OTel SDK implementation installed by the observability atom |
 | `ObservabilityQueryStore` | Read diagnostic events and spans | Local OTLP JSONL, collector-managed ClickHouse |
 | `TraceQueryStore` | Present both read planes without merging their storage | `CompositeTraceQueryStore` delegates to one trajectory query source and one observability query source |
@@ -25,7 +25,7 @@
 
 | Backend | Stored data | Consistency role |
 | --- | --- | --- |
-| JSONL or PostgreSQL | Full `SessionMeta`, `Turn`, and configured node/head state | Authoritative, selected once per session |
+| JSONL or PostgreSQL | Full `SessionMeta`, latest incomplete `TurnCheckpoint`, committed `Turn`, and configured node/head state | Authoritative, selected once per session |
 | Local OTLP JSONL | Session-scoped diagnostic logs and spans | Optional diagnostics |
 | ClickHouse `otel_logs` / `otel_traces` | Collector-managed diagnostic logs and spans | Optional, eventually visible query backend |
 

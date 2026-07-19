@@ -9,7 +9,7 @@ from agentm.core.abi.query import (
     SessionIdentity,
 )
 from agentm.core.abi.store import TrajectoryStore
-from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 
 
 class TrajectoryStoreQueryAdapter:
@@ -35,6 +35,10 @@ class TrajectoryStoreQueryAdapter:
     def turns(self, session_id: str) -> Iterable[Turn]:
         _, turns = self._store.load(session_id)
         return turns
+
+    def checkpoints(self, session_id: str) -> Iterable[TurnCheckpoint]:
+        checkpoint = self._store.load_checkpoint(session_id)
+        return () if checkpoint is None else (checkpoint,)
 
 def _session_matches(row: SessionIdentity, filter: SessionFilter) -> bool:
     if filter.session_id is not None and row.id != filter.session_id:

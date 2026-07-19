@@ -872,7 +872,7 @@ def test_session_graph_traversals() -> None:
 
 @pytest.mark.asyncio
 async def test_decide_action_priority() -> None:
-    from agentm.core.runtime.driver import _resolve_action
+    from agentm.core.runtime.reaction import _resolve_action
 
     inject_msg = UserMessage(
         role="user", content=[TextContent(type="text", text="injected")], timestamp=0.0,

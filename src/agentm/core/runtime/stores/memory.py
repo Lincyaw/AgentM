@@ -6,10 +6,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from agentm.core.abi.store import SessionMeta
-from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint, TurnRef
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
+    validate_checkpoint_commit,
     validate_turn_append,
+    validate_turn_checkpoint,
     validate_turn_sequence,
 )
 
@@ -23,10 +25,11 @@ class InMemoryTrajectoryStore:
     and shared between copies.
     """
 
-    __slots__ = ("_sessions",)
+    __slots__ = ("_checkpoints", "_sessions")
 
     def __init__(self) -> None:
         self._sessions: dict[str, tuple[SessionMeta, list[Turn]]] = {}
+        self._checkpoints: dict[str, TurnCheckpoint] = {}
 
     def create_session(self, meta: SessionMeta) -> None:
         self.create_session_with_turns(meta, ())
@@ -40,12 +43,31 @@ class InMemoryTrajectoryStore:
         validate_turn_sequence(copied)
         self._sessions[meta.id] = (meta, copied)
 
+    def save_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None:
+        record = self._sessions.get(session_id)
+        if record is None:
+            raise KeyError(session_id)
+        existing = self._checkpoints.get(session_id)
+        validate_turn_checkpoint(record[1], checkpoint, existing=existing)
+        self._checkpoints[session_id] = checkpoint
+
+    def load_checkpoint(self, session_id: str) -> TurnCheckpoint | None:
+        if session_id not in self._sessions:
+            raise KeyError(session_id)
+        return self._checkpoints.get(session_id)
+
     def append(self, session_id: str, turn: Turn) -> None:
         record = self._sessions.get(session_id)
         if record is None:
             raise KeyError(session_id)
         validate_turn_append(record[1], turn)
+        validate_checkpoint_commit(self._checkpoints.get(session_id), turn)
         record[1].append(turn)
+        self._checkpoints.pop(session_id, None)
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         record = self._sessions.get(session_id)

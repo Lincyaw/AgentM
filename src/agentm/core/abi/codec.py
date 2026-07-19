@@ -62,6 +62,7 @@ from agentm.core.abi.trajectory import (
     Round,
     ToolRecord,
     Turn,
+    TurnCheckpoint,
     TurnMeta,
 )
 from agentm.core.abi.trigger import (
@@ -165,6 +166,77 @@ def _only_fields(data: Mapping[str, Any], allowed: set[str], path: str) -> None:
     unknown = set(data) - allowed
     if unknown:
         raise ValueError(f"{path} has unknown fields: {sorted(unknown)}")
+
+
+def _serialize_injected(
+    injected: tuple[InjectedMessages, ...],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "after_round": injection.after_round,
+            "messages": [
+                serialize_message(message) for message in injection.messages
+            ],
+        }
+        for injection in injected
+    ]
+
+
+def _deserialize_injected(
+    data: Any,
+    *,
+    path: str,
+) -> tuple[InjectedMessages, ...]:
+    raw_injected = _array(data, path)
+    records: list[InjectedMessages] = []
+    for index, raw_entry in enumerate(raw_injected):
+        entry_path = f"{path}[{index}]"
+        entry = _object(raw_entry, entry_path)
+        _only_fields(
+            entry,
+            {"after_round", "messages"},
+            entry_path,
+        )
+        raw_messages = _array(
+            entry.get("messages"),
+            f"{entry_path}.messages",
+        )
+        records.append(
+            InjectedMessages(
+                after_round=_integer(
+                    entry.get("after_round"),
+                    f"{entry_path}.after_round",
+                    minimum=-1,
+                ),
+                messages=tuple(
+                    deserialize_message(
+                        _object(
+                            message,
+                            f"{entry_path}.messages[{message_index}]",
+                        )
+                    )
+                    for message_index, message in enumerate(raw_messages)
+                ),
+            )
+        )
+    return tuple(records)
+
+
+def _serialize_trigger_metadata(
+    metadata: TriggerMetadata | None,
+) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    return {
+        "priority": metadata.priority,
+        "target_session_id": metadata.target_session_id,
+        "target_agent_id": metadata.target_agent_id,
+        "origin": metadata.origin,
+        "mode": metadata.mode,
+        "is_meta": metadata.is_meta,
+        "skip_commands": metadata.skip_commands,
+        "meta": _json_safe(metadata.meta),
+    }
 
 
 # --- Message serialization --------------------------------------------------
@@ -885,53 +957,16 @@ class CodecRegistry:
             }
         }
         if outcome.injected:
-            d["injected"] = [
-                {
-                    "after_round": injection.after_round,
-                    "messages": [
-                        serialize_message(message) for message in injection.messages
-                    ],
-                }
-                for injection in outcome.injected
-            ]
+            d["injected"] = _serialize_injected(outcome.injected)
         return d
 
     def _deserialize_outcome(self, data: dict[str, Any]) -> Outcome:
         data = _object(data, "outcome")
         _only_fields(data, {"cause", "injected"}, "outcome")
-        raw_injected = _array(data.get("injected", []), "outcome.injected")
-        injected_records: list[InjectedMessages] = []
-        for index, raw_entry in enumerate(raw_injected):
-            entry = _object(raw_entry, f"outcome.injected[{index}]")
-            _only_fields(
-                entry,
-                {"after_round", "messages"},
-                f"outcome.injected[{index}]",
-            )
-            raw_messages = _array(
-                entry.get("messages"),
-                f"outcome.injected[{index}].messages",
-            )
-            injected_records.append(
-                InjectedMessages(
-                    after_round=_integer(
-                        entry.get("after_round"),
-                        f"outcome.injected[{index}].after_round",
-                        minimum=0,
-                    ),
-                    messages=tuple(
-                        deserialize_message(
-                            _object(
-                                message,
-                                f"outcome.injected[{index}].messages"
-                                f"[{message_index}]",
-                            )
-                        )
-                        for message_index, message in enumerate(raw_messages)
-                    ),
-                )
-            )
-        injected = tuple(injected_records)
+        injected = _deserialize_injected(
+            data.get("injected", []),
+            path="outcome.injected",
+        )
         if "cause" not in data:
             raise ValueError("serialized Outcome is missing cause")
         raw_cause = data["cause"]
@@ -1117,6 +1152,91 @@ class CodecRegistry:
 
     # --- Turn ---
 
+    def serialize_turn_checkpoint(
+        self,
+        checkpoint: TurnCheckpoint,
+    ) -> dict[str, Any]:
+        """Convert an incomplete turn checkpoint to a JSON-safe dict."""
+        return {
+            "schema_version": TRAJECTORY_CODEC_VERSION,
+            "index": checkpoint.index,
+            "id": checkpoint.id,
+            "trigger": self.serialize_trigger(checkpoint.trigger),
+            "rounds": [self._serialize_round(r) for r in checkpoint.rounds],
+            "updated_at": checkpoint.updated_at,
+            "meta": self._serialize_meta(checkpoint.meta),
+            "injected": _serialize_injected(checkpoint.injected),
+            "trigger_metadata": _serialize_trigger_metadata(
+                checkpoint.trigger_metadata
+            ),
+        }
+
+    def deserialize_turn_checkpoint(
+        self,
+        data: dict[str, Any],
+    ) -> TurnCheckpoint:
+        """Reconstruct an incomplete turn checkpoint from a dict."""
+        data = _object(data, "turn checkpoint")
+        _only_fields(
+            data,
+            {
+                "schema_version",
+                "index",
+                "id",
+                "trigger",
+                "rounds",
+                "updated_at",
+                "meta",
+                "injected",
+                "trigger_metadata",
+            },
+            "turn checkpoint",
+        )
+        version = _integer(
+            data.get("schema_version"),
+            "turn checkpoint.schema_version",
+        )
+        if version != TRAJECTORY_CODEC_VERSION:
+            raise ValueError(
+                f"unsupported turn checkpoint schema version: {version}"
+            )
+        raw_rounds = _array(data.get("rounds"), "turn checkpoint.rounds")
+        return TurnCheckpoint(
+            index=_integer(
+                data.get("index"),
+                "turn checkpoint.index",
+                minimum=0,
+            ),
+            id=_string(
+                data.get("id"),
+                "turn checkpoint.id",
+                allow_empty=False,
+            ),
+            trigger=self.deserialize_trigger(
+                _object(data.get("trigger"), "turn checkpoint.trigger")
+            ),
+            rounds=tuple(
+                self._deserialize_round(
+                    _object(item, f"turn checkpoint.rounds[{index}]")
+                )
+                for index, item in enumerate(raw_rounds)
+            ),
+            updated_at=_number(
+                data.get("updated_at"),
+                "turn checkpoint.updated_at",
+            ),
+            meta=self._deserialize_meta(
+                _object(data.get("meta"), "turn checkpoint.meta")
+            ),
+            injected=_deserialize_injected(
+                data.get("injected", []),
+                path="turn checkpoint.injected",
+            ),
+            trigger_metadata=self._deserialize_trigger_metadata(
+                data.get("trigger_metadata")
+            ),
+        )
+
     def serialize_turn(self, turn: Turn) -> dict[str, Any]:
         """Convert a Turn to a JSON-safe dict for storage."""
         return {
@@ -1128,20 +1248,7 @@ class CodecRegistry:
             "outcome": self._serialize_outcome(turn.outcome),
             "timestamp": turn.timestamp,
             "meta": self._serialize_meta(turn.meta),
-            "trigger_metadata": (
-                {
-                    "priority": turn.trigger_metadata.priority,
-                    "target_session_id": turn.trigger_metadata.target_session_id,
-                    "target_agent_id": turn.trigger_metadata.target_agent_id,
-                    "origin": turn.trigger_metadata.origin,
-                    "mode": turn.trigger_metadata.mode,
-                    "is_meta": turn.trigger_metadata.is_meta,
-                    "skip_commands": turn.trigger_metadata.skip_commands,
-                    "meta": _json_safe(turn.trigger_metadata.meta),
-                }
-                if turn.trigger_metadata is not None
-                else None
-            ),
+            "trigger_metadata": _serialize_trigger_metadata(turn.trigger_metadata),
         }
 
     def deserialize_turn(self, data: dict[str, Any]) -> Turn:

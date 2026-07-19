@@ -26,7 +26,11 @@ requirements:
       core and fail at their transport or persistence boundaries. Provider
       requests that exhaust retries must persist a non-replayable failed turn
       before the trigger receipt raises, so trajectory inspection never shows
-      only an unexplained session header.
+      only an unexplained session header. Every materialized execution step
+      must replace an explicit incomplete checkpoint in the selected
+      trajectory store. Checkpoints remain queryable after a crash but are
+      excluded from resume, context replay, compaction, and node projection;
+      final append atomically supersedes the matching checkpoint.
     priority: P0
     status: tested
     confidence: confirmed
@@ -88,6 +92,7 @@ requirements:
       - path: src/agentm/core/lib/trajectory_nodes.py
       - path: src/agentm/core/runtime/catalog.py
       - path: src/agentm/core/runtime/driver.py
+      - path: src/agentm/core/runtime/reaction.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/runtime/session_core.py

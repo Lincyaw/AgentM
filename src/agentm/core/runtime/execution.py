@@ -12,9 +12,10 @@ from agentm.core.abi.trajectory import (
     Round,
     ToolRecord,
     Turn,
+    TurnCheckpoint,
     TurnMeta,
 )
-from agentm.core.abi.trigger import Trigger
+from agentm.core.abi.trigger import Trigger, TriggerMetadata
 
 
 class StateError(RuntimeError):
@@ -73,25 +74,32 @@ class Execution:
             raise StateError("cannot add a round to an inactive execution")
         self._rounds.append(Round(response=response, tool_results=tuple(tool_results)))
 
-    def snapshot(self, outcome: Outcome, meta: TurnMeta) -> Turn:
-        """Build an immutable Turn without deactivating this execution."""
+    def checkpoint(
+        self,
+        meta: TurnMeta,
+        *,
+        trigger_metadata: TriggerMetadata | None = None,
+        pending_response: AssistantMessage | None = None,
+    ) -> TurnCheckpoint:
+        """Snapshot materialized progress without ending the execution."""
+        if not self._active:
+            raise StateError("cannot checkpoint an inactive execution")
+        rounds = tuple(self._rounds)
+        if pending_response is not None:
+            rounds = (*rounds, Round(response=pending_response))
         anchored = tuple(
             InjectedMessages(after_round=round_index, messages=tuple(messages))
             for round_index, messages in self._injected
         )
-        effective_outcome = (
-            Outcome(cause=outcome.cause, injected=anchored)
-            if anchored
-            else outcome
-        )
-        return Turn(
+        return TurnCheckpoint(
             index=self._index,
             id=self._id,
             trigger=self._trigger,
-            rounds=tuple(self._rounds),
-            outcome=effective_outcome,
-            timestamp=time.time(),
+            rounds=rounds,
+            injected=anchored,
+            updated_at=time.time(),
             meta=meta,
+            trigger_metadata=trigger_metadata,
         )
 
     def commit(self, outcome: Outcome, meta: TurnMeta) -> Turn:

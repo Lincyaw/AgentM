@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from agentm.core.abi.store import SessionMeta
-from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +98,10 @@ class TrajectoryQueryStore(Protocol):
         ...
 
     def turns(self, session_id: str) -> Iterable[Turn]:
+        ...
+
+    def checkpoints(self, session_id: str) -> Iterable[TurnCheckpoint]:
+        """Return incomplete turn state for diagnostics, never replay."""
         ...
 
 

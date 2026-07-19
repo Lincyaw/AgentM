@@ -25,6 +25,7 @@ from agentm.core.abi.trajectory import (
     TrajectoryNodeRole,
     TrajectoryProjectionStatus,
     Turn,
+    TurnCheckpoint,
     TurnRef,
 )
 
@@ -94,7 +95,11 @@ class SessionMeta:
 class TrajectoryStore(Protocol):
     """Persistence boundary for trajectories.
 
-    ``append`` must be atomic — a Turn is either fully written or not.
+    ``save_checkpoint`` durably replaces the latest incomplete state for the
+    active turn. ``append`` must atomically commit the final Turn and supersede
+    a matching checkpoint. ``load`` and ``load_prefix`` return committed turns
+    only, so incomplete work is never replayed on resume.
+
     Methods are synchronous blocking ports; async runtimes must offload calls
     instead of running backend I/O on the event loop.
     """
@@ -105,11 +110,15 @@ class TrajectoryStore(Protocol):
         self, meta: SessionMeta, turns: Sequence[Turn]
     ) -> None: ...
 
-    def append(self, session_id: str, turn: Turn) -> None: ...
+    def save_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None: ...
 
-    def upsert_turn(self, session_id: str, turn: Turn) -> None:
-        """Insert or replace a turn — used for incremental round persistence."""
-        ...
+    def load_checkpoint(self, session_id: str) -> TurnCheckpoint | None: ...
+
+    def append(self, session_id: str, turn: Turn) -> None: ...
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]: ...
 

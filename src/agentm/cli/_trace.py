@@ -23,7 +23,7 @@ from agentm.core.abi.query import (
 )
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.termination import ProviderRequestFailed
-from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.trigger import UserInput
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 
@@ -32,6 +32,7 @@ RecordT = TypeVar("RecordT")
 
 
 class _TurnSummary(TypedDict):
+    status: Literal["committed", "incomplete"]
     turn_index: int
     turn_id: str
     trigger_source: str
@@ -43,7 +44,7 @@ class _TurnSummary(TypedDict):
     output_tokens: int
     cache_read: int
     model: str | None
-    cause: str
+    cause: str | None
     error_type: NotRequired[str]
     error: NotRequired[str]
 
@@ -202,6 +203,7 @@ def _turn_summary(turn: Turn) -> _TurnSummary:
             if rec.result.is_error:
                 tool_errors += 1
     summary: _TurnSummary = {
+        "status": "committed",
         "turn_index": turn.index, "turn_id": turn.id,
         "trigger_source": turn.trigger.source,
         "rounds": len(turn.rounds), "tool_calls": tool_names,
@@ -214,6 +216,34 @@ def _turn_summary(turn: Turn) -> _TurnSummary:
         summary["error_type"] = turn.outcome.cause.error_type
         summary["error"] = turn.outcome.cause.detail
     return summary
+
+
+def _checkpoint_summary(checkpoint: TurnCheckpoint) -> _TurnSummary:
+    tool_names = [
+        record.call.name
+        for round_ in checkpoint.rounds
+        for record in round_.tool_results
+    ]
+    return {
+        "status": "incomplete",
+        "turn_index": checkpoint.index,
+        "turn_id": checkpoint.id,
+        "trigger_source": checkpoint.trigger.source,
+        "rounds": len(checkpoint.rounds),
+        "tool_calls": tool_names,
+        "tool_call_count": len(tool_names),
+        "tool_error_count": sum(
+            1
+            for round_ in checkpoint.rounds
+            for record in round_.tool_results
+            if record.result.is_error
+        ),
+        "input_tokens": checkpoint.meta.total_input_tokens,
+        "output_tokens": checkpoint.meta.total_output_tokens,
+        "cache_read": checkpoint.meta.cache_read_tokens,
+        "model": checkpoint.meta.model_id,
+        "cause": None,
+    }
 
 
 @trace_app.command("turns")
@@ -232,12 +262,18 @@ def turns_cmd(
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
-    summaries = [_turn_summary(t) for t in turns]
+    checkpoints = list(query.checkpoints(sid))
+    summaries = [
+        *(_turn_summary(turn) for turn in turns),
+        *(_checkpoint_summary(checkpoint) for checkpoint in checkpoints),
+    ]
+    summaries.sort(key=lambda item: item["turn_index"])
 
     def _render(d: _TurnSummary) -> str:
         tools = ", ".join(d["tool_calls"]) if d["tool_calls"] else "---"
+        state = d["cause"] if d["cause"] is not None else d["status"]
         rendered = (
-            f"  [{d['turn_index']}] {d['cause']:<20} tools=[{tools}] "
+            f"  [{d['turn_index']}] {state:<20} tools=[{tools}] "
             f"in={d['input_tokens']} out={d['output_tokens']}"
         )
         if "error_type" in d:
@@ -245,7 +281,10 @@ def turns_cmd(
         return rendered
 
     if chosen_fmt == "text":
-        stderr_console.print(f"[dim]session {sid}: {len(summaries)} turn(s)[/dim]")
+        stderr_console.print(
+            f"[dim]session {sid}: {len(turns)} committed, "
+            f"{len(checkpoints)} incomplete[/dim]"
+        )
     _emit_records(iter(summaries), chosen_fmt, _render, limit)
 
 
@@ -271,8 +310,13 @@ def messages_cmd(
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
     all_msgs: list[_MessageRecord] = []
-    for turn in turns:
-        if isinstance(turn.trigger, UserInput):
+    records: list[Turn | TurnCheckpoint] = [
+        *turns,
+        *query.checkpoints(sid),
+    ]
+    records.sort(key=lambda item: item.index)
+    for turn_record in records:
+        if isinstance(turn_record.trigger, UserInput):
             trigger_content = [
                 block.text
                 if isinstance(block, TextContent)
@@ -281,17 +325,17 @@ def messages_cmd(
                     if isinstance(block, ImageContent)
                     else f"[{type(block).__name__}]"
                 )
-                for block in turn.trigger.content
+                for block in turn_record.trigger.content
             ]
             all_msgs.append(
                 {
-                    "turn_index": turn.index,
+                    "turn_index": turn_record.index,
                     "round_index": None,
                     "role": "user",
                     "content": "\n".join(trigger_content),
                 }
             )
-        for ri, rnd in enumerate(turn.rounds):
+        for ri, rnd in enumerate(turn_record.rounds):
             blocks: list[str] = []
             for block in rnd.response.content:
                 if isinstance(block, TextContent):
@@ -308,7 +352,7 @@ def messages_cmd(
                     )
             all_msgs.append(
                 {
-                    "turn_index": turn.index,
+                    "turn_index": turn_record.index,
                     "round_index": ri,
                     "role": "assistant",
                     "content": "\n".join(blocks),
@@ -322,7 +366,7 @@ def messages_cmd(
                 )[:500]
                 all_msgs.append(
                     {
-                        "turn_index": turn.index,
+                        "turn_index": turn_record.index,
                         "round_index": ri,
                         "role": "tool_result",
                         "tool": rec.call.name,
@@ -330,15 +374,18 @@ def messages_cmd(
                         "content": txt,
                     }
                 )
-        if isinstance(turn.outcome.cause, ProviderRequestFailed):
+        if isinstance(turn_record, Turn) and isinstance(
+            turn_record.outcome.cause,
+            ProviderRequestFailed,
+        ):
             all_msgs.append(
                 {
-                    "turn_index": turn.index,
+                    "turn_index": turn_record.index,
                     "round_index": None,
                     "role": "error",
                     "content": (
-                        f"{turn.outcome.cause.error_type}: "
-                        f"{turn.outcome.cause.detail}"
+                        f"{turn_record.outcome.cause.error_type}: "
+                        f"{turn_record.outcome.cause.detail}"
                     ),
                 }
             )
@@ -457,8 +504,13 @@ def tools_cmd(
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
     records: list[_ToolRecord] = []
-    for turn in turns:
-        for ri, rnd in enumerate(turn.rounds):
+    trajectory_records: list[Turn | TurnCheckpoint] = [
+        *turns,
+        *query.checkpoints(sid),
+    ]
+    trajectory_records.sort(key=lambda item: item.index)
+    for turn_record in trajectory_records:
+        for ri, rnd in enumerate(turn_record.rounds):
             for rec in rnd.tool_results:
                 name = rec.call.name
                 if tool and name != tool:
@@ -470,7 +522,7 @@ def tools_cmd(
                 )
                 records.append(
                     {
-                        "turn_index": turn.index,
+                        "turn_index": turn_record.index,
                         "round_index": ri,
                         "tool": name,
                         "args": dict(rec.call.arguments),

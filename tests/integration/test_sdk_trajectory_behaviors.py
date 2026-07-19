@@ -31,6 +31,7 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.provider import ProviderPromptCacheRequest
 from agentm.core.abi.store import TrajectoryNodeStore, TrajectoryStore
 from agentm.core.abi.stream import MessageEnd, TextDelta
+from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.abi.trajectory import PromptCacheState
 from agentm.core.abi.trigger import UserInput
 from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
@@ -706,6 +707,70 @@ async def test_sdk_interrupt_cancels_one_request_and_session_continues() -> None
         "continued-answer",
     ]
     assert session.status()["phase"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    store = trajectory_backend.open_turn_store()
+    tool_response = _tool_call("blocking-call", "blocking_tool", {})
+    provider = _StubProvider(tool_response)
+    tool_started = asyncio.Event()
+
+    async def blocking_tool(
+        args: dict[str, object],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult:
+        del args
+        if signal is None:
+            raise AssertionError("SDK did not pass a cancellation signal")
+        tool_started.set()
+        await signal.wait()
+        return ToolResult(
+            content=(TextContent(type="text", text="cancelled"),),
+            is_error=True,
+        )
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            store=store,
+            extra_tools=[
+                FunctionTool(
+                    name="blocking_tool",
+                    description="Wait for cancellation.",
+                    parameters={"type": "object", "properties": {}},
+                    fn=blocking_tool,
+                )
+            ],
+        )
+    )
+    run_task = asyncio.create_task(session.run("checkpoint-question"))
+    try:
+        await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+
+        checkpoint = store.load_checkpoint(session.session_id)
+        assert checkpoint is not None
+        assert checkpoint.index == 0
+        assert len(checkpoint.rounds) == 1
+        assert checkpoint.rounds[0].response == tool_response
+        assert checkpoint.rounds[0].tool_results == ()
+        assert store.load(session.session_id)[1] == []
+
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(run_task, timeout=2.0)
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+        await session.shutdown()
+
+    _, committed = store.load(session.session_id)
+    assert len(committed) == 1
+    assert store.load_checkpoint(session.session_id) is None
 
 
 @pytest.mark.asyncio

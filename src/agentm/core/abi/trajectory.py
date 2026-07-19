@@ -786,6 +786,59 @@ class Outcome:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnCheckpoint:
+    """Latest durable execution state for one incomplete turn.
+
+    A checkpoint deliberately has no ``Outcome``: it is diagnostic and
+    crash-recovery evidence, not a committed trajectory turn. Resume and
+    context construction consume ``Turn`` records only.
+    """
+
+    index: int
+    id: str
+    trigger: Trigger
+    rounds: tuple[Round, ...]
+    updated_at: float
+    meta: TurnMeta = field(default_factory=TurnMeta)
+    injected: tuple[InjectedMessages, ...] = ()
+    trigger_metadata: TriggerMetadata | None = None
+
+    def __post_init__(self) -> None:
+        from agentm.core.abi.trigger import Trigger, TriggerMetadata
+
+        _require_index(self.index, "turn checkpoint index")
+        _require_string(self.id, "turn checkpoint id")
+        if not isinstance(self.trigger, Trigger):
+            raise TypeError("turn checkpoint trigger must implement Trigger")
+        _require_string(self.trigger.source, "turn checkpoint trigger source")
+        if not isinstance(self.rounds, tuple) or not all(
+            isinstance(item, Round) for item in self.rounds
+        ):
+            raise TypeError("turn checkpoint rounds must be a tuple of Round")
+        if not isinstance(self.injected, tuple) or not all(
+            isinstance(item, InjectedMessages) for item in self.injected
+        ):
+            raise TypeError(
+                "turn checkpoint injected must be a tuple of InjectedMessages"
+            )
+        for injection in self.injected:
+            if injection.after_round >= len(self.rounds):
+                raise ValueError(
+                    "checkpoint injection anchor must reference a materialized round"
+                )
+        _require_finite(self.updated_at, "turn checkpoint updated_at")
+        if not isinstance(self.meta, TurnMeta):
+            raise TypeError("turn checkpoint meta must be TurnMeta")
+        if self.trigger_metadata is not None and not isinstance(
+            self.trigger_metadata,
+            TriggerMetadata,
+        ):
+            raise TypeError(
+                "turn checkpoint trigger_metadata must be TriggerMetadata or None"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class Turn:
     """One committed turn in a trajectory.  Immutable after commit."""
 
@@ -890,6 +943,7 @@ __all__ = [
     "TrajectoryProjectionState",
     "TrajectoryProjectionStatus",
     "Turn",
+    "TurnCheckpoint",
     "TurnMeta",
     "TurnRef",
 ]
