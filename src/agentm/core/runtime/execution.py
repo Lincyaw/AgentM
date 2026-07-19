@@ -75,12 +75,21 @@ class Execution:
 
     def snapshot(self, outcome: Outcome, meta: TurnMeta) -> Turn:
         """Build an immutable Turn without deactivating this execution."""
+        anchored = tuple(
+            InjectedMessages(after_round=round_index, messages=tuple(messages))
+            for round_index, messages in self._injected
+        )
+        effective_outcome = (
+            Outcome(cause=outcome.cause, injected=anchored)
+            if anchored
+            else outcome
+        )
         return Turn(
             index=self._index,
             id=self._id,
             trigger=self._trigger,
             rounds=tuple(self._rounds),
-            outcome=outcome,
+            outcome=effective_outcome,
             timestamp=time.time(),
             meta=meta,
         )
