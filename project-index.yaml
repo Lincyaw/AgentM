@@ -135,6 +135,7 @@ requirements:
       - path: src/agentm/storage/catalog/json.py
       - path: src/agentm/storage/query/__init__.py
       - path: src/agentm/storage/query/clickhouse.py
+      - path: src/agentm/storage/query/composite.py
       - path: src/agentm/storage/resources/__init__.py
       - path: src/agentm/storage/resources/local.py
       - path: src/agentm/storage/serialization.py
@@ -156,6 +157,7 @@ requirements:
       - path: tests/fixtures/process_tools.py
       - path: tests/fixtures/prompt_cache_adapter.py
       - path: tests/test_authoring.py
+      - path: tests/integration/test_observability_backends.py
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_code_health.py
