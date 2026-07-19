@@ -32,7 +32,6 @@ from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_SERVICE,
     BASH_OPERATIONS_SERVICE,
     CONTEXT_PROJECTION_SERVICE,
-    EFFECT_SCOPE_SERVICE,
     ENVIRONMENT_OPERATIONS_SERVICE,
     OPERATIONS_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
@@ -495,19 +494,15 @@ async def test_effect_scope_fork_and_resume() -> None:
     assert forked.get_effect_scope() is scope.children[0]
 
     resume_scope = _RecordingEffectScope()
-    services = ServiceRegistry()
-    services.register(
-        EFFECT_SCOPE_SERVICE,
-        resume_scope,
-        _RecordingEffectScope,
-        scope="tree",
-    )
     resumed = await Session.resume(
         session.id,
         store,
-        stream_fn=_StaticStream("resumed"),
-        model=_model(),
-        services=services,
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=_StaticStream("resumed"),
+            model=_model(),
+            effect_scope=resume_scope,
+        ),
     )
 
     assert resumed.id == session.id

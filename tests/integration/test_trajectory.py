@@ -62,6 +62,7 @@ from agentm.core.abi.query import SessionFilter, TrajectoryQueryStore
 from agentm.core.abi.resource import ResourceMutation, ResourceRef
 from agentm.core.abi.roles import TRAJECTORY_QUERY_STORE_SERVICE
 from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.abi.store import SessionMeta
 from agentm.core.abi.trajectory import Outcome, Round, Turn, TurnMeta
 from agentm.core.abi.trigger import (
@@ -510,9 +511,12 @@ async def test_store_persistence() -> None:
     session2 = await Session.resume(
         session.id,
         store,
-        stream_fn=mock2,
-        model=make_model(),
-        system="test",
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=mock2,
+            model=make_model(),
+            system="test",
+        ),
     )
     # Session reuses ID but store already has it, so we don't re-create
     session2.start()
@@ -550,8 +554,14 @@ async def test_session_resume() -> None:
     mock2 = MockStreamFn()
     mock2.enqueue(text_response("turn-2"))
     resumed = await Session.resume(
-        session.id, store,
-        stream_fn=mock2, model=make_model(), system="test",
+        session.id,
+        store,
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=mock2,
+            model=make_model(),
+            system="test",
+        ),
     )
 
     # Trajectory was loaded from store

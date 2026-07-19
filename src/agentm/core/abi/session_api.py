@@ -29,7 +29,12 @@ from agentm.core.abi.provider import (
     ProviderResolver,
     ProviderSessionIdentity,
 )
-from agentm.core.abi.resource import ResourceReader, ResourceTxn, ResourceWriter
+from agentm.core.abi.resource import (
+    ResourceReader,
+    ResourceStore,
+    ResourceTxn,
+    ResourceWriter,
+)
 from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.services import ServiceRegistry
@@ -115,7 +120,9 @@ class AgentSessionConfig:
     provider_resolver: ProviderResolver | None = None
     stream_fn: StreamFn | None = None
     model: Model | None = None
+    system: str | None = None
     resource_reader: ResourceReader | None = None
+    resource_store: ResourceStore | None = None
     resource_writer: ResourceWriter | None = None
     tool_executor: ToolExecutor | None = None
     tool_orchestrator: ToolOrchestrator | None = None
@@ -289,6 +296,19 @@ class AtomAPI(Protocol):
 
     def get_resource_reader(self) -> ResourceReader | None:
         """Return the ResourceRef read boundary, when registered."""
+        ...
+
+    def register_resource_store(
+        self,
+        store: ResourceStore,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register durable logical ResourceRef read/write storage."""
+        ...
+
+    def get_resource_store(self) -> ResourceStore | None:
+        """Return durable logical ResourceRef storage, when registered."""
         ...
 
     def get_resource_txn(self) -> ResourceTxn | None:

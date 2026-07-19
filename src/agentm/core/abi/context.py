@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from agentm.core.abi.stream import Model, StreamFn
 
+from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.messages import (
     AgentMessage,
     ToolResultBlock,
@@ -61,6 +62,7 @@ class PolicyContext:
     store: Any | None = None
     model: "Model | None" = None
     stream_fn: "StreamFn | None" = None
+    trigger_renderers: dict[str, TriggerRenderer] | None = None
 
 
 @runtime_checkable
@@ -78,6 +80,23 @@ class ContextPolicy(Protocol):
         self,
         messages: list[AgentMessage],
         turns: Sequence[Turn],
+    ) -> list[AgentMessage]: ...
+
+
+class ContextTransformCancelled(Exception):
+    """Raised when cancellation interrupts an async context transform."""
+
+
+@runtime_checkable
+class CancellableContextPolicy(Protocol):
+    """Optional per-turn cancellation capability for async policies."""
+
+    async def transform_with_signal(
+        self,
+        messages: list[AgentMessage],
+        turns: Sequence[Turn],
+        *,
+        signal: CancelSignal,
     ) -> list[AgentMessage]: ...
 
 
@@ -196,6 +215,7 @@ async def build_context(
     turns: Sequence[Turn],
     policies: Sequence[ContextPolicy] = (),
     renderers: dict[str, TriggerRenderer] | None = None,
+    signal: CancelSignal | None = None,
 ) -> list[AgentMessage]:
     """Build the message list from committed turns, then apply policies.
 
@@ -206,9 +226,41 @@ async def build_context(
     for turn in turns:
         messages.extend(turn_to_messages(turn, renderers))
 
-    for policy in policies:
-        messages = await policy.transform(messages, turns)
+    return await apply_context_policies(
+        messages,
+        turns,
+        policies,
+        signal=signal,
+    )
 
+
+async def apply_context_policies(
+    messages: list[AgentMessage],
+    turns: Sequence[Turn],
+    policies: Sequence[ContextPolicy],
+    *,
+    signal: CancelSignal | None = None,
+) -> list[AgentMessage]:
+    """Apply policies while preserving per-turn cancellation semantics."""
+
+    for policy in policies:
+        if signal is not None and signal.is_set():
+            raise ContextTransformCancelled
+        try:
+            if signal is not None and isinstance(policy, CancellableContextPolicy):
+                messages = await policy.transform_with_signal(
+                    messages,
+                    turns,
+                    signal=signal,
+                )
+            else:
+                messages = await policy.transform(messages, turns)
+        except Exception as exc:
+            if signal is not None and signal.is_set():
+                raise ContextTransformCancelled from exc
+            raise
+        if signal is not None and signal.is_set():
+            raise ContextTransformCancelled
     return messages
 
 
@@ -226,8 +278,11 @@ def build_context_sync(
 
 __all__ = [
     "BindableContextPolicy",
+    "CancellableContextPolicy",
     "ContextPolicy",
+    "ContextTransformCancelled",
     "PolicyContext",
+    "apply_context_policies",
     "build_context",
     "build_context_sync",
     "render_trigger",

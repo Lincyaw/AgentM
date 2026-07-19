@@ -25,6 +25,9 @@ RESOURCE_WRITER_SERVICE: Final = "resource_writer"
 RESOURCE_READER_SERVICE: Final = "resource_reader"
 """Service key for backend-neutral ResourceRef reads."""
 
+RESOURCE_STORE_SERVICE: Final = "resource_store"
+"""Service key for durable logical ResourceRef reads and mutations."""
+
 RESOURCE_TXN_SERVICE: Final = "resource_txn"
 """Service key for the active turn-scoped resource transaction."""
 
@@ -103,6 +106,7 @@ __all__ = [
     "PROVIDER_SESSION_IDENTITY_SERVICE",
     "RETRY_POLICY_SERVICE",
     "RESOURCE_READER_SERVICE",
+    "RESOURCE_STORE_SERVICE",
     "RESOURCE_WRITER_SERVICE",
     "RESOURCE_TXN_SERVICE",
     "RESOLVED_SESSION_SPEC_SERVICE",

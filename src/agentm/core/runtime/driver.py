@@ -46,6 +46,10 @@ from agentm.core.abi.permission import (
     PermissionRequest,
     permission_denial_result,
 )
+from agentm.core.abi.provider import (
+    ProviderPromptCacheAdapter,
+    ProviderPromptCacheRequest,
+)
 from agentm.core.abi.resource import (
     ResourceMutation,
     ResourceTxn,
@@ -53,7 +57,11 @@ from agentm.core.abi.resource import (
     ResourceWriter,
     TransactionalResourceWriter,
 )
-from agentm.core.abi.roles import CONTEXT_PROJECTION_SERVICE, RESOURCE_TXN_SERVICE
+from agentm.core.abi.roles import (
+    CONTEXT_PROJECTION_SERVICE,
+    PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
+    RESOURCE_TXN_SERVICE,
+)
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.stream import (
     AssistantStreamEvent,
@@ -81,7 +89,13 @@ from agentm.core.abi.tool_orchestration import (
     ToolWorkItem,
 )
 from agentm.core.abi.bus import EventBus
-from agentm.core.abi.context import ContextPolicy, build_context, render_trigger
+from agentm.core.abi.context import (
+    ContextPolicy,
+    ContextTransformCancelled,
+    apply_context_policies,
+    build_context,
+    render_trigger,
+)
 from agentm.core.abi.events import (
     BeforeRunEvent,
     BeforeSendEvent,
@@ -122,6 +136,7 @@ from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
     Outcome,
+    PromptCacheState,
     ToolRecord,
     TrajectoryHead,
     TrajectoryHeadAdvance,
@@ -818,9 +833,15 @@ async def _history_messages(
     session_id: str,
     root_session_id: str | None,
     parent_session_id: str | None,
+    signal: CancelSignal | None,
 ) -> list[AgentMessage]:
     if projection is None:
-        return await build_context(turns, policies, trigger_renderers)
+        return await build_context(
+            turns,
+            policies,
+            trigger_renderers,
+            signal=signal,
+        )
     projection_input = await _projection_input(
         turns=turns,
         projection=projection,
@@ -830,9 +851,62 @@ async def _history_messages(
         parent_session_id=parent_session_id,
     )
     messages = list(project_context(projection, projection_input, budget))
-    for policy in policies:
-        messages = await policy.transform(messages, turns)
-    return messages
+    return await apply_context_policies(
+        messages,
+        turns,
+        policies,
+        signal=signal,
+    )
+
+
+def _message_cache_key(messages: Sequence[AgentMessage]) -> str | None:
+    for message in reversed(messages):
+        cache_key = message.meta.tags.get("cache_key")
+        if isinstance(cache_key, str) and cache_key:
+            return cache_key
+    return None
+
+
+async def _apply_provider_prompt_cache(
+    *,
+    messages: Sequence[AgentMessage],
+    model: Model,
+    adapter: ProviderPromptCacheAdapter | None,
+    store: TrajectoryNodeStore | None,
+    session_id: str,
+) -> list[AgentMessage]:
+    if adapter is None:
+        return list(messages)
+    cache_key = _message_cache_key(messages)
+    if cache_key is None:
+        return list(messages)
+
+    state = (
+        await asyncio.to_thread(store.load_prompt_cache_state, session_id, cache_key)
+        if store is not None
+        else None
+    )
+    if state is None:
+        state = PromptCacheState(cache_key=cache_key, provider=model.provider)
+    result = adapter.apply_prompt_cache(
+        ProviderPromptCacheRequest(
+            messages=messages,
+            model=model,
+            state=state,
+            metadata={"session_id": session_id},
+        )
+    )
+    if result.state.cache_key != cache_key:
+        raise ValueError(
+            "provider prompt-cache adapter cannot change the cache identity"
+        )
+    if store is not None:
+        await asyncio.to_thread(
+            store.save_prompt_cache_state,
+            session_id,
+            result.state,
+        )
+    return list(result.messages)
 
 
 async def _projection_input(
@@ -921,6 +995,7 @@ async def drive(
     parent_session_id: str | None = None,
     system: str | None = None,
     context_policies: list[ContextPolicy] | None = None,
+    prompt_cache_adapter: ProviderPromptCacheAdapter | None = None,
     trigger_renderers: dict[str, TriggerRenderer] | None = None,
     interrupt: ResettableCancelSource | None = None,
     shutdown: ResettableCancelSource | None = None,
@@ -958,6 +1033,11 @@ async def drive(
         if services is not None
         else None
     )
+    if prompt_cache_adapter is None and services is not None:
+        prompt_cache_adapter = services.get(
+            PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
+            cast(type[ProviderPromptCacheAdapter], ProviderPromptCacheAdapter),
+        )
     turns_run = 0
     tool_calls_run = 0
 
@@ -1023,6 +1103,7 @@ async def drive(
                 system=system,
                 policies=policies,
                 context_projection=context_projection,
+                prompt_cache_adapter=prompt_cache_adapter,
                 trigger_renderers=trigger_renderers,
                 interrupt=_interrupt,
                 shutdown=_shutdown,
@@ -1168,6 +1249,7 @@ async def _react_loop(
     system: str | None,
     policies: list[ContextPolicy],
     context_projection: ContextProjection | None,
+    prompt_cache_adapter: ProviderPromptCacheAdapter | None,
     trigger_renderers: dict[str, TriggerRenderer] | None,
     interrupt: ResettableCancelSource,
     shutdown: ResettableCancelSource,
@@ -1194,24 +1276,31 @@ async def _react_loop(
     start_ns = time.perf_counter_ns()
     trigger_messages = render_trigger(trigger, trigger_renderers)
     context_budget = _context_budget(model)
-
-    history_messages = await _history_messages(
-        turns=trajectory.turns,
-        policies=policies,
-        trigger_renderers=trigger_renderers,
-        projection=context_projection,
-        budget=context_budget,
-        trajectory_node_store=trajectory_node_store,
-        session_id=session_id,
-        root_session_id=root_session_id,
-        parent_session_id=parent_session_id,
-    )
-    messages = list(history_messages) + list(trigger_messages)
     turn_signal = _TurnCancelSignal(
         interrupt=interrupt,
         shutdown=shutdown,
         parent=parent_cancel_signal,
     )
+    try:
+        history_messages = await _history_messages(
+            turns=trajectory.turns,
+            policies=policies,
+            trigger_renderers=trigger_renderers,
+            projection=context_projection,
+            budget=context_budget,
+            trajectory_node_store=trajectory_node_store,
+            session_id=session_id,
+            root_session_id=root_session_id,
+            parent_session_id=parent_session_id,
+            signal=turn_signal,
+        )
+    except ContextTransformCancelled:
+        return Outcome(cause=_signal_aborted(turn_signal)), _meta(
+            0,
+            0,
+            start_ns,
+        ), tool_calls_used
+    messages = list(history_messages) + list(trigger_messages)
 
     before_returns = await bus.emit(BeforeRunEvent.CHANNEL, BeforeRunEvent(
         messages=tuple(messages), system=system,
@@ -1235,17 +1324,27 @@ async def _react_loop(
             ), tool_calls_used
 
         if round_index > 0:
-            history_messages = await _history_messages(
-                turns=trajectory.turns,
-                policies=policies,
-                trigger_renderers=trigger_renderers,
-                projection=context_projection,
-                budget=context_budget,
-                trajectory_node_store=trajectory_node_store,
-                session_id=session_id,
-                root_session_id=root_session_id,
-                parent_session_id=parent_session_id,
-            )
+            try:
+                history_messages = await _history_messages(
+                    turns=trajectory.turns,
+                    policies=policies,
+                    trigger_renderers=trigger_renderers,
+                    projection=context_projection,
+                    budget=context_budget,
+                    trajectory_node_store=trajectory_node_store,
+                    session_id=session_id,
+                    root_session_id=root_session_id,
+                    parent_session_id=parent_session_id,
+                    signal=turn_signal,
+                )
+            except ContextTransformCancelled:
+                return Outcome(cause=_signal_aborted(turn_signal)), _meta(
+                    total_input,
+                    total_output,
+                    start_ns,
+                    cache_read=total_cache_read,
+                    cache_write=total_cache_write,
+                ), tool_calls_used
             round_messages = _execution_to_messages(execution, trigger_messages)
             messages = list(history_messages) + round_messages
 
@@ -1278,6 +1377,14 @@ async def _react_loop(
                     effective_model = ret["model"]
                 if "tools" in ret and isinstance(ret["tools"], list):
                     effective_tools = ret["tools"]
+
+        messages = await _apply_provider_prompt_cache(
+            messages=messages,
+            model=effective_model,
+            adapter=prompt_cache_adapter,
+            store=trajectory_node_store,
+            session_id=session_id,
+        )
 
         allowed_tool_names = set(tool_allowlist) if tool_allowlist is not None else None
         if allowed_tool_names is not None:

@@ -127,7 +127,7 @@ def turn_to_nodes(
     return messages_to_nodes(
         messages=messages,
         session_id=session_id,
-        node_id_prefix=f"turn:{turn.id}",
+        node_id_prefix=f"session:{session_id}:turn:{turn.id}",
         start_seq=start_seq,
         root_session_id=root_session_id,
         parent_session_id=parent_session_id,

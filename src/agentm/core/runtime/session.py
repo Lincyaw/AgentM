@@ -40,7 +40,12 @@ from agentm.core.abi.provider import (
     ProviderResolver,
     ProviderSessionIdentity,
 )
-from agentm.core.abi.resource import ResourceReader, ResourceTxn, ResourceWriter
+from agentm.core.abi.resource import (
+    ResourceReader,
+    ResourceStore,
+    ResourceTxn,
+    ResourceWriter,
+)
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
@@ -75,9 +80,10 @@ from agentm.core.abi.roles import (
     PROVIDER_RESOLVER_SERVICE,
     PROVIDER_SESSION_IDENTITY_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
-    RESOURCE_WRITER_SERVICE,
     RESOURCE_READER_SERVICE,
+    RESOURCE_STORE_SERVICE,
     RESOURCE_TXN_SERVICE,
+    RESOURCE_WRITER_SERVICE,
     TOOL_EXECUTOR_SERVICE,
     TOOL_ORCHESTRATOR_SERVICE,
     TRAJECTORY_NODE_STORE_SERVICE,
@@ -186,6 +192,82 @@ async def _replace_node_projection_for_turns(
     )
 
 
+async def _fork_node_projection(
+    *,
+    store: TrajectoryNodeStore,
+    source: "Session",
+    target_session_id: str,
+    target_parent_session_id: str,
+    turns: Sequence[Turn],
+) -> None:
+    logical_parent_id: str | None = None
+    high_water_turn = turns[-1] if turns else None
+    if high_water_turn is not None:
+        source_tail = await asyncio.to_thread(
+            store.query_nodes,
+            TrajectoryNodeQuery(
+                session_id=source.id,
+                turn_id=high_water_turn.id,
+                sort="desc",
+                limit=1,
+            ),
+        )
+        if not source_tail:
+            await _replace_node_projection_for_turns(
+                store=store,
+                session_id=source.id,
+                root_session_id=source.ctx.root_session_id,
+                parent_session_id=source.ctx.parent_session_id,
+                turns=source.trajectory.turns,
+                renderers=source.trigger_renderers,
+            )
+            source_tail = await asyncio.to_thread(
+                store.query_nodes,
+                TrajectoryNodeQuery(
+                    session_id=source.id,
+                    turn_id=high_water_turn.id,
+                    sort="desc",
+                    limit=1,
+                ),
+            )
+        if not source_tail:
+            raise RuntimeError(
+                f"cannot resolve node projection for fork turn {high_water_turn.id}"
+            )
+        logical_parent_id = source_tail[0].id
+
+    head = TrajectoryHead(
+        session_id=target_session_id,
+        head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+        branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        root_session_id=source.ctx.root_session_id,
+        parent_session_id=target_parent_session_id,
+        logical_parent_id=logical_parent_id,
+        status="active",
+        updated_at=time.time(),
+    )
+    status = TrajectoryProjectionStatus(
+        session_id=target_session_id,
+        state="current",
+        high_water_turn_id=(
+            high_water_turn.id if high_water_turn is not None else None
+        ),
+        high_water_turn_index=(
+            high_water_turn.index if high_water_turn is not None else None
+        ),
+        node_count=0,
+        updated_at=time.time(),
+        metadata={"fork_projection": "logical_parent"},
+    )
+    await asyncio.to_thread(
+        store.replace_session_projection,
+        target_session_id,
+        (),
+        heads=(head,),
+        status=status,
+    )
+
+
 async def _resolve_fork_turn_ref(
     *,
     source: "Session",
@@ -269,6 +351,7 @@ class Session:
         tool_orchestrator: ToolOrchestrator | None = None,
         permission_policy: PermissionPolicy | None = None,
         resource_reader: ResourceReader | None = None,
+        resource_store: ResourceStore | None = None,
         trajectory_node_store: TrajectoryNodeStore | None = None,
         versioned_resource_store: VersionedResourceStore | None = None,
         environment_restore_policy: EnvironmentRestorePolicy | None = None,
@@ -358,6 +441,8 @@ class Session:
             self.register_permission_policy(permission_policy, replace=True)
         if resource_reader is not None:
             self.register_resource_reader(resource_reader, replace=True)
+        if resource_store is not None:
+            self.register_resource_store(resource_store, replace=True)
         if trajectory_node_store is not None:
             self.register_trajectory_node_store(trajectory_node_store, replace=True)
         if versioned_resource_store is not None:
@@ -406,6 +491,7 @@ class Session:
             store=self.store,
             model=self._model,
             stream_fn=self._stream_fn,
+            trigger_renderers=dict(self.trigger_renderers),
         )
         for policy in self.context_policies:
             if isinstance(policy, BindableContextPolicy):
@@ -438,6 +524,7 @@ class Session:
         try:
             assert self._stream_fn is not None
             assert self._model is not None
+            provider = self.get_provider()
             await drive(
                 trajectory=self.trajectory,
                 triggers=self.triggers,
@@ -451,6 +538,9 @@ class Session:
                 parent_session_id=self.ctx.parent_session_id,
                 system=self.system,
                 context_policies=self.context_policies,
+                prompt_cache_adapter=(
+                    provider.prompt_cache_adapter if provider is not None else None
+                ),
                 trigger_renderers=self.trigger_renderers,
                 interrupt=self._interrupt,
                 shutdown=self._shutdown,
@@ -982,6 +1072,39 @@ class Session:
             cast(type[ResourceReader], ResourceReader),
         )
 
+    def register_resource_store(
+        self,
+        store: ResourceStore,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = RESOURCE_STORE_SERVICE
+        previous = self.services.get(service_name)
+        if self.services.has(service_name) and not replace:
+            raise ValueError("resource_store already registered")
+        self.services.register(
+            service_name,
+            store,
+            ResourceStore,
+            scope="resource",
+        )
+        reader = self.services.get(RESOURCE_READER_SERVICE)
+        if reader is None:
+            self.register_resource_reader(store)
+        elif replace and reader is previous:
+            self.register_resource_reader(store, replace=True)
+        self._emit_register_event(
+            "resource_store",
+            service_name,
+            {"service": store},
+        )
+
+    def get_resource_store(self) -> ResourceStore | None:
+        return self.services.get(
+            RESOURCE_STORE_SERVICE,
+            cast(type[ResourceStore], ResourceStore),
+        )
+
     def get_resource_txn(self) -> ResourceTxn | None:
         return self.services.get(
             RESOURCE_TXN_SERVICE,
@@ -1290,6 +1413,14 @@ class Session:
         child_services.inherit_from(self.services)
         if extra_services is not None:
             child_services.update_from(extra_services)
+        if stream_fn is None and model is None:
+            inherited_provider = self.get_provider()
+            if inherited_provider is not None:
+                child_services.register(
+                    f"provider:{inherited_provider.name}",
+                    inherited_provider,
+                    scope="session",
+                )
 
         child = Session(
             ctx=child_ctx,
@@ -1417,6 +1548,13 @@ class Session:
 
         child_services = ServiceRegistry()
         child_services.inherit_from(source.services)
+        inherited_provider = source.get_provider()
+        if inherited_provider is not None:
+            child_services.register(
+                f"provider:{inherited_provider.name}",
+                inherited_provider,
+                scope="session",
+            )
         effect_scope = source.get_effect_scope()
         if effect_scope is not None:
             child_effect_scope = await effect_scope.fork_at(
@@ -1477,13 +1615,12 @@ class Session:
         node_store = source.get_trajectory_node_store()
         if node_store is not None:
             try:
-                await _replace_node_projection_for_turns(
+                await _fork_node_projection(
                     store=node_store,
-                    session_id=forked.id,
-                    root_session_id=forked.ctx.root_session_id,
-                    parent_session_id=forked.ctx.parent_session_id,
+                    source=source,
+                    target_session_id=forked.id,
+                    target_parent_session_id=source.id,
                     turns=prefix.turns,
-                    renderers=forked.trigger_renderers,
                 )
             except Exception:
                 logger.exception(
@@ -1495,14 +1632,36 @@ class Session:
         return forked
 
     @classmethod
-    async def resume(cls, session_id: str, store: TrajectoryStore, **kwargs: object) -> "Session":
+    async def resume(
+        cls,
+        session_id: str,
+        store: TrajectoryStore,
+        config: AgentSessionConfig,
+    ) -> "Session":
         meta, turns = await asyncio.to_thread(store.load, session_id)
-        trajectory = Trajectory(turns=turns)
         ctx = context_from_session_meta(session_id, meta)
         provider_identity = provider_identity_from_session_meta(meta)
-        if provider_identity is not None and "provider_identity" not in kwargs:
-            kwargs["provider_identity"] = provider_identity
-        session = cls(ctx=ctx, trajectory=trajectory, store=store, **kwargs)  # type: ignore[arg-type]
+        from agentm.core.runtime.session_factory import create_from_config
+
+        resume_scenario = config.scenario
+        if resume_scenario is None and config.extensions is None:
+            resume_scenario = ctx.scenario
+        resume_config = replace(
+            config,
+            cwd=ctx.cwd,
+            scenario=resume_scenario,
+            purpose=ctx.purpose,
+            store=store,
+            session_id=ctx.session_id,
+            root_session_id=ctx.root_session_id,
+            parent_session_id=ctx.parent_session_id,
+            initial_turns=list(turns),
+        )
+        session = await create_from_config(
+            resume_config,
+            restored_context=ctx,
+            restored_provider_identity=provider_identity,
+        )
         effect_scope = session.get_effect_scope()
         if effect_scope is not None:
             try:

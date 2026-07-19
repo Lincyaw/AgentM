@@ -17,6 +17,11 @@ requirements:
       - path: pyproject.toml
       - path: uv.lock
       - path: src/agentm/__init__.py
+      - path: src/agentm/authoring/__init__.py
+      - path: src/agentm/authoring/artifacts.py
+      - path: src/agentm/config/__init__.py
+      - path: src/agentm/config/provider_change.py
+      - path: src/agentm/config/resolver.py
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/core/abi/catalog.py
       - path: src/agentm/core/abi/codec.py
@@ -55,11 +60,21 @@ requirements:
       - path: src/agentm/core/runtime/tree.py
       - path: src/agentm/core/runtime/trajectory_nodes.py
       - path: src/agentm/core/runtime/trigger_queue.py
+      - path: src/agentm/environments/__init__.py
+      - path: src/agentm/environments/local.py
+      - path: src/agentm/execution/__init__.py
+      - path: src/agentm/execution/process.py
+      - path: src/agentm/execution/sandbox.py
+      - path: src/agentm/execution/worker.py
       - path: src/agentm/extensions/builtin/file_tools.py
+      - path: src/agentm/extensions/builtin/context_projection.py
       - path: src/agentm/extensions/builtin/llm_anthropic.py
+      - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: src/agentm/extensions/builtin/llm_openai.py
+      - path: src/agentm/extensions/builtin/message_patterns.py
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/operations.py
+      - path: src/agentm/extensions/builtin/prompt_cache.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/validate.py
@@ -69,13 +84,35 @@ requirements:
       - path: src/agentm/extensions/observability/otel_export.py
       - path: src/agentm/extensions/observability/otlp.py
       - path: src/agentm/extensions/observability/paths.py
+      - path: src/agentm/gateway/__init__.py
+      - path: src/agentm/gateway/forwarding.py
+      - path: src/agentm/observability/__init__.py
+      - path: src/agentm/observability/query.py
+      - path: src/agentm/presenter/__init__.py
+      - path: src/agentm/presenter/frontmatter.py
       - path: src/agentm/scenarios.py
+      - path: src/agentm/storage/__init__.py
+      - path: src/agentm/storage/catalog/__init__.py
+      - path: src/agentm/storage/catalog/json.py
+      - path: src/agentm/storage/query/__init__.py
+      - path: src/agentm/storage/query/clickhouse.py
+      - path: src/agentm/storage/resources/__init__.py
+      - path: src/agentm/storage/resources/local.py
+      - path: src/agentm/storage/serialization.py
+      - path: src/agentm/storage/trajectory/__init__.py
+      - path: src/agentm/storage/trajectory/jsonl.py
+      - path: src/agentm/storage/trajectory/postgres.py
       - path: src/agentm_toolbox/__main__.py
       - path: src/agentm_toolbox/_state.py
+      - path: tools/otel/docker-compose.yaml
     tests:
+      - path: tests/fixtures/__init__.py
+      - path: tests/fixtures/prompt_cache_adapter.py
+      - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_lifecycle_catalog_ports.py
     docs:
+      - path: .claude/index.yaml
       - path: README.md
       - path: docs/refactor-abstract-inventory.md
     depends_on: []

@@ -14,7 +14,7 @@ import json
 import uuid
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
@@ -40,7 +40,7 @@ from agentm.core.abi.manifest import (
 from agentm.core.abi.permission import PermissionPolicy
 from agentm.core.abi.provider import ProviderResolver
 from agentm.core.abi.provider import ProviderSessionIdentity
-from agentm.core.abi.resource import ResourceReader, ResourceWriter
+from agentm.core.abi.resource import ResourceReader, ResourceStore, ResourceWriter
 from agentm.core.abi.tool_executor import ToolExecutor
 from agentm.core.abi.tool_orchestration import ToolOrchestrator
 from agentm.core.abi.roles import (
@@ -434,6 +434,7 @@ async def create_session(
     cwd: str = "",
     purpose: str = "root",
     store: TrajectoryStore | None = None,
+    session_context: SessionContext | None = None,
     session_id: str | None = None,
     root_session_id: str | None = None,
     parent_session_id: str | None = None,
@@ -445,6 +446,7 @@ async def create_session(
     provider_resolver: ProviderResolver | None = None,
     provider_identity: ProviderSessionIdentity | None = None,
     resource_reader: ResourceReader | None = None,
+    resource_store: ResourceStore | None = None,
     resource_writer: ResourceWriter | None = None,
     tool_executor: ToolExecutor | None = None,
     tool_orchestrator: ToolOrchestrator | None = None,
@@ -489,17 +491,20 @@ async def create_session(
     _register_default_catalog_services(resolved_services)
     _register_default_query_store(resolved_services, store)
 
-    resolved_session_id = session_id or uuid.uuid4().hex[:16]
-    resolved_root_id = root_session_id or resolved_session_id
-    ctx = SessionContext(
-        session_id=resolved_session_id,
-        root_session_id=resolved_root_id,
-        parent_session_id=parent_session_id,
-        cwd=cwd or "",
-        purpose=purpose,
-        scenario=scenario_name,
-        scenario_dir=scenario_dir,
-    )
+    if session_context is None:
+        resolved_session_id = session_id or uuid.uuid4().hex[:16]
+        resolved_root_id = root_session_id or resolved_session_id
+        ctx = SessionContext(
+            session_id=resolved_session_id,
+            root_session_id=resolved_root_id,
+            parent_session_id=parent_session_id,
+            cwd=cwd or "",
+            purpose=purpose,
+            scenario=scenario_name,
+            scenario_dir=scenario_dir,
+        )
+    else:
+        ctx = session_context
 
     session = Session(
         ctx=ctx,
@@ -517,6 +522,7 @@ async def create_session(
         tool_orchestrator=tool_orchestrator,
         permission_policy=permission_policy,
         resource_reader=resource_reader,
+        resource_store=resource_store,
         trajectory_node_store=trajectory_node_store,
         versioned_resource_store=versioned_resource_store,
         environment_restore_policy=environment_restore_policy,
@@ -547,8 +553,8 @@ async def create_session(
         store,
         meta=SessionMeta(
             id=session.id,
-            parent_id=parent_session_id,
-            purpose=purpose,
+            parent_id=ctx.parent_session_id,
+            purpose=ctx.purpose,
             cwd=ctx.cwd,
             created_at=created_at,
             config=session_meta_config(
@@ -564,7 +570,12 @@ async def create_session(
     return session
 
 
-async def create_from_config(config: "AgentSessionConfig") -> Session:
+async def create_from_config(
+    config: "AgentSessionConfig",
+    *,
+    restored_context: SessionContext | None = None,
+    restored_provider_identity: ProviderSessionIdentity | None = None,
+) -> Session:
     """Create a root session from the public SDK config dataclass."""
 
     max_turns = config.loop_config.max_turns if config.loop_config else None
@@ -592,6 +603,11 @@ async def create_from_config(config: "AgentSessionConfig") -> Session:
             scope="session",
         )
     resolved_spec = _resolve_session_spec(config)
+    if resolved_spec is not None and restored_provider_identity is not None:
+        resolved_spec = replace(
+            resolved_spec,
+            provider_identity=restored_provider_identity,
+        )
     if resolved_spec is not None:
         services.register(
             RESOLVED_SESSION_SPEC_SERVICE,
@@ -614,13 +630,19 @@ async def create_from_config(config: "AgentSessionConfig") -> Session:
         provider=resolved_spec.provider if resolved_spec is not None else config.provider,
         provider_resolver=config.provider_resolver,
         provider_identity=(
-            resolved_spec.provider_identity
-            if resolved_spec is not None
-            else None
+            restored_provider_identity
+            if restored_provider_identity is not None
+            else (
+                resolved_spec.provider_identity
+                if resolved_spec is not None
+                else None
+            )
         ),
         stream_fn=config.stream_fn,
         model=config.model,
+        system=config.system,
         resource_reader=config.resource_reader,
+        resource_store=config.resource_store,
         resource_writer=config.resource_writer,
         tool_executor=config.tool_executor,
         tool_orchestrator=config.tool_orchestrator,
@@ -635,6 +657,7 @@ async def create_from_config(config: "AgentSessionConfig") -> Session:
         cwd=config.cwd,
         purpose=config.purpose,
         store=config.store,
+        session_context=restored_context,
         session_id=config.session_id,
         root_session_id=config.root_session_id,
         parent_session_id=config.parent_session_id,
@@ -700,6 +723,21 @@ async def create_child_session(
             ResolvedSessionSpec,
             scope="session",
         )
+    provider_spec = (
+        resolved_spec.provider if resolved_spec is not None else config.provider
+    )
+    if (
+        provider_spec is None
+        and config.stream_fn is None
+        and config.model is None
+    ):
+        inherited_provider = parent.get_provider()
+        if inherited_provider is not None:
+            child_services.register(
+                f"provider:{inherited_provider.name}",
+                inherited_provider,
+                scope="session",
+            )
 
     scenario_loader = config.scenario_loader or _get_scenario_loader(child_services)
     if resolved_spec is not None:
@@ -744,6 +782,7 @@ async def create_child_session(
         bus=config.bus,
         stream_fn=config.stream_fn or parent._stream_fn,
         model=config.model or parent._model,
+        system=config.system if config.system is not None else parent.system,
         store=child_store,
         graph=parent.graph,
         max_turns=max_turns,
@@ -764,6 +803,8 @@ async def create_child_session(
         child.register_resource_writer(config.resource_writer, replace=True)
     if config.resource_reader is not None:
         child.register_resource_reader(config.resource_reader, replace=True)
+    if config.resource_store is not None:
+        child.register_resource_store(config.resource_store, replace=True)
     if config.tool_executor is not None:
         child.register_tool_executor(config.tool_executor, replace=True)
     if config.tool_orchestrator is not None:
@@ -783,7 +824,6 @@ async def create_child_session(
         child.register_atom_catalog(config.atom_catalog, replace=True)
 
     plan_specs = list(extensions)
-    provider_spec = resolved_spec.provider if resolved_spec is not None else config.provider
     if provider_spec is not None:
         plan_specs.append(provider_spec)
     plan = _extension_plan(

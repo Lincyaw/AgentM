@@ -121,6 +121,43 @@ class ResourceReader(Protocol):
 
 
 @runtime_checkable
+class ResourceStore(ResourceReader, Protocol):
+    """Durable read/write authority for logical ``ResourceRef`` values.
+
+    Unlike ``ResourceWriter``, this port has no workspace-path semantics.
+    Policies use it for host-managed content such as summaries and artifacts
+    that may live in a filesystem, object store, or database.
+    """
+
+    async def write_ref(
+        self,
+        ref: ResourceRef,
+        content: bytes,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> ResourceMutation: ...
+
+    async def replace_ref(
+        self,
+        ref: ResourceRef,
+        old: bytes,
+        new: bytes,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> ResourceMutation: ...
+
+    async def delete_ref(
+        self,
+        ref: ResourceRef,
+        *,
+        rationale: str,
+        author: WriterAuthor = "agent",
+    ) -> ResourceMutation: ...
+
+
+@runtime_checkable
 class ResourceTxn(Protocol):
     """Turn-scoped resource mutation transaction."""
 
@@ -238,6 +275,7 @@ __all__ = [
     "ResourceNamespace",
     "ResourceReader",
     "ResourceRef",
+    "ResourceStore",
     "ResourceTxn",
     "ResourceTxnContext",
     "ResourceWriter",

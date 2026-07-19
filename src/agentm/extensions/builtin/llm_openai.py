@@ -33,11 +33,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
 from loguru import logger
 import os
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from agentm.core.abi import (
@@ -57,6 +58,9 @@ from agentm.core.abi import (
     PauseTurn,
     ProviderConfig,
     ProviderError,
+    ProviderPromptCacheAdapter,
+    ProviderPromptCacheRequest,
+    ProviderPromptCacheResult,
     RetryPolicy,
     TerminationHint,
     TextContent,
@@ -102,6 +106,8 @@ class LlmOpenaiConfig(BaseModel):
     context_window: int | None = None
     max_output_tokens: int | None = None
     thinking_round_trip: Literal["drop", "system_note", "raise"] | None = None
+    prompt_cache_enabled: bool | None = None
+    prompt_cache_retention: Literal["in_memory", "24h"] = "in_memory"
     azure_endpoint: str | None = None
     api_version: str | None = None
 
@@ -113,6 +119,94 @@ MANIFEST = ExtensionManifest(
     requires=(),
     priority=AtomInstallPriority.PROVIDER,
 )
+
+
+_PROMPT_CACHE_KEY_TAG = "openai.prompt_cache_key"
+_PROMPT_CACHE_RETENTION_TAG = "openai.prompt_cache_retention"
+
+
+class OpenAIPromptCacheAdapter(ProviderPromptCacheAdapter):
+    """Materialize provider-neutral cache identity for OpenAI requests."""
+
+    def __init__(
+        self,
+        *,
+        retention: Literal["in_memory", "24h"] = "in_memory",
+    ) -> None:
+        self._retention = retention
+
+    def apply_prompt_cache(
+        self,
+        request: ProviderPromptCacheRequest,
+    ) -> ProviderPromptCacheResult:
+        provider_key = _normalize_prompt_cache_key(request.state.cache_key)
+        target = next(
+            (
+                index
+                for index in range(len(request.messages) - 1, -1, -1)
+                if request.messages[index].meta.tags.get("cache_key")
+                == request.state.cache_key
+            ),
+            len(request.messages) - 1,
+        )
+        messages = tuple(request.messages)
+        if target >= 0:
+            tagged = messages[target]
+            tags = {
+                **dict(tagged.meta.tags),
+                _PROMPT_CACHE_KEY_TAG: provider_key,
+                _PROMPT_CACHE_RETENTION_TAG: self._retention,
+            }
+            messages = (
+                *messages[:target],
+                replace(tagged, meta=replace(tagged.meta, tags=tags)),
+                *messages[target + 1 :],
+            )
+        state = replace(
+            request.state,
+            provider="openai",
+            metadata={
+                **dict(request.state.metadata),
+                "adapter": "openai",
+                "openai_prompt_cache_key": provider_key,
+                "openai_prompt_cache_retention": self._retention,
+            },
+        )
+        return ProviderPromptCacheResult(
+            messages=messages,
+            state=state,
+            metadata={
+                "prompt_cache_key": provider_key,
+                "prompt_cache_retention": self._retention,
+            },
+        )
+
+
+def _normalize_prompt_cache_key(cache_key: str) -> str:
+    if len(cache_key) <= 64:
+        return cache_key
+    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+    return f"agentm:{digest[:57]}"
+
+
+def _prompt_cache_options(
+    messages: list[AgentMessage],
+) -> tuple[str | None, Literal["in_memory", "24h"] | None]:
+    for message in reversed(messages):
+        raw_key = message.meta.tags.get(_PROMPT_CACHE_KEY_TAG)
+        if not isinstance(raw_key, str) or not raw_key:
+            continue
+        raw_retention = message.meta.tags.get(_PROMPT_CACHE_RETENTION_TAG)
+        retention: Literal["in_memory", "24h"] | None
+        if raw_retention == "in_memory":
+            retention = "in_memory"
+        elif raw_retention == "24h":
+            retention = "24h"
+        else:
+            retention = None
+        return raw_key, retention
+    return None, None
+
 
 def _is_openai_retryable(exc: BaseException) -> bool:
     try:
@@ -621,6 +715,7 @@ class OpenAIStreamFn:
         del thinking
 
         client = self._get_client()
+        prompt_cache_key, prompt_cache_retention = _prompt_cache_options(messages)
         body: dict[str, Any] = {
             "model": model.id,
             "max_tokens": model.max_output_tokens,
@@ -639,6 +734,21 @@ class OpenAIStreamFn:
             body["tools"] = _to_openai_tools(tools, strict=strict)
 
         extra = dict(self.extra_body or {})
+        prompt_cache_key = extra.pop("prompt_cache_key", prompt_cache_key)
+        prompt_cache_retention = extra.pop(
+            "prompt_cache_retention",
+            prompt_cache_retention,
+        )
+        if prompt_cache_key is not None:
+            if not isinstance(prompt_cache_key, str):
+                raise TypeError("OpenAI prompt_cache_key must be a string")
+            body["prompt_cache_key"] = prompt_cache_key
+        if prompt_cache_retention is not None:
+            if prompt_cache_retention not in {"in_memory", "24h"}:
+                raise ValueError(
+                    "OpenAI prompt_cache_retention must be 'in_memory' or '24h'"
+                )
+            body["prompt_cache_retention"] = prompt_cache_retention
         if self.reasoning_effort is not None:
             if self.azure_endpoint is not None and tools:
                 self._emit_reasoning_skip_diagnostic()
@@ -854,7 +964,18 @@ class _OpenAIProviderRuntime:
         self._ensure_provider_name_available(name)
         self._session.register_provider(
             name,
-            ProviderConfig(stream_fn=stream_fn, model=model, name=name),
+            ProviderConfig(
+                stream_fn=stream_fn,
+                model=model,
+                name=name,
+                prompt_cache_adapter=(
+                    OpenAIPromptCacheAdapter(
+                        retention=self._config.prompt_cache_retention,
+                    )
+                    if self._prompt_cache_enabled()
+                    else None
+                ),
+            ),
         )
 
     def _model_id(self) -> str:
@@ -865,6 +986,12 @@ class _OpenAIProviderRuntime:
                 "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
             )
         return model_id
+
+    def _prompt_cache_enabled(self) -> bool:
+        configured = self._config.prompt_cache_enabled
+        if configured is not None:
+            return configured
+        return not _is_non_canonical_base_url(self._config.base_url)
 
     def _verify_ssl(self) -> bool:
         verify_ssl = self._config.verify_ssl if self._config.verify_ssl is not None else True
@@ -986,4 +1113,10 @@ class DuplicateProviderError(ValueError):
     * The session already has a provider registered under the requested name.
     """
 
-__all__ = ("DuplicateProviderError", "MANIFEST", "OpenAIStreamFn", "install")
+__all__ = (
+    "DuplicateProviderError",
+    "MANIFEST",
+    "OpenAIPromptCacheAdapter",
+    "OpenAIStreamFn",
+    "install",
+)

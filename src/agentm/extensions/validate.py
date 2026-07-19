@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from agentm.core.abi.manifest import ExtensionManifest, parse_capability_ref
+
 
 Severity = Literal["error", "warning"]
 
@@ -133,6 +135,43 @@ def extension_helper_imports(path: str | Path) -> list[str]:
     return sorted(modules)
 
 
+def validate_manifest_requirements(
+    manifest: ExtensionManifest,
+    *,
+    path: str = "",
+    allow_bare_compatibility: bool = True,
+) -> list[ValidationIssue]:
+    """Return authoring feedback for capability-oriented dependencies."""
+
+    issues: list[ValidationIssue] = []
+    for requirement in manifest.requires:
+        ref = parse_capability_ref(requirement)
+        if ":" not in requirement:
+            severity: Severity = "warning" if allow_bare_compatibility else "error"
+            issues.append(
+                ValidationIssue(
+                    severity=severity,
+                    rule="bare-requirement",
+                    message=(
+                        f"manifest requirement {requirement!r} is a compatibility "
+                        f"alias for {ref.key!r}; prefer explicit capability keys "
+                        "such as 'service:operations' or 'tool:bash'"
+                    ),
+                    path=path,
+                )
+            )
+        elif ref.kind == "unknown":
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    rule="unknown-capability-kind",
+                    message=f"manifest requirement {requirement!r} uses an unknown capability kind",
+                    path=path,
+                )
+            )
+    return issues
+
+
 def _is_extension_helper_module(module: str) -> bool:
     if module == "agentm.extensions":
         return False
@@ -171,6 +210,7 @@ def _forbidden_import_reason(module: str) -> str | None:
 __all__ = [
     "ValidationIssue",
     "extension_helper_imports",
+    "validate_manifest_requirements",
     "validate_atom_file",
     "validate_atom_package",
 ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .messages import AgentMessage
 from .stream import Model, StreamFn
@@ -23,6 +23,7 @@ class ProviderConfig:
     stream_fn: StreamFn
     model: Model
     name: str
+    prompt_cache_adapter: ProviderPromptCacheAdapter | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,7 @@ class ProviderPromptCacheResult:
     )
 
 
+@runtime_checkable
 class ProviderPromptCacheAdapter(Protocol):
     """Provider-specific bridge for prompt-cache state.
 
@@ -83,6 +85,7 @@ class ProviderPromptCacheAdapter(Protocol):
     ) -> ProviderPromptCacheResult: ...
 
 
+@runtime_checkable
 class ProviderResolver(Protocol):
     """Tree-scoped host policy for selecting the active provider."""
 
