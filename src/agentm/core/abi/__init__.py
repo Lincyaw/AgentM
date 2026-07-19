@@ -1,24 +1,47 @@
-"""AgentM kernel ABI — the single import surface for atoms.
-
-Atoms import from ``agentm.core.abi`` only; direct sub-module imports
-(``from agentm.core.abi.events import ...``) are forbidden by the §11
-validator. This keeps the public surface explicit and auditable.
-"""
+"""AgentM SDK ABI import surface for atoms."""
 
 from __future__ import annotations
 
-# -- bus ---------------------------------------------------------------------
-from .bus import (  # noqa: E402
-    BusPriority,
-    Envelope,
-    Event,
-    EventBus,
-    EventBusObserver,
-    Handler,
+from .bus import BusPriority, Envelope, Event, EventBus, EventBusObserver, Handler
+from .cancel import (
+    CancelReason,
+    CancelSignal,
+    CancelSource,
+    EventCancelSource,
+    ReasonedCancelSignal,
+    ResettableCancelSource,
+    cancel_reason,
 )
-
-# -- events (kernel) ---------------------------------------------------------
+from .catalog import (
+    ActiveSetFingerprint,
+    AtomActivation,
+    AtomCatalog,
+    CatalogMeta,
+    ResourceVersion,
+    VersionedResourceStore,
+)
+from .codec import (
+    CodecRegistry,
+    DEFAULT_CODEC,
+    RawTrigger,
+    TriggerCodec,
+    deserialize_message,
+    serialize_message,
+)
+from .compaction import ContextBudget, ContextProjection, ProjectionReport, TurnRange
+from .context import (
+    ContextPolicy,
+    ContextPolicyState,
+    PersistentContextPolicy,
+    PolicyContext,
+    build_context,
+    build_context_sync,
+    render_trigger,
+    turn_to_messages,
+)
 from .events import (
+    ApiRegisterEvent,
+    ApiSendUserMessageEvent,
     BeforeRunEvent,
     BeforeSendEvent,
     BudgetExhausted,
@@ -27,12 +50,18 @@ from .events import (
     ContextEvent,
     DecideEvent,
     DiagnosticEvent,
+    ExtensionInstallEvent,
+    ExtensionReloadEvent,
+    ExtensionUnloadEvent,
     Inject,
+    LlmRequestEndEvent,
+    LlmRequestStartEvent,
     LoopAction,
     MaxTurnsExhausted,
     ModelEndTurn,
     NoPendingInput,
     ProviderTruncated,
+    ResourcesDiscoverEvent,
     RunEndEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
@@ -49,122 +78,15 @@ from .events import (
     TurnCommittedEvent,
     TurnObservation,
 )
-
-# -- events (domain, atom-to-atom) ------------------------------------------
-from .events import (  # noqa: F811
-    AfterCompactEvent,
-    ApiRegisterEvent,
-    ApiSendUserMessageEvent,
-    BackgroundActivityEvent,
-    BeforeCompactEvent,
-    BeforeInstallAtomEvent,
-    BeforeUnloadAtomEvent,
-    CommandDispatchedEvent,
-    CostBudgetExceededEvent,
-    EntryAppendedEvent,
-    ExtensionInstallEvent,
-    ExtensionReloadEvent,
-    ExtensionUnloadEvent,
-    InputEvent,
-    LlmRequestEndEvent,
-    LlmRequestStartEvent,
-    MessageAppendedEvent,
-    MessagePersistedEvent,
-    PlanSubmittedEvent,
-    ResolveSubagentEvent,
-    ResourceWriteEvent,
-    ResourcesDiscoverEvent,
-    SessionHeaderEmittedEvent,
-)
-
-# -- trajectory --------------------------------------------------------------
-from .trajectory import (
-    Outcome,
-    Round,
-    ToolRecord,
-    Turn,
-    TurnMeta,
-    TurnRef,
-)
-
-# -- trigger -----------------------------------------------------------------
-from .trigger import (
-    BackgroundCompletion,
-    ContinueTrigger,
-    Injection,
-    MonitorFire,
-    SubagentResult,
-    Trigger,
-    TriggerRenderer,
-    UserInput,
-)
-
-# -- context -----------------------------------------------------------------
-from .context import (
-    ContextPolicy,
-    PolicyContext,
-    build_context,
-    build_context_sync,
-    render_trigger,
-    turn_to_messages,
-)
-
-# -- store -------------------------------------------------------------------
-from .store import (
-    SessionMeta,
-    TrajectoryStore,
-)
-
-# -- tree --------------------------------------------------------------------
-from .tree import (
-    EdgeKind,
-    SessionEdge,
-    SessionGraphProtocol,
-    SessionNode,
-)
-
-# -- codec -------------------------------------------------------------------
-from .codec import (
-    CodecRegistry,
-    DEFAULT_CODEC,
-    RawTrigger,
-    TriggerCodec,
-    deserialize_message,
-    serialize_message,
-)
-
-# -- services ----------------------------------------------------------------
-from .services import (
-    ServiceNotFound,
-    ServiceRegistry,
-    ServiceTypeMismatch,
-)
-
-# -- session_api -------------------------------------------------------------
-from .session_api import (
-    AgentSessionConfig,
-    AtomAPI,
-    LoopConfig,
-    SessionContext,
-    SpawnedSession,
-    Unsubscribe,
-)
-
-# -- lifecycle ---------------------------------------------------------------
+from .errors import ExtensionLoadError
 from .lifecycle import (
-    AbandonEvent,
-    ForkEvent,
-    LifecycleHook,
-    LifecycleHookRegistry,
-    ReplayEvent,
-    ResumeEvent,
+    EffectScope,
+    EffectTxn,
+    EnvironmentSnapshot,
+    EnvironmentSnapshotter,
+    LifecycleMeta,
 )
-
-# -- manifest ----------------------------------------------------------------
-from .manifest import ChannelEffects as ChannelEffects
-from .manifest import ExtensionManifest as ExtensionManifest
-
-# -- messages ----------------------------------------------------------------
+from .manifest import AtomInstallPriority, ExtensionManifest
 from .messages import (
     AgentMessage,
     AssistantContent,
@@ -180,8 +102,69 @@ from .messages import (
     text_message,
     tool_result,
 )
-
-# -- stream ------------------------------------------------------------------
+from .operations import (
+    BashOperations,
+    EnvironmentKind,
+    EnvironmentOperations,
+    EnvironmentRef,
+    ExecResult,
+    Operations,
+)
+from .provider import ProviderConfig, ProviderRegistry, ProviderResolver
+from .query import (
+    EventRecord,
+    QueryMeta,
+    SessionFilter,
+    SessionIdentity,
+    SpanRecord,
+    TrajectoryQueryStore,
+)
+from .resource import (
+    BatchHandle,
+    PathClass,
+    ResourceMutation,
+    ResourceMutationOp,
+    ResourceRef,
+    ResourceTxn,
+    ResourceTxnContext,
+    ResourceWriter,
+    TransactionalResourceWriter,
+    WriteResult,
+    WriterAuthor,
+)
+from .retry import RetryPolicy
+from .roles import (
+    ACTIVE_SET_FINGERPRINT_SERVICE,
+    ATOM_CATALOG_SERVICE,
+    CONTEXT_PROJECTION_SERVICE,
+    EFFECT_SCOPE_SERVICE,
+    LOOP_BUDGET_SERVICE,
+    PROVIDER_RESOLVER_SERVICE,
+    RETRY_POLICY_SERVICE,
+    RESOURCE_TXN_SERVICE,
+    RESOURCE_WRITER_SERVICE,
+    RESOLVED_SESSION_SPEC_SERVICE,
+    SCENARIO_LOADER_SERVICE,
+    SESSION_SPEC_RESOLVER_SERVICE,
+    TOOL_EXECUTOR_SERVICE,
+    TRAJECTORY_QUERY_STORE_SERVICE,
+    VERSIONED_RESOURCE_STORE_SERVICE,
+)
+from .services import ServiceNotFound, ServiceRegistry, ServiceScope, ServiceTypeMismatch
+from .session_api import (
+    AgentSessionConfig,
+    AtomAPI,
+    ExtensionSpec,
+    LoopConfig,
+    ResolvedSessionSpec,
+    ScenarioLoader,
+    ScenarioSpec,
+    SessionSpecResolver,
+    SessionContext,
+    SpawnedSession,
+    Unsubscribe,
+)
+from .store import SessionMeta, TrajectoryStore
 from .stream import (
     AssistantStreamEvent,
     MessageEnd,
@@ -194,8 +177,7 @@ from .stream import (
     ToolCallEnd,
     ToolCallStart,
 )
-
-# -- termination -------------------------------------------------------------
+from .telemetry import SessionTelemetry
 from .termination import (
     Aborted,
     EndTurn,
@@ -206,266 +188,265 @@ from .termination import (
     ToolUseExpected,
     VendorSpecific,
 )
-
-# -- tool --------------------------------------------------------------------
 from .tool import (
     FILE_OP_EDIT,
     FILE_OP_METADATA_KEY,
     FILE_OP_READ,
     FILE_OP_WRITE,
     FunctionTool,
-    TOOL_EXECUTION_DOMAIN_EVENT_LOOP,
-    TOOL_EXECUTION_DOMAIN_METADATA_KEY,
-    TOOL_EXECUTION_DOMAIN_PROCESS,
-    TOOL_EXECUTION_DOMAIN_SANDBOX,
-    TOOL_EXECUTION_DOMAIN_THREAD,
     TOOL_RESULT_FORMAT_METADATA_KEY,
     Tool,
     ToolContinue,
-    ToolExecutionDomain,
     ToolOutcome,
     ToolResult,
     ToolTerminate,
 )
-
-# -- tool execution ----------------------------------------------------------
 from .tool_executor import (
-    ToolExecutionDomainUnavailable,
-    ToolProcessFailed,
-    ToolProcessTerminated,
-    execute_tool_call,
-    tool_execution_domain,
+    FilesystemAccess,
+    IsolationLevel,
+    ToolConcurrency,
+    ToolExecutionCapabilities,
+    ToolExecutionRequest,
+    ToolExecutionRequirements,
+    ToolExecutionRequirementsProvider,
+    ToolExecutor,
+    ToolInterruptBehavior,
+    tool_execution_requirements,
+)
+from .trajectory import InjectedMessages, Outcome, Round, ToolRecord, Turn, TurnMeta, TurnRef
+from .tree import EdgeKind, SessionEdge, SessionGraphProtocol, SessionNode
+from .trigger import (
+    BackgroundCompletion,
+    ContinueTrigger,
+    Injection,
+    MonitorFire,
+    SubagentResult,
+    Trigger,
+    TriggerEnvelope,
+    TriggerPriority,
+    TriggerRenderer,
+    UserInput,
+    trigger_priority_rank,
 )
 
-# -- operations --------------------------------------------------------------
-from .operations import (
-    BashOperations,
-    ExecResult,
-)
-
-# -- resource ----------------------------------------------------------------
-from .resource import (
-    BatchHandle,
-    PathClass,
-    ResourceWriter,
-    WriteResult,
-    WriterAuthor,
-)
-
-# -- catalog -----------------------------------------------------------------
-from .catalog import ActiveSetFingerprint, atom_decisions_path
-
-# -- skill -------------------------------------------------------------------
-from .skill import SkillDiagnostic, SkillRecord
-
-# -- prompt_template ---------------------------------------------------------
-from .prompt_template import PromptRegistry, PromptTemplateRecord
-
-# -- roles -------------------------------------------------------------------
-from .roles import (
-    APPROVAL_MANAGER_SERVICE,
-    ARTIFACT_STORE_SERVICE,
-    COMMAND_PARSER,
-    COMPACTION_PROMPTS,
-    COST_QUERY_SERVICE,
-    GATEWAY_SCHEDULER_SERVICE,
-    LOOP_BUDGET_SERVICE,
-    MODEL_RESOLVER_SERVICE,
-    PARENT_PROVIDER_CONFIG_KEY,
-    PROMPT_REGISTRY,
-    PROMPT_TEMPLATES_SERVICE,
-    PROVIDER_INHERITOR,
-    RETRY_POLICY_SERVICE,
-    SESSION_STORE_SERVICE,
-    SLASH_COMMAND_DISPATCHER_SERVICE,
-    SUB_AGENT_RUNTIME,
-    SYSTEM_PROMPT_PROVIDER,
-    WIRE_CHILD_FORWARDER_SERVICE,
-    WIRE_OUTBOUND_SERVICE,
-)
-
-# -- presenter ---------------------------------------------------------------
-from .presenter import PHASE_GLYPHS, Phase  # noqa: F401
-
-# -- provider ----------------------------------------------------------------
-from .provider import ProviderConfig, ProviderManifest, ProviderResolver  # noqa: F401
-
-# -- retry -------------------------------------------------------------------
-from .retry import RetryPolicy  # noqa: F401
-
-# -- telemetry ---------------------------------------------------------------
-from .telemetry import SessionTelemetry  # noqa: F401
-
-# -- command -----------------------------------------------------------------
-from .command import (
-    CommandDispatcher,
-    CommandSpec,
-    DispatchResult,
-)
-
-# -- compaction --------------------------------------------------------------
-from .compaction import (
-    ENTRY_MATERIALIZERS,
-    ENTRY_TYPE_BRANCH_SUMMARY,
-    ENTRY_TYPE_COMPACTION,
-    ENTRY_TYPE_MESSAGE,
-    CompactionDetails,
-    CompactionPrompts,
-    CompactionResult,
-    CompactionSettings,
-    ContextUsageSnapshot,
-    PROMPT_BRANCH_SUMMARY,
-    PROMPT_BRANCH_SUMMARY_PREAMBLE,
-    PROMPT_SUMMARIZATION,
-    PROMPT_SUMMARIZATION_SYSTEM,
-    PROMPT_UPDATE_SUMMARIZATION,
-    SessionEntry,
-)
-
-# -- extension errors --------------------------------------------------------
-from agentm.core.runtime.extension import ExtensionLoadError  # noqa: F401
-
-# -- trace reader (lib, re-exported for access) ------------------------------
-from agentm.core.lib.trace_reader import (  # noqa: F401
-    LogRecord,
-    SessionIdentity,
-    Span,
-    TraceReader,
-    attr,
-)
-
-# ---------------------------------------------------------------------------
-# Non-import definitions AFTER all imports (avoids E402)
-# ---------------------------------------------------------------------------
-
-
-class ExtensionStaleError(RuntimeError):
-    """Raised when an atom's source has changed since it was loaded."""
-    ...
-
-
-# Type alias — atoms typed against the legacy name still import it
 ExtensionAPI = AtomAPI
 
-# Event aliases — atoms may import these names
-TurnStartEvent = TurnBeginEvent
-TurnEndEvent = TurnCommittedEvent
-AgentStartEvent = BeforeRunEvent
-AgentEndEvent = RunEndEvent
-BeforeAgentStartEvent = BeforeRunEvent
-BeforeSendToLlmEvent = BeforeSendEvent
-DecideTurnActionEvent = DecideEvent
-
 __all__ = [
-    # bus
-    "BusPriority", "Envelope", "Event", "EventBus", "EventBusObserver", "Handler",
-    # events (kernel)
-    "BeforeRunEvent", "BeforeSendEvent", "BudgetExhausted",
-    "ChildSessionEndEvent", "ChildSessionStartEvent",
-    "ContextEvent", "DecideEvent", "DiagnosticEvent",
-    "Inject", "LoopAction", "MaxTurnsExhausted", "ModelEndTurn",
-    "NoPendingInput", "ProviderTruncated",
-    "RunEndEvent", "SessionReadyEvent", "SessionShutdownEvent",
-    "SignalAborted", "Step", "Stop", "StreamDeltaEvent",
-    "TerminationCause", "ToolCallEvent", "ToolErrorEvent",
-    "ToolResultEvent", "ToolTerminated",
-    "TurnBeginEvent", "TurnCommittedEvent", "TurnObservation",
-    # events (domain)
-    "AfterCompactEvent", "ApiRegisterEvent", "ApiSendUserMessageEvent",
-    "BackgroundActivityEvent", "BeforeCompactEvent",
-    "BeforeInstallAtomEvent", "BeforeUnloadAtomEvent",
-    "CommandDispatchedEvent", "CostBudgetExceededEvent",
-    "EntryAppendedEvent", "ExtensionInstallEvent",
-    "ExtensionReloadEvent", "ExtensionUnloadEvent",
-    "InputEvent", "LlmRequestEndEvent", "LlmRequestStartEvent",
-    "MessageAppendedEvent", "MessagePersistedEvent",
-    "PlanSubmittedEvent", "ResolveSubagentEvent",
-    "ResourceWriteEvent", "ResourcesDiscoverEvent",
-    "SessionHeaderEmittedEvent",
-    # event aliases
-    "TurnStartEvent", "TurnEndEvent", "AgentStartEvent", "AgentEndEvent",
-    "BeforeAgentStartEvent", "BeforeSendToLlmEvent", "DecideTurnActionEvent",
-    # trajectory
-    "Outcome", "Round", "ToolRecord", "Turn", "TurnMeta", "TurnRef",
-    # trigger
-    "BackgroundCompletion", "ContinueTrigger", "Injection", "MonitorFire",
-    "SubagentResult", "Trigger", "TriggerRenderer", "UserInput",
-    # context
-    "ContextPolicy", "PolicyContext",
-    "build_context", "build_context_sync", "render_trigger", "turn_to_messages",
-    # store
-    "SessionMeta", "TrajectoryStore",
-    # tree
-    "EdgeKind", "SessionEdge", "SessionGraphProtocol", "SessionNode",
-    # codec
-    "CodecRegistry", "DEFAULT_CODEC", "RawTrigger", "TriggerCodec",
-    "deserialize_message", "serialize_message",
-    # services
-    "ServiceNotFound", "ServiceRegistry", "ServiceTypeMismatch",
-    # session_api
-    "AgentSessionConfig", "AtomAPI", "ExtensionAPI",
-    "LoopConfig", "SessionContext", "SpawnedSession", "Unsubscribe",
-    # lifecycle
-    "AbandonEvent", "ForkEvent", "LifecycleHook", "LifecycleHookRegistry",
-    "ReplayEvent", "ResumeEvent",
-    # manifest
-    "ChannelEffects", "ExtensionManifest",
-    # messages
-    "AgentMessage", "AssistantContent", "AssistantMessage",
-    "ImageContent", "TextContent", "ThinkingBlock",
-    "ToolCallBlock", "ToolResultBlock", "ToolResultMessage",
-    "Usage", "UserMessage", "text_message", "tool_result",
-    # stream
-    "AssistantStreamEvent", "MessageEnd", "Model", "StreamFn",
-    "TextDelta", "ThinkingDelta", "ToolCallArgsDelta",
-    "ToolCallArgsParseError", "ToolCallEnd", "ToolCallStart",
-    # termination
-    "Aborted", "EndTurn", "MaxTokens", "PauseTurn",
-    "ProviderError", "TerminationHint", "ToolUseExpected", "VendorSpecific",
-    # tool
-    "FILE_OP_EDIT", "FILE_OP_METADATA_KEY", "FILE_OP_READ", "FILE_OP_WRITE",
+    "Aborted",
+    "ActiveSetFingerprint",
+    "AgentMessage",
+    "AgentSessionConfig",
+    "ApiRegisterEvent",
+    "ApiSendUserMessageEvent",
+    "AssistantContent",
+    "AssistantMessage",
+    "AssistantStreamEvent",
+    "AtomActivation",
+    "AtomCatalog",
+    "AtomInstallPriority",
+    "AtomAPI",
+    "BackgroundCompletion",
+    "BashOperations",
+    "BatchHandle",
+    "BeforeRunEvent",
+    "BeforeSendEvent",
+    "BudgetExhausted",
+    "BusPriority",
+    "CancelReason",
+    "CancelSignal",
+    "CancelSource",
+    "CatalogMeta",
+    "ChildSessionEndEvent",
+    "ChildSessionStartEvent",
+    "CodecRegistry",
+    "ContextBudget",
+    "ContextEvent",
+    "ContextPolicy",
+    "ContextPolicyState",
+    "ContextProjection",
+    "ContinueTrigger",
+    "CONTEXT_PROJECTION_SERVICE",
+    "DEFAULT_CODEC",
+    "DecideEvent",
+    "DiagnosticEvent",
+    "EdgeKind",
+    "EffectScope",
+    "EffectTxn",
+    "EFFECT_SCOPE_SERVICE",
+    "EndTurn",
+    "Envelope",
+    "EnvironmentSnapshot",
+    "EnvironmentSnapshotter",
+    "EnvironmentKind",
+    "EnvironmentOperations",
+    "EnvironmentRef",
+    "Event",
+    "EventBus",
+    "EventBusObserver",
+    "EventRecord",
+    "EventCancelSource",
+    "ExecResult",
+    "ExtensionAPI",
+    "ExtensionInstallEvent",
+    "ExtensionLoadError",
+    "ExtensionManifest",
+    "ExtensionReloadEvent",
+    "ExtensionSpec",
+    "ExtensionUnloadEvent",
+    "FILE_OP_EDIT",
+    "FILE_OP_METADATA_KEY",
+    "FILE_OP_READ",
+    "FILE_OP_WRITE",
+    "FilesystemAccess",
     "FunctionTool",
-    "TOOL_EXECUTION_DOMAIN_EVENT_LOOP", "TOOL_EXECUTION_DOMAIN_METADATA_KEY",
-    "TOOL_EXECUTION_DOMAIN_PROCESS", "TOOL_EXECUTION_DOMAIN_SANDBOX",
-    "TOOL_EXECUTION_DOMAIN_THREAD", "TOOL_RESULT_FORMAT_METADATA_KEY",
-    "Tool", "ToolContinue", "ToolExecutionDomain", "ToolOutcome",
-    "ToolResult", "ToolTerminate",
-    "ToolExecutionDomainUnavailable", "ToolProcessFailed",
-    "ToolProcessTerminated", "execute_tool_call", "tool_execution_domain",
-    # operations
-    "BashOperations", "ExecResult",
-    # resource
-    "BatchHandle", "PathClass", "ResourceWriter", "WriteResult", "WriterAuthor",
-    # catalog
-    "ActiveSetFingerprint", "atom_decisions_path",
-    # skill
-    "SkillDiagnostic", "SkillRecord",
-    # prompt_template
-    "PromptRegistry", "PromptTemplateRecord",
-    # command
-    "CommandDispatcher", "CommandSpec", "DispatchResult",
-    # compaction
-    "CompactionDetails", "CompactionPrompts", "CompactionResult",
-    "CompactionSettings", "ContextUsageSnapshot",
-    "ENTRY_MATERIALIZERS", "ENTRY_TYPE_BRANCH_SUMMARY",
-    "ENTRY_TYPE_COMPACTION", "ENTRY_TYPE_MESSAGE",
-    "PROMPT_BRANCH_SUMMARY", "PROMPT_BRANCH_SUMMARY_PREAMBLE",
-    "PROMPT_SUMMARIZATION", "PROMPT_SUMMARIZATION_SYSTEM",
-    "PROMPT_UPDATE_SUMMARIZATION", "SessionEntry",
-    # presenter / provider / retry / telemetry
-    "PHASE_GLYPHS", "Phase",
-    "ProviderConfig", "ProviderManifest", "ProviderResolver",
-    "RetryPolicy", "SessionTelemetry",
-    # errors
-    "ExtensionStaleError", "ExtensionLoadError",
-    # roles
-    "APPROVAL_MANAGER_SERVICE", "ARTIFACT_STORE_SERVICE",
-    "COMMAND_PARSER", "COMPACTION_PROMPTS", "COST_QUERY_SERVICE",
-    "GATEWAY_SCHEDULER_SERVICE", "LOOP_BUDGET_SERVICE",
-    "MODEL_RESOLVER_SERVICE", "PARENT_PROVIDER_CONFIG_KEY",
-    "PROMPT_REGISTRY", "PROMPT_TEMPLATES_SERVICE", "PROVIDER_INHERITOR",
-    "RETRY_POLICY_SERVICE", "SESSION_STORE_SERVICE",
-    "SLASH_COMMAND_DISPATCHER_SERVICE", "SUB_AGENT_RUNTIME",
-    "SYSTEM_PROMPT_PROVIDER", "WIRE_CHILD_FORWARDER_SERVICE",
-    "WIRE_OUTBOUND_SERVICE",
+    "Handler",
+    "ImageContent",
+    "Inject",
+    "Injection",
+    "IsolationLevel",
+    "ACTIVE_SET_FINGERPRINT_SERVICE",
+    "ATOM_CATALOG_SERVICE",
+    "LOOP_BUDGET_SERVICE",
+    "LifecycleMeta",
+    "LlmRequestEndEvent",
+    "LlmRequestStartEvent",
+    "LoopAction",
+    "LoopConfig",
+    "MaxTokens",
+    "MaxTurnsExhausted",
+    "MessageEnd",
+    "Model",
+    "ModelEndTurn",
+    "MonitorFire",
+    "NoPendingInput",
+    "Operations",
+    "InjectedMessages",
+    "Outcome",
+    "PauseTurn",
+    "PersistentContextPolicy",
+    "PathClass",
+    "PolicyContext",
+    "ProviderConfig",
+    "ProviderError",
+    "ProviderRegistry",
+    "PROVIDER_RESOLVER_SERVICE",
+    "ProviderResolver",
+    "ProviderTruncated",
+    "ProjectionReport",
+    "QueryMeta",
+    "RETRY_POLICY_SERVICE",
+    "RESOURCE_WRITER_SERVICE",
+    "RESOURCE_TXN_SERVICE",
+    "RawTrigger",
+    "RESOLVED_SESSION_SPEC_SERVICE",
+    "ResourcesDiscoverEvent",
+    "ReasonedCancelSignal",
+    "ResourceMutation",
+    "ResourceMutationOp",
+    "ResourceRef",
+    "ResourceTxn",
+    "ResourceTxnContext",
+    "ResourceVersion",
+    "ResourceWriter",
+    "ResettableCancelSource",
+    "ResolvedSessionSpec",
+    "RetryPolicy",
+    "Round",
+    "RunEndEvent",
+    "SCENARIO_LOADER_SERVICE",
+    "ScenarioLoader",
+    "ScenarioSpec",
+    "SESSION_SPEC_RESOLVER_SERVICE",
+    "ServiceNotFound",
+    "ServiceRegistry",
+    "ServiceScope",
+    "ServiceTypeMismatch",
+    "SessionContext",
+    "SessionEdge",
+    "SessionGraphProtocol",
+    "SessionMeta",
+    "SessionNode",
+    "SessionFilter",
+    "SessionIdentity",
+    "SessionReadyEvent",
+    "SessionShutdownEvent",
+    "SessionSpecResolver",
+    "SessionTelemetry",
+    "SignalAborted",
+    "SpawnedSession",
+    "Step",
+    "Stop",
+    "SpanRecord",
+    "StreamDeltaEvent",
+    "StreamFn",
+    "SubagentResult",
+    "TerminationCause",
+    "TerminationHint",
+    "TextContent",
+    "TextDelta",
+    "ThinkingBlock",
+    "ThinkingDelta",
+    "TOOL_RESULT_FORMAT_METADATA_KEY",
+    "TOOL_EXECUTOR_SERVICE",
+    "TRAJECTORY_QUERY_STORE_SERVICE",
+    "Tool",
+    "ToolCallArgsDelta",
+    "ToolCallArgsParseError",
+    "ToolCallBlock",
+    "ToolCallEnd",
+    "ToolCallEvent",
+    "ToolCallStart",
+    "ToolConcurrency",
+    "ToolContinue",
+    "ToolErrorEvent",
+    "ToolExecutionCapabilities",
+    "ToolExecutionRequest",
+    "ToolExecutionRequirements",
+    "ToolExecutionRequirementsProvider",
+    "ToolExecutor",
+    "ToolInterruptBehavior",
+    "ToolOutcome",
+    "ToolRecord",
+    "ToolResult",
+    "ToolResultBlock",
+    "ToolResultEvent",
+    "ToolResultMessage",
+    "ToolTerminate",
+    "ToolTerminated",
+    "ToolUseExpected",
+    "TransactionalResourceWriter",
+    "TrajectoryQueryStore",
+    "TrajectoryStore",
+    "Trigger",
+    "TriggerCodec",
+    "TriggerEnvelope",
+    "TriggerPriority",
+    "TriggerRenderer",
+    "Turn",
+    "TurnBeginEvent",
+    "TurnCommittedEvent",
+    "TurnMeta",
+    "TurnObservation",
+    "TurnRef",
+    "TurnRange",
+    "Unsubscribe",
+    "Usage",
+    "UserInput",
+    "UserMessage",
+    "VendorSpecific",
+    "VERSIONED_RESOURCE_STORE_SERVICE",
+    "VersionedResourceStore",
+    "WriteResult",
+    "WriterAuthor",
+    "build_context",
+    "build_context_sync",
+    "cancel_reason",
+    "deserialize_message",
+    "render_trigger",
+    "serialize_message",
+    "text_message",
+    "tool_result",
+    "tool_execution_requirements",
+    "trigger_priority_rank",
+    "turn_to_messages",
 ]

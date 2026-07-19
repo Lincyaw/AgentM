@@ -9,43 +9,63 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator
+from typing import Iterator, cast
 
 from loguru import logger
 
+from agentm.core.abi.cancel import CancelReason, CancelSignal, EventCancelSource
+from agentm.core.abi.codec import CodecRegistry, TriggerCodec
+from agentm.core.abi.catalog import (
+    AtomCatalog,
+    VersionedResourceStore,
+)
+from agentm.core.abi.lifecycle import EffectScope
 from agentm.core.abi.messages import AgentMessage, ImageContent, TextContent
+from agentm.core.abi.provider import ProviderConfig, ProviderResolver
+from agentm.core.abi.resource import ResourceTxn, ResourceWriter
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
-from agentm.core.abi.bus import EventBus, EventBusObserver
+from agentm.core.abi.tool_executor import ToolExecutor
+from agentm.core.abi.bus import EventBus, EventBusObserver, Handler
 from agentm.core.abi.context import (
     ContextPolicy,
     PolicyContext,
     build_context_sync,
 )
 from agentm.core.abi.events import (
+    ApiRegisterEvent,
+    ChildSessionEndEvent,
     ChildSessionStartEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
 )
 from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.roles import (
+    ATOM_CATALOG_SERVICE,
+    EFFECT_SCOPE_SERVICE,
+    PROVIDER_RESOLVER_SERVICE,
+    RESOURCE_WRITER_SERVICE,
+    RESOURCE_TXN_SERVICE,
+    TOOL_EXECUTOR_SERVICE,
+    VERSIONED_RESOURCE_STORE_SERVICE,
+)
 from agentm.core.abi.session_api import AgentSessionConfig, SessionContext
 from agentm.core.abi.store import SessionMeta, TrajectoryStore
 from agentm.core.abi.trajectory import Turn, TurnRef
 from agentm.core.abi.tree import SessionGraphProtocol
-from agentm.core.abi.trigger import Trigger, TriggerRenderer, UserInput
-from agentm.core.abi.lifecycle import (
-    ForkEvent,
-    LifecycleHook,
-    LifecycleHookRegistry,
-    ResumeEvent,
-)
+from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
 from agentm.core.runtime.driver import ThinkingLevel, drive
+from agentm.core.runtime.session_meta import (
+    context_from_session_meta,
+    session_meta_config,
+)
 from agentm.core.runtime.trajectory import Trajectory
-from agentm.core.runtime.trigger_queue import TriggerQueue
+from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
 
 
 class Session:
@@ -66,8 +86,13 @@ class Session:
         system: str | None = None,
         context_policies: list[ContextPolicy] | None = None,
         trigger_renderers: dict[str, TriggerRenderer] | None = None,
+        codec: CodecRegistry | None = None,
         max_turns: int | None = None,
+        max_tool_calls: int | None = None,
+        tool_allowlist: Sequence[str] | None = None,
         thinking: ThinkingLevel = "off",
+        cancel_signal: CancelSignal | None = None,
+        provider_resolver: ProviderResolver | None = None,
         services: ServiceRegistry | None = None,
         cwd: str = "",
         purpose: str = "root",
@@ -90,7 +115,13 @@ class Session:
         else:
             self.ctx = ctx
         self.id = self.ctx.session_id
-        self.trajectory = trajectory or Trajectory()
+        if trajectory is not None:
+            self.trajectory = trajectory
+        else:
+            stored_turns: list[Turn] = []
+            if store is not None and store.session_exists(self.id):
+                _, stored_turns = store.load(self.id)
+            self.trajectory = Trajectory(turns=stored_turns)
         self.bus = bus or EventBus()
         self.store = store
         self.graph = graph
@@ -99,25 +130,38 @@ class Session:
         self.system = system
         self.context_policies: list[ContextPolicy] = list(context_policies or [])
         self.trigger_renderers: dict[str, TriggerRenderer] = dict(trigger_renderers or {})
+        store_codec = getattr(store, "codec", None)
+        self.codec = codec or (
+            store_codec if isinstance(store_codec, CodecRegistry) else CodecRegistry()
+        )
         self.services = services or ServiceRegistry()
 
         self._stream_fn = stream_fn
         self._model = model
         self._max_turns = max_turns
+        self._max_tool_calls = max_tool_calls
         self._thinking = thinking
-        self._interrupt = asyncio.Event()
-        self._shutdown = asyncio.Event()
+        self._parent_cancel_signal = cancel_signal
+        self._interrupt = EventCancelSource()
+        self._shutdown = EventCancelSource()
         self._closed = False
+        self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
-        self._pending_installs: list[asyncio.Task[object]] = []
-        self.lifecycle = LifecycleHookRegistry()
         self.installed_extensions: list[str] = []
+        self._active_provider_name: str | None = None
+        if provider_resolver is not None:
+            self.services.register(
+                PROVIDER_RESOLVER_SERVICE,
+                provider_resolver,
+                scope="host",
+            )
+        if tool_allowlist is not None:
+            self.services.register("tool_allowlist", tuple(tool_allowlist), scope="session")
 
-        if self.graph is not None:
+        if self.graph is not None and self.ctx.parent_session_id is None:
             self.graph.register(
                 self.id,
-                parent_id=self.ctx.parent_session_id,
-                purpose=purpose,
+                purpose=self.ctx.purpose,
             )
 
     # --- Lifecycle ---
@@ -132,6 +176,7 @@ class Session:
     def start(self) -> None:
         if self._driver_task is not None:
             return
+        self._activate_provider(fallback=self._active_provider_name)
         if self._stream_fn is None:
             raise RuntimeError("cannot start: no stream_fn")
         if self._model is None:
@@ -147,10 +192,7 @@ class Session:
         )
         for policy in self.context_policies:
             if hasattr(policy, "bind"):
-                try:
-                    policy.bind(policy_ctx)
-                except Exception:
-                    logger.exception("policy bind failed")
+                policy.bind(policy_ctx)
 
         self.bus.freeze_clear()
         self._driver_task = asyncio.create_task(
@@ -185,20 +227,27 @@ class Session:
                 trigger_renderers=self.trigger_renderers,
                 interrupt=self._interrupt,
                 shutdown=self._shutdown,
+                cancel_signal=self._parent_cancel_signal,
+                effect_scope=self.get_effect_scope(),
+                resource_writer=self.get_resource_writer(),
+                services=self.services,
+                tool_executor=self.get_tool_executor(),
                 max_turns=self._max_turns,
+                max_tool_calls=self._max_tool_calls,
+                tool_allowlist=self._tool_allowlist(),
                 thinking=self._thinking,
-                lifecycle=self.lifecycle,
             )
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except Exception as exc:
+            self._driver_error = str(exc)
             logger.exception("session driver crashed")
 
     async def shutdown(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self._shutdown.set()
+        self._shutdown.set("shutdown")
         self.triggers.close()
         if self._driver_task is not None:
             try:
@@ -220,19 +269,57 @@ class Session:
 
     # --- Input ---
 
-    async def prompt(self, text: str, *, images: list[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        text: str,
+        *,
+        images: list[ImageContent] | None = None,
+        priority: TriggerPriority = "next",
+        origin: str | None = "human",
+        mode: str = "prompt",
+    ) -> TriggerReceipt[object]:
         content: list[TextContent | ImageContent] = []
         if text:
             content.append(TextContent(type="text", text=text))
         if images:
             content.extend(images)
-        self.triggers.push(UserInput(content=tuple(content)))
+        return self.push_trigger(
+            UserInput(content=tuple(content)),
+            priority=priority,
+            origin=origin,
+            mode=mode,
+        )
 
-    def push_trigger(self, trigger: Trigger) -> None:
-        self.triggers.push(trigger)
+    def push_trigger(
+        self,
+        trigger: Trigger,
+        *,
+        priority: TriggerPriority = "next",
+        target_session_id: str | None = None,
+        target_agent_id: str | None = None,
+        origin: str | None = None,
+        mode: str = "prompt",
+        is_meta: bool = False,
+        skip_commands: bool = False,
+        meta: dict[str, object] | None = None,
+    ) -> TriggerReceipt[object]:
+        receipt = self.triggers.push(
+            trigger,
+            priority=priority,
+            target_session_id=target_session_id,
+            target_agent_id=target_agent_id,
+            origin=origin,
+            mode=mode,
+            is_meta=is_meta,
+            skip_commands=skip_commands,
+            meta=meta,
+        )
+        if priority == "now":
+            self.interrupt("submit_interrupt")
+        return receipt
 
-    def interrupt(self) -> None:
-        self._interrupt.set()
+    def interrupt(self, reason: CancelReason | str = "user_cancel") -> None:
+        self._interrupt.set(reason)
 
     async def idle(self, timeout: float | None = None) -> bool:
         return await self.triggers.wait_quiescent(timeout)
@@ -245,8 +332,8 @@ class Session:
         """
         if self._driver_task is None:
             self.start()
-        await self.prompt(text)
-        await self.idle()
+        receipt = await self.prompt(text)
+        await receipt.wait()
         return self.get_messages()
 
     @contextmanager
@@ -295,11 +382,14 @@ class Session:
     def on(
         self,
         channel: str,
-        handler: object,
+        handler: Handler,
         *,
         priority: int = 500,
-    ) -> object:
-        return self.bus.on(channel, handler, priority=priority)  # type: ignore[arg-type]
+    ) -> Callable[[], None]:
+        from agentm.core.runtime.extension import current_installing_extension
+
+        owner = current_installing_extension() or None
+        return self.bus.on(channel, handler, priority=priority, owner=owner)
 
     # --- Registration ---
 
@@ -308,101 +398,326 @@ class Session:
         if tool.name in existing:
             raise ValueError(f"duplicate tool: {tool.name}")
         self.tools.append(tool)
+        self._emit_register_event("tool", tool.name, {"tool": tool})
 
     def register_context_policy(self, policy: ContextPolicy, *, priority: int = 500) -> None:
         policy._priority = priority  # type: ignore[attr-defined]
         self.context_policies.append(policy)
         self.context_policies.sort(key=lambda p: getattr(p, "_priority", 500))
+        self._emit_register_event(
+            "context_policy",
+            type(policy).__name__,
+            {"policy": policy, "priority": priority},
+        )
 
     def register_trigger_renderer(self, source: str, renderer: TriggerRenderer) -> None:
         self.trigger_renderers[source] = renderer
+        self._emit_register_event(
+            "trigger_renderer",
+            source,
+            {"renderer": renderer},
+        )
 
     def register_trigger_codec(self, source: str, codec: object) -> None:
-        from agentm.core.abi.codec import DEFAULT_CODEC
-        DEFAULT_CODEC.register_trigger_codec(source, codec)  # type: ignore[arg-type]
-
-    def register_lifecycle_hook(self, hook: LifecycleHook) -> None:
-        self.lifecycle.register(hook)
-
-    def _v2_push_trigger_stub(self, *, source: str, payload: str, **kwargs: object) -> None:
-        """Bridge for atoms that construct triggers from raw source+payload."""
-        from agentm.core.abi.trigger import (
-            BackgroundCompletion, MonitorFire, SubagentResult, UserInput,
+        if not isinstance(codec, TriggerCodec):
+            raise TypeError("trigger codec must implement serialize and deserialize")
+        self.codec.register_trigger_codec(source, codec)
+        self._emit_register_event(
+            "trigger_codec",
+            source,
+            {"codec": codec},
         )
-        if source == "monitor":
-            monitor_id = str(kwargs.get("dedup_key", ""))
-            self.push_trigger(MonitorFire(monitor_id=monitor_id, payload=payload))
-        elif source == "background":
-            task_id = str(kwargs.get("task_id", ""))
-            terminal = bool(kwargs.get("terminal", False))
-            self.push_trigger(BackgroundCompletion(task_id=task_id, payload=payload, terminal=terminal))
-        elif source == "subagent":
-            child_id = str(kwargs.get("child_session_id", ""))
-            terminal = bool(kwargs.get("terminal", False))
-            self.push_trigger(SubagentResult(child_session_id=child_id, payload=payload, terminal=terminal))
-        else:
-            content = (TextContent(type="text", text=payload),)
-            self.push_trigger(UserInput(content=content))
 
-    def _v2_send_user_stub(self, text: str) -> None:
-        """Bridge for atoms that want to emit a message to the user."""
-        from agentm.core.abi.events import DiagnosticEvent
-        self.bus.emit_sync(DiagnosticEvent.CHANNEL, DiagnosticEvent(
-            level="info", source="session", message=text,
-        ))
+    def register_provider(
+        self,
+        name: str,
+        config: ProviderConfig,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register an LLM provider and refresh the active provider."""
+        key = f"provider:{name}"
+        if self.services.get(key) is not None and not replace:
+            raise ValueError(f"provider {name!r} already registered")
+        self.services.register(key, config, scope="session")
+        self._activate_provider(fallback=name)
+        self._emit_register_event("provider", name, {"provider": config})
 
-    def register_provider(self, name: str, config: object) -> None:
-        """Register an LLM provider — sets model and stream_fn from config."""
-        stream_fn = getattr(config, "stream_fn", None)
-        model = getattr(config, "model", None)
-        if stream_fn is not None:
-            self._stream_fn = stream_fn
-        if model is not None:
-            self._model = model
-        self.services.register(f"provider:{name}", config)
+    def has_provider(self, name: str) -> bool:
+        return self.services.get(f"provider:{name}") is not None
 
-    def get_service(self, key: str) -> object | None:
-        """Bridge — atoms that called api.get_service() now call session.get_service()."""
-        return self.services.get(key)
+    def get_provider(self, name: str | None = None) -> ProviderConfig | None:
+        if name is None:
+            self._activate_provider(fallback=self._active_provider_name)
+        provider_name = name or self._active_provider_name
+        if provider_name is None:
+            return None
+        provider = self.services.get(f"provider:{provider_name}")
+        return provider if isinstance(provider, ProviderConfig) else None
 
-    def set_service(self, key: str, value: object) -> None:
-        """Bridge — atoms that called api.set_service() now call session.set_service()."""
-        self.services.register(key, value)
+    def provider_names(self) -> list[str]:
+        prefix = "provider:"
+        return sorted(
+            name[len(prefix):]
+            for name in self.services.names()
+            if name.startswith(prefix)
+        )
+
+    def _provider_configs(self) -> dict[str, ProviderConfig]:
+        prefix = "provider:"
+        providers: dict[str, ProviderConfig] = {}
+        for service_name in self.services.names():
+            if not service_name.startswith(prefix):
+                continue
+            provider = self.services.get(service_name)
+            if isinstance(provider, ProviderConfig):
+                providers[service_name[len(prefix):]] = provider
+        return providers
+
+    def _provider_resolver(self) -> ProviderResolver | None:
+        candidate = self.services.get(PROVIDER_RESOLVER_SERVICE)
+        if callable(getattr(candidate, "resolve_provider", None)):
+            return cast(ProviderResolver, candidate)
+        return None
+
+    def _activate_provider(self, *, fallback: str | None) -> None:
+        providers = self._provider_configs()
+        if not providers:
+            return
+        selected = self._resolve_provider_name(providers, fallback=fallback)
+        if selected is None:
+            return
+        provider = providers[selected]
+        self._active_provider_name = selected
+        self._stream_fn = provider.stream_fn
+        self._model = provider.model
+
+    def _resolve_provider_name(
+        self,
+        providers: dict[str, ProviderConfig],
+        *,
+        fallback: str | None,
+    ) -> str | None:
+        resolver = self._provider_resolver()
+        if resolver is not None:
+            selected = resolver.resolve_provider(providers)
+            if selected is not None and selected in providers:
+                return selected
+        if fallback is not None and fallback in providers:
+            return fallback
+        if (
+            self._active_provider_name is not None
+            and self._active_provider_name in providers
+        ):
+            return self._active_provider_name
+        return next(reversed(providers))
 
     def register_operations(self, **kwargs: object) -> None:
-        """Bridge — register bash/sandbox operations as services."""
-        for key, value in kwargs.items():
-            self.services.register(f"operations:{key}", value)
+        """Register named operation services."""
+        from agentm.core.abi.operations import BashOperations
 
-    def register_resource_writer(self, writer: object) -> None:
-        """Bridge — register the resource writer as a service."""
-        self.services.register("resource_writer", writer)
+        protocols = {"bash": BashOperations}
+        for key, value in kwargs.items():
+            service_name = f"operations:{key}"
+            if self.services.has(service_name):
+                raise ValueError(f"operation {key!r} already registered")
+            self.services.register(
+                service_name,
+                value,
+                protocols.get(key),
+                scope="session",
+            )
+            self._emit_register_event(
+                "operations",
+                key,
+                {"service_name": service_name, "service": value},
+            )
+
+    def register_resource_writer(
+        self,
+        writer: ResourceWriter,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = RESOURCE_WRITER_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("resource_writer already registered")
+        self.services.register(
+            service_name,
+            writer,
+            ResourceWriter,
+            scope="resource",
+        )
+        self._emit_register_event(
+            "resource_writer",
+            service_name,
+            {"service": writer},
+        )
+
+    def get_resource_writer(self) -> ResourceWriter | None:
+        return self.services.get(
+            RESOURCE_WRITER_SERVICE,
+            cast(type[ResourceWriter], ResourceWriter),
+        )
+
+    def get_resource_txn(self) -> ResourceTxn | None:
+        return self.services.get(
+            RESOURCE_TXN_SERVICE,
+            cast(type[ResourceTxn], ResourceTxn),
+        )
+
+    def register_tool_executor(
+        self,
+        executor: ToolExecutor,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = TOOL_EXECUTOR_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("tool_executor already registered")
+        self.services.register(
+            service_name,
+            executor,
+            cast(type[ToolExecutor], ToolExecutor),
+            scope="host",
+        )
+        self._emit_register_event(
+            "tool_executor",
+            service_name,
+            {"service": executor},
+        )
+
+    def get_tool_executor(self) -> ToolExecutor | None:
+        return self.services.get(
+            TOOL_EXECUTOR_SERVICE,
+            cast(type[ToolExecutor], ToolExecutor),
+        )
+
+    def register_effect_scope(
+        self,
+        scope: EffectScope,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = EFFECT_SCOPE_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("effect_scope already registered")
+        self.services.register(
+            service_name,
+            scope,
+            cast(type[EffectScope], EffectScope),
+            scope="tree",
+        )
+        self._emit_register_event(
+            "effect_scope",
+            service_name,
+            {"service": scope},
+        )
+
+    def get_effect_scope(self) -> EffectScope | None:
+        return self.services.get(
+            EFFECT_SCOPE_SERVICE,
+            cast(type[EffectScope], EffectScope),
+        )
+
+    def register_versioned_resource_store(
+        self,
+        store: VersionedResourceStore,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = VERSIONED_RESOURCE_STORE_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("versioned_resource_store already registered")
+        self.services.register(
+            service_name,
+            store,
+            cast(type[VersionedResourceStore], VersionedResourceStore),
+            scope="host",
+        )
+        self._emit_register_event(
+            "versioned_resource_store",
+            service_name,
+            {"service": store},
+        )
+
+    def get_versioned_resource_store(self) -> VersionedResourceStore | None:
+        return self.services.get(
+            VERSIONED_RESOURCE_STORE_SERVICE,
+            cast(type[VersionedResourceStore], VersionedResourceStore),
+        )
+
+    def register_atom_catalog(
+        self,
+        catalog: AtomCatalog,
+        *,
+        replace: bool = False,
+    ) -> None:
+        service_name = ATOM_CATALOG_SERVICE
+        if self.services.has(service_name) and not replace:
+            raise ValueError("atom_catalog already registered")
+        self.services.register(
+            service_name,
+            catalog,
+            cast(type[AtomCatalog], AtomCatalog),
+            scope="host",
+        )
+        self._emit_register_event(
+            "atom_catalog",
+            service_name,
+            {"service": catalog},
+        )
+
+    def get_atom_catalog(self) -> AtomCatalog | None:
+        return self.services.get(
+            ATOM_CATALOG_SERVICE,
+            cast(type[AtomCatalog], AtomCatalog),
+        )
+
+    def _emit_register_event(
+        self,
+        kind: str,
+        name: str,
+        payload: dict[str, object],
+    ) -> None:
+        from agentm.core.runtime.extension import current_installing_extension
+
+        self.bus.emit_sync(
+            ApiRegisterEvent.CHANNEL,
+            ApiRegisterEvent(
+                kind=kind,
+                name=name,
+                extension=current_installing_extension(),
+                payload=payload,
+            ),
+        )
+
+    def _tool_allowlist(self) -> tuple[str, ...] | None:
+        raw = self.services.get("tool_allowlist")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return (raw,)
+        if isinstance(raw, Sequence):
+            return tuple(str(item) for item in raw)
+        logger.warning("tool_allowlist service has unsupported type {}", type(raw).__name__)
+        return None
 
     def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
         """Register a bus observer for session-scoped instrumentation."""
         return self.bus.add_observer(observer)
 
-    def install_atom(self, module_path: str, config: dict[str, object] | None = None) -> None:
-        """Load and install an atom at runtime."""
-        from agentm.core.runtime.extension import load_extension
-        result = load_extension(module_path, self, config or {})
-        if result is not None:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                task = asyncio.ensure_future(result)
-                self._pending_installs.append(task)
+    async def install_extension(
+        self,
+        module_path: str,
+        config: dict[str, object] | None = None,
+        *,
+        trigger: str = "runtime",
+    ) -> None:
+        """Install an extension through the standard lifecycle path."""
+        from agentm.core.runtime.extension import install_extension
 
-    def unload_atom(self, name: str, **kwargs: object) -> None:
-        """Placeholder — atom unloading not yet supported in v2."""
-        logger.warning("unload_atom({!r}) called but not implemented in v2", name)
-
-    def reload_atom(self, name: str, **kwargs: object) -> None:
-        """Placeholder — atom reloading not yet supported in v2."""
-        logger.warning("reload_atom({!r}) called but not implemented in v2", name)
-
-    def list_atoms(self) -> list[str]:
-        """Placeholder — atom listing not yet supported in v2."""
-        return []
+        await install_extension(self, module_path, config or {}, trigger=trigger)
 
     @property
     def cwd(self) -> str:
@@ -426,12 +741,9 @@ class Session:
         }
 
     @property
-    def provider(self) -> object | None:
+    def provider(self) -> ProviderConfig | None:
         """Active ProviderConfig, if any provider atom registered one."""
-        for name in self.services.names():
-            if name.startswith("provider:"):
-                return self.services.get(name)
-        return None
+        return self.get_provider()
 
     @property
     def experiment(self) -> dict[str, object] | None:
@@ -451,6 +763,7 @@ class Session:
         cwd: str | None = None,
         max_turns: int | None = None,
         extra_services: ServiceRegistry | None = None,
+        cancel_signal: CancelSignal | None = None,
     ) -> "Session":
         """Spawn a lightweight child inheriting parent config.
 
@@ -464,7 +777,7 @@ class Session:
             scenario=scenario,
         )
         child_services = ServiceRegistry()
-        child_services.update_from(self.services)
+        child_services.inherit_from(self.services)
         if extra_services is not None:
             child_services.update_from(extra_services)
 
@@ -480,8 +793,12 @@ class Session:
             system=system if system is not None else self.system,
             context_policies=[copy.copy(p) for p in self.context_policies],
             trigger_renderers=dict(self.trigger_renderers),
-            max_turns=max_turns or self._max_turns,
+            codec=self.codec,
+            max_turns=self._max_turns if max_turns is None else max_turns,
+            max_tool_calls=self._max_tool_calls,
+            tool_allowlist=self._tool_allowlist(),
             thinking=self._thinking,
+            cancel_signal=cancel_signal,
             services=child_services,
         )
 
@@ -505,13 +822,31 @@ class Session:
         return child
 
     async def _register_child(self, child: "Session", *, purpose: str) -> None:
+        async def _on_child_shutdown(_: SessionShutdownEvent) -> None:
+            await self.bus.emit(
+                ChildSessionEndEvent.CHANNEL,
+                ChildSessionEndEvent(
+                    child_session_id=child.id,
+                    parent_session_id=self.id,
+                    final_message_count=len(child.get_messages()),
+                    error=child._driver_error,
+                ),
+            )
+
+        child.bus.on(SessionShutdownEvent.CHANNEL, _on_child_shutdown)
+
         if child.store is not None:
-            child.store.create_session(SessionMeta(
-                id=child.id,
-                parent_id=self.id,
-                purpose=purpose,
-                cwd=child.ctx.cwd,
-            ))
+            await asyncio.to_thread(
+                child.store.create_session,
+                SessionMeta(
+                    id=child.id,
+                    parent_id=self.id,
+                    purpose=purpose,
+                    cwd=child.ctx.cwd,
+                    created_at=time.time(),
+                    config=session_meta_config(child.ctx),
+                ),
+            )
 
         if child.graph is not None:
             child.graph.register(
@@ -537,8 +872,36 @@ class Session:
             purpose=purpose,
         )
 
+        if source.store is not None:
+            await asyncio.to_thread(
+                source.store.create_session_with_turns,
+                SessionMeta(
+                    id=child_ctx.session_id,
+                    parent_id=source.id,
+                    fork_point=at,
+                    purpose=purpose,
+                    cwd=source.ctx.cwd,
+                    created_at=time.time(),
+                    config=session_meta_config(child_ctx),
+                ),
+                prefix.turns,
+            )
+
         child_services = ServiceRegistry()
-        child_services.update_from(source.services)
+        child_services.inherit_from(source.services)
+        effect_scope = source.get_effect_scope()
+        if effect_scope is not None:
+            child_effect_scope = await effect_scope.fork_at(
+                at,
+                source_session_id=source.id,
+                child_session_id=child_ctx.session_id,
+            )
+            child_services.register(
+                EFFECT_SCOPE_SERVICE,
+                child_effect_scope,
+                cast(type[EffectScope], EffectScope),
+                scope="tree",
+            )
 
         forked = cls(
             ctx=child_ctx,
@@ -548,22 +911,17 @@ class Session:
             graph=source.graph,
             stream_fn=source._stream_fn,
             model=source._model,
+            tools=list(source.tools),
             system=source.system,
             context_policies=[copy.copy(p) for p in source.context_policies],
             trigger_renderers=dict(source.trigger_renderers),
+            codec=source.codec,
             max_turns=source._max_turns,
+            max_tool_calls=source._max_tool_calls,
+            tool_allowlist=source._tool_allowlist(),
             thinking=source._thinking,
             services=child_services,
         )
-
-        if forked.store is not None:
-            forked.store.create_session(SessionMeta(
-                id=forked.id, parent_id=source.id,
-                fork_point=at, purpose=purpose,
-                cwd=source.ctx.cwd,
-            ))
-            for turn in prefix.turns:
-                forked.store.append(forked.id, turn)
 
         if forked.graph is not None:
             forked.graph.register(
@@ -572,32 +930,17 @@ class Session:
                 edge_kind="forked",
             )
 
-        await source.lifecycle.fire_fork(ForkEvent(
-            source_session_id=source.id,
-            fork_session_id=forked.id,
-            fork_point=at,
-            source_turns=tuple(prefix.turns),
-        ))
-
         return forked
 
     @classmethod
     async def resume(cls, session_id: str, store: TrajectoryStore, **kwargs: object) -> "Session":
-        meta, turns = store.load(session_id)
+        meta, turns = await asyncio.to_thread(store.load, session_id)
         trajectory = Trajectory(turns=turns)
-        ctx = SessionContext(
-            session_id=session_id,
-            root_session_id=session_id,
-            parent_session_id=meta.parent_id,
-            cwd=meta.cwd,
-            purpose=meta.purpose,
-        )
+        ctx = context_from_session_meta(session_id, meta)
         session = cls(ctx=ctx, trajectory=trajectory, store=store, **kwargs)  # type: ignore[arg-type]
-
-        await session.lifecycle.fire_resume(ResumeEvent(
-            session_id=session_id,
-            committed_turns=tuple(turns),
-        ))
+        effect_scope = session.get_effect_scope()
+        if effect_scope is not None:
+            await effect_scope.restore(session_id=session.id, turns=tuple(turns))
 
         return session
 

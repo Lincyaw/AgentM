@@ -62,6 +62,7 @@ class SignalAborted(TerminationCause):
     """Turn was interrupted — not session-terminal."""
     overridable: ClassVar[bool] = False
     session_terminal: ClassVar[bool] = False
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +260,8 @@ class ChildSessionEndEvent(Event):
     CHANNEL: ClassVar[str] = "child_session_end"
     child_session_id: str = ""
     parent_session_id: str = ""
+    final_message_count: int = 0
+    error: str | None = None
 
 
 # --- Diagnostic -------------------------------------------------------------
@@ -271,85 +274,7 @@ class DiagnosticEvent(Event):
     message: str = ""
 
 
-__all__ = [
-    "BeforeRunEvent",
-    "BeforeSendEvent",
-    "BudgetExhausted",
-    "ChildSessionEndEvent",
-    "ChildSessionStartEvent",
-    "ContextEvent",
-    "DecideEvent",
-    "DiagnosticEvent",
-    "Inject",
-    "LoopAction",
-    "MaxTurnsExhausted",
-    "ModelEndTurn",
-    "NoPendingInput",
-    "ProviderTruncated",
-    "RunEndEvent",
-    "SessionReadyEvent",
-    "SessionShutdownEvent",
-    "SignalAborted",
-    "Step",
-    "Stop",
-    "StreamDeltaEvent",
-    "TerminationCause",
-    "ToolCallEvent",
-    "ToolErrorEvent",
-    "ToolResultEvent",
-    "ToolTerminated",
-    "TurnBeginEvent",
-    "TurnCommittedEvent",
-    "TurnObservation",
-]
-
-
-# --- Domain events (atom-to-atom communication) ---------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class InputEvent(Event):
-    """User input pre-filter.
-
-    Handlers return ``{"text": "rewritten"}`` to modify,
-    ``{"handled": True}`` to consume (no trigger fires),
-    or ``None`` for no opinion.
-    """
-    CHANNEL: ClassVar[str] = "input"
-    text: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class BackgroundActivityEvent(Event):
-    CHANNEL: ClassVar[str] = "background_activity"
-    source: str = ""
-    activity_id: str = ""
-    label: str = ""
-    status: str = ""
-    session_id: str | None = None
-    note: str | None = None
-    terminal: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class BeforeCompactEvent(Event):
-    CHANNEL: ClassVar[str] = "before_compact"
-
-
-@dataclass(frozen=True, slots=True)
-class AfterCompactEvent(Event):
-    CHANNEL: ClassVar[str] = "after_compact"
-
-
-@dataclass(frozen=True, slots=True)
-class CostBudgetExceededEvent(Event):
-    CHANNEL: ClassVar[str] = "cost_budget_exceeded"
-    detail: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ResolveSubagentEvent(Event):
-    CHANNEL: ClassVar[str] = "resolve_subagent"
+# --- SDK domain events ------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,13 +311,6 @@ class ExtensionUnloadEvent(Event):
 
 
 @dataclass(frozen=True, slots=True)
-class CommandDispatchedEvent(Event):
-    CHANNEL: ClassVar[str] = "command_dispatched"
-    name: str = ""
-    args: str = ""
-
-
-@dataclass(frozen=True, slots=True)
 class ApiRegisterEvent(Event):
     CHANNEL: ClassVar[str] = "api_register"
     kind: str = ""
@@ -413,32 +331,6 @@ class ResourcesDiscoverEvent(Event):
     CHANNEL: ClassVar[str] = "resources_discover"
     cwd: str = ""
     reason: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceWriteEvent(Event):
-    CHANNEL: ClassVar[str] = "resource_write"
-    path: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class PlanSubmittedEvent(Event):
-    CHANNEL: ClassVar[str] = "plan_submitted"
-
-
-@dataclass(frozen=True, slots=True)
-class MessageAppendedEvent(Event):
-    CHANNEL: ClassVar[str] = "message_appended"
-
-
-@dataclass(frozen=True, slots=True)
-class MessagePersistedEvent(Event):
-    CHANNEL: ClassVar[str] = "message_persisted"
-
-
-@dataclass(frozen=True, slots=True)
-class SessionHeaderEmittedEvent(Event):
-    CHANNEL: ClassVar[str] = "session_header_emitted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,24 +355,42 @@ class LlmRequestEndEvent(Event):
     error: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class EntryAppendedEvent(Event):
-    CHANNEL: ClassVar[str] = "entry_appended"
-
-
-@dataclass(frozen=True, slots=True)
-class BeforeInstallAtomEvent(Event):
-    CHANNEL: ClassVar[str] = "before_install_atom"
-    name: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class BeforeUnloadAtomEvent(Event):
-    CHANNEL: ClassVar[str] = "before_unload_atom"
-    name: str = ""
-
-
-# v2 events are immutable and handler effects are return-value based.  The code
-# health checker imports this map to find legacy mutable-hook call sites; an
-# empty map makes that rule a no-op under the trajectory model.
-MUTABLE_EVENT_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {}
+__all__ = [
+    "ApiRegisterEvent",
+    "ApiSendUserMessageEvent",
+    "BeforeRunEvent",
+    "BeforeSendEvent",
+    "BudgetExhausted",
+    "ChildSessionEndEvent",
+    "ChildSessionStartEvent",
+    "ContextEvent",
+    "DecideEvent",
+    "DiagnosticEvent",
+    "ExtensionInstallEvent",
+    "ExtensionReloadEvent",
+    "ExtensionUnloadEvent",
+    "Inject",
+    "LlmRequestEndEvent",
+    "LlmRequestStartEvent",
+    "LoopAction",
+    "MaxTurnsExhausted",
+    "ModelEndTurn",
+    "NoPendingInput",
+    "ProviderTruncated",
+    "ResourcesDiscoverEvent",
+    "RunEndEvent",
+    "SessionReadyEvent",
+    "SessionShutdownEvent",
+    "SignalAborted",
+    "Step",
+    "Stop",
+    "StreamDeltaEvent",
+    "TerminationCause",
+    "ToolCallEvent",
+    "ToolErrorEvent",
+    "ToolResultEvent",
+    "ToolTerminated",
+    "TurnBeginEvent",
+    "TurnCommittedEvent",
+    "TurnObservation",
+]

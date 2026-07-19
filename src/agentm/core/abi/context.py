@@ -25,7 +25,7 @@ bus handlers transform the live tail.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -50,6 +50,8 @@ from agentm.core.abi.trigger import (
     TriggerRenderer,
     UserInput,
 )
+
+ContextPolicyState = Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,30 @@ class ContextPolicy(Protocol):
     ) -> list[AgentMessage]: ...
 
     def bind(self, ctx: PolicyContext) -> None: ...
+
+
+@runtime_checkable
+class PersistentContextPolicy(ContextPolicy, Protocol):
+    """Context policy with state that can be persisted across resume/fork.
+
+    Implement this when a policy replaces durable-looking context with a
+    computed summary, cache marker, or compaction boundary that must survive
+    process restarts. The runtime can persist the returned mapping under
+    ``state_key`` without knowing the policy's internal schema.
+    """
+
+    @property
+    def state_key(self) -> str:
+        """Stable storage key scoped to one session."""
+        ...
+
+    def dump_state(self) -> ContextPolicyState:
+        """Return a serializable policy state snapshot."""
+        ...
+
+    def load_state(self, state: ContextPolicyState) -> None:
+        """Restore a previously dumped policy state snapshot."""
+        ...
 
 
 # --- Trigger → message renderers --------------------------------------------
@@ -153,7 +179,11 @@ def turn_to_messages(
     messages: list[AgentMessage] = []
     messages.extend(render_trigger(turn.trigger, renderers))
 
-    for rnd in turn.rounds:
+    injected_by_round = {
+        injection.after_round: injection.messages
+        for injection in turn.outcome.injected
+    }
+    for round_index, rnd in enumerate(turn.rounds):
         messages.append(rnd.response)
         if rnd.tool_results:
             result_blocks = [
@@ -162,6 +192,8 @@ def turn_to_messages(
                     tool_call_id=tr.call.id,
                     content=list(tr.result.content),
                     is_error=tr.result.is_error,
+                    deterministic=tr.result.deterministic,
+                    extras=tr.result.extras,
                 )
                 for tr in rnd.tool_results
             ]
@@ -172,9 +204,7 @@ def turn_to_messages(
                     timestamp=0.0,
                 )
             )
-
-    if turn.outcome.injected:
-        messages.extend(turn.outcome.injected)
+        messages.extend(injected_by_round.get(round_index, ()))
 
     return messages
 
@@ -216,6 +246,8 @@ def build_context_sync(
 
 __all__ = [
     "ContextPolicy",
+    "ContextPolicyState",
+    "PersistentContextPolicy",
     "PolicyContext",
     "build_context",
     "build_context_sync",

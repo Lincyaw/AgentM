@@ -8,14 +8,22 @@ registered TriggerRenderers to convert triggers into AgentMessages.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.messages import (
     AgentMessage,
     ImageContent,
     TextContent,
 )
+
+TriggerPriority = Literal["now", "next", "later"]
+_TRIGGER_PRIORITY_RANK: dict[TriggerPriority, int] = {
+    "now": 0,
+    "next": 1,
+    "later": 2,
+}
 
 
 @runtime_checkable
@@ -37,6 +45,37 @@ class TriggerRenderer(Protocol):
     """
 
     def render(self, trigger: Trigger) -> list[AgentMessage]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TriggerEnvelope:
+    """Control-plane metadata for a queued trigger.
+
+    The wrapped ``trigger`` is the durable input stored on a Turn. Everything
+    else describes queueing and routing policy: priority, target, origin, and
+    presenter/system metadata. Hosts may keep their own process-level queues;
+    this envelope is the SDK boundary they map into a session.
+    """
+
+    trigger: Trigger
+    priority: TriggerPriority = "next"
+    target_session_id: str | None = None
+    target_agent_id: str | None = None
+    origin: str | None = None
+    mode: str = "prompt"
+    is_meta: bool = False
+    skip_commands: bool = False
+    meta: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def source(self) -> str:
+        return getattr(self.trigger, "source", "unknown")
+
+
+def trigger_priority_rank(priority: TriggerPriority) -> int:
+    """Return the numeric priority order used by queues."""
+
+    return _TRIGGER_PRIORITY_RANK[priority]
 
 
 # --- Built-in trigger types -------------------------------------------------
@@ -101,6 +140,9 @@ __all__ = [
     "MonitorFire",
     "SubagentResult",
     "Trigger",
+    "TriggerEnvelope",
+    "TriggerPriority",
     "TriggerRenderer",
     "UserInput",
+    "trigger_priority_rank",
 ]
