@@ -236,6 +236,137 @@ mid-run (which was surfacing as a spurious `invalid_trial`). The per-task
 `[verifier] timeout_sec` still extends `--eval-timeout` when larger, same as
 LHTB.
 
+#### Running single tasks via `harbor run` (direct mode)
+
+For single-task runs, debugging, or experiments with supervisor interrupts,
+use `harbor run` directly instead of the `agentm eval sandbox batch`
+wrapper. This gives full control over env injection and timeout multipliers.
+
+**Prerequisites:**
+
+- ARL gateway running on a Kubernetes cluster with an internal registry
+- Model profile configured in `~/.agentm/config.toml` (see below)
+- `ARL_GATEWAY_URL` and `ARL_API_KEY` set in environment
+
+**Model profile** (`~/.agentm/config.toml`):
+
+```toml
+[models.<profile-name>]
+provider = "openai"
+name = "<profile-name>"
+model = "<model-id-on-proxy>"           # e.g. "azure-chat", "DeepSeek-V4-pro"
+base_url = "${LITELLM_BASE_URL}/v1"     # litellm proxy endpoint
+api_key = "${LITELLM_API_KEY}"
+context_window = 262144
+```
+
+**Run command:**
+
+```bash
+ARL_GATEWAY_URL="$ARL_GATEWAY_URL" \
+ARL_API_KEY="$ARL_API_KEY" \
+uv run harbor run \
+  -p <path-to-task-dir> \
+  -a agentm_harbor:ExternalAgentMAgent \
+  --environment-import-path arl.harbor:ArlEnvironment \
+  -m <model-profile> \
+  --ek gateway_url="$ARL_GATEWAY_URL" \
+  --agent-timeout-multiplier 5 \
+  --verifier-timeout-multiplier 5 \
+  --no-delete -k 1 -y \
+  --ae SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<judge-model> \
+  --ae OPENAI_API_KEY="$LITELLM_API_KEY" \
+  --ae OPENAI_BASE_URL="$LITELLM_BASE_URL" \
+  --ve SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<judge-model> \
+  --ve OPENAI_API_KEY="$LITELLM_API_KEY" \
+  --ve OPENAI_BASE_URL="$LITELLM_BASE_URL"
+```
+
+**`--ae` vs `--ve` (critical):** `--ae` injects env vars into the **agent**
+container; `--ve` injects into the **verifier** container. The rubric and
+taste judges run inside the verifier, not the agent. If you only pass
+credentials via `--ae`, judges skip with `skipped:no_api_key`. Always pass
+judge credentials via **both** `--ae` and `--ve`.
+
+**Verifier LLM model routing:** The verifier uses three independent model
+slots, each with its own override env var and default:
+
+| Slot | Override env var | Default | Purpose |
+|---|---|---|---|
+| Judge | `SSB_OVERRIDE_ALL_JUDGE_MODEL` | `anthropic/claude-sonnet-4-6` | Rubric scoring, taste evaluation, validation review |
+| Classifier | `SSB_OVERRIDE_CLASSIFIER_MODEL` | `anthropic/claude-haiku-4-5` | Patch file classification (behavioral vs cosmetic) |
+| Validation agent | `SSB_OVERRIDE_VA_MODEL` | (mini-swe-agent default) | Runs user stories against the agent's patch (25/50 tasks) |
+
+The credential gate (`have_credentials()`) checks for any of:
+`PORTKEY_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`. If none is set in
+the verifier env, all LLM judges skip.
+
+Routing: with no `PORTKEY_API_KEY`, litellm dispatches directly by the
+provider prefix in the model slug (`openai/...` → OpenAI endpoint,
+`anthropic/...` → Anthropic endpoint). So `OPENAI_API_KEY` +
+`OPENAI_BASE_URL` + `SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<model>` routes all
+judge calls through your litellm proxy. But `SSB_OVERRIDE_CLASSIFIER_MODEL`
+must be set **separately** — `ALL_JUDGE_MODEL` does not cover it.
+
+Minimal `--ve` set for full scoring via a litellm/OpenAI-compatible proxy:
+
+```bash
+--ve OPENAI_API_KEY="$LITELLM_API_KEY" \
+--ve OPENAI_BASE_URL="$LITELLM_BASE_URL" \
+--ve SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<judge-model> \
+--ve SSB_OVERRIDE_CLASSIFIER_MODEL=openai/<classifier-model>
+```
+
+Known issue: DeepSeek models do not reliably follow structured output
+schemas. The taste judge expects top-level `{practice_alignment, relative_taste}`
+but DeepSeek wraps them in `{scores: {...}}`, causing a Pydantic validation
+error and `taste_judge_ok=0`. Use a model with strict structured output
+support (GPT-4o, Claude) for the taste judge if full scoring is needed.
+
+**Key flags:**
+
+| Flag | Purpose |
+|---|---|
+| `-p <path>` | Local path to a single task directory |
+| `-a agentm_harbor:ExternalAgentMAgent` | AgentM as the agent harness |
+| `--environment-import-path arl.harbor:ArlEnvironment` | ARL sandbox backend |
+| `-m <profile>` | Model profile name from `config.toml` |
+| `--ek key=value` | Extra kwargs passed to `ArlEnvironment.__init__` |
+| `--ae KEY=VALUE` | Env var injected into the agent container |
+| `--ve KEY=VALUE` | Env var injected into the verifier container |
+| `--no-delete` | Keep sandbox session alive after the run (for debugging) |
+| `-k N` | Number of trials per task |
+
+**Inspecting results:**
+
+```bash
+# Overall result
+cat jobs/<job-dir>/result.json | python3 -m json.tool
+
+# Detailed reward breakdown (correctness, rubric, taste, patch_bloat)
+cat jobs/<job-dir>/<trial>/verifier/reward_details.json | python3 -m json.tool
+
+# Agent patch diff
+cat jobs/<job-dir>/<trial>/verifier/agent.patch
+
+# Judge logs (diagnose skipped judges)
+cat jobs/<job-dir>/<trial>/verifier/run_judge_rubric.stderr
+cat jobs/<job-dir>/<trial>/verifier/run_judge_taste.stderr
+
+# Functional test stdout
+cat jobs/<job-dir>/<trial>/verifier/test-stdout.txt
+```
+
+**Verifier scoring:**
+
+| Metric | Description |
+|---|---|
+| `correctness` | 1.0 if all functional tests pass |
+| `rubric_judge_ok` | LLM judge score against rubric criteria |
+| `taste_judge_ok` | LLM judge code style/taste score |
+| `taste_patch_bloat` | `agent_sloc / oracle_sloc` ratio |
+| `verifier_score` | Aggregate verifier score |
+
 ## Experiment output
 
 Every run produces a structured output directory:

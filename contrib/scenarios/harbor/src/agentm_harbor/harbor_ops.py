@@ -33,8 +33,7 @@ from agentm.extensions import ExtensionManifest
 from loguru import logger
 from pydantic import BaseModel
 
-if TYPE_CHECKING:
-    from harbor.environments.base import BaseEnvironment
+from harbor.environments.base import BaseEnvironment
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +131,8 @@ class HarborBashOperations:
 
         result = await self._env.exec(
             command=cmd,
+            cwd=cwd or self._default_work_dir or None,
+            env=env,
             timeout_sec=timeout_sec,
         )
 
@@ -295,15 +296,24 @@ class HarborResourceWriter:
                 for kind, args in self._ops:
                     if kind == "write":
                         r = await writer.write(
-                            args[0], args[1], rationale="batch", author=author,
+                            args[0],
+                            args[1],
+                            rationale="batch",
+                            author=author,
                         )
                     elif kind == "replace":
                         r = await writer.replace(
-                            args[0], args[1], args[2], rationale="batch", author=author,
+                            args[0],
+                            args[1],
+                            args[2],
+                            rationale="batch",
+                            author=author,
                         )
                     else:
                         r = await writer.delete(
-                            args[0], rationale="batch", author=author,
+                            args[0],
+                            rationale="batch",
+                            author=author,
                         )
                     if r.error:
                         raise RuntimeError(f"batch {kind} {args[0]!r}: {r.error}")
@@ -327,7 +337,9 @@ async def install(api: ExtensionAPI, config: HarborOpsConfig) -> None:
     work_dir = config.work_dir.rstrip("/") or "/"
 
     bash_ops = HarborBashOperations(
-        env, default_work_dir=work_dir, default_timeout=config.timeout,
+        env,
+        default_work_dir=work_dir,
+        default_timeout=config.timeout,
     )
     writer = HarborResourceWriter(env, work_dir=work_dir)
     api.register_operations(bash=bash_ops)
