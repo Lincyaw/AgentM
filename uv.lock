@@ -21,14 +21,31 @@ name = "agentm"
 version = "0.2.5"
 source = { editable = "." }
 dependencies = [
-    { name = "anthropic" },
-    { name = "httpx" },
     { name = "loguru" },
-    { name = "openai" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+observability-otel = [
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-sdk" },
-    { name = "pydantic" },
+]
+packaged-minimal = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp" },
+    { name = "opentelemetry-sdk" },
+    { name = "tiktoken" },
+]
+provider-anthropic = [
+    { name = "anthropic" },
+    { name = "httpx" },
+]
+provider-openai = [
+    { name = "httpx" },
+    { name = "openai" },
+]
+tokenizer = [
     { name = "tiktoken" },
 ]
 
@@ -44,16 +61,22 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.86.0" },
-    { name = "httpx", specifier = ">=0.28.0" },
+    { name = "anthropic", marker = "extra == 'provider-anthropic'", specifier = ">=0.86.0" },
+    { name = "httpx", marker = "extra == 'provider-anthropic'", specifier = ">=0.28.0" },
+    { name = "httpx", marker = "extra == 'provider-openai'", specifier = ">=0.28.0" },
     { name = "loguru", specifier = ">=0.7" },
-    { name = "openai", specifier = ">=1.50.0" },
-    { name = "opentelemetry-api", specifier = ">=1.30.0" },
-    { name = "opentelemetry-exporter-otlp", specifier = ">=1.30.0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.30.0" },
+    { name = "openai", marker = "extra == 'provider-openai'", specifier = ">=1.50.0" },
+    { name = "opentelemetry-api", marker = "extra == 'observability-otel'", specifier = ">=1.30.0" },
+    { name = "opentelemetry-api", marker = "extra == 'packaged-minimal'", specifier = ">=1.30.0" },
+    { name = "opentelemetry-exporter-otlp", marker = "extra == 'observability-otel'", specifier = ">=1.30.0" },
+    { name = "opentelemetry-exporter-otlp", marker = "extra == 'packaged-minimal'", specifier = ">=1.30.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'observability-otel'", specifier = ">=1.30.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'packaged-minimal'", specifier = ">=1.30.0" },
     { name = "pydantic", specifier = ">=2.0" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
+    { name = "tiktoken", marker = "extra == 'packaged-minimal'", specifier = ">=0.12.0" },
+    { name = "tiktoken", marker = "extra == 'tokenizer'", specifier = ">=0.12.0" },
 ]
+provides-extras = ["provider-openai", "provider-anthropic", "observability-otel", "tokenizer", "packaged-minimal"]
 
 [package.metadata.requires-dev]
 dev = [

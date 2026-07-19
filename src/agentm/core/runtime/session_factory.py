@@ -25,6 +25,7 @@ from agentm.core.abi.catalog import (
     AtomActivation,
     AtomCatalog,
     AtomCatalogQuery,
+    CatalogActiveSetInput,
     ResourceVersion,
     VersionedResourceStore,
 )
@@ -82,25 +83,6 @@ if TYPE_CHECKING:
     from agentm.core.abi.session_api import AgentSessionConfig
 
 
-DEFAULT_SCENARIO = "minimal"
-
-_BUILTIN_SCENARIOS: dict[str, ScenarioSpec] = {
-    "empty": ScenarioSpec(extensions=()),
-    DEFAULT_SCENARIO: ScenarioSpec(
-        extensions=(
-            ("agentm.extensions.builtin.observability", {}),
-            ("agentm.extensions.builtin.operations", {}),
-            ("agentm.extensions.builtin.retry_policy", {}),
-            ("agentm.extensions.builtin.tool_result_cap", {}),
-            ("agentm.extensions.builtin.tool_error_messages", {}),
-            ("agentm.extensions.builtin.file_tools", {}),
-            ("agentm.extensions.builtin.tool_bash", {}),
-            ("agentm.extensions.builtin.system_prompt", {}),
-        ),
-    ),
-}
-
-
 @dataclass(frozen=True, slots=True)
 class _ExtensionPlanItem:
     module_path: str
@@ -132,11 +114,8 @@ def _resolve_scenario(
 ) -> tuple[list[ExtensionSpec], str | None]:
     if loader is not None:
         return _normalize_scenario_result(loader(scenario))
-    builtin = _BUILTIN_SCENARIOS.get(scenario)
-    if builtin is not None:
-        return _normalize_scenario_result(builtin)
     raise ValueError(
-        f"unknown scenario {scenario!r}; pass extensions directly or provide "
+        f"cannot resolve scenario {scenario!r}; pass extensions directly or provide "
         "AgentSessionConfig.scenario_loader"
     )
 
@@ -148,10 +127,14 @@ def _resolve_extensions(
     extra_extensions: Sequence[ExtensionSpec],
     atom_configs: dict[str, dict[str, Any]] | None,
     scenario_loader: ScenarioLoader | None,
-) -> tuple[list[ExtensionSpec], str | None, str]:
-    scenario_name = scenario or DEFAULT_SCENARIO
+) -> tuple[list[ExtensionSpec], str | None, str | None]:
+    scenario_name = scenario
+    resolved: list[ExtensionSpec]
     if extensions is None:
-        resolved, base_dir = _resolve_scenario(scenario_name, scenario_loader)
+        if scenario_name is None:
+            resolved, base_dir = [], None
+        else:
+            resolved, base_dir = _resolve_scenario(scenario_name, scenario_loader)
     else:
         resolved = _copy_extension_specs(extensions)
         base_dir = None
@@ -406,6 +389,8 @@ def _atom_activation(
 async def _record_active_set(
     session: Session,
     plan: Sequence[_ExtensionPlanItem],
+    *,
+    created_at: float,
 ) -> ActiveSetFingerprint | None:
     catalog = session.get_atom_catalog()
     if catalog is None:
@@ -419,9 +404,17 @@ async def _record_active_set(
             else None
         )
         activations.append(_atom_activation(item, version=version))
+    provider_identity = session.provider_session_identity()
     fingerprint = await catalog.record_active_set(
-        session_id=session.id,
-        atoms=tuple(activations),
+        CatalogActiveSetInput(
+            session_id=session.id,
+            root_session_id=session.ctx.root_session_id,
+            parent_session_id=session.ctx.parent_session_id,
+            scenario=session.ctx.scenario,
+            provider=provider_identity.name if provider_identity is not None else None,
+            created_at=created_at,
+            atoms=tuple(activations),
+        )
     )
     session.services.register(
         ACTIVE_SET_FINGERPRINT_SERVICE,
@@ -548,7 +541,8 @@ async def create_session(
     )
     for item in plan:
         await install_extension(session, item.module_path, item.config)
-    active_set = await _record_active_set(session, plan)
+    created_at = time.time()
+    active_set = await _record_active_set(session, plan, created_at=created_at)
     await _ensure_store_session(
         store,
         meta=SessionMeta(
@@ -556,7 +550,7 @@ async def create_session(
             parent_id=parent_session_id,
             purpose=purpose,
             cwd=ctx.cwd,
-            created_at=time.time(),
+            created_at=created_at,
             config=session_meta_config(
                 ctx,
                 resolved_spec=resolved_spec,
@@ -708,11 +702,12 @@ async def create_child_session(
         )
 
     scenario_loader = config.scenario_loader or _get_scenario_loader(child_services)
-    scenario = (
-        resolved_spec.scenario
-        if resolved_spec is not None
-        else config.scenario or parent.ctx.scenario or DEFAULT_SCENARIO
-    )
+    if resolved_spec is not None:
+        scenario = resolved_spec.scenario
+    elif config.scenario is not None:
+        scenario = config.scenario
+    else:
+        scenario = parent.ctx.scenario
     extensions, scenario_dir, scenario_name = _resolve_extensions(
         scenario=scenario,
         extensions=(
@@ -806,7 +801,8 @@ async def create_child_session(
     for tool in config.extra_tools:
         child.register_tool(tool)
 
-    active_set = await _record_active_set(child, plan)
+    created_at = time.time()
+    active_set = await _record_active_set(child, plan, created_at=created_at)
     await _ensure_store_session(
         child_store,
         meta=SessionMeta(
@@ -814,7 +810,7 @@ async def create_child_session(
             parent_id=parent.id,
             purpose=config.purpose,
             cwd=child_ctx.cwd,
-            created_at=time.time(),
+            created_at=created_at,
             config=session_meta_config(
                 child_ctx,
                 resolved_spec=resolved_spec,
@@ -829,7 +825,6 @@ async def create_child_session(
 
 
 __all__ = [
-    "DEFAULT_SCENARIO",
     "create_child_session",
     "create_from_config",
     "create_session",

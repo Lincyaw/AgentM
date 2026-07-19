@@ -8,7 +8,10 @@ from typing import Any
 
 import pytest
 
-from agentm.core.abi.catalog import ActiveSetFingerprint, AtomActivation
+from agentm.core.abi.catalog import (
+    ActiveSetFingerprint,
+    CatalogActiveSetInput,
+)
 from agentm.core.abi.compaction import ContextBudget, ContextProjection, ProjectionReport
 from agentm.core.abi.lifecycle import EffectTxn
 from agentm.core.abi.messages import (
@@ -221,16 +224,14 @@ class _RecordingEffectScope:
 
 class _RecordingCatalog:
     def __init__(self) -> None:
-        self.active_sets: list[tuple[str, tuple[AtomActivation, ...]]] = []
+        self.active_sets: list[CatalogActiveSetInput] = []
 
     async def record_active_set(
         self,
-        *,
-        session_id: str,
-        atoms: Sequence[AtomActivation],
+        active_set: CatalogActiveSetInput,
     ) -> ActiveSetFingerprint:
-        captured = tuple(atoms)
-        self.active_sets.append((session_id, captured))
+        captured = tuple(active_set.atoms)
+        self.active_sets.append(active_set)
         return ActiveSetFingerprint(
             algorithm="test",
             digest=f"test:{len(captured)}",
@@ -238,12 +239,12 @@ class _RecordingCatalog:
         )
 
     async def get_active_set(self, session_id: str) -> ActiveSetFingerprint | None:
-        for recorded_session_id, atoms in self.active_sets:
-            if recorded_session_id == session_id:
+        for active_set in self.active_sets:
+            if active_set.session_id == session_id:
                 return ActiveSetFingerprint(
                     algorithm="test",
-                    digest=f"test:{len(atoms)}",
-                    atoms=atoms,
+                    digest=f"test:{len(active_set.atoms)}",
+                    atoms=active_set.atoms,
                 )
         return None
 
@@ -525,7 +526,15 @@ async def test_atom_catalog_records_active_set_service() -> None:
 
     fingerprint = session.services.get(ACTIVE_SET_FINGERPRINT_SERVICE)
 
-    assert catalog.active_sets == [(session.id, ())]
+    assert len(catalog.active_sets) == 1
+    active_set = catalog.active_sets[0]
+    assert active_set.session_id == session.id
+    assert active_set.root_session_id == session.id
+    assert active_set.parent_session_id is None
+    assert active_set.scenario is None
+    assert active_set.provider == "direct"
+    assert active_set.atoms == ()
+    assert active_set.created_at > 0
     assert isinstance(fingerprint, ActiveSetFingerprint)
     assert fingerprint.digest == "test:0"
 
@@ -548,7 +557,7 @@ async def test_atom_catalog_freezes_atom_identity_versions() -> None:
     )
 
     assert len(catalog.active_sets) == 1
-    _session_id, atoms = catalog.active_sets[0]
+    atoms = catalog.active_sets[0].atoms
     assert len(atoms) == 1
     atom = atoms[0]
     assert atom.name == "system_prompt"
@@ -644,7 +653,6 @@ async def test_default_tool_executor_rejects_unsupported_requirements() -> None:
     assert result.is_error
     assert "tool executor does not satisfy requirements" in result.content[0].text
     assert "isolation=process" in result.content[0].text
-    assert "filesystem=read" in result.content[0].text
     assert "killable=true" in result.content[0].text
 
 

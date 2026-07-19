@@ -179,7 +179,11 @@ def validate_extension_source(module_path: str) -> None:
     """Run AST validation before importing an atom module."""
 
     try:
-        from agentm.extensions.validate import validate_atom_file, validate_atom_package
+        from agentm.extensions.validate import (
+            extension_helper_imports,
+            validate_atom_file,
+            validate_atom_package,
+        )
     except ImportError as exc:
         raise ExtensionLoadError(
             module_path,
@@ -194,6 +198,7 @@ def validate_extension_source(module_path: str) -> None:
         return
 
     issues = []
+    visited: set[str] = {module_path}
     if spec.submodule_search_locations:
         for package_dir in spec.submodule_search_locations:
             issues.extend(
@@ -219,7 +224,83 @@ def validate_extension_source(module_path: str) -> None:
                 module_path=module_path,
                 known_extension_names=set(),
             )
+            for helper in extension_helper_imports(src_file):
+                issues.extend(
+                    _validate_extension_helper_source(
+                        helper,
+                        visited=visited,
+                        validate_atom_file=validate_atom_file,
+                        validate_atom_package=validate_atom_package,
+                        extension_helper_imports=extension_helper_imports,
+                    )
+                )
     _raise_blocking_validation_issues(module_path, issues)
+
+
+def _validate_extension_helper_source(
+    module_path: str,
+    *,
+    visited: set[str],
+    validate_atom_file: Any,
+    validate_atom_package: Any,
+    extension_helper_imports: Any,
+) -> list[Any]:
+    if module_path in visited:
+        return []
+    visited.add(module_path)
+    try:
+        spec = importlib.util.find_spec(module_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "extension validator could not inspect helper {!r}: {}",
+            module_path,
+            exc,
+        )
+        return []
+    if spec is None:
+        return []
+
+    issues: list[Any] = []
+    if spec.submodule_search_locations:
+        for package_dir in spec.submodule_search_locations:
+            issues.extend(
+                validate_atom_package(
+                    package_dir,
+                    module_path=module_path,
+                    known_extension_names=set(),
+                )
+            )
+    elif spec.origin is not None:
+        src_file = Path(spec.origin)
+        if src_file.suffix != ".py":
+            return []
+        if src_file.name == "__init__.py":
+            issues.extend(
+                validate_atom_package(
+                    src_file.parent,
+                    module_path=module_path,
+                    known_extension_names=set(),
+                )
+            )
+        else:
+            issues.extend(
+                validate_atom_file(
+                    src_file,
+                    module_path=module_path,
+                    known_extension_names=set(),
+                )
+            )
+            for helper in extension_helper_imports(src_file):
+                issues.extend(
+                    _validate_extension_helper_source(
+                        helper,
+                        visited=visited,
+                        validate_atom_file=validate_atom_file,
+                        validate_atom_package=validate_atom_package,
+                        extension_helper_imports=extension_helper_imports,
+                    )
+                )
+    return issues
 
 
 def _raise_blocking_validation_issues(module_path: str, issues: list[Any]) -> None:

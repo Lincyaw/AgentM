@@ -15,6 +15,7 @@ from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
     CatalogActiveSetRecord,
+    CatalogActiveSetInput,
     CatalogMeta,
     CatalogQuery,
     ResourceVersion,
@@ -94,11 +95,9 @@ class InMemoryAtomCatalog:
 
     async def record_active_set(
         self,
-        *,
-        session_id: str,
-        atoms: list[AtomActivation] | tuple[AtomActivation, ...],
+        active_set: CatalogActiveSetInput,
     ) -> ActiveSetFingerprint:
-        captured = tuple(atoms)
+        captured = tuple(active_set.atoms)
         payload = [_activation_record(atom) for atom in captured]
         fingerprint = ActiveSetFingerprint(
             algorithm="sha256",
@@ -106,10 +105,16 @@ class InMemoryAtomCatalog:
             atoms=captured,
             metadata={"atom_count": len(captured)},
         )
-        self._active_sets[session_id] = fingerprint
-        self._records[session_id] = CatalogActiveSetRecord(
-            session_id=session_id,
+        self._active_sets[active_set.session_id] = fingerprint
+        self._records[active_set.session_id] = CatalogActiveSetRecord(
+            session_id=active_set.session_id,
             fingerprint=fingerprint,
+            root_session_id=active_set.root_session_id,
+            parent_session_id=active_set.parent_session_id,
+            scenario=active_set.scenario,
+            provider=active_set.provider,
+            created_at=active_set.created_at,
+            metadata=active_set.metadata,
         )
         return fingerprint
 

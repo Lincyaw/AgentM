@@ -81,6 +81,10 @@ from agentm.extensions import ExtensionManifest
 
 import httpx
 
+from agentm.core.lib.async_cancel import (
+    OperationCancelledBySignal,
+    await_with_cancel_signal,
+)
 from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.tool_schema import _force_strict
 
@@ -654,13 +658,26 @@ class OpenAIStreamFn:
         async def _create_stream() -> Any:
             return await client.chat.completions.create(**body)
 
-        stream = await retry_policy.run(
-            _create_stream,
-            is_retryable=_is_openai_retryable,
-        )
+        stream: Any | None = None
         try:
-            async for chunk in stream:
-                if signal is not None and signal.is_set():
+            stream = await await_with_cancel_signal(
+                retry_policy.run(
+                    _create_stream,
+                    is_retryable=_is_openai_retryable,
+                ),
+                signal,
+            )
+            assert stream is not None
+            iterator = stream.__aiter__()
+            while True:
+                try:
+                    chunk = await await_with_cancel_signal(
+                        iterator.__anext__(),
+                        signal,
+                    )
+                except StopAsyncIteration:
+                    break
+                except OperationCancelledBySignal:
                     aborted = True
                     try:
                         await stream.close()
@@ -672,6 +689,8 @@ class OpenAIStreamFn:
                     break
                 async for kernel_event in _translate_chunk(chunk, state):
                     yield kernel_event
+        except OperationCancelledBySignal:
+            aborted = True
         finally:
             close = getattr(stream, "close", None)
             if close is not None and not aborted:

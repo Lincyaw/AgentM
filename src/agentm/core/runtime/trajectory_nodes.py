@@ -602,7 +602,7 @@ class InMemoryTrajectoryNodeStore:
         cloned = replace(
             state,
             source_session_id=source_session_id,
-            source_leaf_id=target_leaf_id,
+            source_leaf_id=state.leaf_node_id or state.source_leaf_id,
             leaf_node_id=target_leaf_id,
         )
         self.save_content_replacement_state(target_session_id, cloned)

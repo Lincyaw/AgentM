@@ -14,7 +14,7 @@ from agentm.core.abi import (
     ToolResult,
     ToolResultEvent,
 )
-from agentm.core.lib import (
+from agentm.core.lib.tokens import (
     count_text_tokens,
     truncate_text_tokens_middle,
 )

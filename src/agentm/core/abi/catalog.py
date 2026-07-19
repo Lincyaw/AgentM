@@ -7,7 +7,7 @@ which mutates user/workspace resources.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -96,6 +96,20 @@ class ActiveSetFingerprint:
 
 
 @dataclass(frozen=True, slots=True)
+class CatalogActiveSetInput:
+    """Resolved active-set data to persist into an atom catalog."""
+
+    session_id: str
+    atoms: tuple[AtomActivation, ...]
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    scenario: str | None = None
+    provider: str | None = None
+    created_at: float = 0.0
+    metadata: CatalogMeta = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class CatalogActiveSetRecord:
     """One queryable active-set record.
 
@@ -138,9 +152,7 @@ class AtomCatalog(Protocol):
 
     async def record_active_set(
         self,
-        *,
-        session_id: str,
-        atoms: Sequence[AtomActivation],
+        active_set: CatalogActiveSetInput,
     ) -> ActiveSetFingerprint:
         ...
 
@@ -167,6 +179,7 @@ __all__ = [
     "AtomActivation",
     "AtomCatalog",
     "AtomCatalogQuery",
+    "CatalogActiveSetInput",
     "CatalogActiveSetRecord",
     "CatalogMeta",
     "CatalogQuery",

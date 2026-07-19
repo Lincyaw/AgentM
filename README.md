@@ -62,12 +62,13 @@ The public path is `AgentSession.create(AgentSessionConfig(...))`.
 ```python
 from pathlib import Path
 
-from agentm import AgentSession, AgentSessionConfig, LoopConfig
+from agentm import AgentSession, AgentSessionConfig, LoopConfig, builtin_scenario_loader
 from agentm.core.runtime.stores.jsonl import JsonlTrajectoryStore
 
 session = await AgentSession.create(AgentSessionConfig(
     cwd=".",
     scenario="minimal",
+    scenario_loader=builtin_scenario_loader,
     provider=("agentm.extensions.builtin.llm_openai", {"model": "gpt-4o"}),
     store=JsonlTrajectoryStore(Path(".agentm/trajectory")),
     loop_config=LoopConfig(max_turns=8, max_tool_calls=32),
@@ -78,8 +79,9 @@ messages = await session.run("summarize src/agentm/core/abi")
 await session.shutdown()
 ```
 
-Use `extensions=[...]` to bypass scenario lookup entirely. The built-in scenario
-names in this reduced worktree are:
+Use `extensions=[...]` to bypass scenario lookup entirely. The core runtime has
+no built-in scenario registry; pass `builtin_scenario_loader` to opt into the
+packaged scenario names in this reduced worktree:
 
 | Scenario | Meaning |
 |---|---|
@@ -88,6 +90,9 @@ names in this reduced worktree are:
 
 Hosts that need named scenarios beyond these should pass
 `AgentSessionConfig.scenario_loader`.
+
+Provider and backend implementations are optional package extras. For example,
+install `agentm[provider-openai,packaged-minimal]` when using the example above.
 
 ## Persistence
 

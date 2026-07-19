@@ -69,6 +69,10 @@ from pydantic import BaseModel, ConfigDict
 from agentm.extensions import ExtensionManifest
 
 from agentm.core.abi import RETRY_POLICY_SERVICE
+from agentm.core.lib.async_cancel import (
+    OperationCancelledBySignal,
+    await_with_cancel_signal,
+)
 from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
@@ -455,13 +459,26 @@ class AnthropicStreamFn:
             stream = await ctx.__aenter__()
             return ctx, stream
 
-        stream_ctx, stream = await retry_policy.run(
-            _open_stream,
-            is_retryable=_is_anthropic_retryable,
-        )
+        stream_ctx: Any | None = None
+        stream: Any | None = None
         try:
-            async for event in stream:
-                if signal is not None and signal.is_set():
+            stream_ctx, stream = await await_with_cancel_signal(
+                retry_policy.run(
+                    _open_stream,
+                    is_retryable=_is_anthropic_retryable,
+                ),
+                signal,
+            )
+            iterator = stream.__aiter__()
+            while True:
+                try:
+                    event = await await_with_cancel_signal(
+                        iterator.__anext__(),
+                        signal,
+                    )
+                except StopAsyncIteration:
+                    break
+                except OperationCancelledBySignal:
                     aborted = True
                     try:
                         await stream.close()
@@ -473,8 +490,11 @@ class AnthropicStreamFn:
                     break
                 async for kernel_event in _translate_event(event, state):
                     yield kernel_event
+        except OperationCancelledBySignal:
+            aborted = True
         finally:
-            await stream_ctx.__aexit__(None, None, None)
+            if stream_ctx is not None:
+                await stream_ctx.__aexit__(None, None, None)
 
         if aborted:
             state.stop_reason = "aborted"

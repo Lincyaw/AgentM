@@ -22,10 +22,13 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .cancel import CancelSignal
 from .messages import ImageContent, TextContent
+
+if TYPE_CHECKING:
+    from .tool_executor import ToolExecutionRequirements
 
 
 # --- File-op metadata vocabulary -------------------------------------------
@@ -160,6 +163,7 @@ class FunctionTool:
     parameters: dict[str, Any]
     fn: Callable[..., Awaitable[ToolResult | ToolOutcome]]
     metadata: dict[str, Any] = field(default_factory=dict)
+    execution_requirements: "ToolExecutionRequirements | None" = None
     _accepts_signal: bool = False
 
     def __init__(
@@ -170,11 +174,13 @@ class FunctionTool:
         parameters: dict[str, Any] | type,
         fn: Callable[..., Awaitable[ToolResult | ToolOutcome]],
         metadata: dict[str, Any] | None = None,
+        execution_requirements: "ToolExecutionRequirements | None" = None,
     ) -> None:
         self.name = name
         self.description = description
         self.fn = fn
         self.metadata = metadata or {}
+        self.execution_requirements = execution_requirements
         self._accepts_signal = _accepts_signal(fn)
         if isinstance(parameters, type):
             from agentm.core.lib.tool_schema import pydantic_to_tool_schema

@@ -99,8 +99,8 @@ class AgentSessionConfig:
     """Configuration for creating or spawning a session.
 
     Primary path: pass ``extensions`` directly. ``scenario`` is only a named
-    indirection; it is resolved through ``scenario_loader`` when provided, or
-    through the SDK's built-in minimal presets.
+    indirection resolved through ``scenario_loader``. The core runtime does not
+    own a built-in scenario registry; packaged helpers live outside core.
     """
 
     cwd: str = ""

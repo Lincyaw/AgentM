@@ -14,15 +14,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from agentm.core.abi import (
     AtomInstallPriority,
     BashOperations,
+    EnvironmentOperations,
+    ENVIRONMENT_OPERATIONS_SERVICE,
     FunctionTool,
     ResourceRef,
     ResourceTxn,
     ResourceWriter,
     TOOL_RESULT_FORMAT_METADATA_KEY,
     TextContent,
+    ToolExecutionRequirements,
     ToolResult,
 )
-from agentm.core.lib import record_read
 from agentm.extensions import ExtensionManifest
 
 from agentm_toolbox import FileToolbox
@@ -46,6 +48,7 @@ class FileToolsConfig(BaseModel):
     default_limit: int = 250
     verify_readback: bool = False
     toolbox_command: str = "python3 -m agentm_toolbox"
+    toolbox_state_file: str | None = None
 
     @field_validator("tools")
     @classmethod
@@ -331,6 +334,14 @@ def _coerce_bash_ops(session: Any) -> BashOperations | None:
     return None
 
 
+def _coerce_environment_id(session: Any) -> str | None:
+    service = session.services.get(ENVIRONMENT_OPERATIONS_SERVICE)
+    if isinstance(service, EnvironmentOperations):
+        ref = service.ref
+        return f"{ref.kind}:{ref.id}"
+    return None
+
+
 class _FileToolsRuntime:
     """Owns file_tools registration and per-session handler state."""
 
@@ -342,6 +353,7 @@ class _FileToolsRuntime:
         self._deny_globs = _coerce_globs(config.deny_globs, session.ctx.cwd)
         self._max_size_bytes = config.max_size_bytes
         self._bash_ops = _coerce_bash_ops(session)
+        self._environment_id = _coerce_environment_id(session)
         self._toolbox_command = config.toolbox_command
         self._toolbox = FileToolbox(
             cwd=session.ctx.cwd,
@@ -457,7 +469,10 @@ class _FileToolsRuntime:
             "_max_size": self._max_size_bytes,
             "_require_read": self._config.require_read,
             "_default_limit": self._config.default_limit,
+            "_state_namespace": self._toolbox_state_namespace(),
         }
+        if self._config.toolbox_state_file:
+            exec_args["_state_file"] = self._config.toolbox_state_file
         payload = json.dumps(exec_args, ensure_ascii=False).encode("utf-8")
         command = f"{self._toolbox_command} {shlex.quote(tool_name)} -"
         result = await bash_ops.exec(
@@ -493,23 +508,17 @@ class _FileToolsRuntime:
                 is_error=True,
             )
 
-    # -- sync bridge --------------------------------------------------------
-
-    def _sync_read_state(self, path: str, result: ToolboxResult) -> None:
-        if result.is_error:
-            return
-        state_key = self._read_state_path(path)
-        record_read(
-            state_key,
-            total_lines=result.total_lines,
-            is_partial=result.is_partial,
-            content_hash=result.content_hash,
+    def _toolbox_state_namespace(self) -> str:
+        return json.dumps(
+            {
+                "root_session_id": self._session.ctx.root_session_id,
+                "session_id": self._session.ctx.session_id,
+                "environment_id": self._environment_id,
+                "cwd": self._session.ctx.cwd,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
-
-    def _read_state_path(self, path: str) -> str:
-        if os.path.isabs(path):
-            return os.path.normpath(path)
-        return os.path.normpath(os.path.join(self._session.ctx.cwd, path))
 
     # -- read ---------------------------------------------------------------
 
@@ -534,6 +543,7 @@ class _FileToolsRuntime:
                 parameters=_ReadArgs,
                 fn=self._read_execute,
                 metadata={"file_op": "read"},
+                execution_requirements=ToolExecutionRequirements(filesystem="read"),
             )
         )
 
@@ -557,7 +567,6 @@ class _FileToolsRuntime:
             "offset": args.get("offset"),
             "limit": args.get("limit"),
         })
-        self._sync_read_state(path, result)
         return _toolbox_to_tool_result(result)
 
     # -- write --------------------------------------------------------------
@@ -575,6 +584,7 @@ class _FileToolsRuntime:
                 parameters=_WriteArgs,
                 fn=self._write_execute,
                 metadata={"file_op": "write"},
+                execution_requirements=ToolExecutionRequirements(filesystem="write"),
             )
         )
 
@@ -615,7 +625,6 @@ class _FileToolsRuntime:
         result = await self._dispatch("write", {
             "path": path, "content": content,
         })
-        self._sync_read_state(path, result)
         return _toolbox_to_tool_result(result)
 
     # -- edit ---------------------------------------------------------------
@@ -641,6 +650,7 @@ class _FileToolsRuntime:
                 parameters=_EditArgs,
                 fn=self._edit_execute,
                 metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
+                execution_requirements=ToolExecutionRequirements(filesystem="write"),
             )
         )
 
@@ -687,5 +697,4 @@ class _FileToolsRuntime:
             "end_line": args.get("end_line"),
             "replace_all": bool(args.get("replace_all", False)),
         })
-        self._sync_read_state(path, result)
         return _toolbox_to_tool_result(result)

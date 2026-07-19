@@ -59,7 +59,12 @@ class DirectToolExecutor:
     """Default executor: run the tool coroutine in the current event loop."""
 
     def capabilities(self) -> ToolExecutionCapabilities:
-        return ToolExecutionCapabilities(interrupt=("block", "cancel"))
+        return ToolExecutionCapabilities(
+            isolation=("none",),
+            filesystem=("none", "read", "write"),
+            network=True,
+            interrupt=("block", "cancel"),
+        )
 
     async def execute(
         self,

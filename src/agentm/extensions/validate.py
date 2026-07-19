@@ -112,6 +112,35 @@ def validate_atom_package(
     return issues
 
 
+def extension_helper_imports(path: str | Path) -> list[str]:
+    """Return extension helper modules imported by one atom source file."""
+
+    src_path = Path(path)
+    try:
+        tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
+    except (OSError, SyntaxError):
+        return []
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_extension_helper_module(alias.name):
+                    modules.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if _is_extension_helper_module(module):
+                modules.add(module)
+    return sorted(modules)
+
+
+def _is_extension_helper_module(module: str) -> bool:
+    if module == "agentm.extensions":
+        return False
+    if module.startswith("agentm.extensions.builtin"):
+        return False
+    return module.startswith("agentm.extensions.")
+
+
 def _record_forbidden_import(
     issues: list[ValidationIssue],
     module: str,
@@ -141,6 +170,7 @@ def _forbidden_import_reason(module: str) -> str | None:
 
 __all__ = [
     "ValidationIssue",
+    "extension_helper_imports",
     "validate_atom_file",
     "validate_atom_package",
 ]

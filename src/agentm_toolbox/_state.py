@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
+from tempfile import NamedTemporaryFile
 
 
 @dataclass(slots=True)
@@ -85,8 +86,11 @@ class ReadStateStore:
 
     def save_to(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
+        directory = os.path.dirname(path) or "."
+        with NamedTemporaryFile("w", dir=directory, delete=False) as f:
             f.write(self.dump())
+            tmp_path = f.name
+        os.replace(tmp_path, path)
 
     @classmethod
     def load_from(cls, path: str) -> "ReadStateStore":

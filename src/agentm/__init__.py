@@ -6,6 +6,7 @@ from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
     AtomCatalog,
+    CatalogActiveSetInput,
 )
 from agentm.core.abi.lifecycle import (
     EffectScope,
@@ -43,12 +44,17 @@ from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.tool_executor import ToolExecutionRequirements, ToolExecutor
 from agentm.core.abi.trajectory import SessionConfigChange
 from agentm.core.runtime.session import Session
+from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
+
+AgentSession = Session
 
 __all__ = [
     "ActiveSetFingerprint",
+    "AgentSession",
     "AgentSessionConfig",
     "AtomActivation",
     "AtomCatalog",
+    "CatalogActiveSetInput",
     "EffectScope",
     "EffectTxn",
     "EnvironmentRestorePolicy",
@@ -80,4 +86,6 @@ __all__ = [
     "TrajectoryStore",
     "TransactionalResourceWriter",
     "WriteResult",
+    "builtin_scenario_loader",
+    "packaged_scenario_names",
 ]

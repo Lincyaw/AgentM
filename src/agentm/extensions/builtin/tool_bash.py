@@ -23,6 +23,7 @@ from agentm.core.abi import (
     BashOperations,
     CancelSignal,
     TextContent,
+    ToolExecutionRequirements,
     ToolResult,
 )
 from agentm.extensions import ExtensionManifest
@@ -183,6 +184,11 @@ def install(session: Any, config: ToolBashConfig) -> None:
 
 class _BashTool:
     name = "bash"
+    execution_requirements = ToolExecutionRequirements(
+        filesystem="write",
+        network=True,
+        interrupt="cancel",
+    )
     description = (
         "Execute a shell command in the session cwd. The result reports the "
         "exit code, wall time, stdout/stderr line counts, and the captured "
