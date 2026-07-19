@@ -1,0 +1,147 @@
+version: 1
+
+labels:
+  secret:
+    source:
+      tool: "read|bash"
+      result_matches: '(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD)\s*[=:]\s*(\S{8,})'
+    clears_on: never
+    min_length: 8
+
+rules:
+  # --- Enforce (validated, always active) ---
+
+  - name: edit-without-read
+    on: tool_call_pre
+    match: {tool: edit}
+    when: "not file_state.get(event.args.get('path', ''))"
+    effect: notify
+    mode: enforce
+    reason: "Editing {event.args[path]} without reading it first."
+
+  - name: dangerous-bash
+    on: tool_call_pre
+    match: {tool: bash}
+    when: |
+      any(p in event.args.get('cmd', '') for p in [
+        'rm -rf', 'git push --force', 'git reset --hard',
+        'git clean -f', 'DROP TABLE', 'DROP DATABASE',
+        'kubectl delete', '> /dev/', 'dd if=', 'mkfs'
+      ])
+    effect: block
+    mode: enforce
+    reason: "Blocked destructive command: {event.args[cmd]}"
+
+  - name: budget-warning
+    on: turn_end
+    when: "lookup('context_state', session.turn_count, 'context_usage_pct') > 80"
+    effect: notify
+    mode: enforce
+    reason: "Context budget above 80% — prioritize completing the task."
+
+  - name: spawn-storm
+    on: session_spawn
+    when: "lookup('session_tree', session.id, 'concurrent_siblings') > 5"
+    effect: block
+    mode: enforce
+    reason: "Too many concurrent sub-agents. Complete existing ones first."
+
+  # --- Observe (ship but measure before enforcing) ---
+
+  - name: test-before-commit
+    on: tool_call_pre
+    match: {tool: bash}
+    when: |
+      'git commit' in event.args.get('cmd', '')
+      and not tool_log.exists(
+        where={tool: "bash", cmd: "pytest*|go test*|npm test*|make test*", exit_code: 0},
+        since=tool_log.last(where={tool: "edit|write"}).turn
+      )
+    effect: block
+    mode: observe
+    reason: "Tests haven't passed since last edit. Run tests first."
+
+  - name: stuck-loop
+    on: turn_end
+    when: |
+      tool_log.count(last=5, where={exit_code: "!=0"}) >= 3
+      and tool_log.distinct("args_hash", last=5) < 2
+    effect: escalate
+    mode: observe
+    cooldown: 5 turns
+    reason: "Agent stuck — repeated failures with no strategy change."
+
+  - name: weak-grounding-edit
+    on: tool_call_pre
+    match: {tool: edit}
+    when: "not entity_evidence(event.args.get('path', '')).has(type='tool_success')"
+    effect: escalate
+    mode: observe
+    escalate_context: "entity_evidence(event.args.get('path', ''))"
+    reason: "Editing {event.args[path]} with no tool-confirmed evidence of existence."
+
+  - name: premature-irreversible
+    on: tool_call_pre
+    match: {tool: bash}
+    when: |
+      any(p in event.args.get('cmd', '') for p in ['git push', 'rm -rf'])
+      and session.turn_count <= 4
+      and tool_log.count(where={tool: "read"}) < 3
+    effect: escalate
+    mode: observe
+    reason: "Irreversible action at turn {session.turn_count} with insufficient reads."
+
+  - name: exploration-without-action
+    on: turn_end
+    when: |
+      session.turn_count > 10
+      and tool_log.count(last=10, where={tool: "read|glob|find"}) > 0
+      and ratio(
+        tool_log.count(last=10, where={tool: "read|glob|find"}),
+        max(tool_log.count(last=10), 1)
+      ) > 0.8
+      and tool_log.count(last=10, where={tool: "edit|write"}) == 0
+    effect: notify
+    mode: observe
+    reason: "10+ turns of mostly reading with no writes — consider taking action."
+
+  - name: file-churn
+    on: tool_call_post
+    match: {tool: "edit|write"}
+    when: |
+      file_state.get(event.args.get('path', ''))
+      and file_state.get(event.args.get('path', '')).write_count > 3
+    effect: notify
+    mode: observe
+    reason: "Multiple modifications to the same file — likely thrashing."
+
+  - name: cross-session-repeat
+    on: tool_call_post
+    when: |
+      event.result.get('error', '')
+      and tool_log.count(
+        scope=user,
+        where={error_fingerprint: "placeholder"},
+        ttl="14d"
+      ) >= 3
+    effect: escalate
+    mode: observe
+    reason: "This error pattern has appeared in 3+ previous sessions."
+
+  - name: no-secrets-to-network
+    on: tool_call_pre
+    match: {tool: bash}
+    when: "'secret' in event.taint"
+    effect: abort
+    mode: enforce
+    reason: "Secret material flowing to network via bash command."
+
+  # --- Meta (queries effect_log) ---
+
+  - name: abort-on-persistent-stagnation
+    on: turn_end
+    when: |
+      effect_log.count(where={rule_id: "stuck-loop", effect: "escalate"}, last=10) >= 2
+    effect: abort
+    mode: enforce
+    reason: "Stagnation persists after two escalations. Aborting."
