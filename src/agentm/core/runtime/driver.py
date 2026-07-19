@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 from loguru import logger
@@ -113,8 +113,14 @@ from agentm.core.abi.termination import (
     ToolTerminated,
 )
 from agentm.core.abi.trajectory import (
+    DEFAULT_TRAJECTORY_BRANCH_ID,
+    DEFAULT_TRAJECTORY_HEAD_ID,
     Outcome,
     ToolRecord,
+    TrajectoryHead,
+    TrajectoryHeadAdvance,
+    TrajectoryNode,
+    TrajectoryProjectionStatus,
     Turn,
     TurnMeta,
 )
@@ -127,7 +133,7 @@ from agentm.core.abi.trigger import (
 from agentm.core.runtime.execution import Execution
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
-from agentm.core.runtime.trajectory_nodes import turn_to_nodes
+from agentm.core.runtime.trajectory_nodes import turn_to_nodes, turns_to_nodes
 from agentm.core.runtime.trigger_queue import (
     QueueClosed,
     TriggerQueue,
@@ -140,6 +146,15 @@ ThinkingLevel = Literal["off", "low", "medium", "high"]
 # --- Helpers ----------------------------------------------------------------
 
 _INTERRUPTED_BY_USER = "Interrupted by user"
+
+
+@dataclass(frozen=True, slots=True)
+class _NodeAppendPosition:
+    start_seq: int
+    parent_node_id: str | None
+    logical_parent_id: str | None
+    head_id: str
+    branch_id: str
 
 
 class _TurnCancelSignal:
@@ -538,20 +553,206 @@ async def _abandon_resource_txn(txn: ResourceTxn | None) -> None:
         await txn.abandon()
 
 
-def _node_append_position(
+async def _node_append_position(
     store: TrajectoryNodeStore,
     session_id: str,
-) -> tuple[int, str | None]:
-    latest = store.query_nodes(
-        TrajectoryNodeQuery(session_id=session_id, sort="desc", limit=1)
+    *,
+    committed_turns: Sequence[Turn],
+    root_session_id: str | None,
+    parent_session_id: str | None,
+    trigger_renderers: dict[str, TriggerRenderer] | None,
+) -> _NodeAppendPosition:
+    """Load the explicit append head, repairing stale projection if needed."""
+
+    latest, head = await asyncio.gather(
+        asyncio.to_thread(
+            store.query_nodes,
+            TrajectoryNodeQuery(session_id=session_id, sort="desc", limit=1),
+        ),
+        asyncio.to_thread(
+            store.get_head,
+            session_id,
+            head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+            branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+            is_sidechain=False,
+        ),
     )
-    leaves = store.leaves(session_id, is_sidechain=False)
-    if len(leaves) > 1:
-        raise RuntimeError(
-            f"ambiguous main trajectory leaves for session {session_id}: "
-            f"{sorted(leaf.node_id for leaf in leaves)}"
+    start_seq = latest[0].seq + 1 if latest else 0
+    if head is not None and head.status == "active":
+        return _NodeAppendPosition(
+            start_seq=start_seq,
+            parent_node_id=head.node_id,
+            logical_parent_id=head.logical_parent_id if head.node_id is None else None,
+            head_id=head.head_id,
+            branch_id=head.branch_id,
         )
-    return (latest[0].seq + 1 if latest else 0, leaves[0].node_id if leaves else None)
+
+    if not latest:
+        return _NodeAppendPosition(
+            start_seq=0,
+            parent_node_id=None,
+            logical_parent_id=None,
+            head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+            branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        )
+
+    logger.warning(
+        "trajectory projection head missing for session {}; rebuilding projection",
+        session_id,
+    )
+    await _rebuild_node_projection(
+        store=store,
+        session_id=session_id,
+        turns=committed_turns,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        trigger_renderers=trigger_renderers,
+    )
+    latest, head = await asyncio.gather(
+        asyncio.to_thread(
+            store.query_nodes,
+            TrajectoryNodeQuery(session_id=session_id, sort="desc", limit=1),
+        ),
+        asyncio.to_thread(
+            store.get_head,
+            session_id,
+            head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+            branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+            is_sidechain=False,
+        ),
+    )
+    if not latest:
+        return _NodeAppendPosition(
+            start_seq=0,
+            parent_node_id=None,
+            logical_parent_id=None,
+            head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+            branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        )
+    if head is None or head.status != "active":
+        raise RuntimeError(
+            f"trajectory projection for session {session_id} has nodes but no "
+            "active append head after rebuild"
+        )
+    return _NodeAppendPosition(
+        start_seq=latest[0].seq + 1,
+        parent_node_id=head.node_id,
+        logical_parent_id=head.logical_parent_id if head.node_id is None else None,
+        head_id=head.head_id,
+        branch_id=head.branch_id,
+    )
+
+
+def _projection_status_for_nodes(
+    session_id: str,
+    nodes: Sequence[TrajectoryNode],
+) -> TrajectoryProjectionStatus:
+    last = nodes[-1] if nodes else None
+    return TrajectoryProjectionStatus(
+        session_id=session_id,
+        state="current",
+        high_water_turn_id=last.turn_id if last is not None else None,
+        high_water_turn_index=last.turn_index if last is not None else None,
+        node_count=len(nodes),
+        updated_at=time.time(),
+    )
+
+
+def _projection_head_for_nodes(
+    *,
+    session_id: str,
+    root_session_id: str | None,
+    parent_session_id: str | None,
+    nodes: Sequence[TrajectoryNode],
+    head_id: str = DEFAULT_TRAJECTORY_HEAD_ID,
+    branch_id: str = DEFAULT_TRAJECTORY_BRANCH_ID,
+) -> TrajectoryHead:
+    last = nodes[-1] if nodes else None
+    return TrajectoryHead(
+        session_id=session_id,
+        head_id=head_id,
+        branch_id=branch_id,
+        node_id=last.id if last is not None else None,
+        seq=last.seq if last is not None else None,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        status="active",
+        updated_at=time.time(),
+    )
+
+
+async def _rebuild_node_projection(
+    *,
+    store: TrajectoryNodeStore,
+    session_id: str,
+    turns: Sequence[Turn],
+    root_session_id: str | None,
+    parent_session_id: str | None,
+    trigger_renderers: dict[str, TriggerRenderer] | None,
+) -> None:
+    nodes = turns_to_nodes(
+        turns,
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+        renderers=trigger_renderers,
+    )
+    head = _projection_head_for_nodes(
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        nodes=nodes,
+    )
+    await asyncio.to_thread(
+        store.replace_session_projection,
+        session_id,
+        nodes,
+        heads=(head,),
+        status=_projection_status_for_nodes(session_id, nodes),
+    )
+
+
+async def _append_or_rebuild_nodes(
+    *,
+    store: TrajectoryNodeStore,
+    session_id: str,
+    nodes: Sequence[TrajectoryNode],
+    advance_head: TrajectoryHeadAdvance | None,
+    committed_turns: Sequence[Turn],
+    root_session_id: str | None,
+    parent_session_id: str | None,
+    trigger_renderers: dict[str, TriggerRenderer] | None,
+) -> None:
+    """Update the non-authoritative node projection without failing turn commit."""
+
+    try:
+        await asyncio.to_thread(
+            store.append_nodes,
+            session_id,
+            nodes,
+            advance_head=advance_head,
+        )
+    except Exception:
+        logger.exception(
+            "trajectory node projection append failed; rebuilding session {}",
+            session_id,
+        )
+        try:
+            await _rebuild_node_projection(
+                store=store,
+                session_id=session_id,
+                turns=committed_turns,
+                root_session_id=root_session_id,
+                parent_session_id=parent_session_id,
+                trigger_renderers=trigger_renderers,
+            )
+        except Exception:
+            logger.exception(
+                "trajectory node projection rebuild failed for session {}",
+                session_id,
+            )
 
 
 def _clear_resource_txn(services: ServiceRegistry | None) -> None:
@@ -771,31 +972,53 @@ async def drive(
                         resource_mutations=resource_mutations,
                     ),
                 )
-            node_append_position: tuple[int, str | None] | None = None
+            node_append_position: _NodeAppendPosition | None = None
             if trajectory_node_store is not None:
-                node_append_position = _node_append_position(
+                node_append_position = await _node_append_position(
                     trajectory_node_store,
                     session_id,
+                    committed_turns=trajectory.turns,
+                    root_session_id=root_session_id,
+                    parent_session_id=parent_session_id,
+                    trigger_renderers=trigger_renderers,
                 )
             cancelled_during_append = False
             if store is not None:
                 cancelled_during_append = await _append_turn(store, session_id, turn)
             if trajectory_node_store is not None and node_append_position is not None:
-                start_seq, parent_node_id = node_append_position
                 nodes = turn_to_nodes(
                     turn,
                     session_id=session_id,
-                    start_seq=start_seq,
+                    start_seq=node_append_position.start_seq,
                     root_session_id=root_session_id,
                     parent_session_id=parent_session_id,
-                    parent_node_id=parent_node_id,
+                    branch_id=node_append_position.branch_id,
+                    head_id=node_append_position.head_id,
+                    parent_node_id=node_append_position.parent_node_id,
+                    logical_parent_id=node_append_position.logical_parent_id,
                     renderers=trigger_renderers,
                 )
                 if nodes:
-                    await asyncio.to_thread(
-                        trajectory_node_store.append_nodes,
-                        session_id,
-                        nodes,
+                    advance_head = TrajectoryHeadAdvance(
+                        session_id=session_id,
+                        node_id=nodes[-1].id,
+                        seq=nodes[-1].seq,
+                        previous_node_id=node_append_position.parent_node_id,
+                        head_id=node_append_position.head_id,
+                        branch_id=node_append_position.branch_id,
+                        root_session_id=root_session_id,
+                        parent_session_id=parent_session_id,
+                        updated_at=time.time(),
+                    )
+                    await _append_or_rebuild_nodes(
+                        store=trajectory_node_store,
+                        session_id=session_id,
+                        nodes=nodes,
+                        advance_head=advance_head,
+                        committed_turns=(*trajectory.turns, turn),
+                        root_session_id=root_session_id,
+                        parent_session_id=parent_session_id,
+                        trigger_renderers=trigger_renderers,
                     )
             trajectory.finalize_commit(turn)
             turn_published = True

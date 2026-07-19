@@ -72,8 +72,22 @@ from agentm.core.abi.session_api import (
     ResolvedSessionSpec,
     SessionContext,
 )
-from agentm.core.abi.store import SessionMeta, TrajectoryNodeStore, TrajectoryStore
-from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.store import (
+    SessionMeta,
+    TrajectoryNodeQuery,
+    TrajectoryNodeStore,
+    TrajectoryStore,
+)
+from agentm.core.abi.trajectory import (
+    DEFAULT_TRAJECTORY_BRANCH_ID,
+    DEFAULT_TRAJECTORY_HEAD_ID,
+    TrajectoryForkPoint,
+    TrajectoryHead,
+    TrajectoryNode,
+    TrajectoryProjectionStatus,
+    Turn,
+    TurnRef,
+)
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
 from agentm.core.runtime.driver import ThinkingLevel, drive
@@ -82,7 +96,131 @@ from agentm.core.runtime.session_meta import (
     session_meta_config,
 )
 from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.runtime.trajectory_nodes import turns_to_nodes
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
+
+
+def _projection_status_for_nodes(
+    session_id: str,
+    nodes: Sequence[TrajectoryNode],
+) -> TrajectoryProjectionStatus:
+    last = nodes[-1] if nodes else None
+    return TrajectoryProjectionStatus(
+        session_id=session_id,
+        state="current",
+        high_water_turn_id=last.turn_id if last is not None else None,
+        high_water_turn_index=last.turn_index if last is not None else None,
+        node_count=len(nodes),
+        updated_at=time.time(),
+    )
+
+
+def _projection_head_for_nodes(
+    *,
+    session_id: str,
+    root_session_id: str | None,
+    parent_session_id: str | None,
+    nodes: Sequence[TrajectoryNode],
+) -> TrajectoryHead:
+    last = nodes[-1] if nodes else None
+    return TrajectoryHead(
+        session_id=session_id,
+        head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+        branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        node_id=last.id if last is not None else None,
+        seq=last.seq if last is not None else None,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        status="active",
+        updated_at=time.time(),
+    )
+
+
+async def _replace_node_projection_for_turns(
+    *,
+    store: TrajectoryNodeStore,
+    session_id: str,
+    root_session_id: str | None,
+    parent_session_id: str | None,
+    turns: Sequence[Turn],
+    renderers: dict[str, TriggerRenderer] | None,
+) -> None:
+    nodes = turns_to_nodes(
+        turns,
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+        renderers=renderers,
+    )
+    head = _projection_head_for_nodes(
+        session_id=session_id,
+        root_session_id=root_session_id,
+        parent_session_id=parent_session_id,
+        nodes=nodes,
+    )
+    await asyncio.to_thread(
+        store.replace_session_projection,
+        session_id,
+        nodes,
+        heads=(head,),
+        status=_projection_status_for_nodes(session_id, nodes),
+    )
+
+
+async def _resolve_fork_turn_ref(
+    *,
+    source: "Session",
+    at: TurnRef | TrajectoryForkPoint,
+) -> TurnRef:
+    if not isinstance(at, TrajectoryForkPoint):
+        return at
+    if at.turn_ref is not None:
+        return at.turn_ref
+
+    node_store = source.get_trajectory_node_store()
+    if node_store is None:
+        raise ValueError("node/head fork points require a trajectory_node_store")
+
+    node_id = at.node_id
+    if node_id is None and at.head_id is not None:
+        head = await asyncio.to_thread(
+            node_store.get_head,
+            at.session_id,
+            head_id=at.head_id,
+            branch_id=at.branch_id,
+        )
+        if head is None:
+            raise KeyError(at.head_id)
+        node_id = head.node_id or head.logical_parent_id
+    if node_id is None:
+        raise ValueError("fork point must include turn_ref, node_id, or head_id")
+
+    chain = await asyncio.to_thread(
+        node_store.load_chain,
+        at.session_id,
+        node_id,
+        include_logical_parent=at.include_logical_parent,
+    )
+    for node in reversed(chain):
+        if node.turn_index is not None:
+            turn_tail = await asyncio.to_thread(
+                node_store.query_nodes,
+                TrajectoryNodeQuery(
+                    session_id=node.session_id,
+                    turn_index=node.turn_index,
+                    sort="desc",
+                    limit=1,
+                ),
+            )
+            if turn_tail and turn_tail[0].id == node.id:
+                return node.turn_index
+            raise ValueError(
+                "node/head fork points must target a committed turn boundary; "
+                "exact mid-turn node forks require a node-chain ContextProjection"
+            )
+    raise KeyError(node_id)
 
 
 class Session:
@@ -140,10 +278,7 @@ class Session:
         if trajectory is not None:
             self.trajectory = trajectory
         else:
-            stored_turns: list[Turn] = []
-            if store is not None and store.session_exists(self.id):
-                _, stored_turns = store.load(self.id)
-            self.trajectory = Trajectory(turns=stored_turns)
+            self.trajectory = Trajectory()
         self.bus = bus or EventBus()
         self.store = store
         self.graph = graph
@@ -1026,8 +1161,15 @@ class Session:
     # --- Fork / Resume ---
 
     @classmethod
-    async def fork(cls, source: "Session", at: TurnRef, *, purpose: str = "fork") -> "Session":
-        prefix = source.trajectory.prefix(at)
+    async def fork(
+        cls,
+        source: "Session",
+        at: TurnRef | TrajectoryForkPoint,
+        *,
+        purpose: str = "fork",
+    ) -> "Session":
+        turn_ref = await _resolve_fork_turn_ref(source=source, at=at)
+        prefix = source.trajectory.prefix(turn_ref)
         child_ctx = source.ctx.child(
             session_id=uuid.uuid4().hex[:16],
             purpose=purpose,
@@ -1039,7 +1181,7 @@ class Session:
                 SessionMeta(
                     id=child_ctx.session_id,
                     parent_id=source.id,
-                    fork_point=at,
+                    fork_point=turn_ref,
                     purpose=purpose,
                     cwd=source.ctx.cwd,
                     created_at=time.time(),
@@ -1057,7 +1199,7 @@ class Session:
         effect_scope = source.get_effect_scope()
         if effect_scope is not None:
             child_effect_scope = await effect_scope.fork_at(
-                at,
+                turn_ref,
                 source_session_id=source.id,
                 child_session_id=child_ctx.session_id,
             )
@@ -1099,9 +1241,27 @@ class Session:
         if forked.graph is not None:
             forked.graph.register(
                 forked.id, parent_id=source.id,
-                fork_point=at, purpose=purpose,
+                fork_point=turn_ref, purpose=purpose,
                 edge_kind="forked",
             )
+
+        node_store = source.get_trajectory_node_store()
+        if node_store is not None:
+            try:
+                await _replace_node_projection_for_turns(
+                    store=node_store,
+                    session_id=forked.id,
+                    root_session_id=forked.ctx.root_session_id,
+                    parent_session_id=forked.ctx.parent_session_id,
+                    turns=prefix.turns,
+                    renderers=forked.trigger_renderers,
+                )
+            except Exception:
+                logger.exception(
+                    "trajectory node projection rebuild failed for forked "
+                    "session {}",
+                    forked.id,
+                )
 
         return forked
 
@@ -1114,6 +1274,30 @@ class Session:
         effect_scope = session.get_effect_scope()
         if effect_scope is not None:
             await effect_scope.restore(session_id=session.id, turns=tuple(turns))
+
+        node_store = session.get_trajectory_node_store()
+        if node_store is not None:
+            try:
+                status = await asyncio.to_thread(
+                    node_store.projection_status,
+                    session.id,
+                )
+                last_turn_index = turns[-1].index if turns else None
+                if status is None or status.high_water_turn_index != last_turn_index:
+                    await _replace_node_projection_for_turns(
+                        store=node_store,
+                        session_id=session.id,
+                        root_session_id=session.ctx.root_session_id,
+                        parent_session_id=session.ctx.parent_session_id,
+                        turns=turns,
+                        renderers=session.trigger_renderers,
+                    )
+            except Exception:
+                logger.exception(
+                    "trajectory node projection refresh failed during resume "
+                    "for session {}",
+                    session.id,
+                )
 
         return session
 

@@ -10,7 +10,7 @@ from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.tool import ToolResult
 
-PermissionDecisionKind = Literal["allow", "deny", "defer"]
+PermissionDecisionKind = Literal["allow", "deny"]
 PermissionAudience = Literal["user", "subagent", "system"]
 PermissionSource = Literal["user", "policy", "classifier", "mode", "system"]
 
@@ -57,6 +57,12 @@ class PermissionPolicy(Protocol):
         *,
         signal: CancelSignal | None = None,
     ) -> PermissionDecision:
+        """Return the final permission decision.
+
+        Policies that need user interaction should await that interaction
+        internally and then return ``allow`` or ``deny``. The runtime does not
+        expose a separate deferred state.
+        """
         ...
 
 

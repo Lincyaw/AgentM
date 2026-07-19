@@ -1,89 +1,120 @@
-# AgentM Remaining Optional Capability Backlog
+# AgentM Core Abstraction Inventory
 
-This document tracks only unfinished optional capabilities and the design
-questions that must be answered before implementation.
-
-Completed core work is intentionally omitted here. The minimal SDK already has
-the core ports and runtime wiring for catalog identity, lifecycle/effects,
-operations, tool execution requirements, config provenance, trajectory query,
-and context projection.
+This document separates fixed SDK/core contracts from implementation backlog.
+The refactor target is that future work implements Protocol backends and policy
+atoms without reopening trajectory, store, or cancellation modeling.
 
 ## Boundary Rule
 
 Do not add optional backends directly into minimal SDK core unless the backend
 is required for embedded SDK sessions to run.
 
-Core should define stable ports, invariants, service keys, and default local
-behavior. Optional packages should provide durable storage, remote execution,
+Core defines stable ports, invariants, service keys, and default local
+behavior. Optional packages provide durable storage, remote execution,
 gateway/presenter integrations, and deployment-specific policy.
 
-## Open Backlog
+## Fixed Core Contracts
 
-| Capability | Why it remains open | Discussion needed | Likely home |
-| --- | --- | --- | --- |
-| Durable catalog backend | Current catalog/resource store is in-memory. Composition identity is captured, but not durable across process restarts unless host persists it. | JSONL vs SQLite vs host DB; where project-local state lives; whether catalog records are indexed by default. | SDK storage extra or host backend. |
-| Indexed catalog query | Active-set identity exists, but there is no query model beyond session active-set lookup. | Query predicates: session, atom name, digest, version, scenario, provider, provenance. Whether this belongs with trajectory query or catalog API. | Catalog/query extra. |
-| Remote observability query | Local `TrajectoryQueryStore` covers sessions/turns only. Events/spans belong to observability backends. | OTLP files vs ClickHouse vs collector export vs host service. Schema ownership and dependency boundary. | Observability extra. |
-| Concrete `TrajectoryNodeStore` backends | The core message-tree/index Protocol exists, but there are no durable Postgres, ClickHouse, or JSONL sidecar implementations yet. | Canonical DDL, migration ownership, ClickHouse partition/order keys, JSONL sidecar index shape, and compatibility guarantees across stores. | SDK storage extra or host backend. |
-| Node-store-backed fork/resume | `Session.fork()` and `Session.resume()` still primarily operate on Turn prefixes. The node projection can model sidechain leaves, logical parents, compact boundaries, and cache-identical prefixes, but the public flows do not yet consume it. | Whether fork/resume should require a `TrajectoryNodeStore`; how to resolve current leaf; how logical parent traversal interacts with compact boundaries; whether Turn-prefix fallback remains supported. | Core runtime glue plus storage-backed policy. |
-| Concrete `SessionSpecResolver` | Resolver port and provenance persistence exist, but no default host policy for config search/precedence. | Precedence for CLI flags, env vars, user config, project config, scenario config, atom config, and provider profiles. | CLI/presenter package or SDK helper. |
-| ResourceWriter read/write authority | Transactional resource mutation exists, but read authority, artifact namespace, and restore semantics still need sharper policy. | Should `ResourceWriter` cover reads, or should reads use a separate `ResourceReader`? Are artifacts just another `ResourceRef` namespace? How do resource mutations restore on fork/resume? | Core ABI decision plus optional writer backends. |
-| Sandbox/remote environment backend | Local `EnvironmentOperations` exists. Remote/sandbox/agent-env execution brings deployment dependencies and auth. | Environment identity, cwd mapping, file transfer, cancellation, stdout/stderr logs, snapshot capability, and backend lifecycle. | Environment backend extra. |
-| Environment snapshot persistence | `EffectScope.fork_at()` and `restore()` are wired, but concrete snapshot storage is backend-specific. | Restore failure policy: fail session creation, degraded read-only session, or host decision. Snapshot retention and id durability. | Environment backend extra plus host policy. |
-| Process/sandbox `ToolExecutor` | Requirements/capabilities are enforced, but only direct execution is built in. | Capability matrix for isolation, filesystem read/write, network, killability, concurrency, and interrupt behavior. Relationship to `EnvironmentOperations`. | Tool execution extra or environment backend. |
-| Concrete `ContextProjection` strategies | Projection service is wired, but no real compaction/summarization strategy exists. | Token accounting source; summary artifact storage; `ProjectionReport` persistence; whether summaries are catalog resources. | Optional builtin atom or host service. |
-| Prompt-cache/content-replacement policy | `ContentReplacementState` and `PromptCacheState` are typed and persistable, but no context policy currently enforces deterministic tool-result replacement or provider cache identity. | Per-message budget rules, replacement text format, state cloning on fork, reconstruction on resume, and provider adapter contract for cache keys. | Optional builtin atom plus provider adapters. |
-| Claude Code message-pattern policy atoms | Core now has synthetic message metadata, permission decisions, queue priorities, and tool orchestration, but concrete attachment/message producers are still policy. | Which patterns become builtin atoms: hook results, task notifications, plan-mode messages, local-command caveats, memory reminders, teammate/channel mailbox, and token/budget nudges. | Optional builtin atoms or presenter/gateway packages. |
-| Fork/resume/cache E2E coverage | Existing tests protect the core runtime paths, but there is no end-to-end scenario proving node-store fork/resume plus content-replacement cache stability. | Load-bearing scenario definition; real vs stub provider; whether to test JSONL sidecar, Postgres, or an in-memory node store first. | Integration tests after behavior is declared load-bearing. |
-| Presenter/gateway/authoring capabilities | These are workflows around the SDK, not minimal runtime invariants. | Package boundaries for frontmatter, renderers, child wire forwarding, trace CLI, prompt/skill authoring helpers. | Presenter, gateway, or authoring packages. |
+| Contract | Fixed abstraction | Core files |
+| --- | --- | --- |
+| Message patterns | `MessageMeta` models synthetic, hidden, replay-only, no-response, target session/agent, mode, and tags. Concrete Claude Code-style producers remain policy atoms or presenters. | `src/agentm/core/abi/messages.py` |
+| Cancellation | `CancelSignal` / `CancelSource` carry user cancel, submit interrupt, shutdown, sibling error, and task stop reasons across LLM streams, tool execution, and child sessions. | `src/agentm/core/abi/cancel.py`, `src/agentm/core/runtime/driver.py` |
+| Tool execution | `ToolExecutor` and `ToolOrchestrator` model isolation, interrupt behavior, concurrency, sibling cancellation, and ordered result completion. | `src/agentm/core/abi/tool_executor.py`, `src/agentm/core/abi/tool_orchestration.py` |
+| Permission | `PermissionPolicy.decide()` is async and returns a final `allow` or `deny`. Policies that need user interaction await internally; the runtime has no half-modeled deferred state. | `src/agentm/core/abi/permission.py` |
+| Branch/head trajectory model | Message nodes carry `branch_id` and `head_id`; `TrajectoryHead` is the explicit append point for a session/agent/sidechain chain. Appends never infer "current" from leaves; missing heads are repaired by rebuilding projection from the authoritative turn log. | `src/agentm/core/abi/trajectory.py`, `src/agentm/core/abi/store.py` |
+| Store consistency | `TrajectoryStore` is the authoritative turn log. `TrajectoryNodeStore` is a rebuildable projection/read model with `replace_session_projection()` and `projection_status()` for crash/migration recovery. | `src/agentm/core/abi/store.py`, `src/agentm/core/runtime/driver.py` |
+| Portable node indexes | Node query/index fields cover root/session/parent/logical parent/branch/head/agent/sidechain/kind/role/turn/round/message/seq/timestamp, plus logical tool-call, cache, content-ref, and visibility lookups. Head indexes are separate. | `src/agentm/core/abi/trajectory.py`, `src/agentm/core/abi/store.py` |
+| Async SDK boundary | Store Protocols remain synchronous blocking ports for backend neutrality, but runtime async paths offload store calls with `asyncio.to_thread`. Constructors do not perform store I/O; resume/factory paths own loading. | `src/agentm/core/runtime/session.py`, `src/agentm/core/runtime/session_factory.py`, `src/agentm/core/runtime/driver.py` |
+| Fork/resume anchors | `TrajectoryForkPoint` can name a turn prefix, node, or head. `Session.fork()` remains compatible with `TurnRef`; the default turn-based runtime resolves node/head anchors only when they point at a committed turn boundary. Exact mid-turn node-chain forks require the node-chain `ContextProjection` implementation. `Session.resume()` rebuilds stale node projection when a node store is present. | `src/agentm/core/abi/trajectory.py`, `src/agentm/core/runtime/session.py` |
+| Prompt cache state | `PromptCacheState` and `ContentReplacementState` persist cache/replacement identity, branch/head, leaf node, and clone provenance. Enforcement remains a context/provider policy. | `src/agentm/core/abi/trajectory.py`, `src/agentm/core/abi/store.py` |
+| Content/reference boundary | Trajectory nodes record control facts such as compaction boundaries, cache identity, replacement identity, and `content_ref`. Large prompt content, summaries, files, and long tool results live behind resource/artifact references rather than inside the trajectory control stream. | `src/agentm/core/abi/trajectory.py`, `src/agentm/core/abi/resource.py` |
+| Catalog/trajectory separation | Trajectory queries answer what happened in a session. Catalog/resource queries answer which atoms, tools, providers, scenarios, and versioned resources were active. Presenter/CLI layers may join them for display, but core keeps the APIs separate because their lifecycles differ. | `src/agentm/core/abi/query.py`, `src/agentm/core/abi/catalog.py` |
 
-## Discussion Queue
+## Store Backend Contract
 
-1. Which storage backend should be the first durable catalog implementation:
-   JSONL, SQLite, or host-provided only?
-2. Should catalog query and trajectory query share one query facade, or remain
-   separate APIs?
-3. Which `TrajectoryNodeStore` backend should be implemented first: JSONL
-   sidecar, Postgres, ClickHouse, or host-provided only?
-4. What is the canonical portable schema/index contract for trajectory nodes,
-   content-replacement state, and prompt-cache state?
-5. Should `Session.fork()` and `Session.resume()` require node-store-backed
-   leaf reconstruction when a node store is available, or keep Turn-prefix
-   semantics as the public default?
-6. Should compact boundaries and content-replacement entries always be
-   materialized as trajectory nodes, or can some stores keep them as side
-   tables/projection state?
-7. What is the exact config precedence for `SessionSpecResolver`?
-8. Should `ResourceWriter` include reads, or should read/write authority split?
-9. Are resource artifacts, workspace files, and sandbox files all `ResourceRef`
-   namespaces, or do artifacts need a separate abstraction?
-10. Should sandbox/environment backends ship as one optional extra or multiple
-   backend-specific packages?
-11. What happens when environment restore fails during resume?
-12. Should process/sandbox tool execution be implemented as a `ToolExecutor`, an
-   `EnvironmentOperations` capability, or a composition of both?
-13. Should compaction summaries be trajectory records, context projection
-   artifacts, catalog resources, or observability records?
-14. How should prompt-cache keys and content-replacement state flow into
-   provider adapters without making provider-specific cache policy core?
-15. Which Claude Code message-pattern producers are minimal builtin policy and
-   which belong to presenter/gateway packages?
-16. Should provider config be frozen after the first committed turn?
-17. Should atom dependencies target atom names or provided capabilities?
-18. Which builtin atoms define the minimal SDK baseline?
+All trajectory node backends should implement the same logical schema even when
+physical storage differs.
+
+Required node identity and ordering fields:
+
+- `id`
+- `session_id`
+- `root_session_id`
+- `parent_session_id`
+- `seq`
+- `parent_id`
+- `logical_parent_id`
+- `branch_id`
+- `head_id`
+
+Required turn/message join fields:
+
+- `turn_id`
+- `turn_index`
+- `round_index`
+- `message_index`
+- `kind`
+- `role`
+- `visibility`
+- `timestamp`
+
+Required routing/query fields:
+
+- `agent_id`
+- `is_sidechain`
+- `tool_call_id`
+- `tool_name`
+- `cache_key`
+- `content_ref`
+
+The `tool_call_id` and `tool_name` fields are logical inverted indexes. A
+message node may contain multiple tool calls/results; SQL stores may normalize
+them into a child table, while JSONL stores may scan arrays.
+
+Head storage is separate from node storage. A backend must support a unique
+current head per `(session_id, head_id)` and efficient branch/agent/sidechain
+selection by `(root_session_id, session_id, branch_id, agent_id, is_sidechain)`.
+
+## Remaining Implementation Backlog
+
+| Capability | Design decision | Why it remains open | Fixed protocol to implement | Likely home |
+| --- | --- | --- | --- | --- |
+| Durable `TrajectoryNodeStore` backends | Land Postgres first as the durable owner of node/head state, add JSONL sidecar second for local portability, and use ClickHouse as a read/query mirror rather than the sole current-head owner. | Core has only the in-memory reference implementation. | Implement `TrajectoryNodeStore`, `TRAJECTORY_NODE_INDEXES`, `TRAJECTORY_HEAD_INDEXES`, projection status, head compare-and-advance, and rebuild for the selected backend. | SDK storage extra or host backend. |
+| Exact node-chain context replay | The first exact replay abstraction is generic `ContextProjection`; Claude Code-style cache/content replacement is layered policy, not the replay substrate. | Fork/resume can keep projections coherent and resolve turn-boundary node/head anchors, but normal prompt context still uses turn replay. | Implement a `ContextProjection` that reads a `TrajectoryNodeStore` chain for exact mid-turn node/head replay, compact-boundary traversal, and sidechain visibility. | Optional builtin atom or host policy. |
+| Prompt-cache/content-replacement policy | Cache and replacement boundaries are trajectory control facts. Large content, summaries, and replacement payloads live behind `content_ref` in a resource/artifact store. | State is typed and persistable, but no policy enforces deterministic replacement or provider cache identity. | Implement a `ContextPolicy` plus provider adapter glue using `PromptCacheState`, `ContentReplacementState`, node `cache_key`, and node `content_ref`. | Optional builtin atom plus provider adapters. |
+| Claude Code message-pattern policy atoms | Core owns metadata, cancellation, and message invariants. Builtin policy atoms may produce memory reminders, budget nudges, and content/cache policy messages; presenter/gateway packages own UI task notifications, plan-mode UI, teammate mailboxes, and local-command caveats. | Core supports the metadata and interrupt/tool-result mechanics, but concrete producers are still policy. | Implement atoms/presenters for hook output, task notifications, plan-mode messages, local-command caveats, memory reminders, teammate/channel mailboxes, and token/budget nudges. | Optional builtin atoms or presenter/gateway packages. |
+| Fork/resume/cache E2E coverage | Add coverage only after durable node-store replay and cache/content replacement behavior are declared load-bearing. | Existing tests protect current runtime paths, but not full durable node-store replay/cache stability. | Add an E2E scenario around node-store fork/resume plus content-replacement cache stability. | Integration tests. |
+| Durable catalog backend | Catalog storage remains separate from trajectory storage because catalog identity describes active capabilities, not session event order. | Current catalog/resource store is in-memory. Composition identity is captured but not durable across process restarts unless the host persists it. | Implement `AtomCatalog` and `VersionedResourceStore` backends. | SDK storage extra or host backend. |
+| Indexed catalog query | Keep catalog query separate from `TrajectoryQueryStore`; CLI/UI can aggregate the two query surfaces when they need joined views. | Active-set identity exists, but there is no query model beyond session active-set lookup. | Add a catalog query facade if callers need predicates over session, atom name, digest, version, scenario, provider, and provenance. | Catalog/query extra. |
+| Remote observability query | Events and spans remain observability data. They can be correlated with trajectory by ids, but they are not trajectory nodes or catalog records. | Local `TrajectoryQueryStore` covers sessions/turns only. Events/spans belong to observability backends. | Implement `TrajectoryQueryStore.events()` and `.spans()` over OTLP files, ClickHouse, collector export, or a host service. | Observability extra. |
+| Concrete `SessionSpecResolver` | Precedence is explicit SDK/CLI args, then atom overrides or `--set`, then env and `.env`, then project config, then user config/profile/default model, then scenario manifest defaults, then provider defaults. | Resolver port and provenance persistence exist, but no default host policy for config search/precedence. | Implement `SessionSpecResolver` for CLI flags, env vars, user config, project config, scenario config, atom config, and provider profiles. | CLI/presenter package or SDK helper. |
+| Provider/session config freeze | Freeze active provider/model identity after the first committed turn. Switching provider requires a fork/new session or an explicit config-change control node. | Provider selection exists, but no durable session-history guard prevents accidental mid-session identity drift. | Persist provider/model/config provenance with the active set and enforce the freeze in session creation/resume/turn commit. | Core runtime plus CLI/SDK helper policy. |
+| Resource read/write authority | Keep write authority in `ResourceWriter`; reads stay in `Operations` unless a future `ResourceReader` becomes load-bearing. | Transactional resource mutation exists, but read authority and restore semantics remain policy. | Preserve transactional write APIs and add a read protocol only when callers need backend-neutral reads outside `Operations`. | Core ABI decision plus optional writer/read backends. |
+| Resource/artifact namespace policy | Workspace files, artifacts, sandbox files, summaries, and large content use one `ResourceRef` namespace model; backends map namespaces to physical storage. | `ResourceRef` exists, but artifact and sandbox namespace conventions are not standardized. | Define namespace conventions and implement resource/artifact backends that can resolve `content_ref` without coupling trajectory to storage layout. | Resource backend extra or host policy. |
+| Sandbox/remote environment backend | Remote execution belongs in `EnvironmentOperations`; tool isolation composes with it through `ToolExecutor`. | Local `EnvironmentOperations` exists. Remote/sandbox/agent-env execution brings deployment dependencies and auth. | Implement `EnvironmentOperations` backends with environment identity, cwd mapping, file transfer, cancellation, logs, snapshots, and lifecycle. | Environment backend extra. |
+| Environment snapshot persistence | Resume restore is fail-fast by default. A host can explicitly opt into degraded read-only resume, but that is a policy choice outside core invariants. | `EffectScope.fork_at()` and `restore()` are wired, but concrete snapshot storage is backend-specific. | Implement snapshot persistence and host restore-failure policy. | Environment backend extra plus host policy. |
+| Process/sandbox `ToolExecutor` | Implement sandboxed tool execution as a composition: `ToolExecutor` owns call isolation, killability, and concurrency; `EnvironmentOperations` owns environment identity, files, processes, logs, and snapshots. | Requirements/capabilities are enforced, but only direct execution is built in. | Implement `ToolExecutor` backends for process/sandbox isolation, killability, concurrency, filesystem, and network controls. | Tool execution extra or environment backend. |
+| Concrete `ContextProjection` strategies | Compaction summaries are not catalog or observability records. Trajectory records the boundary and replacement control facts, summary payloads live behind `content_ref`, and `ProjectionReport` records projection metadata. | Projection service is wired, but no real compaction/summarization strategy exists. | Implement `ContextProjection.project()` and `ProjectionReport` persistence for summarization/compaction. | Optional builtin atom or host service. |
+| Capability dependency validation | Atom dependencies should target capabilities/services, not atom names. Atom names remain useful for pinning, conflicts, provenance, and debugging. | The manifest contract can express registrations, but dependency semantics still need stricter capability-level validation. | Extend manifest validation and catalog checks to resolve required capabilities/services against registered providers. | Extension validation and catalog package. |
+| Minimal SDK baseline packaging | Core baseline contains no scenario strategy. The SDK baseline is session/runtime protocols plus in-memory reference implementations; packaged `minimal`/`chatbot` scenarios compose provider, operations, file tools, observability, and safety atoms. | Packaging still needs to make the minimal embedded SDK path and packaged scenario path explicit. | Define package boundaries and scenario composition so embedded SDK users can start minimal sessions without inheriting CLI policy. | SDK packaging and bundled scenarios. |
+| Presenter/gateway/authoring capabilities | Presenter, gateway, and authoring workflows stay outside minimal core and consume the stable SDK protocols. | These are workflows around the SDK, not minimal runtime invariants. | Implement frontmatter, renderers, child wire forwarding, trace CLI extensions, prompt/skill authoring helpers. | Presenter, gateway, or authoring packages. |
 
 ## Recommended Order
 
-1. Concrete `TrajectoryNodeStore` backend and schema.
-2. Node-store-backed fork/resume flow, including sidechain leaf lookup.
-3. Prompt-cache/content-replacement context policy.
-4. Fork/resume/cache E2E scenario after the behavior is declared load-bearing.
-5. Durable catalog backend.
-6. Concrete `SessionSpecResolver` policy.
-7. Real `ContextProjection` compaction strategy.
-8. Resource read/write authority and restore policy.
-9. Sandbox/remote `EnvironmentOperations`.
-10. Process/sandbox `ToolExecutor`.
-11. Remote observability and indexed catalog query.
-12. Claude Code message-pattern policy atoms.
-13. Presenter/gateway/authoring package split.
+| Step | Capability | Gate |
+| --- | --- | --- |
+| 1 | Implement the Postgres durable `TrajectoryNodeStore` and migration harness against the fixed node/head index contract. | Head compare-and-advance and projection rebuild are reliable under concurrent appends. |
+| 2 | Add the JSONL sidecar node-store backend for local portability. | It follows the same logical indexes as Postgres, even if implemented by scan plus sidecar metadata. |
+| 3 | Add ClickHouse trajectory query mirroring. | ClickHouse is query/read-model storage only; it does not own current heads. |
+| 4 | Implement exact node-chain `ContextProjection` replay. | Mid-turn fork/resume no longer has to widen to committed turn boundaries. |
+| 5 | Implement prompt-cache/content-replacement policy and provider adapter glue. | Cache identity and `content_ref` behavior are deterministic across fork/resume. |
+| 6 | Add fork/resume/cache E2E coverage once the behavior is declared load-bearing. | The E2E asserts through public CLI/SDK and trace surfaces. |
+| 7 | Implement durable catalog backend and indexed catalog query. | Catalog query remains separate from trajectory query. |
+| 8 | Implement concrete `SessionSpecResolver` policy and provider/session config freeze. | Config provenance is durable, and provider/model drift is explicit. |
+| 9 | Implement resource namespace conventions and read/write authority policy. | `ResourceRef` can address workspace, artifact, sandbox, summary, and large-content storage consistently. |
+| 10 | Implement real compaction/summarization `ContextProjection`. | Summary payloads live behind `content_ref`; trajectory records the control boundary. |
+| 11 | Implement sandbox/remote `EnvironmentOperations` and snapshot persistence. | Resume restore policy is fail-fast unless a host explicitly opts into degraded mode. |
+| 12 | Implement process/sandbox `ToolExecutor`. | Tool execution composes with environment capabilities and preserves cancellation semantics. |
+| 13 | Implement remote observability query. | Events/spans correlate with trajectory ids without becoming trajectory records. |
+| 14 | Implement Claude Code message-pattern policy atoms. | Core metadata is sufficient; producers are policy/presenter choices. |
+| 15 | Split presenter/gateway/authoring packages. | Minimal SDK core remains scenario-neutral. |
