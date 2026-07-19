@@ -9,12 +9,17 @@ Python-native event taxonomy.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
+from typing import ClassVar, Literal, Protocol, runtime_checkable
 
 from .cancel import CancelSignal
-from .messages import AgentMessage, AssistantMessage
+from .messages import (
+    AgentMessage,
+    AssistantMessage,
+    JsonValue,
+    freeze_json,
+)
 from .tool import Tool
 
 
@@ -97,7 +102,7 @@ AssistantStreamEvent = (
 # --- Model descriptor -------------------------------------------------------
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class Model:
     """Provider-agnostic model descriptor.
 
@@ -108,7 +113,29 @@ class Model:
     provider: str
     context_window: int
     max_output_tokens: int
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("model id must be a non-empty string")
+        if not isinstance(self.provider, str) or not self.provider:
+            raise ValueError("model provider must be a non-empty string")
+        for label, value in (
+            ("context_window", self.context_window),
+            ("max_output_tokens", self.max_output_tokens),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"model {label} must be a positive integer")
+        if self.max_output_tokens > self.context_window:
+            raise ValueError(
+                "model max_output_tokens cannot exceed context_window"
+            )
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("model metadata must be an object")
+        frozen = freeze_json(self.metadata)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("model metadata must be an object")
+        object.__setattr__(self, "metadata", frozen)
 
 
 # --- Stream protocol --------------------------------------------------------

@@ -771,18 +771,40 @@ class _EmptyOpenAIStream:
         return None
 
 
-class _OpenAICompletionsStub:
-    def __init__(self) -> None:
-        self.requests: list[dict[str, Any]] = []
+class _OpenAIChunkStream:
+    def __init__(self, *chunks: object) -> None:
+        self._chunks = iter(chunks)
 
-    async def create(self, **body: Any) -> _EmptyOpenAIStream:
+    def __aiter__(self) -> "_OpenAIChunkStream":
+        return self
+
+    async def __anext__(self) -> object:
+        try:
+            return next(self._chunks)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def close(self) -> None:
+        return None
+
+
+class _OpenAICompletionsStub:
+    def __init__(self, stream: object | None = None) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._stream = stream
+
+    async def create(self, **body: Any) -> object:
         self.requests.append(body)
-        return _EmptyOpenAIStream()
+        return (
+            self._stream
+            if self._stream is not None
+            else _EmptyOpenAIStream()
+        )
 
 
 class _OpenAIClientStub:
-    def __init__(self) -> None:
-        self.completions = _OpenAICompletionsStub()
+    def __init__(self, stream: object | None = None) -> None:
+        self.completions = _OpenAICompletionsStub(stream)
         self.chat = type("_Chat", (), {"completions": self.completions})()
 
 
@@ -818,6 +840,38 @@ async def test_openai_provider_materializes_prompt_cache_request_fields() -> Non
         "stable-sdk-session"
     )
     assert client.completions.requests[0]["prompt_cache_retention"] == "24h"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_rejects_malformed_sdk_usage() -> None:
+    usage = type(
+        "_Usage",
+        (),
+        {
+            "prompt_tokens": "12",
+            "completion_tokens": 3,
+            "prompt_tokens_details": None,
+        },
+    )()
+    chunk = type("_Chunk", (), {"usage": usage, "choices": []})()
+    stream_fn = OpenAIStreamFn(
+        client=_OpenAIClientStub(_OpenAIChunkStream(chunk))
+    )
+
+    with pytest.raises(TypeError, match="prompt_tokens"):
+        _ = [
+            event
+            async for event in stream_fn(
+                messages=[text_message("hello")],
+                model=Model(
+                    id="gpt-test",
+                    provider="openai",
+                    context_window=8_192,
+                    max_output_tokens=1_024,
+                ),
+                tools=[],
+            )
+        ]
 
 
 @pytest.mark.asyncio

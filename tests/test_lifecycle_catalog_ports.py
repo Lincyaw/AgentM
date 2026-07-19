@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -26,6 +27,7 @@ from agentm.core.abi.messages import (
     UserMessage,
 )
 from agentm.core.abi.operations import EnvironmentOperations
+from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.resource import (
     PathClass,
     ResourceMutation,
@@ -54,6 +56,7 @@ from agentm.core.abi.trajectory import Turn, TurnRef
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_factory import create_from_config, create_session
 from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
+from agentm.config import DefaultSessionSpecResolver
 
 
 def _model() -> Model:
@@ -313,6 +316,19 @@ class _Resolver:
         )
 
 
+class _ProviderResolver:
+    def __init__(self, selected: str) -> None:
+        self.selected = selected
+
+    def resolve_provider(
+        self,
+        providers: Mapping[str, ProviderConfig],
+    ) -> str | None:
+        if self.selected in providers:
+            return self.selected
+        return next(iter(providers), None)
+
+
 class _NoopBatch:
     async def __aenter__(self) -> "_NoopBatch":
         return self
@@ -560,6 +576,100 @@ async def test_atom_catalog_records_active_set_service() -> None:
     assert active_set.created_at > 0
     assert isinstance(fingerprint, ActiveSetFingerprint)
     assert fingerprint.digest == "test:0"
+
+
+def test_multiple_providers_require_explicit_selection_policy() -> None:
+    first = ProviderConfig(
+        stream_fn=_StaticStream("first"),
+        model=_model(),
+        name="first",
+    )
+    second = ProviderConfig(
+        stream_fn=_StaticStream("second"),
+        model=Model(
+            id="second-model",
+            provider="second",
+            context_window=128_000,
+            max_output_tokens=4_096,
+        ),
+        name="second",
+    )
+    unresolved = Session()
+    unresolved.register_provider("first", first)
+
+    with pytest.raises(RuntimeError, match="ProviderResolver"):
+        unresolved.register_provider("second", second)
+
+    assert unresolved.provider_names() == ["first"]
+    assert unresolved.get_provider() is first
+
+    resolved = Session(provider_resolver=_ProviderResolver("second"))
+    resolved.register_provider("first", first)
+    resolved.register_provider("second", second)
+
+    assert resolved.get_provider() is second
+
+
+def test_session_spec_provider_precedence_is_source_accurate(
+    tmp_path: Path,
+) -> None:
+    user_config = tmp_path / "user.toml"
+    user_config.write_text(
+        "\n".join(
+            (
+                "[providers.openai]",
+                'model = "user-model"',
+                'base_url = "https://user.example/v1"',
+                "verify_ssl = true",
+                "",
+            )
+        )
+    )
+    project_config = tmp_path / "project.toml"
+    project_config.write_text(
+        "\n".join(
+            (
+                'default_provider = "openai"',
+                "",
+                "[providers.openai]",
+                'model = "project-model"',
+                'base_url = "https://project.example/v1"',
+                'api_key_env = "PROJECT_OPENAI_KEY"',
+                "prompt_cache_enabled = false",
+                "",
+            )
+        )
+    )
+    resolved = DefaultSessionSpecResolver(
+        project_config=project_config,
+        user_config=user_config,
+        env={
+            "AGENTM_MODEL": "env-model",
+            "PROJECT_OPENAI_KEY": "secret",
+        },
+    ).resolve(AgentSessionConfig())
+
+    assert resolved.provider is not None
+    module, config = resolved.provider
+    assert module == "agentm.extensions.builtin.llm_openai"
+    assert config == {
+        "api_key": "secret",
+        "base_url": "https://project.example/v1",
+        "model": "env-model",
+        "name": "openai",
+        "prompt_cache_enabled": False,
+        "verify_ssl": True,
+    }
+    assert resolved.provider_identity is not None
+    assert resolved.provider_identity.name == "openai"
+    assert resolved.provider_identity.model_id == "env-model"
+    provenance = {
+        item.path: item.source
+        for item in resolved.value_provenance
+    }
+    assert provenance["provider.model"] == "env"
+    assert provenance["provider.base_url"] == "project_config"
+    assert provenance["provider.api_key"] == "env"
 
 
 @pytest.mark.asyncio

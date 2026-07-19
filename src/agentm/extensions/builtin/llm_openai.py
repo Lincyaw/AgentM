@@ -30,7 +30,6 @@ underlying ``httpx.AsyncClient`` so the OpenAI SDK never has to know.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import copy
 import hashlib
@@ -39,7 +38,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from agentm.core.abi import (
     Aborted,
@@ -94,14 +93,14 @@ from agentm.core.lib.tool_schema import _force_strict
 
 
 class LlmOpenaiConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     model: str = "gpt-4o"
     api_key: str | None = None
     base_url: str | None = None
     name: str | None = None
-    default_query: dict[str, Any] | None = None
-    default_headers: dict[str, Any] | None = None
+    default_query: dict[str, str] | None = None
+    default_headers: dict[str, str] | None = None
     verify_ssl: bool | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
@@ -111,6 +110,8 @@ class LlmOpenaiConfig(BaseModel):
     azure_endpoint: str | None = None
     api_version: str | None = None
     tool_schema_mode: Literal["strict", "compatible"] = "strict"
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
 
 MANIFEST = ExtensionManifest(
     name="llm_openai",
@@ -523,12 +524,27 @@ def _extract_usage(usage_obj: Any) -> Usage | None:
     # live under ``prompt_tokens_details.cached_tokens`` for providers that
     # support it (LiteLLM passes this through).
     cache_read = 0
-    details = getattr(usage_obj, "prompt_tokens_details", None)
+    details = _optional_sdk_attr(
+        usage_obj,
+        "prompt_tokens_details",
+    )
     if details is not None:
-        cache_read = int(getattr(details, "cached_tokens", 0) or 0)
+        cache_read = _nonnegative_sdk_int(
+            details,
+            "cached_tokens",
+            default=0,
+        )
     return Usage(
-        input_tokens=int(getattr(usage_obj, "prompt_tokens", 0) or 0),
-        output_tokens=int(getattr(usage_obj, "completion_tokens", 0) or 0),
+        input_tokens=_nonnegative_sdk_int(
+            usage_obj,
+            "prompt_tokens",
+            default=0,
+        ),
+        output_tokens=_nonnegative_sdk_int(
+            usage_obj,
+            "completion_tokens",
+            default=0,
+        ),
         cache_read=cache_read,
         cache_write=0,
     )
@@ -537,12 +553,87 @@ def _flush_tool_call(state: _StreamState, index: int) -> None:
     scratch = state.tool_scratch.get(index)
     if scratch is None or scratch.get("flushed"):
         return
+    tool_id = scratch.get("id")
+    tool_name = scratch.get("name")
+    arguments = scratch.get("arguments")
+    if not isinstance(tool_id, str) or not tool_id:
+        raise ValueError(
+            f"OpenAI tool call at index {index} ended without an id"
+        )
+    if not isinstance(tool_name, str) or not tool_name:
+        raise ValueError(
+            f"OpenAI tool call at index {index} ended without a name"
+        )
+    if not isinstance(arguments, str):
+        raise TypeError(
+            f"OpenAI tool call arguments at index {index} must be a string"
+        )
     state.accumulator.add_tool_call(
-        id=scratch.get("id", ""),
-        name=scratch.get("name", ""),
-        args_delta=scratch.get("arguments", ""),
+        id=tool_id,
+        name=tool_name,
+        args_delta=arguments,
     )
     scratch["flushed"] = True
+
+
+_SDK_MISSING = object()
+
+
+def _optional_sdk_attr(value: object, name: str) -> object | None:
+    item = getattr(value, name, _SDK_MISSING)
+    return None if item is _SDK_MISSING else item
+
+
+def _optional_sdk_string(value: object, name: str) -> str | None:
+    item = _optional_sdk_attr(value, name)
+    if item is None:
+        return None
+    if not isinstance(item, str):
+        raise TypeError(
+            f"OpenAI SDK field {name!r} must be a string or None"
+        )
+    return item
+
+
+def _nonnegative_sdk_int(
+    value: object,
+    name: str,
+    *,
+    default: int | None = None,
+) -> int:
+    item = _optional_sdk_attr(value, name)
+    if item is None:
+        if default is None:
+            raise ValueError(f"OpenAI SDK field {name!r} is required")
+        return default
+    if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+        raise TypeError(
+            f"OpenAI SDK field {name!r} must be a non-negative integer"
+        )
+    return item
+
+
+def _sdk_sequence(
+    value: object,
+    name: str,
+    *,
+    optional: bool = False,
+) -> tuple[object, ...]:
+    item = _optional_sdk_attr(value, name)
+    if item is None and optional:
+        return ()
+    if not isinstance(item, (list, tuple)):
+        raise TypeError(f"OpenAI SDK field {name!r} must be a list")
+    return tuple(item)
+
+
+@runtime_checkable
+class _OpenAIAsyncStream(Protocol):
+    """Async stream surface required from the injected/OpenAI SDK client."""
+
+    def __aiter__(self) -> AsyncIterator[object]: ...
+
+    async def close(self) -> None: ...
 
 # --- Public callable -------------------------------------------------------
 
@@ -762,16 +853,21 @@ class OpenAIStreamFn:
         async def _create_stream() -> Any:
             return await client.chat.completions.create(**body)
 
-        stream: Any | None = None
+        stream: _OpenAIAsyncStream | None = None
         try:
-            stream = await await_with_cancel_signal(
+            opened = await await_with_cancel_signal(
                 retry_policy.run(
                     _create_stream,
                     is_retryable=_is_openai_retryable,
                 ),
                 signal,
             )
-            assert stream is not None
+            if not isinstance(opened, _OpenAIAsyncStream):
+                raise TypeError(
+                    "OpenAI client must return an async iterable stream with "
+                    "an async close() method"
+                )
+            stream = opened
             iterator = stream.__aiter__()
             while True:
                 try:
@@ -796,12 +892,9 @@ class OpenAIStreamFn:
         except OperationCancelledBySignal:
             aborted = True
         finally:
-            close = getattr(stream, "close", None)
-            if close is not None and not aborted:
+            if stream is not None and not aborted:
                 try:
-                    result = close()
-                    if asyncio.iscoroutine(result):
-                        await result
+                    await stream.close()
                 except Exception:
                     logger.opt(exception=True).debug(
                         "openai: error while closing stream"
@@ -814,7 +907,12 @@ class OpenAIStreamFn:
         for index in state.tool_order:
             scratch = state.tool_scratch.get(index)
             if scratch is not None and not scratch.get("ended"):
-                yield ToolCallEnd(id=scratch.get("id", ""))
+                tool_id = scratch.get("id")
+                if not isinstance(tool_id, str) or not tool_id:
+                    raise ValueError(
+                        f"OpenAI tool call at index {index} ended without an id"
+                    )
+                yield ToolCallEnd(id=tool_id)
                 scratch["ended"] = True
                 _flush_tool_call(state, index)
 
@@ -856,28 +954,28 @@ async def _translate_chunk(
 
     # Some chunks carry only ``usage`` (the final include_usage chunk has an
     # empty ``choices`` list).
-    usage_obj = getattr(chunk, "usage", None)
+    usage_obj = _optional_sdk_attr(chunk, "usage")
     if usage_obj is not None:
         usage = _extract_usage(usage_obj)
         if usage is not None:
             state.usage = usage
 
-    choices = getattr(chunk, "choices", None) or []
+    choices = _sdk_sequence(chunk, "choices")
     if not choices:
         return
 
     choice = choices[0]
-    delta = getattr(choice, "delta", None)
+    delta = _optional_sdk_attr(choice, "delta")
 
     if delta is not None:
         # 1) Reasoning content (OpenAI o-series, DeepSeek-R1, LiteLLM Kimi).
-        reasoning = getattr(delta, "reasoning_content", None)
+        reasoning = _optional_sdk_string(delta, "reasoning_content")
         if reasoning:
             state.accumulator.add_thinking(None, reasoning)
             yield ThinkingDelta(text=reasoning, signature=None)
 
         # 2) Plain text content.
-        content = getattr(delta, "content", None)
+        content = _optional_sdk_string(delta, "content")
         if content:
             state.accumulator.add_text(None, content)
             yield TextDelta(text=content)
@@ -885,14 +983,22 @@ async def _translate_chunk(
         # 3) Tool call deltas. Each entry is identified by ``index``; the
         # first entry for a new index carries id + function.name, later
         # entries only carry function.arguments fragments.
-        tool_calls = getattr(delta, "tool_calls", None) or []
+        tool_calls = _sdk_sequence(delta, "tool_calls", optional=True)
         for tc in tool_calls:
-            index = int(getattr(tc, "index", 0))
+            index = _nonnegative_sdk_int(tc, "index")
             scratch = state.tool_scratch.get(index)
-            tc_id = getattr(tc, "id", None)
-            fn = getattr(tc, "function", None)
-            fn_name = getattr(fn, "name", None) if fn is not None else None
-            fn_args = getattr(fn, "arguments", None) if fn is not None else None
+            tc_id = _optional_sdk_string(tc, "id")
+            fn = _optional_sdk_attr(tc, "function")
+            fn_name = (
+                _optional_sdk_string(fn, "name")
+                if fn is not None
+                else None
+            )
+            fn_args = (
+                _optional_sdk_string(fn, "arguments")
+                if fn is not None
+                else None
+            )
 
             if scratch is None:
                 # First time we see this index — open a tool call block.
@@ -926,7 +1032,7 @@ async def _translate_chunk(
                     )
 
     # 4) Stop reason — emit pending ToolCallEnd events for tools, then record.
-    finish_reason = getattr(choice, "finish_reason", None)
+    finish_reason = _optional_sdk_string(choice, "finish_reason")
     if finish_reason is not None:
         for index in state.tool_order:
             scratch = state.tool_scratch.get(index)
@@ -936,9 +1042,8 @@ async def _translate_chunk(
                 yield ToolCallEnd(id=scratch["id"])
                 scratch["ended"] = True
                 _flush_tool_call(state, index)
-        if finish_reason is not None:
-            state.stop_reason = finish_reason
-            state.termination = _map_finish_reason(finish_reason)
+        state.stop_reason = finish_reason
+        state.termination = _map_finish_reason(finish_reason)
 
 # --- Extension entrypoint --------------------------------------------------
 
@@ -1006,8 +1111,6 @@ class _OpenAIProviderRuntime:
     def _build_stream_fn(self, *, verify_ssl: bool) -> OpenAIStreamFn:
         from agentm.core.abi import RETRY_POLICY_SERVICE
 
-        # Access extra fields from the Pydantic model for pass-through config.
-        extra = self._config.model_extra or {}
         return OpenAIStreamFn(
             api_key=self._config.api_key,
             base_url=self._config.base_url,
@@ -1016,9 +1119,9 @@ class _OpenAIProviderRuntime:
             verify_ssl=verify_ssl,
             retry_policy=self._session.services.get(RETRY_POLICY_SERVICE),
             thinking_round_trip=self._config.thinking_round_trip or "drop",
-            reasoning_effort=extra.get("reasoning_effort"),
-            extra_body=extra.get("extra_body"),
-            events=getattr(self._session, "events", None),
+            reasoning_effort=self._config.reasoning_effort,
+            extra_body=self._config.extra_body,
+            events=self._session.bus,
             azure_endpoint=self._config.azure_endpoint,
             api_version=self._config.api_version,
             tool_schema_mode=self._config.tool_schema_mode,

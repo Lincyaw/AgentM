@@ -537,7 +537,7 @@ class Session:
     def start(self) -> None:
         if self._driver_task is not None:
             return
-        self._activate_provider(preferred=self._active_provider_name)
+        self._activate_provider()
         if self._stream_fn is None:
             raise RuntimeError("cannot start: no stream_fn")
         if self._model is None:
@@ -868,14 +868,48 @@ class Session:
         replace: bool = False,
     ) -> None:
         """Register an LLM provider and refresh the active provider."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("provider registry name must be a non-empty string")
+        if not isinstance(config, ProviderConfig):
+            raise TypeError("provider config must be ProviderConfig")
+        if config.name != name:
+            raise ValueError(
+                f"provider registry name {name!r} does not match "
+                f"ProviderConfig.name {config.name!r}"
+            )
         key = f"provider:{name}"
-        if self.services.get(key) is not None and not replace:
+        previous = self.services.get(key)
+        if previous is not None and not replace:
             raise ValueError(f"provider {name!r} already registered")
-        self.services.register(key, config, scope="session")
+        prospective = self._provider_configs()
+        prospective[name] = config
+        if self._provider_identity is None:
+            self._resolve_provider_name(prospective)
+        elif (
+            self._provider_identity.name == name
+            and self._provider_identity.model_id is not None
+            and config.model.id != self._provider_identity.model_id
+        ):
+            raise RuntimeError(
+                "cannot replace the session-bound provider with model "
+                f"{config.model.id!r}; expected "
+                f"{self._provider_identity.model_id!r}"
+            )
         from agentm.core.runtime.extension import current_installing_extension
 
+        previous_owner = self._provider_owners.get(name)
+        self.services.register(key, config, scope="session")
         self._provider_owners[name] = current_installing_extension() or None
-        self._activate_provider(preferred=name)
+        try:
+            self._activate_provider()
+        except BaseException:
+            if previous is None:
+                self.services.unregister(key)
+                self._provider_owners.pop(name, None)
+            else:
+                self.services.register(key, previous, scope="session")
+                self._provider_owners[name] = previous_owner
+            raise
         self._emit_register_event("provider", name, {"provider": config})
 
     def has_provider(self, name: str) -> bool:
@@ -883,7 +917,7 @@ class Session:
 
     def get_provider(self, name: str | None = None) -> ProviderConfig | None:
         if name is None:
-            self._activate_provider(preferred=self._active_provider_name)
+            self._activate_provider()
         provider_name = name or self._active_provider_name
         if provider_name is None:
             return None
@@ -913,7 +947,7 @@ class Session:
         candidate = self.services.get(PROVIDER_RESOLVER_SERVICE)
         return candidate if isinstance(candidate, ProviderResolver) else None
 
-    def _activate_provider(self, *, preferred: str | None) -> None:
+    def _activate_provider(self) -> None:
         providers = self._provider_configs()
         if not providers:
             if (
@@ -951,7 +985,7 @@ class Session:
             self._stream_fn = provider.stream_fn
             self._model = provider.model
             return
-        selected = self._resolve_provider_name(providers, preferred=preferred)
+        selected = self._resolve_provider_name(providers)
         if selected is None:
             return
         provider = providers[selected]
@@ -988,16 +1022,28 @@ class Session:
             return
         provider_name = self._active_provider_name
         if provider_name is None or provider_name not in providers:
-            provider_name = next(
-                (
-                    name
-                    for name, config in providers.items()
-                    if first_model_id is not None
-                    and config.model.id == first_model_id
-                ),
-                next(reversed(providers)),
-            )
+            matching_names = [
+                name
+                for name, config in providers.items()
+                if first_model_id is not None
+                and config.model.id == first_model_id
+            ]
+            if len(matching_names) == 1:
+                provider_name = matching_names[0]
+            elif len(matching_names) > 1:
+                raise RuntimeError(
+                    "cannot recover provider identity: multiple registered "
+                    f"providers use model {first_model_id!r}"
+                )
+            else:
+                provider_name = self._resolve_provider_name(providers)
         provider = providers[provider_name]
+        if first_model_id is not None and provider.model.id != first_model_id:
+            raise RuntimeError(
+                "cannot recover provider identity: committed model "
+                f"{first_model_id!r} does not match selected provider model "
+                f"{provider.model.id!r}"
+            )
         active_set = self._active_set_fingerprint()
         self._set_provider_identity(
             ProviderSessionIdentity(
@@ -1024,7 +1070,7 @@ class Session:
         if self._provider_identity is not None:
             return self._provider_identity
         if self._active_provider_name is None:
-            self._activate_provider(preferred=None)
+            self._activate_provider()
         if self._model is None:
             return None
         active_set = self._active_set_fingerprint()
@@ -1059,26 +1105,27 @@ class Session:
     def _resolve_provider_name(
         self,
         providers: dict[str, ProviderConfig],
-        *,
-        preferred: str | None,
-    ) -> str | None:
+    ) -> str:
+        if not providers:
+            raise LookupError("cannot resolve an empty provider registry")
         resolver = self._provider_resolver()
         if resolver is not None:
             selected = resolver.resolve_provider(providers)
-            if selected is not None:
-                if selected not in providers:
-                    raise LookupError(
-                        f"provider resolver selected unregistered provider {selected!r}"
-                    )
-                return selected
-        if preferred is not None and preferred in providers:
-            return preferred
-        if (
-            self._active_provider_name is not None
-            and self._active_provider_name in providers
-        ):
-            return self._active_provider_name
-        return next(reversed(providers))
+            if selected is None:
+                raise LookupError(
+                    "provider resolver returned None for a non-empty registry"
+                )
+            if selected not in providers:
+                raise LookupError(
+                    f"provider resolver selected unregistered provider {selected!r}"
+                )
+            return selected
+        if len(providers) == 1:
+            return next(iter(providers))
+        raise RuntimeError(
+            "multiple providers are registered; configure a ProviderResolver "
+            "instead of relying on registration order"
+        )
 
     def _resolved_session_spec(self) -> ResolvedSessionSpec | None:
         spec = self.services.get(RESOLVED_SESSION_SPEC_SERVICE)

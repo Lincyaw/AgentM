@@ -29,7 +29,14 @@ import os
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Protocol,
+    runtime_checkable,
+)
 
 from agentm.core.abi import (
     Aborted,
@@ -80,15 +87,18 @@ if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
 
 
 class LlmAnthropicConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     model: str = "claude-sonnet-4-6"
     api_key: str | None = None
     base_url: str | None = None
+    name: str | None = None
     default_headers: dict[str, str] | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
     thinking_budgets: dict[str, int] | None = None
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
 
 MANIFEST = ExtensionManifest(
     name="llm_anthropic",
@@ -133,6 +143,7 @@ class _IdentityRetryPolicy:
 def _build_model(
     model_id: str,
     *,
+    provider: str = "anthropic",
     context_window: int = 1_000_000,
     max_output_tokens: int = 64_000,
 ) -> Model:
@@ -148,7 +159,7 @@ def _build_model(
 
     return Model(
         id=model_id,
-        provider="anthropic",
+        provider=provider,
         context_window=context_window,
         max_output_tokens=max_output_tokens,
     )
@@ -277,6 +288,7 @@ class _StreamState:
 
     accumulator: StreamAccumulator = field(default_factory=StreamAccumulator)
     scratch: dict[int, dict[str, Any]] = field(default_factory=dict)
+    ignored_blocks: set[int] = field(default_factory=set)
     usage: Usage | None = None
     stop_reason: str | None = None
     termination: TerminationHint | None = None
@@ -302,14 +314,30 @@ def _map_stop_reason(raw: str | None) -> TerminationHint | None:
 def _extract_usage(message_obj: Any) -> Usage | None:
     """Pull ``Usage`` out of an Anthropic ``Message`` (or partial)."""
 
-    raw = getattr(message_obj, "usage", None)
+    raw = _optional_sdk_attr(message_obj, "usage")
     if raw is None:
         return None
     return Usage(
-        input_tokens=int(getattr(raw, "input_tokens", 0) or 0),
-        output_tokens=int(getattr(raw, "output_tokens", 0) or 0),
-        cache_read=int(getattr(raw, "cache_read_input_tokens", 0) or 0),
-        cache_write=int(getattr(raw, "cache_creation_input_tokens", 0) or 0),
+        input_tokens=_nonnegative_sdk_int(
+            raw,
+            "input_tokens",
+            default=0,
+        ),
+        output_tokens=_nonnegative_sdk_int(
+            raw,
+            "output_tokens",
+            default=0,
+        ),
+        cache_read=_nonnegative_sdk_int(
+            raw,
+            "cache_read_input_tokens",
+            default=0,
+        ),
+        cache_write=_nonnegative_sdk_int(
+            raw,
+            "cache_creation_input_tokens",
+            default=0,
+        ),
     )
 
 def _finalize_block(state: _StreamState, index: int) -> None:
@@ -325,12 +353,102 @@ def _finalize_block(state: _StreamState, index: int) -> None:
         state.accumulator.add_thinking(index, scratch.get("text", ""))
         state.accumulator.set_thinking_signature(index, scratch.get("signature"))
     elif kind == "tool_use":
+        tool_id = scratch.get("id")
+        tool_name = scratch.get("name")
+        partial_json = scratch.get("partial_json")
+        if not isinstance(tool_id, str) or not tool_id:
+            raise ValueError(
+                f"Anthropic tool block at index {index} has no id"
+            )
+        if not isinstance(tool_name, str) or not tool_name:
+            raise ValueError(
+                f"Anthropic tool block at index {index} has no name"
+            )
+        if not isinstance(partial_json, str):
+            raise TypeError(
+                f"Anthropic tool arguments at index {index} must be a string"
+            )
         state.accumulator.add_tool_call(
-            id=scratch.get("id", ""),
-            name=scratch.get("name", ""),
-            args_delta=scratch.get("partial_json", ""),
+            id=tool_id,
+            name=tool_name,
+            args_delta=partial_json,
             index=index,
         )
+
+
+_SDK_MISSING = object()
+
+
+def _optional_sdk_attr(value: object, name: str) -> object | None:
+    item = getattr(value, name, _SDK_MISSING)
+    return None if item is _SDK_MISSING else item
+
+
+def _required_sdk_attr(value: object, name: str) -> object:
+    item = _optional_sdk_attr(value, name)
+    if item is None:
+        raise ValueError(f"Anthropic SDK field {name!r} is required")
+    return item
+
+
+def _optional_sdk_string(value: object, name: str) -> str | None:
+    item = _optional_sdk_attr(value, name)
+    if item is None:
+        return None
+    if not isinstance(item, str):
+        raise TypeError(
+            f"Anthropic SDK field {name!r} must be a string or None"
+        )
+    return item
+
+
+def _required_sdk_string(
+    value: object,
+    name: str,
+    *,
+    allow_empty: bool = True,
+) -> str:
+    item = _required_sdk_attr(value, name)
+    if not isinstance(item, str) or (not allow_empty and not item):
+        raise TypeError(f"Anthropic SDK field {name!r} must be a string")
+    return item
+
+
+def _nonnegative_sdk_int(
+    value: object,
+    name: str,
+    *,
+    default: int | None = None,
+) -> int:
+    item = _optional_sdk_attr(value, name)
+    if item is None:
+        if default is None:
+            raise ValueError(f"Anthropic SDK field {name!r} is required")
+        return default
+    if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+        raise TypeError(
+            f"Anthropic SDK field {name!r} must be a non-negative integer"
+        )
+    return item
+
+
+@runtime_checkable
+class _AnthropicAsyncStream(Protocol):
+    def __aiter__(self) -> AsyncIterator[object]: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class _AnthropicStreamContext(Protocol):
+    async def __aenter__(self) -> object: ...
+
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> object: ...
 
 # --- Public callable -------------------------------------------------------
 
@@ -360,12 +478,23 @@ class AnthropicStreamFn:
     def __post_init__(self) -> None:
         budgets = {"low": 1_024, "medium": 4_096, "high": 16_384}
         if self.thinking_budgets is not None:
-            budgets.update(
-                {
-                    str(key): int(value)
-                    for key, value in self.thinking_budgets.items()
-                }
-            )
+            unknown = set(self.thinking_budgets) - set(budgets)
+            if unknown:
+                raise ValueError(
+                    "AnthropicStreamFn thinking_budgets has unknown levels: "
+                    f"{sorted(unknown)}"
+                )
+            for key, value in self.thinking_budgets.items():
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value <= 0
+                ):
+                    raise ValueError(
+                        "AnthropicStreamFn thinking budgets must be positive "
+                        "integers"
+                    )
+                budgets[key] = value
         self.thinking_budgets = budgets
 
     def _get_client(self) -> AsyncAnthropic:
@@ -455,13 +584,22 @@ class AnthropicStreamFn:
 
         retry_policy = self.retry_policy or _IdentityRetryPolicy()
 
-        async def _open_stream() -> tuple[Any, Any]:
+        async def _open_stream() -> tuple[_AnthropicStreamContext, _AnthropicAsyncStream]:
             ctx = client.messages.stream(**body)
-            stream = await ctx.__aenter__()
-            return ctx, stream
+            if not isinstance(ctx, _AnthropicStreamContext):
+                raise TypeError(
+                    "Anthropic client must return an async stream context"
+                )
+            opened = await ctx.__aenter__()
+            if not isinstance(opened, _AnthropicAsyncStream):
+                raise TypeError(
+                    "Anthropic stream context must yield an async iterable "
+                    "stream with an async close() method"
+                )
+            return ctx, opened
 
-        stream_ctx: Any | None = None
-        stream: Any | None = None
+        stream_ctx: _AnthropicStreamContext | None = None
+        stream: _AnthropicAsyncStream | None = None
         try:
             stream_ctx, stream = await await_with_cancel_signal(
                 retry_policy.run(
@@ -495,7 +633,14 @@ class AnthropicStreamFn:
             aborted = True
         finally:
             if stream_ctx is not None:
-                await stream_ctx.__aexit__(None, None, None)
+                try:
+                    await stream_ctx.__aexit__(None, None, None)
+                except Exception:
+                    if not aborted:
+                        raise
+                    logger.opt(exception=True).debug(
+                        "anthropic: error while closing aborted stream context"
+                    )
 
         if aborted:
             state.stop_reason = "aborted"
@@ -525,31 +670,46 @@ async def _translate_event(
     Pydantic models.
     """
 
-    etype = getattr(event, "type", None)
+    etype = _required_sdk_string(event, "type", allow_empty=False)
 
     if etype == "message_start":
-        message = getattr(event, "message", None)
-        if message is not None:
-            usage = _extract_usage(message)
-            if usage is not None:
-                state.usage = usage
+        message = _required_sdk_attr(event, "message")
+        usage = _extract_usage(message)
+        if usage is not None:
+            state.usage = usage
         return
 
     if etype == "content_block_start":
-        index = int(getattr(event, "index", 0))
-        block = getattr(event, "content_block", None)
-        block_type = getattr(block, "type", None)
+        index = _nonnegative_sdk_int(event, "index")
+        if index in state.scratch or index in state.ignored_blocks:
+            raise ValueError(
+                f"Anthropic content block index {index} started twice"
+            )
+        block = _required_sdk_attr(event, "content_block")
+        block_type = _required_sdk_string(
+            block,
+            "type",
+            allow_empty=False,
+        )
         if block_type == "text":
             state.scratch[index] = {"kind": "text", "text": ""}
         elif block_type == "thinking":
             state.scratch[index] = {
                 "kind": "thinking",
-                "text": getattr(block, "thinking", "") or "",
-                "signature": getattr(block, "signature", None),
+                "text": _optional_sdk_string(block, "thinking") or "",
+                "signature": _optional_sdk_string(block, "signature"),
             }
         elif block_type == "tool_use":
-            tool_id = getattr(block, "id", "") or ""
-            tool_name = getattr(block, "name", "") or ""
+            tool_id = _required_sdk_string(
+                block,
+                "id",
+                allow_empty=False,
+            )
+            tool_name = _required_sdk_string(
+                block,
+                "name",
+                allow_empty=False,
+            )
             state.scratch[index] = {
                 "kind": "tool_use",
                 "id": tool_id,
@@ -557,75 +717,108 @@ async def _translate_event(
                 "partial_json": "",
             }
             yield ToolCallStart(id=tool_id, name=tool_name)
+        else:
+            state.ignored_blocks.add(index)
         return
 
     if etype == "content_block_delta":
-        index = int(getattr(event, "index", 0))
-        delta = getattr(event, "delta", None)
-        delta_type = getattr(delta, "type", None)
+        index = _nonnegative_sdk_int(event, "index")
+        delta = _required_sdk_attr(event, "delta")
+        delta_type = _required_sdk_string(
+            delta,
+            "type",
+            allow_empty=False,
+        )
+        if index in state.ignored_blocks:
+            return
         scratch = state.scratch.get(index)
         if delta_type == "text_delta":
-            text = getattr(delta, "text", "") or ""
-            if scratch is not None and scratch.get("kind") == "text":
-                scratch["text"] = scratch.get("text", "") + text
+            if scratch is None or scratch.get("kind") != "text":
+                raise ValueError(
+                    f"Anthropic text delta has no text block at index {index}"
+                )
+            text = _required_sdk_string(delta, "text")
+            scratch["text"] = scratch.get("text", "") + text
             yield TextDelta(text=text)
         elif delta_type == "input_json_delta":
-            partial = getattr(delta, "partial_json", "") or ""
-            if scratch is not None and scratch.get("kind") == "tool_use":
-                scratch["partial_json"] = scratch.get("partial_json", "") + partial
-                yield ToolCallArgsDelta(
-                    id=scratch.get("id", ""),
-                    args_json_delta=partial,
+            if scratch is None or scratch.get("kind") != "tool_use":
+                raise ValueError(
+                    "Anthropic input JSON delta has no tool block at index "
+                    f"{index}"
                 )
+            partial = _required_sdk_string(delta, "partial_json")
+            scratch["partial_json"] = scratch.get("partial_json", "") + partial
+            yield ToolCallArgsDelta(
+                id=scratch["id"],
+                args_json_delta=partial,
+            )
         elif delta_type == "thinking_delta":
-            text = getattr(delta, "thinking", "") or ""
-            if scratch is not None and scratch.get("kind") == "thinking":
-                scratch["text"] = scratch.get("text", "") + text
+            if scratch is None or scratch.get("kind") != "thinking":
+                raise ValueError(
+                    "Anthropic thinking delta has no thinking block at index "
+                    f"{index}"
+                )
+            text = _required_sdk_string(delta, "thinking")
+            scratch["text"] = scratch.get("text", "") + text
             yield ThinkingDelta(text=text, signature=None)
         elif delta_type == "signature_delta":
-            sig = getattr(delta, "signature", None)
-            if scratch is not None and scratch.get("kind") == "thinking":
-                # Anthropic delivers signatures as a single delta; concatenate
-                # defensively in case multiple are sent.
-                prev = scratch.get("signature") or ""
-                scratch["signature"] = (prev + sig) if sig is not None else prev
+            if scratch is None or scratch.get("kind") != "thinking":
+                raise ValueError(
+                    "Anthropic signature delta has no thinking block at index "
+                    f"{index}"
+                )
+            sig = _required_sdk_string(delta, "signature")
+            # Multiple signature deltas are valid; preserve stream order.
+            prev = scratch.get("signature") or ""
+            scratch["signature"] = prev + sig
         return
 
     if etype == "content_block_stop":
-        index = int(getattr(event, "index", 0))
+        index = _nonnegative_sdk_int(event, "index")
+        if index in state.ignored_blocks:
+            state.ignored_blocks.remove(index)
+            return
         scratch = state.scratch.get(index)
+        if scratch is None:
+            raise ValueError(
+                f"Anthropic content block stop has no start at index {index}"
+            )
         kind = scratch.get("kind") if scratch is not None else None
         _finalize_block(state, index)
         if kind == "tool_use" and scratch is not None:
-            yield ToolCallEnd(id=scratch.get("id", ""))
+            yield ToolCallEnd(id=scratch["id"])
         return
 
     if etype == "message_delta":
-        delta = getattr(event, "delta", None)
-        raw_stop = getattr(delta, "stop_reason", None) if delta is not None else None
+        delta = _required_sdk_attr(event, "delta")
+        raw_stop = _optional_sdk_string(delta, "stop_reason")
         if raw_stop is not None:
             state.stop_reason = raw_stop
             state.termination = _map_stop_reason(raw_stop)
         # Anthropic emits a final usage update on message_delta.
-        usage = getattr(event, "usage", None)
-        if usage is not None:
+        raw_usage = _optional_sdk_attr(event, "usage")
+        if raw_usage is not None:
             existing = state.usage
             state.usage = Usage(
-                input_tokens=int(
-                    getattr(usage, "input_tokens", None)
-                    or (existing.input_tokens if existing else 0)
+                input_tokens=_nonnegative_sdk_int(
+                    raw_usage,
+                    "input_tokens",
+                    default=existing.input_tokens if existing else 0,
                 ),
-                output_tokens=int(
-                    getattr(usage, "output_tokens", None)
-                    or (existing.output_tokens if existing else 0)
+                output_tokens=_nonnegative_sdk_int(
+                    raw_usage,
+                    "output_tokens",
+                    default=existing.output_tokens if existing else 0,
                 ),
-                cache_read=int(
-                    getattr(usage, "cache_read_input_tokens", None)
-                    or (existing.cache_read if existing else 0)
+                cache_read=_nonnegative_sdk_int(
+                    raw_usage,
+                    "cache_read_input_tokens",
+                    default=existing.cache_read if existing else 0,
                 ),
-                cache_write=int(
-                    getattr(usage, "cache_creation_input_tokens", None)
-                    or (existing.cache_write if existing else 0)
+                cache_write=_nonnegative_sdk_int(
+                    raw_usage,
+                    "cache_creation_input_tokens",
+                    default=existing.cache_write if existing else 0,
                 ),
             )
         return
@@ -634,9 +827,11 @@ async def _translate_event(
         # Some streams flush remaining blocks here; make sure scratch is empty.
         for idx in sorted(state.scratch.keys()):
             _finalize_block(state, idx)
+        state.ignored_blocks.clear()
         return
 
-    # Unknown events are ignored on purpose; the SDK occasionally adds new ones.
+    # Unknown event types carry no semantics understood by this adapter. They
+    # are ignored for forward compatibility; malformed known events fail.
     return
 
 # --- Extension entrypoint --------------------------------------------------
@@ -651,15 +846,20 @@ class _AnthropicProviderRuntime:
     def install(self) -> None:
         model_id = self._model_id()
         stream_fn = self._build_stream_fn()
-        model = _build_model(model_id, **self._model_kwargs())
-        if self._session.has_provider("anthropic"):
+        name = self._provider_name()
+        model = _build_model(
+            model_id,
+            provider=name,
+            **self._model_kwargs(),
+        )
+        if self._session.has_provider(name):
             raise ValueError(
                 "agentm.extensions.builtin.llm_anthropic.install: provider "
-                "'anthropic' is already registered in this session."
+                f"{name!r} is already registered in this session."
             )
         self._session.register_provider(
-            "anthropic",
-            ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
+            name,
+            ProviderConfig(stream_fn=stream_fn, model=model, name=name),
         )
 
     def _model_id(self) -> str:
@@ -678,17 +878,24 @@ class _AnthropicProviderRuntime:
                 "agentm.extensions.builtin.llm_anthropic.install: config.default_headers "
                 "must be a mapping of header name to string value."
             )
-        # Access extra fields from the Pydantic model for pass-through config.
-        extra = self._config.model_extra or {}
         return AnthropicStreamFn(
             api_key=self._config.api_key,
             base_url=self._config.base_url,
             default_headers=default_headers,
             thinking_budgets=self._config.thinking_budgets,
-            reasoning_effort=extra.get("reasoning_effort"),
-            extra_body=extra.get("extra_body"),
+            reasoning_effort=self._config.reasoning_effort,
+            extra_body=self._config.extra_body,
             retry_policy=self._session.services.get(RETRY_POLICY_SERVICE),
         )
+
+    def _provider_name(self) -> str:
+        name = self._config.name or "anthropic"
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                "agentm.extensions.builtin.llm_anthropic.install: "
+                "config.name must be a non-empty string"
+            )
+        return name
 
     def _model_kwargs(self) -> dict[str, int]:
         # Optional model-spec overrides; defaults handled in ``_build_model``.

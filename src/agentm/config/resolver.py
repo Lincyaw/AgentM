@@ -17,6 +17,7 @@ from agentm.core.abi.session_api import (
     ConfigValueProvenance,
     ExtensionSpec,
     ResolvedSessionSpec,
+    ScenarioSpec,
 )
 
 
@@ -54,9 +55,26 @@ class DefaultSessionSpecResolver:
             ),
         )
         if scenario.source is not None:
-            provenance.append(_provenance("scenario", scenario.source, scenario.ref, scenario.value))
+            scenario_name = _required_nonempty_str(
+                scenario.value,
+                "scenario",
+            )
+            provenance.append(
+                _provenance(
+                    "scenario",
+                    scenario.source,
+                    scenario.ref,
+                    scenario_name,
+                )
+            )
+        else:
+            scenario_name = None
 
-        extensions = self._resolve_extensions(request, scenario.value, provenance)
+        extensions = self._resolve_extensions(
+            request,
+            scenario_name,
+            provenance,
+        )
         atom_config = self._resolve_atom_config(
             request,
             project_config,
@@ -71,7 +89,7 @@ class DefaultSessionSpecResolver:
         )
 
         return ResolvedSessionSpec(
-            scenario=scenario.value if isinstance(scenario.value, str) else None,
+            scenario=scenario_name,
             extensions=tuple(extensions),
             atom_config=atom_config,
             provider=provider,
@@ -97,10 +115,11 @@ class DefaultSessionSpecResolver:
             return [(module, dict(config)) for module, config in request.extensions]
         if isinstance(scenario, str) and request.scenario_loader is not None:
             loaded = request.scenario_loader(scenario)
-            if hasattr(loaded, "extensions"):
-                extensions = getattr(loaded, "extensions")
-            else:
-                extensions = loaded
+            extensions = (
+                loaded.extensions
+                if isinstance(loaded, ScenarioSpec)
+                else loaded
+            )
             provenance.append(
                 _provenance("extensions", "scenario_default", scenario, extensions)
             )
@@ -153,10 +172,20 @@ class DefaultSessionSpecResolver:
     ) -> tuple[ExtensionSpec | None, ProviderSessionIdentity | None]:
         if request.provider is not None:
             module, config = request.provider
+            if not isinstance(module, str) or not module:
+                raise ValueError(
+                    "AgentSessionConfig.provider module must be a "
+                    "non-empty string"
+                )
             provenance.append(
                 _provenance("provider", "explicit", "AgentSessionConfig.provider", request.provider)
             )
-            name = str(config.get("name") or _provider_name_from_module(module))
+            raw_name = config.get("name")
+            name = (
+                _provider_name_from_module(module)
+                if raw_name is None
+                else _required_nonempty_str(raw_name, "provider.name")
+            )
             model_id = _optional_str(config.get("model"))
             return (module, dict(config)), ProviderSessionIdentity(name=name, model_id=model_id)
 
@@ -165,33 +194,74 @@ class DefaultSessionSpecResolver:
             ("project_config", _get_path(project_config, ("default_provider",)), str(self._project_config) if self._project_config is not None else None),
             ("user_config", _get_path(user_config, ("default_provider",)), str(self._user_config) if self._user_config is not None else None),
         )
-        provider = provider_name.value
-        if not isinstance(provider, str) or not provider:
+        if provider_name.source is None:
             return None, None
+        provider = _required_nonempty_str(
+            provider_name.value,
+            "default provider",
+        )
 
-        profile = _provider_profile(provider, project_config, user_config)
+        project_profile = _provider_profile(provider, project_config)
+        user_profile = _provider_profile(provider, user_config)
+        project_ref = (
+            str(self._project_config)
+            if self._project_config is not None
+            else None
+        )
+        user_ref = (
+            str(self._user_config)
+            if self._user_config is not None
+            else None
+        )
         model = _choose(
             ("env", self._env.get("AGENTM_MODEL"), "AGENTM_MODEL"),
-            ("project_config", profile.get("model"), str(self._project_config) if self._project_config is not None else None),
-            ("user_config", profile.get("model"), str(self._user_config) if self._user_config is not None else None),
+            ("project_config", project_profile.get("model"), project_ref),
+            ("user_config", user_profile.get("model"), user_ref),
         )
-        provider_config: dict[str, Any] = {key: value for key, value in profile.items() if isinstance(key, str)}
+        provider_config = {**user_profile, **project_profile}
+        for resolver_only_key in (
+            "api_key",
+            "api_key_env",
+            "base_url",
+            "model",
+            "name",
+        ):
+            provider_config.pop(resolver_only_key, None)
         provider_config["name"] = provider
-        if isinstance(model.value, str):
-            provider_config["model"] = model.value
-            provenance.append(_provenance("provider.model", model.source or "provider_default", model.ref, model.value))
-        api_key = _provider_api_key(provider, profile, self._env)
+        if model.source is not None:
+            model_id = _required_nonempty_str(
+                model.value,
+                "provider.model",
+            )
+            provider_config["model"] = model_id
+            provenance.append(_provenance("provider.model", model.source, model.ref, model_id))
+        api_key = _provider_api_key(
+            provider,
+            project_profile,
+            user_profile,
+            self._env,
+            project_ref=project_ref,
+            user_ref=user_ref,
+        )
         if api_key.value is not None:
-            provider_config["api_key"] = api_key.value
-            provenance.append(_provenance("provider.api_key", api_key.source or "provider_default", api_key.ref, api_key.value))
+            api_key_value = _required_nonempty_str(
+                api_key.value,
+                "provider.api_key",
+            )
+            provider_config["api_key"] = api_key_value
+            provenance.append(_provenance("provider.api_key", api_key.source or "provider_default", api_key.ref, api_key_value))
         base_url = _choose(
             ("env", self._env.get("AGENTM_BASE_URL"), "AGENTM_BASE_URL"),
-            ("project_config", profile.get("base_url"), str(self._project_config) if self._project_config is not None else None),
-            ("user_config", profile.get("base_url"), str(self._user_config) if self._user_config is not None else None),
+            ("project_config", project_profile.get("base_url"), project_ref),
+            ("user_config", user_profile.get("base_url"), user_ref),
         )
-        if isinstance(base_url.value, str):
-            provider_config["base_url"] = base_url.value
-            provenance.append(_provenance("provider.base_url", base_url.source or "provider_default", base_url.ref, base_url.value))
+        if base_url.source is not None:
+            base_url_value = _required_nonempty_str(
+                base_url.value,
+                "provider.base_url",
+            )
+            provider_config["base_url"] = base_url_value
+            provenance.append(_provenance("provider.base_url", base_url.source, base_url.ref, base_url_value))
         provenance.append(
             _provenance("provider", provider_name.source or "provider_default", provider_name.ref, provider)
         )
@@ -215,35 +285,54 @@ def _choose(*candidates: tuple[ConfigSource, object, str | None]) -> _Choice:
 
 def _provider_profile(
     provider: str,
-    project_config: Mapping[str, Any],
-    user_config: Mapping[str, Any],
+    config: Mapping[str, Any],
 ) -> dict[str, Any]:
     merged: dict[str, Any] = {}
-    for config in (user_config, project_config):
-        profile = _get_path(config, ("providers", provider))
-        if isinstance(profile, Mapping):
-            merged.update(dict(profile))
-        models = _get_path(config, ("models", provider))
-        if isinstance(models, Mapping):
-            merged.update(dict(models))
+    profile = _get_path(config, ("providers", provider))
+    if isinstance(profile, Mapping):
+        merged.update(dict(profile))
+    models = _get_path(config, ("models", provider))
+    if isinstance(models, Mapping):
+        merged.update(dict(models))
     return merged
 
 
 def _provider_api_key(
     provider: str,
-    profile: Mapping[str, Any],
+    project_profile: Mapping[str, Any],
+    user_profile: Mapping[str, Any],
     env: Mapping[str, str],
+    *,
+    project_ref: str | None,
+    user_ref: str | None,
 ) -> _Choice:
-    env_name = profile.get("api_key_env")
+    project_env_name = project_profile.get("api_key_env")
+    user_env_name = user_profile.get("api_key_env")
+    if project_env_name is not None:
+        env_name = _required_nonempty_str(
+            project_env_name,
+            "provider.api_key_env",
+        )
+    elif user_env_name is not None:
+        env_name = _required_nonempty_str(
+            user_env_name,
+            "provider.api_key_env",
+        )
+    else:
+        env_name = None
     candidates: list[tuple[ConfigSource, object, str | None]] = []
-    if isinstance(env_name, str):
+    if env_name is not None:
         candidates.append(("env", env.get(env_name), env_name))
     candidates.extend(
         [
             ("env", env.get("AGENTM_API_KEY"), "AGENTM_API_KEY"),
             ("env", env.get(f"{provider.upper()}_API_KEY"), f"{provider.upper()}_API_KEY"),
-            ("project_config", profile.get("api_key"), None),
-            ("user_config", profile.get("api_key"), None),
+            (
+                "project_config",
+                project_profile.get("api_key"),
+                project_ref,
+            ),
+            ("user_config", user_profile.get("api_key"), user_ref),
         ]
     )
     return _choose(*candidates)
@@ -290,7 +379,15 @@ def _get_path(data: Mapping[str, Any], path: tuple[str, ...]) -> object:
 
 
 def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) else None
+    if value is None:
+        return None
+    return _required_nonempty_str(value, "provider.model")
+
+
+def _required_nonempty_str(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
 
 
 def _provenance(
@@ -307,11 +404,13 @@ def _provenance(
     )
 
 
-def _fingerprint(value: object) -> str | None:
-    try:
-        payload = json.dumps(value, sort_keys=True, default=repr).encode("utf-8")
-    except TypeError:
-        return None
+def _fingerprint(value: object) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
