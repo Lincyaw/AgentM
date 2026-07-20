@@ -21,7 +21,6 @@ from loguru import logger
 
 from agentm.core.abi.cancel import (
     CancelSignal,
-    EventCancelSource,
     ResettableCancelSource,
 )
 from agentm.core.abi.compaction import (
@@ -294,7 +293,7 @@ async def _abandon_effect_turn(
 
 async def _begin_resource_txn(
     writer: ResourceWriter | None,
-    services: ServiceRegistry | None,
+    services: ServiceRegistry,
     *,
     session_id: str,
     turn_id: str,
@@ -310,13 +309,12 @@ async def _begin_resource_txn(
             rationale="agent turn resource mutations",
         )
     )
-    if services is not None:
-        services.register(
-            RESOURCE_TXN_SERVICE,
-            txn,
-            ResourceTxn,
-            scope="session",
-        )
+    services.register(
+        RESOURCE_TXN_SERVICE,
+        txn,
+        ResourceTxn,
+        scope="session",
+    )
     return txn
 
 
@@ -420,9 +418,8 @@ async def _node_append_position(
     )
 
 
-def _clear_resource_txn(services: ServiceRegistry | None) -> None:
-    if services is not None:
-        services.unregister(RESOURCE_TXN_SERVICE)
+def _clear_resource_txn(services: ServiceRegistry) -> None:
+    services.unregister(RESOURCE_TXN_SERVICE)
 
 
 # --- Main driver ------------------------------------------------------------
@@ -437,22 +434,22 @@ class DriverConfig:
     bus: EventBus
     stream_fn: StreamFn
     model: Model
+    session_id: str
+    root_session_id: str
+    services: ServiceRegistry
+    interrupt: ResettableCancelSource
+    shutdown: ResettableCancelSource
     tools: list[Tool] = field(default_factory=list)
     store: TrajectoryStore | None = None
-    session_id: str = ""
-    root_session_id: str | None = None
     parent_session_id: str | None = None
     permission_audience: PermissionAudience = "user"
     system: str | None = None
     context_policies: list[ContextPolicy] | None = None
     prompt_cache_adapter: ProviderPromptCacheAdapter | None = None
     trigger_renderers: dict[str, TriggerRenderer] | None = None
-    interrupt: ResettableCancelSource | None = None
-    shutdown: ResettableCancelSource | None = None
     cancel_signal: CancelSignal | None = None
     effect_scope: EffectScope | None = None
     resource_writer: ResourceWriter | None = None
-    services: ServiceRegistry | None = None
     tool_executor: ToolExecutor | None = None
     tool_orchestrator: ToolOrchestrator | None = None
     permission_policy: PermissionPolicy | None = None
@@ -476,30 +473,22 @@ async def drive(config: DriverConfig) -> None:
     trajectory = config.trajectory
     triggers = config.triggers
     bus = config.bus
-    _interrupt = config.interrupt or EventCancelSource()
-    _shutdown = config.shutdown or EventCancelSource()
+    _interrupt = config.interrupt
+    _shutdown = config.shutdown
     policies = config.context_policies or []
-    context_projection = (
-        config.services.get(
-            CONTEXT_PROJECTION_SERVICE,
-            cast(type[ContextProjection], ContextProjection),
-        )
-        if config.services is not None
-        else None
+    context_projection = config.services.get(
+        CONTEXT_PROJECTION_SERVICE,
+        cast(type[ContextProjection], ContextProjection),
     )
     prompt_cache_adapter = config.prompt_cache_adapter
-    if prompt_cache_adapter is None and config.services is not None:
+    if prompt_cache_adapter is None:
         prompt_cache_adapter = config.services.get(
             PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
             cast(type[ProviderPromptCacheAdapter], ProviderPromptCacheAdapter),
         )
-    interruption_policy = (
-        config.services.get(
-            INTERRUPTION_MESSAGE_POLICY_SERVICE,
-            cast(type[InterruptionMessagePolicy], InterruptionMessagePolicy),
-        )
-        if config.services is not None
-        else None
+    interruption_policy = config.services.get(
+        INTERRUPTION_MESSAGE_POLICY_SERVICE,
+        cast(type[InterruptionMessagePolicy], InterruptionMessagePolicy),
     )
     turns_run = 0
     tool_calls_run = 0

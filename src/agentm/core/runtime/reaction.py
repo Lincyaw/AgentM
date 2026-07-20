@@ -745,8 +745,6 @@ async def react(
     trigger_renderers = config.trigger_renderers
     interrupt = config.interrupt
     shutdown = config.shutdown
-    if interrupt is None or shutdown is None:
-        raise RuntimeError("reaction requires resolved cancellation sources")
     parent_cancel_signal = config.cancel_signal
     thinking = config.thinking
     tool_executor = config.tool_executor
