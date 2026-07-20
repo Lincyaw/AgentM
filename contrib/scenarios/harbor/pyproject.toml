@@ -5,6 +5,7 @@ description = "Harbor external agent adapter — AgentM runs locally, tool calls
 requires-python = ">=3.12"
 dependencies = [
     "harbor==0.19.0",
+    "policy-engine",
 ]
 
 [project.scripts]
@@ -15,6 +16,7 @@ external = ["agentm"]
 
 [tool.uv.sources]
 agentm = { workspace = true }
+policy-engine = { workspace = true, editable = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -25,6 +27,7 @@ packages = ["src/agentm_harbor"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "scenario.yaml" = "agentm_harbor/scenario.yaml"
+"base.yaml" = "agentm_harbor/base.yaml"
 
 [tool.ruff]
 line-length = 100

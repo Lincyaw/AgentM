@@ -3,21 +3,5 @@ description: |
   AgentM as Harbor external agent.
   Agent runs locally; tool calls route through Harbor's BaseEnvironment.
 
-extensions:
-  - module: agentm.extensions.builtin.tool_result_cap
-    config:
-      max_tokens: 5000
-  - module: agentm.extensions.builtin.file_tools
-  - module: agentm.extensions.builtin.tool_bash
-    config:
-      default_timeout: 1200
-  - module: agentm.extensions.builtin.observability
-  - module: agentm.extensions.builtin.tool_error_messages
-  - module: agentm.extensions.builtin.retry_policy
-  - module: agentm.extensions.builtin.system_prompt
-    config:
-      prompt: |
-        You are completing a task in a Linux environment. Read the task
-        description carefully and work autonomously until done. Prefer
-        established libraries over hand-rolled implementations. Verify
-        your results before finishing.
+includes:
+  - base.yaml
