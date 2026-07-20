@@ -76,6 +76,8 @@ requirements:
       Reference resource transactions and durable catalog mutations settle
       synchronous filesystem work and update local transaction phase before
       propagating async caller cancellation.
+      Child-agent construction releases every reserved worker slot on ordinary
+      failure, cancellation, and grouped cleanup failure.
       External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and

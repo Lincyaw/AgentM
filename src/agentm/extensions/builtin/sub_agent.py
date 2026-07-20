@@ -48,6 +48,7 @@ from agentm.core.lib import (
     BackgroundTaskRegistry,
     SlotLimitReached,
 )
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.extensions import ExtensionManifest
 
 _RUNNING: Literal["running"] = "running"
@@ -322,11 +323,13 @@ class _ChildTaskManager:
         )
         try:
             child = await self._api.spawn_child_session(child_config)
-        except Exception as exc:  # noqa: BLE001
-            await self._registry.release_slot()
-            logger.warning("sub_agent child creation failed: {}", exc)
+        except BaseException as spawn_error:
+            await await_known_outcome(self._registry.release_slot())
+            if not isinstance(spawn_error, Exception):
+                raise
+            logger.warning("sub_agent child creation failed: {}", spawn_error)
             return _tool_result(
-                {"error": f"child creation failed: {exc}"},
+                {"error": f"child creation failed: {spawn_error}"},
                 is_error=True,
             )
 
@@ -349,7 +352,7 @@ class _ChildTaskManager:
             child.interrupt("unknown")
             state.task.cancel()
             await asyncio.gather(state.task, return_exceptions=True)
-            await self._registry.release_slot()
+            await await_known_outcome(self._registry.release_slot())
             raise
 
         if superseded is not None:
