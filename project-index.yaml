@@ -44,6 +44,8 @@ requirements:
       remain alive across sharing descendants. Portable node index declarations
       include tool-call/name, content-reference, and visibility lookups; SQL
       stores materialize them natively while scan stores preserve semantics.
+      Every synchronous backend serializes complete mutations because async
+      SDK paths may call the same store concurrently from worker threads.
       Compaction publishes its compact boundary, content-replacement state,
       and head advance as one store mutation anchored to the latest committed
       turn. Node/head fork selectors preserve the exact logical-parent anchor

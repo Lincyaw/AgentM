@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from _thread import RLock
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
+from functools import wraps
+from typing import Concatenate, ParamSpec, Protocol, TypeVar
 
 from agentm.core.abi.context import render_trigger
 from agentm.core.abi.messages import (
@@ -31,6 +34,33 @@ from agentm.core.abi.trajectory import (
     Turn,
 )
 from agentm.core.abi.trigger import TriggerRenderer
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+class _TrajectoryStateLockOwner(Protocol):
+    _trajectory_state_lock: RLock
+
+
+_S = TypeVar("_S", bound=_TrajectoryStateLockOwner)
+
+
+def _synchronized_trajectory_state(
+    method: Callable[Concatenate[_S, _P], _R],
+) -> Callable[Concatenate[_S, _P], _R]:
+    """Serialize one complete in-memory trajectory-state operation."""
+
+    @wraps(method)
+    def synchronized(
+        self: _S,
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> _R:
+        with self._trajectory_state_lock:
+            return method(self, *args, **kwargs)
+
+    return synchronized
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,7 +342,10 @@ def leaf_nodes(nodes: Iterable[TrajectoryNode]) -> list[TrajectoryLeaf]:
 class TrajectoryIndexState:
     """Backend-neutral in-memory state machine for trajectory node indexes."""
 
+    _trajectory_state_lock: RLock
+
     def __init__(self) -> None:
+        self._trajectory_state_lock = RLock()
         self._nodes: dict[str, list[TrajectoryNode]] = {}
         self._node_ids: set[str] = set()
         self._heads: dict[tuple[str, str], TrajectoryHead] = {}
@@ -327,6 +360,7 @@ class TrajectoryIndexState:
     def head_indexes(self) -> tuple[TrajectoryIndexSpec, ...]:
         return TRAJECTORY_HEAD_INDEXES
 
+    @_synchronized_trajectory_state
     def _commit_nodes(
         self,
         session_id: str,
@@ -358,6 +392,7 @@ class TrajectoryIndexState:
                 advance_head.to_head()
             )
 
+    @_synchronized_trajectory_state
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         if query.session_id:
             nodes = list(self._nodes.get(query.session_id, ()))
@@ -441,6 +476,7 @@ class TrajectoryIndexState:
             nodes = nodes[: query.limit]
         return nodes
 
+    @_synchronized_trajectory_state
     def get_head(
         self,
         session_id: str,
@@ -461,6 +497,7 @@ class TrajectoryIndexState:
             return None
         return head
 
+    @_synchronized_trajectory_state
     def list_heads(
         self,
         session_id: str,
@@ -486,6 +523,7 @@ class TrajectoryIndexState:
         heads.sort(key=lambda head: (head.updated_at, head.head_id))
         return heads
 
+    @_synchronized_trajectory_state
     def load_chain(
         self,
         session_id: str,
@@ -508,6 +546,7 @@ class TrajectoryIndexState:
             include_logical_parent=include_logical_parent,
         )
 
+    @_synchronized_trajectory_state
     def leaves(
         self,
         session_id: str,
@@ -524,6 +563,7 @@ class TrajectoryIndexState:
         )
         return leaf_nodes(nodes)
 
+    @_synchronized_trajectory_state
     def _initialize_index(
         self,
         session_id: str,
@@ -559,6 +599,7 @@ class TrajectoryIndexState:
         self._node_ids.update(batch_ids)
         self._heads[(session_id, head.head_id)] = head
 
+    @_synchronized_trajectory_state
     def save_content_replacement_state(
         self,
         session_id: str,
@@ -566,6 +607,7 @@ class TrajectoryIndexState:
     ) -> None:
         self._content_states[(session_id, state.state_key)] = state
 
+    @_synchronized_trajectory_state
     def load_content_replacement_state(
         self,
         session_id: str,
@@ -573,6 +615,7 @@ class TrajectoryIndexState:
     ) -> ContentReplacementState | None:
         return self._content_states.get((session_id, state_key))
 
+    @_synchronized_trajectory_state
     def clone_content_replacement_state(
         self,
         *,
@@ -593,6 +636,7 @@ class TrajectoryIndexState:
         self.save_content_replacement_state(target_session_id, cloned)
         return cloned
 
+    @_synchronized_trajectory_state
     def save_prompt_cache_state(
         self,
         session_id: str,
@@ -600,6 +644,7 @@ class TrajectoryIndexState:
     ) -> None:
         self._prompt_cache_states[(session_id, state.cache_key)] = state
 
+    @_synchronized_trajectory_state
     def load_prompt_cache_state(
         self,
         session_id: str,

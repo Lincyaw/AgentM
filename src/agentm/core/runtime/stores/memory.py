@@ -17,7 +17,10 @@ from agentm.core.abi.trajectory import (
     TurnCheckpoint,
     TurnRef,
 )
-from agentm.core.lib.trajectory_nodes import TrajectoryIndexState
+from agentm.core.lib.trajectory_nodes import (
+    TrajectoryIndexState,
+    _synchronized_trajectory_state,
+)
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
     validate_checkpoint_commit,
@@ -43,6 +46,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         self._sessions: dict[str, tuple[SessionMeta, list[Turn]]] = {}
         self._checkpoints: dict[str, TurnCheckpoint] = {}
 
+    @_synchronized_trajectory_state
     def create_session(
         self,
         meta: SessionMeta,
@@ -69,6 +73,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         )
         self._sessions[meta.id] = (meta, copied)
 
+    @_synchronized_trajectory_state
     def save_checkpoint(
         self,
         session_id: str,
@@ -81,11 +86,13 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         validate_turn_checkpoint(record[1], checkpoint, existing=existing)
         self._checkpoints[session_id] = checkpoint
 
+    @_synchronized_trajectory_state
     def load_checkpoint(self, session_id: str) -> TurnCheckpoint | None:
         if session_id not in self._sessions:
             raise KeyError(session_id)
         return self._checkpoints.get(session_id)
 
+    @_synchronized_trajectory_state
     def discard_checkpoint(
         self,
         session_id: str,
@@ -98,6 +105,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         if current is not None:
             self._checkpoints.pop(session_id)
 
+    @_synchronized_trajectory_state
     def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
         record = self._sessions.get(session_id)
         if record is None:
@@ -115,6 +123,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         record[1].append(turn)
         self._checkpoints.pop(session_id, None)
 
+    @_synchronized_trajectory_state
     def commit_compaction(
         self,
         session_id: str,
@@ -136,6 +145,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
             commit.content_replacement_state,
         )
 
+    @_synchronized_trajectory_state
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         record = self._sessions.get(session_id)
         if record is None:
@@ -143,6 +153,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         meta, turns = record
         return (meta, list(turns))
 
+    @_synchronized_trajectory_state
     def load_prefix(
         self,
         session_id: str,
@@ -155,6 +166,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         cut = turn_prefix_cut(turns, up_to)
         return (meta, list(turns[: cut + 1]))
 
+    @_synchronized_trajectory_state
     def session_children(self, session_id: str) -> list[str]:
         return [
             sid
@@ -162,9 +174,11 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
             if meta.parent_id == session_id
         ]
 
+    @_synchronized_trajectory_state
     def session_exists(self, session_id: str) -> bool:
         return session_id in self._sessions
 
+    @_synchronized_trajectory_state
     def list_sessions(self) -> list[SessionMeta]:
         return [meta for meta, _ in self._sessions.values()]
 
