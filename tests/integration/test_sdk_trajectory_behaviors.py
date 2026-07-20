@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -37,7 +38,12 @@ from agentm.core.abi.store import (
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.abi.tool_executor import ToolExecutionRequirements
-from agentm.core.abi.trajectory import PromptCacheState, TrajectoryForkPoint
+from agentm.core.abi.trajectory import (
+    PromptCacheState,
+    Round,
+    TrajectoryForkPoint,
+    TurnCheckpoint,
+)
 from agentm.core.abi.trigger import UserInput
 from agentm.extensions.builtin.llm_openai import (
     OpenAIPromptCacheAdapter,
@@ -125,7 +131,9 @@ class _StubProvider:
         yield MessageEnd(message=response)
 
 
-def _tool_call(call_id: str, name: str, arguments: dict[str, object]) -> AssistantMessage:
+def _tool_call(
+    call_id: str, name: str, arguments: dict[str, object]
+) -> AssistantMessage:
     return AssistantMessage(
         role="assistant",
         content=(
@@ -238,9 +246,7 @@ async def test_sdk_dsn_selects_one_postgres_store(
                 create_schema=False,
             )
             metadata, turns = store.load(session_id)
-            nodes = store.query_nodes(
-                TrajectoryNodeQuery(session_id=session_id)
-            )
+            nodes = store.query_nodes(TrajectoryNodeQuery(session_id=session_id))
 
             assert metadata.id == session_id
             assert len(turns) == 1
@@ -307,7 +313,7 @@ def _write_local_scenario(root: Path, name: str) -> Path:
     )
     source = scenario_dir / "local_echo.py"
     source.write_text(
-        '''\
+        """\
 from agentm.core.abi.manifest import ExtensionManifest
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.tool import ToolResult
@@ -339,7 +345,7 @@ class LocalEcho:
 def install(api, config):
     del config
     api.register_tool(LocalEcho())
-''',
+""",
         encoding="utf-8",
     )
     return source
@@ -379,8 +385,7 @@ async def test_sdk_scenario_local_extension_survives_fork(
         block
         for message in provider.requests[-1]
         for block in message.content
-        if isinstance(block, ToolResultBlock)
-        and block.tool_call_id == "local-call"
+        if isinstance(block, ToolResultBlock) and block.tool_call_id == "local-call"
     ]
     assert len(local_results) == 1
     assert [
@@ -598,9 +603,7 @@ async def test_sdk_node_fork_selectors_require_executable_turn_boundaries(
         await session.run("question-one")
         await session.run("question-two")
         store = trajectory_backend.connect()
-        nodes = store.query_nodes(
-            TrajectoryNodeQuery(session_id=session.session_id)
-        )
+        nodes = store.query_nodes(TrajectoryNodeQuery(session_id=session.session_id))
         head = store.get_head(session.session_id)
         assert head is not None
         assert head.node_id is not None
@@ -819,15 +822,17 @@ async def test_sdk_file_toolbox_transactions_share_behavior_and_protect_constitu
         block
         for message in provider.requests[-1]
         for block in message.content
-        if isinstance(block, ToolResultBlock)
-        and block.tool_call_id == "write-kernel"
+        if isinstance(block, ToolResultBlock) and block.tool_call_id == "write-kernel"
     ]
     assert protected_results[0].is_error
-    assert "constitution" in " ".join(
-        content.text
-        for content in protected_results[0].content
-        if isinstance(content, TextContent)
-    ).lower()
+    assert (
+        "constitution"
+        in " ".join(
+            content.text
+            for content in protected_results[0].content
+            if isinstance(content, TextContent)
+        ).lower()
+    )
 
 
 @pytest.mark.asyncio
@@ -975,8 +980,7 @@ async def test_sdk_memory_round_trip_is_provider_visible(tmp_path: Path) -> None
         block
         for message in provider.requests[-1]
         for block in message.content
-        if isinstance(block, ToolResultBlock)
-        and block.tool_call_id == "read-memory"
+        if isinstance(block, ToolResultBlock) and block.tool_call_id == "read-memory"
     ]
     assert len(visible_results) == 1
     assert "Run the SDK smoke test before every release." in " ".join(
@@ -1028,9 +1032,7 @@ async def test_sdk_background_child_has_an_independent_cancel_domain(
             yield MessageEnd(
                 message=AssistantMessage(
                     role="assistant",
-                    content=(
-                        TextContent(type="text", text="child-result-observed"),
-                    ),
+                    content=(TextContent(type="text", text="child-result-observed"),),
                     timestamp=0.0,
                     stop_reason="end_turn",
                 )
@@ -1170,7 +1172,7 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
                     execution_requirements=ToolExecutionRequirements(
                         concurrency="parallel_safe"
                     ),
-                )
+                ),
             ],
         )
     )
@@ -1193,9 +1195,9 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
         assert checkpoint.index == 0
         assert len(checkpoint.rounds) == 1
         assert checkpoint.rounds[0].response == tool_response
-        assert [
-            record.call.id for record in checkpoint.rounds[0].tool_results
-        ] == ["fast-call"]
+        assert [record.call.id for record in checkpoint.rounds[0].tool_results] == [
+            "fast-call"
+        ]
         assert [
             block.text
             for record in checkpoint.rounds[0].tool_results
@@ -1214,6 +1216,46 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
     _, committed = store.load(session.session_id)
     assert len(committed) == 1
     assert store.load_checkpoint(session.session_id) is None
+
+    orphan_response = AssistantMessage(
+        role="assistant",
+        content=(TextContent(type="text", text="orphan-answer"),),
+        timestamp=0.0,
+        stop_reason="end_turn",
+    )
+    store.save_checkpoint(
+        session.session_id,
+        TurnCheckpoint(
+            index=1,
+            id="orphan-turn",
+            trigger=UserInput(
+                content=(TextContent(type="text", text="orphan-question"),)
+            ),
+            rounds=(Round(response=orphan_response),),
+            updated_at=time.time(),
+        ),
+    )
+    recovery_provider = _StubProvider("recovered-answer")
+    resumed = await AgentSession.resume(
+        session.session_id,
+        store,
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=recovery_provider,
+            model=_model(),
+        ),
+    )
+    try:
+        assert store.load_checkpoint(session.session_id) is None
+        await resumed.run("recovery-question")
+    finally:
+        await resumed.shutdown()
+
+    request_text = _text(recovery_provider.requests[0])
+    assert "orphan-question" not in request_text
+    assert "orphan-answer" not in request_text
+    assert "recovery-question" in request_text
+    assert len(store.load(session.session_id)[1]) == 2
 
 
 @pytest.mark.asyncio
@@ -1535,11 +1577,7 @@ class _OpenAICompletionsStub:
 
     async def create(self, **body: Any) -> object:
         self.requests.append(body)
-        return (
-            self._stream
-            if self._stream is not None
-            else _EmptyOpenAIStream()
-        )
+        return self._stream if self._stream is not None else _EmptyOpenAIStream()
 
 
 class _OpenAIClientStub:
@@ -1576,9 +1614,7 @@ async def test_openai_provider_materializes_prompt_cache_request_fields() -> Non
         )
     ]
 
-    assert client.completions.requests[0]["prompt_cache_key"] == (
-        "stable-sdk-session"
-    )
+    assert client.completions.requests[0]["prompt_cache_key"] == ("stable-sdk-session")
     assert client.completions.requests[0]["prompt_cache_retention"] == "24h"
 
 
@@ -1594,9 +1630,7 @@ async def test_openai_provider_rejects_malformed_sdk_usage() -> None:
         },
     )()
     chunk = type("_Chunk", (), {"usage": usage, "choices": []})()
-    stream_fn = OpenAIStreamFn(
-        client=_OpenAIClientStub(_OpenAIChunkStream(chunk))
-    )
+    stream_fn = OpenAIStreamFn(client=_OpenAIClientStub(_OpenAIChunkStream(chunk)))
 
     with pytest.raises(TypeError, match="prompt_tokens"):
         _ = [
@@ -1631,9 +1665,7 @@ async def test_sdk_trigger_envelope_is_routed_and_persisted(
     session.start()
     try:
         receipt = session.push_trigger(
-            UserInput(
-                content=(TextContent(type="text", text="enveloped-question"),)
-            ),
+            UserInput(content=(TextContent(type="text", text="enveloped-question"),)),
             target_session_id=session.session_id,
             target_agent_id=session.session_id,
             origin="channel",
@@ -1644,9 +1676,7 @@ async def test_sdk_trigger_envelope_is_routed_and_persisted(
         await receipt.wait()
         with pytest.raises(ValueError, match="route to the target session"):
             session.push_trigger(
-                UserInput(
-                    content=(TextContent(type="text", text="misrouted"),)
-                ),
+                UserInput(content=(TextContent(type="text", text="misrouted"),)),
                 target_session_id="another-session",
             )
         session_id = session.session_id

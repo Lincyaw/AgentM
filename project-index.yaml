@@ -32,7 +32,10 @@ requirements:
       must replace an explicit incomplete checkpoint in the selected
       trajectory store. Checkpoints remain queryable after a crash but are
       excluded from resume, context replay, compaction, and message-index queries;
-      final append atomically supersedes the matching checkpoint.
+      final append atomically supersedes the matching checkpoint. Successful
+      SDK resume compare-and-discards the observed orphan checkpoint only after
+      identity, resource, and environment recovery, so a new turn can start
+      without replaying or silently overwriting incomplete work.
       Public SDK users select one authoritative trajectory backend. The same
       transaction owns checkpoints, committed turns, message indexes, heads,
       and cache/compaction state; there is no separately selectable or

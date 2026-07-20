@@ -25,9 +25,7 @@ def validate_turn_append(turns: Sequence[Turn], turn: Turn) -> None:
     """Require the next index and a session-unique durable turn id."""
     expected = len(turns)
     if turn.index != expected:
-        raise ValueError(
-            f"turn index {turn.index} does not follow {expected - 1}"
-        )
+        raise ValueError(f"turn index {turn.index} does not follow {expected - 1}")
     if any(existing.id == turn.id for existing in turns):
         raise ValueError(f"duplicate turn id in session: {turn.id}")
 
@@ -45,15 +43,11 @@ def validate_turn_checkpoint(
             f"checkpoint index {checkpoint.index} does not follow {expected - 1}"
         )
     if any(turn.id == checkpoint.id for turn in turns):
-        raise ValueError(
-            f"checkpoint id duplicates a committed turn: {checkpoint.id}"
-        )
+        raise ValueError(f"checkpoint id duplicates a committed turn: {checkpoint.id}")
     if existing is not None and (
         existing.index != checkpoint.index or existing.id != checkpoint.id
     ):
-        raise ValueError(
-            "checkpoint replacement must preserve turn index and id"
-        )
+        raise ValueError("checkpoint replacement must preserve turn index and id")
 
 
 def validate_checkpoint_commit(
@@ -64,8 +58,20 @@ def validate_checkpoint_commit(
     if checkpoint is None:
         return
     if checkpoint.index != turn.index or checkpoint.id != turn.id:
+        raise ValueError("committed turn does not match the active checkpoint")
+
+
+def validate_checkpoint_discard(
+    current: TurnCheckpoint | None,
+    expected: TurnCheckpoint,
+) -> None:
+    """Require compare-and-discard to target the current checkpoint."""
+
+    if not isinstance(expected, TurnCheckpoint):
+        raise TypeError("checkpoint discard target must be a TurnCheckpoint")
+    if current is not None and current != expected:
         raise ValueError(
-            "committed turn does not match the active checkpoint"
+            "checkpoint discard target does not match the active checkpoint"
         )
 
 
@@ -78,14 +84,10 @@ def validate_compaction_commit(
     turns_by_index = {turn.index: turn for turn in turns}
     boundary = commit.boundary
     if boundary.turn_index is None or boundary.turn_id is None:
-        raise ValueError(
-            "trajectory compact boundary requires a committed turn anchor"
-        )
+        raise ValueError("trajectory compact boundary requires a committed turn anchor")
     turn = turns_by_index.get(boundary.turn_index)
     if turn is None or turn.id != boundary.turn_id:
-        raise ValueError(
-            "trajectory compact boundary does not match committed history"
-        )
+        raise ValueError("trajectory compact boundary does not match committed history")
 
 
 def turn_prefix_cut(turns: Sequence[Turn], up_to: TurnRef) -> int:
@@ -104,6 +106,7 @@ def turn_prefix_cut(turns: Sequence[Turn], up_to: TurnRef) -> int:
 __all__ = [
     "turn_prefix_cut",
     "validate_checkpoint_commit",
+    "validate_checkpoint_discard",
     "validate_compaction_commit",
     "validate_turn_append",
     "validate_turn_checkpoint",

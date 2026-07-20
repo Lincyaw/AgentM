@@ -51,6 +51,7 @@ from agentm.storage.serialization import (
 _VERSION = 1
 _SESSION = "session"
 _CHECKPOINT = "turn_checkpoint"
+_CHECKPOINT_DISCARD = "turn_checkpoint_discard"
 _COMMIT = "turn_commit"
 _COMPACTION_COMMIT = "compaction_commit"
 _CONTENT_STATE = "content_replacement_state"
@@ -138,6 +139,27 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
         with self._guard():
             return self._load_session_unlocked(session_id).load_checkpoint(session_id)
 
+    def discard_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None:
+        with self._guard():
+            state = self._load_session_unlocked(session_id)
+            current = state.load_checkpoint(session_id)
+            state.discard_checkpoint(session_id, checkpoint)
+            if current is None:
+                return
+            self._normalize_tail_for_append_unlocked(session_id)
+            self._append_record_unlocked(
+                session_id,
+                {
+                    "version": _VERSION,
+                    "record_type": _CHECKPOINT_DISCARD,
+                    "checkpoint": self._codec.serialize_turn_checkpoint(checkpoint),
+                },
+            )
+
     def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
         with self._guard():
             state = self._load_session_unlocked(session_id)
@@ -173,9 +195,7 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                     "version": _VERSION,
                     "record_type": _COMPACTION_COMMIT,
                     "boundary": serialize_node(commit.boundary),
-                    "advance_head": _serialize_head_advance(
-                        commit.advance_head
-                    ),
+                    "advance_head": _serialize_head_advance(commit.advance_head),
                     "content_replacement_state": serialize_content_state(
                         commit.content_replacement_state
                     ),
@@ -484,6 +504,11 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                         dict(_required_mapping(record, "checkpoint"))
                     ),
                 )
+            elif record_type == _CHECKPOINT_DISCARD:
+                checkpoint = self._codec.deserialize_turn_checkpoint(  # type: ignore[arg-type]
+                    dict(_required_mapping(record, "checkpoint"))
+                )
+                state.discard_checkpoint(meta.id, checkpoint)
             elif record_type == _COMMIT:
                 raw_advance = record.get("advance_head")
                 state.commit_turn(

@@ -36,6 +36,7 @@ from agentm.core.abi.trajectory import (
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
     validate_checkpoint_commit,
+    validate_checkpoint_discard,
     validate_compaction_commit,
     validate_turn_append,
     validate_turn_checkpoint,
@@ -372,6 +373,25 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 dict(_json_mapping(row[0]))
             )
 
+    def discard_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None:
+        with self._transaction() as cur:
+            self._lock_session_turns(cur, session_id)
+            current = self._select_checkpoint(cur, session_id)
+            validate_checkpoint_discard(current, checkpoint)
+            if current is None:
+                return
+            cur.execute(
+                f"""
+                DELETE FROM {self._table("trajectory_checkpoints")}
+                WHERE session_id = %s AND turn_id = %s
+                """,
+                (session_id, checkpoint.id),
+            )
+
     def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
         if any(node.session_id != session_id for node in commit.nodes):
             raise ValueError("trajectory commit nodes must belong to the session")
@@ -408,9 +428,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         commit: TrajectoryCompactionCommit,
     ) -> None:
         if commit.boundary.session_id != session_id:
-            raise ValueError(
-                "trajectory compact boundary must belong to the session"
-            )
+            raise ValueError("trajectory compact boundary must belong to the session")
         with self._transaction() as cur:
             committed = self._lock_session_turns(cur, session_id)
             validate_compaction_commit(committed, commit)

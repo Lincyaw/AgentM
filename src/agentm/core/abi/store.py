@@ -141,6 +141,19 @@ class TrajectoryStore(Protocol):
 
     def load_checkpoint(self, session_id: str) -> TurnCheckpoint | None: ...
 
+    def discard_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None:
+        """Compare-and-discard one orphan checkpoint after successful recovery.
+
+        The operation is idempotent when no checkpoint exists and fails when a
+        different checkpoint snapshot occupies the session, so recovery cannot
+        erase concurrent or otherwise unexpected incomplete work.
+        """
+        ...
+
     def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
         """Atomically publish one turn, its nodes, and its head advance."""
         ...
@@ -322,9 +335,7 @@ class TrajectoryCompactionCommit:
 
     def __post_init__(self) -> None:
         if not isinstance(self.boundary, TrajectoryNode):
-            raise TypeError(
-                "trajectory compaction boundary must be a TrajectoryNode"
-            )
+            raise TypeError("trajectory compaction boundary must be a TrajectoryNode")
         if self.boundary.kind != "compact_boundary":
             raise ValueError("trajectory compaction requires a compact boundary")
         if not isinstance(self.advance_head, TrajectoryHeadAdvance):
@@ -333,21 +344,16 @@ class TrajectoryCompactionCommit:
                 "TrajectoryHeadAdvance"
             )
         if self.advance_head.node_id != self.boundary.id:
-            raise ValueError(
-                "trajectory compaction head must advance to its boundary"
-            )
+            raise ValueError("trajectory compaction head must advance to its boundary")
         if not isinstance(
             self.content_replacement_state,
             ContentReplacementState,
         ):
             raise TypeError(
-                "trajectory compaction commit state must be "
-                "ContentReplacementState"
+                "trajectory compaction commit state must be ContentReplacementState"
             )
         if self.content_replacement_state.leaf_node_id != self.boundary.id:
-            raise ValueError(
-                "trajectory compaction state must identify its boundary"
-            )
+            raise ValueError("trajectory compaction state must identify its boundary")
 
 
 TrajectoryNodeSort = Literal["asc", "desc"]

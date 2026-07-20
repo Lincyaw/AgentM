@@ -21,6 +21,7 @@ from agentm.core.lib.trajectory_nodes import TrajectoryIndexState
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
     validate_checkpoint_commit,
+    validate_checkpoint_discard,
     validate_compaction_commit,
     validate_turn_append,
     validate_turn_checkpoint,
@@ -85,6 +86,18 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
             raise KeyError(session_id)
         return self._checkpoints.get(session_id)
 
+    def discard_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+    ) -> None:
+        if session_id not in self._sessions:
+            raise KeyError(session_id)
+        current = self._checkpoints.get(session_id)
+        validate_checkpoint_discard(current, checkpoint)
+        if current is not None:
+            self._checkpoints.pop(session_id)
+
     def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
         record = self._sessions.get(session_id)
         if record is None:
@@ -111,9 +124,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         if record is None:
             raise KeyError(session_id)
         if commit.boundary.session_id != session_id:
-            raise ValueError(
-                "trajectory compact boundary must belong to the session"
-            )
+            raise ValueError("trajectory compact boundary must belong to the session")
         validate_compaction_commit(record[1], commit)
         self._commit_nodes(
             session_id,

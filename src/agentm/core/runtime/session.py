@@ -54,6 +54,7 @@ from agentm.core.abi.trajectory import (
     Turn,
     TurnRef,
 )
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.runtime.session_core import (
     SessionRuntimeConfig,
     _SessionComposition,
@@ -553,6 +554,7 @@ class Session(_SessionComposition):
         config: AgentSessionConfig,
     ) -> Self:
         meta, turns = await asyncio.to_thread(store.load, session_id)
+        checkpoint = await asyncio.to_thread(store.load_checkpoint, session_id)
         validate_resume_metadata(meta, has_committed_turns=bool(turns))
         ctx = context_from_session_meta(session_id, meta)
         provider_identity = provider_identity_from_session_meta(meta)
@@ -578,66 +580,84 @@ class Session(_SessionComposition):
             restored_provider_identity=provider_identity,
             session_type=cls,
         )
-        restored_turns = _rehydrate_turn_triggers(turns, session.codec)
-        if restored_turns != turns:
-            session.trajectory = Trajectory(restored_turns)
-            turns = restored_turns
-        validate_resume_identity(
-            meta,
-            resolved_spec=session._resolved_session_spec(),
-            active_set=session._active_set_fingerprint(),
-        )
-        resource_writer = session.get_resource_writer()
-        if isinstance(resource_writer, TransactionalResourceWriter):
-            transaction_ids = tuple(
-                dict.fromkeys(
-                    mutation.transaction_id
-                    for turn in turns
-                    for mutation in turn.meta.resource_mutations
-                    if mutation.transaction_id is not None
-                )
+        try:
+            restored_turns = _rehydrate_turn_triggers(turns, session.codec)
+            if restored_turns != turns:
+                session.trajectory = Trajectory(restored_turns)
+                turns = restored_turns
+            validate_resume_identity(
+                meta,
+                resolved_spec=session._resolved_session_spec(),
+                active_set=session._active_set_fingerprint(),
             )
-            await resource_writer.recover(
-                ResourceRecoveryContext(
-                    session_id=session.id,
-                    committed_transaction_ids=transaction_ids,
-                )
-            )
-        effect_scope = session.get_effect_scope()
-        if effect_scope is not None:
-            try:
-                await effect_scope.restore(
-                    session_id=session.id,
-                    turns=tuple(turns),
-                )
-                session._record_environment_restore_status(
-                    EnvironmentRestoreStatus(
-                        session_id=session.id,
-                        restored=True,
-                        state="restored",
+            resource_writer = session.get_resource_writer()
+            if isinstance(resource_writer, TransactionalResourceWriter):
+                transaction_ids = tuple(
+                    dict.fromkeys(
+                        mutation.transaction_id
+                        for turn in turns
+                        for mutation in turn.meta.resource_mutations
+                        if mutation.transaction_id is not None
                     )
                 )
-            except Exception as exc:
-                handler = session._environment_restore_failure_handler()
-                restore_status = EnvironmentRestoreStatus(
-                    session_id=session.id,
-                    restored=False,
-                    state="degraded_readonly",
-                    error=f"{type(exc).__name__}: {exc}",
+                await resource_writer.recover(
+                    ResourceRecoveryContext(
+                        session_id=session.id,
+                        committed_transaction_ids=transaction_ids,
+                    )
                 )
-                if handler is None:
-                    raise EnvironmentRestoreError(
-                        f"environment restore failed for session {session.id}"
-                    ) from exc
+            effect_scope = session.get_effect_scope()
+            if effect_scope is not None:
                 try:
-                    await handler.activate_degraded_readonly(restore_status)
-                except Exception as handler_exc:
-                    raise ExceptionGroup(
-                        f"environment restore and degraded-mode activation "
-                        f"failed for session {session.id}",
-                        [exc, handler_exc],
-                    ) from handler_exc
-                session._record_environment_restore_status(restore_status)
+                    await effect_scope.restore(
+                        session_id=session.id,
+                        turns=tuple(turns),
+                    )
+                    session._record_environment_restore_status(
+                        EnvironmentRestoreStatus(
+                            session_id=session.id,
+                            restored=True,
+                            state="restored",
+                        )
+                    )
+                except Exception as exc:
+                    handler = session._environment_restore_failure_handler()
+                    restore_status = EnvironmentRestoreStatus(
+                        session_id=session.id,
+                        restored=False,
+                        state="degraded_readonly",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    if handler is None:
+                        raise EnvironmentRestoreError(
+                            f"environment restore failed for session {session.id}"
+                        ) from exc
+                    try:
+                        await handler.activate_degraded_readonly(restore_status)
+                    except Exception as handler_exc:
+                        raise ExceptionGroup(
+                            f"environment restore and degraded-mode activation "
+                            f"failed for session {session.id}",
+                            [exc, handler_exc],
+                        ) from handler_exc
+                    session._record_environment_restore_status(restore_status)
+            if checkpoint is not None:
+                await await_known_outcome(
+                    asyncio.to_thread(
+                        store.discard_checkpoint,
+                        session_id,
+                        checkpoint,
+                    )
+                )
+        except BaseException as resume_error:
+            try:
+                await session.shutdown()
+            except BaseException as cleanup_error:
+                raise BaseExceptionGroup(
+                    "session resume and cleanup failed",
+                    (resume_error, cleanup_error),
+                ) from resume_error
+            raise
 
         return cast(Self, session)
 
