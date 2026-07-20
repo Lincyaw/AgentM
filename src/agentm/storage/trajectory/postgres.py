@@ -13,6 +13,7 @@ from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryCommit,
+    TrajectoryCompactionCommit,
     TrajectoryNodeQuery,
 )
 from agentm.core.abi.trajectory import (
@@ -35,6 +36,7 @@ from agentm.core.abi.trajectory import (
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
     validate_checkpoint_commit,
+    validate_compaction_commit,
     validate_turn_append,
     validate_turn_checkpoint,
     validate_turn_sequence,
@@ -400,6 +402,42 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 (session_id,),
             )
 
+    def commit_compaction(
+        self,
+        session_id: str,
+        commit: TrajectoryCompactionCommit,
+    ) -> None:
+        if commit.boundary.session_id != session_id:
+            raise ValueError(
+                "trajectory compact boundary must belong to the session"
+            )
+        with self._transaction() as cur:
+            committed = self._lock_session_turns(cur, session_id)
+            validate_compaction_commit(committed, commit)
+            self._validate_head_advance(
+                cur,
+                session_id,
+                commit.advance_head,
+                (commit.boundary,),
+            )
+            self._insert_node(cur, commit.boundary)
+            self._upsert_head(cur, commit.advance_head.to_head())
+            state = commit.content_replacement_state
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("trajectory_content_states")}
+                    (session_id, state_key, state_json)
+                VALUES (%s, %s, %s::jsonb)
+                ON CONFLICT (session_id, state_key)
+                DO UPDATE SET state_json = EXCLUDED.state_json
+                """,
+                (
+                    session_id,
+                    state.state_key,
+                    _json_dumps(serialize_content_state(state)),
+                ),
+            )
+
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         with self._transaction() as cur:
             cur.execute(
@@ -629,27 +667,13 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         if is_sidechain is not None:
             clauses.append("node.is_sidechain = %s")
             params.append(is_sidechain)
-        clauses.extend(
-            (
-                f"""
-                NOT EXISTS (
-                    SELECT 1 FROM {self._table("trajectory_nodes")} AS snip
-                    WHERE snip.kind = 'snip'
-                      AND snip.node_json->'removed_node_ids' ? node.id
-                )
-                """,
-                f"""
-                NOT EXISTS (
-                    SELECT 1 FROM {self._table("trajectory_nodes")} AS child
-                    WHERE child.parent_id = node.id
-                      AND NOT EXISTS (
-                          SELECT 1 FROM {self._table("trajectory_nodes")} AS snip
-                          WHERE snip.kind = 'snip'
-                            AND snip.node_json->'removed_node_ids' ? child.id
-                      )
-                )
-                """,
+        clauses.append(
+            f"""
+            NOT EXISTS (
+                SELECT 1 FROM {self._table("trajectory_nodes")} AS child
+                WHERE child.parent_id = node.id
             )
+            """
         )
         with self._transaction() as cur:
             cur.execute(

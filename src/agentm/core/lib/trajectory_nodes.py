@@ -270,17 +270,10 @@ def build_chain(
     """Reconstruct a visible chain by following parent links."""
 
     by_id = {node.id: node for node in nodes}
-    removed = {
-        removed_id
-        for node in by_id.values()
-        if node.kind == "snip"
-        for removed_id in node.removed_node_ids
-    }
     chain: list[TrajectoryNode] = []
     current = by_id.get(leaf_node_id)
     while current is not None:
-        if current.id not in removed:
-            chain.append(current)
+        chain.append(current)
         if current.kind == "compact_boundary" and not include_logical_parent:
             break
         next_id = current.parent_id
@@ -295,16 +288,10 @@ def leaf_nodes(nodes: Iterable[TrajectoryNode]) -> list[TrajectoryLeaf]:
     """Return nodes with no visible children."""
 
     materialized = list(nodes)
-    removed = {
-        removed_id
-        for node in materialized
-        if node.kind == "snip"
-        for removed_id in node.removed_node_ids
-    }
     parents = {
         node.parent_id
         for node in materialized
-        if node.parent_id is not None and node.id not in removed
+        if node.parent_id is not None
     }
     return [
         TrajectoryLeaf(
@@ -318,7 +305,6 @@ def leaf_nodes(nodes: Iterable[TrajectoryNode]) -> list[TrajectoryLeaf]:
         )
         for node in materialized
         if node.kind in {"message", "compact_boundary"}
-        and node.id not in removed
         and node.id not in parents
     ]
 

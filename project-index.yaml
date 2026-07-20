@@ -38,7 +38,15 @@ requirements:
       and cache/compaction state; there is no separately selectable or
       rebuildable node store. A configured DSN/path applies to that one port;
       core factories do not discover backends, and resolver-owned resources
-      remain alive across sharing descendants. External hosts inject
+      remain alive across sharing descendants.
+      Compaction publishes its compact boundary, content-replacement state,
+      and head advance as one store mutation anchored to the latest committed
+      turn. Node/head fork selectors preserve the exact logical-parent anchor
+      but are executable only at committed turn boundaries; context projection
+      cannot turn a mid-turn message into an external-world snapshot.
+      Synchronous store mutations settle to a known backend outcome before
+      async caller cancellation propagates.
+      External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and
       can be explicitly replaced for another environment without ambient

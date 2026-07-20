@@ -247,6 +247,7 @@ from .session_api import (
 from .store import (
     SessionMeta,
     TrajectoryCommit,
+    TrajectoryCompactionCommit,
     TrajectoryNodeQuery,
     TrajectoryNodeSort,
     TrajectoryStore,
@@ -625,6 +626,7 @@ __all__ = [
     "ToolWorkItem",
     "TransactionalResourceWriter",
     "TrajectoryCommit",
+    "TrajectoryCompactionCommit",
     "TrajectoryIndexField",
     "TrajectoryIndexSpec",
     "TrajectoryBranchId",

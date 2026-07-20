@@ -18,6 +18,7 @@ from agentm.core.abi.roles import (
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import PromptCacheState, Turn
 from agentm.core.abi.session_api import AtomAPI
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.extensions import ExtensionManifest
 
 
@@ -110,50 +111,56 @@ class PromptCacheContextPolicy(BindableContextPolicy):
                             "inherited_from_session_id": self._parent_session_id,
                         },
                     )
-            await asyncio.to_thread(
-                self._store.save_prompt_cache_state,
-                self._session_id,
-                PromptCacheState(
-                    cache_key=cache_key,
-                    leaf_node_id=(
-                        head.node_id
-                        if head is not None
-                        else existing.leaf_node_id
-                        if existing is not None
-                        else None
-                    ),
-                    content_replacement_state_key=(
-                        self._config.content_replacement_state_key
-                        or (
-                            existing.content_replacement_state_key
+            await await_known_outcome(
+                asyncio.to_thread(
+                    self._store.save_prompt_cache_state,
+                    self._session_id,
+                    PromptCacheState(
+                        cache_key=cache_key,
+                        leaf_node_id=(
+                            head.node_id
+                            if head is not None
+                            else existing.leaf_node_id
                             if existing is not None
                             else None
-                        )
+                        ),
+                        content_replacement_state_key=(
+                            self._config.content_replacement_state_key
+                            or (
+                                existing.content_replacement_state_key
+                                if existing is not None
+                                else None
+                            )
+                        ),
+                        branch_id=(
+                            head.branch_id
+                            if head is not None
+                            else existing.branch_id
+                            if existing is not None
+                            else "main"
+                        ),
+                        head_id=(
+                            head.head_id
+                            if head is not None
+                            else existing.head_id
+                            if existing is not None
+                            else "main"
+                        ),
+                        provider=(
+                            self._config.provider
+                            or (existing.provider if existing is not None else None)
+                        ),
+                        metadata={
+                            **(
+                                dict(existing.metadata)
+                                if existing is not None
+                                else {}
+                            ),
+                            "turn_count": len(turns),
+                            "tag_last_messages": count,
+                        },
                     ),
-                    branch_id=(
-                        head.branch_id
-                        if head is not None
-                        else existing.branch_id
-                        if existing is not None
-                        else "main"
-                    ),
-                    head_id=(
-                        head.head_id
-                        if head is not None
-                        else existing.head_id
-                        if existing is not None
-                        else "main"
-                    ),
-                    provider=(
-                        self._config.provider
-                        or (existing.provider if existing is not None else None)
-                    ),
-                    metadata={
-                        **(dict(existing.metadata) if existing is not None else {}),
-                        "turn_count": len(turns),
-                        "tag_last_messages": count,
-                    },
-                ),
+                )
             )
         self._last_report = ProjectionReport(
             cache_keys=(cache_key,) if cache_key is not None else (),

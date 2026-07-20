@@ -48,9 +48,6 @@ DEFAULT_TRAJECTORY_HEAD_ID = "main"
 TrajectoryNodeKind = Literal[
     "message",
     "compact_boundary",
-    "content_replacement",
-    "snip",
-    "checkpoint",
 ]
 TrajectoryNodeRole = Literal["user", "assistant", "tool_result", "control"]
 TrajectoryHeadStatus = Literal["active", "dead", "archived"]
@@ -439,11 +436,14 @@ class TrajectoryHeadAdvance:
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryForkPoint:
-    """SDK-level fork/resume anchor.
+    """SDK-level selector for one executable fork boundary.
 
-    ``turn_ref`` preserves the existing turn-prefix fork API. ``node_id`` and
-    ``head_id`` let hosts fork from message-level nodes or active heads once a
-    ``TrajectoryStore`` is present.
+    ``turn_ref`` selects a committed turn directly. ``node_id`` and ``head_id``
+    provide stable graph selectors, but the selected node must still represent
+    a committed turn boundary. A compact boundary is valid because it is a
+    control-only mutation anchored to an already committed turn. A message from
+    the middle of a turn is not executable fork state because external effects
+    are snapshotted only at turn commit.
     """
 
     session_id: str
@@ -451,7 +451,6 @@ class TrajectoryForkPoint:
     node_id: str | None = None
     head_id: TrajectoryHeadId | None = None
     branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID
-    include_logical_parent: bool = True
 
     def __post_init__(self) -> None:
         _require_string(self.session_id, "trajectory fork session_id")
@@ -477,8 +476,6 @@ class TrajectoryForkPoint:
         _require_string(self.node_id, "trajectory fork node_id", optional=True)
         _require_string(self.head_id, "trajectory fork head_id", optional=True)
         _require_string(self.branch_id, "trajectory fork branch_id")
-        if not isinstance(self.include_logical_parent, bool):
-            raise TypeError("trajectory fork include_logical_parent must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,20 +511,13 @@ class TrajectoryNode:
     visibility: MessageVisibility = "visible"
     message: AgentMessage | None = None
     payload: Mapping[str, object] = field(default_factory=dict)
-    removed_node_ids: tuple[str, ...] = ()
     timestamp: float = 0.0
 
     def __post_init__(self) -> None:
         _require_string(self.id, "trajectory node id")
         _require_string(self.session_id, "trajectory node session_id")
         _require_index(self.seq, "trajectory node seq")
-        if self.kind not in {
-            "message",
-            "compact_boundary",
-            "content_replacement",
-            "snip",
-            "checkpoint",
-        }:
+        if self.kind not in {"message", "compact_boundary"}:
             raise ValueError(f"invalid trajectory node kind: {self.kind!r}")
         for label, string_value in (
             ("root_session_id", self.root_session_id),
@@ -581,20 +571,21 @@ class TrajectoryNode:
                 raise ValueError(
                     "trajectory node role must match its message role"
                 )
-        elif self.message is not None:
-            raise ValueError("control trajectory nodes cannot carry a message")
+        else:
+            if self.message is not None:
+                raise ValueError("control trajectory nodes cannot carry a message")
+            if self.role != "control":
+                raise ValueError("control trajectory nodes require the control role")
+            if self.content_ref is None:
+                raise ValueError("compact boundary nodes require a content_ref")
+            if self.turn_id is None or self.turn_index is None:
+                raise ValueError(
+                    "compact boundary nodes require a committed turn anchor"
+                )
         object.__setattr__(
             self,
             "payload",
             _freeze_metadata(self.payload, "trajectory node payload"),
-        )
-        object.__setattr__(
-            self,
-            "removed_node_ids",
-            _string_tuple(
-                self.removed_node_ids,
-                "trajectory node removed_node_ids",
-            ),
         )
         _require_finite(self.timestamp, "trajectory node timestamp")
 

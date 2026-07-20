@@ -99,8 +99,10 @@ class TrajectoryStore(Protocol):
     ``save_checkpoint`` durably replaces the latest incomplete state for the
     active turn. ``commit_turn`` atomically commits the final turn, its
     provider-visible message nodes, and the matching explicit head advance while
-    superseding the checkpoint. ``load`` and ``load_prefix`` return committed
-    turns only, so incomplete work is never replayed on resume.
+    superseding the checkpoint. ``commit_compaction`` atomically commits a
+    compact boundary, its content-replacement state, and its head advance,
+    anchored to an existing committed turn. ``load`` and ``load_prefix`` return
+    committed turns only, so incomplete work is never replayed on resume.
 
     Node/head methods are read and policy-state facets of the same selected
     store, not an independently configurable projection backend. Physical
@@ -141,6 +143,14 @@ class TrajectoryStore(Protocol):
 
     def commit_turn(self, session_id: str, commit: TrajectoryCommit) -> None:
         """Atomically publish one turn, its nodes, and its head advance."""
+        ...
+
+    def commit_compaction(
+        self,
+        session_id: str,
+        commit: TrajectoryCompactionCommit,
+    ) -> None:
+        """Atomically publish compact boundaries, state, and a head advance."""
         ...
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]: ...
@@ -272,6 +282,10 @@ class TrajectoryCommit:
         ):
             raise TypeError("trajectory commit nodes must be a tuple of TrajectoryNode")
         for node in self.nodes:
+            if node.kind != "message":
+                raise ValueError(
+                    "trajectory turn commits can contain only message nodes"
+                )
             if node.turn_id != self.turn.id or node.turn_index != self.turn.index:
                 raise ValueError(
                     "trajectory commit nodes must belong to the committed turn"
@@ -288,6 +302,51 @@ class TrajectoryCommit:
         elif self.advance_head is not None:
             raise ValueError(
                 "trajectory commit cannot advance a head without message nodes"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryCompactionCommit:
+    """One atomic compaction mutation anchored to committed history.
+
+    Control nodes may change the visible message chain but cannot represent
+    external-world progress. Every node therefore names the committed turn
+    whose effect snapshot remains authoritative. Policy state is included in
+    the same mutation so a head can never expose a compact boundary without
+    the state required to interpret it.
+    """
+
+    boundary: TrajectoryNode
+    advance_head: TrajectoryHeadAdvance
+    content_replacement_state: ContentReplacementState
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.boundary, TrajectoryNode):
+            raise TypeError(
+                "trajectory compaction boundary must be a TrajectoryNode"
+            )
+        if self.boundary.kind != "compact_boundary":
+            raise ValueError("trajectory compaction requires a compact boundary")
+        if not isinstance(self.advance_head, TrajectoryHeadAdvance):
+            raise TypeError(
+                "trajectory compaction commit advance_head must be "
+                "TrajectoryHeadAdvance"
+            )
+        if self.advance_head.node_id != self.boundary.id:
+            raise ValueError(
+                "trajectory compaction head must advance to its boundary"
+            )
+        if not isinstance(
+            self.content_replacement_state,
+            ContentReplacementState,
+        ):
+            raise TypeError(
+                "trajectory compaction commit state must be "
+                "ContentReplacementState"
+            )
+        if self.content_replacement_state.leaf_node_id != self.boundary.id:
+            raise ValueError(
+                "trajectory compaction state must identify its boundary"
             )
 
 
@@ -332,6 +391,7 @@ __all__ = [
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
     "TrajectoryCommit",
+    "TrajectoryCompactionCommit",
     "TrajectoryStore",
     "TrajectoryNodeQuery",
     "TrajectoryNodeSort",

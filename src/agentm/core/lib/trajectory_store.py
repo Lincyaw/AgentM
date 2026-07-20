@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from agentm.core.abi.store import TrajectoryCompactionCommit
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint, TurnRef
 
 
@@ -68,6 +69,25 @@ def validate_checkpoint_commit(
         )
 
 
+def validate_compaction_commit(
+    turns: Sequence[Turn],
+    commit: TrajectoryCompactionCommit,
+) -> None:
+    """Require every control node to anchor an existing committed turn."""
+
+    turns_by_index = {turn.index: turn for turn in turns}
+    boundary = commit.boundary
+    if boundary.turn_index is None or boundary.turn_id is None:
+        raise ValueError(
+            "trajectory compact boundary requires a committed turn anchor"
+        )
+    turn = turns_by_index.get(boundary.turn_index)
+    if turn is None or turn.id != boundary.turn_id:
+        raise ValueError(
+            "trajectory compact boundary does not match committed history"
+        )
+
+
 def turn_prefix_cut(turns: Sequence[Turn], up_to: TurnRef) -> int:
     """Return the list index of a turn identified by index or durable id."""
     if isinstance(up_to, int):
@@ -84,6 +104,7 @@ def turn_prefix_cut(turns: Sequence[Turn], up_to: TurnRef) -> int:
 __all__ = [
     "turn_prefix_cut",
     "validate_checkpoint_commit",
+    "validate_compaction_commit",
     "validate_turn_append",
     "validate_turn_checkpoint",
     "validate_turn_sequence",

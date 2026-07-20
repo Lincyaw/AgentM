@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections.abc import Sequence
 
 from pydantic import BaseModel, Field
@@ -28,10 +29,20 @@ from agentm.core.abi.roles import (
     TRAJECTORY_STORE_SERVICE,
 )
 from agentm.core.abi.session_api import AtomAPI
-from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.store import (
+    TrajectoryCompactionCommit,
+    TrajectoryNodeQuery,
+    TrajectoryStore,
+)
 from agentm.core.abi.stream import MessageEnd, Model, StreamFn, TextDelta
-from agentm.core.abi.trajectory import ContentReplacementState, Turn
+from agentm.core.abi.trajectory import (
+    ContentReplacementState,
+    TrajectoryHeadAdvance,
+    TrajectoryNode,
+    Turn,
+)
 from agentm.core.abi.trigger import TriggerRenderer
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.extensions import ExtensionManifest
 
 
@@ -198,11 +209,55 @@ class LlmCompactionPolicy(BindableContextPolicy):
             ),
         )
 
-        head = await asyncio.to_thread(trajectory_store.get_head, self._session_id)
+        head, latest_nodes = await asyncio.gather(
+            asyncio.to_thread(
+                trajectory_store.get_head,
+                self._session_id,
+            ),
+            asyncio.to_thread(
+                trajectory_store.query_nodes,
+                TrajectoryNodeQuery(
+                    session_id=self._session_id,
+                    sort="desc",
+                    limit=1,
+                ),
+            ),
+        )
         if head is None:
             raise RuntimeError(
                 "llm_compaction cannot persist state without an active trajectory head"
             )
+        anchored_turn = turns[-1]
+        boundary_id = _boundary_id(
+            state_key=self._config.state_key,
+            session_id=self._session_id,
+            turn_id=anchored_turn.id,
+            summary_ref=ref,
+        )
+        boundary = TrajectoryNode(
+            id=boundary_id,
+            session_id=self._session_id,
+            seq=latest_nodes[0].seq + 1 if latest_nodes else 0,
+            kind="compact_boundary",
+            root_session_id=head.root_session_id,
+            parent_session_id=head.parent_session_id,
+            branch_id=head.branch_id,
+            head_id=head.head_id,
+            role="control",
+            logical_parent_id=head.node_id or head.logical_parent_id,
+            turn_id=anchored_turn.id,
+            turn_index=anchored_turn.index,
+            agent_id=head.agent_id,
+            is_sidechain=head.is_sidechain,
+            content_ref=ref.uri(),
+            visibility="replay_only",
+            payload={
+                "state_key": self._config.state_key,
+                "covered_through_turn_id": covered_turn.id,
+                "covered_through_turn_index": covered_turn.index,
+            },
+            timestamp=time.time(),
+        )
         replacements = dict(state.replacements) if state is not None else {}
         replacements[f"through:{covered_turn.id}"] = ref.uri()
         persisted = ContentReplacementState(
@@ -211,7 +266,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
             replacements=replacements,
             source_session_id=(state.source_session_id if state is not None else None),
             source_leaf_id=state.source_leaf_id if state is not None else None,
-            leaf_node_id=head.node_id or head.logical_parent_id,
+            leaf_node_id=boundary.id,
             branch_id=head.branch_id,
             head_id=head.head_id,
             metadata={
@@ -224,10 +279,28 @@ class LlmCompactionPolicy(BindableContextPolicy):
                 ).hexdigest(),
             },
         )
-        await asyncio.to_thread(
-            trajectory_store.save_content_replacement_state,
-            self._session_id,
-            persisted,
+        await await_known_outcome(
+            asyncio.to_thread(
+                trajectory_store.commit_compaction,
+                self._session_id,
+                TrajectoryCompactionCommit(
+                    boundary=boundary,
+                    advance_head=TrajectoryHeadAdvance(
+                        session_id=self._session_id,
+                        node_id=boundary.id,
+                        seq=boundary.seq,
+                        previous_node_id=head.node_id,
+                        head_id=head.head_id,
+                        branch_id=head.branch_id,
+                        root_session_id=head.root_session_id,
+                        parent_session_id=head.parent_session_id,
+                        agent_id=head.agent_id,
+                        is_sidechain=head.is_sidechain,
+                        updated_at=boundary.timestamp,
+                    ),
+                    content_replacement_state=persisted,
+                ),
+            )
         )
 
         self._record_report(turns, target, ref, decision="compact")
@@ -275,12 +348,14 @@ class LlmCompactionPolicy(BindableContextPolicy):
             or _covered_position(parent_state, turns) is None
         ):
             return None
-        return await asyncio.to_thread(
-            self._trajectory_store.clone_content_replacement_state,
-            source_session_id=self._parent_session_id,
-            target_session_id=self._session_id,
-            state_key=self._config.state_key,
-            target_leaf_id=head.node_id or head.logical_parent_id,
+        return await await_known_outcome(
+            asyncio.to_thread(
+                self._trajectory_store.clone_content_replacement_state,
+                source_session_id=self._parent_session_id,
+                target_session_id=self._session_id,
+                state_key=self._config.state_key,
+                target_leaf_id=head.node_id or head.logical_parent_id,
+            )
         )
 
     async def _active_summary(
@@ -468,6 +543,20 @@ def _summary_ref(
         f"{_path_token(turn_id)}-{digest[:16]}.txt"
     )
     return ResourceRef(namespace="summary", path=path)
+
+
+def _boundary_id(
+    *,
+    state_key: str,
+    session_id: str,
+    turn_id: str,
+    summary_ref: ResourceRef,
+) -> str:
+    material = "\0".join(
+        (state_key, session_id, turn_id, summary_ref.uri())
+    ).encode("utf-8")
+    digest = hashlib.sha256(material).hexdigest()[:24]
+    return f"session:{session_id}:compact:{digest}"
 
 
 def _path_token(value: str) -> str:

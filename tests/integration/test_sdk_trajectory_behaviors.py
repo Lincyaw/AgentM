@@ -37,7 +37,7 @@ from agentm.core.abi.store import (
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.abi.tool_executor import ToolExecutionRequirements
-from agentm.core.abi.trajectory import PromptCacheState
+from agentm.core.abi.trajectory import PromptCacheState, TrajectoryForkPoint
 from agentm.core.abi.trigger import UserInput
 from agentm.extensions.builtin.llm_openai import (
     OpenAIPromptCacheAdapter,
@@ -578,6 +578,78 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
         "branch-only-question",
         "branch-answer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_node_fork_selectors_require_executable_turn_boundaries(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    provider = _StubProvider("answer-one", "answer-two", "branch-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=_trajectory_extensions("node-fork"),
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    forked: AgentSession | None = None
+    try:
+        await session.run("question-one")
+        await session.run("question-two")
+        store = trajectory_backend.connect()
+        nodes = store.query_nodes(
+            TrajectoryNodeQuery(session_id=session.session_id)
+        )
+        head = store.get_head(session.session_id)
+        assert head is not None
+        assert head.node_id is not None
+
+        with pytest.raises(
+            ValueError,
+            match="final message of a committed turn",
+        ):
+            await AgentSession.fork(
+                session,
+                at=TrajectoryForkPoint(
+                    session_id=session.session_id,
+                    node_id=nodes[0].id,
+                ),
+            )
+        with pytest.raises(
+            ValueError,
+            match="session_id must match",
+        ):
+            await AgentSession.fork(
+                session,
+                at=TrajectoryForkPoint(
+                    session_id="another-session",
+                    node_id=head.node_id,
+                ),
+            )
+
+        forked = await AgentSession.fork(
+            session,
+            at=TrajectoryForkPoint(
+                session_id=session.session_id,
+                head_id=head.head_id,
+            ),
+            purpose="head-selected",
+        )
+        transcript = await forked.run("branch-question")
+    finally:
+        if forked is not None:
+            await forked.shutdown()
+        await session.shutdown()
+
+    assert _text(provider.requests[2]) == [
+        "question-one",
+        "answer-one",
+        "question-two",
+        "answer-two",
+        "branch-question",
+    ]
+    assert _text(transcript)[-2:] == ["branch-question", "branch-answer"]
 
 
 @pytest.mark.asyncio
@@ -1358,6 +1430,14 @@ async def test_sdk_fork_inherits_compaction_at_matching_logical_leaf(
         "branch-only-question",
         "branch-answer",
     ]
+    boundaries = trajectory_backend.connect().query_nodes(
+        TrajectoryNodeQuery(
+            session_id=session.session_id,
+            kinds=("compact_boundary",),
+        )
+    )
+    assert len(boundaries) == 1
+    assert boundaries[0].content_ref is not None
 
 
 @pytest.mark.asyncio

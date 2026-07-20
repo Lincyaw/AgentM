@@ -117,6 +117,7 @@ from agentm.core.abi.trigger import (
     TriggerMetadata,
     TriggerRenderer,
 )
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.runtime.execution import Execution
 
 if TYPE_CHECKING:
@@ -646,10 +647,12 @@ async def _apply_provider_prompt_cache(
             "provider prompt-cache adapter cannot change the cache identity"
         )
     if store is not None:
-        await asyncio.to_thread(
-            store.save_prompt_cache_state,
-            session_id,
-            result.state,
+        await await_known_outcome(
+            asyncio.to_thread(
+                store.save_prompt_cache_state,
+                session_id,
+                result.state,
+            )
         )
     return list(result.messages)
 

@@ -48,7 +48,29 @@ async def await_with_cancel_signal(
         await asyncio.gather(value_task, signal_task, return_exceptions=True)
 
 
+async def await_known_outcome(awaitable: Awaitable[T]) -> T:
+    """Settle a non-cancellable mutation before propagating task cancellation.
+
+    Cancelling an awaiter for ``asyncio.to_thread`` does not stop the backend
+    operation. Durable state transitions must therefore reach success or raise
+    their backend error before the caller can observe cancellation.
+    """
+
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 __all__ = [
     "OperationCancelledBySignal",
+    "await_known_outcome",
     "await_with_cancel_signal",
 ]

@@ -7,7 +7,7 @@ import copy
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Self, cast
 
 from agentm.core.abi.cancel import (
@@ -50,6 +50,7 @@ from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_HEAD_ID,
     TrajectoryForkPoint,
     TrajectoryHead,
+    TrajectoryNode,
     Turn,
     TurnRef,
 )
@@ -87,33 +88,19 @@ def _rehydrate_turn_triggers(
     return restored
 
 
-async def _fork_head(
+@dataclass(frozen=True, slots=True)
+class _ResolvedForkAnchor:
+    turn_ref: TurnRef
+    node_id: str | None = None
+
+
+def _fork_head(
     *,
-    store: TrajectoryStore,
     source: Session,
     target_session_id: str,
     target_parent_session_id: str,
-    turns: Sequence[Turn],
+    logical_parent_id: str,
 ) -> TrajectoryHead:
-    logical_parent_id: str | None = None
-    high_water_turn = turns[-1] if turns else None
-    if high_water_turn is not None:
-        source_tail = await asyncio.to_thread(
-            store.query_nodes,
-            TrajectoryNodeQuery(
-                session_id=source.id,
-                turn_id=high_water_turn.id,
-                sort="desc",
-                limit=1,
-            ),
-        )
-        if not source_tail:
-            raise RuntimeError(
-                f"trajectory store has no committed nodes for fork turn "
-                f"{high_water_turn.id}"
-            )
-        logical_parent_id = source_tail[0].id
-
     return TrajectoryHead(
         session_id=target_session_id,
         head_id=DEFAULT_TRAJECTORY_HEAD_ID,
@@ -126,58 +113,124 @@ async def _fork_head(
     )
 
 
-async def _resolve_fork_turn_ref(
+async def _active_chain(
     *,
     source: Session,
-    at: TurnRef | TrajectoryForkPoint,
-) -> TurnRef:
-    if not isinstance(at, TrajectoryForkPoint):
-        return at
-    if at.turn_ref is not None:
-        return at.turn_ref
-
+    head_id: str = DEFAULT_TRAJECTORY_HEAD_ID,
+    branch_id: str = DEFAULT_TRAJECTORY_BRANCH_ID,
+) -> list[TrajectoryNode]:
     store = source.store
     if store is None:
         raise ValueError("node/head fork points require a trajectory store")
-
-    node_id = at.node_id
-    if node_id is None and at.head_id is not None:
-        head = await asyncio.to_thread(
-            store.get_head,
-            at.session_id,
-            head_id=at.head_id,
-            branch_id=at.branch_id,
-        )
-        if head is None:
-            raise KeyError(at.head_id)
-        node_id = head.node_id or head.logical_parent_id
-    if node_id is None:
-        raise ValueError("fork point must include turn_ref, node_id, or head_id")
-
-    chain = await asyncio.to_thread(
-        store.load_chain,
-        at.session_id,
-        node_id,
-        include_logical_parent=at.include_logical_parent,
+    head = await asyncio.to_thread(
+        store.get_head,
+        source.id,
+        head_id=head_id,
+        branch_id=branch_id,
     )
-    for node in reversed(chain):
-        if node.turn_index is not None:
-            turn_tail = await asyncio.to_thread(
-                store.query_nodes,
-                TrajectoryNodeQuery(
-                    session_id=node.session_id,
-                    turn_index=node.turn_index,
-                    sort="desc",
-                    limit=1,
-                ),
+    if head is None:
+        raise KeyError(head_id)
+    leaf_node_id = head.node_id or head.logical_parent_id
+    if leaf_node_id is None:
+        return []
+    return await asyncio.to_thread(
+        store.load_chain,
+        source.id,
+        leaf_node_id,
+        include_logical_parent=True,
+    )
+
+
+async def _resolve_fork_anchor(
+    *,
+    source: Session,
+    at: TurnRef | TrajectoryForkPoint,
+) -> _ResolvedForkAnchor:
+    if isinstance(at, TrajectoryForkPoint) and at.session_id != source.id:
+        raise ValueError(
+            "trajectory fork point session_id must match the source session"
+        )
+    turn_ref = at.turn_ref if isinstance(at, TrajectoryForkPoint) else at
+    if turn_ref is not None:
+        prefix = source.trajectory.prefix(turn_ref)
+        turn = prefix.turns[-1]
+        if source.store is None:
+            return _ResolvedForkAnchor(turn_ref=turn_ref)
+        chain = await _active_chain(
+            source=source,
+            branch_id=(
+                at.branch_id
+                if isinstance(at, TrajectoryForkPoint)
+                else DEFAULT_TRAJECTORY_BRANCH_ID
+            ),
+        )
+        matching_nodes = [
+            node
+            for node in chain
+            if node.turn_id == turn.id and node.turn_index == turn.index
+        ]
+        if not matching_nodes:
+            raise RuntimeError(
+                f"trajectory store has no committed boundary for fork turn "
+                f"{turn.id}"
             )
-            if turn_tail and turn_tail[0].id == node.id:
-                return node.turn_index
+        return _ResolvedForkAnchor(
+            turn_ref=turn_ref,
+            node_id=matching_nodes[-1].id,
+        )
+
+    if not isinstance(at, TrajectoryForkPoint):
+        raise TypeError("fork point must be a TurnRef or TrajectoryForkPoint")
+    head_id = at.head_id or DEFAULT_TRAJECTORY_HEAD_ID
+    chain = await _active_chain(
+        source=source,
+        head_id=head_id,
+        branch_id=at.branch_id,
+    )
+    node_id = at.node_id
+    if node_id is None:
+        if not chain:
+            raise ValueError("cannot fork from an empty trajectory head")
+        node_id = chain[-1].id
+    selected = next((node for node in chain if node.id == node_id), None)
+    if selected is None:
+        raise ValueError(
+            "trajectory fork node must be reachable from the selected "
+            "source head"
+        )
+    if selected.turn_index is None or selected.turn_id is None:
+        raise ValueError(
+            "trajectory fork node has no committed turn boundary"
+        )
+    prefix = source.trajectory.prefix(selected.turn_index)
+    turn = prefix.turns[-1]
+    if turn.id != selected.turn_id:
+        raise ValueError(
+            "trajectory fork node does not match source committed history"
+        )
+    if selected.kind == "message":
+        if source.store is None:
+            raise ValueError("message node fork points require a trajectory store")
+        turn_messages = await asyncio.to_thread(
+            source.store.query_nodes,
+            TrajectoryNodeQuery(
+                session_id=selected.session_id,
+                turn_index=selected.turn_index,
+                kinds=("message",),
+                sort="desc",
+                limit=1,
+            ),
+        )
+        if not turn_messages or turn_messages[0].id != selected.id:
             raise ValueError(
-                "node/head fork points must target a committed turn boundary; "
-                "exact mid-turn node forks require a node-chain ContextProjection"
+                "message node fork points must target the final message of a "
+                "committed turn; context projection cannot restore mid-turn "
+                "external effects"
             )
-    raise KeyError(node_id)
+    return _ResolvedForkAnchor(
+        turn_ref=selected.turn_index,
+        node_id=selected.id,
+    )
 
 
 class Session(_SessionComposition):
@@ -344,7 +397,8 @@ class Session(_SessionComposition):
         *,
         purpose: str = "fork",
     ) -> Self:
-        turn_ref = await _resolve_fork_turn_ref(source=source, at=at)
+        anchor = await _resolve_fork_anchor(source=source, at=at)
+        turn_ref = anchor.turn_ref
         prefix = source.trajectory.prefix(turn_ref)
         child_ctx = source.ctx.child(
             session_id=uuid.uuid4().hex[:16],
@@ -352,14 +406,13 @@ class Session(_SessionComposition):
         )
         provider_identity = source.provider_session_identity()
         initial_head = (
-            await _fork_head(
-                store=source.store,
+            _fork_head(
                 source=source,
                 target_session_id=child_ctx.session_id,
                 target_parent_session_id=source.id,
-                turns=prefix.turns,
+                logical_parent_id=anchor.node_id,
             )
-            if source.store is not None
+            if anchor.node_id is not None
             else None
         )
 

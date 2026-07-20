@@ -97,6 +97,7 @@ from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_meta import session_meta_config
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.lib.trajectory_nodes import turns_to_nodes
 
 if TYPE_CHECKING:
@@ -318,12 +319,14 @@ async def _ensure_store_session(
             status="active",
             updated_at=time.time(),
         )
-        await asyncio.to_thread(
-            store.create_session,
-            meta,
-            turns=initial_turns,
-            nodes=nodes,
-            head=head,
+        await await_known_outcome(
+            asyncio.to_thread(
+                store.create_session,
+                meta,
+                turns=initial_turns,
+                nodes=nodes,
+                head=head,
+            )
         )
 
 

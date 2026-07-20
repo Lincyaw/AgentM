@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryCommit,
+    TrajectoryCompactionCommit,
 )
 from agentm.core.abi.trajectory import (
     TrajectoryHead,
@@ -20,6 +21,7 @@ from agentm.core.lib.trajectory_nodes import TrajectoryIndexState
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
     validate_checkpoint_commit,
+    validate_compaction_commit,
     validate_turn_append,
     validate_turn_checkpoint,
     validate_turn_sequence,
@@ -99,6 +101,29 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         )
         record[1].append(turn)
         self._checkpoints.pop(session_id, None)
+
+    def commit_compaction(
+        self,
+        session_id: str,
+        commit: TrajectoryCompactionCommit,
+    ) -> None:
+        record = self._sessions.get(session_id)
+        if record is None:
+            raise KeyError(session_id)
+        if commit.boundary.session_id != session_id:
+            raise ValueError(
+                "trajectory compact boundary must belong to the session"
+            )
+        validate_compaction_commit(record[1], commit)
+        self._commit_nodes(
+            session_id,
+            (commit.boundary,),
+            advance_head=commit.advance_head,
+        )
+        self.save_content_replacement_state(
+            session_id,
+            commit.content_replacement_state,
+        )
 
     def load(self, session_id: str) -> tuple[SessionMeta, list[Turn]]:
         record = self._sessions.get(session_id)

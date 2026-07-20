@@ -16,6 +16,7 @@ from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryCommit,
+    TrajectoryCompactionCommit,
     TrajectoryNodeQuery,
 )
 from agentm.core.abi.trajectory import (
@@ -51,6 +52,7 @@ _VERSION = 1
 _SESSION = "session"
 _CHECKPOINT = "turn_checkpoint"
 _COMMIT = "turn_commit"
+_COMPACTION_COMMIT = "compaction_commit"
 _CONTENT_STATE = "content_replacement_state"
 _PROMPT_CACHE_STATE = "prompt_cache_state"
 
@@ -152,6 +154,30 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                         _serialize_head_advance(commit.advance_head)
                         if commit.advance_head is not None
                         else None
+                    ),
+                },
+            )
+
+    def commit_compaction(
+        self,
+        session_id: str,
+        commit: TrajectoryCompactionCommit,
+    ) -> None:
+        with self._guard():
+            state = self._load_session_unlocked(session_id)
+            state.commit_compaction(session_id, commit)
+            self._normalize_tail_for_append_unlocked(session_id)
+            self._append_record_unlocked(
+                session_id,
+                {
+                    "version": _VERSION,
+                    "record_type": _COMPACTION_COMMIT,
+                    "boundary": serialize_node(commit.boundary),
+                    "advance_head": _serialize_head_advance(
+                        commit.advance_head
+                    ),
+                    "content_replacement_state": serialize_content_state(
+                        commit.content_replacement_state
                     ),
                 },
             )
@@ -474,6 +500,24 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                             _deserialize_head_advance(raw_advance)
                             if isinstance(raw_advance, Mapping)
                             else None
+                        ),
+                    ),
+                )
+            elif record_type == _COMPACTION_COMMIT:
+                state.commit_compaction(
+                    meta.id,
+                    TrajectoryCompactionCommit(
+                        boundary=deserialize_node(
+                            _required_mapping(record, "boundary")
+                        ),
+                        advance_head=_deserialize_head_advance(
+                            _required_mapping(record, "advance_head")
+                        ),
+                        content_replacement_state=deserialize_content_state(
+                            _required_mapping(
+                                record,
+                                "content_replacement_state",
+                            )
                         ),
                     ),
                 )

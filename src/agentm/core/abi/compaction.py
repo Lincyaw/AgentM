@@ -48,8 +48,10 @@ class ProjectionInput:
 
     ``turns`` is the authoritative committed turn prefix. ``nodes`` is an
     optional committed message chain from ``TrajectoryStore`` for projections
-    that need exact mid-turn replay, compact-boundary traversal, sidechain
-    filtering, prompt-cache identity, or content references.
+    that need message-level replay, compact-boundary traversal, sidechain
+    filtering, prompt-cache identity, or content references. Projection changes
+    provider input only; it does not create external-world snapshots or make a
+    mid-turn message an executable fork boundary.
     """
 
     turns: Sequence[Turn] = field(default_factory=tuple)

@@ -196,8 +196,6 @@ def _node_message(
     include_replay_only: bool,
     metadata_only_content_refs: bool,
 ) -> AgentMessage | None:
-    if node.kind == "snip":
-        return None
     message = node.message
     if message is not None:
         meta = message.meta

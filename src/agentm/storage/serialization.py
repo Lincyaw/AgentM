@@ -188,7 +188,6 @@ def serialize_node(node: TrajectoryNode) -> JsonObject:
         "content_ref": node.content_ref,
         "visibility": node.visibility,
         "payload": json_safe(node.payload),
-        "removed_node_ids": list(node.removed_node_ids),
         "timestamp": node.timestamp,
     }
     if node.message is not None:
@@ -224,7 +223,6 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
             "content_ref",
             "visibility",
             "payload",
-            "removed_node_ids",
             "timestamp",
             "message",
         },
@@ -255,9 +253,6 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
                 allowed={
                     "message",
                     "compact_boundary",
-                    "content_replacement",
-                    "snip",
-                    "checkpoint",
                 },
             ),
         ),
@@ -334,7 +329,6 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
         ),
         message=message,
         payload=dict(payload),
-        removed_node_ids=_string_tuple(data, "removed_node_ids"),
         timestamp=_required_number(data, "timestamp", path="trajectory node"),
     )
 
