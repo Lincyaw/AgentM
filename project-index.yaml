@@ -67,6 +67,9 @@ requirements:
       typed transaction origin (id/session/turn/index), so a fork preserves
       parent audit history while resume recovers only transactions owned by
       the selected session.
+      Session shutdown is one shared cancellation-safe lifecycle task, so
+      concurrent callers cannot return before driver, event, environment,
+      telemetry, and presenter cleanup reaches one known outcome.
       External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and

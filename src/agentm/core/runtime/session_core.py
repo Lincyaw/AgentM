@@ -111,6 +111,7 @@ from agentm.core.abi.trajectory import (
 )
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 from agentm.core.runtime.trajectory import Trajectory
@@ -271,6 +272,7 @@ class _SessionLifecycle:
         self._closed = False
         self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._cleanup_callbacks: list[Callable[[], Awaitable[None]]] = []
         self.installed_extensions: list[str] = []
         self._installed_extension_specs: list[ExtensionSpec] = []
@@ -443,11 +445,21 @@ class _SessionLifecycle:
             logger.exception("session driver crashed")
 
     async def shutdown(self) -> None:
-        if self._closed:
+        shutdown_task = self._shutdown_task
+        if shutdown_task is None:
+            self._closed = True
+            self._shutdown.set("shutdown")
+            self.triggers.close()
+            shutdown_task = asyncio.create_task(
+                self._shutdown_once(),
+                name=f"agentm-shutdown-{self.id}",
+            )
+            self._shutdown_task = shutdown_task
+        if shutdown_task is asyncio.current_task():
             return
-        self._closed = True
-        self._shutdown.set("shutdown")
-        self.triggers.close()
+        await await_known_outcome(shutdown_task)
+
+    async def _shutdown_once(self) -> None:
         if self._driver_task is not None:
             try:
                 await asyncio.wait_for(self._driver_task, timeout=30.0)
@@ -479,7 +491,7 @@ class _SessionLifecycle:
         )
         if telemetry is not None:
             try:
-                telemetry.shutdown()
+                await asyncio.to_thread(telemetry.shutdown)
             except BaseException as exc:
                 cleanup_errors.append(exc)
         for callback in reversed(self._cleanup_callbacks):

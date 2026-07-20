@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 import shlex
+import threading
 from typing import Any, Literal
 
 import pytest
@@ -649,6 +650,48 @@ async def test_effect_scope_wraps_committed_turns() -> None:
         ("prepare", session.id, 0),
         ("commit", session.id, 0),
     ]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_has_one_cancellation_safe_cleanup_boundary(
+    tmp_path: Path,
+) -> None:
+    close_started = threading.Event()
+    close_release = threading.Event()
+    close_finished = threading.Event()
+
+    def close_environment() -> None:
+        close_started.set()
+        if not close_release.wait(timeout=2.0):
+            raise TimeoutError("test did not release environment close")
+        close_finished.set()
+
+    session = Session(
+        SessionRuntimeConfig(
+            stream_fn=_StaticStream(),
+            model=_model(),
+        )
+    )
+    session.register_operations(
+        environment=LocalEnvironmentOperations(
+            cwd=tmp_path,
+            close_callback=close_environment,
+        )
+    )
+
+    cancelled_shutdown = asyncio.create_task(session.shutdown())
+    assert await asyncio.to_thread(close_started.wait, 1.0)
+    cancelled_shutdown.cancel()
+    concurrent_shutdown = asyncio.create_task(session.shutdown())
+    await asyncio.sleep(0.05)
+    assert not cancelled_shutdown.done()
+    assert not concurrent_shutdown.done()
+
+    close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_shutdown
+    await concurrent_shutdown
+    assert close_finished.is_set()
 
 
 @pytest.mark.asyncio

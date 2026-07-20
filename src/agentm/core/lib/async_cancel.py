@@ -77,7 +77,17 @@ async def settle_known_outcome(awaitable: Awaitable[T]) -> tuple[T, bool]:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             cancelled = True
-    result = task.result()
+    try:
+        result = task.result()
+    except asyncio.CancelledError:
+        raise
+    except BaseException as operation_error:
+        if cancelled:
+            raise BaseExceptionGroup(
+                "operation failed after caller cancellation",
+                (asyncio.CancelledError(), operation_error),
+            ) from operation_error
+        raise
     return result, cancelled
 
 
