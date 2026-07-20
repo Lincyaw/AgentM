@@ -683,16 +683,30 @@ def view_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     follow: bool = typer.Option(False, "--follow", "-f"),
+    legacy: bool = typer.Option(False, "--legacy", help="Use the old ANSI pager."),
 ) -> None:
     """Interactive trace viewer with turn navigation and expand/collapse."""
-    from agentm.cli._trace_viewer import run_interactive_viewer
-
     if not sys.stdout.isatty():
         stderr_console.print("[red]error: interactive viewer requires a terminal[/red]")
         raise typer.Exit(2)
 
     query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session)
+
+    if not legacy:
+        try:
+            from agentm.cli._trace_textual import run_textual_viewer
+        except ImportError:
+            stderr_console.print(
+                "[yellow]warning: Textual viewer unavailable; "
+                "falling back to legacy pager[/yellow]"
+            )
+        else:
+            run_textual_viewer(query, sid, follow=follow)
+            return
+
+    from agentm.cli._trace_viewer import run_interactive_viewer
+
     try:
         turns = list(query.turns(sid))
     except KeyError:

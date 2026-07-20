@@ -227,12 +227,82 @@ _KEY_PAGE_UP = "PGUP"
 _KEY_HOME = "HOME"
 _KEY_END = "END"
 _KEY_TAB = "TAB"
+_KEY_IGNORE = "IGNORE"
+_KEY_SCROLL_UP = "SCROLL_UP"
+_KEY_SCROLL_DOWN = "SCROLL_DOWN"
+_ESCAPE_READ_TIMEOUT = 0.05
+_WHEEL_SCROLL_LINES = 5
+_ENABLE_MOUSE_REPORTING = "\033[?1000h\033[?1006h"
+_DISABLE_MOUSE_REPORTING = "\033[?1006l\033[?1000l"
+
+
+def _read_byte_if_ready(fd: int, timeout: float) -> bytes:
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if not ready:
+        return b""
+    return os.read(fd, 1)
+
+
+def _read_escape_sequence(fd: int) -> bytes:
+    seq = _read_byte_if_ready(fd, _ESCAPE_READ_TIMEOUT)
+    if not seq:
+        return b""
+
+    if seq == b"[":
+        while len(seq) < 64:
+            nxt = _read_byte_if_ready(fd, _ESCAPE_READ_TIMEOUT)
+            if not nxt:
+                break
+            seq += nxt
+            if 0x40 <= nxt[0] <= 0x7E:
+                if seq == b"[M":
+                    for _ in range(3):
+                        more = _read_byte_if_ready(fd, _ESCAPE_READ_TIMEOUT)
+                        if not more:
+                            break
+                        seq += more
+                break
+    elif seq == b"O":
+        nxt = _read_byte_if_ready(fd, _ESCAPE_READ_TIMEOUT)
+        if nxt:
+            seq += nxt
+
+    return seq
+
+
+def _decode_mouse_sequence(seq: bytes) -> str:
+    if seq.startswith(b"[<"):
+        try:
+            button_code = int(seq[2:-1].split(b";", 1)[0])
+        except (TypeError, ValueError):
+            return _KEY_IGNORE
+        if button_code >= 64:
+            button = button_code & 0b11
+            if button == 0:
+                return _KEY_SCROLL_UP
+            if button == 1:
+                return _KEY_SCROLL_DOWN
+        return _KEY_IGNORE
+
+    if len(seq) == 5 and seq.startswith(b"[M"):
+        button_code = seq[2] - 32
+        if button_code >= 64:
+            button = button_code & 0b11
+            if button == 0:
+                return _KEY_SCROLL_UP
+            if button == 1:
+                return _KEY_SCROLL_DOWN
+        return _KEY_IGNORE
+
+    return _KEY_IGNORE
 
 
 def _read_key(fd: int) -> str:
     ch = os.read(fd, 1)
     if ch == b"\x1b":
-        seq = os.read(fd, 2)
+        seq = _read_escape_sequence(fd)
+        if not seq:
+            return _KEY_ESC
         if seq == b"[A":
             return _KEY_UP
         if seq == b"[B":
@@ -241,17 +311,21 @@ def _read_key(fd: int) -> str:
             return _KEY_RIGHT
         if seq == b"[D":
             return _KEY_LEFT
-        if seq == b"[5":
-            os.read(fd, 1)
+        if seq == b"[5~":
             return _KEY_PAGE_UP
-        if seq == b"[6":
-            os.read(fd, 1)
+        if seq == b"[6~":
             return _KEY_PAGE_DOWN
         if seq == b"[H":
             return _KEY_HOME
         if seq == b"[F":
             return _KEY_END
-        return _KEY_ESC
+        if seq in (b"OA", b"[1~", b"[7~"):
+            return _KEY_HOME
+        if seq in (b"OF", b"[4~", b"[8~"):
+            return _KEY_END
+        if seq.startswith((b"[<", b"[M")):
+            return _decode_mouse_sequence(seq)
+        return _KEY_IGNORE
     if ch in (b"\r", b"\n"):
         return _KEY_ENTER
     if ch == b" ":
@@ -527,6 +601,7 @@ class TraceViewer:
         self._msg_cursor = 0
         self._items: list[_ViewItem] | None = None
         self._scroll = 0
+        self._manual_scroll = False
 
     def run(self) -> None:
         if not self._views:
@@ -543,10 +618,12 @@ class TraceViewer:
             new_settings[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
             sys.stdout.write("\033[?1049h")  # alt screen
+            sys.stdout.write(_ENABLE_MOUSE_REPORTING)
             sys.stdout.write("\033[?25l")  # hide cursor
             sys.stdout.flush()
             self._loop(fd)
         finally:
+            sys.stdout.write(_DISABLE_MOUSE_REPORTING)
             sys.stdout.write("\033[?25h")
             sys.stdout.write("\033[?1049l")
             sys.stdout.flush()
@@ -564,11 +641,13 @@ class TraceViewer:
         self._items = None
         self._msg_cursor = 0
         self._scroll = 0
+        self._manual_scroll = False
 
     def _leave_expanded(self) -> None:
         self._expanded = False
         self._items = None
         self._scroll = 0
+        self._manual_scroll = False
 
     def _maybe_reload(self) -> None:
         if self._reload is None:
@@ -586,6 +665,7 @@ class TraceViewer:
                     self._items = None
                     self._msg_cursor = 0
                     self._scroll = 0
+                    self._manual_scroll = False
         else:
             self._views = new_views
 
@@ -605,6 +685,8 @@ class TraceViewer:
                 break
             if key == _KEY_ESC and not self._expanded:
                 break
+            if key == _KEY_IGNORE:
+                continue
 
             if self._expanded:
                 self._handle_expanded_key(key)
@@ -612,20 +694,40 @@ class TraceViewer:
                 self._handle_list_key(key)
 
     def _handle_list_key(self, key: str) -> None:
+        _, rows = self._term_size()
+        page = max(1, rows - 4)
         if key == _KEY_UP:
             self._cursor = max(0, self._cursor - 1)
         elif key == _KEY_DOWN:
             self._cursor = min(len(self._views) - 1, self._cursor + 1)
+        elif key == _KEY_SCROLL_UP:
+            self._cursor = max(0, self._cursor - page)
+        elif key == _KEY_SCROLL_DOWN:
+            self._cursor = min(len(self._views) - 1, self._cursor + page)
         elif key in (_KEY_ENTER, _KEY_SPACE, _KEY_RIGHT):
             self._enter_expanded()
         elif key == _KEY_PAGE_DOWN:
-            self._cursor = min(len(self._views) - 1, self._cursor + 10)
+            self._cursor = min(len(self._views) - 1, self._cursor + page)
         elif key == _KEY_PAGE_UP:
-            self._cursor = max(0, self._cursor - 10)
+            self._cursor = max(0, self._cursor - page)
         elif key == _KEY_HOME:
             self._cursor = 0
         elif key == _KEY_END:
             self._cursor = len(self._views) - 1
+
+    def _expanded_total_lines(self, items: list[_ViewItem]) -> int:
+        return sum(2 + (len(item.body_lines) if item.expanded else 0) for item in items)
+
+    def _scroll_expanded(self, delta: int) -> None:
+        cols, rows = self._term_size()
+        if self._items is None:
+            view = self._views[self._cursor]
+            self._items = _build_view_items(view.messages, cols)
+        usable = max(1, rows - 3)
+        total = self._expanded_total_lines(self._items)
+        max_scroll = max(0, total - usable)
+        self._scroll = max(0, min(max_scroll, self._scroll + delta))
+        self._manual_scroll = True
 
     def _handle_expanded_key(self, key: str) -> None:
         items = self._items
@@ -635,19 +737,29 @@ class TraceViewer:
         if key in (_KEY_ESC, _KEY_LEFT):
             self._leave_expanded()
         elif key == _KEY_UP:
+            self._manual_scroll = False
             self._msg_cursor = max(0, self._msg_cursor - 1)
         elif key == _KEY_DOWN:
+            self._manual_scroll = False
             self._msg_cursor = min(len(items) - 1, self._msg_cursor + 1)
         elif key in (_KEY_ENTER, _KEY_SPACE):
             items[self._msg_cursor].expanded = not items[self._msg_cursor].expanded
         elif key == _KEY_PAGE_DOWN:
-            self._msg_cursor = min(len(items) - 1, self._msg_cursor + 5)
+            _, rows = self._term_size()
+            self._scroll_expanded(max(1, rows - 5))
         elif key == _KEY_PAGE_UP:
-            self._msg_cursor = max(0, self._msg_cursor - 5)
+            _, rows = self._term_size()
+            self._scroll_expanded(-max(1, rows - 5))
+        elif key == _KEY_SCROLL_DOWN:
+            self._scroll_expanded(_WHEEL_SCROLL_LINES)
+        elif key == _KEY_SCROLL_UP:
+            self._scroll_expanded(-_WHEEL_SCROLL_LINES)
         elif key == _KEY_HOME:
+            self._manual_scroll = False
             self._msg_cursor = 0
             self._scroll = 0
         elif key == _KEY_END:
+            self._manual_scroll = False
             self._msg_cursor = len(items) - 1
         elif key == _KEY_TAB:
             if self._cursor < len(self._views) - 1:
@@ -734,10 +846,11 @@ class TraceViewer:
 
         # Auto-scroll: keep cursor item's header visible.
         cursor_line = item_header_line[self._msg_cursor]
-        if cursor_line < self._scroll:
-            self._scroll = cursor_line
-        elif cursor_line >= self._scroll + usable:
-            self._scroll = cursor_line - usable + 1
+        if not self._manual_scroll:
+            if cursor_line < self._scroll:
+                self._scroll = cursor_line
+            elif cursor_line >= self._scroll + usable:
+                self._scroll = cursor_line - usable + 1
         self._scroll = max(0, min(self._scroll, max(0, total - usable)))
 
         visible = all_lines[self._scroll : self._scroll + usable]
@@ -765,7 +878,7 @@ class TraceViewer:
         footer = (
             " ↑↓: move  Enter: toggle  "
             "e: expand all  c: collapse all  "
-            "←/Esc: back  Tab: next turn"
+            "PgUp/PgDn/wheel: scroll  ←/Esc: back  Tab: next turn"
         )
         sys.stdout.write(f"\033[2m{footer:<{cols}}\033[0m")
 
