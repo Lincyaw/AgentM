@@ -7,9 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from agentm.core.abi.manifest import ExtensionManifest, parse_capability_ref
-
-
 Severity = Literal["error", "warning"]
 
 _FORBIDDEN_IMPORTS: dict[str, str] = {
@@ -44,13 +41,9 @@ class ValidationIssue:
 
 def validate_atom_file(
     path: str | Path,
-    *,
-    module_path: str = "",
-    known_extension_names: set[str] | None = None,
 ) -> list[ValidationIssue]:
     """Validate one atom source file."""
 
-    del module_path, known_extension_names
     src_path = Path(path)
     try:
         tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
@@ -95,22 +88,13 @@ def validate_atom_file(
 
 def validate_atom_package(
     package_dir: str | Path,
-    *,
-    module_path: str = "",
-    known_extension_names: set[str] | None = None,
 ) -> list[ValidationIssue]:
     """Validate every Python file in a package atom."""
 
     root = Path(package_dir)
     issues: list[ValidationIssue] = []
     for path in sorted(root.rglob("*.py")):
-        issues.extend(
-            validate_atom_file(
-                path,
-                module_path=module_path,
-                known_extension_names=known_extension_names,
-            )
-        )
+        issues.extend(validate_atom_file(path))
     return issues
 
 
@@ -130,29 +114,6 @@ def extension_helper_imports(path: str | Path) -> list[str]:
             if _is_extension_helper_module(module):
                 modules.add(module)
     return sorted(modules)
-
-
-def validate_manifest_requirements(
-    manifest: ExtensionManifest,
-    *,
-    path: str = "",
-) -> list[ValidationIssue]:
-    """Return authoring feedback for capability-oriented dependencies."""
-
-    issues: list[ValidationIssue] = []
-    for requirement in manifest.requires:
-        try:
-            parse_capability_ref(requirement)
-        except ValueError as exc:
-            issues.append(
-                ValidationIssue(
-                    severity="error",
-                    rule="invalid-capability",
-                    message=str(exc),
-                    path=path,
-                )
-            )
-    return issues
 
 
 def _is_extension_helper_module(module: str) -> bool:
@@ -193,7 +154,6 @@ def _forbidden_import_reason(module: str) -> str | None:
 __all__ = [
     "ValidationIssue",
     "extension_helper_imports",
-    "validate_manifest_requirements",
     "validate_atom_file",
     "validate_atom_package",
 ]

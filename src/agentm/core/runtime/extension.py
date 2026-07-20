@@ -31,6 +31,12 @@ from agentm.core.abi.session_api import (
     ExtensionSource,
     ExtensionSpec,
 )
+from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
+    ValidationIssue,
+    extension_helper_imports,
+    validate_atom_file,
+    validate_atom_package,
+)
 
 
 _INSTALLING_EXTENSION: ContextVar[str | None] = ContextVar(
@@ -279,34 +285,17 @@ def validate_extension_source(source: ExtensionSource | str) -> None:
     if not isinstance(source, ExtensionSource):
         raise TypeError("extension validation requires ExtensionSource or module string")
     module_path = source.module_name
-    try:
-        from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
-            extension_helper_imports,
-            validate_atom_file,
-            validate_atom_package,
-        )
-    except ImportError as exc:
-        raise ExtensionLoadError(
-            module_path,
-            RuntimeError("extension validator unavailable"),
-        ) from exc
+    issues: list[ValidationIssue]
 
     if source.kind == "file":
         _read_verified_file_source(source)
         src_file = Path(source.location)
-        issues = validate_atom_file(
-            src_file,
-            module_path=module_path,
-            known_extension_names=set(),
-        )
+        issues = validate_atom_file(src_file)
         for helper in extension_helper_imports(src_file):
             issues.extend(
                 _validate_extension_helper_source(
                     helper,
                     visited={module_path},
-                    validate_atom_file=validate_atom_file,
-                    validate_atom_package=validate_atom_package,
-                    extension_helper_imports=extension_helper_imports,
                 )
             )
         _read_verified_file_source(source)
@@ -327,37 +316,20 @@ def validate_extension_source(source: ExtensionSource | str) -> None:
     visited: set[str] = {module_path}
     if module_spec.submodule_search_locations:
         for package_dir in module_spec.submodule_search_locations:
-            issues.extend(
-                validate_atom_package(
-                    package_dir,
-                    module_path=module_path,
-                    known_extension_names=set(),
-                )
-            )
+            issues.extend(validate_atom_package(package_dir))
     elif module_spec.origin is not None:
         src_file = Path(module_spec.origin)
         if src_file.suffix != ".py":
             return
         if src_file.name == "__init__.py":
-            issues = validate_atom_package(
-                src_file.parent,
-                module_path=module_path,
-                known_extension_names=set(),
-            )
+            issues = validate_atom_package(src_file.parent)
         else:
-            issues = validate_atom_file(
-                src_file,
-                module_path=module_path,
-                known_extension_names=set(),
-            )
+            issues = validate_atom_file(src_file)
             for helper in extension_helper_imports(src_file):
                 issues.extend(
                     _validate_extension_helper_source(
                         helper,
                         visited=visited,
-                        validate_atom_file=validate_atom_file,
-                        validate_atom_package=validate_atom_package,
-                        extension_helper_imports=extension_helper_imports,
                     )
                 )
     _raise_blocking_validation_issues(module_path, issues)
@@ -367,10 +339,7 @@ def _validate_extension_helper_source(
     module_path: str,
     *,
     visited: set[str],
-    validate_atom_file: Any,
-    validate_atom_package: Any,
-    extension_helper_imports: Any,
-) -> list[Any]:
+) -> list[ValidationIssue]:
     if module_path in visited:
         return []
     visited.add(module_path)
@@ -385,50 +354,32 @@ def _validate_extension_helper_source(
             f"extension validator cannot resolve helper {module_path!r}"
         )
 
-    issues: list[Any] = []
+    issues: list[ValidationIssue] = []
     if spec.submodule_search_locations:
         for package_dir in spec.submodule_search_locations:
-            issues.extend(
-                validate_atom_package(
-                    package_dir,
-                    module_path=module_path,
-                    known_extension_names=set(),
-                )
-            )
+            issues.extend(validate_atom_package(package_dir))
     elif spec.origin is not None:
         src_file = Path(spec.origin)
         if src_file.suffix != ".py":
             return []
         if src_file.name == "__init__.py":
-            issues.extend(
-                validate_atom_package(
-                    src_file.parent,
-                    module_path=module_path,
-                    known_extension_names=set(),
-                )
-            )
+            issues.extend(validate_atom_package(src_file.parent))
         else:
-            issues.extend(
-                validate_atom_file(
-                    src_file,
-                    module_path=module_path,
-                    known_extension_names=set(),
-                )
-            )
+            issues.extend(validate_atom_file(src_file))
             for helper in extension_helper_imports(src_file):
                 issues.extend(
                     _validate_extension_helper_source(
                         helper,
                         visited=visited,
-                        validate_atom_file=validate_atom_file,
-                        validate_atom_package=validate_atom_package,
-                        extension_helper_imports=extension_helper_imports,
                     )
                 )
     return issues
 
 
-def _raise_blocking_validation_issues(module_path: str, issues: list[Any]) -> None:
+def _raise_blocking_validation_issues(
+    module_path: str,
+    issues: list[ValidationIssue],
+) -> None:
     blocking = [i for i in issues if i.severity == "error"]
     if not blocking:
         return
