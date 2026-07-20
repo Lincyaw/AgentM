@@ -1,11 +1,19 @@
-"""Interactive trace viewer — pager-style TUI for session trajectories."""
+"""Interactive trace viewer — pager-style TUI for session trajectories.
+
+Navigation:
+  Level 1  Turn list      ↑↓ select, Enter/→ expand, q quit
+  Level 2  Message list   ↑↓ select, Enter toggle collapse,
+                          e expand-all, c collapse-all, ←/Esc back
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import select
 import sys
 import termios
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from io import StringIO
 
@@ -21,8 +29,10 @@ from agentm.core.abi.messages import (
     ToolCallBlock,
 )
 from agentm.core.abi.termination import ProviderRequestFailed
-from agentm.core.abi.trajectory import Turn
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.trigger import UserInput
+
+_TurnRecord = Turn | TurnCheckpoint
 
 
 # -- Data model --------------------------------------------------------------
@@ -36,18 +46,33 @@ class _Message:
     content: str = ""
     thinking: str | None = None
     args_json: str | None = None
+    round_index: int | None = None
 
 
 @dataclass(slots=True)
 class _TurnView:
-    turn: Turn
-    summary_line: str
+    turn: _TurnRecord
+    trigger_label: str
+    tools_str: str
+    cause: str
+    in_tok: int
+    out_tok: int
+    model: str
     messages: list[_Message] = field(default_factory=list)
 
 
-def _build_views(turns: list[Turn]) -> list[_TurnView]:
+@dataclass(slots=True)
+class _ViewItem:
+    """One collapsible row in the message-list view."""
+
+    msg: _Message
+    body_lines: list[str]
+    expanded: bool
+
+
+def _build_views(records: list[_TurnRecord]) -> list[_TurnView]:
     views: list[_TurnView] = []
-    for turn in turns:
+    for turn in records:
         tool_names: list[str] = []
         tool_errors = 0
         for rnd in turn.rounds:
@@ -69,18 +94,31 @@ def _build_views(turns: list[Turn]) -> list[_TurnView]:
         tools_str = f"{len(tool_names)} tools" if tool_names else "no tools"
         if tool_errors:
             tools_str += f" ({tool_errors} err)"
-        cause = type(turn.outcome.cause).__name__
+        if isinstance(turn, Turn):
+            cause = type(turn.outcome.cause).__name__
+        else:
+            cause = "incomplete"
         in_tok = turn.meta.total_input_tokens
         out_tok = turn.meta.total_output_tokens
         model = turn.meta.model_id or "?"
 
-        summary = f"T{turn.index:>2} | {trigger_label:<52} | {tools_str:<16} | {cause:<16} | in:{in_tok:>8,} out:{out_tok:>6,} | {model}"
         msgs = _extract_messages(turn)
-        views.append(_TurnView(turn=turn, summary_line=summary, messages=msgs))
+        views.append(
+            _TurnView(
+                turn=turn,
+                trigger_label=trigger_label,
+                tools_str=tools_str,
+                cause=cause,
+                in_tok=in_tok,
+                out_tok=out_tok,
+                model=model,
+                messages=msgs,
+            )
+        )
     return views
 
 
-def _extract_messages(turn: Turn) -> list[_Message]:
+def _extract_messages(turn: _TurnRecord) -> list[_Message]:
     msgs: list[_Message] = []
 
     if isinstance(turn.trigger, UserInput):
@@ -94,7 +132,7 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                 parts.append(f"[{type(block).__name__}]")
         msgs.append(_Message(role="user", content="\n".join(parts)))
 
-    for rnd in turn.rounds:
+    for ri, rnd in enumerate(turn.rounds):
         text_parts: list[str] = []
         thinking_parts: list[str] = []
 
@@ -119,6 +157,7 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                             thinking="\n".join(thinking_parts)
                             if thinking_parts
                             else None,
+                            round_index=ri,
                         )
                     )
                     text_parts = []
@@ -128,6 +167,7 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                         role="tool_call",
                         tool_name=response_block.name,
                         args_json=args_str,
+                        round_index=ri,
                     )
                 )
 
@@ -137,6 +177,7 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                     role="assistant",
                     content="\n".join(text_parts),
                     thinking="\n".join(thinking_parts) if thinking_parts else None,
+                    round_index=ri,
                 )
             )
 
@@ -152,15 +193,18 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                     tool_name=rec.call.name,
                     is_error=rec.result.is_error,
                     content=txt,
+                    round_index=ri,
                 )
             )
 
-    if isinstance(turn.outcome.cause, ProviderRequestFailed):
+    if isinstance(turn, Turn) and isinstance(turn.outcome.cause, ProviderRequestFailed):
         msgs.append(
             _Message(
                 role="error",
                 is_error=True,
-                content=f"{turn.outcome.cause.error_type}: {turn.outcome.cause.detail}",
+                content=(
+                    f"{turn.outcome.cause.error_type}: {turn.outcome.cause.detail}"
+                ),
             )
         )
 
@@ -229,128 +273,118 @@ def _read_key(fd: int) -> str:
     return ch.decode("utf-8", errors="replace")
 
 
-# -- Rendering helpers -------------------------------------------------------
+def _try_read_key(fd: int, timeout: float) -> str | None:
+    """Non-blocking key read.  Returns ``None`` if *timeout* elapses."""
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if not ready:
+        return None
+    return _read_key(fd)
 
 
-_ROLE_COLORS = {
-    "user": "green",
-    "assistant": "blue",
-    "tool_call": "yellow",
-    "tool_result": "cyan",
-    "error": "red",
+# -- Turn summary rendering -------------------------------------------------
+
+
+def _render_turn_summary(view: _TurnView, width: int) -> str:
+    """Render a turn summary line that fits within *width* columns.
+
+    Layout priority (right-to-left trim):
+      fixed:  "T 0 | "  (6 chars)
+      tail:   " | <tools> | <cause> | in:N out:N | <model>"
+      flex:   trigger_label gets whatever remains
+    """
+    prefix = f"T{view.turn.index:>2} | "
+    tail = (
+        f" | {view.tools_str} | {view.cause}"
+        f" | in:{view.in_tok:>7,} out:{view.out_tok:>5,}"
+        f" | {view.model}"
+    )
+
+    avail = width - len(prefix) - len(tail)
+    if avail < 12:
+        tail = f" | {view.tools_str} | in:{view.in_tok:,} out:{view.out_tok:,}"
+        avail = width - len(prefix) - len(tail)
+    if avail < 8:
+        tail = ""
+        avail = width - len(prefix)
+
+    label = view.trigger_label
+    if len(label) > avail:
+        label = label[: max(0, avail - 3)] + "..."
+    else:
+        label = f"{label:<{avail}}"
+
+    return f"{prefix}{label}{tail}"
+
+
+# -- Collapsible item rendering ----------------------------------------------
+
+_MAX_BODY_LINES = 60
+
+_ANSI = {
+    "user": "\033[1;32m",
+    "assistant": "\033[1;34m",
+    "tool_call": "\033[1;33m",
+    "tool_result": "\033[36m",
+    "error": "\033[1;31m",
 }
-
-_MAX_LINES = 50
-
-
-def _render_expanded_turn(view: _TurnView, width: int) -> list[str]:
-    """Render a turn's messages into ANSI-colored lines."""
-    con = Console(
-        file=StringIO(),
-        width=width,
-        highlight=False,
-        force_terminal=True,
-        color_system="truecolor",
-    )
-
-    con.print(Text(f"Turn {view.turn.index}", style="bold underline"))
-    con.print()
-
-    for msg in view.messages:
-        _render_message(con, msg, width)
-        con.print()
-
-    output = con.file.getvalue()  # type: ignore[attr-defined]
-    return output.split("\n")
+_RST = "\033[0m"
+_DIM = "\033[2m"
+_REV = "\033[7m"
 
 
-def _render_message(con: Console, msg: _Message, width: int) -> None:
-    msg = _Message(
-        role=msg.role,
-        tool_name=msg.tool_name,
-        is_error=msg.is_error,
-        content=msg.content.expandtabs(4) if msg.content else "",
-        thinking=msg.thinking.expandtabs(4) if msg.thinking else None,
-        args_json=msg.args_json,
-    )
-    color = _ROLE_COLORS.get(msg.role, "white")
+def _collapsed_info(msg: _Message) -> str:
+    """Short info shown on the header when an item is collapsed."""
+    if msg.role == "tool_result":
+        if not msg.content:
+            return "(empty)"
+        n = msg.content.count("\n") + 1
+        chars = len(msg.content)
+        if chars >= 1024:
+            return f"({n} lines, {chars / 1024:.1f}K)"
+        return f"({n} lines)"
+    text = msg.content or msg.args_json or ""
+    text = text.replace("\n", " ").strip()
+    if not text:
+        return ""
+    if len(text) > 50:
+        text = text[:47] + "..."
+    return text
+
+
+def _render_item_header(item: _ViewItem, width: int, *, selected: bool = False) -> str:
+    msg = item.msg
+    marker = "▾" if item.expanded else "▸"
+    color = _ANSI.get(msg.role, "")
+
     label = msg.role.upper()
+    if msg.round_index is not None:
+        label += f" R{msg.round_index}"
     if msg.tool_name:
-        label = f"{label}: {msg.tool_name}"
-    if msg.is_error:
-        label += " [ERROR]"
-        color = "red"
+        label += f": {msg.tool_name}"
+    if msg.is_error and msg.role != "error":
+        label += " [ERR]"
 
-    rule_char = "─"
-    label_str = f" {label} "
-    remaining = max(0, width - len(label_str) - 2)
-    left = remaining // 2
-    right = remaining - left
-    header_line = f"{rule_char * left}{label_str}{rule_char * right}"
-    con.print(Text(header_line, style=f"bold {color}"))
-
-    if msg.thinking:
-        lines = msg.thinking.split("\n")
-        if len(lines) > 8:
-            display = lines[:3] + [f"    ... ({len(lines) - 6} lines) ..."] + lines[-3:]
+    if item.expanded:
+        inner = f" {marker} {label} "
+    else:
+        info = _collapsed_info(msg)
+        if info:
+            inner = f" {marker} {label} {_DIM}{info}{_RST}{color} "
         else:
-            display = lines
-        for line in display:
-            con.print(Text(f"  💭 {line}", style="dim italic"))
+            inner = f" {marker} {label} "
 
-    if msg.args_json:
-        try:
-            syn = Syntax(
-                msg.args_json, "json", theme="monokai", word_wrap=True, padding=(0, 2)
-            )
-            con.print(syn)
-        except Exception:
-            con.print(Text(msg.args_json, style="dim"))
+    # The visible width ignores ANSI sequences for the rule padding.
+    # Approximate: strip DIM/RST/color that appear inside `inner`.
+    vis_len = len(label) + 4  # marker + spaces
+    if not item.expanded:
+        info = _collapsed_info(msg)
+        vis_len += len(info) + 1 if info else 0
+    rule_len = max(0, width - vis_len - 1)
+    line = f"{inner}{'─' * rule_len}"
 
-    if msg.content:
-        content = msg.content
-        lines = content.split("\n")
-        if len(lines) > _MAX_LINES:
-            half = _MAX_LINES // 2
-            content = "\n".join(
-                lines[:half]
-                + [f"\n    ... ({len(lines) - _MAX_LINES} lines omitted) ...\n"]
-                + lines[-half:]
-            )
-
-        if msg.role == "tool_result" and not msg.is_error:
-            if _looks_like_json(content):
-                try:
-                    formatted = json.dumps(
-                        json.loads(content), indent=2, ensure_ascii=False
-                    )
-                    flines = formatted.split("\n")
-                    if len(flines) > _MAX_LINES:
-                        half = _MAX_LINES // 2
-                        formatted = "\n".join(
-                            flines[:half]
-                            + [f"  ... ({len(flines) - _MAX_LINES} lines) ..."]
-                            + flines[-half:]
-                        )
-                    syn = Syntax(
-                        formatted,
-                        "json",
-                        theme="monokai",
-                        word_wrap=True,
-                        padding=(0, 2),
-                    )
-                    con.print(syn)
-                except (json.JSONDecodeError, ValueError):
-                    con.print(Text(content, style="dim"))
-            else:
-                for line in content.split("\n"):
-                    con.print(Text(f"  {line}", style="dim"))
-        elif msg.role == "error":
-            con.print(Text(content, style="bold red"))
-        elif msg.role == "user":
-            con.print(Text(content, style="green"))
-        else:
-            con.print(Text(content))
+    if selected:
+        return f"{_REV}{color}{line}{_RST}"
+    return f"{color}{line}{_RST}"
 
 
 def _looks_like_json(s: str) -> bool:
@@ -362,19 +396,137 @@ def _looks_like_json(s: str) -> bool:
     )
 
 
+def _render_body_lines(msg: _Message, width: int) -> list[str]:
+    """Pre-render message content into indented ANSI lines."""
+    con = Console(
+        file=StringIO(),
+        width=max(20, width - 4),
+        highlight=False,
+        force_terminal=True,
+        color_system="truecolor",
+    )
+
+    if msg.thinking:
+        lines = msg.thinking.split("\n")
+        if len(lines) > 8:
+            display = lines[:3] + [f"... ({len(lines) - 6} lines) ..."] + lines[-3:]
+        else:
+            display = lines
+        for line in display:
+            con.print(Text(f"\U0001f4ad {line}", style="dim italic"))
+        con.print()
+
+    if msg.args_json:
+        try:
+            syn = Syntax(
+                msg.args_json,
+                "json",
+                theme="monokai",
+                word_wrap=True,
+                padding=(0, 0),
+            )
+            con.print(syn)
+        except Exception:
+            con.print(Text(msg.args_json, style="dim"))
+
+    content = msg.content
+    if content:
+        raw_lines = content.split("\n")
+        if len(raw_lines) > _MAX_BODY_LINES:
+            half = _MAX_BODY_LINES // 2
+            omitted = len(raw_lines) - _MAX_BODY_LINES
+            content = "\n".join(
+                raw_lines[:half]
+                + [f"\n... ({omitted} lines omitted) ...\n"]
+                + raw_lines[-half:]
+            )
+
+        if msg.role == "tool_result" and not msg.is_error:
+            if _looks_like_json(content):
+                try:
+                    formatted = json.dumps(
+                        json.loads(content),
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                    flines = formatted.split("\n")
+                    if len(flines) > _MAX_BODY_LINES:
+                        half = _MAX_BODY_LINES // 2
+                        formatted = "\n".join(
+                            flines[:half]
+                            + [f"  ... ({len(flines) - _MAX_BODY_LINES} lines) ..."]
+                            + flines[-half:]
+                        )
+                    syn = Syntax(
+                        formatted,
+                        "json",
+                        theme="monokai",
+                        word_wrap=True,
+                        padding=(0, 0),
+                    )
+                    con.print(syn)
+                except (json.JSONDecodeError, ValueError):
+                    for line in content.split("\n"):
+                        con.print(Text(line, style="dim"))
+            else:
+                for line in content.split("\n"):
+                    con.print(Text(line, style="dim"))
+        elif msg.role == "error":
+            con.print(Text(content, style="bold red"))
+        elif msg.role == "user":
+            con.print(Text(content, style="green"))
+        else:
+            con.print(Text(content))
+
+    raw = con.file.getvalue()  # type: ignore[attr-defined]
+    result: list[str] = []
+    for line in raw.split("\n"):
+        result.append(f"  {line}" if line.rstrip() else "")
+    while result and not result[-1].strip():
+        result.pop()
+    return result
+
+
+def _build_view_items(messages: list[_Message], width: int) -> list[_ViewItem]:
+    items: list[_ViewItem] = []
+    for msg in messages:
+        default_expanded = msg.role != "tool_result"
+        items.append(
+            _ViewItem(
+                msg=msg,
+                body_lines=_render_body_lines(msg, width),
+                expanded=default_expanded,
+            )
+        )
+    return items
+
+
 # -- Interactive viewer ------------------------------------------------------
 
 
 class TraceViewer:
     """Interactive pager for session trace turns."""
 
-    def __init__(self, turns: list[Turn], session_id: str) -> None:
-        self._views = _build_views(turns)
+    def __init__(
+        self,
+        turns: list[Turn],
+        session_id: str,
+        *,
+        checkpoints: list[TurnCheckpoint] | None = None,
+        reload: Callable[[], tuple[list[Turn], list[TurnCheckpoint]]] | None = None,
+    ) -> None:
+        records: list[_TurnRecord] = [*turns, *(checkpoints or [])]
+        records.sort(key=lambda r: r.index)
+        self._views = _build_views(records)
         self._session_id = session_id
+        self._reload = reload
+        # Turn-list state
         self._cursor = 0
         self._expanded = False
+        # Message-list state (active when _expanded is True)
+        self._msg_cursor = 0
+        self._items: list[_ViewItem] | None = None
         self._scroll = 0
-        self._cached_lines: list[str] | None = None
 
     def run(self) -> None:
         if not self._views:
@@ -385,11 +537,8 @@ class TraceViewer:
         old_settings = termios.tcgetattr(fd)
         try:
             new_settings = termios.tcgetattr(fd)
-            # Disable canonical mode, echo, and signals for raw key reading
             new_settings[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
-            # Keep output processing (OPOST) so tabs expand and \n→\n works
             new_settings[1] |= termios.OPOST | termios.ONLCR
-            # Read one byte at a time, no timeout
             new_settings[6][termios.VMIN] = 1
             new_settings[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
@@ -410,71 +559,112 @@ class TraceViewer:
             cols, rows = 120, 40
         return cols, rows
 
+    def _enter_expanded(self) -> None:
+        self._expanded = True
+        self._items = None
+        self._msg_cursor = 0
+        self._scroll = 0
+
+    def _leave_expanded(self) -> None:
+        self._expanded = False
+        self._items = None
+        self._scroll = 0
+
+    def _maybe_reload(self) -> None:
+        if self._reload is None:
+            return
+        new_turns, new_checkpoints = self._reload()
+        records: list[_TurnRecord] = [*new_turns, *new_checkpoints]
+        records.sort(key=lambda r: r.index)
+        new_views = _build_views(records)
+        if len(new_views) != len(self._views):
+            was_at_end = self._cursor >= len(self._views) - 1
+            self._views = new_views
+            if was_at_end:
+                self._cursor = max(0, len(self._views) - 1)
+                if self._expanded:
+                    self._items = None
+                    self._msg_cursor = 0
+                    self._scroll = 0
+        else:
+            self._views = new_views
+
     def _loop(self, fd: int) -> None:
         while True:
             self._draw()
-            key = _read_key(fd)
+
+            if self._reload is not None:
+                key = _try_read_key(fd, 1.5)
+                if key is None:
+                    self._maybe_reload()
+                    continue
+            else:
+                key = _read_key(fd)
 
             if key == _KEY_QUIT:
                 break
-            elif key == _KEY_ESC:
-                if self._expanded:
-                    self._expanded = False
-                    self._scroll = 0
-                    self._cached_lines = None
-                else:
-                    break
-            elif key == _KEY_UP:
-                if self._expanded:
-                    self._scroll = max(0, self._scroll - 1)
-                else:
-                    self._cursor = max(0, self._cursor - 1)
-            elif key == _KEY_DOWN:
-                if self._expanded:
-                    self._scroll += 1
-                else:
-                    self._cursor = min(len(self._views) - 1, self._cursor + 1)
-            elif key in (_KEY_ENTER, _KEY_SPACE, _KEY_RIGHT):
-                if not self._expanded:
-                    self._expanded = True
-                    self._scroll = 0
-                    self._cached_lines = None
-            elif key in (_KEY_LEFT,):
-                if self._expanded:
-                    self._expanded = False
-                    self._scroll = 0
-                    self._cached_lines = None
-            elif key == _KEY_PAGE_DOWN:
-                if self._expanded:
-                    self._scroll += 20
-                else:
-                    self._cursor = min(len(self._views) - 1, self._cursor + 10)
-            elif key == _KEY_PAGE_UP:
-                if self._expanded:
-                    self._scroll = max(0, self._scroll - 20)
-                else:
-                    self._cursor = max(0, self._cursor - 10)
-            elif key == _KEY_HOME:
-                if self._expanded:
-                    self._scroll = 0
-                else:
-                    self._cursor = 0
-            elif key == _KEY_END:
-                if self._expanded:
-                    self._scroll = 99999
-                else:
-                    self._cursor = len(self._views) - 1
-            elif key == _KEY_TAB:
-                if self._expanded:
-                    # next turn while staying expanded
-                    if self._cursor < len(self._views) - 1:
-                        self._cursor += 1
-                        self._scroll = 0
-                        self._cached_lines = None
+            if key == _KEY_ESC and not self._expanded:
+                break
+
+            if self._expanded:
+                self._handle_expanded_key(key)
+            else:
+                self._handle_list_key(key)
+
+    def _handle_list_key(self, key: str) -> None:
+        if key == _KEY_UP:
+            self._cursor = max(0, self._cursor - 1)
+        elif key == _KEY_DOWN:
+            self._cursor = min(len(self._views) - 1, self._cursor + 1)
+        elif key in (_KEY_ENTER, _KEY_SPACE, _KEY_RIGHT):
+            self._enter_expanded()
+        elif key == _KEY_PAGE_DOWN:
+            self._cursor = min(len(self._views) - 1, self._cursor + 10)
+        elif key == _KEY_PAGE_UP:
+            self._cursor = max(0, self._cursor - 10)
+        elif key == _KEY_HOME:
+            self._cursor = 0
+        elif key == _KEY_END:
+            self._cursor = len(self._views) - 1
+
+    def _handle_expanded_key(self, key: str) -> None:
+        items = self._items
+        if items is None:
+            return
+
+        if key in (_KEY_ESC, _KEY_LEFT):
+            self._leave_expanded()
+        elif key == _KEY_UP:
+            self._msg_cursor = max(0, self._msg_cursor - 1)
+        elif key == _KEY_DOWN:
+            self._msg_cursor = min(len(items) - 1, self._msg_cursor + 1)
+        elif key in (_KEY_ENTER, _KEY_SPACE):
+            items[self._msg_cursor].expanded = not items[self._msg_cursor].expanded
+        elif key == _KEY_PAGE_DOWN:
+            self._msg_cursor = min(len(items) - 1, self._msg_cursor + 5)
+        elif key == _KEY_PAGE_UP:
+            self._msg_cursor = max(0, self._msg_cursor - 5)
+        elif key == _KEY_HOME:
+            self._msg_cursor = 0
+            self._scroll = 0
+        elif key == _KEY_END:
+            self._msg_cursor = len(items) - 1
+        elif key == _KEY_TAB:
+            if self._cursor < len(self._views) - 1:
+                self._cursor += 1
+                self._enter_expanded()
+        elif key == "e":
+            for item in items:
+                item.expanded = True
+        elif key == "c":
+            for item in items:
+                item.expanded = False
+
+    # -- Drawing -------------------------------------------------------------
 
     def _draw(self) -> None:
         cols, rows = self._term_size()
-        sys.stdout.write("\033[2J\033[H")  # clear + cursor home
+        sys.stdout.write("\033[2J\033[H")
 
         if self._expanded:
             self._draw_expanded(cols, rows)
@@ -484,8 +674,10 @@ class TraceViewer:
         sys.stdout.flush()
 
     def _draw_list(self, cols: int, rows: int) -> None:
+        follow_tag = " [following]" if self._reload is not None else ""
         header = (
-            f" agentm trace | session: {self._session_id} | {len(self._views)} turn(s)"
+            f" agentm trace | session: {self._session_id}"
+            f" | {len(self._views)} turn(s){follow_tag}"
         )
         footer = " ↑↓/jk: move  Enter/→: expand  q: quit  Home/End: jump"
 
@@ -500,19 +692,13 @@ class TraceViewer:
         for i in range(start, end):
             view = self._views[i]
             selected = i == self._cursor
-            line = view.summary_line[: cols - 3]
+            line = _render_turn_summary(view, cols - 3)
 
             if selected:
-                sys.stdout.write(f"\033[1;7m ▸ {line}\033[0m")
+                sys.stdout.write(f"\033[1;7m ▸ {line}\033[0m\n")
             else:
-                sys.stdout.write(f"   {line}")
+                sys.stdout.write(f"   {line}\n")
 
-            # pad to full width and newline
-            written = len(line) + 3
-            sys.stdout.write(" " * max(0, cols - written))
-            sys.stdout.write("\n")
-
-        # fill remaining rows
         remaining = usable - (end - start)
         for _ in range(remaining):
             sys.stdout.write(" " * cols + "\n")
@@ -522,37 +708,75 @@ class TraceViewer:
     def _draw_expanded(self, cols: int, rows: int) -> None:
         view = self._views[self._cursor]
 
-        if self._cached_lines is None:
-            self._cached_lines = _render_expanded_turn(view, cols - 2)
+        if self._items is None:
+            self._items = _build_view_items(view.messages, cols)
+            self._msg_cursor = 0
+            self._scroll = 0
 
-        all_lines = self._cached_lines
+        items = self._items
+
+        # Build flat line list with item ownership.
+        all_lines: list[str] = []
+        item_header_line: list[int] = []  # line index of each item's header
+
+        for idx, item in enumerate(items):
+            item_header_line.append(len(all_lines))
+            hdr = _render_item_header(item, cols, selected=(idx == self._msg_cursor))
+            all_lines.append(hdr)
+
+            if item.expanded:
+                all_lines.extend(item.body_lines)
+
+            all_lines.append("")  # separator
+
         total = len(all_lines)
         usable = rows - 3
 
-        self._scroll = min(self._scroll, max(0, total - usable))
+        # Auto-scroll: keep cursor item's header visible.
+        cursor_line = item_header_line[self._msg_cursor]
+        if cursor_line < self._scroll:
+            self._scroll = cursor_line
+        elif cursor_line >= self._scroll + usable:
+            self._scroll = cursor_line - usable + 1
+        self._scroll = max(0, min(self._scroll, max(0, total - usable)))
 
         visible = all_lines[self._scroll : self._scroll + usable]
 
+        # Header bar
         pct = (
             int(self._scroll / max(1, total - usable) * 100) if total > usable else 100
         )
-        turn_label = f"Turn {view.turn.index + 1}/{len(self._views)}"
-        header = f" {turn_label} | {len(view.messages)} msg(s) | {pct}%"
-        footer = " ↑↓: scroll  ←/Esc: back  PgUp/PgDn: page  Tab: next turn"
-
+        turn_label = f"Turn {self._cursor + 1}/{len(self._views)}"
+        n_collapsed = sum(1 for it in items if not it.expanded)
+        header = (
+            f" {turn_label} | {len(items)} msg(s)"
+            f"{f', {n_collapsed} collapsed' if n_collapsed else ''}"
+            f" | {pct}%"
+        )
         sys.stdout.write(f"\033[7m{header:<{cols}}\033[0m\n")
 
         for line in visible:
-            sys.stdout.write(f" {line}\n")
+            sys.stdout.write(f"{line}\n")
 
         remaining = usable - len(visible)
         for _ in range(remaining):
             sys.stdout.write("\n")
 
+        footer = (
+            " ↑↓: move  Enter: toggle  "
+            "e: expand all  c: collapse all  "
+            "←/Esc: back  Tab: next turn"
+        )
         sys.stdout.write(f"\033[2m{footer:<{cols}}\033[0m")
 
 
-def run_interactive_viewer(turns: list[Turn], session_id: str) -> None:
+def run_interactive_viewer(
+    turns: list[Turn],
+    session_id: str,
+    *,
+    checkpoints: list[TurnCheckpoint] | None = None,
+    reload: Callable[[], tuple[list[Turn], list[TurnCheckpoint]]] | None = None,
+) -> None:
     """Entry point for the interactive trace viewer."""
-    viewer = TraceViewer(turns, session_id)
+    viewer = TraceViewer(turns, session_id, checkpoints=checkpoints, reload=reload)
     viewer.run()

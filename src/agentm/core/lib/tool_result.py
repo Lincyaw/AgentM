@@ -63,4 +63,12 @@ def with_model_note(
     )
 
 
-__all__ = ["with_model_note"]
+def text_result(text: str) -> ToolResult:
+    return ToolResult(content=[TextContent(type="text", text=text)])
+
+
+def error_result(text: str) -> ToolResult:
+    return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
+
+__all__ = ["error_result", "text_result", "with_model_note"]

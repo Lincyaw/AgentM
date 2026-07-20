@@ -24,6 +24,7 @@ app.command("run")(run)
 app.add_typer(config_app, name="config")
 app.add_typer(scenario_app, name="scenario")
 app.add_typer(trace_app, name="trace")
+app.add_typer(trace_app, name="t", hidden=True)
 app.add_typer(lint_app, name="lint")
 
 

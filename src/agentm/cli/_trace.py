@@ -77,9 +77,35 @@ class _TraceContext:
 trace_app = typer.Typer(
     name="trace",
     help="Query session trajectories.",
-    no_args_is_help=True,
+    invoke_without_command=True,
     add_completion=False,
 )
+
+
+@trace_app.callback()
+def _trace_default(
+    ctx: typer.Context,
+    session: str | None = typer.Option(None, "--session", "-s"),
+    fmt: str | None = typer.Option(None, "--output", "-o", help="json for ndjson dump"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Stream new content"),
+) -> None:
+    """Open the interactive viewer for the latest session when no subcommand is given."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if follow and not sys.stdout.isatty():
+        _follow_session(ctx, session)
+        return
+    if not follow and (fmt == "json" or not sys.stdout.isatty()):
+        messages_cmd(
+            ctx,
+            session=session,
+            role=None,
+            hide_thinking=False,
+            limit=None,
+            fmt="ndjson",
+        )
+        return
+    view_cmd(ctx, session=session, follow=follow)
 
 
 def _get_query_store(ctx: typer.Context) -> TrajectoryQueryStore:
@@ -107,23 +133,170 @@ def _get_query_store(ctx: typer.Context) -> TrajectoryQueryStore:
 def _resolve_session_id(
     query: TrajectoryQueryStore,
     session: str | None,
-    latest: bool,
 ) -> str:
-    if session and latest:
-        stderr_console.print(
-            "[red]error: --session and --latest are mutually exclusive[/red]"
-        )
-        raise typer.Exit(2)
     if session:
         return session
-    if latest:
-        metas = list(query.sessions())
-        if not metas:
-            stderr_console.print("[red]error: no sessions in store[/red]")
-            raise typer.Exit(EXIT_NOT_FOUND)
-        return max(metas, key=lambda item: item.created_at).id
-    stderr_console.print("[red]error: must specify --session or --latest[/red]")
-    raise typer.Exit(2)
+    metas = list(query.sessions())
+    if not metas:
+        stderr_console.print("[red]error: no sessions in store[/red]")
+        raise typer.Exit(EXIT_NOT_FOUND)
+    return max(metas, key=lambda item: item.created_at).id
+
+
+# -- follow ----------------------------------------------------------------
+
+
+_F_COLORS: dict[str, str] = {
+    "user": "\033[1;32m",
+    "assistant": "\033[1;34m",
+    "tool_call": "\033[1;33m",
+    "tool_result": "\033[36m",
+    "error": "\033[1;31m",
+}
+_F_RST = "\033[0m"
+_F_DIM = "\033[2m"
+
+
+def _follow_print(
+    role: str,
+    label: str,
+    content: str,
+    *,
+    dim: bool = False,
+) -> None:
+    color = _F_COLORS.get(role, "")
+    sys.stdout.write(f"{color}── {label} ──{_F_RST}\n")
+    if dim:
+        sys.stdout.write(f"{_F_DIM}{content}{_F_RST}\n\n")
+    else:
+        sys.stdout.write(f"{content}\n\n")
+    sys.stdout.flush()
+
+
+def _follow_print_trigger(
+    record: Turn | TurnCheckpoint,
+) -> None:
+    if not isinstance(record.trigger, UserInput):
+        return
+    parts: list[str] = []
+    for block in record.trigger.content:
+        if isinstance(block, TextContent):
+            parts.append(block.text)
+        elif isinstance(block, ImageContent):
+            parts.append(f"[image {block.mime_type}]")
+        else:
+            parts.append(f"[{type(block).__name__}]")
+    _follow_print("user", f"USER  turn={record.index}", "\n".join(parts))
+
+
+def _follow_print_round(
+    record: Turn | TurnCheckpoint,
+    ri: int,
+) -> None:
+    rnd = record.rounds[ri]
+
+    # assistant response
+    text_parts: list[str] = []
+    for block in rnd.response.content:
+        if isinstance(block, TextContent):
+            text_parts.append(block.text)
+        elif isinstance(block, ThinkingBlock):
+            text_parts.append(f"[thinking] {block.text[:200]}")
+        elif isinstance(block, OpaqueThinkingBlock):
+            text_parts.append(f"[thinking: {block.provider}]")
+        elif isinstance(block, ToolCallBlock):
+            args = json.dumps(dict(block.arguments), ensure_ascii=False)[:120]
+            text_parts.append(f"[call: {block.name}({args})]")
+    if text_parts:
+        _follow_print(
+            "assistant",
+            f"ASSISTANT  turn={record.index} round={ri}",
+            "\n".join(text_parts),
+        )
+
+    # tool results
+    for rec in rnd.tool_results:
+        txt = "".join(b.text for b in rec.result.content if isinstance(b, TextContent))
+        label = f"RESULT: {rec.call.name}  turn={record.index} round={ri}"
+        if rec.result.is_error:
+            label += " [ERROR]"
+        preview = txt[:500]
+        if len(txt) > 500:
+            preview += f"\n... ({len(txt) - 500} chars truncated)"
+        _follow_print(
+            "tool_result" if not rec.result.is_error else "error",
+            label,
+            preview,
+            dim=not rec.result.is_error,
+        )
+
+
+def _follow_print_commit(turn: Turn) -> None:
+    cause = type(turn.outcome.cause).__name__
+    inp = turn.meta.total_input_tokens
+    out = turn.meta.total_output_tokens
+    sys.stdout.write(
+        f"{_F_DIM}── committed: {cause}  in:{inp:,} out:{out:,} ──{_F_RST}\n\n"
+    )
+    sys.stdout.flush()
+
+
+def _follow_session(
+    ctx: typer.Context,
+    session: str | None,
+) -> None:
+    import time
+
+    query = _get_query_store(ctx)
+    sid = _resolve_session_id(query, session)
+
+    shown_turn_ids: set[str] = set()
+    checkpoint_id: str | None = None
+    checkpoint_rounds = 0
+
+    stderr_console.print(f"[dim]following {sid} (Ctrl+C to stop)[/dim]")
+
+    try:
+        while True:
+            try:
+                turns = list(query.turns(sid))
+            except KeyError:
+                stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+                raise typer.Exit(EXIT_NOT_FOUND)
+
+            for turn in turns:
+                if turn.id in shown_turn_ids:
+                    continue
+                shown_turn_ids.add(turn.id)
+
+                if turn.id == checkpoint_id:
+                    # was being followed as checkpoint — print remaining rounds
+                    for ri in range(checkpoint_rounds, len(turn.rounds)):
+                        _follow_print_round(turn, ri)
+                else:
+                    _follow_print_trigger(turn)
+                    for ri in range(len(turn.rounds)):
+                        _follow_print_round(turn, ri)
+
+                _follow_print_commit(turn)
+                checkpoint_id = None
+                checkpoint_rounds = 0
+
+            checkpoints = list(query.checkpoints(sid))
+            if checkpoints:
+                cp = checkpoints[0]
+                if cp.id != checkpoint_id:
+                    checkpoint_id = cp.id
+                    checkpoint_rounds = 0
+                    _follow_print_trigger(cp)
+
+                for ri in range(checkpoint_rounds, len(cp.rounds)):
+                    _follow_print_round(cp, ri)
+                checkpoint_rounds = len(cp.rounds)
+
+            time.sleep(1)
+    except KeyboardInterrupt:
+        stderr_console.print("\n[dim]stopped[/dim]")
 
 
 def _resolve_format(fmt: str | None) -> TraceFormat:
@@ -270,13 +443,12 @@ def _checkpoint_summary(checkpoint: TurnCheckpoint) -> _TurnSummary:
 def turns_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
-    latest: bool = typer.Option(False, "--latest"),
     limit: int | None = typer.Option(None, "--limit"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print per-turn summaries for a session."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session, latest)
+    sid = _resolve_session_id(query, session)
     try:
         turns = list(query.turns(sid))
     except KeyError:
@@ -316,7 +488,6 @@ def turns_cmd(
 def messages_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
-    latest: bool = typer.Option(False, "--latest"),
     role: str | None = typer.Option(None, "--role"),
     hide_thinking: bool = typer.Option(False, "--hide-thinking"),
     limit: int | None = typer.Option(None, "--limit"),
@@ -324,7 +495,7 @@ def messages_cmd(
 ) -> None:
     """Print the conversation messages for a session."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session, latest)
+    sid = _resolve_session_id(query, session)
     try:
         turns = list(query.turns(sid))
     except KeyError:
@@ -466,12 +637,11 @@ def messages_cmd(
 def usage_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
-    latest: bool = typer.Option(False, "--latest"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Token usage summary for a session."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session, latest)
+    sid = _resolve_session_id(query, session)
     try:
         turns = list(query.turns(sid))
     except KeyError:
@@ -512,7 +682,7 @@ def usage_cmd(
 def view_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
-    latest: bool = typer.Option(False, "--latest"),
+    follow: bool = typer.Option(False, "--follow", "-f"),
 ) -> None:
     """Interactive trace viewer with turn navigation and expand/collapse."""
     from agentm.cli._trace_viewer import run_interactive_viewer
@@ -522,14 +692,25 @@ def view_cmd(
         raise typer.Exit(2)
 
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session, latest)
+    sid = _resolve_session_id(query, session)
     try:
         turns = list(query.turns(sid))
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
+    checkpoints = list(query.checkpoints(sid))
 
-    run_interactive_viewer(turns, sid)
+    reload = None
+    if follow:
+
+        def reload() -> tuple[list[Turn], list[TurnCheckpoint]]:
+            try:
+                t = list(query.turns(sid))
+            except KeyError:
+                t = []
+            return t, list(query.checkpoints(sid))
+
+    run_interactive_viewer(turns, sid, checkpoints=checkpoints, reload=reload)
 
 
 # -- tools -------------------------------------------------------------------
@@ -539,14 +720,13 @@ def view_cmd(
 def tools_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
-    latest: bool = typer.Option(False, "--latest"),
     tool: str | None = typer.Option(None, "--tool"),
     limit: int | None = typer.Option(None, "--limit"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """Print tool calls with arguments and results."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session, latest)
+    sid = _resolve_session_id(query, session)
     try:
         turns = list(query.turns(sid))
     except KeyError:

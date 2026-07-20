@@ -581,14 +581,17 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 ORDER BY created_at
                 """
             )
-            metas = [
-                self._codec.deserialize_session_meta(  # type: ignore[arg-type]
-                    dict(_json_mapping(record[0]))
-                )
-                for record in cur.fetchall()
-            ]
-        if not all(isinstance(meta, SessionMeta) for meta in metas):
-            raise TypeError("trajectory session metadata codec returned invalid data")
+            metas: list[SessionMeta] = []
+            for (raw,) in cur.fetchall():
+                try:
+                    meta = self._codec.deserialize_session_meta(  # type: ignore[arg-type]
+                        dict(_json_mapping(raw))
+                    )
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if not isinstance(meta, SessionMeta):
+                    continue
+                metas.append(meta)
         return metas
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:

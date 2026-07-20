@@ -419,7 +419,10 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
     def _load_all_unlocked(self) -> InMemoryTrajectoryStore:
         state = InMemoryTrajectoryStore()
         for path in sorted(self._directory.glob("*.jsonl")):
-            self._replay_file(path, state)
+            try:
+                self._replay_file(path, state)
+            except (ValueError, KeyError, TypeError):
+                continue
         return state
 
     def _load_session_unlocked(
