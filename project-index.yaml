@@ -41,7 +41,9 @@ requirements:
       and cache/compaction state; there is no separately selectable or
       rebuildable node store. A configured DSN/path applies to that one port;
       core factories do not discover backends, and resolver-owned resources
-      remain alive across sharing descendants.
+      remain alive across sharing descendants. Portable node index declarations
+      include tool-call/name, content-reference, and visibility lookups; SQL
+      stores materialize them natively while scan stores preserve semantics.
       Compaction publishes its compact boundary, content-replacement state,
       and head advance as one store mutation anchored to the latest committed
       turn. Node/head fork selectors preserve the exact logical-parent anchor

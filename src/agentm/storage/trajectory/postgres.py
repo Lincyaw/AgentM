@@ -1062,7 +1062,10 @@ def _index_statements(schema: str) -> tuple[str, ...]:
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_root_session_seq_idx ON {prefix} (root_session_id, session_id, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_turn_idx ON {prefix} (session_id, turn_index, round_index, message_index, turn_id)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_tool_call_idx ON {prefix} USING gin (tool_call_ids)",
+        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_tool_name_idx ON {prefix} USING gin (tool_names)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_cache_idx ON {prefix} (root_session_id, cache_key, session_id, seq)",
+        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_content_ref_idx ON {prefix} (content_ref, session_id, seq)",
+        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_visibility_idx ON {prefix} (session_id, kind, role, visibility, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_session_timestamp_idx ON {prefix} (session_id, timestamp, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_heads_branch_idx ON {heads} (root_session_id, session_id, branch_id, agent_id, is_sidechain)",
     )

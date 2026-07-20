@@ -195,9 +195,24 @@ TRAJECTORY_NODE_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
         purpose="tool_use/tool_result completion and replay diagnostics",
     ),
     TrajectoryIndexSpec(
+        name="trajectory_nodes_tool_name",
+        fields=("root_session_id", "tool_name", "session_id", "seq"),
+        purpose="tool-name trajectory filtering and usage diagnostics",
+    ),
+    TrajectoryIndexSpec(
         name="trajectory_nodes_cache",
         fields=("root_session_id", "cache_key", "session_id", "seq"),
         purpose="prompt-cache/content-replacement prefix lookup",
+    ),
+    TrajectoryIndexSpec(
+        name="trajectory_nodes_content_ref",
+        fields=("content_ref", "session_id", "seq"),
+        purpose="referenced summary and artifact lineage lookup",
+    ),
+    TrajectoryIndexSpec(
+        name="trajectory_nodes_visibility",
+        fields=("session_id", "kind", "role", "visibility", "seq"),
+        purpose="provider-visible and control-node replay filtering",
     ),
     TrajectoryIndexSpec(
         name="trajectory_nodes_session_timestamp",
