@@ -5,22 +5,29 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
+import re
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentm.cli._trace_model import (
+from loguru import logger
+from sqlalchemy.engine import Connection, RowMapping
+
+from agentm.presenter.trajectory import (
     TraceQuery,
     TraceRow,
     TraceSnapshot,
+    TraceTableColumn,
     TraceView,
     TraceViewRegistry,
     TraceViewSpec,
-    default_trace_view_specs,
+    build_trace_view_registry,
     filter_trace_rows,
+    run_textual_viewer,
 )
 from agentm.core.abi.query import TrajectoryQueryStore
+from agentm.storage.sql import create_sqlite_engine
 
 _POLICY_TABLES = (
     "event_log",
@@ -37,8 +44,87 @@ _SUMMARY_CATEGORIES = frozenset({"summary"})
 _EFFECT_CATEGORIES = frozenset({"effects"})
 _TOOL_CATEGORIES = frozenset({"tools"})
 _FILE_CATEGORIES = frozenset({"files"})
+_FILE_STREAM_CATEGORIES = frozenset({"file_stream"})
 _ENTITY_CATEGORIES = frozenset({"entities"})
 _ERROR_CATEGORIES = frozenset({"errors"})
+
+_FILE_COLUMNS = (
+    TraceTableColumn("location", "Loc", max_width=8),
+    TraceTableColumn("name", "File", max_width=60),
+    TraceTableColumn("reads", "Reads", max_width=6),
+    TraceTableColumn("writes", "Writes", max_width=6),
+    TraceTableColumn("refs", "Refs", max_width=5),
+    TraceTableColumn("events", "Events", max_width=6),
+    TraceTableColumn("latest", "Latest", max_width=34),
+    TraceTableColumn("preview", "Preview", max_width=56),
+)
+_FILE_STREAM_COLUMNS = (
+    TraceTableColumn("location", "Loc", max_width=8),
+    TraceTableColumn("name", "File", max_width=58),
+    TraceTableColumn("operation", "Operation", max_width=9),
+    TraceTableColumn("phase", "Phase", max_width=9),
+    TraceTableColumn("result", "Result", max_width=18),
+    TraceTableColumn("source", "Source", max_width=22),
+    TraceTableColumn("tool", "Tool", max_width=16),
+    TraceTableColumn("preview", "Preview", max_width=56),
+)
+
+_HEREDOC_RE = re.compile(
+    r"<<-?\s*(?:(?P<quote>['\"])(?P<quoted>[^'\"]+)(?P=quote)|(?P<bare>[A-Za-z0-9_./-]+))"
+)
+_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "|&", "\n"})
+_SHELL_REDIRECTS = frozenset(
+    {">", ">>", "<", "<<", "<<-", "<<<", "<>", ">|", "&>", "&>>"}
+)
+_FILE_READER_COMMANDS = frozenset({"cat"})
+_PATH_TOKEN_RE = re.compile(
+    r"(?<![\w./-])("
+    r"/[A-Za-z0-9_./@+-]{3,}"
+    r"|(?:[A-Za-z0-9_.@+-]+/)+[A-Za-z0-9_.@+-]+"
+    r"|[A-Za-z0-9_.@+-]+\."
+    r"(?:ts|tsx|js|jsx|py|go|rs|json|md|yaml|yml|toml|txt|sql|sh)"
+    r")(?![\w./-])"
+)
+_IDENTIFIER_RE = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]{2,}\b")
+_DECLARATION_RE = re.compile(
+    r"\b(?:class|const|def|enum|function|interface|let|type|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _FileEvent:
+    event_id: int
+    ts: float
+    turn: int
+    phase: str
+    tool_name: str
+    operation: str
+    path: str
+    source: str
+    args_hash: str | None
+    status: str
+    error_category: str | None
+    error_fingerprint: str | None
+    result_content_hash: str | None
+    content_hash: str | None
+    previous_content_hash: str | None
+    policy_tool_event: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _MergedFileEvent:
+    event: _FileEvent
+    phases: tuple[str, ...]
+    sources: tuple[str, ...]
+    events: tuple[_FileEvent, ...]
+
+    @property
+    def phase_label(self) -> str:
+        return "+".join(self.phases)
+
+    @property
+    def source_label(self) -> str:
+        return "+".join(self.sources)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +177,7 @@ class PolicyTraceViewProvider:
             TraceViewSpec(
                 id="policy-files",
                 title="Policy Files",
-                description="Per-file policy state snapshots.",
+                description="Per-file read/write history.",
                 shortcut="",
                 build=lambda snapshot, query: self._build_view(
                     "policy-files",
@@ -99,6 +185,19 @@ class PolicyTraceViewProvider:
                     snapshot,
                     query,
                     categories=_FILE_CATEGORIES,
+                ),
+            ),
+            TraceViewSpec(
+                id="policy-file-stream",
+                title="File Stream",
+                description="Chronological file read/write/reference event stream.",
+                shortcut="",
+                build=lambda snapshot, query: self._build_view(
+                    "policy-file-stream",
+                    "File Stream",
+                    snapshot,
+                    query,
+                    categories=_FILE_STREAM_CATEGORIES,
                 ),
             ),
             TraceViewSpec(
@@ -151,17 +250,24 @@ class PolicyTraceViewProvider:
             rows=filtered,
             summary=_summary_text(db_path, rows, filtered),
             empty_text="No policy rows match the current query.",
+            columns=_columns_for_categories(categories),
         )
 
 
-def build_policy_trace_view_registry(db_path: Path | None = None) -> TraceViewRegistry:
-    """Build the default trace registry with the policy placeholder replaced."""
+def _columns_for_categories(
+    categories: frozenset[str],
+) -> tuple[TraceTableColumn, ...]:
+    if categories == _FILE_CATEGORIES:
+        return _FILE_COLUMNS
+    if categories == _FILE_STREAM_CATEGORIES:
+        return _FILE_STREAM_COLUMNS
+    return ()
 
-    registry = TraceViewRegistry(
-        spec for spec in default_trace_view_specs() if spec.id != "policy"
-    )
-    registry.extend(PolicyTraceViewProvider(db_path=db_path))
-    return registry
+
+def build_policy_trace_view_registry(db_path: Path | None = None) -> TraceViewRegistry:
+    """Build AgentM's shared trajectory app registry with policy tabs."""
+
+    return build_trace_view_registry((PolicyTraceViewProvider(db_path=db_path),))
 
 
 def run_policy_trace_viewer(
@@ -172,8 +278,6 @@ def run_policy_trace_viewer(
     follow: bool = False,
 ) -> None:
     """Run AgentM's shared Textual trace viewer with policy projection tabs."""
-
-    from agentm.cli._trace_textual import run_textual_viewer
 
     run_textual_viewer(
         query,
@@ -209,42 +313,62 @@ def load_policy_trace_rows(
             ),
         )
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    engine = create_sqlite_engine(db_path)
     try:
-        existing = _existing_tables(conn)
-        if not existing.intersection(_POLICY_TABLES):
-            return (
-                _diagnostic_row(
-                    session_id,
-                    title="Policy Tables Missing",
-                    preview=str(db_path),
-                    content=f"No policy projection tables were found in {db_path}",
-                ),
-            )
-        counts = _session_counts(conn, session_id, existing)
-        rows: list[TraceRow] = []
-        if "summary" in categories:
-            rows.extend(_summary_rows(conn, session_id, db_path, existing, counts))
-        if "effects" in categories and "event_log" in existing:
-            rows.extend(_effect_rows(conn, session_id))
-        if "tools" in categories and "policy_tool_events" in existing:
-            rows.extend(_tool_rows(conn, session_id))
-        if "files" in categories and "policy_file_state" in existing:
-            rows.extend(_file_rows(conn, session_id))
-        if "entities" in categories and "policy_entity_state" in existing:
-            rows.extend(_entity_rows(conn, session_id))
-        if "errors" in categories and "policy_eval_error" in existing:
-            rows.extend(_eval_error_rows(conn, session_id))
-        if not rows:
-            rows.append(_empty_category_row(session_id, db_path, counts, categories))
-        return tuple(rows)
+        with engine.connect() as conn:
+            existing = _existing_tables(conn)
+            if not existing.intersection(_POLICY_TABLES):
+                return (
+                    _diagnostic_row(
+                        session_id,
+                        title="Policy Tables Missing",
+                        preview=str(db_path),
+                        content=f"No policy projection tables were found in {db_path}",
+                    ),
+                )
+            counts = _session_counts(conn, session_id, existing)
+            rows: list[TraceRow] = []
+            if "summary" in categories:
+                rows.extend(_summary_rows(conn, session_id, db_path, existing, counts))
+            if "effects" in categories and "event_log" in existing:
+                rows.extend(_effect_rows(conn, session_id))
+            if "tools" in categories and "policy_tool_events" in existing:
+                rows.extend(_tool_rows(conn, session_id))
+            if "files" in categories and "policy_file_state" in existing:
+                rows.extend(_file_rows(conn, session_id))
+            if "file_stream" in categories and "policy_tool_events" in existing:
+                rows.extend(_file_stream_rows(conn, session_id))
+            if "entities" in categories and "policy_entity_state" in existing:
+                rows.extend(_entity_rows(conn, session_id))
+            if "errors" in categories and "policy_eval_error" in existing:
+                rows.extend(_eval_error_rows(conn, session_id))
+            if not rows:
+                rows.append(
+                    _empty_category_row(session_id, db_path, counts, categories)
+                )
+            return tuple(rows)
     finally:
-        conn.close()
+        engine.dispose()
+
+
+def _rows(
+    conn: Connection,
+    sql: str,
+    params: Sequence[object] = (),
+) -> list[RowMapping]:
+    return list(conn.exec_driver_sql(sql, tuple(params)).mappings().all())
+
+
+def _row(
+    conn: Connection,
+    sql: str,
+    params: Sequence[object] = (),
+) -> RowMapping | None:
+    return conn.exec_driver_sql(sql, tuple(params)).mappings().fetchone()
 
 
 def _summary_rows(
-    conn: sqlite3.Connection,
+    conn: Connection,
     session_id: str,
     db_path: Path,
     existing: set[str],
@@ -268,14 +392,15 @@ def _summary_rows(
     ]
 
     if "policy_session_summary" in existing:
-        row = conn.execute(
+        row = _row(
+            conn,
             """
             SELECT updated_at, summary_json
             FROM policy_session_summary
             WHERE session_id = ?
             """,
             (session_id,),
-        ).fetchone()
+        )
         if row is not None:
             summary = _loads(row["summary_json"])
             rows.append(
@@ -305,7 +430,8 @@ def _summary_rows(
         rows.append(_aggregate_row(conn, session_id, "file_hotspots"))
 
     if "policy_turn_summary" in existing:
-        for row in conn.execute(
+        for row in _rows(
+            conn,
             """
             SELECT turn_index, updated_at, summary_json
             FROM policy_turn_summary
@@ -313,7 +439,7 @@ def _summary_rows(
             ORDER BY turn_index ASC
             """,
             (session_id,),
-        ).fetchall():
+        ):
             summary = _loads(row["summary_json"])
             rows.append(
                 TraceRow(
@@ -338,14 +464,15 @@ def _summary_rows(
 
 
 def _aggregate_row(
-    conn: sqlite3.Connection,
+    conn: Connection,
     session_id: str,
     category: str,
 ) -> TraceRow:
     if category == "effects":
         data = [
             dict(row)
-            for row in conn.execute(
+            for row in _rows(
+                conn,
                 """
                 SELECT rule_id, mode, effect, COUNT(*) AS count
                 FROM event_log
@@ -354,7 +481,7 @@ def _aggregate_row(
                 ORDER BY count DESC, rule_id ASC
                 """,
                 (session_id,),
-            ).fetchall()
+            )
         ]
         return TraceRow(
             key=f"policy:aggregate:effects:{session_id}",
@@ -367,7 +494,8 @@ def _aggregate_row(
     if category == "tools":
         data = [
             dict(row)
-            for row in conn.execute(
+            for row in _rows(
+                conn,
                 """
                 SELECT tool_name, phase, COUNT(*) AS count
                 FROM policy_tool_events
@@ -376,7 +504,7 @@ def _aggregate_row(
                 ORDER BY count DESC, tool_name ASC, phase ASC
                 """,
                 (session_id,),
-            ).fetchall()
+            )
         ]
         return TraceRow(
             key=f"policy:aggregate:tools:{session_id}",
@@ -389,7 +517,8 @@ def _aggregate_row(
     if category == "entities":
         data = [
             dict(row)
-            for row in conn.execute(
+            for row in _rows(
+                conn,
                 """
                 SELECT entity_type, COUNT(*) AS count,
                        SUM(occurrence_count) AS occurrences
@@ -399,7 +528,7 @@ def _aggregate_row(
                 ORDER BY count DESC, entity_type ASC
                 """,
                 (session_id,),
-            ).fetchall()
+            )
         ]
         return TraceRow(
             key=f"policy:aggregate:entities:{session_id}",
@@ -412,7 +541,8 @@ def _aggregate_row(
 
     data = [
         dict(row)
-        for row in conn.execute(
+        for row in _rows(
+            conn,
             """
             SELECT path, read_count, write_count, first_read_turn,
                    last_read_turn, last_write_turn, content_hash
@@ -422,7 +552,7 @@ def _aggregate_row(
             LIMIT 50
             """,
             (session_id,),
-        ).fetchall()
+        )
     ]
     return TraceRow(
         key=f"policy:aggregate:file_hotspots:{session_id}",
@@ -434,8 +564,9 @@ def _aggregate_row(
     )
 
 
-def _effect_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
-    for row in conn.execute(
+def _effect_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
         """
         SELECT *
         FROM event_log
@@ -443,7 +574,7 @@ def _effect_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow
         ORDER BY ts ASC, id ASC
         """,
         (session_id,),
-    ).fetchall():
+    ):
         context = _loads(row["context_json"])
         state = f"{row['mode'] or '-'}:{row['effect'] or '-'}"
         yield TraceRow(
@@ -471,8 +602,9 @@ def _effect_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow
         )
 
 
-def _tool_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
-    for row in conn.execute(
+def _tool_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
         """
         SELECT *
         FROM policy_tool_events
@@ -480,7 +612,7 @@ def _tool_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
         ORDER BY turn ASC, id ASC
         """,
         (session_id,),
-    ).fetchall():
+    ):
         args = _loads(row["args_json"])
         result = _loads(row["result_json"])
         state = _loads(row["state_json"])
@@ -543,8 +675,13 @@ def _tool_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
         )
 
 
-def _file_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
-    for row in conn.execute(
+def _file_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+    events_by_path = _file_events_by_path(
+        _merge_file_events(_file_events(conn, session_id))
+    )
+    state_paths: set[str] = set()
+    for row in _rows(
+        conn,
         """
         SELECT *
         FROM policy_file_state
@@ -552,16 +689,24 @@ def _file_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
         ORDER BY (read_count + write_count) DESC, path ASC
         """,
         (session_id,),
-    ).fetchall():
+    ):
+        state_paths.add(row["path"])
+        history = events_by_path.get(row["path"], [])
         last_turn = _last_turn(row["last_write_turn"], row["last_read_turn"])
-        state = f"reads:{row['read_count']} writes:{row['write_count']}"
+        refs = sum(1 for event in history if event.event.operation == "reference")
+        latest = _latest_file_event(history)
+        content_signals = _file_content_signals(history)
+        state = (
+            f"r:{row['read_count']} w:{row['write_count']} ref:{refs} ev:{len(history)}"
+        )
         yield TraceRow(
             key=f"policy:file:{row['path']}",
             kind="policy",
             title=row["path"],
             preview=(
-                f"{state} first:{_dash(row['first_read_turn'])} "
-                f"last:{_dash(last_turn)} hash:{row['content_hash'] or '-'}"
+                f"first:{_dash(row['first_read_turn'])} "
+                f"last:{_dash(last_turn)} latest:{latest} "
+                f"hash:{row['content_hash'] or '-'}"
             ),
             content=_json_content(
                 {
@@ -576,15 +721,481 @@ def _file_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
                     "content_hash": row["content_hash"],
                     "reverts_to_prior_hash": bool(row["reverts_to_prior_hash"]),
                     "state": _loads(row["state_json"]),
+                    "history": [_merged_file_event_json(event) for event in history],
+                    "content_signals": content_signals,
                 }
             ),
             turn_index=last_turn,
-            metadata={"category": "file", "path": row["path"], "state": state},
+            cause=state,
+            metadata={
+                "category": "file",
+                "path": row["path"],
+                "state": state,
+                "reads": row["read_count"],
+                "writes": row["write_count"],
+                "refs": refs,
+                "events": len(history),
+                "latest": latest,
+            },
+        )
+
+    for path, history in sorted(events_by_path.items()):
+        if path in state_paths:
+            continue
+        if not history:
+            continue
+        reads = sum(1 for event in history if event.event.operation == "read")
+        writes = sum(1 for event in history if event.event.operation == "write")
+        refs = sum(1 for event in history if event.event.operation == "reference")
+        latest = history[-1]
+        state = f"r:{reads} w:{writes} ref:{refs} ev:{len(history)}"
+        latest_label = _latest_file_event(history)
+        content_signals = _file_content_signals(history)
+        yield TraceRow(
+            key=f"policy:file:derived:{path}",
+            kind="policy",
+            title=path,
+            preview=f"latest:{latest_label}",
+            content=_json_content(
+                {
+                    "session_id": session_id,
+                    "path": path,
+                    "state": "derived from policy_tool_events",
+                    "history": [_merged_file_event_json(event) for event in history],
+                    "content_signals": content_signals,
+                }
+            ),
+            turn_index=latest.event.turn,
+            cause=state,
+            metadata={
+                "category": "file",
+                "path": path,
+                "state": state,
+                "reads": reads,
+                "writes": writes,
+                "refs": refs,
+                "events": len(history),
+                "latest": latest_label,
+            },
         )
 
 
-def _entity_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
-    for row in conn.execute(
+def _file_stream_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+    for merged in _merge_file_events(_file_events(conn, session_id)):
+        event = merged.event
+        is_error = event.status.startswith("error")
+        tool_call_id = event.policy_tool_event.get("tool_call_id")
+        phase = merged.phase_label
+        source = merged.source_label
+        yield TraceRow(
+            key=(
+                f"policy:file_stream:{event.turn}:{tool_call_id}:"
+                f"{event.operation}:{event.path}:{phase}"
+            ),
+            kind="policy",
+            title=event.path,
+            preview=(
+                f"hash:{_dash(_short_text(event.args_hash, 8))} "
+                f"call:{_dash(tool_call_id)} raw:{len(merged.events)}"
+            ),
+            content=_json_content(
+                {
+                    "session_id": session_id,
+                    "file_event": _merged_file_event_json(merged),
+                    "raw_file_events": [
+                        _file_event_json(raw_event) for raw_event in merged.events
+                    ],
+                    "policy_tool_event": event.policy_tool_event,
+                }
+            ),
+            turn_index=event.turn,
+            tool_name=event.tool_name,
+            display_name=event.path,
+            is_error=is_error,
+            cause=event.status,
+            metadata={
+                "category": "file_stream",
+                "path": event.path,
+                "operation": event.operation,
+                "phase": phase,
+                "result": event.status,
+                "source": source,
+                "tool": event.tool_name,
+                "tool_call_id": tool_call_id,
+                "args_hash": event.args_hash,
+                "raw_event_count": len(merged.events),
+                "error_category": event.error_category,
+                "error_fingerprint": event.error_fingerprint,
+            },
+        )
+
+
+def _file_events(conn: Connection, session_id: str) -> list[_FileEvent]:
+    events: list[_FileEvent] = []
+    known_paths = _known_file_paths(conn, session_id)
+    for row in _rows(
+        conn,
+        """
+        SELECT *
+        FROM policy_tool_events
+        WHERE session_id = ?
+        ORDER BY turn ASC, id ASC
+        """,
+        (session_id,),
+    ):
+        args = _loads(row["args_json"])
+        result = _loads(row["result_json"])
+        state = _loads(row["state_json"])
+        processed = _loads(row["processed_json"])
+        error = _tool_is_error(row, result, state, processed)
+        paths = _file_event_paths(
+            row["tool_name"],
+            args,
+            processed,
+            state,
+            known_paths=known_paths,
+        )
+        if not paths:
+            continue
+        status = _file_event_status(row, state, processed, error)
+        policy_tool_event = {
+            "id": row["id"],
+            "ts": row["ts"],
+            "turn": row["turn"],
+            "phase": row["phase"],
+            "tool_call_id": row["tool_call_id"],
+            "tool_name": row["tool_name"],
+            "args_hash": row["args_hash"],
+            "args": args,
+            "result": result,
+            "processed": processed,
+            "state": state,
+            "exit_code": row["exit_code"],
+            "duration_ms": row["duration_ms"],
+            "result_content_hash": row["result_content_hash"],
+        }
+        for path, source in paths:
+            operation = _file_operation(row["tool_name"], args, processed, source)
+            known_paths.add(path)
+            events.append(
+                _FileEvent(
+                    event_id=row["id"],
+                    ts=row["ts"],
+                    turn=row["turn"],
+                    phase=row["phase"],
+                    tool_name=row["tool_name"],
+                    operation=operation,
+                    path=path,
+                    source=source,
+                    args_hash=row["args_hash"],
+                    status=status,
+                    error_category=_tool_error_category(state, processed),
+                    error_fingerprint=_tool_error_fingerprint(state, processed),
+                    result_content_hash=row["result_content_hash"],
+                    content_hash=_mapping_str(processed, "content_hash"),
+                    previous_content_hash=_mapping_str(
+                        processed, "previous_content_hash"
+                    ),
+                    policy_tool_event=policy_tool_event,
+                )
+            )
+    return events
+
+
+def _merge_file_events(events: Sequence[_FileEvent]) -> list[_MergedFileEvent]:
+    grouped: dict[tuple[object, ...], list[_FileEvent]] = {}
+    order: list[tuple[object, ...]] = []
+    for event in events:
+        key = _file_event_merge_key(event)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(event)
+
+    merged: list[_MergedFileEvent] = []
+    for key in order:
+        raw_events = grouped[key]
+        display_event = next(
+            (event for event in reversed(raw_events) if event.phase == "post"),
+            raw_events[-1],
+        )
+        merged.append(
+            _MergedFileEvent(
+                event=display_event,
+                phases=_unique_labels(event.phase for event in raw_events),
+                sources=_unique_labels(event.source for event in raw_events),
+                events=tuple(raw_events),
+            )
+        )
+    return merged
+
+
+def _file_event_merge_key(event: _FileEvent) -> tuple[object, ...]:
+    tool_call_id = event.policy_tool_event.get("tool_call_id")
+    if tool_call_id is None:
+        return ("event", event.event_id)
+    return (
+        "tool_call_file",
+        event.turn,
+        tool_call_id,
+        event.tool_name,
+        event.operation,
+        event.path,
+    )
+
+
+def _unique_labels(values: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    labels: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        labels.append(value)
+    return tuple(labels)
+
+
+def _file_events_by_path(
+    events: Sequence[_MergedFileEvent],
+) -> dict[str, list[_MergedFileEvent]]:
+    grouped: defaultdict[str, list[_MergedFileEvent]] = defaultdict(list)
+    for event in events:
+        grouped[event.event.path].append(event)
+    return dict(grouped)
+
+
+def _known_file_paths(conn: Connection, session_id: str) -> set[str]:
+    paths: set[str] = set()
+    try:
+        rows = _rows(
+            conn,
+            """
+            SELECT path
+            FROM policy_file_state
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+    except Exception as exc:
+        logger.debug("policy known file lookup failed: {}", exc)
+        return paths
+    for row in rows:
+        path = _clean_path(row["path"])
+        if path:
+            paths.add(path)
+    return paths
+
+
+def _file_event_paths(
+    tool_name: str,
+    args: object,
+    processed: object,
+    state: object,
+    *,
+    known_paths: set[str],
+) -> list[tuple[str, str]]:
+    candidates: list[tuple[object, str]] = []
+    if isinstance(args, Mapping):
+        candidates.extend(
+            [
+                (args.get("path"), "args.path"),
+                (args.get("file_path"), "args.file_path"),
+            ]
+        )
+    if isinstance(processed, Mapping):
+        candidates.append((processed.get("path"), "processed.path"))
+    entry = _tool_log_entry(state)
+    candidates.append((entry.get("path"), "tool_log.path"))
+
+    cmd = _command_text(args)
+    if cmd and tool_name == "bash":
+        candidates.extend(_paths_from_command(cmd, known_paths=known_paths))
+
+    seen: set[str] = set()
+    paths: list[tuple[str, str]] = []
+    for raw, source in candidates:
+        path = _clean_path(raw)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append((path, source))
+    return paths
+
+
+def _file_operation(
+    tool_name: str,
+    args: object,
+    processed: object,
+    source: str,
+) -> str:
+    raw_op = _mapping_str(processed, "file_op")
+    if raw_op:
+        lowered = raw_op.lower()
+        if lowered in {"read", "open", "glob", "list"}:
+            return "read"
+        if lowered in {"edit", "write", "patch", "delete", "remove"}:
+            return "write"
+    if tool_name in {"read", "glob"}:
+        return "read"
+    if tool_name in {"edit", "write"}:
+        return "write"
+    if source == "cmd.heuristic":
+        return _bash_file_operation(_command_text(args))
+    return "reference"
+
+
+def _bash_file_operation(cmd: str) -> str:
+    lowered = f" {cmd.lower()} "
+    write_markers = (
+        " >",
+        ">>",
+        " tee ",
+        " sed -i",
+        " perl -pi",
+        " touch ",
+        " rm ",
+        " rm -",
+        " mv ",
+        " cp ",
+        " mkdir ",
+    )
+    if any(marker in lowered for marker in write_markers):
+        return "write"
+    read_markers = (
+        " cat ",
+        " sed ",
+        " grep ",
+        " rg ",
+        " find ",
+        " ls ",
+        " head ",
+        " tail ",
+        " wc ",
+        " awk ",
+    )
+    if any(marker in lowered for marker in read_markers):
+        return "read"
+    return "reference"
+
+
+def _file_event_status(
+    row: RowMapping,
+    state: object,
+    processed: object,
+    error: bool,
+) -> str:
+    if row["phase"] == "pre":
+        return "intent"
+    if error:
+        return f"error:{_tool_error_category(state, processed) or 'unknown'}"
+    exit_code = row["exit_code"]
+    if exit_code is None and isinstance(processed, Mapping):
+        exit_code = processed.get("exit_code")
+    return f"ok:{_dash(exit_code)}"
+
+
+def _file_event_json(event: _FileEvent) -> dict[str, object]:
+    return {
+        "event_id": event.event_id,
+        "ts": event.ts,
+        "turn": event.turn,
+        "phase": event.phase,
+        "tool_name": event.tool_name,
+        "operation": event.operation,
+        "path": event.path,
+        "source": event.source,
+        "args_hash": event.args_hash,
+        "status": event.status,
+        "error_category": event.error_category,
+        "error_fingerprint": event.error_fingerprint,
+        "result_content_hash": event.result_content_hash,
+        "content_hash": event.content_hash,
+        "previous_content_hash": event.previous_content_hash,
+    }
+
+
+def _merged_file_event_json(event: _MergedFileEvent) -> dict[str, object]:
+    data = _file_event_json(event.event)
+    data["phase"] = event.phase_label
+    data["source"] = event.source_label
+    data["raw_event_count"] = len(event.events)
+    return data
+
+
+def _latest_file_event(history: Sequence[_MergedFileEvent]) -> str:
+    if not history:
+        return "-"
+    event = history[-1]
+    return (
+        f"T{event.event.turn} {event.event.operation}/"
+        f"{event.phase_label} {event.event.tool_name}"
+    )
+
+
+def _file_content_signals(
+    history: Sequence[_MergedFileEvent],
+) -> list[dict[str, object]]:
+    signals: list[dict[str, object]] = []
+    for merged in history:
+        event = merged.event
+        if not any(
+            (
+                event.content_hash,
+                event.previous_content_hash,
+                event.result_content_hash,
+            )
+        ):
+            continue
+        signals.append(
+            {
+                "turn": event.turn,
+                "operation": event.operation,
+                "phase": merged.phase_label,
+                "content_hash": event.content_hash,
+                "previous_content_hash": event.previous_content_hash,
+                "result_content_hash": event.result_content_hash,
+            }
+        )
+    return signals
+
+
+def _command_text(args: object) -> str:
+    if not isinstance(args, Mapping):
+        return ""
+    raw = args.get("cmd") or args.get("command")
+    return raw if isinstance(raw, str) else ""
+
+
+def _paths_from_command(cmd: str) -> list[str]:
+    paths: list[str] = []
+    for match in _PATH_TOKEN_RE.finditer(cmd):
+        if _is_cd_operand(cmd, match.start()):
+            continue
+        path = _clean_path(match.group(1))
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _is_cd_operand(cmd: str, start: int) -> bool:
+    prefix = cmd[max(0, start - 8) : start].lower()
+    return bool(re.search(r"(?:^|[;&|]\s*)cd\s+$", prefix))
+
+
+def _clean_path(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    path = value.strip().strip("\"'`,;:()[]{}")
+    if not path or len(path) < 3:
+        return None
+    if path.startswith("-") or "*" in path or "://" in path:
+        return None
+    return path
+
+
+def _entity_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
         """
         SELECT *
         FROM policy_entity_state
@@ -592,7 +1203,7 @@ def _entity_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow
         ORDER BY occurrence_count DESC, updated_at DESC, entity ASC
         """,
         (session_id,),
-    ).fetchall():
+    ):
         evidence = _loads(row["evidence_json"])
         yield TraceRow(
             key=f"policy:entity:{row['entity']}",
@@ -623,8 +1234,9 @@ def _entity_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow
         )
 
 
-def _eval_error_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[TraceRow]:
-    for row in conn.execute(
+def _eval_error_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
         """
         SELECT *
         FROM policy_eval_error
@@ -632,7 +1244,7 @@ def _eval_error_rows(conn: sqlite3.Connection, session_id: str) -> Iterable[Trac
         ORDER BY ts ASC, id ASC
         """,
         (session_id,),
-    ).fetchall():
+    ):
         yield TraceRow(
             key=f"policy:eval_error:{row['id']}",
             kind="policy",
@@ -692,6 +1304,9 @@ def _empty_category_row(
     elif categories == _FILE_CATEGORIES:
         title = "No Policy File State"
         preview = "No persisted policy file state for this session."
+    elif categories == _FILE_STREAM_CATEGORIES:
+        title = "No Policy File Stream"
+        preview = "No file events could be derived for this session."
     elif categories == _ENTITY_CATEGORIES:
         title = "No Policy Entity State"
         preview = "No persisted policy entity state for this session."
@@ -714,17 +1329,15 @@ def _empty_category_row(
     )
 
 
-def _existing_tables(conn: sqlite3.Connection) -> set[str]:
+def _existing_tables(conn: Connection) -> set[str]:
     return {
         str(row["name"])
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
+        for row in _rows(conn, "SELECT name FROM sqlite_master WHERE type = 'table'")
     }
 
 
 def _session_counts(
-    conn: sqlite3.Connection,
+    conn: Connection,
     session_id: str,
     existing: set[str],
 ) -> dict[str, int]:
@@ -733,10 +1346,11 @@ def _session_counts(
         if table not in existing:
             counts[table] = 0
             continue
-        row = conn.execute(
+        row = _row(
+            conn,
             f"SELECT COUNT(*) AS count FROM {table} WHERE session_id = ?",  # noqa: S608
             (session_id,),
-        ).fetchone()
+        )
         counts[table] = int(row["count"]) if row is not None else 0
     return counts
 
@@ -797,7 +1411,7 @@ def _turn_summary_preview(summary: object) -> str:
 
 
 def _tool_policy_state_label(
-    row: sqlite3.Row,
+    row: RowMapping,
     state: object,
     processed: object,
     is_error: bool,
@@ -817,7 +1431,7 @@ def _tool_policy_state_label(
 
 
 def _tool_policy_preview(
-    row: sqlite3.Row,
+    row: RowMapping,
     args: object,
     result: object,
     state: object,
@@ -845,7 +1459,7 @@ def _tool_policy_preview(
 
 
 def _tool_rule_author_event(
-    row: sqlite3.Row,
+    row: RowMapping,
     args: object,
     result: object,
     state: object,
@@ -924,7 +1538,7 @@ def _candidate_values(value: object, keys: Sequence[str]) -> Iterable[object]:
 
 
 def _tool_is_error(
-    row: sqlite3.Row,
+    row: RowMapping,
     result: object,
     state: object,
     processed: object,
@@ -1017,6 +1631,11 @@ def _mapping_value(value: object, key: str) -> object:
     if isinstance(value, Mapping):
         return value.get(key)
     return None
+
+
+def _mapping_str(value: object, key: str) -> str | None:
+    raw = _mapping_value(value, key)
+    return str(raw) if raw not in (None, "") else None
 
 
 def _single_line(value: object, *, limit: int = 100) -> str:

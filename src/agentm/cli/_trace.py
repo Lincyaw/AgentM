@@ -696,7 +696,7 @@ def view_cmd(
 
     if not legacy:
         try:
-            from agentm.cli._trace_textual import run_textual_viewer
+            from agentm.presenter.trajectory import run_textual_viewer
         except ImportError:
             stderr_console.print(
                 "[yellow]warning: Textual viewer unavailable; "

@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from agentm.cli._trace_model import (
+from agentm.presenter.trajectory import (
+    TraceQuery,
+    TraceSnapshot,
+    TraceView,
+    TraceViewSpec,
     build_trace_snapshot,
+    build_trace_view_registry,
     default_trace_view_registry,
     filter_trace_rows,
     parse_trace_query,
@@ -110,17 +115,47 @@ def test_default_registry_exposes_extensible_views() -> None:
         "tools",
         "errors",
         "metrics",
-        "policy",
     ]
     with pytest.raises(ValueError, match="duplicate trace view id"):
         registry.register(registry.get("trajectory"))
 
 
+def test_trace_registry_accepts_subapp_provider() -> None:
+    class _Provider:
+        def trace_view_specs(self) -> tuple[TraceViewSpec, ...]:
+            return (
+                TraceViewSpec(
+                    id="files",
+                    title="Files",
+                    description="file-centric trajectory projection",
+                    shortcut="5",
+                    build=_build_files,
+                ),
+            )
+
+    def _build_files(_snapshot: TraceSnapshot, _query: TraceQuery) -> TraceView:
+        return TraceView(id="files", title="Files", rows=())
+
+    registry = build_trace_view_registry((_Provider(),))
+
+    assert [spec.id for spec in registry.specs()] == [
+        "trajectory",
+        "tools",
+        "errors",
+        "metrics",
+        "files",
+    ]
+
+
 def test_metrics_view_builds_summary_rows() -> None:
     snapshot = build_trace_snapshot("session-1", [_sample_turn()])
-    view = default_trace_view_registry().get("metrics").build(
-        snapshot,
-        parse_trace_query(""),
+    view = (
+        default_trace_view_registry()
+        .get("metrics")
+        .build(
+            snapshot,
+            parse_trace_query(""),
+        )
     )
 
     assert {row.title for row in view.rows} == {"Turns", "Tokens", "Tools", "Rows"}

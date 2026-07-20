@@ -121,6 +121,10 @@ Built-in stores:
 | `JsonlTrajectoryStore` | Local append-only persistence, one JSONL file per session. |
 | `PostgresTrajectoryStore` | Durable transactional session, turn, node/head, and policy-state persistence. |
 
+SQL-backed adapters are opened through the shared SQLAlchemy entry point in
+`agentm.storage.sql`; PostgreSQL and ClickHouse still require their optional
+driver extras.
+
 The same `TrajectoryStore` exposes committed message-tree queries with stable
 node ids and portable index fields:
 

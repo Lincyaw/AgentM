@@ -254,11 +254,11 @@ requirements:
       - path: src/agentm/storage/resources/__init__.py
       - path: src/agentm/storage/resources/local.py
       - path: src/agentm/storage/serialization.py
+      - path: src/agentm/storage/sql.py
       - path: src/agentm/storage/trajectory/__init__.py
       - path: src/agentm/storage/trajectory/jsonl.py
       - path: src/agentm/storage/trajectory/memory.py
       - path: src/agentm/storage/trajectory/postgres.py
-      - path: src/agentm/storage/trajectory/psycopg.py
       - path: src/agentm/storage/trajectory/resolve.py
       - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py

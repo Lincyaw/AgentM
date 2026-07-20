@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 
+from sqlalchemy.engine import Connection
+
+from agentm.presenter.trajectory import TraceMetrics, TraceQuery, TraceSnapshot
+from agentm.storage.sql import create_sqlite_engine
 from agentm.core.lib.tokens import count_text_tokens
 from agentm.core.abi.messages import (
     AssistantMessage,
@@ -31,8 +34,8 @@ from policy_engine.types import (
 )
 
 
-def _count(conn: sqlite3.Connection, table: str) -> int:
-    row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+def _count(conn: Connection, table: str) -> int:
+    row = conn.exec_driver_sql(f"SELECT COUNT(*) FROM {table}").fetchone()
     assert row is not None
     return int(row[0])
 
@@ -199,52 +202,201 @@ def test_policy_persistence_records_intermediate_state(tmp_path) -> None:
     persistence.flush()
     persistence.close()
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    engine = create_sqlite_engine(db_path)
     try:
-        assert _count(conn, "event_log") == 1
-        assert _count(conn, "policy_tool_events") == 2
-        assert _count(conn, "policy_file_state") == 1
-        assert _count(conn, "policy_entity_state") == 1
-        assert _count(conn, "policy_context_state") == 1
-        assert _count(conn, "policy_turn_summary") == 1
-        assert _count(conn, "policy_session_summary") == 1
-        assert _count(conn, "policy_eval_error") == 1
+        with engine.connect() as conn:
+            assert _count(conn, "event_log") == 1
+            assert _count(conn, "policy_tool_events") == 2
+            assert _count(conn, "policy_file_state") == 1
+            assert _count(conn, "policy_entity_state") == 1
+            assert _count(conn, "policy_context_state") == 1
+            assert _count(conn, "policy_turn_summary") == 1
+            assert _count(conn, "policy_session_summary") == 1
+            assert _count(conn, "policy_eval_error") == 1
 
-        pre = conn.execute(
-            "SELECT args_json, state_json FROM policy_tool_events WHERE phase = 'pre'"
-        ).fetchone()
-        assert pre is not None
-        pre_args = json.loads(pre["args_json"])
-        assert pre_args["api_key"] == "secret-value"
-        assert len(pre_args["items"]) == 105
-        assert json.loads(pre["state_json"])["taint_labels"] == ["secret"]
+            pre = (
+                conn.exec_driver_sql(
+                    "SELECT args_json, state_json FROM policy_tool_events WHERE phase = 'pre'"
+                )
+                .mappings()
+                .fetchone()
+            )
+            assert pre is not None
+            pre_args = json.loads(pre["args_json"])
+            assert pre_args["api_key"] == "secret-value"
+            assert len(pre_args["items"]) == 105
+            assert json.loads(pre["state_json"])["taint_labels"] == ["secret"]
 
-        post = conn.execute(
-            """
-            SELECT state_json, result_json, processed_json, exit_code, duration_ms,
-                   result_content_hash
-            FROM policy_tool_events WHERE phase = 'post'
-            """
-        ).fetchone()
-        assert post is not None
-        post_state = json.loads(post["state_json"])
-        assert post_state["tool_log_entry"]["error_fingerprint"] == "fp-1"
-        assert len(post_state["tool_log_entry"]["error"]) == 3000
-        assert json.loads(post["result_json"])["is_error"] is True
-        post_processed = json.loads(post["processed_json"])
-        assert post_processed["result_content_hash"] == "result-hash-1"
-        assert post["exit_code"] == 1
-        assert post["duration_ms"] == 321
-        assert post["result_content_hash"] == "result-hash-1"
+            post = (
+                conn.exec_driver_sql(
+                    """
+                SELECT state_json, result_json, processed_json, exit_code, duration_ms,
+                       result_content_hash
+                FROM policy_tool_events WHERE phase = 'post'
+                """
+                )
+                .mappings()
+                .fetchone()
+            )
+            assert post is not None
+            post_state = json.loads(post["state_json"])
+            assert post_state["tool_log_entry"]["error_fingerprint"] == "fp-1"
+            assert len(post_state["tool_log_entry"]["error"]) == 3000
+            assert json.loads(post["result_json"])["is_error"] is True
+            post_processed = json.loads(post["processed_json"])
+            assert post_processed["result_content_hash"] == "result-hash-1"
+            assert post["exit_code"] == 1
+            assert post["duration_ms"] == 321
+            assert post["result_content_hash"] == "result-hash-1"
 
-        context = conn.execute(
-            "SELECT context_json FROM policy_context_state"
-        ).fetchone()
-        assert context is not None
-        assert json.loads(context["context_json"])["access_token"] == "raw-token"
+            context = (
+                conn.exec_driver_sql("SELECT context_json FROM policy_context_state")
+                .mappings()
+                .fetchone()
+            )
+            assert context is not None
+            assert json.loads(context["context_json"])["access_token"] == "raw-token"
     finally:
-        conn.close()
+        engine.dispose()
+
+
+def test_policy_trace_file_history_and_stream_from_tool_events(tmp_path) -> None:
+    db_path = tmp_path / "policy.db"
+    persistence = PolicyPersistence(db_path)
+    persistence.open()
+    try:
+        persistence.queue_tool_event(
+            session_id="session-file",
+            turn=0,
+            phase="pre",
+            tool_call_id="read-1",
+            tool_name="read",
+            args={"path": "/tmp/app.py"},
+        )
+        persistence.queue_tool_event(
+            session_id="session-file",
+            turn=0,
+            phase="post",
+            tool_call_id="read-1",
+            tool_name="read",
+            args={"path": "/tmp/app.py"},
+            result={"is_error": False, "text": "print('hi')"},
+            processed={"is_error": False, "text_length": 11},
+        )
+        persistence.queue_tool_event(
+            session_id="session-file",
+            turn=1,
+            phase="pre",
+            tool_call_id="edit-1",
+            tool_name="edit",
+            args={"path": "/tmp/app.py"},
+        )
+        persistence.queue_tool_event(
+            session_id="session-file",
+            turn=1,
+            phase="post",
+            tool_call_id="edit-1",
+            tool_name="edit",
+            args={"path": "/tmp/app.py"},
+            result={"is_error": False},
+            processed={
+                "is_error": False,
+                "content_hash": "hash-after",
+                "previous_content_hash": "hash-before",
+            },
+        )
+        persistence.queue_tool_event(
+            session_id="session-file",
+            turn=2,
+            phase="post",
+            tool_call_id="bash-1",
+            tool_name="bash",
+            args={"cmd": "cat package.json"},
+            result={"is_error": False},
+            processed={"is_error": False},
+        )
+        persistence.flush()
+    finally:
+        persistence.close()
+
+    stream_rows = load_policy_trace_rows(
+        db_path,
+        "session-file",
+        categories=frozenset({"file_stream"}),
+    )
+    assert [(row.title, row.cause, row.metadata["phase"]) for row in stream_rows] == [
+        ("/tmp/app.py", "ok:-", "pre+post"),
+        ("/tmp/app.py", "ok:-", "pre+post"),
+        ("package.json", "ok:-", "post"),
+    ]
+    assert [row.metadata["operation"] for row in stream_rows] == [
+        "read",
+        "write",
+        "read",
+    ]
+    assert [row.metadata["result"] for row in stream_rows] == ["ok:-", "ok:-", "ok:-"]
+    assert [row.display_name for row in stream_rows] == [
+        "/tmp/app.py",
+        "/tmp/app.py",
+        "package.json",
+    ]
+    assert all(row.metadata["category"] == "file_stream" for row in stream_rows)
+    assert stream_rows[2].metadata["source"] == "cmd.heuristic"
+
+    file_rows = load_policy_trace_rows(
+        db_path,
+        "session-file",
+        categories=frozenset({"files"}),
+    )
+    app_row = next(row for row in file_rows if row.title == "/tmp/app.py")
+    app_detail = json.loads(app_row.content)
+    assert app_row.display_name is None
+    assert app_row.cause == "r:1 w:1 ref:0 ev:2"
+    assert app_row.metadata["reads"] == 1
+    assert app_row.metadata["writes"] == 1
+    assert app_row.metadata["events"] == 2
+    assert [event["operation"] for event in app_detail["history"]] == ["read", "write"]
+    assert [event["phase"] for event in app_detail["history"]] == [
+        "pre+post",
+        "pre+post",
+    ]
+    assert app_detail["history"][1]["content_hash"] == "hash-after"
+
+    snapshot = TraceSnapshot(
+        session_id="session-file",
+        turns=(),
+        rows=(),
+        metrics=TraceMetrics(),
+    )
+    specs = build_policy_trace_view_registry(db_path).specs()
+    file_view = next(spec for spec in specs if spec.id == "policy-files").build(
+        snapshot,
+        TraceQuery(),
+    )
+    stream_view = next(spec for spec in specs if spec.id == "policy-file-stream").build(
+        snapshot,
+        TraceQuery(),
+    )
+    assert [column.title for column in file_view.columns] == [
+        "Loc",
+        "File",
+        "Reads",
+        "Writes",
+        "Refs",
+        "Events",
+        "Latest",
+        "Preview",
+    ]
+    assert [column.title for column in stream_view.columns] == [
+        "Loc",
+        "File",
+        "Operation",
+        "Phase",
+        "Result",
+        "Source",
+        "Tool",
+        "Preview",
+    ]
 
 
 def test_policy_projection_backfills_existing_turns_idempotently(tmp_path) -> None:
@@ -298,30 +450,36 @@ rules:
     assert first.effects == 1
     assert second.effects == 1
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    engine = create_sqlite_engine(db_path)
     try:
-        assert _count(conn, "event_log") == 1
-        assert _count(conn, "policy_tool_events") == 2
-        assert _count(conn, "policy_turn_summary") == 1
-        assert _count(conn, "policy_session_summary") == 1
-        event = conn.execute("SELECT * FROM event_log").fetchone()
-        assert event is not None
-        assert event["session_id"] == "session-2"
-        assert event["rule_id"] == "destructive-command-observed"
-        post = conn.execute(
-            """
-            SELECT exit_code, duration_ms, result_content_hash, processed_json
-            FROM policy_tool_events WHERE phase = 'post'
-            """
-        ).fetchone()
-        assert post is not None
-        assert post["exit_code"] == 2
-        assert post["duration_ms"] == 45
-        assert post["result_content_hash"] == "result-hash-2"
-        assert json.loads(post["processed_json"])["exit_code"] == 2
+        with engine.connect() as conn:
+            assert _count(conn, "event_log") == 1
+            assert _count(conn, "policy_tool_events") == 2
+            assert _count(conn, "policy_turn_summary") == 1
+            assert _count(conn, "policy_session_summary") == 1
+            event = (
+                conn.exec_driver_sql("SELECT * FROM event_log").mappings().fetchone()
+            )
+            assert event is not None
+            assert event["session_id"] == "session-2"
+            assert event["rule_id"] == "destructive-command-observed"
+            post = (
+                conn.exec_driver_sql(
+                    """
+                SELECT exit_code, duration_ms, result_content_hash, processed_json
+                FROM policy_tool_events WHERE phase = 'post'
+                """
+                )
+                .mappings()
+                .fetchone()
+            )
+            assert post is not None
+            assert post["exit_code"] == 2
+            assert post["duration_ms"] == 45
+            assert post["result_content_hash"] == "result-hash-2"
+            assert json.loads(post["processed_json"])["exit_code"] == 2
     finally:
-        conn.close()
+        engine.dispose()
 
     rows = load_policy_trace_rows(
         db_path,
@@ -347,6 +505,7 @@ rules:
         "policy",
     ]
     assert "policy-tools" in {spec.id for spec in specs}
+    assert "policy-file-stream" in {spec.id for spec in specs}
 
 
 def _turn_with_tool(

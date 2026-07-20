@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from loguru import logger
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from agentm.storage.sql import create_sqlite_engine, execute_script
 
 from .state import args_hash
 from .types import EffectRecord, EntityRecord, FileStateEntry, ToolArgs, ToolLogEntry
@@ -142,11 +145,11 @@ _POLICY_TOOL_EVENTS_COLUMNS = {
 
 
 class PolicyPersistence:
-    """Cross-session state store backed by SQLite WAL."""
+    """Cross-session state store backed by a SQLAlchemy SQLite engine."""
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path
-        self._conn: sqlite3.Connection | None = None
+        self._engine: Engine | None = None
         self._pending_effects: list[tuple[str, EffectRecord]] = []
         self._pending_tool_events: list[dict[str, object]] = []
         self._pending_file_states: list[dict[str, object]] = []
@@ -160,17 +163,22 @@ class PolicyPersistence:
         if self._db_path is None:
             return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.executescript(_SCHEMA_SQL)
-        self._ensure_columns("policy_tool_events", _POLICY_TOOL_EVENTS_COLUMNS)
+        self._engine = create_sqlite_engine(self._db_path)
+        with self._engine.begin() as conn:
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+            conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+            execute_script(conn, _SCHEMA_SQL)
+            self._ensure_columns(
+                conn,
+                "policy_tool_events",
+                _POLICY_TOOL_EVENTS_COLUMNS,
+            )
 
     def close(self) -> None:
         self.flush()
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        if self._engine:
+            self._engine.dispose()
+            self._engine = None
 
     def queue_effect(self, session_id: str, record: EffectRecord) -> None:
         """Queue an effect record for batch write."""
@@ -331,22 +339,22 @@ class PolicyPersistence:
 
     def flush(self) -> None:
         """Write all pending policy records in one transaction."""
-        if not self._conn or not self._has_pending():
+        if not self._engine or not self._has_pending():
             return
 
         now = time.time()
         try:
-            with self._conn:
-                self._flush_effects(now)
-                self._flush_tool_events(now)
-                self._flush_file_states(now)
-                self._flush_entity_states(now)
-                self._flush_context_states(now)
-                self._flush_turn_summaries(now)
-                self._flush_session_summaries(now)
-                self._flush_eval_errors(now)
+            with self._engine.begin() as conn:
+                self._flush_effects(conn, now)
+                self._flush_tool_events(conn, now)
+                self._flush_file_states(conn, now)
+                self._flush_entity_states(conn, now)
+                self._flush_context_states(conn, now)
+                self._flush_turn_summaries(conn, now)
+                self._flush_session_summaries(conn, now)
+                self._flush_eval_errors(conn, now)
             self._clear_pending()
-        except sqlite3.Error as e:
+        except SQLAlchemyError as e:
             logger.warning("policy persistence flush failed: {}", e)
 
     def count_cross_session(
@@ -356,7 +364,7 @@ class PolicyPersistence:
         ttl_days: int = 14,
     ) -> int:
         """Count matching events across sessions within TTL."""
-        if not self._conn:
+        if not self._engine:
             return 0
 
         cutoff = time.time() - (ttl_days * 86400)
@@ -372,14 +380,15 @@ class PolicyPersistence:
 
         sql = f"SELECT COUNT(*) FROM event_log WHERE {' AND '.join(conditions)}"
         try:
-            row = self._conn.execute(sql, params).fetchone()
+            with self._engine.connect() as conn:
+                row = conn.exec_driver_sql(sql, tuple(params)).fetchone()
             return row[0] if row else 0
-        except sqlite3.Error:
+        except SQLAlchemyError:
             return 0
 
     def delete_session(self, session_id: str) -> int:
         """Delete all persisted policy projections for one session."""
-        if not self._conn:
+        if not self._engine:
             return 0
         tables = (
             "event_log",
@@ -393,49 +402,49 @@ class PolicyPersistence:
         )
         try:
             deleted = 0
-            with self._conn:
+            with self._engine.begin() as conn:
                 for table in tables:
-                    cursor = self._conn.execute(
+                    cursor = conn.exec_driver_sql(
                         f"DELETE FROM {table} WHERE session_id = ?",  # noqa: S608
                         (session_id,),
                     )
                     deleted += cursor.rowcount
             return deleted
-        except sqlite3.Error:
+        except SQLAlchemyError:
             return 0
 
     def prune(self, ttl_days: int = 30) -> int:
         """Remove old entries from TTL. Returns count deleted."""
-        if not self._conn:
+        if not self._engine:
             return 0
         cutoff = time.time() - (ttl_days * 86400)
         try:
             deleted = 0
-            for table in (
-                "event_log",
-                "policy_tool_events",
-                "policy_eval_error",
-            ):
-                cursor = self._conn.execute(
-                    f"DELETE FROM {table} WHERE ts < ?",  # noqa: S608
-                    (cutoff,),
-                )
-                deleted += cursor.rowcount
-            for table in (
-                "policy_file_state",
-                "policy_entity_state",
-                "policy_context_state",
-                "policy_turn_summary",
-                "policy_session_summary",
-            ):
-                cursor = self._conn.execute(
-                    f"DELETE FROM {table} WHERE updated_at < ?",  # noqa: S608
-                    (cutoff,),
-                )
-                deleted += cursor.rowcount
-            self._conn.commit()
+            with self._engine.begin() as conn:
+                for table in (
+                    "event_log",
+                    "policy_tool_events",
+                    "policy_eval_error",
+                ):
+                    cursor = conn.exec_driver_sql(
+                        f"DELETE FROM {table} WHERE ts < ?",  # noqa: S608
+                        (cutoff,),
+                    )
+                    deleted += cursor.rowcount
+                for table in (
+                    "policy_file_state",
+                    "policy_entity_state",
+                    "policy_context_state",
+                    "policy_turn_summary",
+                    "policy_session_summary",
+                ):
+                    cursor = conn.exec_driver_sql(
+                        f"DELETE FROM {table} WHERE updated_at < ?",  # noqa: S608
+                        (cutoff,),
+                    )
+                    deleted += cursor.rowcount
             return deleted
-        except sqlite3.Error:
+        except SQLAlchemyError:
             return 0
 
     def _has_pending(self) -> bool:
@@ -462,10 +471,9 @@ class PolicyPersistence:
         self._pending_session_summaries.clear()
         self._pending_eval_errors.clear()
 
-    def _flush_effects(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_effects(self, conn: Connection, now: float) -> None:
         for session_id, rec in self._pending_effects:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO event_log
                     (ts, session_id, rule_id, mode, effect, reason,
@@ -484,10 +492,9 @@ class PolicyPersistence:
                 ),
             )
 
-    def _flush_tool_events(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_tool_events(self, conn: Connection, now: float) -> None:
         for row in self._pending_tool_events:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO policy_tool_events
                     (ts, session_id, turn, phase, tool_call_id, tool_name,
@@ -513,10 +520,9 @@ class PolicyPersistence:
                 ),
             )
 
-    def _flush_file_states(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_file_states(self, conn: Connection, now: float) -> None:
         for row in self._pending_file_states:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO policy_file_state
                     (session_id, path, updated_at, first_read_turn,
@@ -549,10 +555,9 @@ class PolicyPersistence:
                 ),
             )
 
-    def _flush_entity_states(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_entity_states(self, conn: Connection, now: float) -> None:
         for row in self._pending_entity_states:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO policy_entity_state
                     (session_id, entity, updated_at, entity_type,
@@ -579,10 +584,9 @@ class PolicyPersistence:
                 ),
             )
 
-    def _flush_context_states(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_context_states(self, conn: Connection, now: float) -> None:
         for row in self._pending_context_states:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO policy_context_state
                     (session_id, turn_index, updated_at, context_json)
@@ -599,10 +603,9 @@ class PolicyPersistence:
                 ),
             )
 
-    def _flush_turn_summaries(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_turn_summaries(self, conn: Connection, now: float) -> None:
         for row in self._pending_turn_summaries:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO policy_turn_summary
                     (session_id, turn_index, updated_at, summary_json)
@@ -619,10 +622,9 @@ class PolicyPersistence:
                 ),
             )
 
-    def _flush_session_summaries(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_session_summaries(self, conn: Connection, now: float) -> None:
         for row in self._pending_session_summaries:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO policy_session_summary
                     (session_id, updated_at, summary_json)
@@ -638,10 +640,9 @@ class PolicyPersistence:
                 ),
             )
 
-    def _flush_eval_errors(self, now: float) -> None:
-        assert self._conn is not None
+    def _flush_eval_errors(self, conn: Connection, now: float) -> None:
         for row in self._pending_eval_errors:
-            self._conn.execute(
+            conn.exec_driver_sql(
                 """
                 INSERT INTO policy_eval_error
                     (ts, session_id, turn, rule_id, channel, tool_name, error)
@@ -658,16 +659,20 @@ class PolicyPersistence:
                 ),
             )
 
-    def _ensure_columns(self, table: str, columns: Mapping[str, str]) -> None:
-        assert self._conn is not None
+    def _ensure_columns(
+        self,
+        conn: Connection,
+        table: str,
+        columns: Mapping[str, str],
+    ) -> None:
         existing = {
             str(row[1])
-            for row in self._conn.execute(f"PRAGMA table_info({table})")  # noqa: S608
+            for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")  # noqa: S608
         }
         for name, ddl_type in columns.items():
             if name in existing:
                 continue
-            self._conn.execute(
+            conn.exec_driver_sql(
                 f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}"  # noqa: S608
             )
 

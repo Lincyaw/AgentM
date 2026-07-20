@@ -10,12 +10,11 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Protocol
 
 from agentm.core.abi.store import TrajectoryStore
+from agentm.storage.sql import create_sql_engine
 from agentm.storage.trajectory.jsonl import JsonlTrajectoryStore
 from agentm.storage.trajectory.postgres import (
-    PostgresConnection,
     PostgresTrajectoryStore,
 )
 
@@ -34,10 +33,6 @@ class _PostgresLocation:
 
 
 _TrajectoryLocation = _JsonlLocation | _PostgresLocation
-
-
-class _OwnedPostgresConnection(PostgresConnection, Protocol):
-    def close(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -264,37 +259,19 @@ def _open_store(
 def _open_postgres_store(
     location: _PostgresLocation,
 ) -> ResolvedTrajectoryStore:
-    connect = _postgres_connect()
     with ExitStack() as cleanup:
-        connection = connect(location.dsn)
-        cleanup.callback(connection.close)
+        engine = create_sql_engine(location.dsn)
+        cleanup.callback(engine.dispose)
         store = PostgresTrajectoryStore(
-            connection,
+            engine,
             schema=location.schema,
             create_schema=True,
         )
         cleanup.pop_all()
     return ResolvedTrajectoryStore(
         store=store,
-        _closers=(connection.close,),
+        _closers=(engine.dispose,),
     )
-
-
-def _postgres_connect() -> Callable[[str], _OwnedPostgresConnection]:
-    try:
-        from agentm.storage.trajectory.psycopg import (
-            connect,
-        )
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"psycopg", "psycopg_binary"}:
-            raise
-        raise RuntimeError(
-            "Postgres trajectory storage requires the "
-            "'agentm[storage-postgres]' extra (psycopg >= 3.2)"
-        ) from exc
-
-    typed_connect: Callable[[str], _OwnedPostgresConnection] = connect
-    return typed_connect
 
 
 __all__ = [

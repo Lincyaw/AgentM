@@ -9,7 +9,8 @@ import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Protocol, runtime_checkable
+
+from sqlalchemy.engine import Connection, CursorResult, Engine
 
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import (
@@ -57,29 +58,34 @@ from agentm.storage.serialization import (
     serialize_prompt_cache_state,
 )
 
-
-@runtime_checkable
-class PostgresCursor(Protocol):
-    """Minimal synchronous cursor contract used by the Postgres adapter."""
-
-    def execute(self, query: str, params: object | None = None) -> object: ...
-
-    def fetchone(self) -> Sequence[object] | None: ...
-
-    def fetchall(self) -> Sequence[Sequence[object]]: ...
-
-    def close(self) -> None: ...
+PostgresParams = Sequence[object] | Mapping[str, object]
 
 
-@runtime_checkable
-class PostgresConnection(Protocol):
-    """Minimal transaction-capable connection contract."""
+class PostgresCursor:
+    """Driver-SQL cursor facade over one SQLAlchemy connection."""
 
-    def cursor(self) -> PostgresCursor: ...
+    __slots__ = ("_connection", "_result")
 
-    def commit(self) -> None: ...
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+        self._result: CursorResult[object] | None = None
 
-    def rollback(self) -> None: ...
+    def execute(self, query: str, params: PostgresParams | None = None) -> object:
+        if params is None:
+            self._result = self._connection.exec_driver_sql(query)
+        else:
+            self._result = self._connection.exec_driver_sql(query, params)
+        return self._result
+
+    def fetchone(self) -> Sequence[object] | None:
+        if self._result is None:
+            raise RuntimeError("Postgres cursor has no result")
+        return self._result.fetchone()
+
+    def fetchall(self) -> Sequence[Sequence[object]]:
+        if self._result is None:
+            raise RuntimeError("Postgres cursor has no result")
+        return self._result.fetchall()
 
 
 class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
@@ -87,24 +93,23 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
 
     The tables use denormalized columns for the portable index contract and a
     JSONB payload for lossless ABI reconstruction. This adapter assumes a
-    psycopg-style sync connection and keeps methods blocking, matching the SDK
+    synchronous SQLAlchemy engine and keeps methods blocking, matching the SDK
     store protocol.
     """
 
     def __init__(
         self,
-        connection: PostgresConnection,
+        engine: Engine | Connection,
         *,
         schema: str = "public",
         codec: CodecRegistry | None = None,
         create_schema: bool = True,
     ) -> None:
-        if not isinstance(connection, PostgresConnection):
+        if not isinstance(engine, (Engine, Connection)):
             raise TypeError(
-                "PostgresTrajectoryStore requires a transaction-capable "
-                "PostgresConnection"
+                "PostgresTrajectoryStore requires a SQLAlchemy Engine or Connection"
             )
-        self._connection = connection
+        self._handle: Engine | Connection = engine
         self._schema = _validate_identifier(schema, label="Postgres schema")
         self._codec = codec if codec is not None else CodecRegistry()
         self._lock = threading.RLock()
@@ -1186,37 +1191,18 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
     @contextmanager
     def _transaction(self) -> Iterator[PostgresCursor]:
         with self._lock:
-            with _cursor(self._connection) as cur:
-                yield cur
-            _commit(self._connection)
+            if isinstance(self._handle, Engine):
+                with self._handle.begin() as connection:
+                    yield PostgresCursor(connection)
+                return
+            with self._handle.begin():
+                yield PostgresCursor(self._handle)
 
     def _table(self, table: str) -> str:
         return f'"{self._schema}"."agentm_{table}"'
 
     def _index(self, name: str) -> str:
         return f"agentm_trajectory_{name}"
-
-
-class _cursor:
-    def __init__(self, connection: PostgresConnection) -> None:
-        self._connection = connection
-        self._cursor: PostgresCursor | None = None
-
-    def __enter__(self) -> PostgresCursor:
-        cursor = self._connection.cursor()
-        self._cursor = cursor
-        return cursor
-
-    def __exit__(
-        self,
-        exc_type: object,
-        _exc: object,
-        _traceback: object,
-    ) -> None:
-        if self._cursor is not None:
-            self._cursor.close()
-        if exc_type is not None:
-            _rollback(self._connection)
 
 
 def _index_statements(schema: str) -> tuple[str, ...]:
@@ -1350,20 +1336,7 @@ def _required_bool(value: object, *, column: str) -> bool:
     return value
 
 
-def _commit(connection: PostgresConnection) -> None:
-    try:
-        connection.commit()
-    except Exception:
-        _rollback(connection)
-        raise
-
-
-def _rollback(connection: PostgresConnection) -> None:
-    connection.rollback()
-
-
 __all__ = [
-    "PostgresConnection",
     "PostgresCursor",
     "PostgresTrajectoryStore",
 ]

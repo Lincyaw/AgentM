@@ -7,32 +7,16 @@ from collections.abc import Iterable, Mapping, Sequence
 import json
 import math
 import re
-from typing import Protocol, runtime_checkable
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection, Engine
 
 from agentm.core.abi.query import (
     EventRecord,
     QueryMeta,
     SpanRecord,
 )
-
-
-@runtime_checkable
-class ClickHouseQueryResult(Protocol):
-    """Result surface returned by a ClickHouse driver."""
-
-    result_rows: Sequence[Sequence[object]]
-
-
-@runtime_checkable
-class ClickHouseQueryClient(Protocol):
-    """Minimal driver-neutral ClickHouse query contract."""
-
-    def query(
-        self,
-        query: str,
-        *,
-        parameters: Mapping[str, object] | None = None,
-    ) -> ClickHouseQueryResult: ...
+from agentm.storage.sql import create_sql_engine
 
 
 class ClickHouseObservabilityQueryStore:
@@ -43,21 +27,22 @@ class ClickHouseObservabilityQueryStore:
     copied into an AgentM-specific ClickHouse schema.
     """
 
-    __slots__ = ("_client", "_database", "_logs_table", "_traces_table")
+    __slots__ = ("_database", "_handle", "_logs_table", "_traces_table")
 
     def __init__(
         self,
-        client: ClickHouseQueryClient,
+        engine: Engine | Connection,
         *,
         database: str = "otel",
         logs_table: str = "otel_logs",
         traces_table: str = "otel_traces",
     ) -> None:
-        if not isinstance(client, ClickHouseQueryClient):
+        if not isinstance(engine, (Engine, Connection)):
             raise TypeError(
-                "ClickHouseObservabilityQueryStore requires a ClickHouseQueryClient"
+                "ClickHouseObservabilityQueryStore requires a SQLAlchemy "
+                "Engine or Connection"
             )
-        self._client = client
+        self._handle: Engine | Connection = engine
         self._database = _validate_identifier(
             database,
             label="ClickHouse observability database",
@@ -71,9 +56,27 @@ class ClickHouseObservabilityQueryStore:
             label="ClickHouse traces table",
         )
 
+    @classmethod
+    def from_url(
+        cls,
+        database_url: str,
+        *,
+        database: str = "otel",
+        logs_table: str = "otel_logs",
+        traces_table: str = "otel_traces",
+    ) -> "ClickHouseObservabilityQueryStore":
+        """Open a ClickHouse SQLAlchemy engine for observability queries."""
+
+        return cls(
+            create_sql_engine(database_url),
+            database=database,
+            logs_table=logs_table,
+            traces_table=traces_table,
+        )
+
     def events(self, session_id: str) -> Iterable[EventRecord]:
         rows = _query(
-            self._client,
+            self._handle,
             f"""
             SELECT DISTINCT
                 EventName,
@@ -82,7 +85,7 @@ class ClickHouseObservabilityQueryStore:
                 Body,
                 LogAttributes
             FROM {self._database}.{self._logs_table}
-            WHERE LogAttributes['agentm.session.id'] = %(session_id)s
+            WHERE LogAttributes['agentm.session.id'] = :session_id
             ORDER BY timestamp, EventName
             """,
             {"session_id": session_id},
@@ -109,7 +112,7 @@ class ClickHouseObservabilityQueryStore:
 
     def spans(self, session_id: str) -> Iterable[SpanRecord]:
         rows = _query(
-            self._client,
+            self._handle,
             f"""
             SELECT DISTINCT
                 SpanName,
@@ -122,7 +125,7 @@ class ClickHouseObservabilityQueryStore:
                 ) / 1000000000.0 AS end_time,
                 SpanAttributes
             FROM {self._database}.{self._traces_table}
-            WHERE SpanAttributes['agentm.session.id'] = %(session_id)s
+            WHERE SpanAttributes['agentm.session.id'] = :session_id
             ORDER BY start_time, SpanId
             """,
             {"session_id": session_id},
@@ -155,14 +158,14 @@ class ClickHouseObservabilityQueryStore:
 
 
 def _query(
-    client: ClickHouseQueryClient,
+    handle: Engine | Connection,
     sql: str,
     params: Mapping[str, object],
 ) -> Sequence[Sequence[object]]:
-    result = client.query(sql, parameters=params)
-    if not isinstance(result, ClickHouseQueryResult):
-        raise TypeError("ClickHouseQueryClient.query() returned an invalid result")
-    return list(result.result_rows)
+    if isinstance(handle, Engine):
+        with handle.connect() as conn:
+            return list(conn.execute(text(sql), params).fetchall())
+    return list(handle.execute(text(sql), params).fetchall())
 
 
 def _json_mapping(value: object, *, column: str) -> dict[str, object]:
@@ -248,6 +251,4 @@ def _validate_identifier(value: str, *, label: str) -> str:
 
 __all__ = [
     "ClickHouseObservabilityQueryStore",
-    "ClickHouseQueryClient",
-    "ClickHouseQueryResult",
 ]

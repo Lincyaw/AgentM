@@ -23,6 +23,7 @@ from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trigger import UserInput
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
+from agentm.storage.sql import create_sql_engine
 from agentm.storage.query import (
     ClickHouseObservabilityQueryStore,
     CompositeTraceQueryStore,
@@ -68,7 +69,6 @@ async def test_sdk_composes_one_trajectory_store_with_otlp_clickhouse(
             "set AGENTM_TEST_CLICKHOUSE_URL and AGENTM_TEST_OTLP_ENDPOINT "
             "to run the ClickHouse OTLP behavior contract"
         )
-    clickhouse_connect = pytest.importorskip("clickhouse_connect")
     from agentm.extensions.observability.otel_export import (
         shutdown_process_telemetry,
     )
@@ -114,17 +114,17 @@ async def test_sdk_composes_one_trajectory_store_with_otlp_clickhouse(
         if isinstance(block, TextContent)
     ] == ["observed-question", "observed-answer"]
 
-    client = clickhouse_connect.get_client(dsn=clickhouse_url)
+    engine = create_sql_engine(clickhouse_url)
     query = CompositeTraceQueryStore(
         TrajectoryStoreQueryAdapter(JsonlTrajectoryStore(store_path)),
-        ClickHouseObservabilityQueryStore(client),
+        ClickHouseObservabilityQueryStore(engine),
     )
     try:
         sessions = list(query.sessions())
         turns = list(query.turns(session_id))
         events, spans = await _wait_for_observability(query, session_id)
     finally:
-        client.close()
+        engine.dispose()
         shutdown_process_telemetry()
 
     assert [row.id for row in sessions] == [session_id]

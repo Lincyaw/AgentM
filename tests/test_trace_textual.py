@@ -7,12 +7,19 @@ from rich.text import Text
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 
-from agentm.cli._trace_model import TraceRow
-from agentm.cli._trace_textual import (
+from agentm.presenter.trajectory import (
+    TraceQuery,
+    TraceRow,
+    TraceSnapshot,
+    TraceTableColumn,
+    TraceView,
+    TraceViewRegistry,
+    TraceViewSpec,
+    ResizableDataTable,
     TraceConsoleApp,
     TrajectoryDataSource,
-    _detail_renderable,
 )
+from agentm.presenter.trajectory.textual import _detail_renderable
 from agentm.core.abi.messages import (
     AssistantMessage,
     TextContent,
@@ -42,14 +49,18 @@ class _Query:
         return []
 
 
-def _turn_with_many_rounds(count: int = 6) -> Turn:
+def _turn_with_many_rounds(
+    count: int = 6,
+    *,
+    command_template: str = "echo {index}",
+) -> Turn:
     rounds: list[Round] = []
     for index in range(count):
         call = ToolCallBlock(
             type="tool_call",
             id=f"call-{index}",
             name="bash",
-            arguments={"cmd": f"echo {index}"},
+            arguments={"cmd": command_template.format(index=index)},
         )
         result = ToolResultBlock(
             type="tool_result",
@@ -191,6 +202,122 @@ async def test_turn_pane_width_keyboard_resize_is_clamped() -> None:
         assert app._turn_pane_width > 24
 
 
+@pytest.mark.asyncio
+async def test_trace_table_columns_fit_once_then_stay_fixed() -> None:
+    app = TraceConsoleApp(
+        TrajectoryDataSource(_Query(_turn_with_many_rounds(2)), "session-1")
+    )
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+
+        turns = app.query_one("#turns", ResizableDataTable)
+        rows = app.query_one("#rows", ResizableDataTable)
+
+        assert all(not column.auto_width for column in turns.ordered_columns)
+        assert all(not column.auto_width for column in rows.ordered_columns)
+        assert all(column.width > 0 for column in turns.ordered_columns)
+        assert all(column.width > 0 for column in rows.ordered_columns)
+
+
+@pytest.mark.asyncio
+async def test_row_table_column_width_does_not_change_on_refresh() -> None:
+    query = _Query(_turn_with_many_rounds(2))
+    app = TraceConsoleApp(TrajectoryDataSource(query, "session-1"))
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        rows = app.query_one("#rows", ResizableDataTable)
+        await pilot.pause()
+
+        original_width = rows.ordered_columns[4].width
+
+        query._turn = _turn_with_many_rounds(
+            2,
+            command_template="printf 'this content is intentionally much longer {index}'",
+        )
+        app._reload_snapshot()
+        await pilot.pause()
+
+        assert rows.ordered_columns[4].width == original_width
+
+
+@pytest.mark.asyncio
+async def test_row_table_column_width_can_be_dragged() -> None:
+    app = TraceConsoleApp(
+        TrajectoryDataSource(_Query(_turn_with_many_rounds(2)), "session-1")
+    )
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        rows = app.query_one("#rows", ResizableDataTable)
+        await pilot.pause()
+
+        column = rows.ordered_columns[2]
+        original_width = column.width
+
+        rows.begin_column_resize(2, 40)
+        rows.drag_column_resize(52)
+        rows.end_column_resize()
+        await pilot.pause()
+
+        assert not column.auto_width
+        assert column.width == original_width + 12
+
+
+@pytest.mark.asyncio
+async def test_trace_view_can_define_row_table_columns() -> None:
+    row = TraceRow(
+        key="file-row-1",
+        kind="policy",
+        title="/tmp/app.py",
+        preview="raw:2",
+        content="detail",
+        turn_index=0,
+        display_name="/tmp/app.py",
+        metadata={"operation": "read", "phase": "pre+post", "result": "ok:-"},
+    )
+
+    def build(_snapshot: TraceSnapshot, _query: TraceQuery) -> TraceView:
+        return TraceView(
+            id="files",
+            title="Files",
+            rows=(row,),
+            columns=(
+                TraceTableColumn("location", "Loc"),
+                TraceTableColumn("name", "File"),
+                TraceTableColumn("operation", "Operation"),
+                TraceTableColumn("phase", "Phase"),
+                TraceTableColumn("result", "Result"),
+            ),
+        )
+
+    registry = TraceViewRegistry(
+        (
+            TraceViewSpec(
+                id="files",
+                title="Files",
+                description="custom file columns",
+                shortcut="1",
+                build=build,
+            ),
+        )
+    )
+    app = TraceConsoleApp(
+        TrajectoryDataSource(_Query(_turn_with_many_rounds(1)), "session-1"),
+        registry=registry,
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        rows = app.query_one("#rows", ResizableDataTable)
+
+        labels = [
+            column.label.plain if isinstance(column.label, Text) else str(column.label)
+            for column in rows.ordered_columns
+        ]
+        assert labels == ["Loc", "File", "Operation", "Phase", "Result"]
+        assert rows.get_row_at(0) == ["T0", "/tmp/app.py", "read", "pre+post", "ok:-"]
+
+
 def test_tool_call_detail_only_highlights_json_payload() -> None:
     row = TraceRow(
         key="row-1",
@@ -207,13 +334,13 @@ def test_tool_call_detail_only_highlights_json_payload() -> None:
 
     renderable = _detail_renderable(row)
 
-    assert isinstance(renderable, Group)
+    assert type(renderable) is Group
     header, spacer, payload = renderable.renderables
-    assert isinstance(header, Text)
+    assert type(header) is Text
     assert header.plain.startswith("key: row-1")
     assert "metadata:" in header.plain
-    assert isinstance(spacer, Text)
+    assert type(spacer) is Text
     assert spacer.plain == ""
-    assert isinstance(payload, Syntax)
+    assert type(payload) is Syntax
     assert payload.code == row.content
     assert "key:" not in payload.code

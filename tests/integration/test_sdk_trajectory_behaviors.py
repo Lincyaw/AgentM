@@ -52,6 +52,7 @@ from agentm.extensions.builtin.llm_openai import (
 from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
 from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
 from agentm.storage.resources import LocalResourceStore
+from agentm.storage.sql import create_sql_engine
 from agentm.storage.trajectory import JsonlTrajectoryStore, PostgresTrajectoryStore
 from tests.fixtures.custom_trigger import CustomTrigger
 
@@ -164,33 +165,25 @@ def trajectory_backend(
     database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
     if not database_url:
         pytest.skip("set AGENTM_TEST_POSTGRES_URL to run Postgres behavior contracts")
-    psycopg = pytest.importorskip("psycopg")
-    from agentm.storage.trajectory.psycopg import (
-        PsycopgConnectionAdapter,
-        connect as connect_postgres,
-    )
 
     schema = f"agentm_test_{uuid.uuid4().hex}"
-    admin = psycopg.connect(database_url)
-    connections: list[PsycopgConnectionAdapter] = []
-    with admin.cursor() as cursor:
-        cursor.execute(f'CREATE SCHEMA "{schema}"')
-    admin.commit()
+    admin = create_sql_engine(database_url)
+    engines = [admin]
+    with admin.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
 
     def open_store() -> TrajectoryStore:
-        connection = connect_postgres(database_url)
-        connections.append(connection)
-        return PostgresTrajectoryStore(connection, schema=schema)
+        engine = create_sql_engine(database_url)
+        engines.append(engine)
+        return PostgresTrajectoryStore(engine, schema=schema)
 
     try:
         yield _TrajectoryBackend(open_store=open_store)
     finally:
-        for connection in connections:
-            connection.close()
-        with admin.cursor() as cursor:
-            cursor.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-        admin.commit()
-        admin.close()
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        for engine in engines:
+            engine.dispose()
 
 
 def _model() -> Model:
@@ -210,8 +203,6 @@ async def test_sdk_dsn_selects_one_postgres_store(
     database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
     if not database_url:
         pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres DSN contract")
-    psycopg = pytest.importorskip("psycopg")
-    from agentm.storage.trajectory.psycopg import connect as connect_postgres
 
     schema = f"agentm_test_{uuid.uuid4().hex}"
     monkeypatch.setenv("AGENTM_TRAJECTORY_DSN", database_url)
@@ -219,10 +210,9 @@ async def test_sdk_dsn_selects_one_postgres_store(
     monkeypatch.delenv("AGENTM_TRAJECTORY_DIR", raising=False)
 
     provider = _StubProvider("dsn-answer")
-    admin = psycopg.connect(database_url)
-    with admin.cursor() as cursor:
-        cursor.execute(f'CREATE SCHEMA "{schema}"')
-    admin.commit()
+    admin = create_sql_engine(database_url)
+    with admin.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
     try:
         session = await AgentSession.create(
             AgentSessionConfig(
@@ -238,10 +228,10 @@ async def test_sdk_dsn_selects_one_postgres_store(
         finally:
             await session.shutdown()
 
-        connection = connect_postgres(database_url)
+        engine = create_sql_engine(database_url)
         try:
             store = PostgresTrajectoryStore(
-                connection,
+                engine,
                 schema=schema,
                 create_schema=False,
             )
@@ -255,12 +245,11 @@ async def test_sdk_dsn_selects_one_postgres_store(
                 [node.message for node in nodes if node.message is not None]
             ) == ["dsn-question", "dsn-answer"]
         finally:
-            connection.close()
+            engine.dispose()
     finally:
-        with admin.cursor() as cursor:
-            cursor.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-        admin.commit()
-        admin.close()
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
 
 
 @pytest.mark.asyncio

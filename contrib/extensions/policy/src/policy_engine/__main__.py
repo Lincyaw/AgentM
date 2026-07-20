@@ -15,20 +15,21 @@ Run from anywhere with uv:
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Protocol
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy.engine import Connection, Engine, RowMapping
 
 from agentm.core.abi.query import SessionFilter, SessionIdentity
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
+from agentm.storage.sql import create_sqlite_engine
 
 app = typer.Typer(
     name="policy",
@@ -100,21 +101,36 @@ def _db_path() -> Path:
     return Path(agentm_home) / "policy_state" / "policy.db"
 
 
-def _connect() -> sqlite3.Connection | None:
+def _connect() -> Engine | None:
     path = _db_path()
     if not path.exists():
         console.print(f"[yellow]No policy database at {path}[/yellow]")
         return None
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    return conn
+    return create_sqlite_engine(path)
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
+def _rows(
+    conn: Connection,
+    sql: str,
+    params: Sequence[object] = (),
+) -> list[RowMapping]:
+    return list(conn.exec_driver_sql(sql, tuple(params)).mappings().all())
+
+
+def _row(
+    conn: Connection,
+    sql: str,
+    params: Sequence[object] = (),
+) -> RowMapping | None:
+    return conn.exec_driver_sql(sql, tuple(params)).mappings().fetchone()
+
+
+def _table_exists(conn: Connection, table: str) -> bool:
+    row = _row(
+        conn,
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
         (table,),
-    ).fetchone()
+    )
     return row is not None
 
 
@@ -139,8 +155,8 @@ def stats(
     days: int = typer.Option(7, "--days", "-d", help="Look back N days"),
 ) -> None:
     """Show per-rule firing statistics."""
-    conn = _connect()
-    if not conn:
+    engine = _connect()
+    if not engine:
         return
 
     cutoff = time.time() - (days * 86400)
@@ -158,8 +174,11 @@ def stats(
         GROUP BY rule_id, mode, effect
         ORDER BY count DESC
     """
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
+    try:
+        with engine.connect() as conn:
+            rows = _rows(conn, sql, params)
+    finally:
+        engine.dispose()
 
     if not rows:
         console.print("[dim]No rule firings in the specified window.[/dim]")
@@ -194,8 +213,8 @@ def log(
     limit: int = typer.Option(20, "--limit", "-n", help="Max rows"),
 ) -> None:
     """Show recent effect_log entries."""
-    conn = _connect()
-    if not conn:
+    engine = _connect()
+    if not engine:
         return
 
     conditions: list[str] = []
@@ -209,8 +228,11 @@ def log(
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     sql = f"SELECT * FROM event_log {where} ORDER BY ts DESC LIMIT ?"
-    rows = conn.execute(sql, [*params, limit]).fetchall()
-    conn.close()
+    try:
+        with engine.connect() as conn:
+            rows = _rows(conn, sql, [*params, limit])
+    finally:
+        engine.dispose()
 
     if not rows:
         console.print("[dim]No entries found.[/dim]")
@@ -393,27 +415,29 @@ def events(
     limit: int = typer.Option(20, "--limit", "-n", help="Max rows"),
 ) -> None:
     """Show persisted policy-observed tool events."""
-    conn = _connect()
-    if not conn:
+    engine = _connect()
+    if not engine:
         return
-    if not _table_exists(conn, "policy_tool_events"):
-        console.print("[dim]No policy_tool_events table found.[/dim]")
-        conn.close()
-        return
+    try:
+        with engine.connect() as conn:
+            if not _table_exists(conn, "policy_tool_events"):
+                console.print("[dim]No policy_tool_events table found.[/dim]")
+                return
 
-    conditions: list[str] = []
-    params: list[str] = []
-    if session:
-        conditions.append("session_id = ?")
-        params.append(session)
-    if tool:
-        conditions.append("tool_name = ?")
-        params.append(tool)
+            conditions: list[str] = []
+            params: list[str] = []
+            if session:
+                conditions.append("session_id = ?")
+                params.append(session)
+            if tool:
+                conditions.append("tool_name = ?")
+                params.append(tool)
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"SELECT * FROM policy_tool_events {where} ORDER BY ts DESC LIMIT ?"
-    rows = conn.execute(sql, [*params, limit]).fetchall()
-    conn.close()
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            sql = f"SELECT * FROM policy_tool_events {where} ORDER BY ts DESC LIMIT ?"
+            rows = _rows(conn, sql, [*params, limit])
+    finally:
+        engine.dispose()
 
     if not rows:
         console.print("[dim]No tool events found.[/dim]")
@@ -459,42 +483,44 @@ def state(
     limit: int = typer.Option(20, "--limit", "-n", help="Max rows"),
 ) -> None:
     """Show persisted policy intermediate state snapshots."""
-    conn = _connect()
-    if not conn:
+    engine = _connect()
+    if not engine:
         return
 
-    normalized = kind.lower()
-    if normalized == "files":
-        _show_file_state(conn, session, limit)
-    elif normalized == "entities":
-        _show_entity_state(conn, session, limit)
-    elif normalized == "context":
-        _show_json_state(
-            conn,
-            table_name="policy_context_state",
-            title="Policy Context State",
-            json_column="context_json",
-            session=session,
-            limit=limit,
-        )
-    elif normalized in ("turns", "turn_summary"):
-        _show_json_state(
-            conn,
-            table_name="policy_turn_summary",
-            title="Policy Turn Summary",
-            json_column="summary_json",
-            session=session,
-            limit=limit,
-        )
-    elif normalized in ("errors", "eval_errors"):
-        _show_eval_errors(conn, session, limit)
-    else:
-        console.print(
-            "[red]Unknown state kind. Use one of: files, entities, context, turns, errors[/red]"
-        )
-        conn.close()
-        raise typer.Exit(1)
-    conn.close()
+    try:
+        with engine.connect() as conn:
+            normalized = kind.lower()
+            if normalized == "files":
+                _show_file_state(conn, session, limit)
+            elif normalized == "entities":
+                _show_entity_state(conn, session, limit)
+            elif normalized == "context":
+                _show_json_state(
+                    conn,
+                    table_name="policy_context_state",
+                    title="Policy Context State",
+                    json_column="context_json",
+                    session=session,
+                    limit=limit,
+                )
+            elif normalized in ("turns", "turn_summary"):
+                _show_json_state(
+                    conn,
+                    table_name="policy_turn_summary",
+                    title="Policy Turn Summary",
+                    json_column="summary_json",
+                    session=session,
+                    limit=limit,
+                )
+            elif normalized in ("errors", "eval_errors"):
+                _show_eval_errors(conn, session, limit)
+            else:
+                console.print(
+                    "[red]Unknown state kind. Use one of: files, entities, context, turns, errors[/red]"
+                )
+                raise typer.Exit(1)
+    finally:
+        engine.dispose()
 
 
 def _session_where(
@@ -513,7 +539,7 @@ def _session_where(
 
 
 def _show_file_state(
-    conn: sqlite3.Connection,
+    conn: Connection,
     session: str | None,
     limit: int,
 ) -> None:
@@ -522,7 +548,7 @@ def _show_file_state(
         return
 
     where, params = _session_where(session, order_by="updated_at", limit=limit)
-    rows = conn.execute(f"SELECT * FROM policy_file_state {where}", params).fetchall()
+    rows = _rows(conn, f"SELECT * FROM policy_file_state {where}", params)
     if not rows:
         console.print("[dim]No file state found.[/dim]")
         return
@@ -552,7 +578,7 @@ def _show_file_state(
 
 
 def _show_entity_state(
-    conn: sqlite3.Connection,
+    conn: Connection,
     session: str | None,
     limit: int,
 ) -> None:
@@ -561,7 +587,7 @@ def _show_entity_state(
         return
 
     where, params = _session_where(session, order_by="updated_at", limit=limit)
-    rows = conn.execute(f"SELECT * FROM policy_entity_state {where}", params).fetchall()
+    rows = _rows(conn, f"SELECT * FROM policy_entity_state {where}", params)
     if not rows:
         console.print("[dim]No entity state found.[/dim]")
         return
@@ -589,7 +615,7 @@ def _show_entity_state(
 
 
 def _show_json_state(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     table_name: str,
     title: str,
@@ -602,7 +628,7 @@ def _show_json_state(
         return
 
     where, params = _session_where(session, order_by="updated_at", limit=limit)
-    rows = conn.execute(f"SELECT * FROM {table_name} {where}", params).fetchall()
+    rows = _rows(conn, f"SELECT * FROM {table_name} {where}", params)
     if not rows:
         console.print("[dim]No state rows found.[/dim]")
         return
@@ -622,7 +648,7 @@ def _show_json_state(
 
 
 def _show_eval_errors(
-    conn: sqlite3.Connection,
+    conn: Connection,
     session: str | None,
     limit: int,
 ) -> None:
@@ -631,7 +657,7 @@ def _show_eval_errors(
         return
 
     where, params = _session_where(session, order_by="ts", limit=limit)
-    rows = conn.execute(f"SELECT * FROM policy_eval_error {where}", params).fetchall()
+    rows = _rows(conn, f"SELECT * FROM policy_eval_error {where}", params)
     if not rows:
         console.print("[dim]No eval errors found.[/dim]")
         return
@@ -766,31 +792,36 @@ def prune(
     ),
 ) -> None:
     """Remove old entries from the policy database."""
-    conn = _connect()
-    if not conn:
+    engine = _connect()
+    if not engine:
         return
 
     cutoff = time.time() - (days * 86400)
     deleted = 0
-    for table_name in ("event_log", "policy_tool_events", "policy_eval_error"):
-        if _table_exists(conn, table_name):
-            cursor = conn.execute(f"DELETE FROM {table_name} WHERE ts < ?", (cutoff,))
-            deleted += cursor.rowcount
-    for table_name in (
-        "policy_file_state",
-        "policy_entity_state",
-        "policy_context_state",
-        "policy_turn_summary",
-    ):
-        if _table_exists(conn, table_name):
-            cursor = conn.execute(
-                f"DELETE FROM {table_name} WHERE updated_at < ?",
-                (cutoff,),
-            )
-            deleted += cursor.rowcount
-    conn.commit()
+    try:
+        with engine.begin() as conn:
+            for table_name in ("event_log", "policy_tool_events", "policy_eval_error"):
+                if _table_exists(conn, table_name):
+                    cursor = conn.exec_driver_sql(
+                        f"DELETE FROM {table_name} WHERE ts < ?",
+                        (cutoff,),
+                    )
+                    deleted += cursor.rowcount
+            for table_name in (
+                "policy_file_state",
+                "policy_entity_state",
+                "policy_context_state",
+                "policy_turn_summary",
+            ):
+                if _table_exists(conn, table_name):
+                    cursor = conn.exec_driver_sql(
+                        f"DELETE FROM {table_name} WHERE updated_at < ?",
+                        (cutoff,),
+                    )
+                    deleted += cursor.rowcount
+    finally:
+        engine.dispose()
     console.print(f"Pruned {deleted} records older than {days} days.")
-    conn.close()
 
 
 def main() -> None:

@@ -1,6 +1,4 @@
-"""Compatibility exports for the public trajectory presenter model."""
-
-from __future__ import annotations
+"""Shared trajectory presenter app and extension points."""
 
 from agentm.presenter.trajectory.model import (
     TraceMetrics,
@@ -24,8 +22,16 @@ from agentm.presenter.trajectory.model import (
     parse_trace_query,
     trace_row_matches,
 )
+from agentm.presenter.trajectory.textual import (
+    ResizableDataTable,
+    TraceConsoleApp,
+    TrajectoryDataSource,
+    run_textual_viewer,
+)
 
 __all__ = [
+    "ResizableDataTable",
+    "TraceConsoleApp",
     "TraceMetrics",
     "TraceQuery",
     "TraceRecordStatus",
@@ -39,11 +45,13 @@ __all__ = [
     "TraceViewProvider",
     "TraceViewRegistry",
     "TraceViewSpec",
+    "TrajectoryDataSource",
     "build_trace_snapshot",
     "build_trace_view_registry",
     "default_trace_view_registry",
     "default_trace_view_specs",
     "filter_trace_rows",
     "parse_trace_query",
+    "run_textual_viewer",
     "trace_row_matches",
 ]
