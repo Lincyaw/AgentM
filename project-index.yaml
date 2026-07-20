@@ -55,6 +55,9 @@ requirements:
       async caller cancellation propagates. Rollback participants likewise
       settle in effect-before-resource order while preserving any cancellation
       observed during cleanup for propagation after the cleanup boundary.
+      Resume-time resource/environment recovery and degraded-readonly
+      activation also settle before cancellation propagates, and failed resume
+      construction closes the newly created session.
       External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and

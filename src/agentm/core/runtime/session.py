@@ -600,18 +600,22 @@ class Session(_SessionComposition):
                         if mutation.transaction_id is not None
                     )
                 )
-                await resource_writer.recover(
-                    ResourceRecoveryContext(
-                        session_id=session.id,
-                        committed_transaction_ids=transaction_ids,
+                await await_known_outcome(
+                    resource_writer.recover(
+                        ResourceRecoveryContext(
+                            session_id=session.id,
+                            committed_transaction_ids=transaction_ids,
+                        )
                     )
                 )
             effect_scope = session.get_effect_scope()
             if effect_scope is not None:
                 try:
-                    await effect_scope.restore(
-                        session_id=session.id,
-                        turns=tuple(turns),
+                    await await_known_outcome(
+                        effect_scope.restore(
+                            session_id=session.id,
+                            turns=tuple(turns),
+                        )
                     )
                     session._record_environment_restore_status(
                         EnvironmentRestoreStatus(
@@ -633,7 +637,9 @@ class Session(_SessionComposition):
                             f"environment restore failed for session {session.id}"
                         ) from exc
                     try:
-                        await handler.activate_degraded_readonly(restore_status)
+                        await await_known_outcome(
+                            handler.activate_degraded_readonly(restore_status)
+                        )
                     except Exception as handler_exc:
                         raise ExceptionGroup(
                             f"environment restore and degraded-mode activation "
