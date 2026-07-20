@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
 """Backend-neutral invariants shared by trajectory store implementations."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- scenario loader validates untyped YAML manifest input
 """Host-side scenario discovery and manifest parsing.
 
 The loader returns data only. Scenario-local Python files are represented by

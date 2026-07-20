@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """Session core lifecycle, registration, and composition layers.
 
 Owns driver task, trajectory, trigger queue, bus, tools, services,

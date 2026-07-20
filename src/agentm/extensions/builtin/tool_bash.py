@@ -12,13 +12,12 @@ command is still running. No key bound → no buffering.
 from __future__ import annotations
 
 from collections.abc import Mapping
-import math
 import time
 from contextvars import ContextVar, Token
-from typing import Callable, Final
+from typing import Callable, Final, cast
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
     AtomInstallPriority,
@@ -31,7 +30,9 @@ from agentm.core.abi import (
     ToolExecutionRequirements,
     ToolResult,
 )
+from agentm.core.abi.services import ServiceNotFound, ServiceTypeMismatch
 from agentm.core.abi.tool_executor import EnvironmentExecutableTool
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -121,6 +122,21 @@ class ToolBashConfig(BaseModel):
     )
 
 
+class _BashArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    cmd: str = Field(min_length=1, description="Shell command to execute.")
+    timeout: float = Field(
+        default=_DEFAULT_TIMEOUT_SECONDS,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Max seconds the command may run before it is killed and the "
+            "result is flagged TIMED OUT."
+        ),
+    )
+
+
 MANIFEST = ExtensionManifest(
     name="tool_bash",
     description="Register the bash tool backed by BashOperations.",
@@ -129,28 +145,6 @@ MANIFEST = ExtensionManifest(
     requires=("service:operations:bash",),
     priority=AtomInstallPriority.TOOL,
 )
-
-
-def _bash_parameters(default_timeout: float) -> dict[str, object]:
-    return {
-        "type": "object",
-        "properties": {
-            "cmd": {
-                "type": "string",
-                "description": "Shell command to execute.",
-            },
-            "timeout": {
-                "type": "number",
-                "description": (
-                    "Max seconds the command may run before it is killed and "
-                    "the result is flagged TIMED OUT."
-                ),
-                "default": default_timeout,
-            },
-        },
-        "required": ["cmd"],
-        "additionalProperties": False,
-    }
 
 
 class _ToolBashRuntime:
@@ -171,7 +165,7 @@ class _ToolBashRuntime:
                 session=self._session,
                 bash_ops=self._bash_ops,
                 default_timeout=self._default_timeout,
-                parameters=_bash_parameters(self._default_timeout),
+                parameters=pydantic_to_tool_schema(_BashArgs),
                 tails=tails,
             )
         )
@@ -233,11 +227,13 @@ class _BashTool(EnvironmentExecutableTool):
         resolved_cwd = cwd
         if resolved_cwd is None:
             candidate = environment.ref.metadata.get("cwd")
-            if not isinstance(candidate, str) or not candidate:
-                return _error(
-                    f"Environment {environment.ref.id!r} does not declare a cwd"
-                )
-            resolved_cwd = candidate
+            match candidate:
+                case str() if candidate:
+                    resolved_cwd = candidate
+                case _:
+                    return _error(
+                        f"Environment {environment.ref.id!r} does not declare a cwd"
+                    )
         return await self._execute_with(
             args,
             bash_ops=environment.bash,
@@ -253,18 +249,12 @@ class _BashTool(EnvironmentExecutableTool):
         cwd: str,
         signal: CancelSignal | None,
     ) -> ToolResult:
-        cmd = args.get("cmd")
-        if not isinstance(cmd, str) or not cmd:
-            return _error("bash cmd must be a non-empty string")
-        timeout_value = args.get("timeout", self._default_timeout)
-        if (
-            not isinstance(timeout_value, (int, float))
-            or isinstance(timeout_value, bool)
-            or not math.isfinite(timeout_value)
-            or timeout_value <= 0
-        ):
-            return _error("bash timeout must be a finite positive number")
-        timeout = float(timeout_value)
+        try:
+            parsed = _BashArgs.model_validate(dict(args))
+        except ValidationError as exc:
+            return _error(f"Invalid bash call: {exc}")
+        cmd = parsed.cmd
+        timeout = parsed.timeout if "timeout" in args else self._default_timeout
         on_data: Callable[[bytes], None] | None = None
         log_path: str | None = None
         if self._tails is not None:
@@ -285,7 +275,9 @@ class _BashTool(EnvironmentExecutableTool):
         except Exception as exc:
             logger.debug("tool_bash: exec failed for {!r}: {}", cmd, exc)
             return _error(f"Failed to run command {cmd!r}: {exc}")
-        wall_time = round(time.monotonic() - t0, 1)
+        elapsed_s = time.monotonic() - t0
+        duration_ms = max(0, int(round(elapsed_s * 1000)))
+        wall_time = round(elapsed_s, 1)
 
         stdout = result.stdout.decode("utf-8", errors="replace")
         stderr = result.stderr.decode("utf-8", errors="replace")
@@ -312,14 +304,31 @@ class _BashTool(EnvironmentExecutableTool):
         return ToolResult(
             content=[TextContent(type="text", text=text)],
             is_error=is_error,
+            extras={
+                "exit_code": result.exit_code,
+                "duration_ms": duration_ms,
+                "wall_time_s": wall_time,
+                "timed_out": result.timed_out,
+                "timeout_s": timeout,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_lines": stdout_lines,
+                "stderr_lines": stderr_lines,
+                "log_path": log_path,
+            },
         )
 
 
 def _require_bash_ops(session: AtomAPI) -> BashOperations:
-    service = session.services.get(BASH_OPERATIONS_SERVICE)
-    if not isinstance(service, BashOperations):
-        raise RuntimeError("tool_bash requires the operations atom to register bash")
-    return service
+    try:
+        return session.services.require(
+            BASH_OPERATIONS_SERVICE,
+            cast(type[BashOperations], BashOperations),
+        )
+    except (ServiceNotFound, ServiceTypeMismatch) as exc:
+        raise RuntimeError(
+            "tool_bash requires the operations atom to register bash"
+        ) from exc
 
 
 def _error(text: str) -> ToolResult:

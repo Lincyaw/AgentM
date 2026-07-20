@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Cap oversized tool results with middle-out truncation."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``task`` atom — session-scoped structured task tracking.
 
 The agent creates, decomposes, and tracks progress on tasks during a

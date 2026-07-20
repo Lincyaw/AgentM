@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- AST checks require node-class discrimination
 """Project-level code health checks — AST-based static analysis.
 
 Complements ``ruff`` (general Python style) and ``mypy`` (type correctness)
@@ -35,11 +36,11 @@ Rules:
   gateway → builtin atoms, or ABI → runtime). Extends §11 to cover the
   full dependency graph. Constitution-listed exceptions require a precise
   line-level ignore.
-- **AM011** ``hand-written-schema``: Tool ``parameters`` defined as a
-  dict literal instead of ``pydantic_to_tool_schema(Model)``. Pydantic
-  schemas are the project convention — they stay in sync with
-  validation, generate descriptions from ``Field()``, and avoid
-  hand-maintained JSON Schema boilerplate.
+- **AM011** ``hand-written-schema``: Tool ``parameters`` defined from a
+  dict literal or schema-factory helper instead of a Pydantic model or
+  ``pydantic_to_tool_schema(Model)``. Pydantic schemas are the project
+  convention — they stay in sync with validation, generate descriptions
+  from ``Field()``, and avoid hand-maintained JSON Schema boilerplate.
 - **AM012** ``config-dict-splat``: ``**dict`` unpacking into a core typed
   contract — ``AgentSessionConfig(...)``, ``FunctionTool(...)``, or
   ``spawn_child_session(...)``. These are typed contracts — build them
@@ -75,6 +76,9 @@ Rules:
 - **AM024** ``stdlib-logging``: AgentM uses Loguru consistently; importing
   the standard-library ``logging`` package creates split configuration and
   output behavior.
+- **AM025** ``runtime-type-check``: ``isinstance`` branches on runtime shape
+  and usually hides a missing typed contract, DTO, Protocol, or dispatch table.
+  A precise ignore is required at genuine validation/deserialization boundaries.
 
 AM015 and AM016 intentionally do not exist in v2. They guarded the old mutable
 event/HookContract model; v2 events are frozen DTOs and handlers return typed
@@ -757,42 +761,189 @@ def _collect_dict_schema_names(tree: ast.Module) -> set[str]:
     return names
 
 
+def _returned_schema_dict_names(node: ast.FunctionDef) -> set[str]:
+    names: set[str] = set()
+    for statement in node.body:
+        if isinstance(statement, ast.Assign):
+            if not _is_dict_with_type_object(statement.value):
+                continue
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
+            and _is_dict_with_type_object(statement.value)
+        ):
+            names.add(statement.target.id)
+    return names
+
+
+class _SchemaReturnVisitor(ast.NodeVisitor):
+    """Find schema returns without descending into nested definitions."""
+
+    def __init__(self, local_schema_names: set[str]) -> None:
+        self.returns_schema = False
+        self._local_schema_names = local_schema_names
+
+    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+        value = node.value
+        if value is None:
+            return
+        if _is_dict_with_type_object(value):
+            self.returns_schema = True
+        elif isinstance(value, ast.Name) and value.id in self._local_schema_names:
+            self.returns_schema = True
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self, node: ast.AsyncFunctionDef
+    ) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+
+def _returns_dict_schema(node: ast.FunctionDef) -> bool:
+    """Return whether a helper function returns a hand-written tool schema."""
+    local_schema_names = _returned_schema_dict_names(node)
+    visitor = _SchemaReturnVisitor(local_schema_names)
+    for statement in node.body:
+        visitor.visit(statement)
+        if visitor.returns_schema:
+            return True
+    return False
+
+
+def _collect_dict_schema_factory_names(tree: ast.Module) -> set[str]:
+    """Return module-level helpers that return a ``{"type": "object", ...}`` dict."""
+    return {
+        node.name
+        for node in ast.iter_child_nodes(tree)
+        if isinstance(node, ast.FunctionDef) and _returns_dict_schema(node)
+    }
+
+
+def _is_schema_factory_call(
+    node: ast.expr,
+    schema_factory_names: set[str],
+) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and (func_name := _call_name(node)) is not None
+        and func_name in schema_factory_names
+    )
+
+
+def _target_named_parameters(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Name) and node.id == "parameters") or (
+        isinstance(node, ast.Attribute) and node.attr == "parameters"
+    )
+
+
+def _declares_atom(tree: ast.Module) -> bool:
+    has_manifest = False
+    has_install = False
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(target, ast.Name) and target.id == "MANIFEST"
+                for target in targets
+            ):
+                has_manifest = True
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            node.name == "install"
+        ):
+            has_install = True
+    return has_manifest and has_install
+
+
 def _check_hand_written_schema(
     tree: ast.Module, path: str, file_path: Path
 ) -> list[Issue]:
-    """AM011: Tool parameters as dict literal instead of pydantic schema."""
-    parts = file_path.parts
-    is_atom = (
-        "extensions" in parts
-        and "builtin" in parts
-        and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name)
-    )
-    if not is_atom:
+    """AM011: Tool parameters as dict/factory instead of pydantic schema."""
+    if not _declares_atom(tree):
         return []
 
     schema_names = _collect_dict_schema_names(tree)
+    schema_factory_names = _collect_dict_schema_factory_names(tree)
     issues: list[Issue] = []
     for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if not any(_target_named_parameters(target) for target in targets):
+                continue
+            if _is_dict_with_type_object(value):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=value.lineno,
+                        rule="AM011",
+                        message=(
+                            "hand-written tool schema — use a Pydantic model or "
+                            "pydantic_to_tool_schema(Model) instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            elif isinstance(value, ast.Name) and value.id in schema_names:
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=value.lineno,
+                        rule="AM011",
+                        message=(
+                            f"hand-written tool schema ({value.id}) — use a "
+                            "Pydantic model or pydantic_to_tool_schema(Model) "
+                            "instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            elif _is_schema_factory_call(value, schema_factory_names):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=value.lineno,
+                        rule="AM011",
+                        message=(
+                            "hand-written tool schema factory — use a Pydantic "
+                            "model or pydantic_to_tool_schema(Model) instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            continue
+
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        func_name = ""
-        if isinstance(func, ast.Name):
-            func_name = func.id
-        elif isinstance(func, ast.Attribute):
-            func_name = func.attr
-        if func_name != "FunctionTool":
-            continue
+        is_function_tool = _call_name(node) == "FunctionTool"
         for kw in node.keywords:
             if kw.arg != "parameters":
                 continue
-            if isinstance(kw.value, ast.Dict):
+            if isinstance(kw.value, ast.Dict) and (
+                is_function_tool or _is_dict_with_type_object(kw.value)
+            ):
                 issues.append(
                     Issue(
                         path=path,
                         line=kw.value.lineno,
                         rule="AM011",
-                        message="hand-written tool schema — use pydantic_to_tool_schema(Model) instead",
+                        message=(
+                            "hand-written tool schema — use a Pydantic model or "
+                            "pydantic_to_tool_schema(Model) instead"
+                        ),
                         severity="warning",
                     )
                 )
@@ -802,7 +953,24 @@ def _check_hand_written_schema(
                         path=path,
                         line=kw.value.lineno,
                         rule="AM011",
-                        message=f"hand-written tool schema ({kw.value.id}) — use pydantic_to_tool_schema(Model) instead",
+                        message=(
+                            f"hand-written tool schema ({kw.value.id}) — use a "
+                            "Pydantic model or pydantic_to_tool_schema(Model) "
+                            "instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            elif _is_schema_factory_call(kw.value, schema_factory_names):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=kw.value.lineno,
+                        rule="AM011",
+                        message=(
+                            "hand-written tool schema factory — use a Pydantic "
+                            "model or pydantic_to_tool_schema(Model) instead"
+                        ),
                         severity="warning",
                     )
                 )
@@ -1280,6 +1448,44 @@ def _check_stdlib_logging(tree: ast.Module, path: str) -> list[Issue]:
     return issues
 
 
+def _check_runtime_type_check(tree: ast.Module, path: str) -> list[Issue]:
+    """AM025: isinstance() should not replace typed contracts."""
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "isinstance":
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM025",
+                    message=(
+                        "isinstance() branches on runtime shape; prefer a typed "
+                        "contract, DTO, Protocol, or dispatch table"
+                    ),
+                )
+            )
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "isinstance"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "builtins"
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM025",
+                    message=(
+                        "builtins.isinstance() branches on runtime shape; prefer "
+                        "a typed contract, DTO, Protocol, or dispatch table"
+                    ),
+                )
+            )
+    return issues
+
+
 def _directive_rules(line: str, pattern: re.Pattern[str]) -> frozenset[str]:
     match = pattern.search(line)
     if match is None:
@@ -1330,6 +1536,7 @@ ALL_RULES: Final[tuple[str, ...]] = (
     "AM022",
     "AM023",
     "AM024",
+    "AM025",
 )
 
 
@@ -1378,6 +1585,7 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_typing_any(tree, rel))
     issues.extend(_check_bare_dict(tree, rel))
     issues.extend(_check_stdlib_logging(tree, rel))
+    issues.extend(_check_runtime_type_check(tree, rel))
     return [issue for issue in issues if not _suppressed(issue, source_lines)]
 
 

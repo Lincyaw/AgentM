@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``skill_loader`` atom.
 
 Discovers SKILL.md files (default agent dir, explicit paths, peer

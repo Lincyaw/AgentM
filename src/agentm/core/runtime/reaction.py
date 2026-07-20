@@ -1,8 +1,11 @@
+# code-health: ignore-file[AM025] -- loop normalizes hook returns and event DTO variants
 """One-turn ReAct execution independent of trajectory commit coordination."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -22,12 +25,14 @@ from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
     InterruptionMessagePolicy,
+    JsonValue,
     TextContent,
     ToolCallBlock,
     ToolResultBlock,
     ToolResultMessage,
     UserMessage,
     freeze_json,
+    thaw_json,
 )
 from agentm.core.abi.permission import (
     PermissionAudience,
@@ -384,6 +389,69 @@ def _tool_result_block(tool_call_id: str, result: ToolResult) -> ToolResultBlock
     )
 
 
+def _tool_result_content_hash(result: ToolResult) -> str:
+    digest = hashlib.sha256()
+    for block in result.content:
+        digest.update(block.type.encode("utf-8"))
+        if isinstance(block, TextContent):
+            digest.update(block.text.encode("utf-8"))
+        else:
+            digest.update(block.mime_type.encode("utf-8"))
+            digest.update(block.data)
+    return digest.hexdigest()[:16]
+
+
+def _args_hash(args: Mapping[str, object]) -> str:
+    raw = json.dumps(args, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_result_exit_code(result: ToolResult) -> int | None:
+    if isinstance(result.extras, Mapping):
+        for key in ("exit_code", "return_code", "returncode"):
+            value = _coerce_int(result.extras.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _with_runtime_tool_metadata(
+    result: ToolResult,
+    *,
+    args: Mapping[str, object],
+    duration_ms: int | None,
+) -> ToolResult:
+    runtime_metadata: dict[str, object] = {
+        "args_hash": _args_hash(args),
+        "result_content_hash": _tool_result_content_hash(result),
+    }
+    if duration_ms is not None:
+        runtime_metadata["duration_ms"] = duration_ms
+
+    thawed = thaw_json(result.extras)
+    if isinstance(thawed, Mapping):
+        extras = dict(thawed)
+    elif thawed is None:
+        extras = {}
+    else:
+        extras = {"tool_extras": thawed}
+    extras["agentm_runtime"] = runtime_metadata
+    return ToolResult(
+        content=result.content,
+        is_error=result.is_error,
+        extras=extras,
+    )
+
+
 def _permission_request(
     *,
     tc: ToolCallBlock,
@@ -461,18 +529,38 @@ async def _finalize_tool_outcome(
     bus: EventBus,
     call: ToolCallBlock,
     outcome: ToolOutcome,
+    args: Mapping[str, object] | None = None,
+    duration_ms: int | None = None,
 ) -> tuple[ToolRecord, ToolOutcome]:
-    result = _outcome_result(outcome)
+    frozen_event_args = freeze_json(args or call.arguments)
+    if not isinstance(frozen_event_args, Mapping):
+        raise TypeError("ToolResultEvent args must be an object")
+    event_args: dict[str, JsonValue] = dict(frozen_event_args)
+    result = _with_runtime_tool_metadata(
+        _outcome_result(outcome),
+        args=event_args,
+        duration_ms=duration_ms,
+    )
     returns = await bus.emit(
         ToolResultEvent.CHANNEL,
         ToolResultEvent(
             tool_call_id=call.id,
             tool_name=call.name,
             result=result,
+            args=event_args,
+            duration_ms=duration_ms,
+            exit_code=_tool_result_exit_code(result),
+            result_content_hash=_tool_result_content_hash(result),
         ),
     )
     replacement = _last_of(returns, ToolResult)
-    final_result = replacement if replacement is not None else result
+    final_result = (
+        _with_runtime_tool_metadata(
+            replacement, args=event_args, duration_ms=duration_ms
+        )
+        if replacement is not None
+        else result
+    )
     final_outcome = _replace_outcome_result(outcome, final_result)
     return (
         ToolRecord(
@@ -1157,10 +1245,13 @@ async def react(
             outcomes_by_index: dict[int, ToolOutcome] = {}
             records_by_index: dict[int, ToolRecord] = {}
             work_items: list[ToolWorkItem] = []
+            tool_args_by_index: dict[int, Mapping[str, object]] = {}
 
             async def materialize_tool_outcome(
                 index: int,
                 outcome: ToolOutcome,
+                *,
+                duration_ms: int | None = None,
             ) -> None:
                 nonlocal tool_calls_used
                 if index in outcomes_by_index:
@@ -1171,6 +1262,8 @@ async def react(
                     bus=bus,
                     call=tool_calls[index],
                     outcome=outcome,
+                    args=tool_args_by_index.get(index),
+                    duration_ms=duration_ms,
                 )
                 outcomes_by_index[index] = final_outcome
                 records_by_index[index] = record
@@ -1187,6 +1280,7 @@ async def react(
                 )
 
             for index, tc in enumerate(tool_calls):
+                tool_args_by_index[index] = dict(tc.arguments)
                 if turn_signal.is_set():
                     tool_records = _cancelled_tool_records(
                         calls=tool_calls,
@@ -1249,6 +1343,7 @@ async def react(
                     if not isinstance(frozen_rewrite, Mapping):
                         raise TypeError("ToolCallEvent rewrite must be an object")
                     args.update(frozen_rewrite)
+                tool_args_by_index[index] = dict(args)
                 if allowed_tool_names is not None and tc.name not in allowed_tool_names:
                     await materialize_tool_outcome(
                         index,
@@ -1363,6 +1458,7 @@ async def react(
                     await materialize_tool_outcome(
                         orch_result.item.index,
                         outcome,
+                        duration_ms=orch_result.duration_ms,
                     )
 
             if turn_signal.is_set() and len(outcomes_by_index) < len(tool_calls):

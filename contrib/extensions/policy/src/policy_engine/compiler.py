@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- policy engine normalizes untyped YAML, SQLite, and runtime event payloads
 """Policy engine compiler — YAML parse + expression compilation."""
 
 from __future__ import annotations
@@ -15,37 +16,116 @@ from .types import EffectSpec, Guard, RuleInstance
 # AST allowlist
 # ---------------------------------------------------------------------------
 
-ALLOWED_NODES: frozenset[type] = frozenset({
-    ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
-    ast.IfExp, ast.Call, ast.Attribute, ast.Subscript, ast.Starred,
-    ast.Dict, ast.List, ast.Tuple, ast.Set,
-    ast.GeneratorExp, ast.ListComp, ast.comprehension,
-    ast.Name, ast.Constant, ast.JoinedStr, ast.FormattedValue,
-    ast.And, ast.Or, ast.Not, ast.Add, ast.Sub, ast.Mult, ast.Div,
-    ast.Mod, ast.FloorDiv, ast.Pow,
-    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
-    ast.Is, ast.IsNot, ast.In, ast.NotIn,
-    ast.UAdd, ast.USub,
-    ast.Load, ast.Store,
-    ast.Slice,
-    ast.keyword,
-})
+ALLOWED_NODES: frozenset[type] = frozenset(
+    {
+        ast.Expression,
+        ast.BoolOp,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.Compare,
+        ast.IfExp,
+        ast.Call,
+        ast.Attribute,
+        ast.Subscript,
+        ast.Starred,
+        ast.Dict,
+        ast.List,
+        ast.Tuple,
+        ast.Set,
+        ast.GeneratorExp,
+        ast.ListComp,
+        ast.comprehension,
+        ast.Name,
+        ast.Constant,
+        ast.JoinedStr,
+        ast.FormattedValue,
+        ast.And,
+        ast.Or,
+        ast.Not,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Mod,
+        ast.FloorDiv,
+        ast.Pow,
+        ast.Eq,
+        ast.NotEq,
+        ast.Lt,
+        ast.LtE,
+        ast.Gt,
+        ast.GtE,
+        ast.Is,
+        ast.IsNot,
+        ast.In,
+        ast.NotIn,
+        ast.UAdd,
+        ast.USub,
+        ast.Load,
+        ast.Store,
+        ast.Slice,
+        ast.keyword,
+    }
+)
 
-FORBIDDEN_NAMES: frozenset[str] = frozenset({
-    "eval", "exec", "compile", "__import__", "open",
-    "getattr", "setattr", "delattr", "type", "vars",
-    "dir", "globals", "locals", "breakpoint", "exit", "quit",
-    "input", "print",
-})
+FORBIDDEN_NAMES: frozenset[str] = frozenset(
+    {
+        "eval",
+        "exec",
+        "compile",
+        "__import__",
+        "open",
+        "getattr",
+        "setattr",
+        "delattr",
+        "type",
+        "vars",
+        "dir",
+        "globals",
+        "locals",
+        "breakpoint",
+        "exit",
+        "quit",
+        "input",
+        "print",
+    }
+)
 
-NAMESPACE_NAMES: frozenset[str] = frozenset({
-    "event", "session", "labels", "tool_log", "file_state", "effect_log",
-    "streak", "trend", "ratio", "sequence", "group", "diff",
-    "lookup", "entity_evidence", "fingerprint", "hash",
-    "max", "min", "abs", "len", "any", "all", "sorted",
-    "True", "False", "None", "EMPTY",
-    "not", "and", "or", "in",
-})
+NAMESPACE_NAMES: frozenset[str] = frozenset(
+    {
+        "event",
+        "session",
+        "labels",
+        "tool_log",
+        "file_state",
+        "effect_log",
+        "streak",
+        "trend",
+        "ratio",
+        "sequence",
+        "group",
+        "diff",
+        "lookup",
+        "entity_evidence",
+        "fingerprint",
+        "hash",
+        "max",
+        "min",
+        "abs",
+        "len",
+        "any",
+        "all",
+        "sorted",
+        "True",
+        "False",
+        "None",
+        "EMPTY",
+        "not",
+        "and",
+        "or",
+        "in",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +149,7 @@ def _validate_ast(tree: ast.AST, rule_id: str) -> None:
                 f"rule '{rule_id}': dunder attribute access '{node.attr}' forbidden"
             )
         if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
-            raise CompileError(
-                f"rule '{rule_id}': forbidden name '{node.id}'"
-            )
+            raise CompileError(f"rule '{rule_id}': forbidden name '{node.id}'")
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``trace_query`` atom -- query the parent session's trajectory.
 
 Exposes read-only tools that let a child session inspect its parent's

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """Crash-aware JSONL implementation of the unified trajectory store."""
 
 from __future__ import annotations

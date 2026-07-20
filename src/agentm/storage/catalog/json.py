@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """Local durable catalog and versioned-resource store."""
 
 # code-health: ignore-file[AM022] -- validates untyped persisted catalog JSON

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- observability adapters normalize external telemetry payloads
 """OTel-backed telemetry implementation for the builtin observability atom.
 
 Writes one OTLP ``ResourceSpans`` / ``ResourceLogs`` element per line as

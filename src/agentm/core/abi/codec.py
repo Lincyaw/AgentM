@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Serialization codec for trajectory data.
 
 Every field on Turn must be serializable to a JSON-safe dict so that

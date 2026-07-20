@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- observability adapters normalize external telemetry payloads
 """OTel translators for v2 session events."""
 
 # code-health: ignore-file[AM022] -- adapts dynamic OpenTelemetry SDK objects

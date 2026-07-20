@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Kernel message data model.
 
 Implements the message types that flow through the agent loop, per

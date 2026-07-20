@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Tool execution capability port."""
 
 from __future__ import annotations

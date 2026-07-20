@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """``structured_output`` atom -- register a terminal ``submit_result`` tool.
 
 The caller supplies a JSON Schema via atom config; the atom builds a

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Auto-background long-running tool calls at the execution boundary.
 
 The atom installs a wrapping :class:`ToolExecutor`. Fast calls preserve the

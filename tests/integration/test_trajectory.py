@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from agentm.core.abi.messages import (
     OpaqueThinkingBlock,
     TextContent,
     ToolCallBlock,
+    ToolResultBlock,
     UserMessage,
 )
 from agentm.core.abi.stream import MessageEnd, Model, TextDelta
@@ -71,7 +72,14 @@ from agentm.core.abi.roles import TRAJECTORY_QUERY_STORE_SERVICE
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.abi.store import SessionMeta, TrajectoryCommit, TrajectoryStore
-from agentm.core.abi.trajectory import Outcome, Round, TrajectoryHead, Turn, TurnMeta
+from agentm.core.abi.trajectory import (
+    Outcome,
+    Round,
+    ToolRecord,
+    TrajectoryHead,
+    Turn,
+    TurnMeta,
+)
 from agentm.core.abi.trigger import (
     BackgroundCompletion,
     ContinueTrigger,
@@ -1194,7 +1202,12 @@ async def test_tool_result_replaced() -> None:
     turn = session.trajectory.turns[0]
     tr = turn.rounds[0].tool_results[0]
     assert tr.result.content[0].text == "replaced"  # type: ignore[union-attr]
-    assert observed_outcomes == [replacement]
+    assert isinstance(tr.result.extras, Mapping)
+    assert "agentm_runtime" in tr.result.extras
+    assert len(observed_outcomes) == 1
+    assert observed_outcomes[0].content == replacement.content
+    assert isinstance(observed_outcomes[0].extras, Mapping)
+    assert "agentm_runtime" in observed_outcomes[0].extras
 
 
 # ---------------------------------------------------------------------------
@@ -1293,6 +1306,12 @@ def test_codec_round_trip() -> None:
     codec = CodecRegistry()
 
     trigger = UserInput(content=(TextContent(type="text", text="test input"),))
+    tool_call = ToolCallBlock(
+        type="tool_call",
+        id="tool-1",
+        name="bash",
+        arguments={"cmd": "echo ok"},
+    )
     response = AssistantMessage(
         role="assistant",
         content=[
@@ -1305,9 +1324,19 @@ def test_codec_round_trip() -> None:
                     "data": "encrypted-reasoning",
                 },
             ),
+            tool_call,
         ],
         timestamp=1234.0,
         stop_reason="end_turn",
+    )
+    tool_result = ToolResultBlock(
+        type="tool_result",
+        tool_call_id="tool-1",
+        content=(TextContent(type="text", text="ok"),),
+        extras={
+            "exit_code": 0,
+            "agentm_runtime": {"duration_ms": 12, "result_content_hash": "abc123"},
+        },
     )
     outcome = Outcome(cause=ModelEndTurn())
     meta = TurnMeta(
@@ -1327,7 +1356,12 @@ def test_codec_round_trip() -> None:
         index=0,
         id="turn-abc",
         trigger=trigger,
-        rounds=(Round(response=response, tool_results=()),),
+        rounds=(
+            Round(
+                response=response,
+                tool_results=(ToolRecord(call=tool_call, result=tool_result),),
+            ),
+        ),
         outcome=outcome,
         timestamp=1234.0,
         meta=meta,
@@ -1347,6 +1381,12 @@ def test_codec_round_trip() -> None:
     assert isinstance(restored.trigger, UserInput)
     assert len(restored.rounds) == 1
     assert restored.rounds[0].response.content[0].text == "response text"  # type: ignore[union-attr]
+    restored_tool_result = restored.rounds[0].tool_results[0].result
+    assert isinstance(restored_tool_result.extras, Mapping)
+    assert restored_tool_result.extras["exit_code"] == 0
+    restored_runtime = restored_tool_result.extras["agentm_runtime"]
+    assert isinstance(restored_runtime, Mapping)
+    assert restored_runtime["duration_ms"] == 12
     opaque = restored.rounds[0].response.content[1]
     assert isinstance(opaque, OpaqueThinkingBlock)
     assert dict(opaque.payload) == {

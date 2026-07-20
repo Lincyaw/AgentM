@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- CLI renders typed-union trace records from query/store boundaries
 """``agentm scenario`` — scenario discovery and inspection."""
 
 from __future__ import annotations

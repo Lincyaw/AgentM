@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- execution worker and wire boundaries validate cross-process payloads
 """Environment-backed sandbox ``ToolExecutor``."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """Local filesystem implementation of resource read/write protocols."""
 
 from __future__ import annotations

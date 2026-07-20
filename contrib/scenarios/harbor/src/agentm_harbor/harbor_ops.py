@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- scenario adapter validates external command payloads
 """Harbor implementations of AgentM environment and workspace ports."""
 
 from __future__ import annotations
@@ -454,6 +455,7 @@ class HarborResourceWriter:
                 error=result.stderr or "delete failed",
             )
         return WriteResult(path=path, path_class="managed")
+
 
 def harbor_bindings(
     env: BaseEnvironment,

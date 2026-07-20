@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Spawn foreground or detached child sessions through the SDK child port.
 
 ``dispatch_agent`` has two explicit cancellation domains:

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- observability queries normalize backend result payloads
 """Pure, backend-neutral OTLP proto-JSON decoding helpers."""
 
 from __future__ import annotations

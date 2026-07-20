@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- observability queries normalize backend result payloads
 """Read-side query store over local OTLP/JSONL observability files."""
 
 from __future__ import annotations

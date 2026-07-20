@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+staged_py=()
+while IFS= read -r path; do
+  staged_py+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+
+if ((${#staged_py[@]} == 0)); then
+  exit 0
+fi
+
+printf '\n==> uv run ruff format --check <staged-python-files>\n'
+uv run ruff format --check "${staged_py[@]}"
+
+printf '\n==> uv run ruff check <staged-python-files>\n'
+uv run ruff check "${staged_py[@]}"
+
+src_py=()
+code_health_py=()
+for path in "${staged_py[@]}"; do
+  case "$path" in
+    src/*)
+      src_py+=("$path")
+      code_health_py+=("$path")
+      ;;
+    contrib/*)
+      code_health_py+=("$path")
+      ;;
+  esac
+done
+
+if ((${#src_py[@]} > 0)); then
+  printf '\n==> uv run mypy <staged-src-python-files>\n'
+  uv run mypy "${src_py[@]}"
+fi
+
+if ((${#code_health_py[@]} > 0)); then
+  printf '\n==> uv run python -m agentm.code_health <staged-source-python-files>\n'
+  uv run python -m agentm.code_health "${code_health_py[@]}"
+fi

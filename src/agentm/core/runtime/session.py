@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """SDK session facade for child creation, fork, and durable resume."""
 
 from __future__ import annotations

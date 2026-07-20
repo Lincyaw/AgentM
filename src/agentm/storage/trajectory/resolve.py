@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """Host-side trajectory backend resolution and store construction."""
 
 from __future__ import annotations

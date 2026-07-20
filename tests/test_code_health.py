@@ -79,6 +79,36 @@ if hasattr(subject, "close"):
     assert rules.count("AM021") == 2
 
 
+def test_code_health_rejects_runtime_type_checks(tmp_path: Path) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+import builtins
+
+if isinstance(value, str):
+    handle_text(value)
+if builtins.isinstance(value, int):
+    handle_number(value)
+""",
+        relative="src/agentm/runtime.py",
+    )
+    assert rules.count("AM025") == 2
+
+
+def test_code_health_allows_runtime_type_check_with_precise_ignore(
+    tmp_path: Path,
+) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+if isinstance(value, str):  # code-health: ignore[AM025] -- wire validation boundary
+    handle_text(value)
+""",
+        relative="src/agentm/runtime/wire.py",
+    )
+    assert "AM025" not in rules
+
+
 def test_code_health_rejects_any_and_bare_dict_in_all_source(
     tmp_path: Path,
 ) -> None:
@@ -106,6 +136,70 @@ from logging.handlers import RotatingFileHandler
         relative="src/agentm/runtime.py",
     )
     assert rules.count("AM024") == 2
+
+
+def test_code_health_rejects_hand_written_tool_schema_factory(
+    tmp_path: Path,
+) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+MANIFEST = object()
+
+def _bash_parameters(default_timeout: float) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "cmd": {"type": "string"},
+            "timeout": {"type": "number", "default": default_timeout},
+        },
+        "required": ["cmd"],
+    }
+
+def install(api, config):
+    api.register_tool(_BashTool(parameters=_bash_parameters(120.0)))
+""",
+        relative="contrib/extensions/policy/src/policy_engine/__init__.py",
+    )
+    assert rules.count("AM011") == 1
+
+
+def test_code_health_rejects_hand_written_tool_schema_in_async_atom(
+    tmp_path: Path,
+) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+MANIFEST = object()
+
+async def install(api, config):
+    api.register_tool(
+        FunctionTool(parameters={"type": "object", "properties": {}}, fn=execute)
+    )
+""",
+        relative="src/agentm/extensions/builtin/async_atom.py",
+    )
+    assert rules.count("AM011") == 1
+
+
+def test_code_health_allows_pydantic_tool_schema(
+    tmp_path: Path,
+) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+MANIFEST = object()
+
+class _Args(BaseModel):
+    cmd: str
+
+def install(api, config):
+    api.register_tool(FunctionTool(parameters=_Args, fn=execute))
+    api.register_tool(_CustomTool(parameters=pydantic_to_tool_schema(_Args)))
+""",
+        relative="contrib/extensions/policy/src/policy_engine/__init__.py",
+    )
+    assert "AM011" not in rules
 
 
 def test_code_health_rejects_authoring_presenter_dependency(

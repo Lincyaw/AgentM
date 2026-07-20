@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- config resolver validates untyped TOML/environment values
 """Concrete host-side ``SessionSpecResolver`` implementation."""
 
 # code-health: ignore-file[AM022] -- validates untyped TOML and environment input

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """LLM stream boundary.
 
 Implements the LLM stream port in ``docs/refactor-abstract-inventory.md``.

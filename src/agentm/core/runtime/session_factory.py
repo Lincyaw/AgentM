@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """Build SDK sessions from explicit extension specs.
 
 The factory owns runtime construction only. It does not search source trees,

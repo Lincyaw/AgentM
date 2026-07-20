@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Block destructive file-editing shell commands (sed -i, awk inplace).
 
 When agents fail to use the edit tool, they fall back to shell commands

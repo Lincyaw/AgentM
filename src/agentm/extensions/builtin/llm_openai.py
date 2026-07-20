@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- vendor LLM adapters normalize untyped provider SDK payloads
 """OpenAI Chat Completions API provider — native ``StreamFn`` implementation.
 
 Sibling of :mod:`agentm.extensions.builtin.llm_anthropic` for OpenAI-compatible endpoints (the

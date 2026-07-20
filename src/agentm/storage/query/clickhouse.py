@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """ClickHouse adapter for collector-managed OTLP observability."""
 
 from __future__ import annotations

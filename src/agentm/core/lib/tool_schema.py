@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
 """Convert a Pydantic model into a provider-neutral JSON tool schema.
 
 Pydantic's :meth:`pydantic.BaseModel.model_json_schema` produces output

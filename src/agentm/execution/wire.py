@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- execution worker and wire boundaries validate cross-process payloads
 """Strict JSON wire format for process-isolated tool results."""
 
 # code-health: ignore-file[AM022] -- validates untyped process-wire JSON

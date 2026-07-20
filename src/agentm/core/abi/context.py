@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Context reconstruction — async policies and pluggable transforms.
 
 Context is a COMPUTED view, not stored data.  ``build_context`` walks

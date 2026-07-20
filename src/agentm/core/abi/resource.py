@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Resource mutation port for SDK atoms.
 
 ResourceWriter is the boundary for writes that outlive a tool call: files,

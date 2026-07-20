@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Provider-agnostic termination hint sum-type.
 
 The kernel must decide what a turn's end means without speaking any specific

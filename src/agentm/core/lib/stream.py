@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
 """Provider-neutral stream accumulator for LLM ``StreamFn`` adapters.
 
 Holds the kernel-side accumulator used by all provider adapters (Anthropic,

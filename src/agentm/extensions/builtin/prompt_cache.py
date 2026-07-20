@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Prompt-cache and content-reference context policy."""
 
 from __future__ import annotations

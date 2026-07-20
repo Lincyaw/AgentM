@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """World-effect lifecycle ports.
 
 Lifecycle is the boundary that keeps a session's committed trajectory aligned

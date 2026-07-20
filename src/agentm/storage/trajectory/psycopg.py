@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """Typed psycopg 3 adapter for AgentM's driver-neutral Postgres ports."""
 
 from __future__ import annotations

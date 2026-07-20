@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Default retry policy atom for provider stream functions."""
 
 from __future__ import annotations

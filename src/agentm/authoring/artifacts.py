@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- authoring parsers validate untyped frontmatter data
 """Authoring artifact helpers for prompts, skills, and scenario snippets."""
 
 from __future__ import annotations

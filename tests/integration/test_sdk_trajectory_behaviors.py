@@ -484,7 +484,7 @@ async def test_sdk_all_packaged_scenarios_create(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENTM_HOME", str(tmp_path / "agentm-home"))
 
-    expected = {"chat", "empty", "interrupt_demo", "minimal"}
+    expected = {"chat", "empty", "minimal"}
     assert set(packaged_scenario_names()) == expected
 
     for scenario in sorted(expected):

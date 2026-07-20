@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """In-memory append-only sequence of committed Turns with one active Execution slot."""
 
 from __future__ import annotations

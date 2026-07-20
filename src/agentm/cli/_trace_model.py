@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- CLI renders typed-union trace records from query/store boundaries
 """Read-side view models for trajectory-oriented trace UIs.
 
 This module is intentionally independent from Textual. It turns durable
@@ -92,6 +93,7 @@ class TraceRow:
     status: TraceRecordStatus | None = None
     role: str | None = None
     tool_name: str | None = None
+    display_name: str | None = None
     is_error: bool = False
     cause: str | None = None
     input_tokens: int = 0
@@ -118,6 +120,7 @@ class TraceRow:
             self.content,
             self.role or "",
             self.tool_name or "",
+            self.display_name or "",
             self.status or "",
             self.cause or "",
             self.location,
@@ -357,7 +360,9 @@ def trace_row_matches(row: TraceRow, query: TraceQuery) -> bool:
         return False
     if query.terms and not all(term in haystack for term in query.terms):
         return False
-    return all(_token_predicate_matches(row, predicate) for predicate in query.token_predicates)
+    return all(
+        _token_predicate_matches(row, predicate) for predicate in query.token_predicates
+    )
 
 
 def build_trace_snapshot(
@@ -376,7 +381,9 @@ def build_trace_snapshot(
         status: TraceRecordStatus = (
             "committed" if isinstance(record, Turn) else "incomplete"
         )
-        cause = type(record.outcome.cause).__name__ if isinstance(record, Turn) else None
+        cause = (
+            type(record.outcome.cause).__name__ if isinstance(record, Turn) else None
+        )
         tool_calls = sum(len(round_.tool_results) for round_ in record.rounds)
         tool_errors = sum(
             1
@@ -636,7 +643,9 @@ def _build_tools_view(snapshot: TraceSnapshot, query: TraceQuery) -> TraceView:
         (row for row in snapshot.rows if row.kind in {"tool_call", "tool_result"}),
         query,
     )
-    return TraceView(id="tools", title="Tools", rows=rows, summary=_summary_text(snapshot, rows))
+    return TraceView(
+        id="tools", title="Tools", rows=rows, summary=_summary_text(snapshot, rows)
+    )
 
 
 def _build_errors_view(snapshot: TraceSnapshot, query: TraceQuery) -> TraceView:
@@ -644,7 +653,9 @@ def _build_errors_view(snapshot: TraceSnapshot, query: TraceQuery) -> TraceView:
         (row for row in snapshot.rows if row.is_error or row.kind == "error"),
         query,
     )
-    return TraceView(id="errors", title="Errors", rows=rows, summary=_summary_text(snapshot, rows))
+    return TraceView(
+        id="errors", title="Errors", rows=rows, summary=_summary_text(snapshot, rows)
+    )
 
 
 def _build_metrics_view(snapshot: TraceSnapshot, query: TraceQuery) -> TraceView:
@@ -789,6 +800,7 @@ def _with_message_indices(rows: Sequence[TraceRow]) -> tuple[TraceRow, ...]:
                 status=row.status,
                 role=row.role,
                 tool_name=row.tool_name,
+                display_name=row.display_name,
                 is_error=row.is_error,
                 cause=row.cause,
                 input_tokens=row.input_tokens,
@@ -811,8 +823,12 @@ def _compute_metrics(
         if row.kind == "tool_result" and row.tool_name:
             by_tool[row.tool_name] += 1
     return TraceMetrics(
-        committed_turns=sum(1 for summary in summaries if summary.status == "committed"),
-        incomplete_turns=sum(1 for summary in summaries if summary.status == "incomplete"),
+        committed_turns=sum(
+            1 for summary in summaries if summary.status == "committed"
+        ),
+        incomplete_turns=sum(
+            1 for summary in summaries if summary.status == "incomplete"
+        ),
         rows=len(rows),
         tool_calls=sum(summary.tool_calls for summary in summaries),
         tool_errors=sum(summary.tool_errors for summary in summaries),
@@ -884,9 +900,7 @@ def _token_predicate_matches(row: TraceRow, predicate: TokenPredicate) -> bool:
 
 
 def _counter_lines(label: str, values: Mapping[str, int]) -> str:
-    return "\n".join(
-        f"{label}:{key} {value}" for key, value in sorted(values.items())
-    )
+    return "\n".join(f"{label}:{key} {value}" for key, value in sorted(values.items()))
 
 
 def _summary_text(snapshot: TraceSnapshot, rows: Sequence[TraceRow]) -> str:

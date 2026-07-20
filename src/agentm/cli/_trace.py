@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- CLI renders typed-union trace records from query/store boundaries
 """``agentm trace`` -- query trajectories via the SDK store layer."""
 
 from __future__ import annotations

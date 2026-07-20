@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- extension validator checks dynamically loaded atom objects
 """Minimal load-time atom contract validator."""
 
 from __future__ import annotations

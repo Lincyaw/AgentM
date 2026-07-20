@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``memory`` atom.
 
 Project-local persistent memory built on a layered model (L2 global /

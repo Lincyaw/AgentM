@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``turn_reminder`` atom -- budget-aware, cache-friendly runway warnings.
 
 Pairs with the ``loop_budget`` atom.  As the agent approaches the loop's

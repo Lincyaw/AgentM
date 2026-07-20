@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
 """Pure redaction helpers for observability atoms.
 
 Two responsibilities, both pure (no I/O, no logging, no side effects):

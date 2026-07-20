@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- execution worker and wire boundaries validate cross-process payloads
 """Process-isolated ``ToolExecutor`` for explicit entrypoint tools."""
 
 from __future__ import annotations

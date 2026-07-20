@@ -41,9 +41,22 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _FIELD_NAMES = (
-    "tool", "path", "cmd", "exit_code", "error", "error_fingerprint",
-    "error_category", "args_hash", "turn", "rule_id", "effect",
-    "mode", "duration_ms", "is_repeat", "repeat_count", "result_length",
+    "tool",
+    "path",
+    "cmd",
+    "exit_code",
+    "error",
+    "error_fingerprint",
+    "error_category",
+    "args_hash",
+    "turn",
+    "rule_id",
+    "effect",
+    "mode",
+    "duration_ms",
+    "is_repeat",
+    "repeat_count",
+    "result_length",
 )
 
 
@@ -123,16 +136,21 @@ class PolicyEvaluator:
     def __init__(self, rules: list[RuleInstance], state: PolicyState) -> None:
         self._rules = rules
         self._state = state
-        self._entity_evidence_fn: Callable[[str], EvidenceList | _EmptyType] | None = None
+        self._entity_evidence_fn: Callable[[str], EvidenceList | _EmptyType] | None = (
+            None
+        )
         self._ifc_engine: IFCEngine | None = None
         self._cross_session_fn: Callable[..., int] | None = None
+        self._eval_error_fn: Callable[[str, str, str, str], None] | None = None
 
         self._tool_index: dict[str, list[RuleInstance]] = defaultdict(list)
         self._wildcard: dict[str, list[RuleInstance]] = defaultdict(list)
 
         self._build_indices()
 
-    def set_entity_evidence_fn(self, fn: Callable[[str], EvidenceList | _EmptyType]) -> None:
+    def set_entity_evidence_fn(
+        self, fn: Callable[[str], EvidenceList | _EmptyType]
+    ) -> None:
         self._entity_evidence_fn = fn
 
     def set_ifc_engine(self, engine: IFCEngine) -> None:
@@ -140,6 +158,12 @@ class PolicyEvaluator:
 
     def set_cross_session_fn(self, fn: Callable[..., int]) -> None:
         self._cross_session_fn = fn
+
+    def set_eval_error_fn(
+        self,
+        fn: Callable[[str, str, str, str], None],
+    ) -> None:
+        self._eval_error_fn = fn
 
     def _build_indices(self) -> None:
         self._tool_index.clear()
@@ -199,6 +223,13 @@ class PolicyEvaluator:
                         continue
                 except Exception as e:
                     logger.debug("rule '{}' predicate error: {}", rule.rule_id, e)
+                    if self._eval_error_fn:
+                        self._eval_error_fn(
+                            rule.rule_id,
+                            channel,
+                            tool_name,
+                            str(e),
+                        )
                     continue
 
             rule.last_fired_turn = turn
@@ -222,14 +253,16 @@ class PolicyEvaluator:
                 escalate_context_value=ctx_value,
             )
 
-            self._state.effect_log.append(EffectRecord(
-                rule_id=rule.rule_id,
-                mode=rule.mode,
-                channel=channel,
-                effect=rule.effect.effect,
-                reason=diagnostic,
-                turn=turn,
-            ))
+            self._state.effect_log.append(
+                EffectRecord(
+                    rule_id=rule.rule_id,
+                    mode=rule.mode,
+                    channel=channel,
+                    effect=rule.effect.effect,
+                    reason=diagnostic,
+                    turn=turn,
+                )
+            )
 
             if rule.mode == "enforce":
                 fired.append((rule.rule_id, rule.effect, diagnostic))
@@ -261,6 +294,7 @@ class PolicyEvaluator:
             "event": event,
             "session": SessionProxy(state),
             "labels": _LabelsProxy(event.taint),
+            "user": "user",
             "tool_log": tool_log_q,
             "file_state": file_state_q,
             "effect_log": effect_log_q,

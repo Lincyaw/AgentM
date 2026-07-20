@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Iterable
 
 from agentm.core.abi.cancel import (
@@ -72,6 +73,11 @@ async def _run_item(
     signal: CancelSignal | None,
     executor: ToolExecutor | None,
 ) -> ToolOrchestrationResult:
+    start_ns = time.perf_counter_ns()
+
+    def duration_ms() -> int:
+        return max(0, (time.perf_counter_ns() - start_ns) // 1_000_000)
+
     try:
         output = await execute_tool_call(
             item.tool,
@@ -84,6 +90,7 @@ async def _run_item(
             item=item,
             status="completed",
             output=output,
+            duration_ms=duration_ms(),
         )
     except asyncio.CancelledError as exc:
         current = asyncio.current_task()
@@ -93,12 +100,14 @@ async def _run_item(
             item=item,
             status="cancelled",
             cancel_reason=cancel_reason(signal) or str(exc) or "tool_cancelled",
+            duration_ms=duration_ms(),
         )
     except Exception as exc:
         return ToolOrchestrationResult(
             item=item,
             status="failed",
             error=exc,
+            duration_ms=duration_ms(),
         )
 
 

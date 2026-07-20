@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """Helpers for persisting and restoring session identity metadata."""
 
 from __future__ import annotations

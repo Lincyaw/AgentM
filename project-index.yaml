@@ -130,6 +130,7 @@ requirements:
     code:
       - path: pyproject.toml
       - path: uv.lock
+      - path: .githooks/pre-commit
       - path: src/agentm/__init__.py
       - path: src/agentm/__main__.py
       - path: src/agentm/cli/__init__.py
@@ -226,6 +227,7 @@ requirements:
       - path: src/agentm/extensions/builtin/thinking_retry.py
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/builtin/tool_error_messages.py
+      - path: src/agentm/extensions/builtin/tool_purpose.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/observability/__init__.py
@@ -262,9 +264,8 @@ requirements:
       - path: src/agentm_toolbox/_state.py
       - path: contrib/scenarios/chat/manifest.yaml
       - path: contrib/scenarios/chat/slow_tool.py
-      - path: contrib/scenarios/interrupt_demo/manifest.yaml
-      - path: contrib/scenarios/interrupt_demo/slow_tool.py
       - path: contrib/scenarios/harbor/pyproject.toml
+      - path: contrib/scenarios/harbor/base.yaml
       - path: contrib/scenarios/harbor/scenario.yaml
       - path: contrib/scenarios/harbor/src/agentm_harbor/__init__.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/external_agent.py
@@ -289,6 +290,7 @@ requirements:
       - path: tests/test_gateway_contracts.py
       - path: tests/test_lifecycle_catalog_ports.py
       - path: tests/test_manifest_contract.py
+      - path: tests/test_tool_purpose.py
     docs:
       - path: .claude/index.yaml
       - path: .claude/designs/observability.md

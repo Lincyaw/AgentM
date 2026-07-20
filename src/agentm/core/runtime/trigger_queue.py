@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """Trigger queue with per-trigger completion and host-idle tracking."""
 
 from __future__ import annotations

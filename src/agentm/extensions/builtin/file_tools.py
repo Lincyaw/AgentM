@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 from pathlib import Path
 from typing import Final
@@ -15,7 +16,6 @@ from agentm.core.abi import (
     FunctionTool,
     ResourceRef,
     ResourceTxn,
-    ResourceWriter,
     TOOL_RESULT_FORMAT_METADATA_KEY,
     TextContent,
     ToolExecutionRequirements,
@@ -73,20 +73,32 @@ MANIFEST = ExtensionManifest(
 # ---------------------------------------------------------------------------
 
 
-def _ok(text: str) -> ToolResult:
-    return ToolResult(content=[TextContent(type="text", text=text)])
+def _ok(text: str, *, extras: object = None) -> ToolResult:
+    return ToolResult(content=[TextContent(type="text", text=text)], extras=extras)
 
 
-def _error(text: str) -> ToolResult:
-    return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+def _error(text: str, *, extras: object = None) -> ToolResult:
+    return ToolResult(
+        content=[TextContent(type="text", text=text)],
+        is_error=True,
+        extras=extras,
+    )
 
 
-def _toolbox_to_tool_result(r: ToolboxResult) -> ToolResult:
-    return _error(r.text) if r.is_error else _ok(r.text)
+def _toolbox_to_tool_result(
+    r: ToolboxResult,
+    *,
+    extras: object = None,
+) -> ToolResult:
+    return _error(r.text, extras=extras) if r.is_error else _ok(r.text, extras=extras)
 
 
 def _invalid_call(tool_name: str, error: ValidationError) -> ToolResult:
     return _error(f"Invalid {tool_name} call: {error}")
+
+
+def _content_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:16]
 
 
 def _resolve_globs(value: list[str] | None, cwd: str) -> tuple[str, ...]:
@@ -251,14 +263,14 @@ class _FileToolsRuntime:
     async def _resource_view(
         self,
         path: str,
-    ) -> tuple[ResourceTxn | ResourceWriter, bytes | None]:
+    ) -> bytes | None:
         ref = ResourceRef(namespace="workspace", path=path)
         txn = self._resource_txn()
         if txn is not None:
-            return txn, await txn.read(ref)
+            return await txn.read(ref)
         if not await self._writer.exists(path):
-            return self._writer, None
-        return self._writer, await self._writer.read(path)
+            return None
+        return await self._writer.read(path)
 
     async def _resource_read(
         self,
@@ -267,7 +279,7 @@ class _FileToolsRuntime:
         offset: int | None,
         limit: int | None,
     ) -> ToolResult:
-        _, current = await self._resource_view(path)
+        current = await self._resource_view(path)
         if current is None:
             return _error(f"Failed to read {path!r}: file does not exist")
         return _toolbox_to_tool_result(
@@ -276,7 +288,15 @@ class _FileToolsRuntime:
                 current,
                 offset=offset,
                 limit=limit,
-            )
+            ),
+            extras={
+                "file_op": "read",
+                "path": path,
+                "bytes": len(current),
+                "content_hash": _content_hash(current),
+                "offset": offset,
+                "limit": limit,
+            },
         )
 
     async def _resource_write(
@@ -286,27 +306,33 @@ class _FileToolsRuntime:
         *,
         rationale: str,
     ) -> ToolResult:
-        authority, current = await self._resource_view(path)
+        ref = ResourceRef(namespace="workspace", path=path)
+        txn = self._resource_txn()
+        if txn is not None:
+            current = await txn.read(ref)
+        elif await self._writer.exists(path):
+            current = await self._writer.read(path)
+        else:
+            current = None
         result, data = self._toolbox.plan_write(path, current, content)
         if result.is_error or data is None:
             return _toolbox_to_tool_result(result)
-        ref = ResourceRef(namespace="workspace", path=path)
-        if isinstance(authority, ResourceTxn):
+        if txn is not None:
             if current is None:
-                await authority.create(ref, data, rationale=rationale)
+                await txn.create(ref, data, rationale=rationale)
             else:
-                await authority.replace(
+                await txn.replace(
                     ref,
                     current,
                     data,
                     rationale=rationale,
                 )
         elif current is None:
-            write_result = await authority.write(path, data, rationale=rationale)
+            write_result = await self._writer.write(path, data, rationale=rationale)
             if write_result.error is not None:
                 return _error(write_result.error)
         else:
-            write_result = await authority.replace(
+            write_result = await self._writer.replace(
                 path,
                 current,
                 data,
@@ -315,14 +341,29 @@ class _FileToolsRuntime:
             if write_result.error is not None:
                 return _error(write_result.error)
         self._toolbox.accept_content(path, data)
-        return _toolbox_to_tool_result(result)
+        extras: dict[str, object] = {
+            "file_op": "write",
+            "path": path,
+            "bytes": len(data),
+            "content_hash": _content_hash(data),
+        }
+        if current is not None:
+            extras["previous_content_hash"] = _content_hash(current)
+        return _toolbox_to_tool_result(result, extras=extras)
 
     async def _resource_edit(
         self,
         path: str,
         args: _EditArgs,
     ) -> ToolResult:
-        authority, current = await self._resource_view(path)
+        ref = ResourceRef(namespace="workspace", path=path)
+        txn = self._resource_txn()
+        if txn is not None:
+            current = await txn.read(ref)
+        elif await self._writer.exists(path):
+            current = await self._writer.read(path)
+        else:
+            current = None
         result, new_bytes = self._toolbox.plan_edit(
             path,
             current,
@@ -336,16 +377,15 @@ class _FileToolsRuntime:
             return _toolbox_to_tool_result(result)
         if current is None:
             return _error(f"Failed to read {path!r}: file does not exist")
-        ref = ResourceRef(namespace="workspace", path=path)
-        if isinstance(authority, ResourceTxn):
-            await authority.replace(
+        if txn is not None:
+            await txn.replace(
                 ref,
                 current,
                 new_bytes,
                 rationale=args.rationale,
             )
         else:
-            write_result = await authority.replace(
+            write_result = await self._writer.replace(
                 path,
                 current,
                 new_bytes,
@@ -354,7 +394,16 @@ class _FileToolsRuntime:
             if write_result.error is not None:
                 return _error(write_result.error)
         self._toolbox.accept_content(path, new_bytes, read_ranges=result.read_ranges)
-        return _toolbox_to_tool_result(result)
+        return _toolbox_to_tool_result(
+            result,
+            extras={
+                "file_op": "edit",
+                "path": path,
+                "bytes": len(new_bytes),
+                "content_hash": _content_hash(new_bytes),
+                "previous_content_hash": _content_hash(current),
+            },
+        )
 
     # -- read ---------------------------------------------------------------
 

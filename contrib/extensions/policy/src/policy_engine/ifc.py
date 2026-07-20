@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- policy engine normalizes untyped YAML, SQLite, and runtime event payloads
 """Policy engine IFC — minimal literal substring taint tracking."""
 
 from __future__ import annotations
@@ -131,7 +132,9 @@ def _flatten_value(value: object, parts: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def compile_labels(labels_config: dict[str, dict[str, object]] | None) -> list[TaintLabel]:
+def compile_labels(
+    labels_config: dict[str, dict[str, object]] | None,
+) -> list[TaintLabel]:
     """Compile label definitions from policy YAML."""
     if not labels_config:
         return []
@@ -158,11 +161,13 @@ def compile_labels(labels_config: dict[str, dict[str, object]] | None) -> list[T
             continue
 
         min_length = int(str(config.get("min_length", 8) or 8))
-        compiled.append(TaintLabel(
-            name=name,
-            source_tools=tools,
-            result_regex=regex,
-            min_length=min_length,
-        ))
+        compiled.append(
+            TaintLabel(
+                name=name,
+                source_tools=tools,
+                result_regex=regex,
+                min_length=min_length,
+            )
+        )
 
     return compiled

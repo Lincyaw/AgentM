@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """Session driver — persistent loop that converts triggers into committed turns.
 
 Design:

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- CLI renders typed-union trace records from query/store boundaries
 """Interactive trace viewer — pager-style TUI for session trajectories.
 
 Navigation:

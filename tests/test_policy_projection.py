@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+
+from agentm.core.lib.tokens import count_text_tokens
+from agentm.core.abi.messages import (
+    AssistantMessage,
+    TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
+)
+from agentm.core.abi.termination import ModelEndTurn
+from agentm.core.abi.trajectory import Outcome, Round, ToolRecord, Turn
+from agentm.core.abi.trigger import UserInput
+from policy_engine import _content_stats
+from policy_engine.compiler import compile_policy_file
+from policy_engine.persistence import PolicyPersistence
+from policy_engine.projection import events_from_turns, project_events
+from policy_engine.trace_view import (
+    build_policy_trace_view_registry,
+    load_policy_trace_rows,
+)
+from policy_engine.types import (
+    EMPTY,
+    EffectRecord,
+    EntityRecord,
+    Evidence,
+    FileStateEntry,
+    ToolLogEntry,
+)
+
+
+def _count(conn: sqlite3.Connection, table: str) -> int:
+    row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_effect_record_get_supports_slots() -> None:
+    record = EffectRecord(
+        rule_id="stuck-loop",
+        mode="observe",
+        channel="tool_result",
+        effect="notify",
+        reason="diagnostic",
+        turn=3,
+    )
+
+    assert record.get("rule_id") == "stuck-loop"
+    assert record.get("missing", "fallback") == "fallback"
+
+
+def test_empty_comparisons_are_false() -> None:
+    assert not (EMPTY > 80)
+    assert not (EMPTY < 80)
+
+
+def test_context_content_stats_count_tokens_for_text_and_tool_calls() -> None:
+    tool_call = ToolCallBlock(
+        type="tool_call",
+        id="call-1",
+        name="bash",
+        arguments={"cmd": "echo hi"},
+    )
+    tool_result = ToolResultBlock(
+        type="tool_result",
+        tool_call_id="call-1",
+        content=(TextContent(type="text", text="ok"),),
+    )
+
+    chars, tokens, text_blocks, image_blocks = _content_stats(
+        (
+            TextContent(type="text", text="hello world"),
+            tool_call,
+            tool_result,
+        ),
+        model_name=None,
+    )
+
+    rendered_call = json.dumps(
+        {"arguments": {"cmd": "echo hi"}, "name": "bash"},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    assert chars == len("hello world") + len(rendered_call) + len("ok")
+    assert tokens == (
+        count_text_tokens("hello world")
+        + count_text_tokens(rendered_call)
+        + count_text_tokens("ok")
+    )
+    assert text_blocks == 2
+    assert image_blocks == 0
+
+
+def test_policy_persistence_records_intermediate_state(tmp_path) -> None:
+    db_path = tmp_path / "policy.db"
+    persistence = PolicyPersistence(db_path)
+    persistence.open()
+
+    file_entry = FileStateEntry(
+        path="/tmp/app.py",
+        content_hash="abc123",
+        first_read_turn=0,
+        last_read_turn=1,
+        last_write_turn=1,
+        read_count=2,
+        write_count=1,
+        reverts_to_prior_hash=True,
+    )
+    entity = EntityRecord(
+        entity="/tmp/app.py",
+        entity_type="path",
+        first_seen_turn=0,
+        last_seen_turn=1,
+        occurrence_count=2,
+    )
+    entity.evidence.records.append(
+        Evidence(type="structural", turn=0, detail="path argument")
+    )
+    tool_entry = ToolLogEntry(
+        turn=1,
+        tool="bash",
+        args_hash="deadbeef",
+        cmd="make test",
+        exit_code=1,
+        error="x" * 3000,
+        error_fingerprint="fp-1",
+        error_category="runtime",
+        duration_ms=321,
+        result_length=123,
+        is_repeat=True,
+        repeat_count=1,
+    )
+    effect = EffectRecord(
+        rule_id="stuck-loop",
+        mode="observe",
+        channel="tool_result",
+        effect="notify",
+        reason="diagnostic",
+        turn=1,
+    )
+
+    persistence.queue_tool_event(
+        session_id="session-1",
+        turn=1,
+        phase="pre",
+        tool_call_id="call-1",
+        tool_name="bash",
+        args={
+            "cmd": "echo hi",
+            "api_key": "secret-value",
+            "items": list(range(105)),
+        },
+        taint_labels=("secret",),
+    )
+    persistence.queue_tool_event(
+        session_id="session-1",
+        turn=1,
+        phase="post",
+        tool_call_id="call-1",
+        tool_name="bash",
+        args={"cmd": "make test"},
+        entry=tool_entry,
+        result={"is_error": True, "error": "boom"},
+        processed={
+            "is_error": True,
+            "error": "boom",
+            "result_content_hash": "result-hash-1",
+            "duration_ms": 321,
+        },
+    )
+    persistence.queue_file_state_snapshot("session-1", (file_entry,))
+    persistence.queue_entity_state_snapshot("session-1", (entity,))
+    persistence.queue_context_state(
+        "session-1",
+        1,
+        {"total_context_tokens": 42, "access_token": "raw-token"},
+    )
+    persistence.queue_turn_summary(
+        "session-1",
+        1,
+        {"tool_calls_count": 2, "tool_names_set": {"bash", "read"}},
+    )
+    persistence.queue_session_summary(
+        "session-1",
+        {"turn_count": 1, "tool_call_count": 1},
+    )
+    persistence.queue_eval_error(
+        session_id="session-1",
+        turn=1,
+        rule_id="bad-rule",
+        channel="tool_call",
+        tool_name="bash",
+        error="NameError: missing",
+    )
+    persistence.queue_effect("session-1", effect)
+    persistence.flush()
+    persistence.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        assert _count(conn, "event_log") == 1
+        assert _count(conn, "policy_tool_events") == 2
+        assert _count(conn, "policy_file_state") == 1
+        assert _count(conn, "policy_entity_state") == 1
+        assert _count(conn, "policy_context_state") == 1
+        assert _count(conn, "policy_turn_summary") == 1
+        assert _count(conn, "policy_session_summary") == 1
+        assert _count(conn, "policy_eval_error") == 1
+
+        pre = conn.execute(
+            "SELECT args_json, state_json FROM policy_tool_events WHERE phase = 'pre'"
+        ).fetchone()
+        assert pre is not None
+        pre_args = json.loads(pre["args_json"])
+        assert pre_args["api_key"] == "secret-value"
+        assert len(pre_args["items"]) == 105
+        assert json.loads(pre["state_json"])["taint_labels"] == ["secret"]
+
+        post = conn.execute(
+            """
+            SELECT state_json, result_json, processed_json, exit_code, duration_ms,
+                   result_content_hash
+            FROM policy_tool_events WHERE phase = 'post'
+            """
+        ).fetchone()
+        assert post is not None
+        post_state = json.loads(post["state_json"])
+        assert post_state["tool_log_entry"]["error_fingerprint"] == "fp-1"
+        assert len(post_state["tool_log_entry"]["error"]) == 3000
+        assert json.loads(post["result_json"])["is_error"] is True
+        post_processed = json.loads(post["processed_json"])
+        assert post_processed["result_content_hash"] == "result-hash-1"
+        assert post["exit_code"] == 1
+        assert post["duration_ms"] == 321
+        assert post["result_content_hash"] == "result-hash-1"
+
+        context = conn.execute(
+            "SELECT context_json FROM policy_context_state"
+        ).fetchone()
+        assert context is not None
+        assert json.loads(context["context_json"])["access_token"] == "raw-token"
+    finally:
+        conn.close()
+
+
+def test_policy_projection_backfills_existing_turns_idempotently(tmp_path) -> None:
+    policy = """
+version: 1
+rules:
+  - name: destructive-command-observed
+    on: tool_call_pre
+    match: {tool: bash}
+    when: "'rm -rf' in event.args.get('cmd', '')"
+    effect: notify
+    mode: observe
+    reason: "destructive command"
+"""
+    rules, _disabled = compile_policy_file(policy)
+    turn = _turn_with_tool(
+        turn_index=0,
+        tool_name="bash",
+        args={"cmd": "rm -rf /tmp/nope"},
+        result_text="blocked elsewhere",
+        is_error=True,
+        extras={
+            "exit_code": 2,
+            "duration_ms": 45,
+            "agentm_runtime": {"result_content_hash": "result-hash-2"},
+        },
+    )
+
+    db_path = tmp_path / "policy.db"
+    persistence = PolicyPersistence(db_path)
+    persistence.open()
+    try:
+        first = project_events(
+            session_id="session-2",
+            events=events_from_turns((turn,)),
+            rules=rules,
+            persistence=persistence,
+        )
+        persistence.delete_session("session-2")
+        second = project_events(
+            session_id="session-2",
+            events=events_from_turns((turn,)),
+            rules=rules,
+            persistence=persistence,
+        )
+    finally:
+        persistence.close()
+
+    assert first.turns == 1
+    assert first.tool_calls == 1
+    assert first.effects == 1
+    assert second.effects == 1
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        assert _count(conn, "event_log") == 1
+        assert _count(conn, "policy_tool_events") == 2
+        assert _count(conn, "policy_turn_summary") == 1
+        assert _count(conn, "policy_session_summary") == 1
+        event = conn.execute("SELECT * FROM event_log").fetchone()
+        assert event is not None
+        assert event["session_id"] == "session-2"
+        assert event["rule_id"] == "destructive-command-observed"
+        post = conn.execute(
+            """
+            SELECT exit_code, duration_ms, result_content_hash, processed_json
+            FROM policy_tool_events WHERE phase = 'post'
+            """
+        ).fetchone()
+        assert post is not None
+        assert post["exit_code"] == 2
+        assert post["duration_ms"] == 45
+        assert post["result_content_hash"] == "result-hash-2"
+        assert json.loads(post["processed_json"])["exit_code"] == 2
+    finally:
+        conn.close()
+
+    rows = load_policy_trace_rows(
+        db_path,
+        "session-2",
+        categories=frozenset({"summary", "effects", "tools", "files", "entities"}),
+    )
+    assert any(row.title == "Projection Counts" for row in rows)
+    assert any(row.title == "destructive-command-observed" for row in rows)
+    assert any(row.tool_name == "bash" for row in rows)
+    tool_rows = [row for row in rows if row.key.startswith("policy:tool:")]
+    assert {row.display_name for row in tool_rows} == {"pre bash", "post bash"}
+    assert any(row.cause == "pre taint:-" for row in tool_rows)
+    assert any(str(row.cause).startswith("post err:") for row in tool_rows)
+    assert all("hash:" in row.preview for row in tool_rows)
+    assert any("fp:" in row.preview for row in tool_rows)
+
+    specs = build_policy_trace_view_registry(db_path).specs()
+    assert [spec.id for spec in specs[:5]] == [
+        "trajectory",
+        "tools",
+        "errors",
+        "metrics",
+        "policy",
+    ]
+    assert "policy-tools" in {spec.id for spec in specs}
+
+
+def _turn_with_tool(
+    *,
+    turn_index: int,
+    tool_name: str,
+    args: dict[str, object],
+    result_text: str,
+    is_error: bool = False,
+    extras: dict[str, object] | None = None,
+) -> Turn:
+    call = ToolCallBlock(
+        type="tool_call",
+        id=f"call-{turn_index}",
+        name=tool_name,
+        arguments=args,  # type: ignore[arg-type]
+    )
+    result = ToolResultBlock(
+        type="tool_result",
+        tool_call_id=call.id,
+        content=(TextContent(type="text", text=result_text),),
+        is_error=is_error,
+        extras=extras,
+    )
+    return Turn(
+        index=turn_index,
+        id=f"turn-{turn_index}",
+        trigger=UserInput(
+            content=(TextContent(type="text", text=f"turn {turn_index}"),)
+        ),
+        rounds=(
+            Round(
+                response=AssistantMessage(
+                    role="assistant",
+                    content=(call,),
+                    timestamp=1.0,
+                ),
+                tool_results=(ToolRecord(call=call, result=result),),
+            ),
+        ),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=2.0,
+    )

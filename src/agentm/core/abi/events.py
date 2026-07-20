@@ -128,6 +128,10 @@ class ToolResultEvent(Event):
     tool_call_id: str = ""
     tool_name: str = ""
     result: ToolResult | None = None
+    args: dict[str, JsonValue] = field(default_factory=dict)
+    duration_ms: int | None = None
+    exit_code: int | None = None
+    result_content_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

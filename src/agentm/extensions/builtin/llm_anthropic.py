@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- vendor LLM adapters normalize untyped provider SDK payloads
 """Anthropic Messages API provider — native ``StreamFn`` implementation.
 
 This module plugs into the kernel via the ``StreamFn`` Protocol and extension

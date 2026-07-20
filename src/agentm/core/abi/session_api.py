@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Session-facing ABI types.
 
 The session config is shared by embedders and atoms that spawn children.

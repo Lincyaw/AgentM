@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- vendor LLM adapters normalize untyped provider SDK payloads
 """Durable LLM-backed context compaction policy."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- policy engine normalizes untyped YAML, SQLite, and runtime event payloads
 """Policy engine effects — diagnostic construction and injection."""
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ def interpolate_reason(template: str, event_args: ToolArgs) -> str:
 
     Supports both simple {key} and nested {event.args[key]} patterns.
     """
+
     def _resolve_nested(match: re.Match[str]) -> str:
         expr = match.group(1)
         if "event.args" in expr:

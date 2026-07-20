@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- CLI renders typed-union trace records from query/store boundaries
 """``agentm run`` — non-interactive single-shot execution."""
 
 from __future__ import annotations

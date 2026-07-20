@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- gateway wire DTOs validate external transport payloads
 """Pluggable persistence and authentication ports for gateway hosts."""
 
 from __future__ import annotations

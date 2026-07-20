@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- execution worker and wire boundaries validate cross-process payloads
 """Subprocess worker for :mod:`agentm.execution.process`."""
 
 from __future__ import annotations

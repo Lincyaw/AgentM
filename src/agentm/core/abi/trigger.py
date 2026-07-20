@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Trigger types — what causes a Turn to begin.
 
 Trigger is an open Protocol: atoms can define new trigger kinds by

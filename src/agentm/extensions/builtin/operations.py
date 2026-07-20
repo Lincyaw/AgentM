@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Local operations atom: configure and register the local environment."""
 
 from __future__ import annotations

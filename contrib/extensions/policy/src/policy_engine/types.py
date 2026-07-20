@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- shared records normalize sentinel and JSON values
 """Policy engine shared types — dataclasses, sentinels, typed records."""
 
 from __future__ import annotations
@@ -7,12 +8,14 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Literal
 
+from agentm.core.abi.messages import JsonValue
+
 
 # ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------
 
-ToolArgs = dict[str, str | int | float | bool | list | None]
+ToolArgs = dict[str, JsonValue]
 WhereClause = dict[str, str | int | None]
 EffectType = Literal["notify", "block", "escalate", "abort"]
 RuleMode = Literal["enforce", "observe"]
@@ -52,6 +55,18 @@ class _EmptyType:
     def __len__(self) -> int:
         return 0
 
+    def __lt__(self, other: object) -> bool:
+        return False
+
+    def __le__(self, other: object) -> bool:
+        return False
+
+    def __gt__(self, other: object) -> bool:
+        return False
+
+    def __ge__(self, other: object) -> bool:
+        return False
+
 
 EMPTY = _EmptyType()
 
@@ -78,8 +93,14 @@ class EvidenceList:
         return any(e.type == type for e in self.records)
 
     def strongest(self) -> Evidence | _EmptyType:
-        priority = ("tool_success", "structural", "user_provided",
-                    "tool_failure", "lexical_match", "dict_recall")
+        priority = (
+            "tool_success",
+            "structural",
+            "user_provided",
+            "tool_failure",
+            "lexical_match",
+            "dict_recall",
+        )
         for p in priority:
             for e in reversed(self.records):
                 if e.type == p:
@@ -152,7 +173,9 @@ class ToolLogEntry:
     is_repeat: bool = False
     repeat_count: int = 0
 
-    def get(self, field: str, default: int | str | None = None) -> str | int | bool | None:
+    def get(
+        self, field: str, default: int | str | None = None
+    ) -> str | int | bool | None:
         try:
             return object.__getattribute__(self, field)
         except AttributeError:
@@ -176,7 +199,9 @@ class FileStateEntry:
     reverts_to_prior_hash: bool = False
     _content_hashes: set[str] = field(default_factory=set)
 
-    def get(self, field: str, default: int | str | None = None) -> str | int | bool | None:
+    def get(
+        self, field: str, default: int | str | None = None
+    ) -> str | int | bool | None:
         try:
             return object.__getattribute__(self, field)
         except AttributeError:
@@ -198,7 +223,10 @@ class EffectRecord:
     turn: int
 
     def get(self, field: str, default: str | int | None = None) -> str | int | None:
-        return self.__dict__.get(field, default)
+        try:
+            return object.__getattribute__(self, field)
+        except AttributeError:
+            return default
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +305,9 @@ def _match_pattern(value: str, pattern: str) -> bool:
     return value == pattern
 
 
-def match_row(row: ToolLogEntry | EffectRecord | FileStateEntry, where: WhereClause) -> bool:
+def match_row(
+    row: ToolLogEntry | EffectRecord | FileStateEntry, where: WhereClause
+) -> bool:
     """Check if a typed record matches ALL where-clause conditions."""
     for field_path, pattern in where.items():
         fp = str(field_path)

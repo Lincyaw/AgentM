@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- authoring parsers validate untyped frontmatter data
 """Strict YAML frontmatter document used by authoring workflows."""
 
 from __future__ import annotations

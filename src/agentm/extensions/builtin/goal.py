@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``goal`` atom -- condition-driven session continuation.
 
 Sets a completion condition; after every turn an independent evaluator

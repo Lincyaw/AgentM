@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, cast
 
+from loguru import logger
 from rich.console import Group, RenderableType
 from rich.syntax import Syntax
 from rich.text import Text
@@ -65,23 +66,20 @@ class PaneDivider(Static):
         event.stop()
         self.capture_mouse()
         self.add_class("dragging")
-        app = self.app
-        if isinstance(app, TraceConsoleApp):
-            app.begin_turn_pane_resize(event.screen_x)
+        app = cast("TraceConsoleApp", self.app)
+        app.begin_turn_pane_resize(event.screen_x)
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
-        app = self.app
-        if isinstance(app, TraceConsoleApp):
-            event.stop()
-            app.drag_turn_pane_resize(event.screen_x)
+        event.stop()
+        app = cast("TraceConsoleApp", self.app)
+        app.drag_turn_pane_resize(event.screen_x)
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         event.stop()
         self.release_mouse()
         self.remove_class("dragging")
-        app = self.app
-        if isinstance(app, TraceConsoleApp):
-            app.end_turn_pane_resize()
+        app = cast("TraceConsoleApp", self.app)
+        app.end_turn_pane_resize()
 
 
 class TraceConsoleApp(App[None]):
@@ -179,6 +177,11 @@ class TraceConsoleApp(App[None]):
         Binding("3", "view_index(2)", "Errors", show=False),
         Binding("4", "view_index(3)", "Metrics", show=False),
         Binding("5", "view_index(4)", "Policy", show=False),
+        Binding("6", "view_index(5)", "View 6", show=False),
+        Binding("7", "view_index(6)", "View 7", show=False),
+        Binding("8", "view_index(7)", "View 8", show=False),
+        Binding("9", "view_index(8)", "View 9", show=False),
+        Binding("0", "view_index(9)", "View 10", show=False),
         Binding("[", "resize_turn_pane(-4)", "Narrow", show=False),
         Binding("]", "resize_turn_pane(4)", "Widen", show=False),
         Binding("n", "next_match", "Next"),
@@ -341,7 +344,7 @@ class TraceConsoleApp(App[None]):
             self._rows_by_key[row.key] = row
             self._row_keys.append(row.key)
             state = row.cause or row.status or "-"
-            name = row.tool_name or row.title
+            name = row.display_name or row.tool_name or row.title
             cells = (
                 row.location,
                 row.kind,
@@ -432,11 +435,11 @@ class TraceConsoleApp(App[None]):
         self.query_one("#query", Input).focus()
 
     def action_clear_focus(self) -> None:
-        focused = self.focused
-        if isinstance(focused, Input):
+        query = self.query_one("#query", Input)
+        if self.focused is query:
             self.query_one("#rows", DataTable).focus()
         else:
-            self.query_one("#query", Input).value = ""
+            query.value = ""
 
     def action_next_view(self) -> None:
         self._activate_view_offset(1)
@@ -535,9 +538,10 @@ class TraceConsoleApp(App[None]):
             return None
         try:
             value = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-        except Exception:
+        except Exception as exc:
+            logger.debug("trace textual row-key lookup failed: {}", exc)
             return None
-        return value if isinstance(value, str) else None
+        return cast(str | None, value)
 
     def _restore_cursor(
         self,
@@ -662,7 +666,10 @@ def _detail_header(row: TraceRow) -> str:
 def _truncated_content(content: str, *, max_chars: int) -> str:
     if len(content) <= max_chars:
         return content
-    return content[:max_chars] + f"\n\n... truncated {len(content) - max_chars:,} chars ..."
+    return (
+        content[:max_chars]
+        + f"\n\n... truncated {len(content) - max_chars:,} chars ..."
+    )
 
 
 def _short_id(value: str, *, keep: int = 8) -> str:

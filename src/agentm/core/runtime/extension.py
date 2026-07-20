@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """Extension loader — import an atom module and call its install().
 
 Atoms receive the Session object directly.

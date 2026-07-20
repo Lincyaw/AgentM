@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Retry when the model emits only thinking with no actionable output.
 
 Some models (e.g. doubao-seed-2.0-code) occasionally emit tool-call

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Tool atom: ``read_history`` — recover the original content of past turns.
 
 The ``llm_compaction`` atom replaces old turns with a structured summary that

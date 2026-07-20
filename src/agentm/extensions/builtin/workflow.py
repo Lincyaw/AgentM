@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """``workflow`` atom -- orchestration scripts with journal-based resume.
 
 Single-file atom: journal, lineage, SDK primitives (agent / parallel /

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Core trajectory data types.
 
 All types here are frozen dataclasses — once a Turn is committed to a

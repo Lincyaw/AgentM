@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
 """Default runtime catalog implementations for SDK composition identity."""
 
 from __future__ import annotations

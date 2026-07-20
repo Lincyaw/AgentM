@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- policy engine normalizes untyped YAML, SQLite, and runtime event payloads
 """Policy engine query primitives — the runtime query API."""
 
 from __future__ import annotations
@@ -60,9 +61,7 @@ class TableQuery:
         if scope == "user" and self._cross_session_fn:
             ttl_days = _parse_ttl(ttl) if ttl else 14
             fp = where.get("error_fingerprint") if where else None
-            return self._cross_session_fn(
-                error_fingerprint=fp, ttl_days=ttl_days
-            )
+            return self._cross_session_fn(error_fingerprint=fp, ttl_days=ttl_days)
         window = self._window(last=last, since=since)
         if not where:
             return len(window)
@@ -216,7 +215,9 @@ def trend(
     if where:
         window = [r for r in window if match_row(r, where)]
 
-    raw_values = [r.get(field, 0) for r in window if isinstance(r.get(field), (int, float))]
+    raw_values = [
+        r.get(field, 0) for r in window if isinstance(r.get(field), (int, float))
+    ]
     values: list[float] = [float(v) for v in raw_values if v is not None]
     if len(values) < 3:
         return "stable"

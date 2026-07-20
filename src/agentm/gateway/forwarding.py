@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- gateway wire DTOs validate external transport payloads
 """Gateway child-session forwarding contracts."""
 
 from __future__ import annotations

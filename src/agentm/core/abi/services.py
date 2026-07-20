@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Typed service registry — scoped dependency injection for atoms.
 
 Services are the atom-to-atom communication channel when atoms cannot import

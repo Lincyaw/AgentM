@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Observability atom for SDK sessions.
 
 The atom has two responsibilities:

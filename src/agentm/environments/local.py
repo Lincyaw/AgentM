@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- environment adapters validate external operation metadata
 """Local environment and snapshot lifecycle helpers."""
 
 from __future__ import annotations

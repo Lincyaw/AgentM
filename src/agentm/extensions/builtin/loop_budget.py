@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``loop_budget`` atom -- sets the agent-loop turn / tool budget.
 
 The loop budget is a policy, so it lives as an atom rather than a

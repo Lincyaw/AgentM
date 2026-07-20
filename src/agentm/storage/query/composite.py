@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """Composition adapter for independent trace query data planes."""
 
 from __future__ import annotations

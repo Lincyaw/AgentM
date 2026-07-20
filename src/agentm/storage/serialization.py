@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- storage adapters normalize persisted JSON and database rows
 """JSON-safe serialization helpers for optional storage backends."""
 
 # code-health: ignore-file[AM022] -- validates untyped persisted trajectory JSON

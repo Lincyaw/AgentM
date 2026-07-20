@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- CLI renders typed-union trace records from query/store boundaries
 """``agentm chat`` — interactive REPL with streaming display."""
 
 from __future__ import annotations

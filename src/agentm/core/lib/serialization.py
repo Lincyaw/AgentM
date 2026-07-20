@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
 """Explicit, non-reflective JSON encoding for diagnostic payloads."""
 
 # code-health: ignore-file[AM022] -- serializes heterogeneous diagnostic boundary values

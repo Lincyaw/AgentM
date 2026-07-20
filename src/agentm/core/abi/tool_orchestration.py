@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- frozen ABI DTOs enforce runtime invariants
 """Batch tool orchestration ABI.
 
 ``ToolExecutor`` executes one call. ``ToolOrchestrator`` owns the scheduling
@@ -94,6 +95,7 @@ class ToolOrchestrationResult:
     output: ToolResult | ToolOutcome | None = None
     error: BaseException | None = None
     cancel_reason: str | None = None
+    duration_ms: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.item, ToolWorkItem):
@@ -115,6 +117,12 @@ class ToolOrchestrationResult:
             raise TypeError(
                 "tool orchestration cancel_reason must be non-empty or None"
             )
+        if self.duration_ms is not None and (
+            not isinstance(self.duration_ms, int)
+            or isinstance(self.duration_ms, bool)
+            or self.duration_ms < 0
+        ):
+            raise ValueError("tool orchestration duration_ms must be non-negative")
         if self.status == "completed":
             if (
                 self.output is None

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- state hashing normalizes untyped tool arguments
 """Policy engine state tables — reactions that record raw facts."""
 
 from __future__ import annotations
@@ -53,6 +54,15 @@ def _classify_error(error_text: str | None) -> str | None:
     return "runtime"
 
 
+def _coerce_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # RollingLog — generic bounded append-only log
 # ---------------------------------------------------------------------------
@@ -91,6 +101,9 @@ class IndexedTable[K, V]:
     def record(self, key: K, value: V) -> None:
         self._entries[key] = value
 
+    def entries(self) -> tuple[V, ...]:
+        return tuple(self._entries.values())
+
 
 # ---------------------------------------------------------------------------
 # FileState — entity map keyed by path
@@ -105,6 +118,9 @@ class FileState:
 
     def get(self, path: str) -> FileStateEntry | None:
         return self._entries.get(path)
+
+    def entries(self) -> tuple[FileStateEntry, ...]:
+        return tuple(self._entries.values())
 
     def record_file_op(
         self,
@@ -161,7 +177,8 @@ class SessionTree:
 
     def concurrent_children(self, parent_id: str) -> int:
         return sum(
-            1 for e in self._entries.values()
+            1
+            for e in self._entries.values()
             if e.parent_id == parent_id and e.exit_reason is None
         )
 
@@ -204,10 +221,16 @@ class PolicyState:
         cmd = str(args.get("cmd") or args.get("command") or "")
         error: str | None = None
         exit_code: int | None = None
+        duration_ms = 0
+        result_length = 0
+        content_hash: str | None = None
         if result:
             error = str(result["error"]) if "error" in result else None
-            raw_code = result.get("exit_code")
-            exit_code = int(str(raw_code)) if raw_code is not None else None
+            exit_code = _coerce_int(result.get("exit_code"))
+            duration_ms = _coerce_int(result.get("duration_ms")) or 0
+            result_length = _coerce_int(result.get("result_length")) or len(str(result))
+            raw_hash = result.get("content_hash")
+            content_hash = str(raw_hash) if raw_hash else None
 
         key = (tool_name, ah)
         repeat_count = self._repeat_counter[key]
@@ -223,15 +246,20 @@ class PolicyState:
             error=error,
             error_fingerprint=fingerprint(error),
             error_category=_classify_error(error),
-            duration_ms=0,
-            result_length=len(str(result)) if result else 0,
+            duration_ms=duration_ms,
+            result_length=result_length,
             is_repeat=repeat_count > 0,
             repeat_count=repeat_count,
         )
         self.tool_log.append(entry)
 
         if path and tool_name in ("read", "edit", "write", "glob"):
-            self.file_state.record_file_op(path, tool_name, self._turn_count)
+            self.file_state.record_file_op(
+                path,
+                tool_name,
+                self._turn_count,
+                content_hash=content_hash,
+            )
 
         if error:
             err_entry = ToolLogEntry(

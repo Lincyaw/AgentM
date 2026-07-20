@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- gateway wire DTOs validate external transport payloads
 """Transport-neutral DTOs for the version-2 gateway wire."""
 
 from __future__ import annotations

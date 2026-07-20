@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Local workspace and logical-resource storage atom."""
 
 from __future__ import annotations
