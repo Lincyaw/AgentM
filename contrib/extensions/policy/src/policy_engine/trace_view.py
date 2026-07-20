@@ -3,16 +3,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
-from collections import defaultdict
+import shlex
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
 from sqlalchemy.engine import Connection, RowMapping
+
+from policy_engine.bash_parser import BashRedirect, BashSegment, parse_bash_segments
 
 from agentm.presenter.trajectory import (
     TraceQuery,
@@ -45,6 +49,9 @@ _EFFECT_CATEGORIES = frozenset({"effects"})
 _TOOL_CATEGORIES = frozenset({"tools"})
 _FILE_CATEGORIES = frozenset({"files"})
 _FILE_STREAM_CATEGORIES = frozenset({"file_stream"})
+_FILE_TOOL_STREAM_CATEGORIES = frozenset({"file_tool_stream"})
+_BASH_FILE_STREAM_CATEGORIES = frozenset({"bash_file_stream"})
+_BASH_COMMAND_CATEGORIES = frozenset({"bash_commands"})
 _ENTITY_CATEGORIES = frozenset({"entities"})
 _ERROR_CATEGORIES = frozenset({"errors"})
 
@@ -63,10 +70,31 @@ _FILE_STREAM_COLUMNS = (
     TraceTableColumn("name", "File", max_width=58),
     TraceTableColumn("operation", "Operation", max_width=9),
     TraceTableColumn("phase", "Phase", max_width=9),
-    TraceTableColumn("result", "Result", max_width=18),
+    TraceTableColumn("file_result", "File Result", max_width=12),
+    TraceTableColumn("tool_result", "Tool Result", max_width=18),
     TraceTableColumn("source", "Source", max_width=22),
     TraceTableColumn("tool", "Tool", max_width=16),
     TraceTableColumn("preview", "Preview", max_width=56),
+)
+_BASH_FILE_STREAM_COLUMNS = (
+    TraceTableColumn("location", "Loc", max_width=8),
+    TraceTableColumn("name", "File", max_width=58),
+    TraceTableColumn("operation", "Operation", max_width=9),
+    TraceTableColumn("evidence", "Evidence", max_width=12),
+    TraceTableColumn("phase", "Phase", max_width=9),
+    TraceTableColumn("tool_result", "Tool Result", max_width=18),
+    TraceTableColumn("source", "Source", max_width=22),
+    TraceTableColumn("command", "Command", max_width=72),
+)
+_BASH_COMMAND_COLUMNS = (
+    TraceTableColumn("count", "Count", max_width=7),
+    TraceTableColumn("family", "Family", max_width=10),
+    TraceTableColumn("command", "Command", max_width=14),
+    TraceTableColumn("template", "Template", max_width=82),
+    TraceTableColumn("errors", "Tool Err", max_width=8),
+    TraceTableColumn("first_turn", "First", max_width=7),
+    TraceTableColumn("last_turn", "Last", max_width=7),
+    TraceTableColumn("example", "Example", max_width=72),
 )
 
 _HEREDOC_RE = re.compile(
@@ -76,19 +104,22 @@ _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "|&", "\n"})
 _SHELL_REDIRECTS = frozenset(
     {">", ">>", "<", "<<", "<<-", "<<<", "<>", ">|", "&>", "&>>"}
 )
-_FILE_READER_COMMANDS = frozenset({"cat"})
-_PATH_TOKEN_RE = re.compile(
-    r"(?<![\w./-])("
-    r"/[A-Za-z0-9_./@+-]{3,}"
-    r"|(?:[A-Za-z0-9_.@+-]+/)+[A-Za-z0-9_.@+-]+"
-    r"|[A-Za-z0-9_.@+-]+\."
-    r"(?:ts|tsx|js|jsx|py|go|rs|json|md|yaml|yml|toml|txt|sql|sh)"
-    r")(?![\w./-])"
+_FILE_READER_COMMANDS = frozenset({"awk", "cat", "head", "nl", "sed", "tail", "wc"})
+_FILE_QUERY_COMMANDS = frozenset(
+    {"ack", "ag", "fd", "find", "grep", "ls", "locate", "rg", "tree"}
 )
+_GIT_QUERY_SUBCOMMANDS = frozenset(
+    {"check-ignore", "diff", "grep", "log", "ls-files", "show", "status"}
+)
+_FILE_WRITER_COMMANDS = frozenset(
+    {"cp", "mkdir", "mv", "perl", "rm", "sed", "tee", "touch", "truncate"}
+)
+_STRUCTURED_FILE_TOOL_NAMES = frozenset({"read", "write", "edit"})
+_SUBCOMMAND_TOOLS = frozenset({"git", "npm", "npx", "pnpm", "yarn"})
+_CONTROL_COMMANDS = frozenset({"cd", "echo", "pwd", "readlink", "which"})
 _IDENTIFIER_RE = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]{2,}\b")
-_DECLARATION_RE = re.compile(
-    r"\b(?:class|const|def|enum|function|interface|let|type|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
-)
+_HEX_TOKEN_RE = re.compile(r"[0-9a-fA-F]{7,64}")
+_NUMERIC_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +133,10 @@ class _FileEvent:
     path: str
     source: str
     args_hash: str | None
-    status: str
+    file_status: str
+    tool_status: str
+    tool_exit_code: int | None
+    duration_ms: int | None
     error_category: str | None
     error_fingerprint: str | None
     result_content_hash: str | None
@@ -188,9 +222,48 @@ class PolicyTraceViewProvider:
                 ),
             ),
             TraceViewSpec(
+                id="policy-file-tool-stream",
+                title="File Tool Stream",
+                description="Direct read/write/edit file-tool stream.",
+                shortcut="",
+                build=lambda snapshot, query: self._build_view(
+                    "policy-file-tool-stream",
+                    "File Tool Stream",
+                    snapshot,
+                    query,
+                    categories=_FILE_TOOL_STREAM_CATEGORIES,
+                ),
+            ),
+            TraceViewSpec(
+                id="policy-bash-commands",
+                title="Bash Commands",
+                description="Bash command templates clustered from token sequences.",
+                shortcut="",
+                build=lambda snapshot, query: self._build_view(
+                    "policy-bash-commands",
+                    "Bash Commands",
+                    snapshot,
+                    query,
+                    categories=_BASH_COMMAND_CATEGORIES,
+                ),
+            ),
+            TraceViewSpec(
+                id="policy-bash-file-stream",
+                title="Bash File Stream",
+                description="Bash-derived file operations and references.",
+                shortcut="",
+                build=lambda snapshot, query: self._build_view(
+                    "policy-bash-file-stream",
+                    "Bash File Stream",
+                    snapshot,
+                    query,
+                    categories=_BASH_FILE_STREAM_CATEGORIES,
+                ),
+            ),
+            TraceViewSpec(
                 id="policy-file-stream",
                 title="File Stream",
-                description="Chronological file read/write/reference event stream.",
+                description="Chronological structured file-tool event stream.",
                 shortcut="",
                 build=lambda snapshot, query: self._build_view(
                     "policy-file-stream",
@@ -261,6 +334,12 @@ def _columns_for_categories(
         return _FILE_COLUMNS
     if categories == _FILE_STREAM_CATEGORIES:
         return _FILE_STREAM_COLUMNS
+    if categories == _FILE_TOOL_STREAM_CATEGORIES:
+        return _FILE_STREAM_COLUMNS
+    if categories == _BASH_FILE_STREAM_CATEGORIES:
+        return _BASH_FILE_STREAM_COLUMNS
+    if categories == _BASH_COMMAND_CATEGORIES:
+        return _BASH_COMMAND_COLUMNS
     return ()
 
 
@@ -337,7 +416,35 @@ def load_policy_trace_rows(
             if "files" in categories and "policy_file_state" in existing:
                 rows.extend(_file_rows(conn, session_id))
             if "file_stream" in categories and "policy_tool_events" in existing:
-                rows.extend(_file_stream_rows(conn, session_id))
+                rows.extend(
+                    _file_stream_rows(
+                        conn,
+                        session_id,
+                        include_bash=False,
+                        category="file_stream",
+                    )
+                )
+            if "file_tool_stream" in categories and "policy_tool_events" in existing:
+                rows.extend(
+                    _file_stream_rows(
+                        conn,
+                        session_id,
+                        include_bash=False,
+                        category="file_tool_stream",
+                        tool_names=_STRUCTURED_FILE_TOOL_NAMES,
+                    )
+                )
+            if "bash_file_stream" in categories and "policy_tool_events" in existing:
+                rows.extend(
+                    _file_stream_rows(
+                        conn,
+                        session_id,
+                        include_bash=True,
+                        category="bash_file_stream",
+                    )
+                )
+            if "bash_commands" in categories and "policy_tool_events" in existing:
+                rows.extend(_bash_command_rows(conn, session_id))
             if "entities" in categories and "policy_entity_state" in existing:
                 rows.extend(_entity_rows(conn, session_id))
             if "errors" in categories and "policy_eval_error" in existing:
@@ -780,16 +887,33 @@ def _file_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
         )
 
 
-def _file_stream_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+def _file_stream_rows(
+    conn: Connection,
+    session_id: str,
+    *,
+    include_bash: bool,
+    category: str,
+    tool_names: frozenset[str] | None = None,
+) -> Iterable[TraceRow]:
     for merged in _merge_file_events(_file_events(conn, session_id)):
         event = merged.event
-        is_error = event.status.startswith("error")
+        is_bash = event.tool_name == "bash"
+        if include_bash != is_bash:
+            continue
+        if tool_names is not None and event.tool_name not in tool_names:
+            continue
+        is_error = event.tool_status.startswith(("error", "exit:"))
         tool_call_id = event.policy_tool_event.get("tool_call_id")
         phase = merged.phase_label
         source = merged.source_label
+        command = _single_line(
+            _command_text(event.policy_tool_event.get("args")),
+            limit=240,
+        )
+        evidence = _file_evidence_label(event, source)
         yield TraceRow(
             key=(
-                f"policy:file_stream:{event.turn}:{tool_call_id}:"
+                f"policy:{category}:{event.turn}:{tool_call_id}:"
                 f"{event.operation}:{event.path}:{phase}"
             ),
             kind="policy",
@@ -812,22 +936,183 @@ def _file_stream_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
             tool_name=event.tool_name,
             display_name=event.path,
             is_error=is_error,
-            cause=event.status,
+            cause=event.tool_status,
             metadata={
-                "category": "file_stream",
+                "category": category,
                 "path": event.path,
                 "operation": event.operation,
                 "phase": phase,
-                "result": event.status,
+                "result": event.tool_status,
+                "file_result": event.file_status,
+                "tool_result": event.tool_status,
+                "evidence": evidence,
                 "source": source,
                 "tool": event.tool_name,
                 "tool_call_id": tool_call_id,
+                "tool_exit_code": event.tool_exit_code,
+                "duration_ms": event.duration_ms,
+                "command": command,
                 "args_hash": event.args_hash,
                 "raw_event_count": len(merged.events),
                 "error_category": event.error_category,
                 "error_fingerprint": event.error_fingerprint,
             },
         )
+
+
+def _bash_command_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
+    clusters: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in _preferred_bash_tool_rows(conn, session_id):
+        for segment in _bash_command_segments(row):
+            clusters[str(segment["template"])].append(segment)
+
+    for template, segments in sorted(
+        clusters.items(),
+        key=lambda item: (-len(item[1]), str(item[0])),
+    ):
+        first = min(segments, key=lambda item: (item["turn"], item["event_id"]))
+        last = max(segments, key=lambda item: (item["turn"], item["event_id"]))
+        errors = sum(1 for item in segments if item["is_error"])
+        families = Counter(str(item["family"]) for item in segments)
+        commands = Counter(str(item["command"]) for item in segments)
+        family = families.most_common(1)[0][0]
+        command = commands.most_common(1)[0][0]
+        examples = _unique_command_examples(segments)
+        yield TraceRow(
+            key=f"policy:bash_command:{_stable_id(template)}",
+            kind="policy",
+            title=template,
+            preview=(
+                f"count:{len(segments)} errors:{errors} "
+                f"family:{family} example:{_single_line(examples[0], limit=160)}"
+            ),
+            content=_json_content(
+                {
+                    "session_id": session_id,
+                    "template": template,
+                    "template_tokens": first["template_tokens"],
+                    "count": len(segments),
+                    "errors": errors,
+                    "family_counts": dict(families),
+                    "command_counts": dict(commands),
+                    "first_turn": first["turn"],
+                    "last_turn": last["turn"],
+                    "examples": examples[:8],
+                    "segments": segments[:200],
+                }
+            ),
+            turn_index=last["turn"] if isinstance(last["turn"], int) else None,
+            tool_name="bash",
+            display_name=template,
+            is_error=errors > 0,
+            cause=family,
+            metadata={
+                "category": "bash_commands",
+                "count": len(segments),
+                "family": family,
+                "command": command,
+                "template": template,
+                "errors": errors,
+                "first_turn": first["turn"],
+                "last_turn": last["turn"],
+                "example": _single_line(examples[0], limit=240),
+            },
+        )
+
+
+def _preferred_bash_tool_rows(
+    conn: Connection,
+    session_id: str,
+) -> list[RowMapping]:
+    rows = _rows(
+        conn,
+        """
+        SELECT *
+        FROM policy_tool_events
+        WHERE session_id = ? AND tool_name = 'bash'
+        ORDER BY turn ASC, id ASC
+        """,
+        (session_id,),
+    )
+    by_call: dict[str, RowMapping] = {}
+    order: list[str] = []
+    for row in rows:
+        key = str(row["tool_call_id"] or f"event:{row['id']}")
+        if key not in by_call:
+            order.append(key)
+            by_call[key] = row
+            continue
+        if by_call[key]["phase"] != "post" and row["phase"] == "post":
+            by_call[key] = row
+    return [by_call[key] for key in order]
+
+
+def _bash_command_segments(row: RowMapping) -> Iterable[dict[str, object]]:
+    args = _loads(row["args_json"])
+    cmd = _command_text(args)
+    if not cmd:
+        return ()
+    result = _loads(row["result_json"])
+    state = _loads(row["state_json"])
+    processed = _loads(row["processed_json"])
+    error = _tool_is_error(row, result, state, processed)
+    tool_status = _file_tool_status(row, state, processed, error)
+    segments: list[dict[str, object]] = []
+    for index, segment in enumerate(parse_bash_segments(cmd)):
+        command = list(segment.argv)
+        if not command:
+            continue
+        template_tokens = _bash_segment_template_tokens(segment)
+        command_text = _bash_segment_text(segment)
+        segments.append(
+            {
+                "event_id": row["id"],
+                "turn": row["turn"],
+                "phase": row["phase"],
+                "tool_call_id": row["tool_call_id"],
+                "command_index": index,
+                "command": _command_name(command),
+                "family": _bash_segment_family(segment),
+                "tokens": list(command),
+                "template_tokens": list(template_tokens),
+                "template": " ".join(template_tokens),
+                "command_text": command_text,
+                "full_command": _single_line(cmd, limit=600),
+                "parser": segment.parser,
+                "pipeline_index": segment.pipeline_index,
+                "depth": segment.depth,
+                "redirects": [
+                    _redirect_json(redirect) for redirect in segment.redirects
+                ],
+                "tool_result": tool_status,
+                "exit_code": _tool_exit_code(row, processed),
+                "duration_ms": _coerce_int(row["duration_ms"]),
+                "is_error": error,
+            }
+        )
+    return segments
+
+
+def _unique_command_examples(segments: Sequence[Mapping[str, object]]) -> list[str]:
+    examples: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        text = _single_line(segment.get("command_text"), limit=600)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        examples.append(text)
+    return examples or ["-"]
+
+
+def _redirect_json(redirect: BashRedirect) -> dict[str, object]:
+    return {
+        "kind": redirect.kind,
+        "operator": redirect.operator,
+        "destination": redirect.destination,
+        "descriptor": redirect.descriptor,
+        "text": redirect.text,
+    }
 
 
 def _file_events(conn: Connection, session_id: str) -> list[_FileEvent]:
@@ -857,7 +1142,8 @@ def _file_events(conn: Connection, session_id: str) -> list[_FileEvent]:
         )
         if not paths:
             continue
-        status = _file_event_status(row, state, processed, error)
+        tool_status = _file_tool_status(row, state, processed, error)
+        tool_exit_code = _tool_exit_code(row, processed)
         policy_tool_event = {
             "id": row["id"],
             "ts": row["ts"],
@@ -876,6 +1162,11 @@ def _file_events(conn: Connection, session_id: str) -> list[_FileEvent]:
         }
         for path, source in paths:
             operation = _file_operation(row["tool_name"], args, processed, source)
+            file_status = _file_operation_status(
+                row["tool_name"],
+                row["phase"],
+                tool_status,
+            )
             known_paths.add(path)
             events.append(
                 _FileEvent(
@@ -888,7 +1179,18 @@ def _file_events(conn: Connection, session_id: str) -> list[_FileEvent]:
                     path=path,
                     source=source,
                     args_hash=row["args_hash"],
-                    status=status,
+                    file_status=file_status,
+                    tool_status=tool_status,
+                    tool_exit_code=tool_exit_code,
+                    duration_ms=_coerce_int(
+                        row["duration_ms"]
+                        if row["duration_ms"] is not None
+                        else (
+                            processed.get("duration_ms")
+                            if isinstance(processed, Mapping)
+                            else None
+                        )
+                    ),
                     error_category=_tool_error_category(state, processed),
                     error_fingerprint=_tool_error_fingerprint(state, processed),
                     result_content_hash=row["result_content_hash"],
@@ -1039,46 +1341,31 @@ def _file_operation(
         return "read"
     if tool_name in {"edit", "write"}:
         return "write"
-    if source == "cmd.heuristic":
+    if source == "cmd.redirect.write":
+        return "write"
+    if source in {"cmd.reader", "cmd.redirect.read"}:
+        return "read"
+    if source == "cmd.query":
+        return "query"
+    if source == "cmd.known":
         return _bash_file_operation(_command_text(args))
     return "reference"
 
 
 def _bash_file_operation(cmd: str) -> str:
-    lowered = f" {cmd.lower()} "
-    write_markers = (
-        " >",
-        ">>",
-        " tee ",
-        " sed -i",
-        " perl -pi",
-        " touch ",
-        " rm ",
-        " rm -",
-        " mv ",
-        " cp ",
-        " mkdir ",
-    )
-    if any(marker in lowered for marker in write_markers):
+    categories = [
+        _bash_segment_category(segment) for segment in parse_bash_segments(cmd)
+    ]
+    if "write" in categories:
         return "write"
-    read_markers = (
-        " cat ",
-        " sed ",
-        " grep ",
-        " rg ",
-        " find ",
-        " ls ",
-        " head ",
-        " tail ",
-        " wc ",
-        " awk ",
-    )
-    if any(marker in lowered for marker in read_markers):
+    if "query" in categories:
+        return "query"
+    if "read" in categories:
         return "read"
     return "reference"
 
 
-def _file_event_status(
+def _file_tool_status(
     row: RowMapping,
     state: object,
     processed: object,
@@ -1087,11 +1374,44 @@ def _file_event_status(
     if row["phase"] == "pre":
         return "intent"
     if error:
-        return f"error:{_tool_error_category(state, processed) or 'unknown'}"
-    exit_code = row["exit_code"]
-    if exit_code is None and isinstance(processed, Mapping):
-        exit_code = processed.get("exit_code")
-    return f"ok:{_dash(exit_code)}"
+        category = _tool_error_category(state, processed) or "unknown"
+        exit_code = _tool_exit_code(row, processed)
+        if exit_code is not None:
+            return f"exit:{exit_code} {category}"
+        return f"error:{category}"
+    return f"ok:{_dash(_tool_exit_code(row, processed))}"
+
+
+def _file_operation_status(tool_name: str, phase: str, tool_status: str) -> str:
+    if phase == "pre":
+        return "intent"
+    if tool_name == "bash":
+        return "observed"
+    return tool_status
+
+
+def _file_evidence_label(event: _FileEvent, source: str) -> str:
+    if event.tool_name != "bash":
+        return "structured"
+    if event.phase == "pre":
+        return "intent"
+    source_parts = set(source.split("+"))
+    if "cmd.query" in source_parts:
+        return "query"
+    if source_parts.intersection(
+        {"cmd.reader", "cmd.redirect.read", "cmd.redirect.write"}
+    ):
+        return "shell-op"
+    return "reference"
+
+
+def _tool_exit_code(row: RowMapping, processed: object) -> int | None:
+    exit_code = _coerce_int(row["exit_code"])
+    if exit_code is not None:
+        return exit_code
+    if isinstance(processed, Mapping):
+        return _coerce_int(processed.get("exit_code"))
+    return None
 
 
 def _file_event_json(event: _FileEvent) -> dict[str, object]:
@@ -1105,7 +1425,11 @@ def _file_event_json(event: _FileEvent) -> dict[str, object]:
         "path": event.path,
         "source": event.source,
         "args_hash": event.args_hash,
-        "status": event.status,
+        "status": event.tool_status,
+        "file_status": event.file_status,
+        "tool_status": event.tool_status,
+        "tool_exit_code": event.tool_exit_code,
+        "duration_ms": event.duration_ms,
         "error_category": event.error_category,
         "error_fingerprint": event.error_fingerprint,
         "result_content_hash": event.result_content_hash,
@@ -1138,14 +1462,17 @@ def _file_content_signals(
     signals: list[dict[str, object]] = []
     for merged in history:
         event = merged.event
+        text = _file_event_content_text(event)
         if not any(
             (
                 event.content_hash,
                 event.previous_content_hash,
                 event.result_content_hash,
+                text,
             )
         ):
             continue
+        tokens = _content_identifier_tokens(text)
         signals.append(
             {
                 "turn": event.turn,
@@ -1154,9 +1481,27 @@ def _file_content_signals(
                 "content_hash": event.content_hash,
                 "previous_content_hash": event.previous_content_hash,
                 "result_content_hash": event.result_content_hash,
+                "content_preview": _single_line(text, limit=240) if text else "",
+                "identifier_tokens": [
+                    {"token": token, "count": count}
+                    for token, count in Counter(tokens).most_common(30)
+                ],
             }
         )
     return signals
+
+
+def _file_event_content_text(event: _FileEvent) -> str:
+    if event.tool_name != "read" or event.operation != "read":
+        return ""
+    raw = _tool_result_text_for_rule(event.policy_tool_event.get("result"))
+    return raw if isinstance(raw, str) else ""
+
+
+def _content_identifier_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    return [match.group(0) for match in _IDENTIFIER_RE.finditer(text[:200_000])]
 
 
 def _command_text(args: object) -> str:
@@ -1166,20 +1511,474 @@ def _command_text(args: object) -> str:
     return raw if isinstance(raw, str) else ""
 
 
-def _paths_from_command(cmd: str) -> list[str]:
-    paths: list[str] = []
-    for match in _PATH_TOKEN_RE.finditer(cmd):
-        if _is_cd_operand(cmd, match.start()):
+def _paths_from_command(
+    cmd: str,
+    *,
+    known_paths: set[str],
+) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+
+    for segment in parse_bash_segments(cmd):
+        command = segment.argv
+        command_category = _bash_segment_category(segment)
+        candidates.extend(
+            _known_paths_from_tokens(
+                command,
+                known_paths,
+                source=_known_path_source_for_command(command_category),
+            )
+        )
+        candidates.extend(_redirect_paths_from_segment(segment))
+        candidates.extend(_reader_paths_from_command(command))
+        candidates.extend(_query_paths_from_command(command))
+
+    seen: set[tuple[str, str]] = set()
+    result: list[tuple[str, str]] = []
+    for path, source in candidates:
+        clean = _clean_path(path)
+        if not clean or _is_virtual_filesystem_path(clean):
             continue
-        path = _clean_path(match.group(1))
-        if path:
-            paths.append(path)
+        item = (clean, source)
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _strip_heredoc_bodies(cmd: str) -> str:
+    lines = cmd.splitlines()
+    if not lines:
+        return cmd
+
+    kept: list[str] = []
+    markers: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if markers:
+            if stripped == markers[0]:
+                markers.pop(0)
+            continue
+
+        kept.append(line)
+        for match in _HEREDOC_RE.finditer(line):
+            marker = match.group("quoted") or match.group("bare")
+            if marker:
+                markers.append(marker)
+    return "\n".join(kept)
+
+
+def _shell_tokens(cmd: str) -> list[str]:
+    try:
+        lexer = shlex.shlex(
+            cmd.replace("\n", " ; "), posix=True, punctuation_chars=True
+        )
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return cmd.split()
+
+
+def _shell_commands(tokens: Sequence[str]) -> Iterable[list[str]]:
+    command: list[str] = []
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            if command:
+                yield command
+                command = []
+            continue
+        command.append(token)
+    if command:
+        yield command
+
+
+def _bash_segment_template_tokens(segment: BashSegment) -> tuple[str, ...]:
+    tokens = list(_bash_command_template_tokens(segment.argv))
+    for redirect in segment.redirects:
+        operator = redirect.operator
+        if redirect.descriptor:
+            operator = f"{redirect.descriptor}{operator}"
+        if operator:
+            tokens.append(operator)
+        if redirect.kind == "heredoc":
+            tokens.append("<heredoc>")
+        elif redirect.destination:
+            tokens.append(_normalized_bash_template_token(redirect.destination))
+    return tuple(tokens)
+
+
+def _bash_segment_text(segment: BashSegment) -> str:
+    if not segment.redirects or segment.parser == "shlex-fallback":
+        return segment.text
+    return " ".join([segment.text, *(redirect.text for redirect in segment.redirects)])
+
+
+def _bash_command_template_tokens(command: Sequence[str]) -> tuple[str, ...]:
+    pattern_indexes = _bash_pattern_token_indexes(command)
+    return tuple(
+        _bash_template_token(command, index, pattern_indexes)
+        for index in range(len(command))
+    )
+
+
+def _bash_pattern_token_indexes(command: Sequence[str]) -> set[int]:
+    name = _command_name(command)
+    if name == "timeout":
+        inner_index = _timeout_inner_index(command)
+        inner_indexes = _bash_pattern_token_indexes(command[inner_index:])
+        return {inner_index + index for index in inner_indexes}
+    indexes: set[int] = set()
+    if name in {"grep", "rg", "ag", "ack", "fd"} or _is_git_query(command):
+        operands = _query_operand_indexes(command)
+        if operands:
+            indexes.add(operands[0])
+    if name == "find":
+        for index, token in enumerate(command[:-1]):
+            if token in {"-name", "-path", "-regex", "-wholename"}:
+                indexes.add(index + 1)
+    return indexes
+
+
+def _bash_template_token(
+    command: Sequence[str],
+    index: int,
+    pattern_indexes: set[int],
+) -> str:
+    token = command[index]
+    if index in pattern_indexes:
+        return "<pattern>"
+    if _preserve_bash_template_token(command, index):
+        return _normalize_flag_assignment(token)
+    return _normalized_bash_template_token(token)
+
+
+def _preserve_bash_template_token(command: Sequence[str], index: int) -> bool:
+    token = command[index]
+    name = _command_name(command)
+    if index == 0 or token in _SHELL_REDIRECTS:
+        return True
+    if token.startswith("-") and "=" not in token:
+        return True
+    if name in _SUBCOMMAND_TOOLS and index == 1 and not token.startswith("-"):
+        return True
+    if name == "timeout":
+        inner_index = _timeout_inner_index(command)
+        if index == inner_index:
+            return True
+        if inner_index < len(command):
+            inner_name = _command_name(command[inner_index:])
+            if inner_name in _SUBCOMMAND_TOOLS and index in {
+                inner_index + 1,
+                inner_index + 2,
+            }:
+                return not token.startswith("-")
+    return False
+
+
+def _normalize_flag_assignment(token: str) -> str:
+    if token.startswith("-") and "=" in token:
+        key, value = token.split("=", 1)
+        return f"{key}={_normalized_bash_template_token(value)}"
+    return token
+
+
+def _normalized_bash_template_token(token: str) -> str:
+    if not token:
+        return "<arg>"
+    if _NUMERIC_TOKEN_RE.fullmatch(token):
+        return "<num>"
+    if _HEX_TOKEN_RE.fullmatch(token):
+        return "<hash>"
+    if _is_probable_shell_path(token):
+        return "<path>"
+    if _looks_like_glob_or_pattern(token):
+        return "<pattern>"
+    if any(ch.isspace() for ch in token) or len(token) > 80:
+        return "<arg>"
+    if any(ch in token for ch in "{}()[],:"):
+        return "<arg>"
+    return token
+
+
+def _looks_like_glob_or_pattern(token: str) -> bool:
+    return any(char in token for char in "*?[]")
+
+
+def _query_operand_indexes(command: Sequence[str]) -> list[int]:
+    indexes: list[int] = []
+    after_options = False
+    for index, token in enumerate(command[1:], start=1):
+        if token == "--":
+            after_options = True
+            continue
+        if not after_options and token.startswith("-"):
+            continue
+        indexes.append(index)
+    return indexes
+
+
+def _known_paths_from_tokens(
+    tokens: Sequence[str],
+    known_paths: set[str],
+    *,
+    source: str,
+) -> Iterable[tuple[str, str]]:
+    if not known_paths:
+        return ()
+    known_by_variant: dict[str, str] = {}
+    for path in known_paths:
+        for variant in _known_path_variants(path):
+            known_by_variant.setdefault(variant, path)
+
+    matches: list[tuple[str, str]] = []
+    for token in tokens:
+        clean = _clean_path(token)
+        if not clean:
+            continue
+        known = known_by_variant.get(clean)
+        if known is not None:
+            matches.append((known, source))
+    return matches
+
+
+def _known_path_source_for_command(category: str) -> str:
+    if category == "query":
+        return "cmd.query"
+    if category == "read":
+        return "cmd.reader"
+    return "cmd.known"
+
+
+def _known_path_variants(path: str) -> Iterable[str]:
+    clean = _clean_path(path)
+    if not clean:
+        return ()
+    variants = [clean]
+    if clean.startswith("/"):
+        parts = [part for part in clean.split("/") if part]
+        variants.extend("/".join(parts[index:]) for index in range(1, len(parts) - 1))
+    return variants
+
+
+def _redirect_paths_from_segment(segment: BashSegment) -> Iterable[tuple[str, str]]:
+    paths: list[tuple[str, str]] = []
+    for redirect in segment.redirects:
+        if redirect.kind != "file":
+            continue
+        if redirect.operator in {"<", "<>"}:
+            source = "cmd.redirect.read"
+        elif redirect.operator in {">", ">>", ">|", "&>", "&>>"}:
+            source = "cmd.redirect.write"
+        else:
+            continue
+        if _is_probable_shell_path(redirect.destination):
+            paths.append((redirect.destination, source))
     return paths
 
 
-def _is_cd_operand(cmd: str, start: int) -> bool:
-    prefix = cmd[max(0, start - 8) : start].lower()
-    return bool(re.search(r"(?:^|[;&|]\s*)cd\s+$", prefix))
+def _redirect_paths_from_command(command: Sequence[str]) -> Iterable[tuple[str, str]]:
+    paths: list[tuple[str, str]] = []
+    for index, token in enumerate(command[:-1]):
+        if token not in _SHELL_REDIRECTS:
+            continue
+        target = command[index + 1]
+        if token in {"<", "<>"}:
+            source = "cmd.redirect.read"
+        elif token in {"<<", "<<-", "<<<"}:
+            continue
+        else:
+            source = "cmd.redirect.write"
+        if _is_probable_shell_path(target):
+            paths.append((target, source))
+    return paths
+
+
+def _reader_paths_from_command(command: Sequence[str]) -> Iterable[tuple[str, str]]:
+    if not command:
+        return ()
+    if _bash_command_category(command) != "read":
+        return ()
+
+    paths: list[tuple[str, str]] = []
+    skip_next = False
+    for token in command[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _SHELL_REDIRECTS:
+            skip_next = token not in {"<<", "<<-", "<<<"}
+            continue
+        if token.startswith("-"):
+            continue
+        if _is_probable_shell_path(token):
+            paths.append((token, "cmd.reader"))
+    return paths
+
+
+def _query_paths_from_command(command: Sequence[str]) -> Iterable[tuple[str, str]]:
+    if _bash_command_category(command) != "query":
+        return ()
+    name = _command_name(command)
+    if name == "find":
+        return _find_query_paths(command)
+    if name in {"ls", "tree"}:
+        return _all_path_operands(command[1:], "cmd.query")
+    operands = _query_operands(command)
+    if name in {"grep", "rg", "ag", "ack", "fd"} or _is_git_query(command):
+        operands = operands[1:]
+    return _all_path_operands(operands, "cmd.query")
+
+
+def _query_operands(command: Sequence[str]) -> list[str]:
+    return [command[index] for index in _query_operand_indexes(command)]
+
+
+def _find_query_paths(command: Sequence[str]) -> Iterable[tuple[str, str]]:
+    paths: list[tuple[str, str]] = []
+    for token in command[1:]:
+        if token in {"!", "(", ")"} or token.startswith("-"):
+            break
+        if _is_probable_shell_path(token):
+            paths.append((token, "cmd.query"))
+    return paths
+
+
+def _all_path_operands(
+    operands: Iterable[str],
+    source: str,
+) -> Iterable[tuple[str, str]]:
+    paths: list[tuple[str, str]] = []
+    for token in operands:
+        if token.startswith("-"):
+            continue
+        if _is_probable_shell_path(token):
+            paths.append((token, source))
+    return paths
+
+
+def _bash_segment_category(segment: BashSegment) -> str:
+    if _segment_has_write_redirect(segment):
+        return "write"
+    return _bash_command_category(segment.argv)
+
+
+def _segment_has_write_redirect(segment: BashSegment) -> bool:
+    for redirect in segment.redirects:
+        if redirect.kind != "file" or redirect.operator not in {
+            ">",
+            ">>",
+            "<>",
+            ">|",
+            "&>",
+            "&>>",
+        }:
+            continue
+        if redirect.descriptor == "2":
+            continue
+        if _is_virtual_filesystem_path(_clean_path(redirect.destination) or ""):
+            continue
+        return True
+    return False
+
+
+def _bash_command_category(command: Sequence[str]) -> str:
+    name = _command_name(command)
+    if not name:
+        return "reference"
+    if _has_write_redirect(command):
+        return "write"
+    if name == "timeout":
+        return _bash_command_category(_timeout_inner_command(command))
+    if _is_git_query(command) or name in _FILE_QUERY_COMMANDS:
+        return "query"
+    if name == "sed" and any(token.startswith("-i") for token in command[1:]):
+        return "write"
+    if name == "perl" and any(
+        "i" in token for token in command[1:] if token.startswith("-")
+    ):
+        return "write"
+    if name in _FILE_READER_COMMANDS:
+        return "read"
+    if name in _FILE_WRITER_COMMANDS:
+        return "write"
+    if name == "xargs" and any(
+        _command_name((token,)) in _FILE_QUERY_COMMANDS for token in command[1:]
+    ):
+        return "query"
+    return "reference"
+
+
+def _bash_segment_family(segment: BashSegment) -> str:
+    category = _bash_segment_category(segment)
+    if category != "reference":
+        return category
+    name = _command_name(segment.argv)
+    if name in _CONTROL_COMMANDS:
+        return "control"
+    if name:
+        return "exec"
+    return "unknown"
+
+
+def _has_write_redirect(command: Sequence[str]) -> bool:
+    for index, token in enumerate(command[:-1]):
+        if token in {">", ">>", "<>", ">|", "&>", "&>>"}:
+            if index > 0 and command[index - 1] == "2":
+                continue
+            if _is_virtual_filesystem_path(_clean_path(command[index + 1]) or ""):
+                continue
+            return True
+    return False
+
+
+def _bash_command_family(command: Sequence[str]) -> str:
+    category = _bash_command_category(command)
+    if category != "reference":
+        return category
+    name = _command_name(command)
+    if name in _CONTROL_COMMANDS:
+        return "control"
+    if name:
+        return "exec"
+    return "unknown"
+
+
+def _timeout_inner_command(command: Sequence[str]) -> Sequence[str]:
+    return command[_timeout_inner_index(command) :]
+
+
+def _timeout_inner_index(command: Sequence[str]) -> int:
+    for index, token in enumerate(command[1:], start=1):
+        if token.startswith("-") or token.replace(".", "", 1).isdigit():
+            continue
+        return index
+    return len(command)
+
+
+def _is_git_query(command: Sequence[str]) -> bool:
+    return (
+        len(command) > 1
+        and _command_name(command) == "git"
+        and command[1] in _GIT_QUERY_SUBCOMMANDS
+    )
+
+
+def _command_name(command: Sequence[str]) -> str:
+    if not command:
+        return ""
+    return Path(command[0]).name
+
+
+def _is_probable_shell_path(value: object) -> bool:
+    path = _clean_path(value)
+    if not path or _is_virtual_filesystem_path(path):
+        return False
+    return path.startswith(("/", "./", "../")) or "/" in path or "." in path
+
+
+def _is_virtual_filesystem_path(path: str) -> bool:
+    parts = [part for part in path.split("/") if part]
+    return bool(path.startswith("/") and parts and parts[0] in {"dev", "proc", "sys"})
 
 
 def _clean_path(value: object) -> str | None:
@@ -1306,7 +2105,16 @@ def _empty_category_row(
         preview = "No persisted policy file state for this session."
     elif categories == _FILE_STREAM_CATEGORIES:
         title = "No Policy File Stream"
-        preview = "No file events could be derived for this session."
+        preview = "No structured non-bash file events could be derived."
+    elif categories == _FILE_TOOL_STREAM_CATEGORIES:
+        title = "No Policy File Tool Stream"
+        preview = "No direct read/write/edit file-tool events could be derived."
+    elif categories == _BASH_FILE_STREAM_CATEGORIES:
+        title = "No Policy Bash File Stream"
+        preview = "No bash-derived file events could be derived for this session."
+    elif categories == _BASH_COMMAND_CATEGORIES:
+        title = "No Policy Bash Commands"
+        preview = "No bash command templates could be derived for this session."
     elif categories == _ENTITY_CATEGORIES:
         title = "No Policy Entity State"
         preview = "No persisted policy entity state for this session."
@@ -1648,6 +2456,11 @@ def _single_line(value: object, *, limit: int = 100) -> str:
 def _short_text(value: object, keep: int) -> str:
     text = "" if value is None else str(value)
     return text[:keep]
+
+
+def _stable_id(value: object, *, keep: int = 16) -> str:
+    raw = "" if value is None else str(value)
+    return hashlib.sha256(raw.encode()).hexdigest()[:keep]
 
 
 def _evidence_preview(evidence: object) -> str:

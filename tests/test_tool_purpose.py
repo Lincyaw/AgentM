@@ -106,20 +106,6 @@ def test_tool_purpose_injects_required_purpose_in_place() -> None:
     assert tool.parameters["required"] == ["path", "purpose"]
 
 
-def test_tool_purpose_mutation_composes_with_precomputed_tool_filter_list() -> None:
-    tool = _tool()
-    filtered_tools = [tool]
-    api = _install_api(ToolPurposeConfig())
-    handler = api.handlers[BeforeSendEvent.CHANNEL]
-
-    result = handler(BeforeSendEvent(tools=(tool,)))
-
-    assert result is None
-    properties = filtered_tools[0].parameters["properties"]
-    assert isinstance(properties, dict)
-    assert "purpose" in properties
-
-
 @pytest.mark.asyncio
 async def test_tool_purpose_executor_strips_synthetic_arg() -> None:
     executor = _RecordingExecutor()

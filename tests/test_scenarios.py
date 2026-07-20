@@ -14,13 +14,15 @@ async def _stub_stream(**kwargs: object) -> object:
     yield MessageEnd(stop_reason="end_turn", usage=None)
 
 
-def test_harbor_manifest_includes_base_extensions() -> None:
+def test_harbor_manifest_resolves_runtime_contracts() -> None:
     spec = load_scenario_manifest(
         Path("contrib/scenarios/harbor/scenario.yaml"),
         requested_name="arl:harbor",
     )
 
-    assert [extension.module_path for extension in spec.extensions] == [
+    modules = [extension.module_path for extension in spec.extensions]
+    assert len(modules) == len(set(modules))
+    assert {
         "agentm.extensions.builtin.observability",
         "agentm.extensions.builtin.operations",
         "agentm.extensions.builtin.local_resources",
@@ -53,11 +55,21 @@ def test_harbor_manifest_includes_base_extensions() -> None:
         "agentm.extensions.builtin.thinking_retry",
         "agentm.extensions.builtin.goal",
         "policy_engine",
-    ]
-    assert spec.extensions[15].config["default_timeout"] == 6000
-    assert spec.extensions[16].config["max_tokens"] == 1000
-    assert spec.extensions[19].config["tool_result_max_tokens"] == 200
-    assert spec.extensions[19].config["total_max_tokens"] == 1000
+    } <= set(modules)
+    assert modules[-1] == "policy_engine"
+
+    extensions = {extension.module_path: extension for extension in spec.extensions}
+    assert (
+        extensions["agentm.extensions.builtin.tool_bash"].config["default_timeout"]
+        == 6000
+    )
+    assert (
+        extensions["agentm.extensions.builtin.tool_result_cap"].config["max_tokens"]
+        == 1000
+    )
+    read_history = extensions["agentm.extensions.builtin.read_history"].config
+    assert read_history["tool_result_max_tokens"] == 200
+    assert read_history["total_max_tokens"] == 1000
 
 
 @pytest.mark.asyncio

@@ -18,25 +18,21 @@ def _read_key_from_bytes(data: bytes) -> str:
             os.close(write_fd)
 
 
-def test_trace_viewer_reads_plain_escape_as_escape() -> None:
-    assert _read_key_from_bytes(b"\x1b") == viewer._KEY_ESC
+def test_trace_viewer_reads_supported_key_sequences() -> None:
+    cases = {
+        b"\x1b": viewer._KEY_ESC,
+        b"\x1b[A": viewer._KEY_UP,
+        b"\x1b[B": viewer._KEY_DOWN,
+        b"\x1b[5~": viewer._KEY_PAGE_UP,
+        b"\x1b[6~": viewer._KEY_PAGE_DOWN,
+        b"\x1b[<64;10;20M": viewer._KEY_SCROLL_UP,
+        b"\x1b[<65;10;20M": viewer._KEY_SCROLL_DOWN,
+        b"\x1b[<0;10;20M": viewer._KEY_IGNORE,
+        b"\x1b[?1006h": viewer._KEY_IGNORE,
+    }
 
-
-def test_trace_viewer_maps_standard_navigation_sequences() -> None:
-    assert _read_key_from_bytes(b"\x1b[A") == viewer._KEY_UP
-    assert _read_key_from_bytes(b"\x1b[B") == viewer._KEY_DOWN
-    assert _read_key_from_bytes(b"\x1b[5~") == viewer._KEY_PAGE_UP
-    assert _read_key_from_bytes(b"\x1b[6~") == viewer._KEY_PAGE_DOWN
-
-
-def test_trace_viewer_maps_mouse_wheel_sequences() -> None:
-    assert _read_key_from_bytes(b"\x1b[<64;10;20M") == viewer._KEY_SCROLL_UP
-    assert _read_key_from_bytes(b"\x1b[<65;10;20M") == viewer._KEY_SCROLL_DOWN
-
-
-def test_trace_viewer_ignores_unknown_escape_sequences() -> None:
-    assert _read_key_from_bytes(b"\x1b[<0;10;20M") == viewer._KEY_IGNORE
-    assert _read_key_from_bytes(b"\x1b[?1006h") == viewer._KEY_IGNORE
+    for data, expected in cases.items():
+        assert _read_key_from_bytes(data) == expected
 
 
 def test_trace_viewer_mouse_wheel_scrolls_expanded_viewport() -> None:

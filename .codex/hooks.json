@@ -1,0 +1,18 @@
+{
+  "description": "Repository policy hooks for AgentM.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/pre_tool_use_tests_guard.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking tests/ edit policy"
+          }
+        ]
+      }
+    ]
+  }
+}

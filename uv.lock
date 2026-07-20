@@ -1938,6 +1938,8 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "sqlalchemy" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-bash" },
     { name = "typer" },
 ]
 
@@ -1948,6 +1950,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "tree-sitter", specifier = ">=0.25" },
+    { name = "tree-sitter-bash", specifier = ">=0.25" },
     { name = "typer", specifier = ">=0.12" },
 ]
 

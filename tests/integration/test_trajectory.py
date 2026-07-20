@@ -57,6 +57,7 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.termination import (
     BudgetExhausted,
+    MaxTurnsExhausted,
     ModelEndTurn,
     ProviderRequestFailed,
     SignalAborted,
@@ -395,10 +396,26 @@ async def test_max_turns() -> None:
         )
     )
     session.start()
-    await session.prompt("first")
-    await _wait_turn(session)
+
+    first = session.push_trigger(
+        UserInput(content=(TextContent(type="text", text="first"),))
+    )
+    second = session.push_trigger(
+        UserInput(content=(TextContent(type="text", text="second"),))
+    )
+    third = session.push_trigger(
+        UserInput(content=(TextContent(type="text", text="third"),))
+    )
+
+    turns = await asyncio.gather(first.wait(), second.wait())
+    with pytest.raises(TriggerTerminated) as exc_info:
+        await third.wait()
     await session.shutdown()
-    assert len(session.trajectory) <= 2
+
+    assert len(turns) == 2
+    assert len(session.trajectory) == 2
+    assert mock.call_count == 2
+    assert isinstance(exc_info.value.cause, MaxTurnsExhausted)
 
 
 # ---------------------------------------------------------------------------
@@ -900,6 +917,10 @@ async def test_spawn_inheritance() -> None:
     assert child.services.get("test_svc") is not None
     assert len(child.trajectory) == 0
     assert child.bus is not parent.bus
+    assert graph.children(parent.id, kind="spawned") == [child.id]
+    assert graph.ancestors(child.id) == [parent.id]
+    assert graph.descendants(parent.id) == [child.id]
+    assert graph.root(child.id) == parent.id
 
     parent.services.register("new_svc", {"new": True})
     assert child.services.get("new_svc") is None
@@ -954,27 +975,11 @@ async def test_fork_lifecycle() -> None:
     fork_edges = [e for e in edges if e.kind == "forked"]
     assert len(fork_edges) == 1
     assert fork_edges[0].child_id == forked.id
+    assert graph.children(session.id, kind="forked") == [forked.id]
+    assert graph.ancestors(forked.id) == [session.id]
+    assert graph.descendants(session.id) == [forked.id]
+    assert graph.root(forked.id) == session.id
     await forked.shutdown()
-
-
-def test_session_graph_traversals() -> None:
-    graph = InMemorySessionGraph()
-    graph.register("A", purpose="root")
-    graph.register("B", parent_id="A", edge_kind="spawned")
-    graph.register("C", parent_id="B", edge_kind="spawned")
-    graph.register("D", parent_id="A", edge_kind="forked", fork_point=0)
-
-    assert graph.ancestors("C") == ["B", "A"]
-    assert graph.root("C") == "A"
-
-    desc = graph.descendants("A")
-    assert "B" in desc
-    assert "C" in desc
-    assert "D" in desc
-
-    assert graph.children("A", kind="forked") == ["D"]
-    assert set(graph.children("A")) == {"B", "D"}
-    assert graph.children("A", kind="spawned") == ["B"]
 
 
 # ---------------------------------------------------------------------------

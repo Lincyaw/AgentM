@@ -25,7 +25,6 @@ from policy_engine.trace_view import (
     load_policy_trace_rows,
 )
 from policy_engine.types import (
-    EMPTY,
     EffectRecord,
     EntityRecord,
     Evidence,
@@ -38,25 +37,6 @@ def _count(conn: Connection, table: str) -> int:
     row = conn.exec_driver_sql(f"SELECT COUNT(*) FROM {table}").fetchone()
     assert row is not None
     return int(row[0])
-
-
-def test_effect_record_get_supports_slots() -> None:
-    record = EffectRecord(
-        rule_id="stuck-loop",
-        mode="observe",
-        channel="tool_result",
-        effect="notify",
-        reason="diagnostic",
-        turn=3,
-    )
-
-    assert record.get("rule_id") == "stuck-loop"
-    assert record.get("missing", "fallback") == "fallback"
-
-
-def test_empty_comparisons_are_false() -> None:
-    assert not (EMPTY > 80)
-    assert not (EMPTY < 80)
 
 
 def test_context_content_stats_count_tokens_for_text_and_tool_calls() -> None:
@@ -95,6 +75,78 @@ def test_context_content_stats_count_tokens_for_text_and_tool_calls() -> None:
     )
     assert text_blocks == 2
     assert image_blocks == 0
+
+
+def test_policy_projection_queries_missing_state_and_effect_log_records(
+    tmp_path,
+) -> None:
+    policy = """
+version: 1
+rules:
+  - name: slot-backed-effect
+    on: tool_call_pre
+    match: {tool: bash}
+    when: "event.args.get('cmd', '') == 'echo seed'"
+    effect: notify
+    mode: observe
+    reason: "seed effect"
+  - name: effect-log-query-fired
+    on: tool_call_pre
+    match: {tool: bash}
+    when: >
+      event.args.get('cmd', '') == 'echo followup'
+      and effect_log.exists({'rule_id': 'slot-backed-effect'})
+    effect: notify
+    mode: observe
+    reason: "effect log query worked"
+  - name: missing-context-should-not-fire
+    on: tool_call_pre
+    match: {tool: bash}
+    when: >
+      lookup('context_state', session.turn_count, 'context_usage_pct') > 80
+    effect: notify
+    mode: observe
+    reason: "missing context should not compare truthy"
+"""
+    rules, _disabled = compile_policy_file(policy)
+    turns = (
+        _turn_with_tool(
+            turn_index=0,
+            tool_name="bash",
+            args={"cmd": "echo seed"},
+            result_text="seeded",
+        ),
+        _turn_with_tool(
+            turn_index=1,
+            tool_name="bash",
+            args={"cmd": "echo followup"},
+            result_text="followed",
+        ),
+    )
+
+    db_path = tmp_path / "policy.db"
+    persistence = PolicyPersistence(db_path)
+    persistence.open()
+    try:
+        result = project_events(
+            session_id="session-query",
+            events=events_from_turns(turns),
+            rules=rules,
+            persistence=persistence,
+        )
+    finally:
+        persistence.close()
+
+    assert result.effects == 2
+    rows = load_policy_trace_rows(
+        db_path,
+        "session-query",
+        categories=frozenset({"effects"}),
+    )
+    assert {row.title for row in rows} == {
+        "slot-backed-effect",
+        "effect-log-query-fired",
+    }
 
 
 def test_policy_persistence_records_intermediate_state(tmp_path) -> None:
@@ -309,6 +361,16 @@ def test_policy_trace_file_history_and_stream_from_tool_events(tmp_path) -> None
             session_id="session-file",
             turn=2,
             phase="post",
+            tool_call_id="glob-1",
+            tool_name="glob",
+            args={"path": "/tmp/generated.list"},
+            result={"is_error": False},
+            processed={"is_error": False},
+        )
+        persistence.queue_tool_event(
+            session_id="session-file",
+            turn=3,
+            phase="post",
             tool_call_id="bash-1",
             tool_name="bash",
             args={"cmd": "cat package.json"},
@@ -327,7 +389,7 @@ def test_policy_trace_file_history_and_stream_from_tool_events(tmp_path) -> None
     assert [(row.title, row.cause, row.metadata["phase"]) for row in stream_rows] == [
         ("/tmp/app.py", "ok:-", "pre+post"),
         ("/tmp/app.py", "ok:-", "pre+post"),
-        ("package.json", "ok:-", "post"),
+        ("/tmp/generated.list", "ok:-", "post"),
     ]
     assert [row.metadata["operation"] for row in stream_rows] == [
         "read",
@@ -335,13 +397,51 @@ def test_policy_trace_file_history_and_stream_from_tool_events(tmp_path) -> None
         "read",
     ]
     assert [row.metadata["result"] for row in stream_rows] == ["ok:-", "ok:-", "ok:-"]
+    assert [row.metadata["file_result"] for row in stream_rows] == [
+        "ok:-",
+        "ok:-",
+        "ok:-",
+    ]
+    assert [row.metadata["tool_result"] for row in stream_rows] == [
+        "ok:-",
+        "ok:-",
+        "ok:-",
+    ]
     assert [row.display_name for row in stream_rows] == [
         "/tmp/app.py",
         "/tmp/app.py",
-        "package.json",
+        "/tmp/generated.list",
     ]
     assert all(row.metadata["category"] == "file_stream" for row in stream_rows)
-    assert stream_rows[2].metadata["source"] == "cmd.heuristic"
+    assert stream_rows[2].metadata["source"] == "args.path"
+    assert [row.metadata["evidence"] for row in stream_rows] == [
+        "structured",
+        "structured",
+        "structured",
+    ]
+
+    file_tool_rows = load_policy_trace_rows(
+        db_path,
+        "session-file",
+        categories=frozenset({"file_tool_stream"}),
+    )
+    assert [(row.tool_name, row.title) for row in file_tool_rows] == [
+        ("read", "/tmp/app.py"),
+        ("edit", "/tmp/app.py"),
+    ]
+    assert all(row.metadata["category"] == "file_tool_stream" for row in file_tool_rows)
+
+    bash_rows = load_policy_trace_rows(
+        db_path,
+        "session-file",
+        categories=frozenset({"bash_file_stream"}),
+    )
+    assert [(row.title, row.metadata["operation"]) for row in bash_rows] == [
+        ("package.json", "read")
+    ]
+    assert bash_rows[0].metadata["category"] == "bash_file_stream"
+    assert bash_rows[0].metadata["evidence"] == "shell-op"
+    assert bash_rows[0].metadata["source"] == "cmd.reader"
 
     file_rows = load_policy_trace_rows(
         db_path,
@@ -377,26 +477,107 @@ def test_policy_trace_file_history_and_stream_from_tool_events(tmp_path) -> None
         snapshot,
         TraceQuery(),
     )
-    assert [column.title for column in file_view.columns] == [
-        "Loc",
-        "File",
-        "Reads",
-        "Writes",
-        "Refs",
-        "Events",
-        "Latest",
-        "Preview",
+    file_tool_view = next(
+        spec for spec in specs if spec.id == "policy-file-tool-stream"
+    ).build(
+        snapshot,
+        TraceQuery(),
+    )
+    bash_stream_view = next(
+        spec for spec in specs if spec.id == "policy-bash-file-stream"
+    ).build(
+        snapshot,
+        TraceQuery(),
+    )
+    assert any(row.title == "/tmp/app.py" for row in file_view.rows)
+    assert [row.title for row in stream_view.rows] == [
+        "/tmp/app.py",
+        "/tmp/app.py",
+        "/tmp/generated.list",
     ]
-    assert [column.title for column in stream_view.columns] == [
-        "Loc",
-        "File",
-        "Operation",
-        "Phase",
-        "Result",
-        "Source",
-        "Tool",
-        "Preview",
+    assert [row.title for row in file_tool_view.rows] == [
+        "/tmp/app.py",
+        "/tmp/app.py",
     ]
+    assert [row.title for row in bash_stream_view.rows] == ["package.json"]
+
+
+def test_bash_file_stream_ignores_heredoc_source_tokens(tmp_path) -> None:
+    db_path = tmp_path / "policy.db"
+    persistence = PolicyPersistence(db_path)
+    persistence.open()
+    try:
+        persistence.queue_tool_event(
+            session_id="session-bash",
+            turn=0,
+            phase="post",
+            tool_call_id="bash-heredoc",
+            tool_name="bash",
+            args={
+                "cmd": (
+                    "cat > /tmp/repro.any << 'EOF'\n"
+                    'import x from "better-auth/plugins/jwt";\n'
+                    'fetch("/oauth2/token", { headers: { "content-type": '
+                    '"application/json" } });\n'
+                    "EOF\n"
+                    "cat package.json 2>/dev/null"
+                )
+            },
+            result={"is_error": False},
+            processed={"is_error": False},
+        )
+        persistence.queue_tool_event(
+            session_id="session-bash",
+            turn=1,
+            phase="post",
+            tool_call_id="bash-error",
+            tool_name="bash",
+            args={"cmd": "cat README.md"},
+            result={"is_error": True},
+            processed={
+                "is_error": True,
+                "exit_code": 7,
+                "error_category": "runtime",
+            },
+        )
+        persistence.flush()
+    finally:
+        persistence.close()
+
+    stream_rows = load_policy_trace_rows(
+        db_path,
+        "session-bash",
+        categories=frozenset({"bash_file_stream"}),
+    )
+
+    assert [
+        (
+            row.title,
+            row.metadata["operation"],
+            row.metadata["file_result"],
+            row.metadata["evidence"],
+            row.metadata["source"],
+        )
+        for row in stream_rows
+    ] == [
+        ("/tmp/repro.any", "write", "observed", "shell-op", "cmd.redirect.write"),
+        ("package.json", "read", "observed", "shell-op", "cmd.reader"),
+        ("README.md", "read", "observed", "shell-op", "cmd.reader"),
+    ]
+    assert {row.metadata["category"] for row in stream_rows} == {"bash_file_stream"}
+    assert stream_rows[2].metadata["tool_result"] == "exit:7 runtime"
+    assert stream_rows[2].metadata["tool_exit_code"] == 7
+    assert stream_rows[2].metadata["command"] == "cat README.md"
+    structured_rows = load_policy_trace_rows(
+        db_path,
+        "session-bash",
+        categories=frozenset({"file_stream"}),
+    )
+    assert structured_rows[0].title == "No Policy File Stream"
+    assert "better-auth/plugins/jwt" not in {row.title for row in stream_rows}
+    assert "/oauth2/token" not in {row.title for row in stream_rows}
+    assert "application/json" not in {row.title for row in stream_rows}
+    assert "/dev/null" not in {row.title for row in stream_rows}
 
 
 def test_policy_projection_backfills_existing_turns_idempotently(tmp_path) -> None:
@@ -495,17 +676,6 @@ rules:
     assert any(str(row.cause).startswith("post err:") for row in tool_rows)
     assert all("hash:" in row.preview for row in tool_rows)
     assert any("fp:" in row.preview for row in tool_rows)
-
-    specs = build_policy_trace_view_registry(db_path).specs()
-    assert [spec.id for spec in specs[:5]] == [
-        "trajectory",
-        "tools",
-        "errors",
-        "metrics",
-        "policy",
-    ]
-    assert "policy-tools" in {spec.id for spec in specs}
-    assert "policy-file-stream" in {spec.id for spec in specs}
 
 
 def _turn_with_tool(
