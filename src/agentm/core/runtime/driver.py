@@ -125,6 +125,12 @@ class _NodeAppendPosition:
     branch_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _RollbackResult:
+    errors: tuple[BaseException, ...]
+    caller_cancelled: bool
+
+
 async def _emit_lifecycle_diagnostic(
     bus: EventBus,
     *,
@@ -361,8 +367,9 @@ async def _rollback_unpublished_turn(
     effect_scope: EffectScope | None,
     effect_txn: EffectTxn | None,
     bus: EventBus,
-) -> tuple[BaseException, ...]:
+) -> _RollbackResult:
     errors: list[BaseException] = []
+    caller_cancelled = False
 
     # EffectScope is the outer world transaction: it snapshots the state after
     # ResourceTxn.apply(). Restore that world first, then let the resource
@@ -370,17 +377,24 @@ async def _rollback_unpublished_turn(
     # races over the same files for local and sandbox implementations.
     if effect_scope is not None and effect_txn is not None:
         try:
-            await _await_known_outcome(
+            _, cancelled = await _await_known_outcome(
                 _abandon_effect_turn(effect_scope, effect_txn, bus=bus)
             )
+            caller_cancelled = caller_cancelled or cancelled
         except BaseException as exc:
             errors.append(exc)
     if abandon_resource:
         try:
-            await _await_known_outcome(_abandon_resource_txn(resource_txn, bus=bus))
+            _, cancelled = await _await_known_outcome(
+                _abandon_resource_txn(resource_txn, bus=bus)
+            )
+            caller_cancelled = caller_cancelled or cancelled
         except BaseException as exc:
             errors.append(exc)
-    return tuple(errors)
+    return _RollbackResult(
+        errors=tuple(errors),
+        caller_cancelled=caller_cancelled,
+    )
 
 
 async def _node_append_position(
@@ -521,6 +535,7 @@ async def drive(config: DriverConfig) -> None:
         resource_txn_committed = False
         durable_turn_committed = False
         turn_published = False
+        cancelled_during_rollback = False
         try:
             execution = trajectory.begin(trigger)
             await bus.emit(
@@ -611,24 +626,25 @@ async def drive(config: DriverConfig) -> None:
                 trigger_metadata=envelope.metadata,
             )
             if isinstance(outcome.cause, ProviderRequestFailed):
-                cleanup_errors = await _rollback_unpublished_turn(
+                rollback = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
                     abandon_resource=True,
                     effect_scope=config.effect_scope,
                     effect_txn=effect_txn,
                     bus=bus,
                 )
+                cancelled_during_rollback = rollback.caller_cancelled
                 resource_txn = None
                 effect_txn = None
                 _clear_resource_txn(config.services)
-                if cleanup_errors:
+                if rollback.errors:
                     raise BaseExceptionGroup(
                         "provider request and turn rollback failed",
                         [
                             RuntimeError(
                                 f"{outcome.cause.error_type}: {outcome.cause.detail}"
                             ),
-                            *cleanup_errors,
+                            *rollback.errors,
                         ],
                     )
             else:
@@ -751,6 +767,7 @@ async def drive(config: DriverConfig) -> None:
                     cancelled_during_resource_commit,
                     cancelled_during_effect_commit,
                     cancelled_during_event,
+                    cancelled_during_rollback,
                 )
             ):
                 triggers.terminate(TriggerTerminated("driver cancelled after commit"))
@@ -770,7 +787,7 @@ async def drive(config: DriverConfig) -> None:
         except asyncio.CancelledError as exc:
             cancel_error: BaseException = exc
             if not turn_published:
-                cleanup_errors = await _rollback_unpublished_turn(
+                rollback = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
                     abandon_resource=not resource_txn_committed,
                     effect_scope=config.effect_scope,
@@ -784,11 +801,14 @@ async def drive(config: DriverConfig) -> None:
                         "trajectory abandon failed during cancellation: {}",
                         cleanup_exc,
                     )
-                    cleanup_errors = (*cleanup_errors, cleanup_exc)
-                if cleanup_errors:
+                    rollback = replace(
+                        rollback,
+                        errors=(*rollback.errors, cleanup_exc),
+                    )
+                if rollback.errors:
                     cancel_error = BaseExceptionGroup(
                         "turn cancellation and rollback failed",
-                        [exc, *cleanup_errors],
+                        [exc, *rollback.errors],
                     )
             _clear_resource_txn(config.services)
             triggers.terminate(cancel_error)
@@ -797,14 +817,16 @@ async def drive(config: DriverConfig) -> None:
             raise cancel_error
         except Exception as exc:
             execution_error: BaseException = exc
+            cancelled_while_rolling_back = False
             if not turn_published:
-                cleanup_errors = await _rollback_unpublished_turn(
+                rollback = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
                     abandon_resource=not resource_txn_committed,
                     effect_scope=config.effect_scope,
                     effect_txn=effect_txn,
                     bus=bus,
                 )
+                cancelled_while_rolling_back = rollback.caller_cancelled
                 try:
                     trajectory.abandon()
                 except BaseException as cleanup_exc:
@@ -812,11 +834,14 @@ async def drive(config: DriverConfig) -> None:
                         "trajectory abandon failed during rollback: {}",
                         cleanup_exc,
                     )
-                    cleanup_errors = (*cleanup_errors, cleanup_exc)
-                if cleanup_errors:
+                    rollback = replace(
+                        rollback,
+                        errors=(*rollback.errors, cleanup_exc),
+                    )
+                if rollback.errors:
                     execution_error = BaseExceptionGroup(
                         "turn execution and rollback failed",
-                        [exc, *cleanup_errors],
+                        [exc, *rollback.errors],
                     )
             _clear_resource_txn(config.services)
             triggers.terminate(execution_error)
@@ -837,6 +862,8 @@ async def drive(config: DriverConfig) -> None:
                 )
             except Exception:
                 logger.debug("diagnostic emit failed after turn abandon; non-fatal")
+            if cancelled_while_rolling_back:
+                raise asyncio.CancelledError
             return
 
 

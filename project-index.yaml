@@ -45,7 +45,9 @@ requirements:
       but are executable only at committed turn boundaries; context projection
       cannot turn a mid-turn message into an external-world snapshot.
       Synchronous store mutations settle to a known backend outcome before
-      async caller cancellation propagates.
+      async caller cancellation propagates. Rollback participants likewise
+      settle in effect-before-resource order while preserving any cancellation
+      observed during cleanup for propagation after the cleanup boundary.
       External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and
