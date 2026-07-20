@@ -1,18 +1,18 @@
 # Atom API Reference
 
-Detailed API for atoms interacting with the SDK via `ExtensionAPI`.
+Detailed API for atoms interacting with the SDK via `AtomAPI`.
 Read this when writing or editing atoms.
 
 ## Operations — the environment abstraction
 
 The `Operations` bundle is how atoms interact with the target environment
-(local host, K8s sandbox, or any future backend). The unified `operations`
-atom selects the backend via `config.backend`:
+(local host, sandbox, or any future backend). The `operations`
+atom selects the backend via config:
 
 ```yaml
 - module: agentm.extensions.builtin.operations
   config:
-    backend: local       # or "agent_env"
+    backend: local
 ```
 
 ### When to use Operations
@@ -23,7 +23,7 @@ atom selects the backend via `config.backend`:
 
 **Don't use Operations** for agent infrastructure:
 - Reading skill files, prompt templates, config — host resources
-- Writing to `.agentm/` internal state (catalog, traces, eval runs)
+- Writing to `.agentm/` internal state (catalog, traces)
 
 ### FileOperations
 
@@ -46,7 +46,7 @@ await file_ops.makedirs(path, exist_ok=True)    # create directories
 bash_ops = api.get_operations().bash
 
 result = await bash_ops.exec(
-    cmd, cwd=api.cwd, timeout=30.0,
+    cmd, cwd=api.ctx.cwd, timeout=30.0,
     env={"KEY": "val"},       # optional
     on_data=callback,          # optional streaming
     signal=cancel_event,       # optional cancellation
@@ -65,7 +65,7 @@ subprocess.run(["grep", "-r", pattern, "."])
 # RIGHT
 stat = await file_ops.stat(path)
 data = await file_ops.read_file(path)
-result = await bash_ops.exec(f"grep -r {shlex.quote(pattern)} .", cwd=api.cwd)
+result = await bash_ops.exec(f"grep -r {shlex.quote(pattern)} .", cwd=api.ctx.cwd)
 ```
 
 ### Lazy-resolve pattern
@@ -73,7 +73,7 @@ result = await bash_ops.exec(f"grep -r {shlex.quote(pattern)} .", cwd=api.cwd)
 At install time, Operations may not be registered yet. Defer to first use:
 
 ```python
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: AtomAPI, config: Mapping[str, JsonValue]) -> None:
     _cache: list[FileOperations] = []
 
     def _get_file_ops() -> FileOperations:
@@ -163,36 +163,45 @@ api.on(TurnEndEvent.CHANNEL, _on_turn_end)
 
 | Event | Fires when | Use for |
 |-------|-----------|---------|
-| `BeforeAgentStartEvent` | Before agent loop | System prompt injection |
+| `BeforeRunEvent` | Before agent loop | System prompt injection |
 | `SessionReadyEvent` | Session initialized | One-time setup |
 | `TurnStartEvent` / `TurnEndEvent` | Each LLM turn | Per-turn bookkeeping |
 | `ToolCallEvent` / `ToolResultEvent` | Tool invocation | Gating, logging |
 | `ContextEvent` | Context assembly | Per-turn context injection |
-| `BeforeSendToLLMEvent` | Before LLM call | Last-chance message edit |
+| `BeforeSendEvent` | Before LLM call | Last-chance message edit |
 | `SessionShutdownEvent` | Session ending | Cleanup |
-| `ResourcesDiscoverEvent` | Startup scan | Contributing skill/resource paths |
 
 ### Handler priorities
 
-`PRE` -> `NORMAL` -> `POST`. Use `PRE` for gates, `POST` for logging.
+Use `BusPriority.PRE` -> `BusPriority.NORMAL` -> `BusPriority.POST`.
+Use `PRE` for gates, `POST` for logging.
 
 ```python
-api.on(ToolCallEvent.CHANNEL, my_gate, priority="PRE")
+from agentm.core.abi import BusPriority
+api.on(ToolCallEvent.CHANNEL, my_gate, priority=BusPriority.PRE)
 ```
 
 ---
 
 ## Services — inter-atom communication
 
-Atoms communicate through named services, **never through imports**:
+Atoms communicate through the typed `ServiceRegistry`, **never through
+imports**:
 
 ```python
 # Provider atom
-api.set_service("my_service", my_service_object)
+api.services.register("my_service", my_service_object, MyProtocol)
 
 # Consumer atom (declare dependency so provider loads first)
 MANIFEST = ExtensionManifest(requires=("provider_atom",), ...)
 
-def install(api, config):
-    svc = api.get_service("my_service")
+def install(api: AtomAPI, config: Mapping[str, JsonValue]) -> None:
+    svc = api.services.get("my_service", MyProtocol)
 ```
+
+Service scopes control inheritance to child sessions:
+- `"session"` — local to this session only
+- `"tree"` — inherited by child sessions (default)
+- `"host"` — host-owned injection point, inherited
+- `"process"` — process-wide, inherited
+- `"resource"` — tied to an external resource boundary, inherited
