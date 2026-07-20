@@ -348,6 +348,7 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
     ) -> ContentReplacementState | None:
         with self._guard():
             source_state = self._load_session_unlocked(source_session_id)
+            target_state = self._load_session_unlocked(target_session_id)
             source = source_state.load_content_replacement_state(
                 source_session_id,
                 state_key,
@@ -360,7 +361,6 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                 source_leaf_id=source.leaf_node_id or source.source_leaf_id,
                 leaf_node_id=target_leaf_id,
             )
-            target_state = self._load_session_unlocked(target_session_id)
             target_state.save_content_replacement_state(target_session_id, cloned)
             self._normalize_tail_for_append_unlocked(target_session_id)
             self._append_record_unlocked(

@@ -34,6 +34,10 @@ from agentm.core.abi.trajectory import (
     Turn,
 )
 from agentm.core.abi.trigger import TriggerRenderer
+from agentm.core.lib.trajectory_store import (
+    validate_initial_node_state,
+    validate_node_append_state,
+)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -302,7 +306,13 @@ def build_chain(
     by_id = {node.id: node for node in nodes}
     chain: list[TrajectoryNode] = []
     current = by_id.get(leaf_node_id)
+    visited: set[str] = set()
     while current is not None:
+        if current.id in visited:
+            raise ValueError(
+                f"trajectory node parent cycle includes {current.id}"
+            )
+        visited.add(current.id)
         chain.append(current)
         if current.kind == "compact_boundary" and not include_logical_parent:
             break
@@ -373,28 +383,30 @@ class TrajectoryIndexState:
         current = self._nodes.get(session_id, [])
         expected = current[-1].seq + 1 if current else 0
         copied = list(nodes)
+        if advance_head is None:
+            raise ValueError("trajectory node append requires a head advance")
+        current_head = self._heads.get((session_id, advance_head.head_id))
+        validate_node_append_state(
+            session_id,
+            copied,
+            advance_head,
+            current_head=current_head,
+            expected_seq=expected,
+        )
         batch_ids: set[str] = set()
         for node in copied:
-            if node.session_id != session_id:
-                raise ValueError("node session_id does not match append session")
-            if node.seq != expected:
-                raise ValueError(f"node seq {node.seq} does not follow {expected - 1}")
             if node.id in self._node_ids or node.id in batch_ids:
                 raise ValueError(f"duplicate trajectory node id: {node.id}")
             batch_ids.add(node.id)
-            expected += 1
-        if advance_head is not None:
-            self._validate_head_advance(session_id, advance_head, batch_ids)
+        self._validate_head_advance(session_id, advance_head, batch_ids)
         self._nodes.setdefault(session_id, []).extend(copied)
         self._node_ids.update(batch_ids)
-        if advance_head is not None:
-            self._heads[(session_id, advance_head.head_id)] = (
-                advance_head.to_head()
-            )
+        self._heads[(session_id, advance_head.head_id)] = advance_head.to_head()
 
     @_synchronized_trajectory_state
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         if query.session_id:
+            self._require_index_session(query.session_id)
             nodes = list(self._nodes.get(query.session_id, ()))
         else:
             nodes = [
@@ -471,7 +483,14 @@ class TrajectoryIndexState:
                 node for node in nodes
                 if node.timestamp <= query.until_timestamp
             ]
-        nodes.sort(key=lambda node: node.seq, reverse=query.sort == "desc")
+        nodes.sort(
+            key=(
+                (lambda node: node.seq)
+                if query.session_id
+                else (lambda node: (node.session_id, node.seq))
+            ),
+            reverse=query.sort == "desc",
+        )
         if query.limit is not None:
             nodes = nodes[: query.limit]
         return nodes
@@ -486,6 +505,7 @@ class TrajectoryIndexState:
         agent_id: str | None = None,
         is_sidechain: bool | None = None,
     ) -> TrajectoryHead | None:
+        self._require_index_session(session_id)
         head = self._heads.get((session_id, head_id))
         if head is None:
             return None
@@ -507,6 +527,7 @@ class TrajectoryIndexState:
         is_sidechain: bool | None = None,
         include_inactive: bool = False,
     ) -> list[TrajectoryHead]:
+        self._require_index_session(session_id)
         heads = [
             head
             for (head_session_id, _), head in self._heads.items()
@@ -531,6 +552,17 @@ class TrajectoryIndexState:
         *,
         include_logical_parent: bool = False,
     ) -> list[TrajectoryNode]:
+        self._require_index_session(session_id)
+        local_leaf = any(
+            node.id == leaf_node_id for node in self._nodes[session_id]
+        )
+        inherited_leaf = include_logical_parent and any(
+            head_session_id == session_id
+            and head.logical_parent_id == leaf_node_id
+            for (head_session_id, _head_id), head in self._heads.items()
+        )
+        if not local_leaf and not inherited_leaf:
+            raise ValueError(f"unknown trajectory leaf node: {leaf_node_id}")
         nodes: Iterable[TrajectoryNode]
         if include_logical_parent:
             nodes = (
@@ -554,6 +586,7 @@ class TrajectoryIndexState:
         agent_id: str | None = None,
         is_sidechain: bool | None = None,
     ) -> list[TrajectoryLeaf]:
+        self._require_index_session(session_id)
         nodes = self.query_nodes(
             TrajectoryNodeQuery(
                 session_id=session_id,
@@ -577,17 +610,12 @@ class TrajectoryIndexState:
         ):
             raise ValueError(f"trajectory index already exists: {session_id}")
         copied = list(nodes)
-        expected = 0
+        validate_initial_node_state(session_id, copied, head)
         batch_ids: set[str] = set()
         for node in copied:
-            if node.session_id != session_id:
-                raise ValueError("node session_id does not match index session")
-            if node.seq != expected:
-                raise ValueError(f"node seq {node.seq} does not follow {expected - 1}")
             if node.id in batch_ids:
                 raise ValueError(f"duplicate trajectory node id: {node.id}")
             batch_ids.add(node.id)
-            expected += 1
 
         duplicates = batch_ids & self._node_ids
         if duplicates:
@@ -605,6 +633,7 @@ class TrajectoryIndexState:
         session_id: str,
         state: ContentReplacementState,
     ) -> None:
+        self._require_index_session(session_id)
         self._content_states[(session_id, state.state_key)] = state
 
     @_synchronized_trajectory_state
@@ -613,6 +642,7 @@ class TrajectoryIndexState:
         session_id: str,
         state_key: str,
     ) -> ContentReplacementState | None:
+        self._require_index_session(session_id)
         return self._content_states.get((session_id, state_key))
 
     @_synchronized_trajectory_state
@@ -624,6 +654,8 @@ class TrajectoryIndexState:
         state_key: str,
         target_leaf_id: str | None = None,
     ) -> ContentReplacementState | None:
+        self._require_index_session(source_session_id)
+        self._require_index_session(target_session_id)
         state = self.load_content_replacement_state(source_session_id, state_key)
         if state is None:
             return None
@@ -642,6 +674,7 @@ class TrajectoryIndexState:
         session_id: str,
         state: PromptCacheState,
     ) -> None:
+        self._require_index_session(session_id)
         self._prompt_cache_states[(session_id, state.cache_key)] = state
 
     @_synchronized_trajectory_state
@@ -650,7 +683,12 @@ class TrajectoryIndexState:
         session_id: str,
         cache_key: str,
     ) -> PromptCacheState | None:
+        self._require_index_session(session_id)
         return self._prompt_cache_states.get((session_id, cache_key))
+
+    def _require_index_session(self, session_id: str) -> None:
+        if session_id not in self._nodes:
+            raise KeyError(session_id)
 
     def _validate_head_advance(
         self,

@@ -101,6 +101,12 @@ requirements:
       cannot attach; only the named auto mode may choose local diagnostics.
       Prompt-cache policy never advertises provider support through a no-op
       adapter. Extension manifests reject unknown contract fields.
+      Every trajectory backend enforces the same session-scoped read semantics,
+      portable cross-session node order, contiguous append chain, and exact
+      node/head identity before publication. An inherited cross-session chain
+      is reachable only through an empty head's explicit logical parent.
+      PostgreSQL protects node/head/cache/content rows with session foreign keys
+      and clones content-replacement state in one locked transaction.
     priority: P0
     status: tested
     confidence: confirmed

@@ -893,6 +893,10 @@ def _validate_head_fields(
     _require_index(seq, "trajectory head seq", optional=True)
     if (node_id is None) != (seq is None):
         raise ValueError("trajectory head node_id and seq must be set together")
+    if node_id is not None and logical_parent_id is not None:
+        raise ValueError(
+            "trajectory head logical_parent_id is valid only for an empty head"
+        )
     for label, value in (
         ("root_session_id", root_session_id),
         ("parent_session_id", parent_session_id),

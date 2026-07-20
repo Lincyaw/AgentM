@@ -110,6 +110,11 @@ class TrajectoryStore(Protocol):
 
     Methods are synchronous blocking ports; async runtimes must offload calls
     instead of running backend I/O on the event loop.
+
+    Every method scoped by ``session_id`` requires that session to exist and
+    raises ``KeyError`` otherwise, except ``session_exists`` and
+    ``session_children``. A missing head or policy-state key in an existing
+    session is represented by ``None``.
     """
 
     @property
@@ -312,6 +317,11 @@ class TrajectoryCommit:
                 raise ValueError(
                     "trajectory commit head must advance to the final message node"
                 )
+            _validate_node_head_identity(
+                self.nodes[-1],
+                self.advance_head,
+                label="trajectory commit",
+            )
         elif self.advance_head is not None:
             raise ValueError(
                 "trajectory commit cannot advance a head without message nodes"
@@ -354,6 +364,18 @@ class TrajectoryCompactionCommit:
             )
         if self.content_replacement_state.leaf_node_id != self.boundary.id:
             raise ValueError("trajectory compaction state must identify its boundary")
+        _validate_node_head_identity(
+            self.boundary,
+            self.advance_head,
+            label="trajectory compaction",
+        )
+        if (
+            self.content_replacement_state.branch_id != self.boundary.branch_id
+            or self.content_replacement_state.head_id != self.boundary.head_id
+        ):
+            raise ValueError(
+                "trajectory compaction state must belong to its boundary chain"
+            )
 
 
 TrajectoryNodeSort = Literal["asc", "desc"]
@@ -361,7 +383,11 @@ TrajectoryNodeSort = Literal["asc", "desc"]
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryNodeQuery:
-    """Portable query shape for committed message indexes."""
+    """Portable query shape for committed message indexes.
+
+    Results are ordered by ``seq`` for one session and by ``(session_id, seq)``
+    for cross-session scans. ``sort`` applies to the complete ordering key.
+    """
 
     session_id: str = ""
     node_id: str | None = None
@@ -390,6 +416,113 @@ class TrajectoryNodeQuery:
     until_timestamp: float | None = None
     limit: int | None = None
     sort: TrajectoryNodeSort = "asc"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session_id, str):
+            raise TypeError("trajectory node query session_id must be a string")
+        for label, value in (
+            ("node_id", self.node_id),
+            ("root_session_id", self.root_session_id),
+            ("parent_session_id", self.parent_session_id),
+            ("branch_id", self.branch_id),
+            ("head_id", self.head_id),
+            ("agent_id", self.agent_id),
+            ("parent_id", self.parent_id),
+            ("logical_parent_id", self.logical_parent_id),
+            ("turn_id", self.turn_id),
+            ("tool_call_id", self.tool_call_id),
+            ("tool_name", self.tool_name),
+            ("cache_key", self.cache_key),
+            ("content_ref", self.content_ref),
+        ):
+            _validate_optional_query_string(value, label=label)
+        if self.is_sidechain is not None and not isinstance(
+            self.is_sidechain,
+            bool,
+        ):
+            raise TypeError("trajectory node query is_sidechain must be a bool")
+        if not isinstance(self.kinds, tuple) or not all(
+            kind in {"message", "compact_boundary"} for kind in self.kinds
+        ):
+            raise ValueError(
+                "trajectory node query kinds must be a tuple of valid node kinds"
+            )
+        if self.role is not None and self.role not in {
+            "user",
+            "assistant",
+            "tool_result",
+            "control",
+        }:
+            raise ValueError(f"invalid trajectory node query role: {self.role!r}")
+        if self.visibility is not None and self.visibility not in {
+            "visible",
+            "hidden",
+            "replay_only",
+        }:
+            raise ValueError(
+                f"invalid trajectory node query visibility: {self.visibility!r}"
+            )
+        for label, index_value in (
+            ("turn_index", self.turn_index),
+            ("round_index", self.round_index),
+            ("message_index", self.message_index),
+            ("after_seq", self.after_seq),
+            ("before_seq", self.before_seq),
+            ("limit", self.limit),
+        ):
+            _validate_optional_query_index(index_value, label=label)
+        for label, number_value in (
+            ("since_timestamp", self.since_timestamp),
+            ("until_timestamp", self.until_timestamp),
+        ):
+            _validate_optional_query_number(number_value, label=label)
+        if self.sort not in {"asc", "desc"}:
+            raise ValueError(f"invalid trajectory node query sort: {self.sort!r}")
+
+
+def _validate_node_head_identity(
+    node: TrajectoryNode,
+    head: TrajectoryHeadAdvance,
+    *,
+    label: str,
+) -> None:
+    if node.seq != head.seq:
+        raise ValueError(f"{label} head seq must match its final node")
+    if (
+        node.session_id != head.session_id
+        or node.head_id != head.head_id
+        or node.branch_id != head.branch_id
+        or node.root_session_id != head.root_session_id
+        or node.parent_session_id != head.parent_session_id
+        or node.agent_id != head.agent_id
+        or node.is_sidechain != head.is_sidechain
+    ):
+        raise ValueError(f"{label} head identity must match its final node")
+
+
+def _validate_optional_query_string(value: object, *, label: str) -> None:
+    if value is not None and (not isinstance(value, str) or not value):
+        raise ValueError(
+            f"trajectory node query {label} must be a non-empty string"
+        )
+
+
+def _validate_optional_query_index(value: object, *, label: str) -> None:
+    if value is not None and (
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+    ):
+        raise ValueError(
+            f"trajectory node query {label} must be a non-negative integer"
+        )
+
+
+def _validate_optional_query_number(value: object, *, label: str) -> None:
+    if value is not None and (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+    ):
+        raise ValueError(f"trajectory node query {label} must be a finite number")
 
 
 __all__ = [

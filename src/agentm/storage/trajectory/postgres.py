@@ -7,6 +7,7 @@ import re
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Protocol, runtime_checkable
 
 from agentm.core.abi.codec import CodecRegistry
@@ -38,6 +39,8 @@ from agentm.core.lib.trajectory_store import (
     validate_checkpoint_commit,
     validate_checkpoint_discard,
     validate_compaction_commit,
+    validate_initial_node_state,
+    validate_node_append_state,
     validate_turn_append,
     validate_turn_checkpoint,
     validate_turn_sequence,
@@ -163,7 +166,9 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 f"""
                 CREATE TABLE IF NOT EXISTS {self._table("trajectory_nodes")} (
                     id text PRIMARY KEY,
-                    session_id text NOT NULL,
+                    session_id text NOT NULL
+                        CONSTRAINT agentm_trajectory_nodes_session_fk
+                        REFERENCES {self._table("trajectory_sessions")}(id),
                     root_session_id text,
                     parent_session_id text,
                     seq bigint NOT NULL,
@@ -194,7 +199,9 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self._table("trajectory_heads")} (
-                    session_id text NOT NULL,
+                    session_id text NOT NULL
+                        CONSTRAINT agentm_trajectory_heads_session_fk
+                        REFERENCES {self._table("trajectory_sessions")}(id),
                     head_id text NOT NULL,
                     root_session_id text,
                     parent_session_id text,
@@ -203,6 +210,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     is_sidechain boolean NOT NULL DEFAULT false,
                     node_id text,
                     seq bigint,
+                    logical_parent_id text,
                     status text NOT NULL,
                     updated_at double precision NOT NULL DEFAULT 0,
                     head_json jsonb NOT NULL,
@@ -212,8 +220,27 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             )
             cur.execute(
                 f"""
+                ALTER TABLE {self._table("trajectory_heads")}
+                ADD COLUMN IF NOT EXISTS logical_parent_id text
+                """
+            )
+            cur.execute(
+                f"""
+                UPDATE {self._table("trajectory_heads")}
+                SET logical_parent_id = NULLIF(
+                    head_json ->> 'logical_parent_id',
+                    ''
+                )
+                WHERE logical_parent_id IS NULL
+                  AND head_json ->> 'logical_parent_id' IS NOT NULL
+                """
+            )
+            cur.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS {self._table("trajectory_content_states")} (
-                    session_id text NOT NULL,
+                    session_id text NOT NULL
+                        CONSTRAINT agentm_trajectory_content_states_session_fk
+                        REFERENCES {self._table("trajectory_sessions")}(id),
                     state_key text NOT NULL,
                     state_json jsonb NOT NULL,
                     PRIMARY KEY (session_id, state_key)
@@ -223,13 +250,22 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self._table("trajectory_prompt_cache_states")} (
-                    session_id text NOT NULL,
+                    session_id text NOT NULL
+                        CONSTRAINT agentm_trajectory_prompt_cache_states_session_fk
+                        REFERENCES {self._table("trajectory_sessions")}(id),
                     cache_key text NOT NULL,
                     state_json jsonb NOT NULL,
                     PRIMARY KEY (session_id, cache_key)
                 )
                 """
             )
+            for table in (
+                "trajectory_nodes",
+                "trajectory_heads",
+                "trajectory_content_states",
+                "trajectory_prompt_cache_states",
+            ):
+                self._ensure_session_foreign_key(cur, table)
             cur.execute(
                 f"""
                 CREATE INDEX IF NOT EXISTS {self._index("turns_session_idx")}
@@ -269,8 +305,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         copied_turns = tuple(turns)
         copied_nodes = tuple(nodes)
         validate_turn_sequence(copied_turns)
-        if head.session_id != meta.id:
-            raise ValueError("initial trajectory head must belong to the session")
+        validate_initial_node_state(meta.id, copied_nodes, head)
         turn_ids = {turn.id for turn in copied_turns}
         if any(
             node.session_id != meta.id or node.turn_id not in turn_ids
@@ -279,10 +314,6 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             raise ValueError(
                 "initial trajectory nodes must belong to the session's "
                 "initial committed turns"
-            )
-        if copied_nodes and head.node_id != copied_nodes[-1].id:
-            raise ValueError(
-                "initial trajectory head must point to the final initial node"
             )
         meta_json = _json_dumps(self._codec.serialize_session_meta(meta))
         with self._transaction() as cur:
@@ -403,11 +434,18 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 commit.turn,
             )
             if commit.advance_head is not None:
-                self._validate_head_advance(
+                current_head = self._validate_head_advance(
                     cur,
                     session_id,
                     commit.advance_head,
                     commit.nodes,
+                )
+                validate_node_append_state(
+                    session_id,
+                    commit.nodes,
+                    commit.advance_head,
+                    current_head=current_head,
+                    expected_seq=self._next_node_seq(cur, session_id),
                 )
             self._insert_turn(cur, session_id, commit.turn)
             for node in commit.nodes:
@@ -432,11 +470,18 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         with self._transaction() as cur:
             committed = self._lock_session_turns(cur, session_id)
             validate_compaction_commit(committed, commit)
-            self._validate_head_advance(
+            current_head = self._validate_head_advance(
                 cur,
                 session_id,
                 commit.advance_head,
                 (commit.boundary,),
+            )
+            validate_node_append_state(
+                session_id,
+                (commit.boundary,),
+                commit.advance_head,
+                current_head=current_head,
+                expected_seq=self._next_node_seq(cur, session_id),
             )
             self._insert_node(cur, commit.boundary)
             self._upsert_head(cur, commit.advance_head.to_head())
@@ -548,19 +593,24 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         where, params = _node_query_where(query)
-        order = "DESC" if query.sort == "desc" else "ASC"
+        direction = "DESC" if query.sort == "desc" else "ASC"
+        order = (
+            f"seq {direction}"
+            if query.session_id
+            else f"session_id {direction}, seq {direction}"
+        )
         limit = ""
         if query.limit is not None:
-            if query.limit < 0:
-                raise ValueError("trajectory node query limit cannot be negative")
             limit = "LIMIT %s"
             params.append(query.limit)
         with self._transaction() as cur:
+            if query.session_id:
+                self._require_session(cur, query.session_id)
             cur.execute(
                 f"""
                 SELECT node_json FROM {self._table("trajectory_nodes")}
                 {where}
-                ORDER BY seq {order}
+                ORDER BY {order}
                 {limit}
                 """,
                 tuple(params),
@@ -578,6 +628,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         is_sidechain: bool | None = None,
     ) -> TrajectoryHead | None:
         with self._transaction() as cur:
+            self._require_session(cur, session_id)
             cur.execute(
                 f"""
                 SELECT head_json FROM {self._table("trajectory_heads")}
@@ -607,6 +658,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         include_inactive: bool = False,
     ) -> list[TrajectoryHead]:
         with self._transaction() as cur:
+            self._require_session(cur, session_id)
             cur.execute(
                 f"""
                 SELECT head_json FROM {self._table("trajectory_heads")}
@@ -639,28 +691,46 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             if include_logical_parent
             else "chain.parent_id"
         )
-        session_clause = "" if include_logical_parent else "AND node.session_id = %s"
-        params: tuple[object, ...] = (
-            (leaf_node_id,) if include_logical_parent else (leaf_node_id, session_id)
-        )
         with self._transaction() as cur:
+            self._require_session(cur, session_id)
             cur.execute(
                 f"""
                 WITH RECURSIVE chain AS (
                     SELECT node.id, node.parent_id, node.logical_parent_id,
                            node.kind, node.node_json, 0 AS depth
                     FROM {self._table("trajectory_nodes")} AS node
-                    WHERE node.id = %s {session_clause}
+                    WHERE node.id = %s
+                      AND (
+                          node.session_id = %s
+                          OR (
+                              %s
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM {self._table("trajectory_heads")} AS head
+                                  WHERE head.session_id = %s
+                                    AND head.logical_parent_id = node.id
+                              )
+                          )
+                      )
                     UNION ALL
                     SELECT parent.id, parent.parent_id, parent.logical_parent_id,
                            parent.kind, parent.node_json, chain.depth + 1
                     FROM {self._table("trajectory_nodes")} AS parent
                     JOIN chain ON parent.id = {parent_expression}
-                    WHERE %s OR chain.kind <> 'compact_boundary'
+                    WHERE (%s OR chain.kind <> 'compact_boundary')
+                      AND (%s OR parent.session_id = %s)
                 )
                 SELECT node_json FROM chain ORDER BY depth DESC
                 """,
-                (*params, include_logical_parent),
+                (
+                    leaf_node_id,
+                    session_id,
+                    include_logical_parent,
+                    session_id,
+                    include_logical_parent,
+                    include_logical_parent,
+                    session_id,
+                ),
             )
             rows = cur.fetchall()
         if not rows:
@@ -694,6 +764,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             """
         )
         with self._transaction() as cur:
+            self._require_session(cur, session_id)
             cur.execute(
                 f"""
                 SELECT session_id, id, seq, branch_id, head_id, agent_id,
@@ -727,6 +798,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         state: ContentReplacementState,
     ) -> None:
         with self._transaction() as cur:
+            self._require_session(cur, session_id, for_update=True)
             cur.execute(
                 f"""
                 INSERT INTO {self._table("trajectory_content_states")}
@@ -748,6 +820,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         state_key: str,
     ) -> ContentReplacementState | None:
         with self._transaction() as cur:
+            self._require_session(cur, session_id)
             cur.execute(
                 f"""
                 SELECT state_json FROM {self._table("trajectory_content_states")}
@@ -766,19 +839,44 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         state_key: str,
         target_leaf_id: str | None = None,
     ) -> ContentReplacementState | None:
-        state = self.load_content_replacement_state(source_session_id, state_key)
-        if state is None:
-            return None
-        from dataclasses import replace
-
-        cloned = replace(
-            state,
-            source_session_id=source_session_id,
-            source_leaf_id=state.leaf_node_id or state.source_leaf_id,
-            leaf_node_id=target_leaf_id,
-        )
-        self.save_content_replacement_state(target_session_id, cloned)
-        return cloned
+        with self._transaction() as cur:
+            self._lock_sessions(
+                cur,
+                (source_session_id, target_session_id),
+            )
+            cur.execute(
+                f"""
+                SELECT state_json
+                FROM {self._table("trajectory_content_states")}
+                WHERE session_id = %s AND state_key = %s
+                """,
+                (source_session_id, state_key),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            state = deserialize_content_state(_json_mapping(row[0]))
+            cloned = replace(
+                state,
+                source_session_id=source_session_id,
+                source_leaf_id=state.leaf_node_id or state.source_leaf_id,
+                leaf_node_id=target_leaf_id,
+            )
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("trajectory_content_states")}
+                    (session_id, state_key, state_json)
+                VALUES (%s, %s, %s::jsonb)
+                ON CONFLICT (session_id, state_key)
+                DO UPDATE SET state_json = EXCLUDED.state_json
+                """,
+                (
+                    target_session_id,
+                    cloned.state_key,
+                    _json_dumps(serialize_content_state(cloned)),
+                ),
+            )
+            return cloned
 
     def save_prompt_cache_state(
         self,
@@ -786,6 +884,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         state: PromptCacheState,
     ) -> None:
         with self._transaction() as cur:
+            self._require_session(cur, session_id, for_update=True)
             cur.execute(
                 f"""
                 INSERT INTO {self._table("trajectory_prompt_cache_states")}
@@ -807,6 +906,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         cache_key: str,
     ) -> PromptCacheState | None:
         with self._transaction() as cur:
+            self._require_session(cur, session_id)
             cur.execute(
                 f"""
                 SELECT state_json FROM {self._table("trajectory_prompt_cache_states")}
@@ -873,10 +973,13 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             f"""
             INSERT INTO {self._table("trajectory_heads")} (
                 session_id, head_id, root_session_id, parent_session_id,
-                branch_id, agent_id, is_sidechain, node_id, seq, status,
-                updated_at, head_json
+                branch_id, agent_id, is_sidechain, node_id, seq,
+                logical_parent_id, status, updated_at, head_json
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s::jsonb
+            )
             ON CONFLICT (session_id, head_id)
             DO UPDATE SET
                 root_session_id = EXCLUDED.root_session_id,
@@ -886,6 +989,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 is_sidechain = EXCLUDED.is_sidechain,
                 node_id = EXCLUDED.node_id,
                 seq = EXCLUDED.seq,
+                logical_parent_id = EXCLUDED.logical_parent_id,
                 status = EXCLUDED.status,
                 updated_at = EXCLUDED.updated_at,
                 head_json = EXCLUDED.head_json
@@ -900,6 +1004,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 head.is_sidechain,
                 head.node_id,
                 head.seq,
+                head.logical_parent_id,
                 head.status,
                 head.updated_at,
                 _json_dumps(serialize_head(head)),
@@ -927,17 +1032,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         cur: PostgresCursor,
         session_id: str,
     ) -> list[Turn]:
-        cur.execute(
-            f"""
-            SELECT 1
-            FROM {self._table("trajectory_sessions")}
-            WHERE id = %s
-            FOR UPDATE
-            """,
-            (session_id,),
-        )
-        if cur.fetchone() is None:
-            raise KeyError(session_id)
+        self._require_session(cur, session_id, for_update=True)
         cur.execute(
             f"""
             SELECT turn_json
@@ -980,21 +1075,25 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         session_id: str,
         advance: TrajectoryHeadAdvance,
         nodes: Sequence[TrajectoryNode],
-    ) -> None:
+    ) -> TrajectoryHead | None:
         if advance.session_id != session_id:
             raise ValueError("head advance session_id does not match append session")
         if advance.node_id not in {node.id for node in nodes}:
             raise ValueError("head advance node_id is not part of the append batch")
         cur.execute(
             f"""
-            SELECT node_id FROM {self._table("trajectory_heads")}
+            SELECT head_json FROM {self._table("trajectory_heads")}
             WHERE session_id = %s AND head_id = %s
             FOR UPDATE
             """,
             (session_id, advance.head_id),
         )
         row = cur.fetchone()
-        current = row[0] if row is not None else None
+        current_head = (
+            None
+            if row is None
+            else deserialize_head(_json_mapping(row[0]))
+        )
         if row is None and advance.previous_node_id is not None:
             cur.execute(
                 f"""
@@ -1008,12 +1107,83 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 raise ValueError(
                     f"head advance previous_node_id is unknown: {advance.previous_node_id}"
                 )
-            return
-        if current != advance.previous_node_id:
+            return None
+        current_node_id = (
+            current_head.node_id if current_head is not None else None
+        )
+        if current_node_id != advance.previous_node_id:
             raise ValueError(
                 "trajectory head changed before append: "
-                f"{current!r} != {advance.previous_node_id!r}"
+                f"{current_node_id!r} != {advance.previous_node_id!r}"
             )
+        return current_head
+
+    def _next_node_seq(self, cur: PostgresCursor, session_id: str) -> int:
+        cur.execute(
+            f"""
+            SELECT MAX(seq)
+            FROM {self._table("trajectory_nodes")}
+            WHERE session_id = %s
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return 0
+        return _required_int(row[0], column="max(seq)") + 1
+
+    def _require_session(
+        self,
+        cur: PostgresCursor,
+        session_id: str,
+        *,
+        for_update: bool = False,
+    ) -> None:
+        lock = "FOR UPDATE" if for_update else ""
+        cur.execute(
+            f"""
+            SELECT 1
+            FROM {self._table("trajectory_sessions")}
+            WHERE id = %s
+            {lock}
+            """,
+            (session_id,),
+        )
+        if cur.fetchone() is None:
+            raise KeyError(session_id)
+
+    def _lock_sessions(
+        self,
+        cur: PostgresCursor,
+        session_ids: Sequence[str],
+    ) -> None:
+        for session_id in sorted(set(session_ids)):
+            self._require_session(cur, session_id, for_update=True)
+
+    def _ensure_session_foreign_key(
+        self,
+        cur: PostgresCursor,
+        table: str,
+    ) -> None:
+        constraint = f"agentm_{table}_session_fk"
+        cur.execute(
+            """
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = %s::regclass AND conname = %s
+            """,
+            (self._table(table), constraint),
+        )
+        if cur.fetchone() is not None:
+            return
+        cur.execute(
+            f"""
+            ALTER TABLE {self._table(table)}
+            ADD CONSTRAINT "{constraint}"
+            FOREIGN KEY (session_id)
+            REFERENCES {self._table("trajectory_sessions")}(id)
+            """
+        )
 
     @contextmanager
     def _transaction(self) -> Iterator[PostgresCursor]:

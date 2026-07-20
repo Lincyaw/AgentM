@@ -263,6 +263,64 @@ async def test_sdk_dsn_selects_one_postgres_store(
         admin.close()
 
 
+@pytest.mark.asyncio
+async def test_selected_trajectory_backend_preserves_session_scope(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    provider = _StubProvider("first-answer", "second-answer")
+    first = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    second = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    try:
+        await first.run("first-question")
+        await second.run("second-question")
+    finally:
+        await second.shutdown()
+        await first.shutdown()
+
+    store = trajectory_backend.connect()
+    second_head = store.get_head(second.session_id)
+    assert second_head is not None
+    assert second_head.node_id is not None
+
+    with pytest.raises(KeyError):
+        store.query_nodes(TrajectoryNodeQuery(session_id="missing-session"))
+    with pytest.raises(KeyError):
+        store.get_head("missing-session")
+    with pytest.raises(KeyError):
+        store.save_prompt_cache_state(
+            "missing-session",
+            PromptCacheState(cache_key="missing-session-cache"),
+        )
+    with pytest.raises(ValueError, match="unknown trajectory leaf node"):
+        store.load_chain(
+            first.session_id,
+            second_head.node_id,
+            include_logical_parent=True,
+        )
+
+    ordered = store.query_nodes(TrajectoryNodeQuery())
+    identities = [(node.session_id, node.seq) for node in ordered]
+    assert identities == sorted(identities)
+    descending = store.query_nodes(TrajectoryNodeQuery(sort="desc"))
+    assert [(node.session_id, node.seq) for node in descending] == list(
+        reversed(identities)
+    )
+
+
 def _trajectory_extensions(cache_key: str) -> list[tuple[str, dict[str, object]]]:
     return [
         (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
