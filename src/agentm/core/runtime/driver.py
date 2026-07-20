@@ -101,7 +101,7 @@ from agentm.core.runtime.reaction import (
     react,
     record_interruption_message,
 )
-from agentm.core.lib.async_cancel import settle_known_outcome
+from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.lib.trajectory_nodes import turn_to_nodes
 from agentm.core.runtime.trigger_queue import (
@@ -227,16 +227,9 @@ async def _commit_trajectory_turn(
     commit: TrajectoryCommit,
 ) -> bool:
     """Commit durably, returning whether the caller was cancelled meanwhile."""
-    task = asyncio.create_task(asyncio.to_thread(store.commit_turn, session_id, commit))
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # Cancelling to_thread only cancels its awaiter.  The append is the
-            # commit boundary, so repeated cancellation must not obscure its result.
-            cancelled = True
-    task.result()
+    _, cancelled = await settle_known_outcome(
+        asyncio.to_thread(store.commit_turn, session_id, commit)
+    )
     return cancelled
 
 
@@ -246,18 +239,9 @@ async def _save_checkpoint(
     checkpoint: TurnCheckpoint,
 ) -> None:
     """Persist one checkpoint before honoring caller cancellation."""
-    task = asyncio.create_task(
+    await await_known_outcome(
         asyncio.to_thread(store.save_checkpoint, session_id, checkpoint)
     )
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    task.result()
-    if cancelled:
-        raise asyncio.CancelledError
 
 
 async def _abandon_effect_turn(
