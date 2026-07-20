@@ -236,13 +236,12 @@ class _SessionLifecycle:
         store_codec = (
             store.codec if isinstance(store, CodecBackedTrajectoryStore) else None
         )
-        self.codec = (
-            codec
-            if codec is not None
-            else store_codec
-            if isinstance(store_codec, CodecRegistry)
-            else CodecRegistry()
-        )
+        if codec is not None:
+            self.codec = codec
+        elif isinstance(store_codec, CodecRegistry):
+            self.codec = store_codec
+        else:
+            self.codec = CodecRegistry()
         self.services = ServiceRegistry() if services is None else services
         if store is not None:
             selected_store = self.services.get(

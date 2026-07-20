@@ -61,9 +61,9 @@ requirements:
       Driver cancellation inputs are construction-time invariants and cannot
       degrade to disconnected internal cancel sources. Every composed session
       owns one replaceable ToolOrchestrator before the driver starts; reaction
-      and construction treat replaceable Protocol objects as absent only when
-      they are None, never because an implementation is falsey.
-      execution never installs a hidden fallback. Tools without declared
+      execution never installs a hidden fallback. Construction treats
+      replaceable Protocol objects as absent only when they are None, never
+      because an implementation is falsey. Tools without declared
       execution requirements receive the ABI's explicit neutral in-process
       contract before orchestration. Omitting retry policy means one direct
       provider attempt rather than installation of a no-op policy
