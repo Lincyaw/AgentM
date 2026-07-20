@@ -110,6 +110,9 @@ requirements:
       Provider adapters must preserve provider-owned encrypted reasoning and
       every supported semantic field for continuation, while failing on known
       unsupported protocol content rather than silently dropping it.
+      Public service aliases must have an executable producer/consumer path;
+      host configuration and standalone query ports are not mirrored into
+      registration-only service keys.
     priority: P0
     status: tested
     confidence: confirmed

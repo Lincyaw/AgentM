@@ -56,7 +56,6 @@ from agentm.core.abi.roles import (
     PROVIDER_RESOLVER_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
     SCENARIO_LOADER_SERVICE,
-    SESSION_SPEC_RESOLVER_SERVICE,
     TRAJECTORY_QUERY_STORE_SERVICE,
     TRAJECTORY_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_SERVICE,
@@ -744,12 +743,6 @@ async def create_from_config(
         services.register(LOOP_BUDGET_SERVICE, config.loop_config, scope="session")
     if config.scenario_loader is not None:
         services.register(SCENARIO_LOADER_SERVICE, config.scenario_loader, scope="host")
-    if config.spec_resolver is not None:
-        services.register(
-            SESSION_SPEC_RESOLVER_SERVICE,
-            config.spec_resolver,
-            scope="host",
-        )
     if config.environment_restore_failure_handler is not None:
         services.register(
             ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
@@ -866,12 +859,6 @@ async def create_child_session(
         child_services.register(
             SCENARIO_LOADER_SERVICE,
             config.scenario_loader,
-            scope="host",
-        )
-    if config.spec_resolver is not None:
-        child_services.register(
-            SESSION_SPEC_RESOLVER_SERVICE,
-            config.spec_resolver,
             scope="host",
         )
     if config.provider_resolver is not None:

@@ -55,14 +55,8 @@ TRAJECTORY_STORE_SERVICE: Final = "trajectory_store"
 TRAJECTORY_QUERY_STORE_SERVICE: Final = "trajectory_query_store"
 """Service key for session/turn trajectory query."""
 
-OBSERVABILITY_QUERY_STORE_SERVICE: Final = "observability_query_store"
-"""Service key for event/span observability query."""
-
 CATALOG_QUERY_SERVICE: Final = "catalog_query"
 """Service key for indexed catalog active-set query."""
-
-SESSION_SPEC_RESOLVER_SERVICE: Final = "session_spec_resolver"
-"""Service key for host-owned session config resolution."""
 
 RESOLVED_SESSION_SPEC_SERVICE: Final = "resolved_session_spec"
 """Service key for the resolved composition/config used by this session."""
@@ -105,7 +99,6 @@ __all__ = [
     "ENVIRONMENT_OPERATIONS_SERVICE",
     "INTERRUPTION_MESSAGE_POLICY_SERVICE",
     "LOOP_BUDGET_SERVICE",
-    "OBSERVABILITY_QUERY_STORE_SERVICE",
     "PERMISSION_POLICY_SERVICE",
     "PROVIDER_RESOLVER_SERVICE",
     "PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE",
@@ -117,7 +110,6 @@ __all__ = [
     "RESOURCE_TXN_SERVICE",
     "RESOLVED_SESSION_SPEC_SERVICE",
     "SCENARIO_LOADER_SERVICE",
-    "SESSION_SPEC_RESOLVER_SERVICE",
     "TOOL_EXECUTOR_SERVICE",
     "TOOL_ORCHESTRATOR_SERVICE",
     "TRAJECTORY_STORE_SERVICE",
