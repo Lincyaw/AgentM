@@ -52,10 +52,7 @@ from agentm.core.abi.tool import (
     ToolResult,
     ToolTerminate,
 )
-from agentm.core.abi.tool_executor import (
-    ToolExecutionRequirements,
-    tool_execution_requirements,
-)
+from agentm.core.abi.tool_executor import tool_execution_requirements
 from agentm.core.abi.tool_orchestration import (
     ToolOrchestrationRequest,
     ToolOrchestrationResult,
@@ -1313,8 +1310,7 @@ async def react(
                         call=tc,
                         tool=tool,
                         args=args,
-                        requirements=tool_execution_requirements(tool)
-                        or ToolExecutionRequirements(),
+                        requirements=tool_execution_requirements(tool),
                     )
                 )
 

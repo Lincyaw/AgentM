@@ -45,7 +45,7 @@ class SandboxToolExecutor:
                 cwd=request.cwd,
                 signal=signal,
             )
-        if requirements is not None and requirements.isolation == "environment":
+        if requirements.isolation == "environment":
             raise RuntimeError(
                 f"tool {request.tool.name!r} requires environment isolation "
                 "but does not implement EnvironmentExecutableTool"

@@ -487,8 +487,10 @@ async def _record_access(
     name: str,
     cwd: str,
 ) -> None:
-    """Increment ``access_stats.json[name]``. Best-effort: failures are
-    silent so they never break the read path."""
+    """Increment access statistics without making them read-critical.
+
+    Failures remain visible at debug level but do not break memory reads.
+    """
 
     stats_path = base / "access_stats.json"
     stats: dict[str, object] = {}

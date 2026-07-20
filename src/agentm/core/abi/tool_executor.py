@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
@@ -93,11 +93,13 @@ class ToolExecutionCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionRequest:
-    """One tool invocation plus optional execution requirements."""
+    """One tool invocation with fully resolved execution requirements."""
 
     tool: Tool
     args: Mapping[str, object]
-    requirements: ToolExecutionRequirements | None = None
+    requirements: ToolExecutionRequirements = field(
+        default_factory=ToolExecutionRequirements
+    )
     environment: EnvironmentRef | None = None
     cwd: str | None = None
     metadata: Mapping[str, str | int | float | bool | None] | None = None
@@ -109,13 +111,10 @@ class ToolExecutionRequest:
         if not isinstance(frozen_args, Mapping):
             raise TypeError("tool execution request args must be an object")
         object.__setattr__(self, "args", frozen_args)
-        if self.requirements is not None and not isinstance(
-            self.requirements,
-            ToolExecutionRequirements,
-        ):
+        if not isinstance(self.requirements, ToolExecutionRequirements):
             raise TypeError(
                 "tool execution request requirements must be "
-                "ToolExecutionRequirements or None"
+                "ToolExecutionRequirements"
             )
         if self.environment is not None and not isinstance(
             self.environment,
@@ -127,8 +126,7 @@ class ToolExecutionRequest:
         if self.cwd is not None and (not isinstance(self.cwd, str) or not self.cwd):
             raise TypeError("tool execution request cwd must be non-empty or None")
         if (
-            self.requirements is not None
-            and self.requirements.environment_id is not None
+            self.requirements.environment_id is not None
             and (
                 self.environment is None
                 or self.environment.id != self.requirements.environment_id
@@ -183,14 +181,18 @@ class ToolExecutor(Protocol):
         ...
 
 
-def tool_execution_requirements(tool: Tool) -> ToolExecutionRequirements | None:
-    """Return typed requirements declared by a tool, if any."""
+def tool_execution_requirements(tool: Tool) -> ToolExecutionRequirements:
+    """Resolve a tool declaration to a complete executor contract.
+
+    Tools without a declaration receive the neutral in-process requirements.
+    This is an ABI default, not a runtime recovery path.
+    """
 
     if not isinstance(tool, ToolExecutionRequirementsProvider):
-        return None
+        return ToolExecutionRequirements()
     candidate = tool.execution_requirements
     if candidate is None:
-        return None
+        return ToolExecutionRequirements()
     if not isinstance(candidate, ToolExecutionRequirements):
         raise TypeError(
             f"tool {tool.name!r} declares invalid execution_requirements"

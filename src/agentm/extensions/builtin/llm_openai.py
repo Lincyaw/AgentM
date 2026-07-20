@@ -852,18 +852,21 @@ class OpenAIStreamFn:
         state = _StreamState()
         aborted = False
 
-        retry_policy = self.retry_policy or _IdentityRetryPolicy()
-
         async def _create_stream() -> Any:
             return await client.chat.completions.create(**body)
 
         stream: _OpenAIAsyncStream | None = None
         try:
-            opened = await await_with_cancel_signal(
-                retry_policy.run(
+            open_operation = (
+                _create_stream()
+                if self.retry_policy is None
+                else self.retry_policy.run(
                     _create_stream,
                     is_retryable=_is_openai_retryable,
-                ),
+                )
+            )
+            opened = await await_with_cancel_signal(
+                open_operation,
                 signal,
             )
             if not isinstance(opened, _OpenAIAsyncStream):
@@ -935,16 +938,6 @@ class OpenAIStreamFn:
         for parse_error in state.accumulator.parse_errors:
             yield parse_error
         yield MessageEnd(message=assembled)
-
-class _IdentityRetryPolicy:
-    async def run(
-        self,
-        fn: Callable[[], Any],
-        *,
-        is_retryable: Callable[[BaseException], bool],
-    ) -> Any:
-        del is_retryable
-        return await fn()
 
 async def _translate_chunk(
     chunk: Any,

@@ -376,11 +376,10 @@ def _resolve_session_spec(config: "AgentSessionConfig") -> ResolvedSessionSpec |
 
 def _resolved_atom_config(
     spec: ResolvedSessionSpec | None,
-    fallback: dict[str, dict[str, JsonValue]],
+    overrides: dict[str, dict[str, JsonValue]],
 ) -> dict[str, dict[str, JsonValue]]:
-    if spec is None:
-        return fallback
-    return {module: dict(config) for module, config in spec.atom_config.items()}
+    source = overrides if spec is None else spec.atom_config
+    return {module: dict(config) for module, config in source.items()}
 
 
 def _config_fingerprint(config: object) -> str | None:

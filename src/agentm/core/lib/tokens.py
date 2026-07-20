@@ -12,26 +12,31 @@ from functools import lru_cache
 import tiktoken
 from loguru import logger
 
-_FALLBACK_ENCODING = "cl100k_base"
+_DEFAULT_ENCODING = "cl100k_base"
 
 
 @lru_cache(maxsize=64)
-def _encoding(model: str | None, fallback_encoding: str) -> tiktoken.Encoding:
+def _encoding(model: str | None, default_encoding: str) -> tiktoken.Encoding:
     if model:
         try:
             return tiktoken.encoding_for_model(model)
         except KeyError:
-            logger.debug("tiktoken: no encoding for model {!r}, using fallback", model)
-    return tiktoken.get_encoding(fallback_encoding)
+            logger.debug(
+                "tiktoken: no encoding for model {!r}; using configured "
+                "default {!r}",
+                model,
+                default_encoding,
+            )
+    return tiktoken.get_encoding(default_encoding)
 
 
 def _encode_text(
     text: str,
     *,
     model: str | None = None,
-    fallback_encoding: str = _FALLBACK_ENCODING,
+    default_encoding: str = _DEFAULT_ENCODING,
 ) -> list[int]:
-    encoding = _encoding(model, fallback_encoding)
+    encoding = _encoding(model, default_encoding)
     return encoding.encode(text, disallowed_special=())
 
 
@@ -39,14 +44,14 @@ def count_text_tokens(
     text: str,
     *,
     model: str | None = None,
-    fallback_encoding: str = _FALLBACK_ENCODING,
+    default_encoding: str = _DEFAULT_ENCODING,
 ) -> int:
-    """Return the tiktoken token count for arbitrary text."""
+    """Estimate tokens with the model encoding or configured default."""
 
     if not text:
         return 0
     return len(
-        _encode_text(text, model=model, fallback_encoding=fallback_encoding)
+        _encode_text(text, model=model, default_encoding=default_encoding)
     )
 
 
@@ -70,7 +75,7 @@ def truncate_text_tokens(
     max_tokens: int,
     *,
     model: str | None = None,
-    fallback_encoding: str = _FALLBACK_ENCODING,
+    default_encoding: str = _DEFAULT_ENCODING,
 ) -> TokenTruncation:
     """Keep the first ``max_tokens`` tokens of ``text``."""
 
@@ -82,11 +87,11 @@ def truncate_text_tokens(
             original_tokens=count_text_tokens(
                 text,
                 model=model,
-                fallback_encoding=fallback_encoding,
+                default_encoding=default_encoding,
             ),
             kept_tokens=0,
         )
-    encoding = _encoding(model, fallback_encoding)
+    encoding = _encoding(model, default_encoding)
     tokens = encoding.encode(text, disallowed_special=())
     if len(tokens) <= max_tokens:
         return TokenTruncation(
@@ -107,7 +112,7 @@ def truncate_text_tokens_middle(
     max_tokens: int,
     *,
     model: str | None = None,
-    fallback_encoding: str = _FALLBACK_ENCODING,
+    default_encoding: str = _DEFAULT_ENCODING,
 ) -> TokenTruncation:
     """Keep the first and last portions of ``max_tokens`` tokens."""
 
@@ -119,11 +124,11 @@ def truncate_text_tokens_middle(
             original_tokens=count_text_tokens(
                 text,
                 model=model,
-                fallback_encoding=fallback_encoding,
+                default_encoding=default_encoding,
             ),
             kept_tokens=0,
         )
-    encoding = _encoding(model, fallback_encoding)
+    encoding = _encoding(model, default_encoding)
     tokens = encoding.encode(text, disallowed_special=())
     if len(tokens) <= max_tokens:
         return TokenTruncation(

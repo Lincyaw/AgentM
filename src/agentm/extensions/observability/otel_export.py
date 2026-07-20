@@ -402,8 +402,8 @@ class OtlpSink:
                 )
         except Exception as exc:
             # Exporter construction failed (bad endpoint, missing optional
-            # deps) — run without network export rather than crashing
-            # telemetry setup; the caller falls back to file export.
+            # dependencies). The caller applies the selected export mode:
+            # ``auto`` may choose a file sink, while ``otlp`` fails setup.
             logger.warning(
                 "otel_export: OTLP exporter setup failed, network export disabled: {}", exc,
             )
@@ -496,6 +496,7 @@ class LocalFileSink:
 def setup_process_telemetry(
     *,
     enable_otlp: bool = True,
+    require_otlp: bool = False,
 ) -> tuple[TracerProvider, LoggerProvider]:
     """Lazily construct the process-level OTel providers.
 
@@ -508,9 +509,10 @@ def setup_process_telemetry(
     Sink selection happens here, once per process. When ``enable_otlp`` is
     true and the collector at ``OTEL_EXPORTER_OTLP_ENDPOINT`` (default
     ``http://localhost:4317``) is reachable, an :class:`OtlpSink` is attached
-    before any session emits its first event. When it is not,
-    :func:`setup_session_telemetry` may attach a per-session
-    :class:`LocalFileSink`, depending on its export mode.
+    before any session emits its first event. ``require_otlp`` makes an
+    unreachable collector or exporter-construction failure fatal; otherwise
+    :func:`setup_session_telemetry` may apply its explicit ``auto`` policy and
+    attach a per-session :class:`LocalFileSink`.
 
     Returns ``(tracer_provider, logger_provider)``.
     """
@@ -518,24 +520,31 @@ def setup_process_telemetry(
     global _global_atexit_registered, _process_otlp_sink
     with _global_lock:
         if (
-            _global_tracer_provider is not None
-            and _global_logger_provider is not None
+            _global_tracer_provider is None
+            or _global_logger_provider is None
         ):
-            return _global_tracer_provider, _global_logger_provider
-        resource = Resource.create(
-            {
-                "service.name": "agentm",
-                "service.version": _agentm_version(),
-            }
-        )
-        _global_tracer_provider = TracerProvider(resource=resource)
-        _global_logger_provider = LoggerProvider(resource=resource)
-        if enable_otlp:
+            resource = Resource.create(
+                {
+                    "service.name": "agentm",
+                    "service.version": _agentm_version(),
+                }
+            )
+            _global_tracer_provider = TracerProvider(resource=resource)
+            _global_logger_provider = LoggerProvider(resource=resource)
+        tracer_provider = _global_tracer_provider
+        logger_provider = _global_logger_provider
+        if enable_otlp and _process_otlp_sink is None:
             endpoint = resolve_otlp_endpoint()
             if _probe_endpoint(endpoint):
                 sink = OtlpSink(endpoint)
-                if sink.attach(_global_tracer_provider, _global_logger_provider):
+                if sink.attach(tracer_provider, logger_provider):
                     _process_otlp_sink = sink
+                elif require_otlp:
+                    raise RuntimeError(
+                        f"OTLP exporter could not attach to {endpoint!r}"
+                    )
+            elif require_otlp:
+                raise RuntimeError(f"OTLP collector is unreachable at {endpoint!r}")
             else:
                 logger.debug(
                     "otel_export: collector at {} unreachable",
@@ -544,7 +553,7 @@ def setup_process_telemetry(
         if not _global_atexit_registered:
             atexit.register(shutdown_process_telemetry)
             _global_atexit_registered = True
-        return _global_tracer_provider, _global_logger_provider
+        return tracer_provider, logger_provider
 
 
 # --- Operational-log bridge -------------------------------------------------
@@ -643,7 +652,7 @@ def attach_loguru_otel_sink(*, level: str = "DEBUG") -> int | None:
 
     # Ensure the process-level provider + network log exporter exist before
     # the first operational record arrives.
-    setup_process_telemetry(enable_otlp=True)
+    setup_process_telemetry(enable_otlp=True, require_otlp=True)
     return _logger.add(_emit_loguru_record_to_otel, level=level, format="{message}")
 
 
@@ -879,7 +888,7 @@ def setup_session_telemetry(
     ``LoggerProvider``. ``export_mode`` is the explicit backend policy:
     ``auto`` uses OTel when a collector is reachable and otherwise writes
     local files, ``local_file`` always writes a local file sink, and ``otlp``
-    only uses the process-level OTel sink.
+    requires the process-level OTel sink and fails setup if it cannot attach.
 
     The output path defaults to ``$AGENTM_HOME/observability/<session_id>.jsonl``.
     Callers that already know the absolute path (e.g. the trajectory store
@@ -895,8 +904,12 @@ def setup_session_telemetry(
     """
     if export_mode not in {"auto", "local_file", "otlp"}:
         raise ValueError(f"unsupported observability export mode: {export_mode!r}")
+    if export_mode == "otlp" and file_path is not None:
+        raise ValueError("file_path cannot be combined with export_mode='otlp'")
 
-    explicit_file = export_mode == "local_file" or file_path is not None
+    explicit_file = export_mode == "local_file" or (
+        export_mode == "auto" and file_path is not None
+    )
     tracer_provider: TracerProvider
     logger_provider: LoggerProvider
     if explicit_file:
@@ -904,6 +917,7 @@ def setup_session_telemetry(
     else:
         tracer_provider, logger_provider = setup_process_telemetry(
             enable_otlp=True,
+            require_otlp=export_mode == "otlp",
         )
         write_files = (
             export_mode == "auto"

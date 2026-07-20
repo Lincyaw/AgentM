@@ -127,16 +127,6 @@ def _is_anthropic_retryable(exc: BaseException) -> bool:
     )
     return bool(retryable_types) and isinstance(exc, retryable_types)
 
-class _IdentityRetryPolicy:
-    async def run(
-        self,
-        fn: Callable[[], Any],
-        *,
-        is_retryable: Callable[[BaseException], bool],
-    ) -> Any:
-        del is_retryable
-        return await fn()
-
 # --- Model registry ---------------------------------------------------------
 
 def _build_model(
@@ -585,8 +575,6 @@ class AnthropicStreamFn:
         state = _StreamState()
         aborted = False
 
-        retry_policy = self.retry_policy or _IdentityRetryPolicy()
-
         async def _open_stream() -> tuple[_AnthropicStreamContext, _AnthropicAsyncStream]:
             ctx = client.messages.stream(**body)
             if not isinstance(ctx, _AnthropicStreamContext):
@@ -602,16 +590,21 @@ class AnthropicStreamFn:
             return ctx, opened
 
         stream_ctx: _AnthropicStreamContext | None = None
-        stream: _AnthropicAsyncStream | None = None
         try:
-            stream_ctx, stream = await await_with_cancel_signal(
-                retry_policy.run(
+            open_operation = (
+                _open_stream()
+                if self.retry_policy is None
+                else self.retry_policy.run(
                     _open_stream,
                     is_retryable=_is_anthropic_retryable,
-                ),
+                )
+            )
+            opened_ctx, opened_stream = await await_with_cancel_signal(
+                open_operation,
                 signal,
             )
-            iterator = stream.__aiter__()
+            stream_ctx = opened_ctx
+            iterator = opened_stream.__aiter__()
             while True:
                 try:
                     event = await await_with_cancel_signal(
@@ -623,7 +616,7 @@ class AnthropicStreamFn:
                 except OperationCancelledBySignal:
                     aborted = True
                     try:
-                        await stream.close()
+                        await opened_stream.close()
                     except Exception:
                         # Best-effort close; do not let cleanup mask the abort.
                         logger.opt(exception=True).debug(

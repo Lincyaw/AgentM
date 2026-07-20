@@ -72,12 +72,11 @@ class DirectToolExecutor:
         *,
         signal: CancelSignal | None = None,
     ) -> ToolResult | ToolOutcome:
-        interrupt = request.requirements.interrupt if request.requirements else "block"
         return await _execute_direct(
             request.tool,
             request.args,
             signal=signal,
-            interrupt=interrupt,
+            interrupt=request.requirements.interrupt,
         )
 
 
@@ -85,11 +84,9 @@ _DIRECT_EXECUTOR = DirectToolExecutor()
 
 
 def _validate_requirements(
-    requirements: ToolExecutionRequirements | None,
+    requirements: ToolExecutionRequirements,
     capabilities: ToolExecutionCapabilities,
 ) -> None:
-    if requirements is None:
-        return
     unsupported: list[str] = []
     if requirements.isolation not in capabilities.isolation:
         unsupported.append(f"isolation={requirements.isolation}")

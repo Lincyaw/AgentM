@@ -9,7 +9,7 @@
 | Recovery | Resume, fork, cache, and compaction never read OTLP or ClickHouse observability tables. |
 | Correlation | Both planes carry stable session, root, parent, and turn ids where applicable. |
 | Privacy | Prompt-bearing diagnostic payloads are redacted by default; observability is not a hidden trajectory replica. |
-| Failure | A configured trajectory-store failure is fatal to the turn commit. Turn, node/head indexes, and checkpoint supersession succeed or roll back together; no node-index repair path exists. Telemetry delivery failure remains independent and cannot be treated as trajectory persistence. |
+| Failure | A configured trajectory-store failure is fatal to the turn commit. Turn, node/head indexes, and checkpoint supersession succeed or roll back together; no node-index repair path exists. Telemetry delivery failure remains independent and cannot be treated as trajectory persistence. Explicit `otlp` mode fails session setup when its collector/exporter cannot be attached; only `auto` may select local diagnostic JSONL instead. |
 
 ## Ports
 
@@ -38,7 +38,7 @@ external data product, not an SDK fallback or a second persistence contract.
 | Mode | Behavior |
 | --- | --- |
 | `local_file` | Write the local OTLP JSONL diagnostic file. |
-| `otlp` | Export diagnostics only to the configured collector. |
+| `otlp` | Export diagnostics only to the configured collector; fail session setup if the sink cannot attach. |
 | `auto` | Use OTLP when the collector is reachable; otherwise use local diagnostic JSONL. |
 
 The `auto` decision changes only the diagnostic sink. It never changes the

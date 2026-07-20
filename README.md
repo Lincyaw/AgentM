@@ -19,7 +19,7 @@ The SDK is mechanism, not policy. Policy enters through atoms.
 | `MessageMeta` | Control-plane metadata for synthetic messages, hidden attachments, no-response prompts, replay policy, token accounting, origin, mode, and target identity. |
 | `Turn` | Durable trajectory unit: trigger, assistant rounds, tool records, structured tool extras, outcome, timing, and usage. |
 | `TrajectoryStore` | The single replaceable persistence boundary for session metadata, incomplete checkpoints, committed turns, message-node indexes, heads, and cache/compaction state. |
-| `TrajectoryNode` | A committed message/index record used for fork, resume, sidechains, compact boundaries, snip/rewind, content replacement, and prompt-cache lookup. |
+| `TrajectoryNode` | A committed message or compact-boundary index record used for fork, resume, sidechains, compaction, and prompt-cache lookup. Content replacement is state attached atomically to a compact boundary, not another node kind. |
 | `ContextPolicy` | Replaceable context reconstruction policy. Policies may expose `PersistentContextPolicy` state for compaction and content replacement that must survive resume/fork. |
 | `EventBus` | Immutable event dispatch surface for observation and policy hooks. |
 | `AtomAPI` | The only surface atoms receive at install time. |
@@ -130,7 +130,7 @@ node ids and portable index fields:
 | Links | `parent_id`, `logical_parent_id` | Visible chain reconstruction, fork prefix sharing, and compact-boundary lineage. |
 | Ownership | `agent_id`, `is_sidechain` | Subagent sidechains and agent-specific resume. |
 | Turn join | `turn_id`, `turn_index`, `round_index`, `message_index` | Join message nodes back to committed turns and tool records. |
-| Shape | `kind`, `role`, `timestamp` | Filter message, compact boundary, content replacement, snip, checkpoint, and user/assistant/tool-result nodes. |
+| Shape | `kind`, `role`, `timestamp` | Distinguish committed message and compact-boundary nodes, then filter message roles such as user, assistant, and tool result. Incomplete checkpoints are turn-level records outside the committed node graph. |
 
 SQL stores implement these as normal indexed columns. JSONL stores replay the
 same per-session journal; they do not maintain a separately recoverable sidecar
