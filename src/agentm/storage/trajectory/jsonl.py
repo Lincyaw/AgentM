@@ -48,7 +48,7 @@ from agentm.storage.serialization import (
     serialize_prompt_cache_state,
 )
 
-_VERSION = 1
+_VERSION = 2
 _SESSION = "session"
 _CHECKPOINT = "turn_checkpoint"
 _CHECKPOINT_DISCARD = "turn_checkpoint_discard"

@@ -45,7 +45,10 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
-from agentm.core.abi.resource import ResourceMutation, ResourceRef
+from agentm.core.abi._resource_codec import (
+    deserialize_resource_mutations,
+    serialize_resource_mutations,
+)
 from agentm.core.abi.termination import (
     BudgetExhausted,
     MaxTurnsExhausted,
@@ -78,7 +81,7 @@ from agentm.core.abi.trigger import (
 )
 
 
-TRAJECTORY_CODEC_VERSION = 1
+TRAJECTORY_CODEC_VERSION = 2
 
 
 @runtime_checkable
@@ -1012,95 +1015,10 @@ class CodecRegistry:
             "cache_write_tokens": meta.cache_write_tokens,
             "duration_ns": meta.duration_ns,
             "model_id": meta.model_id,
-            "resource_mutations": [
-                {
-                    "ref": {
-                        "namespace": mutation.ref.namespace,
-                        "path": mutation.ref.path,
-                    },
-                    "op": mutation.op,
-                    "transaction_id": mutation.transaction_id,
-                    "before_version": mutation.before_version,
-                    "after_version": mutation.after_version,
-                    "metadata": _json_safe(mutation.metadata),
-                }
-                for mutation in meta.resource_mutations
-            ],
+            "resource_mutations": serialize_resource_mutations(
+                meta.resource_mutations
+            ),
         }
-
-    @staticmethod
-    def _deserialize_resource_mutations(
-        data: Any,
-    ) -> tuple[ResourceMutation, ...]:
-        if not isinstance(data, list):
-            raise ValueError("resource_mutations must be a list")
-        mutations: list[ResourceMutation] = []
-        for index, item in enumerate(data):
-            if not isinstance(item, dict):
-                raise ValueError(
-                    f"resource_mutations[{index}] must be an object"
-                )
-            ref_data = item.get("ref")
-            if not isinstance(ref_data, dict):
-                raise ValueError(
-                    f"resource_mutations[{index}].ref must be an object"
-                )
-            namespace = ref_data.get("namespace")
-            path = ref_data.get("path")
-            op = item.get("op")
-            if not isinstance(namespace, str) or not isinstance(path, str):
-                raise ValueError(
-                    f"resource_mutations[{index}].ref is invalid"
-                )
-            if op not in {"create", "write", "replace", "delete"}:
-                raise ValueError(
-                    f"resource_mutations[{index}].op is invalid"
-                )
-            metadata = _json_restore(item.get("metadata", {}))
-            if not isinstance(metadata, dict):
-                raise ValueError(
-                    f"resource_mutations[{index}].metadata must be an object"
-                )
-            transaction_id = _optional_string(
-                item.get("transaction_id"),
-                f"resource_mutations[{index}].transaction_id",
-            )
-            before_version = _optional_string(
-                item.get("before_version"),
-                f"resource_mutations[{index}].before_version",
-            )
-            after_version = _optional_string(
-                item.get("after_version"),
-                f"resource_mutations[{index}].after_version",
-            )
-            _only_fields(
-                item,
-                {
-                    "ref",
-                    "op",
-                    "transaction_id",
-                    "before_version",
-                    "after_version",
-                    "metadata",
-                },
-                f"resource_mutations[{index}]",
-            )
-            _only_fields(
-                ref_data,
-                {"namespace", "path"},
-                f"resource_mutations[{index}].ref",
-            )
-            mutations.append(
-                ResourceMutation(
-                    ref=ResourceRef(namespace=namespace, path=path),
-                    op=op,
-                    transaction_id=transaction_id,
-                    before_version=before_version,
-                    after_version=after_version,
-                    metadata=metadata,
-                )
-            )
-        return tuple(mutations)
 
     @staticmethod
     def _deserialize_meta(data: dict[str, Any]) -> TurnMeta:
@@ -1145,7 +1063,7 @@ class CodecRegistry:
                 minimum=0,
             ),
             model_id=_optional_string(data.get("model_id"), "turn.meta.model_id"),
-            resource_mutations=CodecRegistry._deserialize_resource_mutations(
+            resource_mutations=deserialize_resource_mutations(
                 data.get("resource_mutations", [])
             ),
         )

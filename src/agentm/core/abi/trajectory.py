@@ -662,6 +662,24 @@ class TurnMeta:
             )
 
 
+def _validate_resource_transaction_anchors(
+    meta: TurnMeta,
+    *,
+    turn_id: str,
+    turn_index: int,
+    label: str,
+) -> None:
+    for mutation in meta.resource_mutations:
+        transaction = mutation.transaction
+        if transaction is None:
+            continue
+        if transaction.turn_id != turn_id or transaction.turn_index != turn_index:
+            raise ValueError(
+                f"{label} resource transaction {transaction.id!r} does not "
+                "match its owning turn"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class ToolRecord:
     """One tool call and its final result (post all bus hooks)."""
@@ -790,6 +808,12 @@ class TurnCheckpoint:
         _require_finite(self.updated_at, "turn checkpoint updated_at")
         if not isinstance(self.meta, TurnMeta):
             raise TypeError("turn checkpoint meta must be TurnMeta")
+        _validate_resource_transaction_anchors(
+            self.meta,
+            turn_id=self.id,
+            turn_index=self.index,
+            label="turn checkpoint",
+        )
         if self.trigger_metadata is not None and not isinstance(
             self.trigger_metadata,
             TriggerMetadata,
@@ -834,6 +858,12 @@ class Turn:
         _require_finite(self.timestamp, "turn timestamp")
         if not isinstance(self.meta, TurnMeta):
             raise TypeError("turn meta must be TurnMeta")
+        _validate_resource_transaction_anchors(
+            self.meta,
+            turn_id=self.id,
+            turn_index=self.index,
+            label="turn",
+        )
         if self.trigger_metadata is not None and not isinstance(
             self.trigger_metadata,
             TriggerMetadata,

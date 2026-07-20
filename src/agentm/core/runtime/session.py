@@ -30,6 +30,7 @@ from agentm.core.abi.resource import (
     ResourceReader,
     ResourceRecoveryContext,
     ResourceStore,
+    ResourceTransactionRef,
     TransactionalResourceWriter,
 )
 from agentm.core.abi.roles import RESOLVED_SESSION_SPEC_SERVICE
@@ -54,7 +55,7 @@ from agentm.core.abi.trajectory import (
     Turn,
     TurnRef,
 )
-from agentm.core.lib.async_cancel import await_known_outcome
+from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
 from agentm.core.runtime.session_core import (
     SessionRuntimeConfig,
     _SessionComposition,
@@ -89,10 +90,80 @@ def _rehydrate_turn_triggers(
     return restored
 
 
+def _owned_resource_transactions(
+    session_id: str,
+    turns: Sequence[Turn],
+) -> tuple[ResourceTransactionRef, ...]:
+    transactions: dict[str, ResourceTransactionRef] = {}
+    for turn in turns:
+        for mutation in turn.meta.resource_mutations:
+            transaction = mutation.transaction
+            if transaction is None or transaction.session_id != session_id:
+                continue
+            previous = transactions.get(transaction.id)
+            if previous is not None and previous != transaction:
+                raise ValueError(
+                    f"resource transaction {transaction.id!r} has conflicting "
+                    "ownership"
+                )
+            transactions[transaction.id] = transaction
+    return tuple(transactions.values())
+
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedForkAnchor:
     turn_ref: TurnRef
     node_id: str | None = None
+
+
+async def _cleanup_unreturned_session(
+    session: Session,
+    handoff_error: BaseException,
+) -> None:
+    try:
+        await await_known_outcome(session.shutdown())
+    except BaseException as cleanup_error:
+        raise BaseExceptionGroup(
+            "child session handoff and cleanup failed",
+            (handoff_error, cleanup_error),
+        ) from handoff_error
+
+
+async def _cleanup_failed_fork(
+    *,
+    forked: Session | None,
+    environment_fork: EnvironmentFork | None,
+    store: TrajectoryStore | None,
+    child_session_id: str,
+    fork_error: BaseException,
+) -> None:
+    cleanup_errors: list[BaseException] = []
+    if forked is not None:
+        try:
+            await await_known_outcome(forked.shutdown())
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+
+    durable_child = store is not None
+    if store is not None:
+        try:
+            durable_child, caller_cancelled = await settle_known_outcome(
+                asyncio.to_thread(store.session_exists, child_session_id)
+            )
+            if caller_cancelled:
+                cleanup_errors.append(asyncio.CancelledError())
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+    if environment_fork is not None and not durable_child:
+        try:
+            await await_known_outcome(environment_fork.lease.abandon())
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+    if cleanup_errors:
+        raise BaseExceptionGroup(
+            "environment fork construction and cleanup failed",
+            (fork_error, *cleanup_errors),
+        ) from fork_error
 
 
 def _fork_head(
@@ -329,7 +400,11 @@ class Session(_SessionComposition):
             session_type=type(self),
         )
 
-        await self._register_child(child, purpose=purpose)
+        try:
+            await self._register_child(child, purpose=purpose)
+        except BaseException as handoff_error:
+            await _cleanup_unreturned_session(child, handoff_error)
+            raise
         return cast(Self, child)
 
     async def spawn_child_session(
@@ -341,7 +416,11 @@ class Session(_SessionComposition):
         from agentm.core.runtime.session_factory import create_child_session
 
         child = await create_child_session(parent=self, config=config)
-        await self._register_child(child, purpose=config.purpose)
+        try:
+            await self._register_child(child, purpose=config.purpose)
+        except BaseException as handoff_error:
+            await _cleanup_unreturned_session(child, handoff_error)
+            raise
         return cast(Self, child)
 
     async def _register_child(self, child: Session, *, purpose: str) -> None:
@@ -426,124 +505,156 @@ class Session(_SessionComposition):
             )
 
         environment_fork: EnvironmentFork | None = None
-        effect_scope = source.get_effect_scope()
-        if effect_scope is not None:
-            environment_fork = await effect_scope.fork_at(
-                turn_ref,
-                source_session_id=source.id,
-                child_session_id=child_ctx.session_id,
-            )
-            if not isinstance(environment_fork, EnvironmentFork):
-                raise TypeError("EffectScope.fork_at() must return an EnvironmentFork")
-            child_ctx = replace(child_ctx, cwd=environment_fork.cwd)
-
-        child_services = ServiceRegistry()
-        child_services.inherit_from(source.services)
-        resolved_spec = source._resolved_session_spec()
-        if resolved_spec is not None:
-            child_services.register(
-                RESOLVED_SESSION_SPEC_SERVICE,
-                resolved_spec,
-                ResolvedSessionSpec,
-                scope="session",
-            )
-
-        child_resource_writer = source_resource_writer
-        child_resource_reader = source.get_resource_reader()
-        child_resource_store = source.get_resource_store()
-        if environment_fork is not None and source_resource_writer is not None:
-            forkable_writer = cast(
-                EnvironmentForkableResourceWriter,
-                source_resource_writer,
-            )
-            child_resource_writer = await forkable_writer.fork_for_environment(
-                workspace_root=environment_fork.cwd,
-                child_session_id=child_ctx.session_id,
-            )
-            if child_resource_store is source_resource_writer:
-                if not isinstance(child_resource_writer, ResourceStore):
-                    raise TypeError(
-                        "forked ResourceWriter must preserve ResourceStore when "
-                        "the source service implemented both contracts"
+        forked: Session | None = None
+        try:
+            effect_scope = source.get_effect_scope()
+            if effect_scope is not None:
+                candidate, caller_cancelled = await settle_known_outcome(
+                    effect_scope.fork_at(
+                        turn_ref,
+                        source_session_id=source.id,
+                        child_session_id=child_ctx.session_id,
                     )
-                child_resource_store = child_resource_writer
-            if child_resource_reader is source_resource_writer:
-                if not isinstance(child_resource_writer, ResourceReader):
+                )
+                if not isinstance(candidate, EnvironmentFork):
                     raise TypeError(
-                        "forked ResourceWriter must preserve ResourceReader when "
-                        "the source service implemented both contracts"
+                        "EffectScope.fork_at() must return an EnvironmentFork"
                     )
-                child_resource_reader = child_resource_writer
+                environment_fork = candidate
+                if caller_cancelled:
+                    raise asyncio.CancelledError
+                child_ctx = replace(child_ctx, cwd=environment_fork.cwd)
 
-        from agentm.core.runtime.session_factory import (
-            SessionBuildConfig,
-            create_session,
-        )
+            child_services = ServiceRegistry()
+            child_services.inherit_from(source.services)
+            resolved_spec = source._resolved_session_spec()
+            if resolved_spec is not None:
+                child_services.register(
+                    RESOLVED_SESSION_SPEC_SERVICE,
+                    resolved_spec,
+                    ResolvedSessionSpec,
+                    scope="session",
+                )
 
-        source_tool_allowlist = source._tool_allowlist()
-        forked = await create_session(
-            SessionBuildConfig(
-                extensions=source._composition_extensions(include_provider_atoms=True),
-                stream_fn=source._stream_fn,
-                model=source._model,
-                system=source.system,
-                cwd=child_ctx.cwd,
-                purpose=purpose,
+            child_resource_writer = source_resource_writer
+            child_resource_reader = source.get_resource_reader()
+            child_resource_store = source.get_resource_store()
+            if environment_fork is not None and source_resource_writer is not None:
+                forkable_writer = cast(
+                    EnvironmentForkableResourceWriter,
+                    source_resource_writer,
+                )
+                child_resource_writer = await await_known_outcome(
+                    forkable_writer.fork_for_environment(
+                        workspace_root=environment_fork.cwd,
+                        child_session_id=child_ctx.session_id,
+                    )
+                )
+                if child_resource_store is source_resource_writer:
+                    if not isinstance(child_resource_writer, ResourceStore):
+                        raise TypeError(
+                            "forked ResourceWriter must preserve ResourceStore when "
+                            "the source service implemented both contracts"
+                        )
+                    child_resource_store = child_resource_writer
+                if child_resource_reader is source_resource_writer:
+                    if not isinstance(child_resource_writer, ResourceReader):
+                        raise TypeError(
+                            "forked ResourceWriter must preserve ResourceReader when "
+                            "the source service implemented both contracts"
+                        )
+                    child_resource_reader = child_resource_writer
+
+            if environment_fork is not None:
+                _, caller_cancelled = await settle_known_outcome(
+                    environment_fork.lease.commit()
+                )
+                if caller_cancelled:
+                    raise asyncio.CancelledError
+
+            from agentm.core.runtime.session_factory import (
+                SessionBuildConfig,
+                create_session,
+            )
+
+            source_tool_allowlist = source._tool_allowlist()
+            forked = await create_session(
+                SessionBuildConfig(
+                    extensions=source._composition_extensions(
+                        include_provider_atoms=True
+                    ),
+                    stream_fn=source._stream_fn,
+                    model=source._model,
+                    system=source.system,
+                    cwd=child_ctx.cwd,
+                    purpose=purpose,
+                    store=source.store,
+                    graph=source.graph,
+                    session_context=child_ctx,
+                    initial_turns=list(prefix.turns),
+                    initial_head=initial_head,
+                    fork_point=turn_ref,
+                    tools=list(source._external_tools()),
+                    context_policies=[
+                        copy.copy(policy)
+                        for policy in source._external_context_policies()
+                    ],
+                    trigger_renderers=source._external_trigger_renderers(),
+                    codec=source._composition_codec(),
+                    provider_identity=provider_identity,
+                    resource_reader=child_resource_reader,
+                    resource_store=child_resource_store,
+                    resource_writer=child_resource_writer,
+                    tool_executor=source.get_tool_executor(),
+                    tool_orchestrator=source.get_tool_orchestrator(),
+                    permission_policy=source.get_permission_policy(),
+                    effect_scope=(
+                        environment_fork.effect_scope
+                        if environment_fork is not None
+                        else None
+                    ),
+                    environment_operations=(
+                        environment_fork.operations
+                        if environment_fork is not None
+                        else None
+                    ),
+                    environment_restore_failure_handler=(
+                        source._environment_restore_failure_handler()
+                    ),
+                    services=child_services,
+                    resolved_spec=resolved_spec,
+                    max_turns=source._max_turns,
+                    max_tool_calls=source._max_tool_calls,
+                    tool_allowlist=(
+                        list(source_tool_allowlist)
+                        if source_tool_allowlist is not None
+                        else None
+                    ),
+                    thinking=source._thinking,
+                ),
+                session_type=cls,
+            )
+
+            if forked.graph is not None:
+                forked.graph.register(
+                    forked.id,
+                    parent_id=source.id,
+                    fork_point=turn_ref,
+                    purpose=purpose,
+                    edge_kind="forked",
+                )
+        except BaseException as fork_error:
+            await _cleanup_failed_fork(
+                forked=forked,
+                environment_fork=environment_fork,
                 store=source.store,
-                graph=source.graph,
-                session_context=child_ctx,
-                initial_turns=list(prefix.turns),
-                initial_head=initial_head,
-                fork_point=turn_ref,
-                tools=list(source._external_tools()),
-                context_policies=[
-                    copy.copy(policy) for policy in source._external_context_policies()
-                ],
-                trigger_renderers=source._external_trigger_renderers(),
-                codec=source._composition_codec(),
-                provider_identity=provider_identity,
-                resource_reader=child_resource_reader,
-                resource_store=child_resource_store,
-                resource_writer=child_resource_writer,
-                tool_executor=source.get_tool_executor(),
-                tool_orchestrator=source.get_tool_orchestrator(),
-                permission_policy=source.get_permission_policy(),
-                effect_scope=(
-                    environment_fork.effect_scope
-                    if environment_fork is not None
-                    else None
-                ),
-                environment_operations=(
-                    environment_fork.operations
-                    if environment_fork is not None
-                    else None
-                ),
-                environment_restore_failure_handler=(
-                    source._environment_restore_failure_handler()
-                ),
-                services=child_services,
-                resolved_spec=resolved_spec,
-                max_turns=source._max_turns,
-                max_tool_calls=source._max_tool_calls,
-                tool_allowlist=(
-                    list(source_tool_allowlist)
-                    if source_tool_allowlist is not None
-                    else None
-                ),
-                thinking=source._thinking,
-            ),
-            session_type=cls,
-        )
-
-        if forked.graph is not None:
-            forked.graph.register(
-                forked.id,
-                parent_id=source.id,
-                fork_point=turn_ref,
-                purpose=purpose,
-                edge_kind="forked",
+                child_session_id=child_ctx.session_id,
+                fork_error=fork_error,
             )
+            raise
 
+        if forked is None:
+            raise RuntimeError("fork construction returned no session")
         return cast(Self, forked)
 
     @classmethod
@@ -592,19 +703,14 @@ class Session(_SessionComposition):
             )
             resource_writer = session.get_resource_writer()
             if isinstance(resource_writer, TransactionalResourceWriter):
-                transaction_ids = tuple(
-                    dict.fromkeys(
-                        mutation.transaction_id
-                        for turn in turns
-                        for mutation in turn.meta.resource_mutations
-                        if mutation.transaction_id is not None
-                    )
-                )
                 await await_known_outcome(
                     resource_writer.recover(
                         ResourceRecoveryContext(
                             session_id=session.id,
-                            committed_transaction_ids=transaction_ids,
+                            committed_transactions=_owned_resource_transactions(
+                                session.id,
+                                turns,
+                            ),
                         )
                     )
                 )

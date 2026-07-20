@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from signal import SIGKILL
 from typing import IO, Iterator
@@ -378,6 +379,11 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
         return EnvironmentFork(
             effect_scope=child_scope,
             cwd=str(child_workspace),
+            lease=_LocalEnvironmentForkLease(
+                snapshotter=self,
+                snapshot=forked_snapshot,
+                workspace=child_workspace,
+            ),
             operations=LocalEnvironmentOperations(
                 cwd=child_workspace,
                 bash=bash,
@@ -395,6 +401,11 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
             source = self._snapshot_source(snapshot)
             if not source.exists():
                 return None
+            turn_id = snapshot.metadata.get("turn_id")
+            if not isinstance(turn_id, str) or not turn_id:
+                raise RuntimeError(
+                    f"snapshot {snapshot.id!r} has no committed turn id"
+                )
             snapshot_id = f"{_ref_token(child_session_id)}-fork-{uuid.uuid4().hex}"
             target = self._snapshot_dir(snapshot_id) / "workspace"
             _copytree(
@@ -412,6 +423,7 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
                     "source_snapshot_id": snapshot.id,
                     "created_at": time.time(),
                     "checkpoint": "fork",
+                    "turn_id": turn_id,
                     "copy_policy_id": self._copy_policy_id,
                 },
             )
@@ -548,6 +560,62 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class _LocalEnvironmentForkLease:
+    """Remove every local artifact owned only by an unreturned child."""
+
+    def __init__(
+        self,
+        *,
+        snapshotter: LocalSnapshotStore,
+        snapshot: EnvironmentSnapshot,
+        workspace: Path,
+    ) -> None:
+        self._snapshotter = snapshotter
+        self._snapshot = snapshot
+        self._workspace = workspace
+
+    async def commit(self) -> None:
+        await asyncio.to_thread(self._commit)
+
+    def _commit(self) -> None:
+        with self._snapshotter._locked():
+            manifest_path = (
+                self._snapshotter._snapshot_dir(self._snapshot.id) / "snapshot.json"
+            )
+            current = _read_snapshot_manifest(manifest_path)
+            checkpoint = current.metadata.get("checkpoint")
+            if checkpoint == "after_turn":
+                return
+            if checkpoint != "fork":
+                raise RuntimeError(
+                    f"environment fork {current.id!r} has invalid checkpoint "
+                    f"{checkpoint!r}"
+                )
+            turn_id = current.metadata.get("turn_id")
+            if not isinstance(turn_id, str) or not turn_id:
+                raise RuntimeError(
+                    f"environment fork {current.id!r} has no committed turn id"
+                )
+            committed = replace(
+                current,
+                metadata={
+                    **dict(current.metadata),
+                    "checkpoint": "after_turn",
+                },
+            )
+            _write_manifest(manifest_path, committed)
+
+    async def abandon(self) -> None:
+        await asyncio.to_thread(self._abandon)
+
+    def _abandon(self) -> None:
+        with self._snapshotter._locked():
+            _rmtree_and_fsync_if_present(self._workspace)
+            _rmtree_and_fsync_if_present(
+                self._snapshotter._snapshot_dir(self._snapshot.id)
+            )
 
 
 class LocalSnapshotEffectScope(EffectScope):
@@ -876,6 +944,13 @@ def _rmtree_and_fsync(path: Path) -> None:
     parent = path.parent
     shutil.rmtree(path)
     _fsync_directory(parent)
+
+
+def _rmtree_and_fsync_if_present(path: Path) -> None:
+    try:
+        _rmtree_and_fsync(path)
+    except FileNotFoundError:
+        return
 
 
 def _real_path(path: Path) -> Path:

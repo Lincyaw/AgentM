@@ -111,12 +111,31 @@ class ResourceRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceTransactionRef:
+    """Stable origin identity for one turn-scoped resource transaction."""
+
+    id: str
+    session_id: str
+    turn_id: str
+    turn_index: int
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.id, "resource transaction ref id")
+        _require_nonempty_string(
+            self.session_id,
+            "resource transaction ref session_id",
+        )
+        _require_nonempty_string(self.turn_id, "resource transaction ref turn_id")
+        _require_index(self.turn_index, "resource transaction ref turn_index")
+
+
+@dataclass(frozen=True, slots=True)
 class ResourceMutation:
-    """One durable mutation produced inside a resource transaction."""
+    """One durable mutation, including its original transaction ownership."""
 
     ref: ResourceRef
     op: ResourceMutationOp
-    transaction_id: str | None = None
+    transaction: ResourceTransactionRef | None = None
     before_version: str | None = None
     after_version: str | None = None
     metadata: ResourceMeta = field(default_factory=dict)
@@ -126,11 +145,13 @@ class ResourceMutation:
             raise TypeError("resource mutation ref must be a ResourceRef")
         if self.op not in {"create", "write", "replace", "delete"}:
             raise ValueError(f"invalid resource mutation op: {self.op!r}")
-        _require_nonempty_string(
-            self.transaction_id,
-            "resource mutation transaction_id",
-            optional=True,
-        )
+        if self.transaction is not None and not isinstance(
+            self.transaction,
+            ResourceTransactionRef,
+        ):
+            raise TypeError(
+                "resource mutation transaction must be a ResourceTransactionRef"
+            )
         _require_nonempty_string(
             self.before_version,
             "resource mutation before_version",
@@ -180,24 +201,32 @@ class ResourceTxnContext:
 
 @dataclass(frozen=True, slots=True)
 class ResourceRecoveryContext:
-    """Committed transaction identities used to recover one session."""
+    """Committed transactions owned by one session and eligible for recovery."""
 
     session_id: str
-    committed_transaction_ids: tuple[str, ...] = ()
+    committed_transactions: tuple[ResourceTransactionRef, ...] = ()
 
     def __post_init__(self) -> None:
         _require_nonempty_string(self.session_id, "resource recovery session_id")
-        if not isinstance(self.committed_transaction_ids, tuple):
-            raise TypeError("committed_transaction_ids must be a tuple")
-        for transaction_id in self.committed_transaction_ids:
-            _require_nonempty_string(
-                transaction_id,
-                "committed resource transaction id",
-            )
-        if len(set(self.committed_transaction_ids)) != len(
-            self.committed_transaction_ids
+        if not isinstance(self.committed_transactions, tuple) or not all(
+            isinstance(transaction, ResourceTransactionRef)
+            for transaction in self.committed_transactions
         ):
-            raise ValueError("committed_transaction_ids must not contain duplicates")
+            raise TypeError(
+                "committed_transactions must be a tuple of ResourceTransactionRef"
+            )
+        if any(
+            transaction.session_id != self.session_id
+            for transaction in self.committed_transactions
+        ):
+            raise ValueError(
+                "committed resource transactions must belong to the recovery session"
+            )
+        transaction_ids = [
+            transaction.id for transaction in self.committed_transactions
+        ]
+        if len(set(transaction_ids)) != len(transaction_ids):
+            raise ValueError("committed resource transactions must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,7 +430,13 @@ class TransactionalResourceWriter(ResourceWriter, Protocol):
 
 @runtime_checkable
 class EnvironmentForkableResourceWriter(Protocol):
-    """Workspace writer that can rebind itself to a forked environment."""
+    """Workspace writer that can rebind itself to a forked environment.
+
+    This operation may validate or construct a binding but must not allocate
+    independently owned external resources. The paired ``EnvironmentForkLease``
+    owns all provisional environment state so failed SDK fork construction has
+    one complete cleanup boundary.
+    """
 
     async def fork_for_environment(
         self,
@@ -432,6 +467,7 @@ __all__ = [
     "ResourceRecoveryContext",
     "ResourceRef",
     "ResourceStore",
+    "ResourceTransactionRef",
     "ResourceTxn",
     "ResourceTxnContext",
     "ResourceWriter",

@@ -661,13 +661,16 @@ async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    snapshot_root = tmp_path / "snapshots"
+    resource_root = tmp_path / "resources"
+    trajectory_store = _jsonl_store(tmp_path / "environment-fork")
     snapshots = LocalSnapshotStore(
         workspace_root=workspace,
-        snapshot_root=tmp_path / "snapshots",
+        snapshot_root=snapshot_root,
     )
     resources = LocalResourceStore(
         workspace_root=workspace,
-        root=tmp_path / "resources",
+        root=resource_root,
     )
     provider = _StubProvider(
         _tool_call(
@@ -692,25 +695,53 @@ async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
             ],
             stream_fn=provider,
             model=_model(),
-            trajectory_store=_jsonl_store(tmp_path / "environment-fork"),
+            trajectory_store=trajectory_store,
             resource_store=resources,
             resource_writer=resources,
             effect_scope=LocalSnapshotEffectScope(snapshotter=snapshots),
         )
     )
     forked: AgentSession | None = None
+    resumed: AgentSession | None = None
     try:
         await session.run("write the parent file")
         forked = await AgentSession.fork(session, at=0, purpose="isolated")
-        await forked.run("write the branch file")
-
         child_workspace = Path(forked.cwd)
         assert child_workspace != workspace
         assert (child_workspace / "parent.txt").read_text() == "parent"
+        await forked.shutdown()
+
+        child_snapshots = LocalSnapshotStore(
+            workspace_root=child_workspace,
+            snapshot_root=snapshot_root,
+        )
+        child_resources = LocalResourceStore(
+            workspace_root=child_workspace,
+            root=resource_root,
+        )
+        resumed = await AgentSession.resume(
+            forked.session_id,
+            trajectory_store,
+            AgentSessionConfig(
+                extensions=[
+                    (_OPERATIONS, {}),
+                    (_FILE_TOOLS, {"tools": ["write"]}),
+                ],
+                stream_fn=provider,
+                model=_model(),
+                resource_store=child_resources,
+                resource_writer=child_resources,
+                effect_scope=LocalSnapshotEffectScope(snapshotter=child_snapshots),
+            ),
+        )
+        await resumed.run("write the branch file")
+
         assert (child_workspace / "branch.txt").read_text() == "branch"
         assert (workspace / "parent.txt").read_text() == "parent"
         assert not (workspace / "branch.txt").exists()
     finally:
+        if resumed is not None:
+            await resumed.shutdown()
         if forked is not None:
             await forked.shutdown()
         await session.shutdown()

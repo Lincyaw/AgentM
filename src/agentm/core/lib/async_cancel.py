@@ -56,6 +56,20 @@ async def await_known_outcome(awaitable: Awaitable[T]) -> T:
     their backend error before the caller can observe cancellation.
     """
 
+    result, cancelled = await settle_known_outcome(awaitable)
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def settle_known_outcome(awaitable: Awaitable[T]) -> tuple[T, bool]:
+    """Return an operation result together with observed caller cancellation.
+
+    Ownership-producing operations need the result even when their caller was
+    cancelled so they can explicitly release the resource before propagating
+    cancellation.
+    """
+
     task = asyncio.ensure_future(awaitable)
     cancelled = False
     while not task.done():
@@ -64,13 +78,12 @@ async def await_known_outcome(awaitable: Awaitable[T]) -> T:
         except asyncio.CancelledError:
             cancelled = True
     result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
+    return result, cancelled
 
 
 __all__ = [
     "OperationCancelledBySignal",
     "await_known_outcome",
     "await_with_cancel_signal",
+    "settle_known_outcome",
 ]

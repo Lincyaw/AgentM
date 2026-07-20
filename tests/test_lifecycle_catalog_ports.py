@@ -209,10 +209,26 @@ async def _wait_turn(session: Session, expected: int = 1) -> None:
     raise TimeoutError("session did not commit a turn")
 
 
+class _RecordingEnvironmentForkLease:
+    def __init__(self) -> None:
+        self.committed = False
+        self.abandoned = False
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def abandon(self) -> None:
+        self.abandoned = True
+
+
 class _RecordingEffectScope:
     def __init__(self) -> None:
         self.events: list[tuple[str, str, str | int]] = []
         self.children: list[_RecordingEffectScope] = []
+        self.fork_leases: list[_RecordingEnvironmentForkLease] = []
+        self.fork_started = asyncio.Event()
+        self.fork_release = asyncio.Event()
+        self.block_fork = False
 
     async def begin_turn(
         self,
@@ -245,11 +261,16 @@ class _RecordingEffectScope:
         source_session_id: str,
         child_session_id: str,
     ) -> EnvironmentFork:
+        if self.block_fork:
+            self.fork_started.set()
+            await self.fork_release.wait()
         child = _RecordingEffectScope()
+        lease = _RecordingEnvironmentForkLease()
         self.children.append(child)
+        self.fork_leases.append(lease)
         self.events.append(("fork", source_session_id, child_session_id))
         del ref
-        return EnvironmentFork(effect_scope=child, cwd="")
+        return EnvironmentFork(effect_scope=child, cwd="", lease=lease)
 
     async def restore(self, *, session_id: str, turns: Sequence[Turn]) -> None:
         self.events.append(("restore", session_id, len(turns)))
@@ -650,6 +671,21 @@ async def test_effect_scope_fork_and_resume() -> None:
     forked = await Session.fork(session, at=0, purpose="branch")
     assert scope.events[-1] == ("fork", session.id, forked.id)
     assert forked.get_effect_scope() is scope.children[0]
+    assert scope.fork_leases[0].committed
+    assert not scope.fork_leases[0].abandoned
+    await forked.shutdown()
+
+    scope.block_fork = True
+    cancelled_fork = asyncio.create_task(
+        Session.fork(session, at=0, purpose="cancelled-branch")
+    )
+    await asyncio.wait_for(scope.fork_started.wait(), timeout=1.0)
+    cancelled_fork.cancel()
+    scope.fork_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(cancelled_fork, timeout=1.0)
+    assert not scope.fork_leases[-1].committed
+    assert scope.fork_leases[-1].abandoned
 
     resume_scope = _RecordingEffectScope()
     resumed = await Session.resume(
@@ -665,6 +701,7 @@ async def test_effect_scope_fork_and_resume() -> None:
 
     assert resumed.id == session.id
     assert resume_scope.events == [("restore", session.id, 1)]
+    await resumed.shutdown()
 
 
 @pytest.mark.asyncio

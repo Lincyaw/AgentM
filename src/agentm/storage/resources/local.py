@@ -27,6 +27,7 @@ from agentm.core.abi.resource import (
     ResourceRecoveryContext,
     ResourceRef,
     ResourceStore,
+    ResourceTransactionRef,
     ResourceTxn,
     ResourceTxnContext,
     TransactionalResourceWriter,
@@ -272,7 +273,9 @@ class _LocalTransactionJournal:
 
     def recover(self, context: ResourceRecoveryContext) -> None:
         with self._files.locked():
-            committed = set(context.committed_transaction_ids)
+            committed = {
+                transaction.id for transaction in context.committed_transactions
+            }
             seen: set[str] = set()
             if self._transactions_root.exists():
                 for txn_dir in sorted(self._transactions_root.iterdir()):
@@ -859,13 +862,15 @@ class _LocalResourceTxn(ResourceTxn):
         return ResourceMutation(
             ref=ref,
             op=op,
-            transaction_id=self._transaction_id,
+            transaction=ResourceTransactionRef(
+                id=self._transaction_id,
+                session_id=self._context.session_id,
+                turn_id=self._context.turn_id,
+                turn_index=self._context.turn_index,
+            ),
             before_version=before,
             after_version=after,
             metadata={
-                "session_id": self._context.session_id,
-                "turn_id": self._context.turn_id,
-                "turn_index": self._context.turn_index,
                 "rationale": rationale,
                 "author": author,
             },
@@ -1267,6 +1272,12 @@ def _manifest_mutations(
     manifest: Mapping[str, object],
 ) -> list[ResourceMutation]:
     transaction_id = _manifest_str(manifest, "transaction_id")
+    transaction = ResourceTransactionRef(
+        id=transaction_id,
+        session_id=_manifest_str(manifest, "session_id"),
+        turn_id=_manifest_str(manifest, "turn_id"),
+        turn_index=_manifest_turn_index(manifest),
+    )
     mutations: list[ResourceMutation] = []
     for operation in _manifest_operations(manifest):
         raw_metadata = operation.get("metadata")
@@ -1285,7 +1296,7 @@ def _manifest_mutations(
             ResourceMutation(
                 ref=_operation_ref(operation),
                 op=_operation_type(operation),
-                transaction_id=transaction_id,
+                transaction=transaction,
                 before_version=_optional_manifest_str(
                     operation,
                     "before_version",

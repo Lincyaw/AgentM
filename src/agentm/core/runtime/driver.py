@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TypeVar, cast
+from typing import cast
 
 from loguru import logger
 
@@ -102,6 +101,7 @@ from agentm.core.runtime.reaction import (
     react,
     record_interruption_message,
 )
+from agentm.core.lib.async_cancel import settle_known_outcome
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.lib.trajectory_nodes import turn_to_nodes
 from agentm.core.runtime.trigger_queue import (
@@ -113,7 +113,6 @@ from agentm.core.runtime.trigger_queue import (
 # --- Helpers ----------------------------------------------------------------
 
 _INTERRUPTED_TOOL_TEXT = "Tool execution interrupted"
-_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,19 +260,6 @@ async def _save_checkpoint(
         raise asyncio.CancelledError
 
 
-async def _await_known_outcome(awaitable: Awaitable[_T]) -> tuple[_T, bool]:
-    """Wait for a state transition without letting caller cancellation race it."""
-
-    task = asyncio.ensure_future(awaitable)
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    return task.result(), cancelled
-
-
 async def _abandon_effect_turn(
     effect_scope: EffectScope | None,
     txn: EffectTxn | None,
@@ -377,7 +363,7 @@ async def _rollback_unpublished_turn(
     # races over the same files for local and sandbox implementations.
     if effect_scope is not None and effect_txn is not None:
         try:
-            _, cancelled = await _await_known_outcome(
+            _, cancelled = await settle_known_outcome(
                 _abandon_effect_turn(effect_scope, effect_txn, bus=bus)
             )
             caller_cancelled = caller_cancelled or cancelled
@@ -385,7 +371,7 @@ async def _rollback_unpublished_turn(
             errors.append(exc)
     if abandon_resource:
         try:
-            _, cancelled = await _await_known_outcome(
+            _, cancelled = await settle_known_outcome(
                 _abandon_resource_txn(resource_txn, bus=bus)
             )
             caller_cancelled = caller_cancelled or cancelled
@@ -564,7 +550,7 @@ async def drive(config: DriverConfig) -> None:
                     )
                 )
 
-            effect_txn, cancelled_during_effect_begin = await _await_known_outcome(
+            effect_txn, cancelled_during_effect_begin = await settle_known_outcome(
                 _begin_effect_turn(
                     config.effect_scope,
                     bus=bus,
@@ -575,7 +561,7 @@ async def drive(config: DriverConfig) -> None:
             )
             if cancelled_during_effect_begin:
                 raise asyncio.CancelledError
-            resource_txn, cancelled_during_resource_begin = await _await_known_outcome(
+            resource_txn, cancelled_during_resource_begin = await settle_known_outcome(
                 _begin_resource_txn(
                     config.resource_writer,
                     config.services,
@@ -651,7 +637,7 @@ async def drive(config: DriverConfig) -> None:
                 (
                     resource_mutations,
                     cancelled_during_resource_prepare,
-                ) = await _await_known_outcome(_prepare_resource_txn(resource_txn))
+                ) = await settle_known_outcome(_prepare_resource_txn(resource_txn))
                 if cancelled_during_resource_prepare:
                     raise asyncio.CancelledError
                 if resource_mutations:
@@ -662,12 +648,12 @@ async def drive(config: DriverConfig) -> None:
                             resource_mutations=resource_mutations,
                         ),
                     )
-                _, cancelled_during_resource_apply = await _await_known_outcome(
+                _, cancelled_during_resource_apply = await settle_known_outcome(
                     _apply_resource_txn(resource_txn)
                 )
                 if cancelled_during_resource_apply:
                     raise asyncio.CancelledError
-                _, cancelled_during_effect_prepare = await _await_known_outcome(
+                _, cancelled_during_effect_prepare = await settle_known_outcome(
                     _prepare_effect_turn(
                         config.effect_scope,
                         effect_txn,
@@ -682,7 +668,7 @@ async def drive(config: DriverConfig) -> None:
                 (
                     node_append_position,
                     cancelled_during_node_position,
-                ) = await _await_known_outcome(
+                ) = await settle_known_outcome(
                     _node_append_position(
                         config.store,
                         config.session_id,
@@ -733,7 +719,7 @@ async def drive(config: DriverConfig) -> None:
                 (
                     _,
                     cancelled_during_resource_commit,
-                ) = await _await_known_outcome(_commit_resource_txn(resource_txn))
+                ) = await settle_known_outcome(_commit_resource_txn(resource_txn))
                 resource_txn_committed = resource_txn is not None
             except Exception:
                 if durable_turn_committed:
@@ -743,7 +729,7 @@ async def drive(config: DriverConfig) -> None:
             trajectory.finalize_commit(turn)
             turn_published = True
             _clear_resource_txn(config.services)
-            _, cancelled_during_effect_commit = await _await_known_outcome(
+            _, cancelled_during_effect_commit = await settle_known_outcome(
                 _commit_effect_turn(config.effect_scope, effect_txn, turn, bus=bus)
             )
 

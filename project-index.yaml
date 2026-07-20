@@ -58,6 +58,15 @@ requirements:
       Resume-time resource/environment recovery and degraded-readonly
       activation also settle before cancellation propagates, and failed resume
       construction closes the newly created session.
+      Environment forks return a provisional lease whose commit promotes the
+      fork point into child-restorable state and whose idempotent abandon
+      removes every allocation when no child metadata became durable. Fork,
+      resource rebinding, child construction, and failed handoff all settle to
+      known outcomes; once child metadata is durable it wins cancellation and
+      retains the environment for explicit resume. Resource mutations carry a
+      typed transaction origin (id/session/turn/index), so a fork preserves
+      parent audit history while resume recovers only transactions owned by
+      the selected session.
       External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and
@@ -105,6 +114,7 @@ requirements:
       - path: src/agentm/config/__init__.py
       - path: src/agentm/config/resolver.py
       - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/_resource_codec.py
       - path: src/agentm/core/abi/bus.py
       - path: src/agentm/core/abi/cancel.py
       - path: src/agentm/core/abi/catalog.py

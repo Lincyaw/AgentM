@@ -206,6 +206,26 @@ class EffectScope(Protocol):
         ...
 
 
+@runtime_checkable
+class EnvironmentForkLease(Protocol):
+    """Own provisional resources created while constructing a child branch.
+
+    ``commit()`` promotes the fork point into restorable child state before
+    child-session metadata is published. ``Session.fork()`` calls ``abandon()``
+    when construction fails before that durable publication, including caller
+    cancellation after the backend operation started. Both methods must be
+    idempotent, and ``abandon()`` remains valid after ``commit()`` until the
+    child session is durable. Once metadata is durable, normal lifetime
+    ownership belongs to the child's registered services.
+    """
+
+    async def commit(self) -> None:
+        ...
+
+    async def abandon(self) -> None:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class EnvironmentFork:
     """Backend-produced bindings for an isolated trajectory branch.
@@ -214,12 +234,32 @@ class EnvironmentFork:
     against the same world represented by that scope, so the backend also
     returns the child's cwd and, when it owns one, its operations bundle.
     Workspace resource writers are rebound separately through
-    ``EnvironmentForkableResourceWriter``.
+    ``EnvironmentForkableResourceWriter``. ``lease`` is mandatory because an
+    async backend may finish allocating the branch after its caller is
+    cancelled; the runtime must still be able to clean up that known result.
     """
 
     effect_scope: EffectScope
     cwd: str
+    lease: EnvironmentForkLease
     operations: EnvironmentOperations | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.effect_scope, EffectScope):
+            raise TypeError("environment fork effect_scope must implement EffectScope")
+        if not isinstance(self.cwd, str):
+            raise TypeError("environment fork cwd must be a string")
+        if not isinstance(self.lease, EnvironmentForkLease):
+            raise TypeError(
+                "environment fork lease must implement EnvironmentForkLease"
+            )
+        if self.operations is not None and not isinstance(
+            self.operations,
+            EnvironmentOperations,
+        ):
+            raise TypeError(
+                "environment fork operations must implement EnvironmentOperations"
+            )
 
 
 @runtime_checkable
@@ -263,6 +303,7 @@ __all__ = [
     "EffectScope",
     "EffectTxn",
     "EnvironmentFork",
+    "EnvironmentForkLease",
     "EnvironmentRestoreError",
     "EnvironmentRestoreFailureHandler",
     "EnvironmentRestoreStatus",
