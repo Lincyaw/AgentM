@@ -25,6 +25,8 @@ Shutting down a local-file handle drains its session-owned providers; shutting
 down an OTLP handle leaves process providers alive until process teardown.
 """
 
+# code-health: ignore-file[AM022] -- adapts dynamic OpenTelemetry SDK objects
+
 from __future__ import annotations
 
 import atexit

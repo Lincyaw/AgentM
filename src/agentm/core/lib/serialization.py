@@ -1,5 +1,7 @@
 """Explicit, non-reflective JSON encoding for diagnostic payloads."""
 
+# code-health: ignore-file[AM022] -- serializes heterogeneous diagnostic boundary values
+
 from __future__ import annotations
 
 import base64

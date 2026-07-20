@@ -6,7 +6,7 @@ import asyncio
 import signal
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import typer
 from loguru import logger
@@ -49,7 +49,7 @@ class _StreamCollector:
     def _refresh(self) -> None:
         if self._live is None:
             return
-        parts: list[Any] = []
+        parts: list[Text] = []
         if self.thinking_buf:
             thinking_text = "".join(self.thinking_buf)
             lines = thinking_text.split("\n")

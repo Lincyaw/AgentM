@@ -28,6 +28,8 @@ atoms and core code (see :mod:`agentm.core.lib.frontmatter`,
 :mod:`agentm.core.lib.redact`).
 """
 
+# code-health: ignore-file[AM022] -- normalizes third-party JSON Schema trees
+
 from __future__ import annotations
 
 from typing import Any

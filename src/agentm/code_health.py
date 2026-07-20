@@ -65,10 +65,11 @@ Rules:
 - **AM021** ``dynamic-attribute-access``: ``getattr`` / ``hasattr`` /
   ``setattr`` / ``delattr`` bypass typed contracts. A precise ignore is
   required at genuine reflection or vendor-adapter boundaries.
-- **AM022** ``abi-any``: Public ``core/abi`` contracts must not erase values
-  to ``typing.Any``.
-- **AM023** ``abi-bare-dict``: Public ``core/abi`` annotations must
-  parameterize ``dict`` or use a more precise DTO / Protocol.
+- **AM022** ``typing-any``: Source annotations must not erase values to
+  ``typing.Any``. Genuine vendor/reflection/serialization boundaries require
+  a precise ignore.
+- **AM023** ``bare-dict``: Source annotations must parameterize ``dict`` or
+  use a more precise DTO / Protocol.
 - **AM024** ``stdlib-logging``: AgentM uses Loguru consistently; importing
   the standard-library ``logging`` package creates split configuration and
   output behavior.
@@ -1077,21 +1078,18 @@ def _check_dynamic_attribute_access(
     ]
 
 
-def _check_abi_any(
+def _check_typing_any(
     tree: ast.Module,
     path: str,
-    file_path: Path,
 ) -> list[Issue]:
-    """AM022: the public ABI must not erase values to typing.Any."""
-    if not _contains_parts(file_path, ("core", "abi")):
-        return []
+    """AM022: source annotations must not erase values to typing.Any."""
     return [
         Issue(
             path=path,
             line=node.lineno,
             rule="AM022",
             message=(
-                "typing.Any erases the ABI contract; use object, JsonValue, "
+                "typing.Any erases the typed contract; use object, JsonValue, "
                 "a concrete DTO, or a Protocol"
             ),
         )
@@ -1143,14 +1141,11 @@ def _bare_dict_names(annotation: ast.expr) -> list[ast.Name]:
     ]
 
 
-def _check_abi_bare_dict(
+def _check_bare_dict(
     tree: ast.Module,
     path: str,
-    file_path: Path,
 ) -> list[Issue]:
-    """AM023: ABI annotations must not contain an unparameterized dict."""
-    if not _contains_parts(file_path, ("core", "abi")):
-        return []
+    """AM023: annotations must not contain an unparameterized dict."""
     return [
         Issue(
             path=path,
@@ -1288,8 +1283,8 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_legacy_extension_shape(tree, rel))
     issues.extend(_check_raw_cli_extension_config(tree, rel, file_path))
     issues.extend(_check_dynamic_attribute_access(tree, rel))
-    issues.extend(_check_abi_any(tree, rel, file_path))
-    issues.extend(_check_abi_bare_dict(tree, rel, file_path))
+    issues.extend(_check_typing_any(tree, rel))
+    issues.extend(_check_bare_dict(tree, rel))
     issues.extend(_check_stdlib_logging(tree, rel))
     return [
         issue

@@ -3,9 +3,7 @@ from __future__ import annotations
 from loguru import logger
 from pydantic import BaseModel
 
-from typing import Any
-
-from agentm.core.abi import AtomInstallPriority, BeforeRunEvent, BusPriority
+from agentm.core.abi import AtomAPI, AtomInstallPriority, BeforeRunEvent, BusPriority
 from agentm.core.lib import expand_path, expand_path_from_cwd
 from agentm.extensions import ExtensionManifest
 
@@ -73,7 +71,7 @@ def _resolve_prompt(
 
 
 class _SystemPromptRuntime:
-    def __init__(self, session: Any, prompt: str) -> None:
+    def __init__(self, session: AtomAPI, prompt: str) -> None:
         self._session = session
         self._prompt = prompt
 
@@ -92,6 +90,6 @@ class _SystemPromptRuntime:
         return {"system": updated}
 
 
-def install(session: Any, config: SystemPromptConfig) -> None:
+def install(session: AtomAPI, config: SystemPromptConfig) -> None:
     prompt = _resolve_prompt(config, cwd=session.ctx.cwd, scenario_dir=session.ctx.scenario_dir)
     _SystemPromptRuntime(session, prompt).install()

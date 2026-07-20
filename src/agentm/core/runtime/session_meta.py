@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 import math
-from typing import Any, Final
+from typing import Final
 
 from agentm.core.abi.catalog import ActiveSetFingerprint
 from agentm.core.abi.provider import ProviderSessionIdentity
@@ -236,7 +236,7 @@ def resolved_spec_digest(spec: ResolvedSessionSpec) -> str:
     return _digest_json(_resolved_spec_record(spec))
 
 
-def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, Any]:
+def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, object]:
     return {
         "scenario": spec.scenario,
         "extensions": [
@@ -266,7 +266,7 @@ def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, Any]:
     }
 
 
-def _extension_identity_record(spec: ExtensionSpec) -> dict[str, Any]:
+def _extension_identity_record(spec: ExtensionSpec) -> dict[str, object]:
     return {
         "source": {
             "kind": spec.source.kind,
@@ -277,7 +277,7 @@ def _extension_identity_record(spec: ExtensionSpec) -> dict[str, Any]:
     }
 
 
-def _provenance_record(spec: ResolvedSessionSpec) -> list[dict[str, Any]]:
+def _provenance_record(spec: ResolvedSessionSpec) -> list[dict[str, object]]:
     return [
         {
             "path": item.path,
@@ -288,7 +288,7 @@ def _provenance_record(spec: ResolvedSessionSpec) -> list[dict[str, Any]]:
     ]
 
 
-def _metadata_record(value: object, *, path: str) -> Any:
+def _metadata_record(value: object, *, path: str) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"{path} must contain finite numbers")
@@ -314,12 +314,12 @@ def _metadata_record(value: object, *, path: str) -> Any:
     )
 
 
-def _digest_json(value: Any) -> str:
+def _digest_json(value: object) -> str:
     payload = _stable_json(value).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _stable_json(value: Any) -> str:
+def _stable_json(value: object) -> str:
     return json.dumps(
         value,
         sort_keys=True,

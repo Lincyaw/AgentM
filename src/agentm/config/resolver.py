@@ -1,5 +1,7 @@
 """Concrete host-side ``SessionSpecResolver`` implementation."""
 
+# code-health: ignore-file[AM022] -- validates untyped TOML and environment input
+
 from __future__ import annotations
 
 import hashlib

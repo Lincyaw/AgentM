@@ -13,7 +13,7 @@ counter caps consecutive thinking-only retries to prevent infinite loops.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Sequence
 
 from loguru import logger
 from pydantic import BaseModel
@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from agentm.core.abi import (
     AtomAPI,
     AtomInstallPriority,
+    AssistantContent,
     DecideEvent,
     ModelEndTurn,
     Step,
@@ -51,7 +52,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def _is_thinking_only(content: list[Any]) -> bool:
+def _is_thinking_only(content: Sequence[AssistantContent]) -> bool:
     has_thinking = False
     for block in content:
         if isinstance(block, ThinkingBlock):
@@ -81,7 +82,7 @@ class _ThinkingRetryRuntime:
             return None
 
         msg = obs.assistant_message
-        if msg is None or not _is_thinking_only(list(msg.content)):
+        if msg is None or not _is_thinking_only(msg.content):
             self._reset()
             return None
 

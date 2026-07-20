@@ -18,10 +18,15 @@ suppress those strings without patching the kernel.
 
 from __future__ import annotations
 
-from typing import Any
+from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import AtomInstallPriority, ToolErrorEvent
+from agentm.core.abi import AtomAPI, AtomInstallPriority, ToolErrorEvent
 from agentm.extensions import ExtensionManifest
+
+
+class ToolErrorMessagesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
 
 MANIFEST = ExtensionManifest(
     name="tool_error_messages",
@@ -30,7 +35,7 @@ MANIFEST = ExtensionManifest(
         "ToolErrorEvent (execution_failed / unknown_tool / blocked)."
     ),
     registers=("event:tool_error",),
-    config_schema=None,
+    config_schema=ToolErrorMessagesConfig,
     requires=(),  # Leaf atom: formats tool_error events only.
     priority=AtomInstallPriority.TOOL,
 )
@@ -51,7 +56,7 @@ def _extract_exception_summary(reason: str) -> str:
 
 
 class _ToolErrorMessagesRuntime:
-    def __init__(self, session: Any) -> None:
+    def __init__(self, session: AtomAPI) -> None:
         self._session = session
 
     def install(self) -> None:
@@ -85,6 +90,6 @@ class _ToolErrorMessagesRuntime:
         return f"tool_error: {event.kind} ({event.tool_name})"  # pragma: no cover
 
 
-def install(session: Any, config: dict[str, Any]) -> None:
+def install(session: AtomAPI, config: ToolErrorMessagesConfig) -> None:
     del config
     _ToolErrorMessagesRuntime(session).install()

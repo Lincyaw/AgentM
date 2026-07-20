@@ -15,7 +15,7 @@ import uuid
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agentm.core.abi.bus import EventBus
 from agentm.core.abi.cancel import CancelSignal
@@ -33,7 +33,7 @@ from agentm.core.abi.catalog import (
 )
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
-from agentm.core.abi.messages import freeze_json
+from agentm.core.abi.messages import JsonValue, freeze_json
 from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.manifest import (
     AtomInstallPriority,
@@ -72,7 +72,7 @@ from agentm.core.abi.session_api import (
     normalize_extension_spec,
 )
 from agentm.core.abi.store import SessionMeta, TrajectoryStore
-from agentm.core.abi.stream import Model, StreamFn
+from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
@@ -89,7 +89,6 @@ from agentm.core.runtime.catalog import (
     build_atom_identity_payload,
     normalize_atom_config,
 )
-from agentm.core.runtime.driver import ThinkingLevel
 from agentm.core.runtime.extension import (
     install_extension,
     load_extension_module,
@@ -108,7 +107,7 @@ if TYPE_CHECKING:
 class _ExtensionPlanItem:
     spec: ExtensionSpec
     module_path: str
-    config: dict[str, Any]
+    config: dict[str, JsonValue]
     index: int
     name: str
     manifest: ExtensionManifest | None
@@ -147,7 +146,7 @@ def _resolve_extensions(
     scenario: str | None,
     extensions: Sequence[ExtensionInput] | None,
     extra_extensions: Sequence[ExtensionInput],
-    atom_configs: dict[str, dict[str, Any]] | None,
+    atom_configs: dict[str, dict[str, JsonValue]] | None,
     scenario_loader: ScenarioLoader | None,
 ) -> tuple[list[ExtensionSpec], str | None, str | None]:
     scenario_name = scenario
@@ -374,14 +373,14 @@ def _resolve_session_spec(config: "AgentSessionConfig") -> ResolvedSessionSpec |
 
 def _resolved_atom_config(
     spec: ResolvedSessionSpec | None,
-    fallback: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
+    fallback: dict[str, dict[str, JsonValue]],
+) -> dict[str, dict[str, JsonValue]]:
     if spec is None:
         return fallback
     return {module: dict(config) for module, config in spec.atom_config.items()}
 
 
-def _config_fingerprint(config: Any) -> str | None:
+def _config_fingerprint(config: object) -> str | None:
     if not config:
         return None
     payload = json.dumps(
@@ -512,7 +511,7 @@ class SessionBuildConfig:
     environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
     versioned_resource_store: VersionedResourceStore | None = None
     atom_catalog: AtomCatalog | None = None
-    atom_configs: dict[str, dict[str, Any]] | None = None
+    atom_configs: dict[str, dict[str, JsonValue]] | None = None
     scenario_loader: ScenarioLoader | None = None
     services: ServiceRegistry | None = None
     resolved_spec: ResolvedSessionSpec | None = None

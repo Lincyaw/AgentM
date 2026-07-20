@@ -284,7 +284,7 @@ class ResolvedSessionSpec:
 
     scenario: str | None
     extensions: tuple[ExtensionSpec, ...]
-    atom_config: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    atom_config: Mapping[str, Mapping[str, JsonValue]] = field(default_factory=dict)
     provider: ExtensionSpec | None = None
     provider_identity: ProviderSessionIdentity | None = None
     value_provenance: tuple[ConfigValueProvenance, ...] = ()

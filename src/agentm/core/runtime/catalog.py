@@ -6,8 +6,8 @@ import base64
 import hashlib
 import importlib.util
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel
 
@@ -21,6 +21,7 @@ from agentm.core.abi.catalog import (
     ResourceVersion,
 )
 from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.messages import JsonValue
 from agentm.core.abi.session_api import ExtensionSource
 
 
@@ -201,7 +202,7 @@ def build_atom_identity_payload(
     *,
     source: ExtensionSource,
     manifest: ExtensionManifest | None,
-    config: dict[str, Any],
+    config: Mapping[str, JsonValue],
 ) -> tuple[bytes, CatalogMeta]:
     """Build an auditable atom identity payload and flat metadata."""
 
@@ -217,7 +218,7 @@ def build_atom_identity_payload(
     ]
     manifest_record = _manifest_record(manifest)
     config_record = normalize_atom_config(manifest, config)
-    payload = {
+    payload: dict[str, object] = {
         "module_path": module_path,
         "extension_source": {
             "kind": source.kind,
@@ -278,7 +279,9 @@ def _extension_source_files(source: ExtensionSource) -> list[tuple[str, bytes]]:
     return [(path.name, path.read_bytes())]
 
 
-def _manifest_record(manifest: ExtensionManifest | None) -> dict[str, Any] | None:
+def _manifest_record(
+    manifest: ExtensionManifest | None,
+) -> dict[str, object] | None:
     if manifest is None:
         return None
     schema = manifest.config_schema
@@ -296,8 +299,8 @@ def _manifest_record(manifest: ExtensionManifest | None) -> dict[str, Any] | Non
 
 def _normalized_config(
     manifest: ExtensionManifest | None,
-    config: dict[str, Any],
-) -> Any:
+    config: Mapping[str, JsonValue],
+) -> object:
     schema = None if manifest is None else manifest.config_schema
     if (
         schema is None
@@ -310,8 +313,8 @@ def _normalized_config(
 
 def normalize_atom_config(
     manifest: ExtensionManifest | None,
-    config: dict[str, Any],
-) -> Any:
+    config: Mapping[str, JsonValue],
+) -> object:
     """Return the config shape used for atom identity fingerprints."""
 
     normalized = _json_value(_normalized_config(manifest, config), path="config")
@@ -320,7 +323,7 @@ def normalize_atom_config(
     return _redact_config_fields(normalized, manifest.sensitive_config_fields)
 
 
-def _activation_record(atom: AtomActivation) -> dict[str, Any]:
+def _activation_record(atom: AtomActivation) -> dict[str, object]:
     version = atom.version
     return {
         "name": atom.name,
@@ -351,11 +354,11 @@ def _digest_bytes(content: bytes) -> str:
     return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
-def _digest_json(value: Any) -> str:
+def _digest_json(value: object) -> str:
     return _digest_bytes(_stable_json(value).encode("utf-8"))
 
 
-def _stable_json(value: Any) -> str:
+def _stable_json(value: object) -> str:
     return json.dumps(
         value,
         sort_keys=True,
@@ -364,15 +367,20 @@ def _stable_json(value: Any) -> str:
     )
 
 
-def _json_value(value: Any, *, path: str) -> Any:
+def _json_value(value: object, *, path: str) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    if isinstance(value, dict):
-        return {
-            str(key): _json_value(item, path=f"{path}.{key}")
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} must use string object keys")
+            result[key] = _json_value(item, path=f"{path}.{key}")
+        return result
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
         return [
             _json_value(item, path=f"{path}[{index}]")
             for index, item in enumerate(value)
@@ -383,20 +391,28 @@ def _json_value(value: Any, *, path: str) -> Any:
     )
 
 
-def _redact_config_fields(value: Any, fields: tuple[str, ...]) -> Any:
-    if not isinstance(value, dict):
+def _redact_config_fields(value: object, fields: tuple[str, ...]) -> object:
+    if not isinstance(value, Mapping):
         return value
-    redacted = dict(value)
+    redacted: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError("normalized config must use string object keys")
+        redacted[key] = item
     for field_path in fields:
         parts = tuple(part for part in field_path.split(".") if part)
         if not parts:
             continue
-        current: dict[str, Any] = redacted
+        current: dict[str, object] = redacted
         for part in parts[:-1]:
             child = current.get(part)
-            if not isinstance(child, dict):
+            if not isinstance(child, Mapping):
                 break
-            copied = dict(child)
+            copied: dict[str, object] = {}
+            for key, item in child.items():
+                if not isinstance(key, str):
+                    raise TypeError("normalized config must use string object keys")
+                copied[key] = item
             current[part] = copied
             current = copied
         else:

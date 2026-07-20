@@ -6,7 +6,7 @@ import asyncio
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Final, Protocol, TypeVar, runtime_checkable
+from typing import Final, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel as PydanticBaseModel
 
@@ -15,12 +15,15 @@ from agentm.core.abi import (
     AtomInstallPriority,
     RETRY_POLICY_SERVICE,
     ApiRegisterEvent,
+    AgentMessage,
     AssistantStreamEvent,
     CancelSignal,
     DiagnosticEvent,
     Model,
     ProviderConfig,
     RetryPolicy,
+    StreamFn,
+    ThinkingLevel,
     Tool,
 )
 from agentm.extensions import ExtensionManifest
@@ -87,19 +90,19 @@ class ExponentialBackoffRetry:
 
 @dataclass(slots=True)
 class _RetryingStreamFn:
-    inner: Any
+    inner: StreamFn
     policy: RetryPolicy
     retry_streaming: bool
 
     def __call__(
         self,
         *,
-        messages: list[Any],
+        messages: list[AgentMessage],
         model: Model,
         tools: list[Tool],
         system: str | None = None,
         signal: CancelSignal | None = None,
-        thinking: str = "off",
+        thinking: ThinkingLevel = "off",
     ) -> AsyncIterator[AssistantStreamEvent]:
         if not self.retry_streaming:
             return self.inner(
@@ -122,12 +125,12 @@ class _RetryingStreamFn:
     async def _iter(
         self,
         *,
-        messages: list[Any],
+        messages: list[AgentMessage],
         model: Model,
         tools: list[Tool],
         system: str | None,
         signal: CancelSignal | None,
-        thinking: str,
+        thinking: ThinkingLevel,
     ) -> AsyncIterator[AssistantStreamEvent]:
         yielded = False
 

@@ -58,7 +58,7 @@ from agentm.core.abi.resource import (
     ResourceTxn,
     ResourceWriter,
 )
-from agentm.core.abi.stream import Model, StreamFn
+from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
 from agentm.core.abi.telemetry import SessionTelemetry
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
@@ -111,7 +111,7 @@ from agentm.core.abi.trajectory import (
 )
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
-from agentm.core.runtime.driver import DriverConfig, ThinkingLevel, drive
+from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
 

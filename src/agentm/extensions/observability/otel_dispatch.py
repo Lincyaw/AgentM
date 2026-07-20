@@ -5,6 +5,8 @@ The builtin observability atom calls :func:`dispatch_otel`; backend-specific
 translator modules register handlers here.
 """
 
+# code-health: ignore-file[AM022] -- dispatches heterogeneous events to OTel adapters
+
 from __future__ import annotations
 
 from typing import Any, Callable

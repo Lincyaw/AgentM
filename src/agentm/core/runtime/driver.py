@@ -15,7 +15,7 @@ import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Literal, TypeVar, cast
+from typing import TypeVar, cast
 
 from loguru import logger
 
@@ -54,6 +54,7 @@ from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.stream import (
     Model,
     StreamFn,
+    ThinkingLevel,
 )
 from agentm.core.abi.tool import (
     Tool,
@@ -108,9 +109,6 @@ from agentm.core.runtime.trigger_queue import (
     TriggerQueue,
     TriggerTerminated,
 )
-
-ThinkingLevel = Literal["off", "low", "medium", "high"]
-
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -842,4 +840,4 @@ async def drive(config: DriverConfig) -> None:
             return
 
 
-__all__ = ["ThinkingLevel", "drive"]
+__all__ = ["drive"]

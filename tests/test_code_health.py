@@ -79,7 +79,7 @@ if hasattr(subject, "close"):
     assert rules.count("AM021") == 2
 
 
-def test_code_health_rejects_any_and_bare_dict_in_abi(
+def test_code_health_rejects_any_and_bare_dict_in_all_source(
     tmp_path: Path,
 ) -> None:
     rules = _issues_for(
@@ -90,7 +90,7 @@ from typing import Any
 def decode(value: Any) -> dict:
     return value
 """,
-        relative="src/agentm/core/abi/codec.py",
+        relative="src/agentm/runtime/codec.py",
     )
     assert rules.count("AM022") == 1
     assert rules.count("AM023") == 1
@@ -130,7 +130,7 @@ from typing import Any, Final  # code-health: ignore[AM022] -- vendor boundary
 payload: Final[dict[str, object]] = {}
 value = getattr(subject, "value")  # code-health: ignore[AM021] -- reflection
 """,
-        relative="src/agentm/core/abi/adapter.py",
+        relative="src/agentm/runtime/adapter.py",
     )
     assert not rules
 
@@ -145,7 +145,7 @@ from typing import Any
 def decode(value: Any) -> object:
     return value
 """,
-        relative="src/agentm/core/abi/wire.py",
+        relative="src/agentm/runtime/wire.py",
     )
     assert not rules
 

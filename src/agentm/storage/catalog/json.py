@@ -1,5 +1,7 @@
 """Local durable catalog and versioned-resource store."""
 
+# code-health: ignore-file[AM022] -- validates untyped persisted catalog JSON
+
 from __future__ import annotations
 
 import asyncio

@@ -16,7 +16,6 @@ dependency on the observability atom. For cross-session trace mining use
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from agentm.core.abi import (
     AgentMessage,
@@ -98,11 +97,11 @@ class _ReadHistoryRuntime:
             )
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(self, args: dict[str, object]) -> ToolResult:
+        params = _ReadHistoryArgs.model_validate(args)
         model_name = self._api.model.id if self._api.model is not None else None
-        start = int(args["start"])
-        end_raw = args.get("end")
-        end = int(end_raw) if end_raw is not None else start
+        start = params.start
+        end = params.end if params.end is not None else start
         if end < start:
             start, end = end, start
 
@@ -199,7 +198,7 @@ def _render_message(
     return ""
 
 
-def _dump(value: Any) -> str:
+def _dump(value: object) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, default=str)
     except (TypeError, ValueError):

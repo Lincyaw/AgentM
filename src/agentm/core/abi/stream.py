@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import ClassVar, Literal, Protocol, runtime_checkable
+from typing import ClassVar, Literal, Protocol, TypeAlias, runtime_checkable
 
 from .cancel import CancelSignal
 from .messages import (
@@ -96,6 +96,7 @@ AssistantStreamEvent = (
     | ToolCallEnd
     | MessageEnd
 )
+ThinkingLevel: TypeAlias = Literal["off", "low", "medium", "high"]
 
 
 # --- Model descriptor -------------------------------------------------------
@@ -157,7 +158,7 @@ class StreamFn(Protocol):
         tools: list[Tool],
         system: str | None = None,
         signal: CancelSignal | None = None,
-        thinking: Literal["off", "low", "medium", "high"] = "off",
+        thinking: ThinkingLevel = "off",
     ) -> AsyncIterator[AssistantStreamEvent]: ...
 
 
@@ -168,6 +169,7 @@ __all__ = [
     "StreamFn",
     "TextDelta",
     "ThinkingDelta",
+    "ThinkingLevel",
     "ToolCallArgsDelta",
     "ToolCallArgsParseError",
     "ToolCallEnd",

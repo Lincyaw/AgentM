@@ -19,11 +19,13 @@ requirements:
       internally consistent, and propagate caller cancellation without detached
       work or stale post-hook observations. Project-specific AST checks must
       prevent runtime composition policy, legacy extension shapes, dynamic
-      attribute probing, untyped ABI contracts, and standard-library logging
-      from re-entering the SDK, while allowing precise documented ignores at
-      genuine dynamic boundaries. Gateway wire DTOs, durable delivery/auth/session
-      ports, observability parsing, and SQL driver adapters must remain outside
-      core and fail at their transport or persistence boundaries. Provider
+      attribute probing, `Any` or bare-dict annotations in all scanned source,
+      and standard-library logging from re-entering the SDK, while allowing
+      precise documented ignores at genuine dynamic boundaries. Gateway wire
+      DTOs, durable delivery/auth/session ports, observability parsing, and SQL
+      driver adapters must remain outside core and fail at their transport or
+      persistence boundaries. StreamFn owns the shared ThinkingLevel ABI used
+      by providers, retry policies, sessions, and drivers. Provider
       requests that exhaust retries must persist a non-replayable failed turn
       before the trigger receipt raises, so trajectory inspection never shows
       only an unexplained session header. Every materialized execution step
@@ -90,6 +92,7 @@ requirements:
       - path: src/agentm/core/abi/session_api.py
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/core/abi/store.py
+      - path: src/agentm/core/abi/stream.py
       - path: src/agentm/core/abi/telemetry.py
       - path: src/agentm/core/abi/tool.py
       - path: src/agentm/core/abi/tool_executor.py
@@ -101,6 +104,7 @@ requirements:
       - path: src/agentm/core/lib/background_tasks.py
       - path: src/agentm/core/lib/redact.py
       - path: src/agentm/core/lib/serialization.py
+      - path: src/agentm/core/lib/stream.py
       - path: src/agentm/core/lib/tool_executor.py
       - path: src/agentm/core/lib/tool_result.py
       - path: src/agentm/core/lib/tool_schema.py
@@ -138,10 +142,15 @@ requirements:
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/prompt_cache.py
+      - path: src/agentm/extensions/builtin/read_history.py
       - path: src/agentm/extensions/builtin/retry_policy.py
       - path: src/agentm/extensions/builtin/sub_agent.py
-      - path: src/agentm/extensions/builtin/tool_result_cap.py
+      - path: src/agentm/extensions/builtin/system_prompt.py
+      - path: src/agentm/extensions/builtin/task_tracking.py
+      - path: src/agentm/extensions/builtin/thinking_retry.py
       - path: src/agentm/extensions/builtin/tool_bash.py
+      - path: src/agentm/extensions/builtin/tool_error_messages.py
+      - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/observability/__init__.py
       - path: src/agentm/extensions/observability/event_otel.py
@@ -175,7 +184,9 @@ requirements:
       - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py
       - path: contrib/scenarios/chat/manifest.yaml
+      - path: contrib/scenarios/chat/slow_tool.py
       - path: contrib/scenarios/interrupt_demo/manifest.yaml
+      - path: contrib/scenarios/interrupt_demo/slow_tool.py
       - path: contrib/scenarios/harbor/pyproject.toml
       - path: contrib/scenarios/harbor/scenario.yaml
       - path: contrib/scenarios/harbor/src/agentm_harbor/__init__.py

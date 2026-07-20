@@ -1,5 +1,7 @@
 """OTel translators for v2 session events."""
 
+# code-health: ignore-file[AM022] -- adapts dynamic OpenTelemetry SDK objects
+
 from __future__ import annotations
 
 import time

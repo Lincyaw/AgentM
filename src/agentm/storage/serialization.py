@@ -1,5 +1,7 @@
 """JSON-safe serialization helpers for optional storage backends."""
 
+# code-health: ignore-file[AM022] -- validates untyped persisted trajectory JSON
+
 from __future__ import annotations
 
 import dataclasses

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sys
-from typing import Any
 
 from rich.console import Console
+
+from agentm.core.abi import Turn
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -34,7 +35,7 @@ class SessionStats:
         self.output_tokens = 0
         self.cache_read_tokens = 0
 
-    def update_from_turn(self, turn: Any) -> None:
+    def update_from_turn(self, turn: Turn) -> None:
         self.turns += 1
         meta = turn.meta
         self.input_tokens += meta.total_input_tokens

@@ -5,6 +5,8 @@ content-addressed ``ExtensionSpec`` values and are validated and executed by
 the runtime extension loader.
 """
 
+# code-health: ignore-file[AM022] -- validates untyped YAML manifest input
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence

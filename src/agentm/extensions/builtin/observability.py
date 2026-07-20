@@ -7,6 +7,8 @@ The atom has two responsibilities:
    (dispatch/handler records) from semantic event translators.
 """
 
+# code-health: ignore-file[AM022] -- observes heterogeneous EventBus payloads
+
 from __future__ import annotations
 
 import time

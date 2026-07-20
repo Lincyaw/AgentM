@@ -7,8 +7,8 @@ import importlib
 import inspect
 import sys
 from pathlib import Path
-from typing import Any
 
+from agentm.core.abi.tool import ToolOutcome, ToolResult
 from agentm.execution.wire import decode_tool_arguments, encode_tool_output
 
 
@@ -31,7 +31,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-async def _run(entrypoint: str, args_path: Path) -> Any:
+async def _run(
+    entrypoint: str,
+    args_path: Path,
+) -> ToolResult | ToolOutcome:
     module_name, _, function_name = entrypoint.partition(":")
     if not module_name or not function_name:
         raise ValueError("entrypoint must be 'module:function'")
@@ -42,7 +45,12 @@ async def _run(entrypoint: str, args_path: Path) -> Any:
     args = decode_tool_arguments(args_path.read_text(encoding="utf-8"))
     result = fn(args)
     if inspect.isawaitable(result):
-        return await result
+        result = await result
+    if not isinstance(result, (ToolResult, ToolOutcome)):
+        raise TypeError(
+            "process entrypoint must return ToolResult or ToolOutcome, got "
+            f"{type(result).__name__}"
+        )
     return result
 
 

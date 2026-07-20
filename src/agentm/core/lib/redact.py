@@ -20,6 +20,8 @@ atom-to-runtime imports remain forbidden. ``core.lib`` is the sanctioned
 shared "stdlib for atoms".
 """
 
+# code-health: ignore-file[AM022] -- recursively sanitizes heterogeneous diagnostic JSON
+
 from __future__ import annotations
 
 import hashlib

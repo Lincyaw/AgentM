@@ -1,5 +1,7 @@
 """Strict JSON wire format for process-isolated tool results."""
 
+# code-health: ignore-file[AM022] -- validates untyped process-wire JSON
+
 from __future__ import annotations
 
 import base64

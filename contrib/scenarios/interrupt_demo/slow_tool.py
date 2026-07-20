@@ -7,10 +7,10 @@ cooperatively checking the cancellation signal.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agentm.core.abi import AtomAPI
 from agentm.core.abi.cancel import CancelSignal, cancel_reason
 from agentm.core.abi.manifest import AtomInstallPriority, ExtensionManifest
 from agentm.core.abi.messages import TextContent
@@ -53,7 +53,7 @@ class _SlowComputeTool:
 
     async def execute(
         self,
-        args: dict[str, Any],
+        args: dict[str, object],
         *,
         signal: CancelSignal | None = None,
     ) -> ToolResult:
@@ -88,5 +88,5 @@ class _SlowComputeTool:
         )
 
 
-def install(session: Any, config: SlowToolConfig) -> None:
+def install(session: AtomAPI, config: SlowToolConfig) -> None:
     session.register_tool(_SlowComputeTool(config.default_duration))

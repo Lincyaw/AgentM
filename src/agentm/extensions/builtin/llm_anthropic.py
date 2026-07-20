@@ -18,6 +18,8 @@ Conversion layout:
   raw event into a kernel ``AssistantStreamEvent``.
 """
 
+# code-health: ignore-file[AM022] -- adapts untyped Anthropic SDK request and stream objects
+
 from __future__ import annotations
 
 import base64

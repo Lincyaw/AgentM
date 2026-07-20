@@ -15,7 +15,7 @@ from collections.abc import Mapping
 import math
 import time
 from contextvars import ContextVar, Token
-from typing import Any, Callable, Final
+from typing import Callable, Final
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
@@ -131,24 +131,26 @@ MANIFEST = ExtensionManifest(
 )
 
 
-_PARAMETERS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "cmd": {
-            "type": "string",
-            "description": "Shell command to execute.",
+def _bash_parameters(default_timeout: float) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "cmd": {
+                "type": "string",
+                "description": "Shell command to execute.",
+            },
+            "timeout": {
+                "type": "number",
+                "description": (
+                    "Max seconds the command may run before it is killed and "
+                    "the result is flagged TIMED OUT."
+                ),
+                "default": default_timeout,
+            },
         },
-        "timeout": {
-            "type": "number",
-            "description": (
-                "Max seconds the command may run before it is killed and "
-                "the result is flagged TIMED OUT."
-            ),
-        },
-    },
-    "required": ["cmd"],
-    "additionalProperties": False,
-}
+        "required": ["cmd"],
+        "additionalProperties": False,
+    }
 
 
 class _ToolBashRuntime:
@@ -169,22 +171,10 @@ class _ToolBashRuntime:
                 session=self._session,
                 bash_ops=self._bash_ops,
                 default_timeout=self._default_timeout,
-                parameters=self._parameters(),
+                parameters=_bash_parameters(self._default_timeout),
                 tails=tails,
             )
         )
-
-    def _parameters(self) -> dict[str, Any]:
-        return {
-            **_PARAMETERS,
-            "properties": {
-                **_PARAMETERS["properties"],
-                "timeout": {
-                    **_PARAMETERS["properties"]["timeout"],
-                    "default": self._default_timeout,
-                },
-            },
-        }
 
 
 def install(session: AtomAPI, config: ToolBashConfig) -> None:
@@ -210,7 +200,7 @@ class _BashTool(EnvironmentExecutableTool):
         session: AtomAPI,
         bash_ops: BashOperations,
         default_timeout: float,
-        parameters: dict[str, Any],
+        parameters: dict[str, object],
         tails: BashOutputTails | None = None,
     ) -> None:
         self.parameters = parameters
@@ -221,7 +211,7 @@ class _BashTool(EnvironmentExecutableTool):
 
     async def execute(
         self,
-        args: dict[str, Any],
+        args: dict[str, object],
         *,
         signal: CancelSignal | None = None,
     ) -> ToolResult:

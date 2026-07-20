@@ -26,6 +26,8 @@ self-signed cert): pass ``verify_ssl=False`` and/or ``default_query`` (e.g.
 underlying ``httpx.AsyncClient`` so the OpenAI SDK never has to know.
 """
 
+# code-health: ignore-file[AM022] -- adapts untyped OpenAI SDK request and stream objects
+
 from __future__ import annotations
 
 import base64

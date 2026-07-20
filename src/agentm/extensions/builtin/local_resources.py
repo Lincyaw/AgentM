@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel
 
@@ -11,6 +10,7 @@ from agentm.core.abi import (
     RESOURCE_READER_SERVICE,
     RESOURCE_STORE_SERVICE,
     RESOURCE_WRITER_SERVICE,
+    AtomAPI,
     AtomInstallPriority,
     ResourceReader,
     ResourceStore,
@@ -40,7 +40,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(session: Any, config: LocalResourcesConfig) -> None:
+def install(session: AtomAPI, config: LocalResourcesConfig) -> None:
     reader = session.services.get(RESOURCE_READER_SERVICE)
     store = session.services.get(RESOURCE_STORE_SERVICE)
     writer = session.services.get(RESOURCE_WRITER_SERVICE)

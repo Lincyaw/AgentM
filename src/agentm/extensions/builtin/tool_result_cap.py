@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
+    AtomAPI,
     AtomInstallPriority,
     BusPriority,
     ImageContent,
@@ -43,12 +44,12 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(session: Any, config: ToolResultCapConfig) -> None:
+def install(session: AtomAPI, config: ToolResultCapConfig) -> None:
     _ToolResultCapRuntime(session, config).install()
 
 
 class _ToolResultCapRuntime:
-    def __init__(self, session: Any, config: ToolResultCapConfig) -> None:
+    def __init__(self, session: AtomAPI, config: ToolResultCapConfig) -> None:
         self._session = session
         self._max_tokens = config.max_tokens
         self._error_floor_tokens = config.error_floor_tokens

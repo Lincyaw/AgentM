@@ -3,6 +3,8 @@
 Atoms receive the Session object directly.
 """
 
+# code-health: ignore-file[AM022] -- validates dynamically imported Python plugin contracts
+
 from __future__ import annotations
 
 import importlib
