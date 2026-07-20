@@ -134,7 +134,9 @@ class MessagePatternFactory:
             text = f"{text}\n\nReason: {reason}"
         return _synthetic(text, kind="permission_rejection", origin="permission")
 
-    def auto_rejection(self, tool_name: str, *, reason: str | None = None) -> UserMessage:
+    def auto_rejection(
+        self, tool_name: str, *, reason: str | None = None
+    ) -> UserMessage:
         text = f"Permission to use {tool_name} has been denied."
         if reason:
             text = f"{text} Reason: {reason}"
@@ -286,7 +288,9 @@ class MessagePatternFactory:
 class MessagePatternsPolicy(ContextPolicy):
     """Inject static reminder attachments at the context boundary."""
 
-    def __init__(self, config: MessagePatternsConfig, factory: MessagePatternFactory) -> None:
+    def __init__(
+        self, config: MessagePatternsConfig, factory: MessagePatternFactory
+    ) -> None:
         self._config = config
         self._factory = factory
         self._used = False
@@ -303,7 +307,9 @@ class MessagePatternsPolicy(ContextPolicy):
         for reminder in self._config.memory_reminders:
             injected.append(self._factory.attachment("relevant_memories", reminder))
         if self._config.budget_nudge:
-            injected.append(self._factory.attachment("budget_usd", self._config.budget_nudge))
+            injected.append(
+                self._factory.attachment("budget_usd", self._config.budget_nudge)
+            )
         for kind, body in self._config.attachments.items():
             injected.append(self._factory.attachment(kind, body))
         self._used = True

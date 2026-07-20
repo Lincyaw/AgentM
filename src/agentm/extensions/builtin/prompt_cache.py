@@ -151,11 +151,7 @@ class PromptCacheContextPolicy(BindableContextPolicy):
                             or (existing.provider if existing is not None else None)
                         ),
                         metadata={
-                            **(
-                                dict(existing.metadata)
-                                if existing is not None
-                                else {}
-                            ),
+                            **(dict(existing.metadata) if existing is not None else {}),
                             "turn_count": len(turns),
                             "tag_last_messages": count,
                         },

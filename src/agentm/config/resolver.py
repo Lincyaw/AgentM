@@ -34,8 +34,12 @@ class DefaultSessionSpecResolver:
         user_config: str | Path | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
-        self._project_config = Path(project_config) if project_config is not None else None
-        self._user_config = Path(user_config) if user_config is not None else _default_user_config()
+        self._project_config = (
+            Path(project_config) if project_config is not None else None
+        )
+        self._user_config = (
+            Path(user_config) if user_config is not None else _default_user_config()
+        )
         self._env = dict(os.environ if env is None else env)
 
     def resolve(self, request: AgentSessionConfig) -> ResolvedSessionSpec:
@@ -100,8 +104,12 @@ class DefaultSessionSpecResolver:
             value_provenance=tuple(provenance),
             provenance={
                 "resolver": type(self).__name__,
-                "project_config": str(self._project_config) if self._project_config is not None else None,
-                "user_config": str(self._user_config) if self._user_config is not None else None,
+                "project_config": str(self._project_config)
+                if self._project_config is not None
+                else None,
+                "user_config": str(self._user_config)
+                if self._user_config is not None
+                else None,
             },
         )
 
@@ -112,10 +120,7 @@ class DefaultSessionSpecResolver:
         provenance: list[ConfigValueProvenance],
     ) -> list[ExtensionSpec]:
         if request.extensions is not None:
-            extensions = [
-                normalize_extension_spec(item)
-                for item in request.extensions
-            ]
+            extensions = [normalize_extension_spec(item) for item in request.extensions]
             provenance.append(
                 _provenance(
                     "extensions",
@@ -128,14 +133,9 @@ class DefaultSessionSpecResolver:
         if isinstance(scenario, str) and request.scenario_loader is not None:
             loaded = request.scenario_loader(scenario)
             raw_extensions = (
-                loaded.extensions
-                if isinstance(loaded, ScenarioSpec)
-                else loaded
+                loaded.extensions if isinstance(loaded, ScenarioSpec) else loaded
             )
-            extensions = [
-                normalize_extension_spec(item)
-                for item in raw_extensions
-            ]
+            extensions = [normalize_extension_spec(item) for item in raw_extensions]
             provenance.append(
                 _provenance(
                     "extensions",
@@ -156,8 +156,16 @@ class DefaultSessionSpecResolver:
     ) -> dict[str, dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
         for source, config, ref in (
-            ("user_config", user_config, str(self._user_config) if self._user_config is not None else None),
-            ("project_config", project_config, str(self._project_config) if self._project_config is not None else None),
+            (
+                "user_config",
+                user_config,
+                str(self._user_config) if self._user_config is not None else None,
+            ),
+            (
+                "project_config",
+                project_config,
+                str(self._project_config) if self._project_config is not None else None,
+            ),
         ):
             atoms = _get_path(config, ("atoms",))
             if isinstance(atoms, Mapping):
@@ -217,10 +225,26 @@ class DefaultSessionSpecResolver:
 
         provider_name = _choose(
             ("env", self._env.get("AGENTM_PROVIDER"), "AGENTM_PROVIDER"),
-            ("project_config", _get_path(project_config, ("default_provider",)), str(self._project_config) if self._project_config is not None else None),
-            ("user_config", _get_path(user_config, ("default_provider",)), str(self._user_config) if self._user_config is not None else None),
-            ("project_config", _get_path(project_config, ("default_model",)), str(self._project_config) if self._project_config is not None else None),
-            ("user_config", _get_path(user_config, ("default_model",)), str(self._user_config) if self._user_config is not None else None),
+            (
+                "project_config",
+                _get_path(project_config, ("default_provider",)),
+                str(self._project_config) if self._project_config is not None else None,
+            ),
+            (
+                "user_config",
+                _get_path(user_config, ("default_provider",)),
+                str(self._user_config) if self._user_config is not None else None,
+            ),
+            (
+                "project_config",
+                _get_path(project_config, ("default_model",)),
+                str(self._project_config) if self._project_config is not None else None,
+            ),
+            (
+                "user_config",
+                _get_path(user_config, ("default_model",)),
+                str(self._user_config) if self._user_config is not None else None,
+            ),
         )
         if provider_name.source is None:
             return None, None
@@ -232,15 +256,9 @@ class DefaultSessionSpecResolver:
         project_profile = _provider_profile(provider, project_config)
         user_profile = _provider_profile(provider, user_config)
         project_ref = (
-            str(self._project_config)
-            if self._project_config is not None
-            else None
+            str(self._project_config) if self._project_config is not None else None
         )
-        user_ref = (
-            str(self._user_config)
-            if self._user_config is not None
-            else None
-        )
+        user_ref = str(self._user_config) if self._user_config is not None else None
         model = _choose(
             ("env", self._env.get("AGENTM_MODEL"), "AGENTM_MODEL"),
             ("project_config", project_profile.get("model"), project_ref),
@@ -263,7 +281,9 @@ class DefaultSessionSpecResolver:
                 "provider.model",
             )
             provider_config["model"] = model_id
-            provenance.append(_provenance("provider.model", model.source, model.ref, model_id))
+            provenance.append(
+                _provenance("provider.model", model.source, model.ref, model_id)
+            )
         api_key = _provider_api_key(
             provider,
             project_profile,
@@ -278,7 +298,14 @@ class DefaultSessionSpecResolver:
                 "provider.api_key",
             )
             provider_config["api_key"] = api_key_value
-            provenance.append(_provenance("provider.api_key", api_key.source or "provider_default", api_key.ref, api_key_value))
+            provenance.append(
+                _provenance(
+                    "provider.api_key",
+                    api_key.source or "provider_default",
+                    api_key.ref,
+                    api_key_value,
+                )
+            )
         base_url = _choose(
             ("env", self._env.get("AGENTM_BASE_URL"), "AGENTM_BASE_URL"),
             ("project_config", project_profile.get("base_url"), project_ref),
@@ -290,9 +317,18 @@ class DefaultSessionSpecResolver:
                 "provider.base_url",
             )
             provider_config["base_url"] = base_url_value
-            provenance.append(_provenance("provider.base_url", base_url.source, base_url.ref, base_url_value))
+            provenance.append(
+                _provenance(
+                    "provider.base_url", base_url.source, base_url.ref, base_url_value
+                )
+            )
         provenance.append(
-            _provenance("provider", provider_name.source or "provider_default", provider_name.ref, provider)
+            _provenance(
+                "provider",
+                provider_name.source or "provider_default",
+                provider_name.ref,
+                provider,
+            )
         )
         provider_type = (
             _optional_str(project_profile.get("provider"))
@@ -310,7 +346,9 @@ class DefaultSessionSpecResolver:
 
 
 class _Choice:
-    def __init__(self, source: ConfigSource | None, value: object, ref: str | None) -> None:
+    def __init__(
+        self, source: ConfigSource | None, value: object, ref: str | None
+    ) -> None:
         self.source = source
         self.value = value
         self.ref = ref
@@ -366,7 +404,11 @@ def _provider_api_key(
     candidates.extend(
         [
             ("env", env.get("AGENTM_API_KEY"), "AGENTM_API_KEY"),
-            ("env", env.get(f"{provider.upper()}_API_KEY"), f"{provider.upper()}_API_KEY"),
+            (
+                "env",
+                env.get(f"{provider.upper()}_API_KEY"),
+                f"{provider.upper()}_API_KEY",
+            ),
             (
                 "project_config",
                 project_profile.get("api_key"),

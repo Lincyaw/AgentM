@@ -178,9 +178,7 @@ def _serialize_injected(
     return [
         {
             "after_round": injection.after_round,
-            "messages": [
-                serialize_message(message) for message in injection.messages
-            ],
+            "messages": [serialize_message(message) for message in injection.messages],
         }
         for injection in injected
     ]
@@ -245,6 +243,7 @@ def _serialize_trigger_metadata(
 
 # --- Message serialization --------------------------------------------------
 
+
 def _message_meta_is_default(meta: MessageMeta) -> bool:
     return meta == MessageMeta()
 
@@ -263,7 +262,11 @@ def _serialize_message_meta(meta: MessageMeta) -> dict[str, Any]:
         "mode": meta.mode,
         "tags": _json_safe(meta.tags),
     }
-    return {k: v for k, v in data.items() if v not in (None, False, {}, "visible", "normal", "include")}
+    return {
+        k: v
+        for k, v in data.items()
+        if v not in (None, False, {}, "visible", "normal", "include")
+    }
 
 
 def _deserialize_message_meta(data: dict[str, Any] | None) -> MessageMeta:
@@ -650,9 +653,18 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
                 ToolUseExpected,
                 VendorSpecific,
             )
+
             _term_types: dict[str, type] = {
                 cls.__qualname__: cls
-                for cls in [EndTurn, ToolUseExpected, MaxTokens, PauseTurn, ProviderError, Aborted, VendorSpecific]
+                for cls in [
+                    EndTurn,
+                    ToolUseExpected,
+                    MaxTokens,
+                    PauseTurn,
+                    ProviderError,
+                    Aborted,
+                    VendorSpecific,
+                ]
             }
             if not isinstance(term_data, dict):
                 raise ValueError("assistant termination must be an object")
@@ -664,9 +676,9 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
                 raise ValueError(
                     f"unknown assistant termination type: {term_type_name}"
                 )
-            allowed_fields = {
-                field.name for field in dataclasses.fields(term_cls)
-            } | {"__type__"}
+            allowed_fields = {field.name for field in dataclasses.fields(term_cls)} | {
+                "__type__"
+            }
             _only_fields(
                 term_data,
                 allowed_fields,
@@ -724,6 +736,7 @@ def deserialize_message(data: dict[str, Any]) -> AgentMessage:
 
 # --- Built-in trigger codecs -----------------------------------------------
 
+
 class _DataclassTriggerCodec:
     """Generic codec for frozen dataclass triggers."""
 
@@ -740,9 +753,7 @@ class _DataclassTriggerCodec:
         data = dict(data)
         encoded_source = data.pop("__source__", None)
         if encoded_source != self._source:
-            raise ValueError(
-                f"{self._cls.__name__} source must be {self._source!r}"
-            )
+            raise ValueError(f"{self._cls.__name__} source must be {self._source!r}")
         field_source = data.pop("source", self._source)
         if field_source != self._source:
             raise ValueError(
@@ -752,9 +763,7 @@ class _DataclassTriggerCodec:
         fields.discard("source")
         unknown = set(data) - fields
         if unknown:
-            raise ValueError(
-                f"unknown {self._cls.__name__} fields: {sorted(unknown)}"
-            )
+            raise ValueError(f"unknown {self._cls.__name__} fields: {sorted(unknown)}")
         return self._cls(**data)
 
 
@@ -771,9 +780,7 @@ class _UserInputCodec:
             raise ValueError("user trigger source must be 'user'")
         raw_content = _array(data.get("content"), "user trigger.content")
         content = tuple(
-            _deserialize_content_block(
-                _object(item, f"user trigger.content[{index}]")
-            )
+            _deserialize_content_block(_object(item, f"user trigger.content[{index}]"))
             for index, item in enumerate(raw_content)
         )
         return UserInput(content=content)
@@ -792,9 +799,7 @@ class _InjectionCodec:
             raise ValueError("injection trigger source must be 'injection'")
         raw_messages = _array(data.get("messages"), "injection trigger.messages")
         messages = tuple(
-            deserialize_message(
-                _object(item, f"injection trigger.messages[{index}]")
-            )
+            deserialize_message(_object(item, f"injection trigger.messages[{index}]"))
             for index, item in enumerate(raw_messages)
         )
         return Injection(messages=messages)
@@ -892,9 +897,7 @@ class CodecRegistry:
                     f"TriggerCodec for {source!r} emitted a different source"
                 )
             return encoded
-        raise ValueError(
-            f"trigger source {source!r} has no registered TriggerCodec"
-        )
+        raise ValueError(f"trigger source {source!r} has no registered TriggerCodec")
 
     def deserialize_trigger(self, data: dict[str, Any]) -> Any:
         data = _object(data, "trigger")
@@ -924,9 +927,7 @@ class CodecRegistry:
             {"call", "result", "backgrounded"},
             "tool record",
         )
-        call = _deserialize_content_block(
-            _object(data.get("call"), "tool record.call")
-        )
+        call = _deserialize_content_block(_object(data.get("call"), "tool record.call"))
         result = _deserialize_content_block(
             _object(data.get("result"), "tool record.result")
         )
@@ -948,7 +949,9 @@ class CodecRegistry:
     def _serialize_round(self, rnd: Round) -> dict[str, Any]:
         return {
             "response": serialize_message(rnd.response),
-            "tool_results": [self._serialize_tool_record(tr) for tr in rnd.tool_results],
+            "tool_results": [
+                self._serialize_tool_record(tr) for tr in rnd.tool_results
+            ],
         }
 
     def _deserialize_round(self, data: dict[str, Any]) -> Round:
@@ -956,14 +959,10 @@ class CodecRegistry:
         _only_fields(data, {"response", "tool_results"}, "round")
         response = deserialize_message(_object(data.get("response"), "round.response"))
         if not isinstance(response, AssistantMessage):
-            raise ValueError(
-                "serialized round response must be an assistant message"
-            )
+            raise ValueError("serialized round response must be an assistant message")
         raw_results = _array(data.get("tool_results"), "round.tool_results")
         tool_results = tuple(
-            self._deserialize_tool_record(
-                _object(item, f"round.tool_results[{index}]")
-            )
+            self._deserialize_tool_record(_object(item, f"round.tool_results[{index}]"))
             for index, item in enumerate(raw_results)
         )
         return Round(response=response, tool_results=tool_results)
@@ -1014,9 +1013,7 @@ class CodecRegistry:
                 "outcome.cause",
             )
             cause_fields = {
-                key: value
-                for key, value in raw_cause.items()
-                if key != "__type__"
+                key: value for key, value in raw_cause.items() if key != "__type__"
             }
             try:
                 cause = cls(**cause_fields)
@@ -1040,9 +1037,7 @@ class CodecRegistry:
             "cache_write_tokens": meta.cache_write_tokens,
             "duration_ns": meta.duration_ns,
             "model_id": meta.model_id,
-            "resource_mutations": serialize_resource_mutations(
-                meta.resource_mutations
-            ),
+            "resource_mutations": serialize_resource_mutations(meta.resource_mutations),
         }
 
     @staticmethod
@@ -1140,9 +1135,7 @@ class CodecRegistry:
             "turn checkpoint.schema_version",
         )
         if version != TRAJECTORY_CODEC_VERSION:
-            raise ValueError(
-                f"unsupported turn checkpoint schema version: {version}"
-            )
+            raise ValueError(f"unsupported turn checkpoint schema version: {version}")
         raw_rounds = _array(data.get("rounds"), "turn checkpoint.rounds")
         return TurnCheckpoint(
             index=_integer(
@@ -1223,18 +1216,14 @@ class CodecRegistry:
                 _object(data.get("trigger"), "turn.trigger")
             ),
             rounds=tuple(
-                self._deserialize_round(
-                    _object(item, f"turn.rounds[{index}]")
-                )
+                self._deserialize_round(_object(item, f"turn.rounds[{index}]"))
                 for index, item in enumerate(raw_rounds)
             ),
             outcome=self._deserialize_outcome(
                 _object(data.get("outcome"), "turn.outcome")
             ),
             timestamp=_number(data.get("timestamp"), "turn.timestamp"),
-            meta=self._deserialize_meta(
-                _object(data.get("meta"), "turn.meta")
-            ),
+            meta=self._deserialize_meta(_object(data.get("meta"), "turn.meta")),
             trigger_metadata=self._deserialize_trigger_metadata(
                 data.get("trigger_metadata")
             ),
@@ -1318,6 +1307,7 @@ class CodecRegistry:
     @staticmethod
     def deserialize_session_meta(data: dict[str, Any]) -> Any:
         from agentm.core.abi.store import SessionMeta
+
         data = _object(data, "session metadata")
         _only_fields(
             data,
@@ -1338,9 +1328,7 @@ class CodecRegistry:
             "session metadata.schema_version",
         )
         if version != TRAJECTORY_CODEC_VERSION:
-            raise ValueError(
-                f"unsupported session metadata schema version: {version}"
-            )
+            raise ValueError(f"unsupported session metadata schema version: {version}")
         fork_point = data.get("fork_point")
         if fork_point is not None and (
             not isinstance(fork_point, (str, int)) or isinstance(fork_point, bool)
@@ -1349,10 +1337,7 @@ class CodecRegistry:
         config = _object(data.get("config"), "session metadata.config")
         if not all(
             isinstance(key, str)
-            and (
-                value is None
-                or isinstance(value, (str, int, float, bool))
-            )
+            and (value is None or isinstance(value, (str, int, float, bool)))
             and (not isinstance(value, float) or math.isfinite(value))
             for key, value in config.items()
         ):

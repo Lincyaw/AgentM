@@ -53,9 +53,7 @@ def freeze_json(value: object) -> JsonValue:
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("JSON object keys must be strings")
-        return MappingProxyType(
-            {key: freeze_json(item) for key, item in value.items()}
-        )
+        return MappingProxyType({key: freeze_json(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(freeze_json(item) for item in value)
     raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
@@ -177,9 +175,7 @@ class OpaqueThinkingBlock:
 
     def __post_init__(self) -> None:
         if self.type != "opaque_thinking":
-            raise ValueError(
-                f"invalid opaque thinking block type: {self.type!r}"
-            )
+            raise ValueError(f"invalid opaque thinking block type: {self.type!r}")
         _require_string(
             self.provider,
             "opaque thinking provider",
@@ -357,7 +353,9 @@ class ToolResultMessage:
             raise ValueError(f"invalid tool result message role: {self.role!r}")
         content = tuple(self.content)
         if not all(isinstance(item, ToolResultBlock) for item in content):
-            raise TypeError("tool result message content must contain tool result blocks")
+            raise TypeError(
+                "tool result message content must contain tool result blocks"
+            )
         _require_timestamp(self.timestamp, "tool result message timestamp")
         if not isinstance(self.meta, MessageMeta):
             raise TypeError("tool result message meta must be MessageMeta")
@@ -377,15 +375,13 @@ class InterruptionMessagePolicy(Protocol):
         reason: str,
         *,
         for_tool_use: bool = False,
-    ) -> UserMessage | None:
-        ...
+    ) -> UserMessage | None: ...
 
     def interrupted_tool_result(
         self,
         tool_call_id: str,
         reason: str,
-    ) -> ToolResultBlock:
-        ...
+    ) -> ToolResultBlock: ...
 
 
 # --- Helper constructors ----------------------------------------------------

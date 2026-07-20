@@ -32,7 +32,11 @@ class ToolWorkItem:
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.index, int) or isinstance(self.index, bool) or self.index < 0:
+        if (
+            not isinstance(self.index, int)
+            or isinstance(self.index, bool)
+            or self.index < 0
+        ):
             raise ValueError("tool work item index must be a non-negative integer")
         if not isinstance(self.call, ToolCallBlock):
             raise TypeError("tool work item call must be a ToolCallBlock")
@@ -100,7 +104,9 @@ class ToolOrchestrationResult:
             self.output,
             (ToolResult, ToolOutcome),
         ):
-            raise TypeError("tool orchestration output must be a tool result or outcome")
+            raise TypeError(
+                "tool orchestration output must be a tool result or outcome"
+            )
         if self.error is not None and not isinstance(self.error, BaseException):
             raise TypeError("tool orchestration error must be an exception or None")
         if self.cancel_reason is not None and (
@@ -115,9 +121,7 @@ class ToolOrchestrationResult:
                 or self.error is not None
                 or self.cancel_reason is not None
             ):
-                raise ValueError(
-                    "completed tool orchestration requires only an output"
-                )
+                raise ValueError("completed tool orchestration requires only an output")
             return
         if self.status == "failed":
             if (
@@ -125,9 +129,7 @@ class ToolOrchestrationResult:
                 or self.output is not None
                 or self.cancel_reason is not None
             ):
-                raise ValueError(
-                    "failed tool orchestration requires only an error"
-                )
+                raise ValueError("failed tool orchestration requires only an error")
             return
         if (
             self.output is not None

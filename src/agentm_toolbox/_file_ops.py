@@ -35,15 +35,54 @@ _MAX_UNINTENDED_SHRINK_LINES: Final[int] = 5
 
 _BINARY_EXTENSIONS: Final[frozenset[str]] = frozenset(
     {
-        ".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv",
-        ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a",
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp",
-        ".ico", ".svg",
-        ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
-        ".bin", ".exe", ".dll", ".so", ".dylib", ".o", ".a",
-        ".pyc", ".class",
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-        ".sqlite", ".db",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".flv",
+        ".wmv",
+        ".mp3",
+        ".wav",
+        ".flac",
+        ".aac",
+        ".ogg",
+        ".wma",
+        ".m4a",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".tiff",
+        ".webp",
+        ".ico",
+        ".svg",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".bin",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".o",
+        ".a",
+        ".pyc",
+        ".class",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".sqlite",
+        ".db",
     }
 )
 
@@ -165,7 +204,11 @@ class FileToolbox:
             caller_wants_range = offset is not None or limit is not None
             if limit is not None:
                 lim = int(limit)
-            elif not caller_wants_range and self._default_limit and total > self._default_limit:
+            elif (
+                not caller_wants_range
+                and self._default_limit
+                and total > self._default_limit
+            ):
                 lim = self._default_limit
             else:
                 lim = None
@@ -175,9 +218,7 @@ class FileToolbox:
             else:
                 sliced = all_lines[off:]
 
-            is_partial = off > 0 or (
-                lim is not None and lim > 0 and off + lim < total
-            )
+            is_partial = off > 0 or (lim is not None and lim > 0 and off + lim < total)
 
             chash = content_hash_for(data)
             self.state.record(
@@ -188,9 +229,7 @@ class FileToolbox:
                 content_hash=chash,
             )
 
-            numbered = [
-                f"{off + i + 1}\t{line}" for i, line in enumerate(sliced)
-            ]
+            numbered = [f"{off + i + 1}\t{line}" for i, line in enumerate(sliced)]
 
             if is_partial:
                 end_line = off + len(sliced)
@@ -205,9 +244,7 @@ class FileToolbox:
                 content_hash=chash,
             )
         except Exception as exc:
-            return Result(
-                text=f"Failed to read {path!r}: {exc}", is_error=True
-            )
+            return Result(text=f"Failed to read {path!r}: {exc}", is_error=True)
 
     # -- write --------------------------------------------------------------
 
@@ -313,7 +350,9 @@ class FileToolbox:
         resolved = _resolve(self._cwd, path)
         if current is None:
             return (
-                Result(text=f"Failed to read {path!r}: file does not exist", is_error=True),
+                Result(
+                    text=f"Failed to read {path!r}: file does not exist", is_error=True
+                ),
                 None,
             )
         rs = self.state.get(resolved)
@@ -417,8 +456,7 @@ class FileToolbox:
             return (
                 Result(
                     text=(
-                        f"String is not unique in {path!r}: "
-                        f"found {occurrences} matches"
+                        f"String is not unique in {path!r}: found {occurrences} matches"
                     ),
                     is_error=True,
                 ),
@@ -429,9 +467,7 @@ class FileToolbox:
             if replace_all
             else original.replace(actual, new_string, 1)
         )
-        shrinkage = _check_shrinkage(
-            original, updated, len(actual), len(new_string)
-        )
+        shrinkage = _check_shrinkage(original, updated, len(actual), len(new_string))
         if shrinkage:
             return Result(text=shrinkage, is_error=True), None
 
@@ -470,17 +506,13 @@ class FileToolbox:
             new_string += "\n"
         updated = "".join(before) + new_string + "".join(after)
         replaced_len = sum(len(ln) for ln in lines[start - 1 : end])
-        shrinkage = _check_shrinkage(
-            original, updated, replaced_len, len(new_string)
-        )
+        shrinkage = _check_shrinkage(original, updated, replaced_len, len(new_string))
         if shrinkage:
             return Result(text=shrinkage, is_error=True), None
 
         new_line_count = new_string.count("\n") + 1
         snippet = _snippet_around(updated, start, start + new_line_count - 1)
         return (
-            Result(
-                text=f"Replaced lines {start}-{end} in {path!r}:\n{snippet}"
-            ),
+            Result(text=f"Replaced lines {start}-{end} in {path!r}:\n{snippet}"),
             updated.encode("utf-8"),
         )

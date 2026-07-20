@@ -231,7 +231,13 @@ TRAJECTORY_HEAD_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
     ),
     TrajectoryIndexSpec(
         name="trajectory_heads_branch",
-        fields=("root_session_id", "session_id", "branch_id", "agent_id", "is_sidechain"),
+        fields=(
+            "root_session_id",
+            "session_id",
+            "branch_id",
+            "agent_id",
+            "is_sidechain",
+        ),
         purpose="branch, agent, and sidechain head selection",
     ),
 )
@@ -266,10 +272,7 @@ class ContentReplacementState:
             ),
         )
         if not isinstance(self.replacements, Mapping) or not all(
-            isinstance(key, str)
-            and key
-            and isinstance(value, str)
-            and value
+            isinstance(key, str) and key and isinstance(value, str) and value
             for key, value in self.replacements.items()
         ):
             raise ValueError(
@@ -470,8 +473,7 @@ class TrajectoryForkPoint:
     def __post_init__(self) -> None:
         _require_string(self.session_id, "trajectory fork session_id")
         anchors = sum(
-            anchor is not None
-            for anchor in (self.turn_ref, self.node_id, self.head_id)
+            anchor is not None for anchor in (self.turn_ref, self.node_id, self.head_id)
         )
         if anchors != 1:
             raise ValueError(
@@ -576,16 +578,12 @@ class TrajectoryNode:
             _string_tuple(self.tool_names, "trajectory node tool_names"),
         )
         if self.visibility not in {"visible", "hidden", "replay_only"}:
-            raise ValueError(
-                f"invalid trajectory node visibility: {self.visibility!r}"
-            )
+            raise ValueError(f"invalid trajectory node visibility: {self.visibility!r}")
         if self.kind == "message":
             if self.message is None:
                 raise ValueError("message trajectory nodes require a message")
             if self.message.role != self.role:
-                raise ValueError(
-                    "trajectory node role must match its message role"
-                )
+                raise ValueError("trajectory node role must match its message role")
         else:
             if self.message is not None:
                 raise ValueError("control trajectory nodes cannot carry a message")
@@ -654,8 +652,7 @@ class TurnMeta:
             _require_index(value, f"turn meta {label}")
         _require_string(self.model_id, "turn meta model_id", optional=True)
         if not isinstance(self.resource_mutations, tuple) or not all(
-            isinstance(item, ResourceMutation)
-            for item in self.resource_mutations
+            isinstance(item, ResourceMutation) for item in self.resource_mutations
         ):
             raise TypeError(
                 "turn meta resource_mutations must be a tuple of ResourceMutation"

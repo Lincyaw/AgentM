@@ -48,12 +48,14 @@ class InMemorySessionGraph:
                 self._nodes[parent_id] = parent
             if session_id not in parent.children:
                 parent.children.append(session_id)
-            self._edges.append(SessionEdge(
-                parent_id=parent_id,
-                child_id=session_id,
-                kind=edge_kind,
-                fork_point=fork_point,
-            ))
+            self._edges.append(
+                SessionEdge(
+                    parent_id=parent_id,
+                    child_id=session_id,
+                    kind=edge_kind,
+                    fork_point=fork_point,
+                )
+            )
         return node
 
     def get(self, session_id: str) -> SessionNode | None:
@@ -66,7 +68,8 @@ class InMemorySessionGraph:
         if kind is None:
             return list(node.children)
         return [
-            e.child_id for e in self._edges
+            e.child_id
+            for e in self._edges
             if e.parent_id == session_id and e.kind == kind
         ]
 

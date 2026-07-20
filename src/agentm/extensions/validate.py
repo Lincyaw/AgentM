@@ -21,12 +21,8 @@ _FORBIDDEN_IMPORTS: dict[str, str] = {
         "atom-to-atom coupling is forbidden; communicate through AtomAPI "
         "services, events, or explicit extension dependencies"
     ),
-    "_agentm_contrib__": (
-        "contrib atoms must stay decoupled from each other"
-    ),
-    "agentm._scenarios": (
-        "scenario-local atom-to-atom coupling is forbidden"
-    ),
+    "_agentm_contrib__": ("contrib atoms must stay decoupled from each other"),
+    "agentm._scenarios": ("scenario-local atom-to-atom coupling is forbidden"),
 }
 
 

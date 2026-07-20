@@ -82,10 +82,12 @@ _VALID_TYPES: Final[tuple[str, ...]] = ("feedback", "project", "user", "referenc
 _NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
 _DEFAULT_MAX_INDEX_LINES: Final[int] = 200
 
+
 class MemoryConfig(BaseModel):
     path: str = ".agentm/memory"
     index_in_system_prompt: bool = True
     max_index_lines: int = _DEFAULT_MAX_INDEX_LINES
+
 
 MANIFEST = ExtensionManifest(
     name="memory",
@@ -105,6 +107,7 @@ MANIFEST = ExtensionManifest(
     requires=("service:resource_writer",),
     priority=AtomInstallPriority.CONTEXT,
 )
+
 
 class _SaveArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -160,6 +163,7 @@ class _DeleteArgs(BaseModel):
         description="Memory name to delete; also removes its MEMORY.md entry.",
     )
 
+
 def install(api: AtomAPI, config: MemoryConfig) -> None:
     cwd = api.ctx.cwd
     base_path = _resolve_base(cwd, config.path)
@@ -191,7 +195,9 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
         content = str(args["content"])
 
         if mem_type not in _VALID_TYPES:
-            return _error(f"unknown type {mem_type!r}; expected one of {list(_VALID_TYPES)}")
+            return _error(
+                f"unknown type {mem_type!r}; expected one of {list(_VALID_TYPES)}"
+            )
         if not _NAME_RE.match(name):
             return _error(
                 f"invalid name {name!r}; use letters/digits/underscore/hyphen only"
@@ -256,9 +262,7 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
         for path in paths:
             try:
                 data = await writer.read(str(path))
-                meta, _body = parse_frontmatter(
-                    data.decode("utf-8", errors="replace")
-                )
+                meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
             except Exception as exc:  # noqa: BLE001
                 logger.debug("memory: skipping invalid file {}: {}", path, exc)
                 skipped.append(path.name)
@@ -274,7 +278,10 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
             result = _ok(f"no memories matched {query!r}")
         else:
             entries.sort(key=lambda row: row[0])
-            lines = [f"- {name} [{mem_type}] — {desc}" for name, mem_type, desc in entries[:limit]]
+            lines = [
+                f"- {name} [{mem_type}] — {desc}"
+                for name, mem_type, desc in entries[:limit]
+            ]
             result = _ok("\n".join(lines))
         if skipped:
             # Surface the silently-skipped files to the model, not just the log.
@@ -353,13 +360,16 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
         )
     )
 
+
 def _resolve_base(cwd: str, raw_path: str) -> Path:
     raw = Path(raw_path).expanduser()
     return raw if raw.is_absolute() else (Path(cwd) / raw).resolve()
 
+
 def _memory_relpath(base: Path, mem_type: str, name: str, cwd: str) -> str:
     abs_path = base / f"{mem_type}_{name}.md"
     return _to_cwd_relative(abs_path, cwd)
+
 
 def _to_cwd_relative(path: Path, cwd: str) -> str:
     cwd_path = Path(cwd).resolve()
@@ -367,6 +377,7 @@ def _to_cwd_relative(path: Path, cwd: str) -> str:
         return str(path.resolve().relative_to(cwd_path))
     except ValueError:
         return str(path)
+
 
 def _serialize_memory(mem_type: str, name: str, description: str, content: str) -> str:
     body = content if content.endswith("\n") else content + "\n"
@@ -378,6 +389,7 @@ def _serialize_memory(mem_type: str, name: str, description: str, content: str) 
         "---\n\n"
         f"{body}"
     )
+
 
 async def _list_memory_files(
     writer: ResourceWriter,
@@ -391,6 +403,7 @@ async def _list_memory_files(
         out.append(base / entry)
     return sorted(out)
 
+
 async def _resolve_memory_path(
     writer: ResourceWriter,
     base: Path,
@@ -403,6 +416,7 @@ async def _resolve_memory_path(
         if await writer.exists(str(candidate)):
             return candidate
     return None
+
 
 async def _build_index_block(
     writer: ResourceWriter,
@@ -439,6 +453,7 @@ async def _build_index_block(
         f"<memory_index>\n{body}\n</memory_index>"
     )
 
+
 async def _rewrite_index(
     writer: ResourceWriter,
     base: Path,
@@ -465,7 +480,10 @@ async def _rewrite_index(
         entries.append((name, mem_type, description))
     entries.sort(key=lambda row: row[0])
 
-    lines = [f"- [{mem_type}/{name}] {description}" for name, mem_type, description in entries]
+    lines = [
+        f"- [{mem_type}/{name}] {description}"
+        for name, mem_type, description in entries
+    ]
     body = "\n".join(lines) + ("\n" if lines else "")
     rel = _to_cwd_relative(base / "MEMORY.md", cwd)
     try:
@@ -480,6 +498,7 @@ async def _rewrite_index(
         logger.warning("memory index rebuild failed: {}", exc)
         return f"index rebuild failed: {exc}"
     return None
+
 
 async def _record_access(
     writer: ResourceWriter,
@@ -501,10 +520,7 @@ async def _record_access(
             if not isinstance(decoded, dict):
                 stats = {}
             else:
-                stats = {
-                    str(key): value
-                    for key, value in decoded.items()
-                }
+                stats = {str(key): value for key, value in decoded.items()}
     except Exception as exc:
         logger.debug("memory access stats read failed: {}", exc)
         stats = {}
@@ -528,13 +544,17 @@ async def _record_access(
     rel = _to_cwd_relative(stats_path, cwd)
     payload = json.dumps(stats, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     try:
-        await writer.write(rel, payload.encode("utf-8"), rationale="memory_access_stats")
+        await writer.write(
+            rel, payload.encode("utf-8"), rationale="memory_access_stats"
+        )
     except Exception as exc:
         logger.debug("memory access stats write failed: {}", exc)
         return
 
+
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
+
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

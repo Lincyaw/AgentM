@@ -66,10 +66,7 @@ class _LocalResourceFiles:
         }
         if namespace_roots:
             self.namespace_roots.update(
-                {
-                    namespace: Path(path)
-                    for namespace, path in namespace_roots.items()
-                }
+                {namespace: Path(path) for namespace, path in namespace_roots.items()}
             )
         self._lock_path = root / "resource.lock"
         (
@@ -232,9 +229,11 @@ class _LocalResourceFiles:
         candidate = Path(path)
         if candidate.is_absolute():
             try:
-                lexical = candidate.absolute().relative_to(
-                    self.workspace_root.absolute()
-                ).as_posix()
+                lexical = (
+                    candidate.absolute()
+                    .relative_to(self.workspace_root.absolute())
+                    .as_posix()
+                )
             except ValueError:
                 lexical = physical
         else:
@@ -344,8 +343,7 @@ class _LocalTransactionJournal:
             return
         if status != "prepared":
             raise RuntimeError(
-                f"resource transaction {transaction_id} has invalid status "
-                f"{status!r}"
+                f"resource transaction {transaction_id} has invalid status {status!r}"
             )
         for operation in _manifest_operations(manifest):
             ref = _operation_ref(operation)
@@ -432,15 +430,12 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         discover_manifest: bool = True,
     ) -> None:
         workspace_path = Path(workspace_root)
-        resource_root = (
-            Path(root) if root is not None else workspace_path / ".agentm"
-        )
+        resource_root = Path(root) if root is not None else workspace_path / ".agentm"
         resolved_manifest = (
             Path(manifest_path)
             if manifest_path is not None
             else workspace_path / "core-manifest.yaml"
-            if discover_manifest
-            and (workspace_path / "core-manifest.yaml").is_file()
+            if discover_manifest and (workspace_path / "core-manifest.yaml").is_file()
             else None
         )
         self._files = _LocalResourceFiles(
@@ -596,9 +591,7 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         return _LocalResourceTxn(self, context)
 
     async def recover(self, context: ResourceRecoveryContext) -> None:
-        await await_known_outcome(
-            asyncio.to_thread(self._journal.recover, context)
-        )
+        await await_known_outcome(asyncio.to_thread(self._journal.recover, context))
 
     async def fork_for_environment(
         self,
@@ -706,7 +699,9 @@ class _LocalResourceTxn(ResourceTxn):
                 author=author,
             )
         )
-        return self._mutation(ref, "replace", _digest_bytes(old), _digest_bytes(new), rationale, author)
+        return self._mutation(
+            ref, "replace", _digest_bytes(old), _digest_bytes(new), rationale, author
+        )
 
     async def delete(
         self,
@@ -851,11 +846,7 @@ class _LocalResourceTxn(ResourceTxn):
                     raise ValueError("old content does not match current resource")
                 new_content = None if pending.op == "delete" else pending.new or b""
                 before = _digest_bytes(current) if current is not None else None
-                after = (
-                    _digest_bytes(new_content)
-                    if new_content is not None
-                    else None
-                )
+                after = _digest_bytes(new_content) if new_content is not None else None
                 before_file = None
                 if current is not None:
                     before_file = f"{index}.before"
@@ -944,9 +935,7 @@ def _load_resource_globs(
     constitution = payload.get("constitution", {})
     managed = payload.get("managed", {})
     if not isinstance(constitution, Mapping) or not isinstance(managed, Mapping):
-        raise ValueError(
-            f"resource manifest sections must be objects: {manifest_path}"
-        )
+        raise ValueError(f"resource manifest sections must be objects: {manifest_path}")
     return (
         _string_sequence(
             constitution.get("paths", ()),
@@ -1078,9 +1067,9 @@ def _resource_mutation(
 
 
 def _transaction_id(context: ResourceTxnContext) -> str:
-    payload = (
-        f"{context.session_id}\0{context.turn_id}\0{context.turn_index}"
-    ).encode("utf-8")
+    payload = (f"{context.session_id}\0{context.turn_id}\0{context.turn_index}").encode(
+        "utf-8"
+    )
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
@@ -1146,9 +1135,7 @@ def _manifest_operations(
 def _manifest_status(manifest: Mapping[str, object]) -> str:
     status = manifest.get("status")
     if status not in {"prepared", "applied", "committed"}:
-        raise ValueError(
-            f"resource transaction manifest has invalid status {status!r}"
-        )
+        raise ValueError(f"resource transaction manifest has invalid status {status!r}")
     return cast(str, status)
 
 
@@ -1182,9 +1169,7 @@ def _validate_manifest_identity(
         or turn_id != context.turn_id
         or turn_index != context.turn_index
     ):
-        raise ValueError(
-            "resource transaction staging belongs to a different turn"
-        )
+        raise ValueError("resource transaction staging belongs to a different turn")
 
 
 def _operation_ref(operation: Mapping[str, object]) -> ResourceRef:
@@ -1225,9 +1210,7 @@ def _manifest_mutations(
             if not isinstance(key, str) or not (
                 value is None or isinstance(value, (str, int, float, bool))
             ):
-                raise ValueError(
-                    "resource transaction operation has invalid metadata"
-                )
+                raise ValueError("resource transaction operation has invalid metadata")
             metadata[key] = value
         mutations.append(
             ResourceMutation(

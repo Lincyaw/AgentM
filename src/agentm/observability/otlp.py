@@ -93,16 +93,12 @@ def iter_log_records(line: Mapping[str, object]) -> list[dict[str, object]]:
         scopes = _mapping_list(line.get("scopeLogs"), "OTLP scopeLogs")
     records: list[dict[str, object]] = []
     for scope in scopes:
-        records.extend(
-            _mapping_list(scope.get("logRecords"), "OTLP logRecords")
-        )
+        records.extend(_mapping_list(scope.get("logRecords"), "OTLP logRecords"))
     return records
 
 
 def _mapping(value: object, label: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
         raise ValueError(f"{label} must be an object with string keys")
     return value
 

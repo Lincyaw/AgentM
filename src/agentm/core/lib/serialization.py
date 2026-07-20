@@ -36,7 +36,11 @@ def _encode(obj: Any, *, depth: int, seen: frozenset[int]) -> Any:
             return obj
         return {
             "type": "non_finite_float",
-            "value": "nan" if math.isnan(obj) else "infinity" if obj > 0 else "-infinity",
+            "value": "nan"
+            if math.isnan(obj)
+            else "infinity"
+            if obj > 0
+            else "-infinity",
         }
     if depth >= _MAX_DEPTH:
         return {
@@ -56,10 +60,12 @@ def _encode(obj: Any, *, depth: int, seen: frozenset[int]) -> Any:
             "__module__",
             None,
         )
-        qualname = getattr(  # code-health: ignore[AM021] -- callable reflection boundary
-            obj,
-            "__qualname__",
-            None,
+        qualname = (
+            getattr(  # code-health: ignore[AM021] -- callable reflection boundary
+                obj,
+                "__qualname__",
+                None,
+            )
         )
         return {
             "type": "callable",
@@ -108,13 +114,9 @@ def _encode(obj: Any, *, depth: int, seen: frozenset[int]) -> Any:
         entries.sort(key=_canonical_json)
         return {"type": "mapping", "entries": entries}
     if isinstance(obj, (list, tuple)):
-        return [
-            _encode(value, depth=depth + 1, seen=child_seen) for value in obj
-        ]
+        return [_encode(value, depth=depth + 1, seen=child_seen) for value in obj]
     if isinstance(obj, (set, frozenset)):
-        values = [
-            _encode(value, depth=depth + 1, seen=child_seen) for value in obj
-        ]
+        values = [_encode(value, depth=depth + 1, seen=child_seen) for value in obj]
         values.sort(key=_canonical_json)
         return {"type": "set", "items": values}
     return {

@@ -234,10 +234,7 @@ class _DelayedChildVisibilityStore(InMemoryTrajectoryStore):
         self._child_visibility_checks = 0
 
     def session_exists(self, session_id: str) -> bool:
-        if (
-            self.parent_session_id is not None
-            and session_id != self.parent_session_id
-        ):
+        if self.parent_session_id is not None and session_id != self.parent_session_id:
             self._child_visibility_checks += 1
             if self._child_visibility_checks == 2:
                 self.visibility_started.set()
@@ -657,11 +654,13 @@ class _OrderedTransactionalWriter(_TransactionalWriter):
 @pytest.mark.asyncio
 async def test_effect_scope_wraps_committed_turns() -> None:
     scope = _RecordingEffectScope()
-    session = Session(SessionRuntimeConfig(
-        stream_fn=_StaticStream(),
-        model=_model(),
-        system="test",
-    ))
+    session = Session(
+        SessionRuntimeConfig(
+            stream_fn=_StaticStream(),
+            model=_model(),
+            system="test",
+        )
+    )
     session.register_effect_scope(scope)
 
     session.start()
@@ -832,13 +831,15 @@ async def test_local_resource_mutations_settle_before_cancellation(
 async def test_effect_scope_fork_and_resume() -> None:
     store = InMemoryTrajectoryStore()
     scope = _RecordingEffectScope()
-    session = await create_session(SessionBuildConfig(
-        extensions=[],
-        stream_fn=_StaticStream(),
-        model=_model(),
-        store=store,
-        effect_scope=scope,
-    ))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=_StaticStream(),
+            model=_model(),
+            store=store,
+            effect_scope=scope,
+        )
+    )
 
     session.start()
     await session.prompt("go")
@@ -886,14 +887,16 @@ async def test_unpublished_turn_rolls_back_effect_before_resource() -> None:
     order: list[str] = []
     scope = _OrderedEffectScope(order)
     writer = _OrderedTransactionalWriter(order)
-    session = await create_session(SessionBuildConfig(
-        extensions=[],
-        stream_fn=_StaticStream(),
-        model=_model(),
-        store=_FailingAppendStore(),
-        resource_writer=writer,
-        effect_scope=scope,
-    ))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=_StaticStream(),
+            model=_model(),
+            store=_FailingAppendStore(),
+            resource_writer=writer,
+            effect_scope=scope,
+        )
+    )
 
     session.start()
     receipt = await session.prompt("go")
@@ -910,12 +913,14 @@ async def test_unpublished_turn_rolls_back_effect_before_resource() -> None:
 @pytest.mark.asyncio
 async def test_atom_catalog_records_active_set_service() -> None:
     catalog = _RecordingCatalog()
-    session = await create_session(SessionBuildConfig(
-        extensions=[],
-        stream_fn=_StaticStream(),
-        model=_model(),
-        atom_catalog=catalog,
-    ))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=_StaticStream(),
+            model=_model(),
+            atom_catalog=catalog,
+        )
+    )
 
     fingerprint = session.services.get(ACTIVE_SET_FINGERPRINT_SERVICE)
 
@@ -957,9 +962,9 @@ def test_multiple_providers_require_explicit_selection_policy() -> None:
     assert unresolved.provider_names() == ["first"]
     assert unresolved.get_provider() is first
 
-    resolved = Session(SessionRuntimeConfig(
-        provider_resolver=_ProviderResolver("second")
-    ))
+    resolved = Session(
+        SessionRuntimeConfig(provider_resolver=_ProviderResolver("second"))
+    )
     resolved.register_provider("first", first)
     resolved.register_provider("second", second)
 
@@ -1007,10 +1012,7 @@ def test_session_spec_provider_precedence_is_source_accurate(
 
     assert resolved.provider is not None
     assert resolved.provider.source.kind == "module"
-    assert (
-        resolved.provider.source.location
-        == "agentm.extensions.builtin.llm_openai"
-    )
+    assert resolved.provider.source.location == "agentm.extensions.builtin.llm_openai"
     assert dict(resolved.provider.config) == {
         "api_key": "secret",
         "base_url": "https://project.example/v1",
@@ -1022,10 +1024,7 @@ def test_session_spec_provider_precedence_is_source_accurate(
     assert resolved.provider_identity is not None
     assert resolved.provider_identity.name == "openai"
     assert resolved.provider_identity.model_id == "env-model"
-    provenance = {
-        item.path: item.source
-        for item in resolved.value_provenance
-    }
+    provenance = {item.path: item.source for item in resolved.value_provenance}
     assert provenance["provider.model"] == "env"
     assert provenance["provider.base_url"] == "project_config"
     assert provenance["provider.api_key"] == "env"
@@ -1035,18 +1034,20 @@ def test_session_spec_provider_precedence_is_source_accurate(
 async def test_atom_catalog_freezes_atom_identity_versions() -> None:
     catalog = _RecordingCatalog()
     store = InMemoryTrajectoryStore()
-    session = await create_session(SessionBuildConfig(
-        extensions=[
-            (
-                "agentm.extensions.builtin.system_prompt",
-                {"prompt": "catalog test"},
-            )
-        ],
-        stream_fn=_StaticStream(),
-        model=_model(),
-        store=store,
-        atom_catalog=catalog,
-    ))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[
+                (
+                    "agentm.extensions.builtin.system_prompt",
+                    {"prompt": "catalog test"},
+                )
+            ],
+            stream_fn=_StaticStream(),
+            model=_model(),
+            store=store,
+            atom_catalog=catalog,
+        )
+    )
 
     assert len(catalog.active_sets) == 1
     atoms = catalog.active_sets[0].atoms
@@ -1092,11 +1093,13 @@ async def test_tool_executor_receives_typed_requirements() -> None:
         content=[TextContent(type="text", text="done")],
         timestamp=0.0,
     )
-    session = Session(SessionRuntimeConfig(
-        stream_fn=_QueuedStream(tool_call, final),
-        model=_model(),
-        tools=[_RequirementsTool()],
-    ))
+    session = Session(
+        SessionRuntimeConfig(
+            stream_fn=_QueuedStream(tool_call, final),
+            model=_model(),
+            tools=[_RequirementsTool()],
+        )
+    )
     session.register_tool_executor(executor)
 
     session.start()
@@ -1130,11 +1133,13 @@ async def test_default_tool_executor_rejects_unsupported_requirements() -> None:
         content=[TextContent(type="text", text="done")],
         timestamp=0.0,
     )
-    session = Session(SessionRuntimeConfig(
-        stream_fn=_QueuedStream(tool_call, final),
-        model=_model(),
-        tools=[_RequirementsTool()],
-    ))
+    session = Session(
+        SessionRuntimeConfig(
+            stream_fn=_QueuedStream(tool_call, final),
+            model=_model(),
+            tools=[_RequirementsTool()],
+        )
+    )
 
     session.start()
     await session.prompt("go")
@@ -1231,6 +1236,7 @@ async def test_tool_orchestrator_propagates_caller_cancellation() -> None:
         )
         for index, name in enumerate(("first", "second"))
     )
+
     async def consume_results() -> None:
         async for _result in DefaultToolOrchestrator().stream_batch(
             ToolOrchestrationRequest(
@@ -1304,10 +1310,7 @@ async def test_local_bash_reaps_on_signal_and_caller_cancellation(
         marker: Path,
         signal: EventCancelSource,
     ) -> asyncio.Task[object]:
-        command = (
-            f"printf started > {shlex.quote(str(marker))}; "
-            "sleep 3600"
-        )
+        command = f"printf started > {shlex.quote(str(marker))}; sleep 3600"
         task: asyncio.Task[object] = asyncio.create_task(
             operations.exec(
                 command,
@@ -1362,9 +1365,7 @@ async def test_sandbox_executor_requires_typed_environment_adapter(
     with pytest.raises(RuntimeError, match="EnvironmentExecutableTool"):
         await executor.execute(
             ToolExecutionRequest(
-                tool=_ProcessEntrypointTool(
-                    "tests.fixtures.process_tools:echo"
-                ),
+                tool=_ProcessEntrypointTool("tests.fixtures.process_tools:echo"),
                 args={},
                 requirements=requirements,
                 environment=environment.ref,
@@ -1396,12 +1397,14 @@ async def test_session_spec_resolver_records_resolved_spec() -> None:
 
 @pytest.mark.asyncio
 async def test_operations_atom_registers_environment_backend_and_bash_alias() -> None:
-    session = await create_session(SessionBuildConfig(
-        extensions=[("agentm.extensions.builtin.operations", {})],
-        stream_fn=_StaticStream(),
-        model=_model(),
-        cwd="/tmp",
-    ))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[("agentm.extensions.builtin.operations", {})],
+            stream_fn=_StaticStream(),
+            model=_model(),
+            cwd="/tmp",
+        )
+    )
 
     environment = session.services.get(
         ENVIRONMENT_OPERATIONS_SERVICE,
@@ -1427,11 +1430,13 @@ async def test_context_projection_service_projects_committed_history() -> None:
         ContextProjection,
         scope="session",
     )
-    session = Session(SessionRuntimeConfig(
-        stream_fn=stream,
-        model=_model(),
-        services=services,
-    ))
+    session = Session(
+        SessionRuntimeConfig(
+            stream_fn=stream,
+            model=_model(),
+            services=services,
+        )
+    )
 
     session.start()
     await session.prompt("go")
@@ -1471,12 +1476,14 @@ async def test_file_tools_write_uses_active_resource_txn() -> None:
         content=[TextContent(type="text", text="done")],
         timestamp=0.0,
     )
-    session = await create_session(SessionBuildConfig(
-        extensions=[("agentm.extensions.builtin.file_tools", {"tools": ["write"]})],
-        stream_fn=_QueuedStream(tool_call, final),
-        model=_model(),
-        resource_writer=writer,
-    ))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[("agentm.extensions.builtin.file_tools", {"tools": ["write"]})],
+            stream_fn=_QueuedStream(tool_call, final),
+            model=_model(),
+            resource_writer=writer,
+        )
+    )
 
     session.start()
     await session.prompt("go")
@@ -1498,12 +1505,14 @@ async def test_file_tools_write_uses_active_resource_txn() -> None:
 @pytest.mark.asyncio
 async def test_resource_txn_abandons_on_turn_failure() -> None:
     writer = _TransactionalWriter()
-    session = await create_session(SessionBuildConfig(
-        extensions=[],
-        stream_fn=_FailingStream(),
-        model=_model(),
-        resource_writer=writer,
-    ))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=_FailingStream(),
+            model=_model(),
+            resource_writer=writer,
+        )
+    )
 
     session.start()
     receipt = await session.prompt("go")

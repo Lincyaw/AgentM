@@ -28,6 +28,7 @@ from agentm.core.abi.trigger import Trigger
 
 # --- Loop actions -----------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class LoopAction:
     pass
@@ -50,6 +51,7 @@ class Inject(LoopAction):
 
 # --- Turn lifecycle events --------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class TurnBeginEvent(Event):
     CHANNEL: ClassVar[str] = "turn_begin"
@@ -67,9 +69,11 @@ class TurnCommittedEvent(Event):
 
 # --- Context events ---------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class ContextEvent(Event):
     """Handlers return ``list[AgentMessage] | None`` to replace messages."""
+
     CHANNEL: ClassVar[str] = "context"
     messages: tuple[AgentMessage, ...] = ()
     turn_index: int = 0
@@ -82,6 +86,7 @@ class BeforeSendEvent(Event):
     Handlers return a dict of overrides (``messages``, ``system``,
     ``tools``, ``model``) or None.  Last non-None wins per field.
     """
+
     CHANNEL: ClassVar[str] = "before_send"
     messages: tuple[AgentMessage, ...] = ()
     system: str | None = None
@@ -92,6 +97,7 @@ class BeforeSendEvent(Event):
 
 # --- Stream events ----------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class StreamDeltaEvent(Event):
     CHANNEL: ClassVar[str] = "stream_delta"
@@ -101,11 +107,13 @@ class StreamDeltaEvent(Event):
 
 # --- Tool events ------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class ToolCallEvent(Event):
     """Handlers return ``{"block": True, "reason": ...}`` or
     ``{"rewrite": {arg_overrides}}`` or None.
     """
+
     CHANNEL: ClassVar[str] = "tool_call"
     tool_call_id: str = ""
     tool_name: str = ""
@@ -115,6 +123,7 @@ class ToolCallEvent(Event):
 @dataclass(frozen=True, slots=True)
 class ToolResultEvent(Event):
     """Handlers return a replacement ``ToolResult`` or None."""
+
     CHANNEL: ClassVar[str] = "tool_result"
     tool_call_id: str = ""
     tool_name: str = ""
@@ -132,6 +141,7 @@ class ToolErrorEvent(Event):
 
 # --- Decision events --------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class TurnObservation:
     turn_index: int = 0
@@ -143,11 +153,13 @@ class TurnObservation:
 @dataclass(frozen=True, slots=True)
 class DecideEvent(Event):
     """Handlers return a ``LoopAction`` or None (no opinion)."""
+
     CHANNEL: ClassVar[str] = "decide"
     observation: TurnObservation = field(default_factory=TurnObservation)
 
 
 # --- Run lifecycle ----------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class BeforeRunEvent(Event):
@@ -159,6 +171,7 @@ class BeforeRunEvent(Event):
     override applies to round 0 only (subsequent rounds rebuild
     context from trajectory + policies).
     """
+
     CHANNEL: ClassVar[str] = "before_run"
     messages: tuple[AgentMessage, ...] = ()
     system: str | None = None
@@ -172,6 +185,7 @@ class RunEndEvent(Event):
 
 
 # --- Session lifecycle ------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class SessionReadyEvent(Event):
@@ -209,6 +223,7 @@ class ChildSessionEndEvent(Event):
 
 
 # --- Diagnostic -------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class DiagnosticEvent(Event):

@@ -131,9 +131,7 @@ def _final_assistant_text(messages: Sequence[AgentMessage]) -> str | None:
             if isinstance(text, str) and text.strip():
                 return text
         chunks = [
-            block.text
-            for block in message.content
-            if isinstance(block, TextContent)
+            block.text for block in message.content if isinstance(block, TextContent)
         ]
         if chunks:
             return "\n".join(chunks)
@@ -167,7 +165,7 @@ def _subagent_result_text(state: _ChildTask) -> str:
     if state.superseded_by is not None:
         lines.append(
             "  <note>This result is stale because a newer dispatch "
-            f"({ _xml_attr(state.superseded_by) }) superseded it.</note>"
+            f"({_xml_attr(state.superseded_by)}) superseded it.</note>"
         )
     if state.summary:
         lines.append(f"  <summary>{_xml_attr(state.summary)}</summary>")
@@ -260,8 +258,8 @@ class _ChildTaskManager:
         self._api = api
         self._max_workers = max_workers
         self._shutdown_grace_seconds = shutdown_grace_seconds
-        self._registry: BackgroundTaskRegistry[_ChildTask] = (
-            BackgroundTaskRegistry(max_workers=max_workers)
+        self._registry: BackgroundTaskRegistry[_ChildTask] = BackgroundTaskRegistry(
+            max_workers=max_workers
         )
         self._shutting_down = False
 
@@ -289,11 +287,7 @@ class _ChildTaskManager:
                 superseded = self._registry.get(request.supersedes)
             if superseded is None:
                 return _tool_result(
-                    {
-                        "error": (
-                            f"unknown supersedes task_id: {request.supersedes}"
-                        )
-                    },
+                    {"error": (f"unknown supersedes task_id: {request.supersedes}")},
                     is_error=True,
                 )
 
@@ -317,9 +311,7 @@ class _ChildTaskManager:
             loop_config=self._parent_loop_config(),
             purpose=request.purpose,
             cancel_signal=cancel_source,
-            parent_cancellation=(
-                "independent" if request.background else "inherit"
-            ),
+            parent_cancellation=("independent" if request.background else "inherit"),
         )
         try:
             child = await self._api.spawn_child_session(child_config)
@@ -394,9 +386,7 @@ class _ChildTaskManager:
             await state.session.run(prompt)
             await state.session.idle()
             state.final_messages = state.session.get_messages()
-            state.status = (
-                _ABORTED if state.abort_signal.is_set() else _COMPLETED
-            )
+            state.status = _ABORTED if state.abort_signal.is_set() else _COMPLETED
         except asyncio.CancelledError:
             state.abort_signal.set(
                 state.abort_signal.reason or "task_stop",
@@ -471,17 +461,11 @@ class _ChildTaskManager:
                     is_error=True,
                 )
             state.session.push_trigger(
-                UserInput(
-                    content=(
-                        TextContent(type="text", text=request.message),
-                    )
-                ),
+                UserInput(content=(TextContent(type="text", text=request.message),)),
                 priority="now",
                 origin="subagent",
             )
-        return _tool_result(
-            {"task_id": request.task_id, "status": _RUNNING}
-        )
+        return _tool_result({"task_id": request.task_id, "status": _RUNNING})
 
     async def abort(self, args: dict[str, object]) -> ToolResult:
         try:
@@ -497,20 +481,14 @@ class _ChildTaskManager:
                 )
             if state.status != _RUNNING:
                 return _tool_result(
-                    {
-                        "error": (
-                            f"task {request.task_id} is already {state.status}"
-                        )
-                    },
+                    {"error": (f"task {request.task_id} is already {state.status}")},
                     is_error=True,
                 )
             state.abort_signal.set("task_stop")
             state.session.interrupt("task_stop")
             if state.task is not None:
                 state.task.cancel()
-        return _tool_result(
-            {"task_id": request.task_id, "status": "cancelling"}
-        )
+        return _tool_result({"task_id": request.task_id, "status": "cancelling"})
 
     async def check_agent(
         self,
@@ -540,11 +518,7 @@ class _ChildTaskManager:
             for state in running:
                 state.abort_signal.set("shutdown")
                 state.session.interrupt("shutdown")
-        tasks = [
-            state.task
-            for state in running
-            if state.task is not None
-        ]
+        tasks = [state.task for state in running if state.task is not None]
         if not tasks:
             return
         _, pending = await asyncio.wait(

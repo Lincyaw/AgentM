@@ -28,10 +28,18 @@ config_app = typer.Typer(
 
 @config_app.command("show")
 def show(
-    scenario: Optional[str] = typer.Option(None, "-s", "--scenario", help="Scenario to resolve"),
-    project_config: Optional[str] = typer.Option(None, "--project-config", help="Project config TOML path"),
-    user_config: Optional[str] = typer.Option(None, "--user-config", help="User config TOML path"),
-    format: str = typer.Option("text", "--format", "-f", help="Output format: text, json"),
+    scenario: Optional[str] = typer.Option(
+        None, "-s", "--scenario", help="Scenario to resolve"
+    ),
+    project_config: Optional[str] = typer.Option(
+        None, "--project-config", help="Project config TOML path"
+    ),
+    user_config: Optional[str] = typer.Option(
+        None, "--user-config", help="User config TOML path"
+    ),
+    format: str = typer.Option(
+        "text", "--format", "-f", help="Output format: text, json"
+    ),
 ) -> None:
     """Display the resolved session configuration.
 
@@ -74,17 +82,14 @@ def show(
         "scenario": spec.scenario,
         "provider": {
             "name": spec.provider_identity.name if spec.provider_identity else None,
-            "model": spec.provider_identity.model_id if spec.provider_identity else None,
+            "model": spec.provider_identity.model_id
+            if spec.provider_identity
+            else None,
             "source": (
-                _extension_record(spec.provider)
-                if spec.provider is not None
-                else None
+                _extension_record(spec.provider) if spec.provider is not None else None
             ),
         },
-        "extensions": [
-            _extension_record(extension)
-            for extension in spec.extensions
-        ],
+        "extensions": [_extension_record(extension) for extension in spec.extensions],
         "atom_config": dict(spec.atom_config),
         "provenance": [
             {
@@ -97,7 +102,9 @@ def show(
     }
 
     if format == "json":
-        sys.stdout.write(json.dumps(result, indent=2, ensure_ascii=False, default=str) + "\n")
+        sys.stdout.write(
+            json.dumps(result, indent=2, ensure_ascii=False, default=str) + "\n"
+        )
         return
 
     from rich.table import Table
@@ -148,7 +155,9 @@ def show(
 
 @config_app.command("init")
 def init(
-    path: Optional[str] = typer.Argument(None, help="Output path (default: ./agentm.toml)"),
+    path: Optional[str] = typer.Argument(
+        None, help="Output path (default: ./agentm.toml)"
+    ),
     force: bool = typer.Option(False, "--force", help="Overwrite existing file"),
 ) -> None:
     """Create a starter agentm.toml in the current directory.
@@ -162,7 +171,9 @@ def init(
     target = Path(path) if path else Path.cwd() / "agentm.toml"
 
     if target.exists() and not force:
-        stderr_console.print(f"[red]error: {target} already exists (use --force to overwrite)[/red]")
+        stderr_console.print(
+            f"[red]error: {target} already exists (use --force to overwrite)[/red]"
+        )
         raise typer.Exit(EXIT_ERROR)
 
     template = """\

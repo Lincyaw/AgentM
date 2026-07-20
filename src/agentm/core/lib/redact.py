@@ -236,9 +236,8 @@ def redact_config(value: Any) -> Any:
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
             normalized = key.lower() if isinstance(key, str) else ""
-            if (
-                normalized in _SENSITIVE_CONFIG_NAMES
-                or normalized.endswith(_SENSITIVE_CONFIG_SUFFIXES)
+            if normalized in _SENSITIVE_CONFIG_NAMES or normalized.endswith(
+                _SENSITIVE_CONFIG_SUFFIXES
             ):
                 redacted[key] = "***"
             elif normalized.endswith("headers"):

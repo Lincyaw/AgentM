@@ -116,17 +116,13 @@ class LocalBashOperations:
         stdout_task = asyncio.create_task(
             read_stream(process.stdout, stdout_chunks, on_data)
         )
-        stderr_task = asyncio.create_task(
-            read_stream(process.stderr, stderr_chunks)
-        )
+        stderr_task = asyncio.create_task(read_stream(process.stderr, stderr_chunks))
         stdin_task = (
             asyncio.create_task(_write_stdin(process.stdin, stdin))
             if stdin is not None and process.stdin is not None
             else None
         )
-        signal_task = (
-            asyncio.create_task(signal.wait()) if signal is not None else None
-        )
+        signal_task = asyncio.create_task(signal.wait()) if signal is not None else None
         wait_task = asyncio.create_task(process.wait())
         interrupted = False
         try:
@@ -172,9 +168,7 @@ class LocalBashOperations:
             stdout=b"".join(stdout_chunks),
             stderr=b"".join(stderr_chunks),
             exit_code=(
-                process.returncode
-                if process.returncode is not None
-                else -SIGKILL
+                process.returncode if process.returncode is not None else -SIGKILL
             ),
             timed_out=timed_out,
         )
@@ -403,9 +397,7 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
                 return None
             turn_id = snapshot.metadata.get("turn_id")
             if not isinstance(turn_id, str) or not turn_id:
-                raise RuntimeError(
-                    f"snapshot {snapshot.id!r} has no committed turn id"
-                )
+                raise RuntimeError(f"snapshot {snapshot.id!r} has no committed turn id")
             snapshot_id = f"{_ref_token(child_session_id)}-fork-{uuid.uuid4().hex}"
             target = self._snapshot_dir(snapshot_id) / "workspace"
             _copytree(
@@ -524,9 +516,7 @@ class LocalSnapshotStore(EnvironmentSnapshotter):
     def _snapshot_source(self, snapshot: EnvironmentSnapshot) -> Path:
         policy_id = snapshot.metadata.get("copy_policy_id")
         if policy_id != self._copy_policy_id:
-            raise ValueError(
-                f"snapshot {snapshot.id!r} uses a different copy policy"
-            )
+            raise ValueError(f"snapshot {snapshot.id!r} uses a different copy policy")
         path = snapshot.metadata.get("path")
         if not isinstance(path, str):
             raise ValueError(f"snapshot {snapshot.id!r} has no local path")
@@ -848,9 +838,7 @@ def _snapshot_created_at(snapshot: EnvironmentSnapshot) -> float:
         or isinstance(value, bool)
         or not math.isfinite(value)
     ):
-        raise ValueError(
-            f"snapshot {snapshot.id!r} has invalid created_at metadata"
-        )
+        raise ValueError(f"snapshot {snapshot.id!r} has invalid created_at metadata")
     return float(value)
 
 

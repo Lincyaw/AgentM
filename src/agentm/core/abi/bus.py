@@ -219,9 +219,7 @@ class EventBus:
         self._handlers.clear()
         self._observers.clear()
 
-    def _observer_emit_start(
-        self, channel: str, event: Any, dispatch_id: str
-    ) -> None:
+    def _observer_emit_start(self, channel: str, event: Any, dispatch_id: str) -> None:
         for observer in list(self._observers):
             try:
                 observer.on_emit_start(channel, event, dispatch_id)

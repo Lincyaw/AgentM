@@ -222,7 +222,12 @@ from .roles import (
     TRAJECTORY_QUERY_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_SERVICE,
 )
-from .services import ServiceNotFound, ServiceRegistry, ServiceScope, ServiceTypeMismatch
+from .services import (
+    ServiceNotFound,
+    ServiceRegistry,
+    ServiceScope,
+    ServiceTypeMismatch,
+)
 from .session_api import (
     AgentSessionConfig,
     AtomAPI,

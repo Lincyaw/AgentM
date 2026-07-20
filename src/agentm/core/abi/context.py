@@ -53,6 +53,7 @@ from agentm.core.abi.trigger import (
     UserInput,
 )
 
+
 @dataclass(frozen=True, slots=True)
 class PolicyContext:
     """Session-scoped context given to a ContextPolicy at bind time."""
@@ -167,9 +168,7 @@ def render_trigger(
     if isinstance(trigger, SubagentResult):
         return _render_system_reminder("subagent", trigger.payload)
 
-    raise LookupError(
-        f"trigger source {source!r} has no registered TriggerRenderer"
-    )
+    raise LookupError(f"trigger source {source!r} has no registered TriggerRenderer")
 
 
 # --- Turn → messages --------------------------------------------------------
@@ -248,12 +247,10 @@ def apply_trigger_metadata(
                         "hidden" if metadata.is_meta else message.meta.visibility
                     ),
                     target_session_id=(
-                        metadata.target_session_id
-                        or message.meta.target_session_id
+                        metadata.target_session_id or message.meta.target_session_id
                     ),
                     target_agent_id=(
-                        metadata.target_agent_id
-                        or message.meta.target_agent_id
+                        metadata.target_agent_id or message.meta.target_agent_id
                     ),
                     mode=metadata.mode or message.meta.mode,
                     tags=tags,
@@ -294,9 +291,7 @@ async def build_context(
     Async so policies can make LLM calls (compaction).
     """
 
-    replayable_turns = tuple(
-        turn for turn in turns if turn.outcome.cause.replayable
-    )
+    replayable_turns = tuple(turn for turn in turns if turn.outcome.cause.replayable)
     messages: list[AgentMessage] = []
     for turn in replayable_turns:
         messages.extend(turn_to_messages(turn, renderers))

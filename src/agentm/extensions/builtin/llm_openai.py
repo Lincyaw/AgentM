@@ -114,6 +114,7 @@ class LlmOpenaiConfig(BaseModel):
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
 
+
 MANIFEST = ExtensionManifest(
     name="llm_openai",
     description="Register an OpenAI Chat Completions API LLM stream provider.",
@@ -233,17 +234,26 @@ def _is_openai_retryable(exc: BaseException) -> bool:
         return True
     return False
 
+
 # Keywords that XGrammar-based constrained-decoding engines (Volcengine Ark,
 # vLLM, SGLang) cannot compile into an EBNF grammar. Leaving them in the
 # schema triggers ``Invalid decoding guidance syntax`` 400 errors. Safe to
 # strip: they are validation constraints, not structural schema description;
 # the LLM generates conforming output from the property descriptions alone.
-_XGRAMMAR_UNSUPPORTED = frozenset({
-    "minItems", "maxItems",
-    "minLength", "maxLength",
-    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
-    "prefixItems",
-})
+_XGRAMMAR_UNSUPPORTED = frozenset(
+    {
+        "minItems",
+        "maxItems",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "prefixItems",
+    }
+)
+
 
 def _strip_validation_constraints(node: Any) -> None:
     """Remove XGrammar-unsupported keywords from a schema in-place."""
@@ -255,6 +265,7 @@ def _strip_validation_constraints(node: Any) -> None:
     elif isinstance(node, list):
         for value in node:
             _strip_validation_constraints(value)
+
 
 def _default_httpx_client(*, verify: bool) -> Any:
     # Without explicit read timeout, a half-dead TCP connection (server
@@ -270,7 +281,9 @@ def _default_httpx_client(*, verify: bool) -> Any:
     )
     return httpx.AsyncClient(verify=verify, timeout=timeout)
 
+
 # --- Model registry ---------------------------------------------------------
+
 
 def _build_model(
     model_id: str,
@@ -296,7 +309,9 @@ def _build_model(
         max_output_tokens=max_output_tokens,
     )
 
+
 # --- Message / tool serialization ------------------------------------------
+
 
 def _encode_image(image: ImageContent) -> dict[str, Any]:
     """Convert kernel ``ImageContent`` to an OpenAI multimodal content part.
@@ -309,6 +324,7 @@ def _encode_image(image: ImageContent) -> dict[str, Any]:
         "type": "image_url",
         "image_url": {"url": f"data:{image.mime_type};base64,{encoded}"},
     }
+
 
 def _encode_user_content(
     blocks: list[TextContent | ImageContent],
@@ -328,6 +344,7 @@ def _encode_user_content(
         else:  # pragma: no cover - exhaustive over the union
             raise TypeError(f"unexpected user content type: {type(block)!r}")
     return parts
+
 
 def _encode_assistant_message(
     msg: AssistantMessage,
@@ -356,7 +373,9 @@ def _encode_assistant_message(
                     "type": "function",
                     "function": {
                         "name": block.name,
-                        "arguments": OpenAIToolSpecAdapter().encode_tool_args(block.arguments),
+                        "arguments": OpenAIToolSpecAdapter().encode_tool_args(
+                            block.arguments
+                        ),
                     },
                 }
             )
@@ -396,6 +415,7 @@ def _encode_assistant_message(
         return [note, out]
     return [out]
 
+
 def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
     """One ``ToolResultBlock`` → one OpenAI ``tool``-role message.
 
@@ -410,6 +430,7 @@ def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
         "tool_call_id": block.tool_call_id,
         "content": text,
     }
+
 
 def _to_openai_messages(
     messages: list[AgentMessage],
@@ -448,6 +469,7 @@ def _to_openai_messages(
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
+
 @dataclass(frozen=True, slots=True)
 class OpenAIToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to OpenAI function-tool specs.
@@ -479,13 +501,18 @@ class OpenAIToolSpecAdapter(ToolSpecAdapter):
     def encode_tool_args(self, args: Mapping[str, Any]) -> str:
         return encode_tool_args(args)
 
+
 def _to_openai_tools(
-    tools: list[Tool], *, strict: bool = True,
+    tools: list[Tool],
+    *,
+    strict: bool = True,
 ) -> list[dict[str, Any]]:
     adapter = OpenAIToolSpecAdapter(strict=strict)
     return [adapter.vendor_spec(t) for t in tools]
 
+
 # --- Streaming bridge -------------------------------------------------------
+
 
 @dataclass(slots=True)
 class _StreamState:
@@ -497,6 +524,7 @@ class _StreamState:
     usage: Usage | None = None
     stop_reason: str | None = None
     termination: TerminationHint | None = None
+
 
 def _map_finish_reason(raw: str | None) -> TerminationHint | None:
     """Translate OpenAI ``finish_reason`` into a kernel ``TerminationHint``.
@@ -520,6 +548,7 @@ def _map_finish_reason(raw: str | None) -> TerminationHint | None:
         # signal: the model paused mid-output and expects a resend.
         return PauseTurn()
     return VendorSpecific(raw=raw)
+
 
 def _extract_usage(usage_obj: Any) -> Usage | None:
     """Pull ``Usage`` out of an OpenAI ``CompletionUsage`` (or partial)."""
@@ -555,6 +584,7 @@ def _extract_usage(usage_obj: Any) -> Usage | None:
         cache_write=0,
     )
 
+
 def _flush_tool_call(state: _StreamState, index: int) -> None:
     scratch = state.tool_scratch.get(index)
     if scratch is None or scratch.get("flushed"):
@@ -563,17 +593,11 @@ def _flush_tool_call(state: _StreamState, index: int) -> None:
     tool_name = scratch.get("name")
     arguments = scratch.get("arguments")
     if not isinstance(tool_id, str) or not tool_id:
-        raise ValueError(
-            f"OpenAI tool call at index {index} ended without an id"
-        )
+        raise ValueError(f"OpenAI tool call at index {index} ended without an id")
     if not isinstance(tool_name, str) or not tool_name:
-        raise ValueError(
-            f"OpenAI tool call at index {index} ended without a name"
-        )
+        raise ValueError(f"OpenAI tool call at index {index} ended without a name")
     if not isinstance(arguments, str):
-        raise TypeError(
-            f"OpenAI tool call arguments at index {index} must be a string"
-        )
+        raise TypeError(f"OpenAI tool call arguments at index {index} must be a string")
     state.accumulator.add_tool_call(
         id=tool_id,
         name=tool_name,
@@ -599,9 +623,7 @@ def _optional_sdk_string(value: object, name: str) -> str | None:
     if item is None:
         return None
     if not isinstance(item, str):
-        raise TypeError(
-            f"OpenAI SDK field {name!r} must be a string or None"
-        )
+        raise TypeError(f"OpenAI SDK field {name!r} must be a string or None")
     return item
 
 
@@ -617,9 +639,7 @@ def _nonnegative_sdk_int(
             raise ValueError(f"OpenAI SDK field {name!r} is required")
         return default
     if not isinstance(item, int) or isinstance(item, bool) or item < 0:
-        raise TypeError(
-            f"OpenAI SDK field {name!r} must be a non-negative integer"
-        )
+        raise TypeError(f"OpenAI SDK field {name!r} must be a non-negative integer")
     return item
 
 
@@ -645,7 +665,9 @@ class _OpenAIAsyncStream(Protocol):
 
     async def close(self) -> None: ...
 
+
 # --- Public callable -------------------------------------------------------
+
 
 @dataclass(slots=True)
 class OpenAIStreamFn:
@@ -945,6 +967,7 @@ class OpenAIStreamFn:
             yield parse_error
         yield MessageEnd(message=assembled)
 
+
 async def _translate_chunk(
     chunk: Any,
     state: _StreamState,
@@ -967,9 +990,7 @@ async def _translate_chunk(
     if not choices:
         return
     if len(choices) != 1:
-        raise ValueError(
-            "OpenAIStreamFn supports exactly one streamed choice"
-        )
+        raise ValueError("OpenAIStreamFn supports exactly one streamed choice")
 
     choice = choices[0]
     delta = _optional_sdk_attr(choice, "delta")
@@ -978,13 +999,11 @@ async def _translate_chunk(
         role = _optional_sdk_string(delta, "role")
         if role is not None and role != "assistant":
             raise ValueError(
-                "OpenAI stream delta role must be 'assistant', "
-                f"got {role!r}"
+                f"OpenAI stream delta role must be 'assistant', got {role!r}"
             )
         if _optional_sdk_attr(delta, "function_call") is not None:
             raise ValueError(
-                "OpenAI deprecated function_call deltas are not modeled; "
-                "use tool_calls"
+                "OpenAI deprecated function_call deltas are not modeled; use tool_calls"
             )
 
         # 1) Reasoning content (OpenAI o-series, DeepSeek-R1, LiteLLM Kimi).
@@ -1014,23 +1033,14 @@ async def _translate_chunk(
             tool_type = _optional_sdk_string(tc, "type")
             if tool_type is not None and tool_type != "function":
                 raise ValueError(
-                    "OpenAI tool call type must be 'function', "
-                    f"got {tool_type!r}"
+                    f"OpenAI tool call type must be 'function', got {tool_type!r}"
                 )
             index = _nonnegative_sdk_int(tc, "index")
             scratch = state.tool_scratch.get(index)
             tc_id = _optional_sdk_string(tc, "id")
             fn = _optional_sdk_attr(tc, "function")
-            fn_name = (
-                _optional_sdk_string(fn, "name")
-                if fn is not None
-                else None
-            )
-            fn_args = (
-                _optional_sdk_string(fn, "arguments")
-                if fn is not None
-                else None
-            )
+            fn_name = _optional_sdk_string(fn, "name") if fn is not None else None
+            fn_args = _optional_sdk_string(fn, "arguments") if fn is not None else None
 
             if scratch is None:
                 # First time we see this index — open a tool call block.
@@ -1059,9 +1069,7 @@ async def _translate_chunk(
             if fn_args:
                 scratch["arguments"] = scratch.get("arguments", "") + fn_args
                 if scratch["started"]:
-                    yield ToolCallArgsDelta(
-                        id=scratch["id"], args_json_delta=fn_args
-                    )
+                    yield ToolCallArgsDelta(id=scratch["id"], args_json_delta=fn_args)
 
     # 5) Stop reason — emit pending ToolCallEnd events for tools, then record.
     finish_reason = _optional_sdk_string(choice, "finish_reason")
@@ -1073,8 +1081,10 @@ async def _translate_chunk(
             )
         for index in state.tool_order:
             scratch = state.tool_scratch.get(index)
-            if scratch is not None and scratch.get("started") and not scratch.get(
-                "ended"
+            if (
+                scratch is not None
+                and scratch.get("started")
+                and not scratch.get("ended")
             ):
                 yield ToolCallEnd(id=scratch["id"])
                 scratch["ended"] = True
@@ -1082,7 +1092,9 @@ async def _translate_chunk(
         state.stop_reason = finish_reason
         state.termination = _map_finish_reason(finish_reason)
 
+
 # --- Extension entrypoint --------------------------------------------------
+
 
 class _OpenAIProviderRuntime:
     """Install-time provider registration runtime for OpenAI-compatible models."""
@@ -1130,7 +1142,9 @@ class _OpenAIProviderRuntime:
         return not _is_non_canonical_base_url(self._config.base_url)
 
     def _verify_ssl(self) -> bool:
-        verify_ssl = self._config.verify_ssl if self._config.verify_ssl is not None else True
+        verify_ssl = (
+            self._config.verify_ssl if self._config.verify_ssl is not None else True
+        )
         if not verify_ssl:
             self._session.bus.emit_sync(
                 DiagnosticEvent.CHANNEL,
@@ -1216,6 +1230,7 @@ def install(session: Any, config: LlmOpenaiConfig) -> None:
 
     _OpenAIProviderRuntime(session, config).install()
 
+
 # Canonical OpenAI base URLs — anything else is treated as a custom endpoint
 # (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for
 # such an endpoint the provider would otherwise silently register under the
@@ -1229,12 +1244,16 @@ _CANONICAL_OPENAI_BASE_URLS: frozenset[str] = frozenset(
     }
 )
 
+
 def _is_non_canonical_base_url(base_url: object) -> bool:
     if base_url is None:
         return False
     if not isinstance(base_url, str) or not base_url.strip():
         return False
-    return base_url.rstrip("/") not in {url.rstrip("/") for url in _CANONICAL_OPENAI_BASE_URLS}
+    return base_url.rstrip("/") not in {
+        url.rstrip("/") for url in _CANONICAL_OPENAI_BASE_URLS
+    }
+
 
 class DuplicateProviderError(ValueError):
     """Raised when an OpenAI-compatible provider would shadow an existing one.
@@ -1247,6 +1266,7 @@ class DuplicateProviderError(ValueError):
       collide with another custom endpoint registered in the same session.
     * The session already has a provider registered under the requested name.
     """
+
 
 __all__ = (
     "DuplicateProviderError",

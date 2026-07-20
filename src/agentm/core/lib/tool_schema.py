@@ -55,7 +55,9 @@ def pydantic_to_tool_schema(
     return _resolve_refs({k: v for k, v in raw.items() if k != "$defs"}, defs)
 
 
-def _resolve_refs(node: Any, defs: dict[str, Any], *, _inside_properties: bool = False) -> Any:
+def _resolve_refs(
+    node: Any, defs: dict[str, Any], *, _inside_properties: bool = False
+) -> Any:
     if isinstance(node, dict):
         ref = node.get("$ref")
         if isinstance(ref, str) and ref.startswith("#/$defs/"):

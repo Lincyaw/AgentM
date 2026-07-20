@@ -113,8 +113,7 @@ class ToolExecutionRequest:
         object.__setattr__(self, "args", frozen_args)
         if not isinstance(self.requirements, ToolExecutionRequirements):
             raise TypeError(
-                "tool execution request requirements must be "
-                "ToolExecutionRequirements"
+                "tool execution request requirements must be ToolExecutionRequirements"
             )
         if self.environment is not None and not isinstance(
             self.environment,
@@ -125,12 +124,9 @@ class ToolExecutionRequest:
             )
         if self.cwd is not None and (not isinstance(self.cwd, str) or not self.cwd):
             raise TypeError("tool execution request cwd must be non-empty or None")
-        if (
-            self.requirements.environment_id is not None
-            and (
-                self.environment is None
-                or self.environment.id != self.requirements.environment_id
-            )
+        if self.requirements.environment_id is not None and (
+            self.environment is None
+            or self.environment.id != self.requirements.environment_id
         ):
             raise ValueError(
                 "tool execution request environment does not satisfy environment_id"
@@ -161,24 +157,21 @@ class EnvironmentExecutableTool(Protocol):
         environment: EnvironmentOperations,
         cwd: str | None = None,
         signal: CancelSignal | None = None,
-    ) -> ToolResult | ToolOutcome:
-        ...
+    ) -> ToolResult | ToolOutcome: ...
 
 
 @runtime_checkable
 class ToolExecutor(Protocol):
     """Runtime-owned boundary that executes tool calls."""
 
-    def capabilities(self) -> ToolExecutionCapabilities:
-        ...
+    def capabilities(self) -> ToolExecutionCapabilities: ...
 
     async def execute(
         self,
         request: ToolExecutionRequest,
         *,
         signal: CancelSignal | None = None,
-    ) -> ToolResult | ToolOutcome:
-        ...
+    ) -> ToolResult | ToolOutcome: ...
 
 
 def tool_execution_requirements(tool: Tool) -> ToolExecutionRequirements:
@@ -194,9 +187,7 @@ def tool_execution_requirements(tool: Tool) -> ToolExecutionRequirements:
     if candidate is None:
         return ToolExecutionRequirements()
     if not isinstance(candidate, ToolExecutionRequirements):
-        raise TypeError(
-            f"tool {tool.name!r} declares invalid execution_requirements"
-        )
+        raise TypeError(f"tool {tool.name!r} declares invalid execution_requirements")
     return candidate
 
 

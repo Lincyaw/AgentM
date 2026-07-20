@@ -103,8 +103,7 @@ def _owned_resource_transactions(
             previous = transactions.get(transaction.id)
             if previous is not None and previous != transaction:
                 raise ValueError(
-                    f"resource transaction {transaction.id!r} has conflicting "
-                    "ownership"
+                    f"resource transaction {transaction.id!r} has conflicting ownership"
                 )
             transactions[transaction.id] = transaction
     return tuple(transactions.values())

@@ -341,9 +341,7 @@ def _session_shutdown_to_otel(event: SessionShutdownEvent, telemetry: Any) -> No
         run_span.end()
     telemetry.close_open_spans(status_description="session shutdown")
     duration_ns = (
-        end_ns - telemetry.obs_session_start_ns
-        if telemetry.obs_session_start_ns
-        else 0
+        end_ns - telemetry.obs_session_start_ns if telemetry.obs_session_start_ns else 0
     )
     telemetry.emit_log(
         "agentm.session.end",

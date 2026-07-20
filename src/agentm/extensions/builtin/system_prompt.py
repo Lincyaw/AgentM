@@ -91,5 +91,7 @@ class _SystemPromptRuntime:
 
 
 def install(session: AtomAPI, config: SystemPromptConfig) -> None:
-    prompt = _resolve_prompt(config, cwd=session.ctx.cwd, scenario_dir=session.ctx.scenario_dir)
+    prompt = _resolve_prompt(
+        config, cwd=session.ctx.cwd, scenario_dir=session.ctx.scenario_dir
+    )
     _SystemPromptRuntime(session, prompt).install()

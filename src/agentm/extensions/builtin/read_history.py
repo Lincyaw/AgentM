@@ -180,8 +180,7 @@ def _render_message(
                 a_parts.append(f"[assistant thinking] {a_block.text}")
             elif isinstance(a_block, OpaqueThinkingBlock):
                 a_parts.append(
-                    "[assistant opaque thinking] "
-                    f"provider={a_block.provider}"
+                    f"[assistant opaque thinking] provider={a_block.provider}"
                 )
             elif isinstance(a_block, TextContent):
                 a_parts.append(f"[assistant] {a_block.text}")

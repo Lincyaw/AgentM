@@ -27,7 +27,9 @@ def main(argv: list[str] | None = None) -> int:
         Path(result_path).write_text(encode_tool_output(result), encoding="utf-8")
         return 0
     except Exception as exc:  # noqa: BLE001
-        print(f"agentm tool worker failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            f"agentm tool worker failed: {type(exc).__name__}: {exc}", file=sys.stderr
+        )
         return 1
 
 

@@ -168,7 +168,9 @@ class ResourceMutation:
         if self.op == "replace" and (
             self.before_version is None or self.after_version is None
         ):
-            raise ValueError("replace mutation requires before_version and after_version")
+            raise ValueError(
+                "replace mutation requires before_version and after_version"
+            )
         if self.op == "delete" and self.after_version is not None:
             raise ValueError("delete mutation cannot have an after_version")
         object.__setattr__(
@@ -333,8 +335,7 @@ class ResourceTxn(Protocol):
         *,
         rationale: str,
         author: WriterAuthor = "agent",
-    ) -> ResourceMutation:
-        ...
+    ) -> ResourceMutation: ...
 
     async def delete(
         self,
@@ -342,20 +343,15 @@ class ResourceTxn(Protocol):
         *,
         rationale: str,
         author: WriterAuthor = "agent",
-    ) -> ResourceMutation:
-        ...
+    ) -> ResourceMutation: ...
 
-    async def prepare(self) -> Sequence[ResourceMutation]:
-        ...
+    async def prepare(self) -> Sequence[ResourceMutation]: ...
 
-    async def apply(self) -> None:
-        ...
+    async def apply(self) -> None: ...
 
-    async def commit(self) -> None:
-        ...
+    async def commit(self) -> None: ...
 
-    async def abandon(self) -> None:
-        ...
+    async def abandon(self) -> None: ...
 
 
 @runtime_checkable
@@ -402,8 +398,7 @@ class ResourceWriter(Protocol):
 class TransactionalResourceWriter(ResourceWriter, Protocol):
     """ResourceWriter that can create turn-scoped transactions."""
 
-    async def begin_txn(self, context: ResourceTxnContext) -> ResourceTxn:
-        ...
+    async def begin_txn(self, context: ResourceTxnContext) -> ResourceTxn: ...
 
     async def recover(self, context: ResourceRecoveryContext) -> None:
         """Finalize committed prepared txns and discard uncommitted staging."""
@@ -425,8 +420,7 @@ class EnvironmentForkableResourceWriter(Protocol):
         *,
         workspace_root: str,
         child_session_id: str,
-    ) -> ResourceWriter:
-        ...
+    ) -> ResourceWriter: ...
 
 
 __all__ = [

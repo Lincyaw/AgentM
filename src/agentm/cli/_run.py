@@ -104,13 +104,27 @@ async def _execute(
 
 
 def run(
-    message: Optional[str] = typer.Option(None, "-m", "--message", help="Prompt text (reads stdin if omitted)"),
-    scenario: Optional[str] = typer.Option(None, "-s", "--scenario", help="Named scenario"),
-    extension: Optional[list[str]] = typer.Option(None, "-e", "--extension", help="Extra extension modules"),
-    project_config: Optional[str] = typer.Option(None, "--project-config", help="Project config TOML path"),
-    user_config: Optional[str] = typer.Option(None, "--user-config", help="User config TOML path"),
-    system: Optional[str] = typer.Option(None, "--system", help="System prompt override"),
-    format: str = typer.Option("text", "--format", "-f", help="Output format: text, json"),
+    message: Optional[str] = typer.Option(
+        None, "-m", "--message", help="Prompt text (reads stdin if omitted)"
+    ),
+    scenario: Optional[str] = typer.Option(
+        None, "-s", "--scenario", help="Named scenario"
+    ),
+    extension: Optional[list[str]] = typer.Option(
+        None, "-e", "--extension", help="Extra extension modules"
+    ),
+    project_config: Optional[str] = typer.Option(
+        None, "--project-config", help="Project config TOML path"
+    ),
+    user_config: Optional[str] = typer.Option(
+        None, "--user-config", help="User config TOML path"
+    ),
+    system: Optional[str] = typer.Option(
+        None, "--system", help="System prompt override"
+    ),
+    format: str = typer.Option(
+        "text", "--format", "-f", help="Output format: text, json"
+    ),
 ) -> None:
     """Run a single prompt and exit.
 
@@ -127,7 +141,9 @@ def run(
         agentm run -m "translate" --system "You are a translator." --format json
     """
     if format not in ("text", "json"):
-        stderr_console.print(f"[red]error: --format must be 'text' or 'json', got {format!r}[/red]")
+        stderr_console.print(
+            f"[red]error: --format must be 'text' or 'json', got {format!r}[/red]"
+        )
         raise typer.Exit(EXIT_USAGE)
 
     if message is None:
@@ -140,12 +156,14 @@ def run(
         stderr_console.print("[red]error: empty message[/red]")
         raise typer.Exit(EXIT_USAGE)
 
-    asyncio.run(_execute(
-        message,
-        scenario=scenario,
-        extensions=extension or [],
-        project_config=project_config,
-        user_config=user_config,
-        system_prompt=system,
-        output_format=format,
-    ))
+    asyncio.run(
+        _execute(
+            message,
+            scenario=scenario,
+            extensions=extension or [],
+            project_config=project_config,
+            user_config=user_config,
+            system_prompt=system,
+            output_format=format,
+        )
+    )

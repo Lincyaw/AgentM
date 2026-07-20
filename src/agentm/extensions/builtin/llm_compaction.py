@@ -552,9 +552,9 @@ def _boundary_id(
     turn_id: str,
     summary_ref: ResourceRef,
 ) -> str:
-    material = "\0".join(
-        (state_key, session_id, turn_id, summary_ref.uri())
-    ).encode("utf-8")
+    material = "\0".join((state_key, session_id, turn_id, summary_ref.uri())).encode(
+        "utf-8"
+    )
     digest = hashlib.sha256(material).hexdigest()[:24]
     return f"session:{session_id}:compact:{digest}"
 

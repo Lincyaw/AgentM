@@ -88,7 +88,9 @@ class ToolOutcome:
 
     def __post_init__(self) -> None:
         if type(self) is ToolOutcome:
-            raise TypeError("ToolOutcome is abstract; use ToolContinue or ToolTerminate")
+            raise TypeError(
+                "ToolOutcome is abstract; use ToolContinue or ToolTerminate"
+            )
 
 
 @dataclass(slots=True, frozen=True)

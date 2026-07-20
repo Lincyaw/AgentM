@@ -144,7 +144,9 @@ async def _run_chat(
             interrupted = False
             collector.reset()
 
-            with Live(Text("..."), console=console, refresh_per_second=12, transient=True) as live:
+            with Live(
+                Text("..."), console=console, refresh_per_second=12, transient=True
+            ) as live:
                 collector.attach_live(live)
                 try:
                     receipt = await session.prompt(text)
@@ -163,10 +165,16 @@ async def _run_chat(
             console.set_window_title(stats.title_string())
 
             if isinstance(last.outcome.cause, SignalAborted):
-                console.print(f"[yellow]⚡ interrupted: {last.outcome.cause.reason}[/yellow]")
+                console.print(
+                    f"[yellow]⚡ interrupted: {last.outcome.cause.reason}[/yellow]"
+                )
                 for rnd in last.rounds:
                     for tr in rnd.tool_results:
-                        t = "".join(b.text for b in tr.result.content if isinstance(b, TextContent))
+                        t = "".join(
+                            b.text
+                            for b in tr.result.content
+                            if isinstance(b, TextContent)
+                        )
                         if t:
                             err = " ERROR" if tr.result.is_error else ""
                             console.print(f"[dim]  [tool{err}] {t}[/dim]")
@@ -180,13 +188,13 @@ async def _run_chat(
                     if isinstance(block, ThinkingBlock):
                         thinking_parts.append(block.text)
                     elif isinstance(block, OpaqueThinkingBlock):
-                        thinking_parts.append(
-                            f"[opaque reasoning: {block.provider}]"
-                        )
+                        thinking_parts.append(f"[opaque reasoning: {block.provider}]")
                     elif isinstance(block, TextContent):
                         text_parts.append(block.text)
                     elif isinstance(block, ToolCallBlock):
-                        console.print(f"[dim]⚙ {block.name}({dict(block.arguments)})[/dim]")
+                        console.print(
+                            f"[dim]⚙ {block.name}({dict(block.arguments)})[/dim]"
+                        )
 
                 if thinking_parts:
                     thinking_text = "\n".join(thinking_parts)
@@ -199,7 +207,9 @@ async def _run_chat(
                     console.print("\n".join(text_parts))
 
                 for tr in rnd.tool_results:
-                    t = "".join(b.text for b in tr.result.content if isinstance(b, TextContent))
+                    t = "".join(
+                        b.text for b in tr.result.content if isinstance(b, TextContent)
+                    )
                     if tr.result.is_error:
                         console.print(f"[red]  ✗ {t}[/red]")
                     else:
@@ -212,11 +222,21 @@ async def _run_chat(
 
 
 def chat(
-    scenario: Optional[str] = typer.Option(None, "-s", "--scenario", help="Named scenario"),
-    extension: Optional[list[str]] = typer.Option(None, "-e", "--extension", help="Extra extension modules"),
-    project_config: Optional[str] = typer.Option(None, "--project-config", help="Project config TOML path"),
-    user_config: Optional[str] = typer.Option(None, "--user-config", help="User config TOML path"),
-    system: Optional[str] = typer.Option(None, "--system", help="System prompt override"),
+    scenario: Optional[str] = typer.Option(
+        None, "-s", "--scenario", help="Named scenario"
+    ),
+    extension: Optional[list[str]] = typer.Option(
+        None, "-e", "--extension", help="Extra extension modules"
+    ),
+    project_config: Optional[str] = typer.Option(
+        None, "--project-config", help="Project config TOML path"
+    ),
+    user_config: Optional[str] = typer.Option(
+        None, "--user-config", help="User config TOML path"
+    ),
+    system: Optional[str] = typer.Option(
+        None, "--system", help="System prompt override"
+    ),
 ) -> None:
     """Interactive agent chat session.
 
@@ -232,13 +252,17 @@ def chat(
         agentm chat -s minimal --system "You are a translator."
     """
     if not sys.stdin.isatty():
-        stderr_console.print("[red]error: chat requires a TTY; use 'agentm run' for non-interactive execution[/red]")
+        stderr_console.print(
+            "[red]error: chat requires a TTY; use 'agentm run' for non-interactive execution[/red]"
+        )
         raise typer.Exit(2)
 
-    asyncio.run(_run_chat(
-        scenario=scenario,
-        extensions=extension or [],
-        project_config=project_config,
-        user_config=user_config,
-        system_prompt=system,
-    ))
+    asyncio.run(
+        _run_chat(
+            scenario=scenario,
+            extensions=extension or [],
+            project_config=project_config,
+            user_config=user_config,
+            system_prompt=system,
+        )
+    )

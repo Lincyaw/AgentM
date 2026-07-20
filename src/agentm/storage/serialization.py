@@ -460,7 +460,10 @@ def deserialize_content_state(data: Mapping[str, Any]) -> ContentReplacementStat
         raise ValueError("content replacement state must contain an object")
     if not isinstance(metadata, Mapping):
         raise ValueError("content replacement metadata must be an object")
-    if not all(isinstance(key, str) and isinstance(value, str) for key, value in replacements.items()):
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in replacements.items()
+    ):
         raise ValueError("content replacements must map strings to strings")
     return ContentReplacementState(
         state_key=_required_str(
@@ -610,7 +613,9 @@ def serialize_atom_activation(atom: AtomActivation) -> JsonObject:
         "name": atom.name,
         "module_path": atom.module_path,
         "version": (
-            serialize_resource_version(atom.version) if atom.version is not None else None
+            serialize_resource_version(atom.version)
+            if atom.version is not None
+            else None
         ),
         "priority": atom.priority,
         "requires": list(atom.requires),
@@ -698,10 +703,7 @@ def deserialize_active_set_fingerprint(
             path="active-set fingerprint",
         ),
         digest=_required_str(data, "digest", path="active-set fingerprint"),
-        atoms=tuple(
-            deserialize_atom_activation(item)
-            for item in atoms
-        ),
+        atoms=tuple(deserialize_atom_activation(item) for item in atoms),
         metadata=dict(metadata),
     )
 
@@ -769,9 +771,7 @@ def deserialize_catalog_record(data: Mapping[str, Any]) -> CatalogActiveSetRecor
 
 def _string_tuple(data: Mapping[str, Any], key: str) -> tuple[str, ...]:
     value = data.get(key)
-    if not isinstance(value, list) or not all(
-        isinstance(item, str) for item in value
-    ):
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{key} must be a list of strings")
     return tuple(value)
 

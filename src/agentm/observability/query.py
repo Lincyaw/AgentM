@@ -51,7 +51,11 @@ class OtlpJsonlQueryStore:
                 if session_id is None:
                     continue
                 body = otlp_unwrap(record.get("body"))
-                name = str(attrs.get("agentm.event.channel") or record.get("severityText") or "event")
+                name = str(
+                    attrs.get("agentm.event.channel")
+                    or record.get("severityText")
+                    or "event"
+                )
                 records.append(
                     EventRecord(
                         session_id=session_id,
@@ -80,7 +84,9 @@ class OtlpJsonlQueryStore:
                         start_time=_time_unix_nano(span.get("startTimeUnixNano")),
                         end_time=_time_unix_nano_or_none(span.get("endTimeUnixNano")),
                         attributes=attrs,
-                        meta=QueryMeta(attributes={"trace_id": span.get("traceId") or ""}),
+                        meta=QueryMeta(
+                            attributes={"trace_id": span.get("traceId") or ""}
+                        ),
                     )
                 )
         return records

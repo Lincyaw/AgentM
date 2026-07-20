@@ -99,9 +99,7 @@ class JsonCatalogStore:
             if path.exists():
                 stored = path.read_bytes()
                 if stored != content:
-                    raise ValueError(
-                        f"catalog content digest collision at {path}"
-                    )
+                    raise ValueError(f"catalog content digest collision at {path}")
             else:
                 _atomic_write_bytes(path, bytes(content))
             if existing is None:
@@ -130,11 +128,7 @@ class JsonCatalogStore:
             if version_id is None:
                 return versions[-1]
             return next(
-                (
-                    version
-                    for version in versions
-                    if version.version_id == version_id
-                ),
+                (version for version in versions if version.version_id == version_id),
                 None,
             )
 
@@ -162,9 +156,7 @@ class JsonCatalogStore:
             return content
 
     async def alias(self, alias: str, version: ResourceVersion) -> None:
-        await await_known_outcome(
-            asyncio.to_thread(self._alias, alias, version)
-        )
+        await await_known_outcome(asyncio.to_thread(self._alias, alias, version))
 
     def _alias(self, alias: str, version: ResourceVersion) -> None:
         with self._files.guard():
@@ -252,10 +244,14 @@ class JsonCatalogStore:
             self._reload_unlocked()
             records = list(self._records.values())
         if query.session_id is not None:
-            records = [record for record in records if record.session_id == query.session_id]
+            records = [
+                record for record in records if record.session_id == query.session_id
+            ]
         if query.root_session_id is not None:
             records = [
-                record for record in records if record.root_session_id == query.root_session_id
+                record
+                for record in records
+                if record.root_session_id == query.root_session_id
             ]
         if query.parent_session_id is not None:
             records = [
@@ -264,18 +260,26 @@ class JsonCatalogStore:
                 if record.parent_session_id == query.parent_session_id
             ]
         if query.scenario is not None:
-            records = [record for record in records if record.scenario == query.scenario]
+            records = [
+                record for record in records if record.scenario == query.scenario
+            ]
         if query.provider is not None:
-            records = [record for record in records if record.provider == query.provider]
+            records = [
+                record for record in records if record.provider == query.provider
+            ]
         if query.digest is not None:
             records = [
-                record for record in records if record.fingerprint.digest == query.digest
+                record
+                for record in records
+                if record.fingerprint.digest == query.digest
             ]
         if query.atom_name is not None:
             records = [
                 record
                 for record in records
-                if any(atom.name == query.atom_name for atom in record.fingerprint.atoms)
+                if any(
+                    atom.name == query.atom_name for atom in record.fingerprint.atoms
+                )
             ]
         if query.module_path is not None:
             records = [
@@ -311,7 +315,8 @@ class JsonCatalogStore:
                 record
                 for record in records
                 if any(
-                    atom.version is not None and atom.version.version_id == query.version_id
+                    atom.version is not None
+                    and atom.version.version_id == query.version_id
                     for atom in record.fingerprint.atoms
                 )
             ]
@@ -334,7 +339,9 @@ class JsonCatalogStore:
         }
         for alias, version in self._aliases.items():
             if (version.resource_id, version.version_id) not in known_versions:
-                raise ValueError(f"catalog alias {alias!r} references an unknown version")
+                raise ValueError(
+                    f"catalog alias {alias!r} references an unknown version"
+                )
 
 
 class _CatalogFiles:
@@ -420,10 +427,7 @@ class _CatalogFiles:
     ) -> None:
         _atomic_write_json_array(
             self._active_sets_path,
-            [
-                serialize_catalog_record(record)
-                for _, record in sorted(records.items())
-            ],
+            [serialize_catalog_record(record) for _, record in sorted(records.items())],
         )
 
     def content_path(self, version: ResourceVersion) -> Path:

@@ -127,9 +127,7 @@ class Model:
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"model {label} must be a positive integer")
         if self.max_output_tokens > self.context_window:
-            raise ValueError(
-                "model max_output_tokens cannot exceed context_window"
-            )
+            raise ValueError("model max_output_tokens cannot exceed context_window")
         if not isinstance(self.metadata, Mapping):
             raise TypeError("model metadata must be an object")
         frozen = freeze_json(self.metadata)

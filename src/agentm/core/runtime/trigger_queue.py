@@ -26,9 +26,7 @@ class TriggerTerminated(RuntimeError):
 
     def __init__(self, cause: object) -> None:
         self.cause = cause
-        super().__init__(
-            f"trigger terminated: {type(cause).__name__}: {cause}"
-        )
+        super().__init__(f"trigger terminated: {type(cause).__name__}: {cause}")
 
 
 _T = TypeVar("_T")
@@ -141,7 +139,9 @@ class TriggerQueue:
             raise QueueClosed
         accepted = cast(_AcceptedTrigger, item)
         if self._in_flight is not None:
-            raise RuntimeError("trigger consumer received while another trigger is in flight")
+            raise RuntimeError(
+                "trigger consumer received while another trigger is in flight"
+            )
         self._in_flight = accepted
         self._idle.clear()
         return accepted.envelope

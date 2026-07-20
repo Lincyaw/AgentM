@@ -54,8 +54,7 @@ class ClickHouseObservabilityQueryStore:
     ) -> None:
         if not isinstance(client, ClickHouseQueryClient):
             raise TypeError(
-                "ClickHouseObservabilityQueryStore requires "
-                "a ClickHouseQueryClient"
+                "ClickHouseObservabilityQueryStore requires a ClickHouseQueryClient"
             )
         self._client = client
         self._database = _validate_identifier(
@@ -168,26 +167,20 @@ def _query(
 def _json_mapping(value: object, *, column: str) -> dict[str, object]:
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
-            raise ValueError(
-                f"ClickHouse column {column!r} contains a non-string key"
-            )
+            raise ValueError(f"ClickHouse column {column!r} contains a non-string key")
         return {str(key): item for key, item in value.items()}
     if isinstance(value, (str, bytes, bytearray)):
         try:
             parsed = json.loads(value)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ValueError(
-                f"ClickHouse column {column!r} is not valid JSON"
-            ) from exc
+            raise ValueError(f"ClickHouse column {column!r} is not valid JSON") from exc
         if isinstance(parsed, Mapping):
             if not all(isinstance(key, str) for key in parsed):
                 raise ValueError(
                     f"ClickHouse column {column!r} contains a non-string key"
                 )
             return {str(key): item for key, item in parsed.items()}
-    raise ValueError(
-        f"ClickHouse column {column!r} must contain a JSON object"
-    )
+    raise ValueError(f"ClickHouse column {column!r} must contain a JSON object")
 
 
 def _body_mapping(value: object) -> Mapping[str, object]:
@@ -233,19 +226,13 @@ def _finite_float(
 ) -> float:
     if value is None:
         if default is None:
-            raise ValueError(
-                f"ClickHouse column {column!r} must contain a number"
-            )
+            raise ValueError(f"ClickHouse column {column!r} must contain a number")
         return default
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise ValueError(
-            f"ClickHouse column {column!r} must contain a number"
-        )
+        raise ValueError(f"ClickHouse column {column!r} must contain a number")
     number = float(value)
     if not math.isfinite(number):
-        raise ValueError(
-            f"ClickHouse column {column!r} must contain a finite number"
-        )
+        raise ValueError(f"ClickHouse column {column!r} must contain a finite number")
     return number
 
 
@@ -254,9 +241,7 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def _validate_identifier(value: str, *, label: str) -> str:
     if not _IDENTIFIER.fullmatch(value):
-        raise ValueError(
-            f"{label} is not a valid SQL identifier: {value!r}"
-        )
+        raise ValueError(f"{label} is not a valid SQL identifier: {value!r}")
     return value
 
 

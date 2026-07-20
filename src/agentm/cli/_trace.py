@@ -109,7 +109,9 @@ def _resolve_session_id(
     latest: bool,
 ) -> str:
     if session and latest:
-        stderr_console.print("[red]error: --session and --latest are mutually exclusive[/red]")
+        stderr_console.print(
+            "[red]error: --session and --latest are mutually exclusive[/red]"
+        )
         raise typer.Exit(2)
     if session:
         return session
@@ -187,8 +189,7 @@ def sessions_cmd(
         for row in rows:
             parent_id = row.parent_session_id or "---"
             sys.stdout.write(
-                f"  {row.id:<20} purpose={row.purpose:<8} "
-                f"parent={parent_id}\n"
+                f"  {row.id:<20} purpose={row.purpose:<8} parent={parent_id}\n"
             )
     else:
         for row in rows:
@@ -217,12 +218,17 @@ def _turn_summary(turn: Turn) -> _TurnSummary:
                 tool_errors += 1
     summary: _TurnSummary = {
         "status": "committed",
-        "turn_index": turn.index, "turn_id": turn.id,
+        "turn_index": turn.index,
+        "turn_id": turn.id,
         "trigger_source": turn.trigger.source,
-        "rounds": len(turn.rounds), "tool_calls": tool_names,
-        "tool_call_count": len(tool_names), "tool_error_count": tool_errors,
-        "input_tokens": turn.meta.total_input_tokens, "output_tokens": turn.meta.total_output_tokens,
-        "cache_read": turn.meta.cache_read_tokens, "model": turn.meta.model_id,
+        "rounds": len(turn.rounds),
+        "tool_calls": tool_names,
+        "tool_call_count": len(tool_names),
+        "tool_error_count": tool_errors,
+        "input_tokens": turn.meta.total_input_tokens,
+        "output_tokens": turn.meta.total_output_tokens,
+        "cache_read": turn.meta.cache_read_tokens,
+        "model": turn.meta.model_id,
         "cause": type(turn.outcome.cause).__name__,
     }
     if isinstance(turn.outcome.cause, ProviderRequestFailed):
@@ -357,19 +363,14 @@ def messages_cmd(
                     blocks.append(block.text)
                 elif isinstance(block, ThinkingBlock) and not hide_thinking:
                     blocks.append(f"[thinking] {block.text}")
-                elif (
-                    isinstance(block, OpaqueThinkingBlock)
-                    and not hide_thinking
-                ):
+                elif isinstance(block, OpaqueThinkingBlock) and not hide_thinking:
                     blocks.append(f"[opaque thinking: {block.provider}]")
                 elif isinstance(block, ToolCallBlock):
                     arguments = json.dumps(
                         dict(block.arguments),
                         ensure_ascii=False,
                     )[:200]
-                    blocks.append(
-                        f"[tool_call: {block.name}({arguments})]"
-                    )
+                    blocks.append(f"[tool_call: {block.name}({arguments})]")
             all_msgs.append(
                 {
                     "turn_index": turn_record.index,
@@ -413,18 +414,16 @@ def messages_cmd(
         all_msgs = [m for m in all_msgs if m["role"] == role]
 
     _ROLE_ANSI = {
-        "user": "\033[1;32m",      # bold green
-        "assistant": "\033[1;34m", # bold blue
-        "tool_result": "\033[36m", # cyan
-        "error": "\033[1;31m",     # bold red
+        "user": "\033[1;32m",  # bold green
+        "assistant": "\033[1;34m",  # bold blue
+        "tool_result": "\033[36m",  # cyan
+        "error": "\033[1;31m",  # bold red
     }
     _RESET = "\033[0m"
     _DIM = "\033[2m"
 
     def _render(m: _MessageRecord) -> str:
-        round_label = (
-            str(m["round_index"]) if m["round_index"] is not None else "---"
-        )
+        round_label = str(m["round_index"]) if m["round_index"] is not None else "---"
         role = m["role"]
         color = _ROLE_ANSI.get(role, "")
         hdr = f"{color}── {role.upper()} ── turn={m['turn_index']} round={round_label}"
@@ -470,10 +469,22 @@ def usage_cmd(
     cache_read = sum(t.meta.cache_read_tokens for t in turns)
     cache_write = sum(t.meta.cache_write_tokens for t in turns)
     hit_pct = (cache_read / total_in * 100) if total_in else 0.0
-    summary = {"session_id": sid, "turns": len(turns), "input_tokens": total_in, "output_tokens": total_out, "cache_read": cache_read, "cache_write": cache_write, "non_cached_input": total_in - cache_read, "cache_hit_rate": round(hit_pct, 1), "total_tokens": total_in + total_out}
+    summary = {
+        "session_id": sid,
+        "turns": len(turns),
+        "input_tokens": total_in,
+        "output_tokens": total_out,
+        "cache_read": cache_read,
+        "cache_write": cache_write,
+        "non_cached_input": total_in - cache_read,
+        "cache_hit_rate": round(hit_pct, 1),
+        "total_tokens": total_in + total_out,
+    }
     chosen_fmt = _resolve_format(fmt)
     if chosen_fmt == "text":
-        sys.stdout.write(f"session:          {sid}\nturns:            {summary['turns']}\ninput tokens:     {total_in:>12,}\n  cache read:     {cache_read:>12,}  ({hit_pct:.1f}%)\n  cache write:    {cache_write:>12,}\n  non-cached:     {total_in - cache_read:>12,}\noutput tokens:    {total_out:>12,}\ntotal tokens:     {total_in + total_out:>12,}\n")
+        sys.stdout.write(
+            f"session:          {sid}\nturns:            {summary['turns']}\ninput tokens:     {total_in:>12,}\n  cache read:     {cache_read:>12,}  ({hit_pct:.1f}%)\n  cache write:    {cache_write:>12,}\n  non-cached:     {total_in - cache_read:>12,}\noutput tokens:    {total_out:>12,}\ntotal tokens:     {total_in + total_out:>12,}\n"
+        )
     else:
         _emit_json(summary)
 
@@ -567,7 +578,9 @@ def tools_cmd(
             f"{_T_YELLOW}── {d['tool']}{error_tag}{_T_YELLOW} ── "
             f"turn={d['turn_index']} round={d['round_index']} {'─' * 10}{_T_RESET}"
         )
-        result_styled = f"{_T_RED}{r}{_T_RESET}" if d["is_error"] else f"{_T_DIM}{r}{_T_RESET}"
+        result_styled = (
+            f"{_T_RED}{r}{_T_RESET}" if d["is_error"] else f"{_T_DIM}{r}{_T_RESET}"
+        )
         return f"{hdr}\n  args:\n{a}\n  result:\n{result_styled}\n"
 
     if chosen_fmt == "text":

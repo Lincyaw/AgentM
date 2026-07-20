@@ -168,16 +168,12 @@ def _environment_location(
         )
     if directory is not None:
         if schema is not None:
-            raise ValueError(
-                "AGENTM_TRAJECTORY_SCHEMA requires AGENTM_TRAJECTORY_DSN"
-            )
+            raise ValueError("AGENTM_TRAJECTORY_SCHEMA requires AGENTM_TRAJECTORY_DSN")
         return _JsonlLocation(Path(directory).expanduser())
     if dsn is not None:
         return _PostgresLocation(dsn=dsn, schema=schema or "public")
     if schema is not None:
-        raise ValueError(
-            "AGENTM_TRAJECTORY_SCHEMA requires AGENTM_TRAJECTORY_DSN"
-        )
+        raise ValueError("AGENTM_TRAJECTORY_SCHEMA requires AGENTM_TRAJECTORY_DSN")
     return None
 
 
@@ -260,9 +256,7 @@ def _open_store(
     location: _TrajectoryLocation,
 ) -> ResolvedTrajectoryStore:
     if isinstance(location, _JsonlLocation):
-        return ResolvedTrajectoryStore(
-            store=JsonlTrajectoryStore(location.directory)
-        )
+        return ResolvedTrajectoryStore(store=JsonlTrajectoryStore(location.directory))
     return _open_postgres_store(location)
 
 

@@ -38,9 +38,7 @@ class PsycopgCursorAdapter:
             (str, bytes, bytearray),
         ):
             return self._cursor.execute(query, tuple(params))
-        raise TypeError(
-            "Postgres parameters must be a mapping or non-string sequence"
-        )
+        raise TypeError("Postgres parameters must be a mapping or non-string sequence")
 
     def fetchone(self) -> Sequence[object] | None:
         return self._cursor.fetchone()

@@ -27,7 +27,6 @@ app.add_typer(trace_app, name="trace")
 app.add_typer(lint_app, name="lint")
 
 
-
 def _version_callback(value: bool) -> None:
     if value:
         try:
@@ -41,7 +40,9 @@ def _version_callback(value: bool) -> None:
 @app.callback()
 def _main(
     version: bool = typer.Option(
-        False, "--version", "-V",
+        False,
+        "--version",
+        "-V",
         callback=_version_callback,
         is_eager=True,
         help="Show version and exit.",

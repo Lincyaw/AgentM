@@ -104,9 +104,7 @@ def _extract_messages(turn: Turn) -> list[_Message]:
             elif isinstance(response_block, ThinkingBlock):
                 thinking_parts.append(response_block.text)
             elif isinstance(response_block, OpaqueThinkingBlock):
-                thinking_parts.append(
-                    f"[opaque reasoning: {response_block.provider}]"
-                )
+                thinking_parts.append(f"[opaque reasoning: {response_block.provider}]")
             elif isinstance(response_block, ToolCallBlock):
                 args_str = json.dumps(
                     dict(response_block.arguments),
@@ -114,23 +112,33 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                     indent=2,
                 )
                 if text_parts or thinking_parts:
-                    msgs.append(_Message(
-                        role="assistant", content="\n".join(text_parts),
-                        thinking="\n".join(thinking_parts) if thinking_parts else None,
-                    ))
+                    msgs.append(
+                        _Message(
+                            role="assistant",
+                            content="\n".join(text_parts),
+                            thinking="\n".join(thinking_parts)
+                            if thinking_parts
+                            else None,
+                        )
+                    )
                     text_parts = []
                     thinking_parts = []
-                msgs.append(_Message(
-                    role="tool_call",
-                    tool_name=response_block.name,
-                    args_json=args_str,
-                ))
+                msgs.append(
+                    _Message(
+                        role="tool_call",
+                        tool_name=response_block.name,
+                        args_json=args_str,
+                    )
+                )
 
         if text_parts or thinking_parts:
-            msgs.append(_Message(
-                role="assistant", content="\n".join(text_parts),
-                thinking="\n".join(thinking_parts) if thinking_parts else None,
-            ))
+            msgs.append(
+                _Message(
+                    role="assistant",
+                    content="\n".join(text_parts),
+                    thinking="\n".join(thinking_parts) if thinking_parts else None,
+                )
+            )
 
         for rec in rnd.tool_results:
             txt = "".join(
@@ -138,16 +146,23 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                 for result_block in rec.result.content
                 if isinstance(result_block, TextContent)
             )
-            msgs.append(_Message(
-                role="tool_result", tool_name=rec.call.name,
-                is_error=rec.result.is_error, content=txt,
-            ))
+            msgs.append(
+                _Message(
+                    role="tool_result",
+                    tool_name=rec.call.name,
+                    is_error=rec.result.is_error,
+                    content=txt,
+                )
+            )
 
     if isinstance(turn.outcome.cause, ProviderRequestFailed):
-        msgs.append(_Message(
-            role="error", is_error=True,
-            content=f"{turn.outcome.cause.error_type}: {turn.outcome.cause.detail}",
-        ))
+        msgs.append(
+            _Message(
+                role="error",
+                is_error=True,
+                content=f"{turn.outcome.cause.error_type}: {turn.outcome.cause.detail}",
+            )
+        )
 
     return msgs
 
@@ -231,8 +246,11 @@ _MAX_LINES = 50
 def _render_expanded_turn(view: _TurnView, width: int) -> list[str]:
     """Render a turn's messages into ANSI-colored lines."""
     con = Console(
-        file=StringIO(), width=width, highlight=False,
-        force_terminal=True, color_system="truecolor",
+        file=StringIO(),
+        width=width,
+        highlight=False,
+        force_terminal=True,
+        color_system="truecolor",
     )
 
     con.print(Text(f"Turn {view.turn.index}", style="bold underline"))
@@ -248,7 +266,9 @@ def _render_expanded_turn(view: _TurnView, width: int) -> list[str]:
 
 def _render_message(con: Console, msg: _Message, width: int) -> None:
     msg = _Message(
-        role=msg.role, tool_name=msg.tool_name, is_error=msg.is_error,
+        role=msg.role,
+        tool_name=msg.tool_name,
+        is_error=msg.is_error,
         content=msg.content.expandtabs(4) if msg.content else "",
         thinking=msg.thinking.expandtabs(4) if msg.thinking else None,
         args_json=msg.args_json,
@@ -280,7 +300,9 @@ def _render_message(con: Console, msg: _Message, width: int) -> None:
 
     if msg.args_json:
         try:
-            syn = Syntax(msg.args_json, "json", theme="monokai", word_wrap=True, padding=(0, 2))
+            syn = Syntax(
+                msg.args_json, "json", theme="monokai", word_wrap=True, padding=(0, 2)
+            )
             con.print(syn)
         except Exception:
             con.print(Text(msg.args_json, style="dim"))
@@ -290,17 +312,33 @@ def _render_message(con: Console, msg: _Message, width: int) -> None:
         lines = content.split("\n")
         if len(lines) > _MAX_LINES:
             half = _MAX_LINES // 2
-            content = "\n".join(lines[:half] + [f"\n    ... ({len(lines) - _MAX_LINES} lines omitted) ...\n"] + lines[-half:])
+            content = "\n".join(
+                lines[:half]
+                + [f"\n    ... ({len(lines) - _MAX_LINES} lines omitted) ...\n"]
+                + lines[-half:]
+            )
 
         if msg.role == "tool_result" and not msg.is_error:
             if _looks_like_json(content):
                 try:
-                    formatted = json.dumps(json.loads(content), indent=2, ensure_ascii=False)
+                    formatted = json.dumps(
+                        json.loads(content), indent=2, ensure_ascii=False
+                    )
                     flines = formatted.split("\n")
                     if len(flines) > _MAX_LINES:
                         half = _MAX_LINES // 2
-                        formatted = "\n".join(flines[:half] + [f"  ... ({len(flines) - _MAX_LINES} lines) ..."] + flines[-half:])
-                    syn = Syntax(formatted, "json", theme="monokai", word_wrap=True, padding=(0, 2))
+                        formatted = "\n".join(
+                            flines[:half]
+                            + [f"  ... ({len(flines) - _MAX_LINES} lines) ..."]
+                            + flines[-half:]
+                        )
+                    syn = Syntax(
+                        formatted,
+                        "json",
+                        theme="monokai",
+                        word_wrap=True,
+                        padding=(0, 2),
+                    )
                     con.print(syn)
                 except (json.JSONDecodeError, ValueError):
                     con.print(Text(content, style="dim"))
@@ -319,8 +357,9 @@ def _looks_like_json(s: str) -> bool:
     stripped = s.strip()
     if len(stripped) < 2:
         return False
-    return (stripped[0] == "{" and stripped[-1] == "}") or \
-           (stripped[0] == "[" and stripped[-1] == "]")
+    return (stripped[0] == "{" and stripped[-1] == "}") or (
+        stripped[0] == "[" and stripped[-1] == "]"
+    )
 
 
 # -- Interactive viewer ------------------------------------------------------
@@ -445,7 +484,9 @@ class TraceViewer:
         sys.stdout.flush()
 
     def _draw_list(self, cols: int, rows: int) -> None:
-        header = f" agentm trace | session: {self._session_id} | {len(self._views)} turn(s)"
+        header = (
+            f" agentm trace | session: {self._session_id} | {len(self._views)} turn(s)"
+        )
         footer = " ↑↓/jk: move  Enter/→: expand  q: quit  Home/End: jump"
 
         sys.stdout.write(f"\033[7m{header:<{cols}}\033[0m\n")
@@ -458,8 +499,8 @@ class TraceViewer:
 
         for i in range(start, end):
             view = self._views[i]
-            selected = (i == self._cursor)
-            line = view.summary_line[:cols - 3]
+            selected = i == self._cursor
+            line = view.summary_line[: cols - 3]
 
             if selected:
                 sys.stdout.write(f"\033[1;7m ▸ {line}\033[0m")
@@ -490,9 +531,11 @@ class TraceViewer:
 
         self._scroll = min(self._scroll, max(0, total - usable))
 
-        visible = all_lines[self._scroll:self._scroll + usable]
+        visible = all_lines[self._scroll : self._scroll + usable]
 
-        pct = int(self._scroll / max(1, total - usable) * 100) if total > usable else 100
+        pct = (
+            int(self._scroll / max(1, total - usable) * 100) if total > usable else 100
+        )
         turn_label = f"Turn {view.turn.index + 1}/{len(self._views)}"
         header = f" {turn_label} | {len(view.messages)} msg(s) | {pct}%"
         footer = " ↑↓: scroll  ←/Esc: back  PgUp/PgDn: page  Tab: next turn"

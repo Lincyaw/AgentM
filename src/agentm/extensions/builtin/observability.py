@@ -303,8 +303,7 @@ class _ObservabilityRuntime:
             attributes={
                 "agentm.session.id": self._session.ctx.session_id,
                 "agentm.session.root_id": self._session.ctx.root_session_id,
-                "agentm.session.parent_id": self._session.ctx.parent_session_id
-                or "",
+                "agentm.session.parent_id": self._session.ctx.parent_session_id or "",
                 "agentm.session.purpose": self._session.ctx.purpose,
                 "agentm.session.scenario": self._session.ctx.scenario or "",
                 "agentm.session.cwd": self._session.ctx.cwd,

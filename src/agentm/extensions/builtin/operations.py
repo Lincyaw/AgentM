@@ -46,9 +46,7 @@ def install(session: AtomAPI, config: OperationsConfig) -> None:
     existing_bash = session.services.get(BASH_OPERATIONS_SERVICE)
     if existing_environment is not None or existing_bash is not None:
         if not isinstance(existing_environment, EnvironmentOperations):
-            raise TypeError(
-                "operations atom found an incomplete environment binding"
-            )
+            raise TypeError("operations atom found an incomplete environment binding")
         if not isinstance(existing_bash, BashOperations):
             raise TypeError("operations atom found an incomplete bash binding")
         if existing_environment.bash is not existing_bash:

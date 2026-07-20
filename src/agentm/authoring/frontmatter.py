@@ -18,9 +18,7 @@ def _empty_metadata() -> Mapping[str, FrontmatterValue]:
 
 @dataclass(frozen=True, slots=True)
 class FrontmatterDocument:
-    metadata: Mapping[str, FrontmatterValue] = field(
-        default_factory=_empty_metadata
-    )
+    metadata: Mapping[str, FrontmatterValue] = field(default_factory=_empty_metadata)
     body: str = ""
 
     def __post_init__(self) -> None:
@@ -29,20 +27,14 @@ class FrontmatterDocument:
         copied: dict[str, FrontmatterValue] = {}
         for key, value in self.metadata.items():
             if not isinstance(key, str) or not key:
-                raise ValueError(
-                    "frontmatter keys must be non-empty strings"
-                )
+                raise ValueError("frontmatter keys must be non-empty strings")
             if value is not None and not isinstance(
                 value,
                 (str, int, float, bool),
             ):
-                raise TypeError(
-                    f"frontmatter value {key!r} must be a scalar"
-                )
+                raise TypeError(f"frontmatter value {key!r} must be a scalar")
             if isinstance(value, float) and not math.isfinite(value):
-                raise ValueError(
-                    f"frontmatter value {key!r} must be finite"
-                )
+                raise ValueError(f"frontmatter value {key!r} must be finite")
             copied[key] = value
         object.__setattr__(
             self,
@@ -69,7 +61,7 @@ class FrontmatterDocument:
         if closing < 0:
             raise ValueError("frontmatter opening delimiter has no closing delimiter")
         raw_metadata = text[4:closing]
-        body = text[closing + 5:]
+        body = text[closing + 5 :]
         loaded = yaml.safe_load(raw_metadata)
         if loaded is None:
             metadata: dict[str, FrontmatterValue] = {}
@@ -82,9 +74,7 @@ class FrontmatterDocument:
                     value,
                     (str, int, float, bool),
                 ):
-                    raise TypeError(
-                        f"frontmatter value {key!r} must be a scalar"
-                    )
+                    raise TypeError(f"frontmatter value {key!r} must be a scalar")
                 metadata[key] = value
         else:
             raise TypeError("frontmatter header must be a YAML object")

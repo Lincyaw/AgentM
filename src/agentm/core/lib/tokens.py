@@ -22,8 +22,7 @@ def _encoding(model: str | None, default_encoding: str) -> tiktoken.Encoding:
             return tiktoken.encoding_for_model(model)
         except KeyError:
             logger.debug(
-                "tiktoken: no encoding for model {!r}; using configured "
-                "default {!r}",
+                "tiktoken: no encoding for model {!r}; using configured default {!r}",
                 model,
                 default_encoding,
             )
@@ -50,9 +49,7 @@ def count_text_tokens(
 
     if not text:
         return 0
-    return len(
-        _encode_text(text, model=model, default_encoding=default_encoding)
-    )
+    return len(_encode_text(text, model=model, default_encoding=default_encoding))
 
 
 @dataclass(frozen=True, slots=True)

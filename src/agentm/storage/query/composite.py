@@ -26,13 +26,10 @@ class CompositeTraceQueryStore:
         observability: ObservabilityQueryStore,
     ) -> None:
         if not isinstance(trajectory, TrajectoryQueryStore):
-            raise TypeError(
-                "CompositeTraceQueryStore requires a TrajectoryQueryStore"
-            )
+            raise TypeError("CompositeTraceQueryStore requires a TrajectoryQueryStore")
         if not isinstance(observability, ObservabilityQueryStore):
             raise TypeError(
-                "CompositeTraceQueryStore requires "
-                "an ObservabilityQueryStore"
+                "CompositeTraceQueryStore requires an ObservabilityQueryStore"
             )
         self._trajectory = trajectory
         self._observability = observability

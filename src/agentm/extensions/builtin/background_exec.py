@@ -140,9 +140,7 @@ def _outcome_result(outcome: ToolResult | ToolOutcome) -> ToolResult:
 
 
 def _result_text(result: ToolResult) -> str:
-    chunks = [
-        block.text for block in result.content if isinstance(block, TextContent)
-    ]
+    chunks = [block.text for block in result.content if isinstance(block, TextContent)]
     return "\n".join(chunks).strip()
 
 
@@ -241,10 +239,7 @@ class _BackgroundManager:
         self._shutting_down = False
 
     def should_detach(self, tool_name: str) -> bool:
-        return (
-            tool_name not in _BYPASS_TOOLS
-            and tool_name not in self._denylist
-        )
+        return tool_name not in _BYPASS_TOOLS and tool_name not in self._denylist
 
     def prepare_call(
         self,
@@ -344,9 +339,7 @@ class _BackgroundManager:
                     state.error,
                 )
             else:
-                state.status = (
-                    _CANCELLED if state.abort_signal.is_set() else _COMPLETED
-                )
+                state.status = _CANCELLED if state.abort_signal.is_set() else _COMPLETED
             if not self._shutting_down:
                 self._post_completion(state)
         finally:
@@ -381,9 +374,7 @@ class _BackgroundManager:
     ) -> ToolResult:
         async with self._registry.lock:
             states = self._registry.values()
-        return _tool_result(
-            {"tasks": tuple(_task_payload(state) for state in states)}
-        )
+        return _tool_result({"tasks": tuple(_task_payload(state) for state in states)})
 
     async def cancel_background(
         self,

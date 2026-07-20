@@ -110,9 +110,7 @@ def messages_to_nodes(
             head_id=context.head_id,
             role=message.role,
             parent_id=parent,
-            logical_parent_id=(
-                context.logical_parent_id if offset == 0 else None
-            ),
+            logical_parent_id=(context.logical_parent_id if offset == 0 else None),
             turn_id=context.turn_id,
             turn_index=context.turn_index,
             round_index=(
@@ -234,7 +232,9 @@ def _turn_indexed_messages(
     renderers: dict[str, TriggerRenderer] | None,
 ) -> list[tuple[AgentMessage, int | None]]:
     messages: list[tuple[AgentMessage, int | None]] = []
-    messages.extend((message, None) for message in render_trigger(turn.trigger, renderers))
+    messages.extend(
+        (message, None) for message in render_trigger(turn.trigger, renderers)
+    )
 
     injected_by_round: dict[int, list[AgentMessage]] = {}
     for injection in turn.outcome.injected:
@@ -256,17 +256,18 @@ def _turn_indexed_messages(
                 )
                 for tr in rnd.tool_results
             ]
-            messages.append((
-                ToolResultMessage(
-                    role="tool_result",
-                    content=result_blocks,
-                    timestamp=0.0,
-                ),
-                round_index,
-            ))
+            messages.append(
+                (
+                    ToolResultMessage(
+                        role="tool_result",
+                        content=result_blocks,
+                        timestamp=0.0,
+                    ),
+                    round_index,
+                )
+            )
         messages.extend(
-            (message, round_index)
-            for message in injected_by_round.get(round_index, ())
+            (message, round_index) for message in injected_by_round.get(round_index, ())
         )
     return messages
 
@@ -309,9 +310,7 @@ def build_chain(
     visited: set[str] = set()
     while current is not None:
         if current.id in visited:
-            raise ValueError(
-                f"trajectory node parent cycle includes {current.id}"
-            )
+            raise ValueError(f"trajectory node parent cycle includes {current.id}")
         visited.add(current.id)
         chain.append(current)
         if current.kind == "compact_boundary" and not include_logical_parent:
@@ -328,11 +327,7 @@ def leaf_nodes(nodes: Iterable[TrajectoryNode]) -> list[TrajectoryLeaf]:
     """Return nodes with no visible children."""
 
     materialized = list(nodes)
-    parents = {
-        node.parent_id
-        for node in materialized
-        if node.parent_id is not None
-    }
+    parents = {node.parent_id for node in materialized if node.parent_id is not None}
     return [
         TrajectoryLeaf(
             session_id=node.session_id,
@@ -344,8 +339,7 @@ def leaf_nodes(nodes: Iterable[TrajectoryNode]) -> list[TrajectoryLeaf]:
             is_sidechain=node.is_sidechain,
         )
         for node in materialized
-        if node.kind in {"message", "compact_boundary"}
-        and node.id not in parents
+        if node.kind in {"message", "compact_boundary"} and node.id not in parents
     ]
 
 
@@ -410,9 +404,7 @@ class TrajectoryIndexState:
             nodes = list(self._nodes.get(query.session_id, ()))
         else:
             nodes = [
-                node
-                for session_nodes in self._nodes.values()
-                for node in session_nodes
+                node for session_nodes in self._nodes.values() for node in session_nodes
             ]
         if query.node_id is not None:
             nodes = [node for node in nodes if node.id == query.node_id]
@@ -433,9 +425,7 @@ class TrajectoryIndexState:
         if query.agent_id is not None:
             nodes = [node for node in nodes if node.agent_id == query.agent_id]
         if query.is_sidechain is not None:
-            nodes = [
-                node for node in nodes if node.is_sidechain == query.is_sidechain
-            ]
+            nodes = [node for node in nodes if node.is_sidechain == query.is_sidechain]
         if query.kinds:
             nodes = [node for node in nodes if node.kind in query.kinds]
         if query.role is not None:
@@ -444,7 +434,8 @@ class TrajectoryIndexState:
             nodes = [node for node in nodes if node.parent_id == query.parent_id]
         if query.logical_parent_id is not None:
             nodes = [
-                node for node in nodes
+                node
+                for node in nodes
                 if node.logical_parent_id == query.logical_parent_id
             ]
         if query.turn_id is not None:
@@ -458,9 +449,7 @@ class TrajectoryIndexState:
                 node for node in nodes if node.message_index == query.message_index
             ]
         if query.tool_call_id is not None:
-            nodes = [
-                node for node in nodes if query.tool_call_id in node.tool_call_ids
-            ]
+            nodes = [node for node in nodes if query.tool_call_id in node.tool_call_ids]
         if query.tool_name is not None:
             nodes = [node for node in nodes if query.tool_name in node.tool_names]
         if query.cache_key is not None:
@@ -474,15 +463,9 @@ class TrajectoryIndexState:
         if query.before_seq is not None:
             nodes = [node for node in nodes if node.seq < query.before_seq]
         if query.since_timestamp is not None:
-            nodes = [
-                node for node in nodes
-                if node.timestamp >= query.since_timestamp
-            ]
+            nodes = [node for node in nodes if node.timestamp >= query.since_timestamp]
         if query.until_timestamp is not None:
-            nodes = [
-                node for node in nodes
-                if node.timestamp <= query.until_timestamp
-            ]
+            nodes = [node for node in nodes if node.timestamp <= query.until_timestamp]
         nodes.sort(
             key=(
                 (lambda node: node.seq)
@@ -553,12 +536,9 @@ class TrajectoryIndexState:
         include_logical_parent: bool = False,
     ) -> list[TrajectoryNode]:
         self._require_index_session(session_id)
-        local_leaf = any(
-            node.id == leaf_node_id for node in self._nodes[session_id]
-        )
+        local_leaf = any(node.id == leaf_node_id for node in self._nodes[session_id])
         inherited_leaf = include_logical_parent and any(
-            head_session_id == session_id
-            and head.logical_parent_id == leaf_node_id
+            head_session_id == session_id and head.logical_parent_id == leaf_node_id
             for (head_session_id, _head_id), head in self._heads.items()
         )
         if not local_leaf and not inherited_leaf:
@@ -566,9 +546,7 @@ class TrajectoryIndexState:
         nodes: Iterable[TrajectoryNode]
         if include_logical_parent:
             nodes = (
-                node
-                for session_nodes in self._nodes.values()
-                for node in session_nodes
+                node for session_nodes in self._nodes.values() for node in session_nodes
             )
         else:
             nodes = self._nodes.get(session_id, ())
@@ -605,8 +583,7 @@ class TrajectoryIndexState:
         head: TrajectoryHead,
     ) -> None:
         if session_id in self._nodes or any(
-            head_session_id == session_id
-            for head_session_id, _head_id in self._heads
+            head_session_id == session_id for head_session_id, _head_id in self._heads
         ):
             raise ValueError(f"trajectory index already exists: {session_id}")
         copied = list(nodes)
@@ -718,6 +695,7 @@ class TrajectoryIndexState:
                     f"head advance previous_node_id is unknown: "
                     f"{advance.previous_node_id}"
                 )
+
 
 __all__ = [
     "TrajectoryIndexState",

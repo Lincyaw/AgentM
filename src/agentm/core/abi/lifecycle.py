@@ -176,17 +176,13 @@ class EffectScope(Protocol):
         session_id: str,
         turn_id: str,
         turn_index: int,
-    ) -> EffectTxn:
-        ...
+    ) -> EffectTxn: ...
 
-    async def commit_turn(self, txn: EffectTxn, turn: Turn) -> None:
-        ...
+    async def commit_turn(self, txn: EffectTxn, turn: Turn) -> None: ...
 
-    async def prepare_turn(self, txn: EffectTxn, turn: Turn) -> None:
-        ...
+    async def prepare_turn(self, txn: EffectTxn, turn: Turn) -> None: ...
 
-    async def abandon_turn(self, txn: EffectTxn) -> None:
-        ...
+    async def abandon_turn(self, txn: EffectTxn) -> None: ...
 
     async def fork_at(
         self,
@@ -194,16 +190,14 @@ class EffectScope(Protocol):
         *,
         source_session_id: str,
         child_session_id: str,
-    ) -> "EnvironmentFork":
-        ...
+    ) -> "EnvironmentFork": ...
 
     async def restore(
         self,
         *,
         session_id: str,
         turns: Sequence[Turn],
-    ) -> None:
-        ...
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -219,11 +213,9 @@ class EnvironmentForkLease(Protocol):
     ownership belongs to the child's registered services.
     """
 
-    async def commit(self) -> None:
-        ...
+    async def commit(self) -> None: ...
 
-    async def abandon(self) -> None:
-        ...
+    async def abandon(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,19 +264,16 @@ class EnvironmentSnapshotter(Protocol):
         session_id: str,
         ref: TurnRef,
         metadata: LifecycleMeta | None = None,
-    ) -> EnvironmentSnapshot:
-        ...
+    ) -> EnvironmentSnapshot: ...
 
     async def fork_from(
         self,
         snapshot: EnvironmentSnapshot,
         *,
         child_session_id: str,
-    ) -> EnvironmentFork | None:
-        ...
+    ) -> EnvironmentFork | None: ...
 
-    async def restore_to(self, snapshot: EnvironmentSnapshot) -> None:
-        ...
+    async def restore_to(self, snapshot: EnvironmentSnapshot) -> None: ...
 
     async def find_snapshot(
         self,
@@ -292,11 +281,9 @@ class EnvironmentSnapshotter(Protocol):
         session_id: str,
         ref: TurnRef | None = None,
         checkpoint: EnvironmentCheckpoint,
-    ) -> EnvironmentSnapshot | None:
-        ...
+    ) -> EnvironmentSnapshot | None: ...
 
-    async def discard(self, snapshot: EnvironmentSnapshot) -> None:
-        ...
+    async def discard(self, snapshot: EnvironmentSnapshot) -> None: ...
 
 
 __all__ = [

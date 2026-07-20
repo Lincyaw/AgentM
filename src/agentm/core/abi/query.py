@@ -94,11 +94,9 @@ class TrajectoryQueryStore(Protocol):
     def sessions(
         self,
         filter: SessionFilter | None = None,
-    ) -> Iterable[SessionIdentity]:
-        ...
+    ) -> Iterable[SessionIdentity]: ...
 
-    def turns(self, session_id: str) -> Iterable[Turn]:
-        ...
+    def turns(self, session_id: str) -> Iterable[Turn]: ...
 
     def checkpoints(self, session_id: str) -> Iterable[TurnCheckpoint]:
         """Return incomplete turn state for diagnostics, never replay."""
@@ -109,11 +107,9 @@ class TrajectoryQueryStore(Protocol):
 class ObservabilityQueryStore(Protocol):
     """Read-side event/span query view."""
 
-    def events(self, session_id: str) -> Iterable[EventRecord]:
-        ...
+    def events(self, session_id: str) -> Iterable[EventRecord]: ...
 
-    def spans(self, session_id: str) -> Iterable[SpanRecord]:
-        ...
+    def spans(self, session_id: str) -> Iterable[SpanRecord]: ...
 
 
 @runtime_checkable

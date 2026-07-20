@@ -40,6 +40,7 @@ class TrajectoryStoreQueryAdapter:
         checkpoint = self._store.load_checkpoint(session_id)
         return () if checkpoint is None else (checkpoint,)
 
+
 def _session_matches(row: SessionIdentity, filter: SessionFilter) -> bool:
     if filter.session_id is not None and row.id != filter.session_id:
         return False

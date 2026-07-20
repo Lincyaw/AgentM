@@ -57,9 +57,7 @@ def session_meta_config(
         if provider_identity.model_id is not None:
             config["provider_model_id"] = provider_identity.model_id
         if provider_identity.active_set_digest is not None:
-            config["provider_active_set_digest"] = (
-                provider_identity.active_set_digest
-            )
+            config["provider_active_set_digest"] = provider_identity.active_set_digest
         if provider_identity.frozen_after_turn_index is not None:
             config["provider_frozen_after_turn_index"] = (
                 provider_identity.frozen_after_turn_index
@@ -138,9 +136,7 @@ def validate_resume_metadata(
                 "root session metadata must identify itself at depth zero"
             )
     elif depth == 0:
-        raise ResumeIdentityError(
-            "child session metadata must have a positive depth"
-        )
+        raise ResumeIdentityError("child session metadata must have a positive depth")
     if not has_committed_turns:
         return
     _required_config_str(meta.config, "provider_name")
@@ -194,9 +190,7 @@ def _required_config_str(
 ) -> str:
     value = _config_str(config, key)
     if value is None:
-        raise ResumeIdentityError(
-            f"stored session config requires {key!r}"
-        )
+        raise ResumeIdentityError(f"stored session config requires {key!r}")
     return value
 
 
@@ -206,9 +200,7 @@ def _required_config_int(
 ) -> int:
     value = config.get(key)
     if value is None:
-        raise ResumeIdentityError(
-            f"stored session config requires {key!r}"
-        )
+        raise ResumeIdentityError(f"stored session config requires {key!r}")
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ResumeIdentityError(
             f"stored session config {key!r} must be a non-negative integer"
@@ -240,14 +232,11 @@ def _resolved_spec_record(spec: ResolvedSessionSpec) -> dict[str, object]:
     return {
         "scenario": spec.scenario,
         "extensions": [
-            _extension_identity_record(extension)
-            for extension in spec.extensions
+            _extension_identity_record(extension) for extension in spec.extensions
         ],
         "atom_config_modules": sorted(spec.atom_config),
         "provider": (
-            None
-            if spec.provider is None
-            else _extension_identity_record(spec.provider)
+            None if spec.provider is None else _extension_identity_record(spec.provider)
         ),
         "provider_identity": (
             None

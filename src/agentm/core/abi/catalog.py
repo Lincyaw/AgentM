@@ -46,28 +46,22 @@ class VersionedResourceStore(Protocol):
         content: bytes,
         media_type: str | None = None,
         metadata: CatalogMeta | None = None,
-    ) -> ResourceVersion:
-        ...
+    ) -> ResourceVersion: ...
 
     async def resolve(
         self,
         resource_id: str,
         *,
         version_id: str | None = None,
-    ) -> ResourceVersion | None:
-        ...
+    ) -> ResourceVersion | None: ...
 
-    async def read(self, version: ResourceVersion) -> bytes:
-        ...
+    async def read(self, version: ResourceVersion) -> bytes: ...
 
-    async def alias(self, alias: str, version: ResourceVersion) -> None:
-        ...
+    async def alias(self, alias: str, version: ResourceVersion) -> None: ...
 
-    async def resolve_alias(self, alias: str) -> ResourceVersion | None:
-        ...
+    async def resolve_alias(self, alias: str) -> ResourceVersion | None: ...
 
-    async def list_versions(self, resource_id: str) -> list[ResourceVersion]:
-        ...
+    async def list_versions(self, resource_id: str) -> list[ResourceVersion]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,14 +147,12 @@ class AtomCatalog(Protocol):
     async def record_active_set(
         self,
         active_set: CatalogActiveSetInput,
-    ) -> ActiveSetFingerprint:
-        ...
+    ) -> ActiveSetFingerprint: ...
 
     async def get_active_set(
         self,
         session_id: str,
-    ) -> ActiveSetFingerprint | None:
-        ...
+    ) -> ActiveSetFingerprint | None: ...
 
 
 @runtime_checkable
@@ -170,8 +162,7 @@ class AtomCatalogQuery(Protocol):
     async def query_active_sets(
         self,
         query: CatalogQuery,
-    ) -> list[CatalogActiveSetRecord]:
-        ...
+    ) -> list[CatalogActiveSetRecord]: ...
 
 
 __all__ = [

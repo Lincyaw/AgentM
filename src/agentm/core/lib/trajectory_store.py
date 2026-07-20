@@ -63,9 +63,7 @@ def validate_node_append_state(
         label="trajectory append",
     )
     if advance.logical_parent_id is not None:
-        raise ValueError(
-            "an advanced trajectory head cannot retain a logical parent"
-        )
+        raise ValueError("an advanced trajectory head cannot retain a logical parent")
 
     if current_head is not None:
         if current_head.status != "active":
@@ -123,16 +121,13 @@ def _validate_node_batch(
         if node.session_id != session_id:
             raise ValueError("trajectory node session_id does not match its session")
         if node.seq != expected_seq:
-            raise ValueError(
-                f"node seq {node.seq} does not follow {expected_seq - 1}"
-            )
+            raise ValueError(f"node seq {node.seq} does not follow {expected_seq - 1}")
         if node.id in batch_ids:
             raise ValueError(f"duplicate trajectory node id: {node.id}")
         batch_ids.add(node.id)
         expected_seq += 1
     if nodes and (
-        nodes[0].parent_id in batch_ids
-        or nodes[0].logical_parent_id in batch_ids
+        nodes[0].parent_id in batch_ids or nodes[0].logical_parent_id in batch_ids
     ):
         raise ValueError("first trajectory node cannot reference its own append batch")
     for previous, node in zip(nodes, nodes[1:], strict=False):
@@ -148,9 +143,7 @@ def _validate_node_batch(
             or node.agent_id != previous.agent_id
             or node.is_sidechain != previous.is_sidechain
         ):
-            raise ValueError(
-                "trajectory append nodes must share one chain identity"
-            )
+            raise ValueError("trajectory append nodes must share one chain identity")
 
 
 def _validate_head_node_identity(

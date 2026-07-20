@@ -1223,7 +1223,7 @@ async def react(
                                 ],
                                 is_error=True,
                             )
-                        )
+                        ),
                     )
                     continue
 
@@ -1249,7 +1249,7 @@ async def react(
                                 ],
                                 is_error=True,
                             )
-                        )
+                        ),
                     )
                     continue
 
@@ -1267,7 +1267,7 @@ async def react(
                                 ],
                                 is_error=True,
                             )
-                        )
+                        ),
                     )
                     continue
 
@@ -1378,9 +1378,7 @@ async def react(
                     f"{sorted(missing_indexes)}"
                 )
 
-            tool_records = [
-                records_by_index[index] for index in range(len(tool_calls))
-            ]
+            tool_records = [records_by_index[index] for index in range(len(tool_calls))]
             paired_outcomes = [
                 (tool_calls[index].name, outcomes_by_index[index])
                 for index in range(len(tool_calls))

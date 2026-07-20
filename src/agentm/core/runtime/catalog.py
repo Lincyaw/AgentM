@@ -267,7 +267,9 @@ def _extension_source_files(source: ExtensionSource) -> list[tuple[str, bytes]]:
                     continue
                 files.append((str(path.relative_to(root)), path.read_bytes()))
         if not files:
-            raise RuntimeError(f"atom package {module_path!r} has no Python source files")
+            raise RuntimeError(
+                f"atom package {module_path!r} has no Python source files"
+            )
         return files
     if spec.origin is None:
         raise RuntimeError(f"atom module {module_path!r} has no source origin")
@@ -285,7 +287,9 @@ def _manifest_record(
     if manifest is None:
         return None
     schema = manifest.config_schema
-    schema_name = None if schema is None else f"{schema.__module__}.{schema.__qualname__}"
+    schema_name = (
+        None if schema is None else f"{schema.__module__}.{schema.__qualname__}"
+    )
     return {
         "name": manifest.name,
         "description": manifest.description,

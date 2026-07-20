@@ -38,8 +38,7 @@ class _CombinedCancelSignal:
         if self.is_set():
             return None
         waiters: list[asyncio.Task[object]] = [
-            asyncio.create_task(signal.wait())
-            for signal in self._signals
+            asyncio.create_task(signal.wait()) for signal in self._signals
         ]
         try:
             await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)

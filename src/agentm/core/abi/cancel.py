@@ -109,10 +109,7 @@ class CompositeCancelSignal:
     async def wait(self) -> object:
         if self.is_set() or not self._signals:
             return None
-        waiters = [
-            asyncio.create_task(signal.wait())
-            for signal in self._signals
-        ]
+        waiters = [asyncio.create_task(signal.wait()) for signal in self._signals]
         try:
             await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
         finally:

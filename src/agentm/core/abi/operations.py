@@ -80,9 +80,7 @@ class EnvironmentRef:
             if not isinstance(key, str):
                 raise TypeError("environment metadata keys must be strings")
             if value is not None and not isinstance(value, (str, int, float, bool)):
-                raise TypeError(
-                    f"environment metadata {key!r} must be a JSON scalar"
-                )
+                raise TypeError(f"environment metadata {key!r} must be a JSON scalar")
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError(f"environment metadata {key!r} must be finite")
             copied[key] = value
@@ -94,18 +92,14 @@ class EnvironmentOperations(Protocol):
     """Typed backend bundle for world-effect operations."""
 
     @property
-    def ref(self) -> EnvironmentRef:
-        ...
+    def ref(self) -> EnvironmentRef: ...
 
     @property
-    def bash(self) -> BashOperations:
-        ...
+    def bash(self) -> BashOperations: ...
 
-    async def snapshot(self) -> str | None:
-        ...
+    async def snapshot(self) -> str | None: ...
 
-    async def close(self) -> None:
-        ...
+    async def close(self) -> None: ...
 
 
 __all__ = [

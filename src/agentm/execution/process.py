@@ -84,7 +84,11 @@ class ProcessToolExecutor:
                     [task for task in (wait_task, signal_task) if task is not None],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if signal_task is not None and signal_task in done and not wait_task.done():
+                if (
+                    signal_task is not None
+                    and signal_task in done
+                    and not wait_task.done()
+                ):
                     await _terminate_and_reap(process, wait_task)
                     raise asyncio.CancelledError("tool process interrupted")
                 stdout, stderr = await wait_task
@@ -127,9 +131,7 @@ async def _terminate_and_reap(
 
 def _process_entrypoint(request: ToolExecutionRequest) -> str:
     metadata = (
-        request.tool.metadata
-        if isinstance(request.tool, ToolMetadataProvider)
-        else {}
+        request.tool.metadata if isinstance(request.tool, ToolMetadataProvider) else {}
     )
     entrypoint = metadata.get(PROCESS_ENTRYPOINT_METADATA_KEY)
     if not isinstance(entrypoint, str) or ":" not in entrypoint:

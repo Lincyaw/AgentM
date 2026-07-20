@@ -60,9 +60,7 @@ class OutboxRecord:
         _require_finite(self.enqueued_at, "outbox enqueued_at")
         _require_finite(self.lease_expires_at, "outbox lease_expires_at")
         if self.lease_expires_at <= self.enqueued_at:
-            raise ValueError(
-                "outbox lease_expires_at must be after enqueued_at"
-            )
+            raise ValueError("outbox lease_expires_at must be after enqueued_at")
 
 
 @runtime_checkable
@@ -148,16 +146,12 @@ class PeerCredentials:
     token: str | None = None
     process_id: int | None = None
     user_id: int | None = None
-    metadata: Mapping[str, JsonValue] = field(
-        default_factory=_empty_json_object
-    )
+    metadata: Mapping[str, JsonValue] = field(default_factory=_empty_json_object)
 
     def __post_init__(self) -> None:
         _require_nonempty(self.peer_id, "peer credentials peer_id")
         if self.transport not in _TRANSPORT_KINDS:
-            raise ValueError(
-                f"unsupported peer transport: {self.transport!r}"
-            )
+            raise ValueError(f"unsupported peer transport: {self.transport!r}")
         if self.token is not None:
             _require_nonempty(self.token, "peer credentials token")
         for label, value in (
@@ -165,9 +159,7 @@ class PeerCredentials:
             ("user_id", self.user_id),
         ):
             if value is not None and (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
             ):
                 raise ValueError(
                     f"peer credentials {label} must be a non-negative integer"
@@ -191,9 +183,7 @@ class AuthenticationResult:
             raise TypeError("authentication accepted must be a boolean")
         if self.accepted:
             if self.principal_id is None:
-                raise ValueError(
-                    "accepted authentication requires principal_id"
-                )
+                raise ValueError("accepted authentication requires principal_id")
             _require_nonempty(
                 self.principal_id,
                 "authentication principal_id",
@@ -204,9 +194,7 @@ class AuthenticationResult:
                 )
             return
         if self.principal_id is not None:
-            raise ValueError(
-                "rejected authentication cannot include principal_id"
-            )
+            raise ValueError("rejected authentication cannot include principal_id")
         if self.reason is None:
             raise ValueError("rejected authentication requires a reason")
         _require_nonempty(self.reason, "authentication rejection reason")
@@ -219,8 +207,7 @@ class Authenticator(Protocol):
     async def authenticate(
         self,
         credentials: PeerCredentials,
-    ) -> AuthenticationResult:
-        ...
+    ) -> AuthenticationResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,20 +234,15 @@ class SessionBinding:
 class SessionBindingStore(Protocol):
     """Persistence port for ``session_key -> session_id`` recovery."""
 
-    async def get(self, session_key: str) -> SessionBinding | None:
-        ...
+    async def get(self, session_key: str) -> SessionBinding | None: ...
 
-    async def put(self, binding: SessionBinding) -> None:
-        ...
+    async def put(self, binding: SessionBinding) -> None: ...
 
-    async def delete(self, session_key: str) -> None:
-        ...
+    async def delete(self, session_key: str) -> None: ...
 
-    async def list(self) -> Sequence[SessionBinding]:
-        ...
+    async def list(self) -> Sequence[SessionBinding]: ...
 
-    async def close(self) -> None:
-        ...
+    async def close(self) -> None: ...
 
 
 __all__ = [

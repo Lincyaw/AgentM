@@ -105,7 +105,11 @@ class ExactNodeChainProjection(ContextProjection):
                 groups.append((turn_index, []))
             groups[-1][1].append(message)
 
-        limit = self._max_messages if self._max_messages is not None else budget.max_messages
+        limit = (
+            self._max_messages
+            if self._max_messages is not None
+            else budget.max_messages
+        )
         limited, kept_indexes, dropped_indexes = _limit_message_groups(groups, limit)
         self._report = ProjectionReport(
             source="node_chain",
@@ -155,7 +159,9 @@ class TailContextProjection(ContextProjection):
                 (turn.index, list(turn_to_messages(turn)))
                 for turn in projection_input.turns
             ],
-            self._max_messages if self._max_messages is not None else budget.max_messages,
+            self._max_messages
+            if self._max_messages is not None
+            else budget.max_messages,
         )
         self._report = ProjectionReport(
             source="turns",

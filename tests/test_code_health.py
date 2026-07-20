@@ -176,11 +176,7 @@ def test_current_composition_boundaries_pass_code_health() -> None:
     )
     issues = [issue for path in paths for issue in check_file(path)]
     boundary_rules = {f"AM{number:03d}" for number in range(17, 25)}
-    assert not [
-        issue
-        for issue in issues
-        if issue.rule in boundary_rules
-    ]
+    assert not [issue for issue in issues if issue.rule in boundary_rules]
 
 
 def test_code_health_retains_main_branch_architecture_rules(

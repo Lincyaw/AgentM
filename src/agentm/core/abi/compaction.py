@@ -103,11 +103,9 @@ class ContextProjection(Protocol):
         self,
         projection_input: ProjectionInput,
         budget: ContextBudget,
-    ) -> Sequence[AgentMessage]:
-        ...
+    ) -> Sequence[AgentMessage]: ...
 
-    def explain(self) -> ProjectionReport:
-        ...
+    def explain(self) -> ProjectionReport: ...
 
 
 __all__ = [

@@ -283,7 +283,9 @@ def validate_extension_source(source: ExtensionSource | str) -> None:
     if isinstance(source, str):
         source = ExtensionSource(kind="module", location=source)
     if not isinstance(source, ExtensionSource):
-        raise TypeError("extension validation requires ExtensionSource or module string")
+        raise TypeError(
+            "extension validation requires ExtensionSource or module string"
+        )
     module_path = source.module_name
     issues: list[ValidationIssue]
 

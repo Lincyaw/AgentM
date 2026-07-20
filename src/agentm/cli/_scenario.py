@@ -27,7 +27,9 @@ scenario_app = typer.Typer(
 
 @scenario_app.command("list")
 def list_scenarios(
-    format: str = typer.Option("text", "--format", "-f", help="Output format: text, json"),
+    format: str = typer.Option(
+        "text", "--format", "-f", help="Output format: text, json"
+    ),
 ) -> None:
     """List available scenarios.
 
@@ -51,6 +53,7 @@ def list_scenarios(
         return
 
     from rich.console import Console
+
     console = Console()
     for name in names:
         console.print(f"  {name}")
@@ -58,8 +61,12 @@ def list_scenarios(
 
 @scenario_app.command("show")
 def show_scenario(
-    name: str = typer.Argument(..., help="Scenario name (e.g. 'chat', 'minimal', 'arl:harbor')"),
-    format: str = typer.Option("text", "--format", "-f", help="Output format: text, json"),
+    name: str = typer.Argument(
+        ..., help="Scenario name (e.g. 'chat', 'minimal', 'arl:harbor')"
+    ),
+    format: str = typer.Option(
+        "text", "--format", "-f", help="Output format: text, json"
+    ),
 ) -> None:
     """Show a scenario's extensions and base directory.
 
@@ -77,20 +84,13 @@ def show_scenario(
 
     extensions = tuple(
         normalize_extension_spec(extension)
-        for extension in (
-            spec.extensions
-            if isinstance(spec, ScenarioSpec)
-            else spec
-        )
+        for extension in (spec.extensions if isinstance(spec, ScenarioSpec) else spec)
     )
 
     result = {
         "name": name,
         "base_dir": spec.base_dir if isinstance(spec, ScenarioSpec) else None,
-        "extensions": [
-            _extension_record(extension)
-            for extension in extensions
-        ],
+        "extensions": [_extension_record(extension) for extension in extensions],
     }
 
     if format == "json":

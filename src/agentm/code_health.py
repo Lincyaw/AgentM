@@ -116,9 +116,7 @@ class Issue:
 # Rule implementations
 # ---------------------------------------------------------------------------
 
-_SURFACE_CALL_NAMES: Final[frozenset[str]] = frozenset(
-    {"print", "warn"}
-)
+_SURFACE_CALL_NAMES: Final[frozenset[str]] = frozenset({"print", "warn"})
 _SURFACE_METHOD_NAMES: Final[frozenset[str]] = frozenset(
     {
         "critical",
@@ -154,9 +152,7 @@ _PUBLIC_MODULE_METADATA_DUNDERS: Final[frozenset[str]] = frozenset(
 _CLI_DECORATOR_METHODS: Final[frozenset[str]] = frozenset(
     {"callback", "command", "group"}
 )
-_CLI_DECORATOR_NAMES: Final[frozenset[str]] = frozenset(
-    {"command", "group"}
-)
+_CLI_DECORATOR_NAMES: Final[frozenset[str]] = frozenset({"command", "group"})
 
 
 def _is_atom_file(path: Path) -> bool:
@@ -205,10 +201,7 @@ class _ExceptionSurfaceVisitor(ast.NodeVisitor):
         if isinstance(func, ast.Name) and func.id in _SURFACE_CALL_NAMES:
             self.surfaced = True
             return
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr in _SURFACE_METHOD_NAMES
-        ):
+        if isinstance(func, ast.Attribute) and func.attr in _SURFACE_METHOD_NAMES:
             self.surfaced = True
             return
         if (
@@ -263,15 +256,17 @@ def _check_silent_except(tree: ast.Module, path: str) -> list[Issue]:
         if not caught.intersection({"<bare>", "BaseException", "Exception"}):
             continue
         if not _handler_surfaces_exception(node):
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM001",
-                message=(
-                    "broad exception handler without reporting — "
-                    "log, surface to the caller, or re-raise"
-                ),
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM001",
+                    message=(
+                        "broad exception handler without reporting — "
+                        "log, surface to the caller, or re-raise"
+                    ),
+                )
+            )
     return issues
 
 
@@ -303,21 +298,35 @@ def _check_missing_slots(tree: ast.Module, path: str) -> list[Issue]:
 
             if is_dataclass and not has_slots:
                 bases = [
-                    b.id if isinstance(b, ast.Name) else
-                    b.attr if isinstance(b, ast.Attribute) else ""
+                    b.id
+                    if isinstance(b, ast.Name)
+                    else b.attr
+                    if isinstance(b, ast.Attribute)
+                    else ""
                     for b in node.bases
                 ]
-                if any(b in ("Exception", "BaseException", "ValueError",
-                             "RuntimeError", "TypeError", "KeyError")
-                       for b in bases):
+                if any(
+                    b
+                    in (
+                        "Exception",
+                        "BaseException",
+                        "ValueError",
+                        "RuntimeError",
+                        "TypeError",
+                        "KeyError",
+                    )
+                    for b in bases
+                ):
                     continue
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM002",
-                    message=f"dataclass {node.name!r} missing slots=True",
-                    severity="warning",
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM002",
+                        message=f"dataclass {node.name!r} missing slots=True",
+                        severity="warning",
+                    )
+                )
     return issues
 
 
@@ -336,23 +345,26 @@ def _check_private_in_all(tree: ast.Module, path: str) -> list[Issue]:
                                 elt.value.startswith("_")
                                 and elt.value not in _PUBLIC_MODULE_METADATA_DUNDERS
                             ):
-                                issues.append(Issue(
-                                    path=path,
-                                    line=elt.lineno,
-                                    rule="AM003",
-                                    message=f"private name {elt.value!r} in __all__",
-                                    severity="warning",
-                                ))
+                                issues.append(
+                                    Issue(
+                                        path=path,
+                                        line=elt.lineno,
+                                        rule="AM003",
+                                        message=f"private name {elt.value!r} in __all__",
+                                        severity="warning",
+                                    )
+                                )
     return issues
 
 
-def _check_atom_raw_io(
-    tree: ast.Module, path: str, file_path: Path
-) -> list[Issue]:
+def _check_atom_raw_io(tree: ast.Module, path: str, file_path: Path) -> list[Issue]:
     """AM004: open()/subprocess in atom files."""
     parts = file_path.parts
-    is_atom = ("extensions" in parts and "builtin" in parts
-               and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name))
+    is_atom = (
+        "extensions" in parts
+        and "builtin" in parts
+        and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name)
+    )
     if not is_atom:
         return []
 
@@ -361,23 +373,26 @@ def _check_atom_raw_io(
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "open":
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM004",
-                    message="raw open() in atom — use api.get_resource_writer() instead",
-                    severity="warning",
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM004",
+                        message="raw open() in atom — use api.get_resource_writer() instead",
+                        severity="warning",
+                    )
+                )
         if isinstance(node, ast.Attribute):
-            if (isinstance(node.value, ast.Name)
-                    and node.value.id == "subprocess"):
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM004",
-                    message="subprocess usage in atom — use api.get_operations().bash instead",
-                    severity="warning",
-                ))
+            if isinstance(node.value, ast.Name) and node.value.id == "subprocess":
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM004",
+                        message="subprocess usage in atom — use api.get_operations().bash instead",
+                        severity="warning",
+                    )
+                )
     return issues
 
 
@@ -397,7 +412,9 @@ def _is_cli_command_decorator(decorator: ast.expr) -> bool:
 
 
 def _is_cli_command_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    return any(_is_cli_command_decorator(decorator) for decorator in node.decorator_list)
+    return any(
+        _is_cli_command_decorator(decorator) for decorator in node.decorator_list
+    )
 
 
 def _check_param_explosion(tree: ast.Module, path: str) -> list[Issue]:
@@ -408,20 +425,21 @@ def _check_param_explosion(tree: ast.Module, path: str) -> list[Issue]:
             continue
         if _is_cli_command_function(node):
             continue
-        n = (len(node.args.args) + len(node.args.posonlyargs)
-             + len(node.args.kwonlyargs))
+        n = len(node.args.args) + len(node.args.posonlyargs) + len(node.args.kwonlyargs)
         if node.args.vararg:
             n += 1
         if node.args.kwarg:
             n += 1
         if n > 15:
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM005",
-                message=f"{node.name}() has {n} parameters — consider a config object",
-                severity="warning",
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM005",
+                    message=f"{node.name}() has {n} parameters — consider a config object",
+                    severity="warning",
+                )
+            )
     return issues
 
 
@@ -442,15 +460,19 @@ def _check_mutable_abi_global(
             if target.id == "__all__":
                 continue
             ann_str = ast.dump(node.annotation) if node.annotation else ""
-            if any(t in ann_str for t in ("Dict", "List", "Set", "dict", "list", "set")):
+            if any(
+                t in ann_str for t in ("Dict", "List", "Set", "dict", "list", "set")
+            ):
                 if "Final" not in ann_str and "ClassVar" not in ann_str:
-                    issues.append(Issue(
-                        path=path,
-                        line=node.lineno,
-                        rule="AM006",
-                        message=f"mutable module-level {target.id!r} in ABI — wrap in Final or move to runtime",
-                        severity="warning",
-                    ))
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM006",
+                            message=f"mutable module-level {target.id!r} in ABI — wrap in Final or move to runtime",
+                            severity="warning",
+                        )
+                    )
         elif isinstance(node, ast.Assign):
             for tgt in node.targets:
                 if not isinstance(tgt, ast.Name):
@@ -460,13 +482,15 @@ def _check_mutable_abi_global(
                 if isinstance(node.value, (ast.Dict, ast.List, ast.Set)):
                     if tgt.id.startswith("_") and tgt.id.isupper():
                         continue
-                    issues.append(Issue(
-                        path=path,
-                        line=node.lineno,
-                        rule="AM006",
-                        message=f"mutable module-level {tgt.id!r} in ABI — use Final or move to runtime",
-                        severity="warning",
-                    ))
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM006",
+                            message=f"mutable module-level {tgt.id!r} in ABI — use Final or move to runtime",
+                            severity="warning",
+                        )
+                    )
     return issues
 
 
@@ -474,13 +498,15 @@ def _check_god_file(source_lines: list[str], path: str) -> list[Issue]:
     """AM007: Files exceeding 1500 LOC."""
     n = len(source_lines)
     if n > 1500:
-        return [Issue(
-            path=path,
-            line=1,
-            rule="AM007",
-            message=f"file has {n} lines (>1500) — consider splitting",
-            severity="warning",
-        )]
+        return [
+            Issue(
+                path=path,
+                line=1,
+                rule="AM007",
+                message=f"file has {n} lines (>1500) — consider splitting",
+                severity="warning",
+            )
+        ]
     return []
 
 
@@ -504,24 +530,28 @@ def _check_redundant_local_import(tree: ast.Module, path: str) -> list[Issue]:
                 for alias in child.names:
                     name = alias.asname or alias.name.split(".")[0]
                     if name in toplevel_names:
-                        issues.append(Issue(
-                            path=path,
-                            line=child.lineno,
-                            rule="AM008",
-                            message=f"redundant local import of {name!r} — already at module level",
-                            severity="warning",
-                        ))
+                        issues.append(
+                            Issue(
+                                path=path,
+                                line=child.lineno,
+                                rule="AM008",
+                                message=f"redundant local import of {name!r} — already at module level",
+                                severity="warning",
+                            )
+                        )
             elif isinstance(child, ast.ImportFrom):
                 for alias in child.names:
                     name = alias.asname or alias.name
                     if name in toplevel_names:
-                        issues.append(Issue(
-                            path=path,
-                            line=child.lineno,
-                            rule="AM008",
-                            message=f"redundant local import of {name!r} — already at module level",
-                            severity="warning",
-                        ))
+                        issues.append(
+                            Issue(
+                                path=path,
+                                line=child.lineno,
+                                rule="AM008",
+                                message=f"redundant local import of {name!r} — already at module level",
+                                severity="warning",
+                            )
+                        )
     return issues
 
 
@@ -569,19 +599,22 @@ def _check_god_class(tree: ast.Module, path: str) -> list[Issue]:
         if _is_protocol_class(node):
             continue
         method_count = sum(
-            1 for child in node.body
+            1
+            for child in node.body
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
             and not _has_decorator(child, "overload")
             and not _has_decorator(child, "property")
         )
         if method_count > 25:
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM009",
-                message=f"class {node.name!r} has {method_count} methods (>25) — consider splitting",
-                severity="warning",
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM009",
+                    message=f"class {node.name!r} has {method_count} methods (>25) — consider splitting",
+                    severity="warning",
+                )
+            )
     return issues
 
 
@@ -651,24 +684,28 @@ def _check_cross_layer_import(
                         continue
                     if _find_parent_if(tree, node) is not None:
                         continue
-                    issues.append(Issue(
-                        path=path,
-                        line=node.lineno,
-                        rule="AM010",
-                        message=f"cross-layer import: {msg} ({alias.name})",
-                    ))
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM010",
+                            message=f"cross-layer import: {msg} ({alias.name})",
+                        )
+                    )
                 continue
             if module_str is None:
                 continue
             if _module_matches(module_str, forbidden_target):
                 if _find_parent_if(tree, node) is not None:
                     continue
-                issues.append(Issue(
-                    path=path,
-                    line=lineno,
-                    rule="AM010",
-                    message=f"cross-layer import: {msg} ({module_str})",
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=lineno,
+                        rule="AM010",
+                        message=f"cross-layer import: {msg} ({module_str})",
+                    )
+                )
     return issues
 
 
@@ -710,7 +747,9 @@ def _collect_dict_schema_names(tree: ast.Module) -> set[str]:
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and _is_dict_with_type_object(node.value):
+                if isinstance(target, ast.Name) and _is_dict_with_type_object(
+                    node.value
+                ):
                     names.add(target.id)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             if node.value is not None and _is_dict_with_type_object(node.value):
@@ -723,8 +762,11 @@ def _check_hand_written_schema(
 ) -> list[Issue]:
     """AM011: Tool parameters as dict literal instead of pydantic schema."""
     parts = file_path.parts
-    is_atom = ("extensions" in parts and "builtin" in parts
-               and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name))
+    is_atom = (
+        "extensions" in parts
+        and "builtin" in parts
+        and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name)
+    )
     if not is_atom:
         return []
 
@@ -745,22 +787,25 @@ def _check_hand_written_schema(
             if kw.arg != "parameters":
                 continue
             if isinstance(kw.value, ast.Dict):
-                issues.append(Issue(
-                    path=path,
-                    line=kw.value.lineno,
-                    rule="AM011",
-                    message="hand-written tool schema — use pydantic_to_tool_schema(Model) instead",
-                    severity="warning",
-                ))
-            elif (isinstance(kw.value, ast.Name)
-                  and kw.value.id in schema_names):
-                issues.append(Issue(
-                    path=path,
-                    line=kw.value.lineno,
-                    rule="AM011",
-                    message=f"hand-written tool schema ({kw.value.id}) — use pydantic_to_tool_schema(Model) instead",
-                    severity="warning",
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=kw.value.lineno,
+                        rule="AM011",
+                        message="hand-written tool schema — use pydantic_to_tool_schema(Model) instead",
+                        severity="warning",
+                    )
+                )
+            elif isinstance(kw.value, ast.Name) and kw.value.id in schema_names:
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=kw.value.lineno,
+                        rule="AM011",
+                        message=f"hand-written tool schema ({kw.value.id}) — use pydantic_to_tool_schema(Model) instead",
+                        severity="warning",
+                    )
+                )
     return issues
 
 
@@ -789,15 +834,17 @@ def _check_config_dict_splat(tree: ast.Module, path: str) -> list[Issue]:
             continue
         # ``**x`` in a call is a keyword whose ``arg`` is None.
         if any(kw.arg is None for kw in node.keywords):
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM012",
-                message=(
-                    f"dict-splat into {name}() — pass explicit typed fields, "
-                    "not **dict"
-                ),
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM012",
+                    message=(
+                        f"dict-splat into {name}() — pass explicit typed fields, "
+                        "not **dict"
+                    ),
+                )
+            )
     return issues
 
 
@@ -817,15 +864,17 @@ def _check_legacy_asyncio_timeout_error(tree: ast.Module, path: str) -> list[Iss
                 and isinstance(exc_type.value, ast.Name)
                 and exc_type.value.id == "asyncio"
             ):
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM013",
-                    message=(
-                        "catch builtin TimeoutError instead of "
-                        "asyncio.TimeoutError on Python 3.12+"
-                    ),
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM013",
+                        message=(
+                            "catch builtin TimeoutError instead of "
+                            "asyncio.TimeoutError on Python 3.12+"
+                        ),
+                    )
+                )
                 break
     return issues
 
@@ -844,31 +893,37 @@ def _check_resolved_parent_chain(tree: ast.Module, path: str) -> list[Issue]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "parent":
             if _is_resolve_call(node.value):
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM014",
-                    message=(
-                        "avoid path.resolve().parent — split resolve() from "
-                        "parent access when symlink resolution is intentional"
-                    ),
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM014",
+                        message=(
+                            "avoid path.resolve().parent — split resolve() from "
+                            "parent access when symlink resolution is intentional"
+                        ),
+                    )
+                )
         elif (
             isinstance(node, ast.Subscript)
             and isinstance(node.value, ast.Attribute)
             and node.value.attr == "parents"
             and _is_resolve_call(node.value.value)
         ):
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM014",
-                message=(
-                    "avoid path.resolve().parents[...] — split resolve() from "
-                    "parent access when symlink resolution is intentional"
-                ),
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM014",
+                    message=(
+                        "avoid path.resolve().parents[...] — split resolve() from "
+                        "parent access when symlink resolution is intentional"
+                    ),
+                )
+            )
     return issues
+
+
 _CONCRETE_ATOM_PREFIX: Final = "agentm.extensions.builtin."
 _SCENARIO_EXECUTION_CALLS: Final[frozenset[str]] = frozenset(
     {
@@ -953,10 +1008,7 @@ def _check_scenario_loader_execution(
         return []
     issues: list[Issue] = []
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and _call_name(node) in _SCENARIO_EXECUTION_CALLS
-        ):
+        if isinstance(node, ast.Call) and _call_name(node) in _SCENARIO_EXECUTION_CALLS:
             issues.append(
                 Issue(
                     path=path,
@@ -1045,14 +1097,9 @@ def _check_legacy_extension_shape(
                     )
                 )
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = (
-                node.targets
-                if isinstance(node, ast.Assign)
-                else [node.target]
-            )
-            if (
-                any(_tuple_target(target) for target in targets)
-                and _attribute_named(node.value, "provider")
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(_tuple_target(target) for target in targets) and _attribute_named(
+                node.value, "provider"
             ):
                 issues.append(
                     Issue(
@@ -1112,8 +1159,7 @@ def _check_dynamic_attribute_access(
             ),
         )
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and _call_name(node) in _DYNAMIC_ATTRIBUTE_CALLS
+        if isinstance(node, ast.Call) and _call_name(node) in _DYNAMIC_ATTRIBUTE_CALLS
     ]
 
 
@@ -1149,9 +1195,7 @@ def _annotation_nodes(tree: ast.Module) -> list[ast.expr]:
                 *node.args.kwonlyargs,
             )
             annotations.extend(
-                arg.annotation
-                for arg in args
-                if arg.annotation is not None
+                arg.annotation for arg in args if arg.annotation is not None
             )
             if node.args.vararg is not None and node.args.vararg.annotation:
                 annotations.append(node.args.vararg.annotation)
@@ -1206,10 +1250,7 @@ def _check_stdlib_logging(tree: ast.Module, path: str) -> list[Issue]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if (
-                    alias.name == "logging"
-                    or alias.name.startswith("logging.")
-                ):
+                if alias.name == "logging" or alias.name.startswith("logging."):
                     issues.append(
                         Issue(
                             path=path,
@@ -1224,10 +1265,7 @@ def _check_stdlib_logging(tree: ast.Module, path: str) -> list[Issue]:
         elif (
             isinstance(node, ast.ImportFrom)
             and node.module is not None
-            and (
-                node.module == "logging"
-                or node.module.startswith("logging.")
-            )
+            and (node.module == "logging" or node.module.startswith("logging."))
         ):
             issues.append(
                 Issue(
@@ -1235,8 +1273,7 @@ def _check_stdlib_logging(tree: ast.Module, path: str) -> list[Issue]:
                     line=node.lineno,
                     rule="AM024",
                     message=(
-                        "stdlib logging is prohibited; use "
-                        "'from loguru import logger'"
+                        "stdlib logging is prohibited; use 'from loguru import logger'"
                     ),
                 )
             )
@@ -1248,9 +1285,7 @@ def _directive_rules(line: str, pattern: re.Pattern[str]) -> frozenset[str]:
     if match is None:
         return frozenset()
     return frozenset(
-        item.strip()
-        for item in match.group("rules").split(",")
-        if item.strip()
+        item.strip() for item in match.group("rules").split(",") if item.strip()
     )
 
 
@@ -1273,9 +1308,27 @@ def _suppressed(issue: Issue, source_lines: list[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 ALL_RULES: Final[tuple[str, ...]] = (
-    "AM001", "AM002", "AM003", "AM004", "AM005", "AM006", "AM007",
-    "AM008", "AM009", "AM010", "AM011", "AM012", "AM013", "AM014",
-    "AM017", "AM018", "AM019", "AM020", "AM021", "AM022", "AM023",
+    "AM001",
+    "AM002",
+    "AM003",
+    "AM004",
+    "AM005",
+    "AM006",
+    "AM007",
+    "AM008",
+    "AM009",
+    "AM010",
+    "AM011",
+    "AM012",
+    "AM013",
+    "AM014",
+    "AM017",
+    "AM018",
+    "AM019",
+    "AM020",
+    "AM021",
+    "AM022",
+    "AM023",
     "AM024",
 )
 
@@ -1325,11 +1378,7 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_typing_any(tree, rel))
     issues.extend(_check_bare_dict(tree, rel))
     issues.extend(_check_stdlib_logging(tree, rel))
-    return [
-        issue
-        for issue in issues
-        if not _suppressed(issue, source_lines)
-    ]
+    return [issue for issue in issues if not _suppressed(issue, source_lines)]
 
 
 def check_paths(paths: list[Path]) -> list[Issue]:
@@ -1351,7 +1400,9 @@ def changed_files(base: str = "origin/main") -> list[Path]:
     try:
         merge_base = subprocess.run(
             ["git", "merge-base", "HEAD", base],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         merge_base = base
@@ -1359,13 +1410,16 @@ def changed_files(base: str = "origin/main") -> list[Path]:
     try:
         diff_output = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=ACMR", merge_base],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
 
     return [
-        Path(f) for f in diff_output.splitlines()
+        Path(f)
+        for f in diff_output.splitlines()
         if f.endswith(".py") and Path(f).exists()
     ]
 
@@ -1388,15 +1442,21 @@ def lint_cmd(
         help="Files or directories to check. Default: src/agentm/",
     ),
     changed: bool = typer.Option(
-        False, "--changed", "-c",
+        False,
+        "--changed",
+        "-c",
         help="Check only files changed since merge-base with main.",
     ),
     rule: list[str] | None = typer.Option(
-        None, "--rule", "-r",
+        None,
+        "--rule",
+        "-r",
         help="Run only specific rules (e.g. -r AM001 -r AM002).",
     ),
     warnings_as_errors: bool = typer.Option(
-        False, "--strict", "-s",
+        False,
+        "--strict",
+        "-s",
         help="Treat warnings as errors.",
     ),
 ) -> None:
@@ -1417,9 +1477,7 @@ def lint_cmd(
         unknown = rule_set - set(ALL_RULES)
         if unknown:
             names = ", ".join(sorted(unknown))
-            raise typer.BadParameter(
-                f"unknown code-health rule(s): {names}"
-            )
+            raise typer.BadParameter(f"unknown code-health rule(s): {names}")
         issues = [i for i in issues if i.rule in rule_set]
 
     if not issues:
@@ -1431,8 +1489,7 @@ def lint_cmd(
     for issue in issues:
         severity_mark = "E" if issue.severity == "error" else "W"
         typer.echo(
-            f"{issue.path}:{issue.line}: {issue.rule} "
-            f"[{severity_mark}] {issue.message}"
+            f"{issue.path}:{issue.line}: {issue.rule} [{severity_mark}] {issue.message}"
         )
 
     errors = [i for i in issues if i.severity == "error"]

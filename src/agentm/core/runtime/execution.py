@@ -87,9 +87,7 @@ class Execution:
         if not self._active:
             raise StateError("cannot checkpoint an inactive execution")
         if pending_tool_results and pending_response is None:
-            raise StateError(
-                "pending tool results require their assistant response"
-            )
+            raise StateError("pending tool results require their assistant response")
         rounds = tuple(self._rounds)
         if pending_response is not None:
             rounds = (
@@ -124,9 +122,7 @@ class Execution:
             for round_index, messages in self._injected
         )
         final_outcome = (
-            Outcome(cause=outcome.cause, injected=anchored)
-            if anchored
-            else outcome
+            Outcome(cause=outcome.cause, injected=anchored) if anchored else outcome
         )
         return Turn(
             index=self._index,

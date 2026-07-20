@@ -502,9 +502,7 @@ def _validate_node_head_identity(
 
 def _validate_optional_query_string(value: object, *, label: str) -> None:
     if value is not None and (not isinstance(value, str) or not value):
-        raise ValueError(
-            f"trajectory node query {label} must be a non-empty string"
-        )
+        raise ValueError(f"trajectory node query {label} must be a non-empty string")
 
 
 def _validate_optional_query_index(value: object, *, label: str) -> None:

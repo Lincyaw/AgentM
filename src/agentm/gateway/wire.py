@@ -78,9 +78,7 @@ class GatewayEnvelope:
             or isinstance(self.version, bool)
             or self.version != WIRE_VERSION
         ):
-            raise ValueError(
-                f"unsupported gateway wire version: {self.version}"
-            )
+            raise ValueError(f"unsupported gateway wire version: {self.version}")
         if (
             not isinstance(self.timestamp, (int, float))
             or isinstance(self.timestamp, bool)
@@ -89,9 +87,7 @@ class GatewayEnvelope:
             raise ValueError("gateway envelope timestamp must be finite")
         if self.kind in {"inbound", "outbound"}:
             if self.session_key is None:
-                raise ValueError(
-                    f"{self.kind} envelope requires session_key"
-                )
+                raise ValueError(f"{self.kind} envelope requires session_key")
             _nonempty(self.session_key, "gateway session_key")
         elif self.session_key is not None:
             _nonempty(self.session_key, "gateway session_key")
@@ -157,9 +153,7 @@ class OutboundButton:
         _nonempty(self.label, "outbound button label")
         _nonempty(self.value, "outbound button value")
         if self.style not in _BUTTON_STYLES:
-            raise ValueError(
-                f"unsupported outbound button style: {self.style!r}"
-            )
+            raise ValueError(f"unsupported outbound button style: {self.style!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,9 +165,7 @@ class OutboundMessage:
     content: str = ""
     thread_id: str | None = None
     buttons: tuple[OutboundButton, ...] = ()
-    metadata: Mapping[str, JsonValue] = field(
-        default_factory=_empty_json_object
-    )
+    metadata: Mapping[str, JsonValue] = field(default_factory=_empty_json_object)
 
     def __post_init__(self) -> None:
         _nonempty(self.channel, "outbound channel")
@@ -185,9 +177,7 @@ class OutboundMessage:
         if not isinstance(self.buttons, tuple) or not all(
             isinstance(button, OutboundButton) for button in self.buttons
         ):
-            raise TypeError(
-                "outbound buttons must be a tuple of OutboundButton"
-            )
+            raise TypeError("outbound buttons must be a tuple of OutboundButton")
         object.__setattr__(
             self,
             "metadata",
@@ -204,17 +194,11 @@ class OutboundDispatch:
 
     def __post_init__(self) -> None:
         if not isinstance(self.envelope, GatewayEnvelope):
-            raise TypeError(
-                "outbound dispatch envelope must be a GatewayEnvelope"
-            )
+            raise TypeError("outbound dispatch envelope must be a GatewayEnvelope")
         if self.envelope.kind != "outbound":
-            raise ValueError(
-                "outbound dispatch requires an outbound envelope"
-            )
+            raise ValueError("outbound dispatch requires an outbound envelope")
         if self.delivery not in _DELIVERY_CLASSES:
-            raise ValueError(
-                f"unsupported outbound delivery class: {self.delivery!r}"
-            )
+            raise ValueError(f"unsupported outbound delivery class: {self.delivery!r}")
 
 
 __all__ = [

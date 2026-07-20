@@ -1089,11 +1089,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             (session_id, advance.head_id),
         )
         row = cur.fetchone()
-        current_head = (
-            None
-            if row is None
-            else deserialize_head(_json_mapping(row[0]))
-        )
+        current_head = None if row is None else deserialize_head(_json_mapping(row[0]))
         if row is None and advance.previous_node_id is not None:
             cur.execute(
                 f"""
@@ -1108,9 +1104,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     f"head advance previous_node_id is unknown: {advance.previous_node_id}"
                 )
             return None
-        current_node_id = (
-            current_head.node_id if current_head is not None else None
-        )
+        current_node_id = current_head.node_id if current_head is not None else None
         if current_node_id != advance.previous_node_id:
             raise ValueError(
                 "trajectory head changed before append: "

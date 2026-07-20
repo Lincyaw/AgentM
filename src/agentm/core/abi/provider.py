@@ -59,12 +59,9 @@ class ProviderConfig:
         if not isinstance(self.model, Model):
             raise TypeError("provider model must be Model")
         _nonempty_string(self.name, "provider name")
-        if (
-            self.prompt_cache_adapter is not None
-            and not isinstance(
-                self.prompt_cache_adapter,
-                ProviderPromptCacheAdapter,
-            )
+        if self.prompt_cache_adapter is not None and not isinstance(
+            self.prompt_cache_adapter,
+            ProviderPromptCacheAdapter,
         ):
             raise TypeError(
                 "provider prompt_cache_adapter must implement "
@@ -101,13 +98,10 @@ class ProviderSessionIdentity:
             "provider identity active_set_digest",
             optional=True,
         )
-        if (
-            self.frozen_after_turn_index is not None
-            and (
-                not isinstance(self.frozen_after_turn_index, int)
-                or isinstance(self.frozen_after_turn_index, bool)
-                or self.frozen_after_turn_index < 0
-            )
+        if self.frozen_after_turn_index is not None and (
+            not isinstance(self.frozen_after_turn_index, int)
+            or isinstance(self.frozen_after_turn_index, bool)
+            or self.frozen_after_turn_index < 0
         ):
             raise ValueError(
                 "provider identity frozen_after_turn_index must be a "
@@ -141,9 +135,7 @@ class ProviderPromptCacheRequest:
         if not isinstance(self.model, Model):
             raise TypeError("provider cache request model must be Model")
         if not isinstance(self.state, PromptCacheState):
-            raise TypeError(
-                "provider cache request state must be PromptCacheState"
-            )
+            raise TypeError("provider cache request state must be PromptCacheState")
         object.__setattr__(self, "messages", messages)
         object.__setattr__(
             self,
@@ -167,9 +159,7 @@ class ProviderPromptCacheResult:
         if not all(isinstance(message, AgentMessage) for message in messages):
             raise TypeError("provider cache result messages are invalid")
         if not isinstance(self.state, PromptCacheState):
-            raise TypeError(
-                "provider cache result state must be PromptCacheState"
-            )
+            raise TypeError("provider cache result state must be PromptCacheState")
         object.__setattr__(self, "messages", messages)
         object.__setattr__(
             self,

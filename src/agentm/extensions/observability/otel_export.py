@@ -107,7 +107,9 @@ class _SessionFilterMixin:
 
     _session_id_filter: str | None
 
-    def __init__(self, *args: Any, session_id_filter: str | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, session_id_filter: str | None = None, **kwargs: Any
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._session_id_filter = session_id_filter
 
@@ -244,7 +246,9 @@ class FileSpanExporter(_FileOtlpExporter, SpanExporter):
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         return self._export_batch(
-            spans, success=SpanExportResult.SUCCESS, failure=SpanExportResult.FAILURE,
+            spans,
+            success=SpanExportResult.SUCCESS,
+            failure=SpanExportResult.FAILURE,
         )
 
 
@@ -256,7 +260,9 @@ class FileLogExporter(_FileOtlpExporter, LogRecordExporter):
 
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         return self._export_batch(
-            batch, success=LogRecordExportResult.SUCCESS, failure=LogRecordExportResult.FAILURE,
+            batch,
+            success=LogRecordExportResult.SUCCESS,
+            failure=LogRecordExportResult.FAILURE,
         )
 
 
@@ -379,10 +385,14 @@ class OtlpSink:
                 )
 
                 span_exp = HttpSpanExp(
-                    endpoint=self._endpoint, headers=headers, timeout=timeout,
+                    endpoint=self._endpoint,
+                    headers=headers,
+                    timeout=timeout,
                 )
                 log_exp = HttpLogExp(
-                    endpoint=self._endpoint, headers=headers, timeout=timeout,
+                    endpoint=self._endpoint,
+                    headers=headers,
+                    timeout=timeout,
                 )
             else:
                 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
@@ -393,19 +403,24 @@ class OtlpSink:
                 )
 
                 span_exp = GrpcSpanExp(
-                    endpoint=self._endpoint, insecure=insecure,
-                    headers=headers, timeout=timeout,
+                    endpoint=self._endpoint,
+                    insecure=insecure,
+                    headers=headers,
+                    timeout=timeout,
                 )
                 log_exp = GrpcLogExp(
-                    endpoint=self._endpoint, insecure=insecure,
-                    headers=headers, timeout=timeout,
+                    endpoint=self._endpoint,
+                    insecure=insecure,
+                    headers=headers,
+                    timeout=timeout,
                 )
         except Exception as exc:
             # Exporter construction failed (bad endpoint, missing optional
             # dependencies). The caller applies the selected export mode:
             # ``auto`` may choose a file sink, while ``otlp`` fails setup.
             logger.warning(
-                "otel_export: OTLP exporter setup failed, network export disabled: {}", exc,
+                "otel_export: OTLP exporter setup failed, network export disabled: {}",
+                exc,
             )
             return False
 
@@ -519,10 +534,7 @@ def setup_process_telemetry(
     global _global_tracer_provider, _global_logger_provider
     global _global_atexit_registered, _process_otlp_sink
     with _global_lock:
-        if (
-            _global_tracer_provider is None
-            or _global_logger_provider is None
-        ):
+        if _global_tracer_provider is None or _global_logger_provider is None:
             resource = Resource.create(
                 {
                     "service.name": "agentm",
@@ -587,6 +599,7 @@ def _severity_number(severity: TelemetrySeverity | SeverityNumber) -> SeverityNu
     if isinstance(severity, SeverityNumber):
         return severity
     return _TELEMETRY_SEVERITY.get(severity, SeverityNumber.INFO)
+
 
 # Reentrancy guard: the OTel export path itself logs via loguru, so without
 # this a failing exporter could recurse through the sink indefinitely.
@@ -919,9 +932,8 @@ def setup_session_telemetry(
             enable_otlp=True,
             require_otlp=export_mode == "otlp",
         )
-        write_files = (
-            export_mode == "auto"
-            and (file_export_requested() or not otlp_is_active())
+        write_files = export_mode == "auto" and (
+            file_export_requested() or not otlp_is_active()
         )
     resolved_path: Path | None = None
     file_sink: LocalFileSink | None = None

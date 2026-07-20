@@ -29,12 +29,15 @@ def encode_tool_arguments(arguments: Mapping[str, object]) -> str:
     encoded = _encode_json_value(arguments, "tool arguments")
     if not isinstance(encoded, dict):
         raise TypeError("tool arguments must be an object")
-    return json.dumps(
-        encoded,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ) + "\n"
+    return (
+        json.dumps(
+            encoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    )
 
 
 def decode_tool_arguments(payload: str) -> dict[str, Any]:
@@ -80,12 +83,15 @@ def encode_tool_output(output: ToolResult | ToolOutcome) -> str:
     }
     if reason is not None:
         payload["reason"] = reason
-    return json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ) + "\n"
+    return (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    )
 
 
 def decode_tool_output(payload: str) -> ToolResult | ToolOutcome:
@@ -187,9 +193,7 @@ def _decode_result(value: object) -> ToolResult:
                 raise ValueError(
                     f"tool result content[{index}] has invalid base64 data"
                 ) from exc
-            content.append(
-                ImageContent(type="image", data=image, mime_type=mime_type)
-            )
+            content.append(ImageContent(type="image", data=image, mime_type=mime_type))
             continue
         raise ValueError(
             f"tool result content[{index}] has invalid type {block_type!r}"
@@ -249,9 +253,7 @@ def _decode_json_value(value: object, path: str) -> Any:
 
 
 def _object(value: object, path: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ValueError(f"{path} must be an object")
     return value
 

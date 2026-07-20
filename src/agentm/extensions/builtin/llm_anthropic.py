@@ -100,6 +100,7 @@ class LlmAnthropicConfig(BaseModel):
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
 
+
 MANIFEST = ExtensionManifest(
     name="llm_anthropic",
     description="Register an Anthropic Messages API LLM stream provider.",
@@ -109,6 +110,7 @@ MANIFEST = ExtensionManifest(
     requires=(),
     priority=AtomInstallPriority.PROVIDER,
 )
+
 
 def _is_anthropic_retryable(exc: BaseException) -> bool:
     try:
@@ -128,7 +130,9 @@ def _is_anthropic_retryable(exc: BaseException) -> bool:
     )
     return bool(retryable_types) and isinstance(exc, retryable_types)
 
+
 # --- Model registry ---------------------------------------------------------
+
 
 def _build_model(
     model_id: str,
@@ -154,7 +158,9 @@ def _build_model(
         max_output_tokens=max_output_tokens,
     )
 
+
 # --- Message / tool serialization ------------------------------------------
+
 
 def _encode_image(image: ImageContent) -> dict[str, Any]:
     """Convert kernel ``ImageContent`` to an Anthropic image content block."""
@@ -168,6 +174,7 @@ def _encode_image(image: ImageContent) -> dict[str, Any]:
         },
     }
 
+
 def _encode_user_content(
     blocks: list[TextContent | ImageContent],
 ) -> list[dict[str, Any]]:
@@ -180,6 +187,7 @@ def _encode_user_content(
         else:  # pragma: no cover - exhaustive over the union
             raise TypeError(f"unexpected user content type: {type(block)!r}")
     return out
+
 
 def _encode_assistant_content(
     blocks: list[AssistantContent],
@@ -224,6 +232,7 @@ def _encode_assistant_content(
             raise TypeError(f"unexpected assistant content type: {type(block)!r}")
     return out
 
+
 def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
     return {
         "type": "tool_result",
@@ -231,6 +240,7 @@ def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
         "content": _encode_user_content(list(block.content)),
         "is_error": block.is_error,
     }
+
 
 def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
     """Convert kernel messages to the Anthropic Messages API request shape.
@@ -270,6 +280,7 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
+
 @dataclass(frozen=True, slots=True)
 class AnthropicToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to Anthropic Messages API tool specs."""
@@ -284,11 +295,14 @@ class AnthropicToolSpecAdapter(ToolSpecAdapter):
     def encode_tool_args(self, args: Mapping[str, Any]) -> str:
         return encode_tool_args(args)
 
+
 def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     adapter = AnthropicToolSpecAdapter()
     return [adapter.vendor_spec(t) for t in tools]
 
+
 # --- Streaming bridge -------------------------------------------------------
+
 
 @dataclass(slots=True)
 class _StreamState:
@@ -299,6 +313,7 @@ class _StreamState:
     usage: Usage | None = None
     stop_reason: str | None = None
     termination: TerminationHint | None = None
+
 
 def _map_stop_reason(raw: str | None) -> TerminationHint | None:
     """Translate Anthropic ``stop_reason`` into a kernel ``TerminationHint``."""
@@ -317,6 +332,7 @@ def _map_stop_reason(raw: str | None) -> TerminationHint | None:
         # Caller must resend the same input to continue.
         return PauseTurn()
     return VendorSpecific(raw=raw)
+
 
 def _extract_usage(message_obj: Any) -> Usage | None:
     """Pull ``Usage`` out of an Anthropic ``Message`` (or partial)."""
@@ -347,6 +363,7 @@ def _extract_usage(message_obj: Any) -> Usage | None:
         ),
     )
 
+
 def _finalize_block(state: _StreamState, index: int) -> None:
     """Flush provider scratch for one Anthropic content block."""
 
@@ -363,8 +380,7 @@ def _finalize_block(state: _StreamState, index: int) -> None:
         payload = scratch.get("payload")
         if not isinstance(payload, Mapping):
             raise TypeError(
-                f"Anthropic opaque thinking block at index {index} "
-                "has no payload"
+                f"Anthropic opaque thinking block at index {index} has no payload"
             )
         state.accumulator.add_opaque_thinking(
             index,
@@ -376,13 +392,9 @@ def _finalize_block(state: _StreamState, index: int) -> None:
         tool_name = scratch.get("name")
         partial_json = scratch.get("partial_json")
         if not isinstance(tool_id, str) or not tool_id:
-            raise ValueError(
-                f"Anthropic tool block at index {index} has no id"
-            )
+            raise ValueError(f"Anthropic tool block at index {index} has no id")
         if not isinstance(tool_name, str) or not tool_name:
-            raise ValueError(
-                f"Anthropic tool block at index {index} has no name"
-            )
+            raise ValueError(f"Anthropic tool block at index {index} has no name")
         if not isinstance(partial_json, str):
             raise TypeError(
                 f"Anthropic tool arguments at index {index} must be a string"
@@ -423,9 +435,7 @@ def _optional_sdk_string(value: object, name: str) -> str | None:
     if item is None:
         return None
     if not isinstance(item, str):
-        raise TypeError(
-            f"Anthropic SDK field {name!r} must be a string or None"
-        )
+        raise TypeError(f"Anthropic SDK field {name!r} must be a string or None")
     return item
 
 
@@ -453,9 +463,7 @@ def _nonnegative_sdk_int(
             raise ValueError(f"Anthropic SDK field {name!r} is required")
         return default
     if not isinstance(item, int) or isinstance(item, bool) or item < 0:
-        raise TypeError(
-            f"Anthropic SDK field {name!r} must be a non-negative integer"
-        )
+        raise TypeError(f"Anthropic SDK field {name!r} must be a non-negative integer")
     return item
 
 
@@ -477,7 +485,9 @@ class _AnthropicStreamContext(Protocol):
         traceback: object,
     ) -> object: ...
 
+
 # --- Public callable -------------------------------------------------------
+
 
 @dataclass(slots=True)
 class AnthropicStreamFn:
@@ -512,14 +522,9 @@ class AnthropicStreamFn:
                     f"{sorted(unknown)}"
                 )
             for key, value in self.thinking_budgets.items():
-                if (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or value <= 0
-                ):
+                if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                     raise ValueError(
-                        "AnthropicStreamFn thinking budgets must be positive "
-                        "integers"
+                        "AnthropicStreamFn thinking budgets must be positive integers"
                     )
                 budgets[key] = value
         self.thinking_budgets = budgets
@@ -609,12 +614,12 @@ class AnthropicStreamFn:
         state = _StreamState()
         aborted = False
 
-        async def _open_stream() -> tuple[_AnthropicStreamContext, _AnthropicAsyncStream]:
+        async def _open_stream() -> tuple[
+            _AnthropicStreamContext, _AnthropicAsyncStream
+        ]:
             ctx = client.messages.stream(**body)
             if not isinstance(ctx, _AnthropicStreamContext):
-                raise TypeError(
-                    "Anthropic client must return an async stream context"
-                )
+                raise TypeError("Anthropic client must return an async stream context")
             opened = await ctx.__aenter__()
             if not isinstance(opened, _AnthropicAsyncStream):
                 raise TypeError(
@@ -689,6 +694,7 @@ class AnthropicStreamFn:
             yield parse_error
         yield MessageEnd(message=assembled)
 
+
 async def _translate_event(
     event: Any,
     state: _StreamState,
@@ -712,9 +718,7 @@ async def _translate_event(
     if etype == "content_block_start":
         index = _nonnegative_sdk_int(event, "index")
         if index in state.scratch:
-            raise ValueError(
-                f"Anthropic content block index {index} started twice"
-            )
+            raise ValueError(f"Anthropic content block index {index} started twice")
         block = _required_sdk_attr(event, "content_block")
         block_type = _required_sdk_string(
             block,
@@ -761,8 +765,7 @@ async def _translate_event(
             yield ToolCallStart(id=tool_id, name=tool_name)
         else:
             raise ValueError(
-                "Anthropic content block type is not modeled by AgentM: "
-                f"{block_type!r}"
+                f"Anthropic content block type is not modeled by AgentM: {block_type!r}"
             )
         return
 
@@ -786,8 +789,7 @@ async def _translate_event(
         elif delta_type == "input_json_delta":
             if scratch is None or scratch.get("kind") != "tool_use":
                 raise ValueError(
-                    "Anthropic input JSON delta has no tool block at index "
-                    f"{index}"
+                    f"Anthropic input JSON delta has no tool block at index {index}"
                 )
             partial = _required_sdk_string(delta, "partial_json")
             scratch["partial_json"] = scratch.get("partial_json", "") + partial
@@ -798,8 +800,7 @@ async def _translate_event(
         elif delta_type == "thinking_delta":
             if scratch is None or scratch.get("kind") != "thinking":
                 raise ValueError(
-                    "Anthropic thinking delta has no thinking block at index "
-                    f"{index}"
+                    f"Anthropic thinking delta has no thinking block at index {index}"
                 )
             text = _required_sdk_string(delta, "thinking")
             scratch["text"] = scratch.get("text", "") + text
@@ -807,21 +808,16 @@ async def _translate_event(
         elif delta_type == "signature_delta":
             if scratch is None or scratch.get("kind") != "thinking":
                 raise ValueError(
-                    "Anthropic signature delta has no thinking block at index "
-                    f"{index}"
+                    f"Anthropic signature delta has no thinking block at index {index}"
                 )
             sig = _required_sdk_string(delta, "signature")
             # Multiple signature deltas are valid; preserve stream order.
             prev = scratch.get("signature") or ""
             scratch["signature"] = prev + sig
         elif delta_type == "citations_delta":
-            raise ValueError(
-                "Anthropic citation deltas are not modeled by AgentM"
-            )
+            raise ValueError("Anthropic citation deltas are not modeled by AgentM")
         else:
-            raise ValueError(
-                f"unknown Anthropic content delta type: {delta_type!r}"
-            )
+            raise ValueError(f"unknown Anthropic content delta type: {delta_type!r}")
         return
 
     if etype == "content_block_stop":
@@ -879,7 +875,9 @@ async def _translate_event(
 
     raise ValueError(f"unknown Anthropic stream event type: {etype!r}")
 
+
 # --- Extension entrypoint --------------------------------------------------
+
 
 class _AnthropicProviderRuntime:
     """Install-time provider registration runtime for Anthropic-compatible models."""
@@ -962,5 +960,6 @@ def install(session: Any, config: LlmAnthropicConfig) -> None:
     """
 
     _AnthropicProviderRuntime(session, config).install()
+
 
 __all__ = ("AnthropicStreamFn", "MANIFEST", "install")
