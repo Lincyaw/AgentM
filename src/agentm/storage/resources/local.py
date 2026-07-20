@@ -34,6 +34,7 @@ from agentm.core.abi.resource import (
     WriteResult,
     WriterAuthor,
 )
+from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
 
 
 _DEFAULT_NAMESPACES = (
@@ -468,12 +469,14 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> ResourceMutation:
-        return await asyncio.to_thread(
-            self._files.write_ref,
-            ref,
-            content,
-            rationale,
-            author,
+        return await await_known_outcome(
+            asyncio.to_thread(
+                self._files.write_ref,
+                ref,
+                content,
+                rationale,
+                author,
+            )
         )
 
     async def replace_ref(
@@ -485,13 +488,15 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> ResourceMutation:
-        return await asyncio.to_thread(
-            self._files.replace_ref,
-            ref,
-            old,
-            new,
-            rationale,
-            author,
+        return await await_known_outcome(
+            asyncio.to_thread(
+                self._files.replace_ref,
+                ref,
+                old,
+                new,
+                rationale,
+                author,
+            )
         )
 
     async def delete_ref(
@@ -501,11 +506,13 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> ResourceMutation:
-        return await asyncio.to_thread(
-            self._files.delete_ref,
-            ref,
-            rationale,
-            author,
+        return await await_known_outcome(
+            asyncio.to_thread(
+                self._files.delete_ref,
+                ref,
+                rationale,
+                author,
+            )
         )
 
     async def read(self, path: str) -> bytes:
@@ -529,10 +536,12 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         path_class = self.classify(path)
         if path_class == "constitution":
             return _constitution_write_error(path)
-        resolved = await asyncio.to_thread(
-            self._files.write_workspace,
-            path,
-            content,
+        resolved = await await_known_outcome(
+            asyncio.to_thread(
+                self._files.write_workspace,
+                path,
+                content,
+            )
         )
         return WriteResult(path=str(resolved), path_class=self.classify(path))
 
@@ -549,11 +558,13 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         path_class = self.classify(path)
         if path_class == "constitution":
             return _constitution_write_error(path)
-        resolved, replaced = await asyncio.to_thread(
-            self._files.replace_workspace,
-            path,
-            old,
-            new,
+        resolved, replaced = await await_known_outcome(
+            asyncio.to_thread(
+                self._files.replace_workspace,
+                path,
+                old,
+                new,
+            )
         )
         if not replaced:
             return WriteResult(
@@ -574,7 +585,9 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         path_class = self.classify(path)
         if path_class == "constitution":
             return _constitution_write_error(path)
-        resolved = await asyncio.to_thread(self._files.delete_workspace, path)
+        resolved = await await_known_outcome(
+            asyncio.to_thread(self._files.delete_workspace, path)
+        )
         return WriteResult(path=str(resolved), path_class=self.classify(path))
 
     def classify(self, path: str) -> PathClass:
@@ -604,7 +617,9 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         return _LocalResourceTxn(self, context)
 
     async def recover(self, context: ResourceRecoveryContext) -> None:
-        await asyncio.to_thread(self._journal.recover, context)
+        await await_known_outcome(
+            asyncio.to_thread(self._journal.recover, context)
+        )
 
     async def fork_for_environment(
         self,
@@ -687,6 +702,9 @@ class _LocalBatchHandle:
         )
 
     async def commit(self) -> None:
+        await await_known_outcome(self._commit_once())
+
+    async def _commit_once(self) -> None:
         await self._txn.prepare()
         try:
             await self._txn.apply()
@@ -694,9 +712,11 @@ class _LocalBatchHandle:
         except BaseException:
             await self._txn.abandon()
             raise
-        await asyncio.to_thread(
-            self._store._journal.forget,
-            self._txn._transaction_id,
+        await await_known_outcome(
+            asyncio.to_thread(
+                self._store._journal.forget,
+                self._txn._transaction_id,
+            )
         )
 
     async def abandon(self) -> None:
@@ -810,7 +830,12 @@ class _LocalResourceTxn(ResourceTxn):
     async def prepare(self) -> tuple[ResourceMutation, ...]:
         self._ensure_open()
         if self._prepared is None:
-            self._prepared = await asyncio.to_thread(self._prepare)
+            prepared, caller_cancelled = await settle_known_outcome(
+                asyncio.to_thread(self._prepare)
+            )
+            self._prepared = prepared
+            if caller_cancelled:
+                raise asyncio.CancelledError
         return self._prepared
 
     async def commit(self) -> None:
@@ -819,32 +844,45 @@ class _LocalResourceTxn(ResourceTxn):
             raise RuntimeError("resource transaction must be prepared before commit")
         if not self._applied:
             raise RuntimeError("resource transaction must be applied before commit")
-        await asyncio.to_thread(
-            self._store._journal.commit,
-            self._transaction_id,
+        _, caller_cancelled = await settle_known_outcome(
+            asyncio.to_thread(
+                self._store._journal.commit,
+                self._transaction_id,
+            )
         )
         self._closed = True
+        if caller_cancelled:
+            raise asyncio.CancelledError
 
     async def apply(self) -> None:
         self._ensure_open()
         if self._prepared is None:
             raise RuntimeError("resource transaction must be prepared before apply")
-        await asyncio.to_thread(
-            self._store._journal.apply,
-            self._transaction_id,
+        _, caller_cancelled = await settle_known_outcome(
+            asyncio.to_thread(
+                self._store._journal.apply,
+                self._transaction_id,
+            )
         )
         self._applied = True
+        if caller_cancelled:
+            raise asyncio.CancelledError
 
     async def abandon(self) -> None:
         if self._closed:
             return
+        caller_cancelled = False
         if self._prepared is not None:
-            await asyncio.to_thread(
-                self._store._journal.abandon,
-                self._transaction_id,
+            _, caller_cancelled = await settle_known_outcome(
+                asyncio.to_thread(
+                    self._store._journal.abandon,
+                    self._transaction_id,
+                )
             )
         self._closed = True
         self._pending.clear()
+        if caller_cancelled:
+            raise asyncio.CancelledError
 
     def _ensure_open(self) -> None:
         if self._closed:

@@ -25,6 +25,7 @@ from agentm.core.abi.catalog import (
     CatalogQuery,
     ResourceVersion,
 )
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.storage.serialization import (
     deserialize_catalog_record,
     deserialize_resource_version,
@@ -53,12 +54,14 @@ class JsonCatalogStore:
         media_type: str | None = None,
         metadata: CatalogMeta | None = None,
     ) -> ResourceVersion:
-        return await asyncio.to_thread(
-            self._put,
-            resource_id,
-            content,
-            media_type,
-            metadata,
+        return await await_known_outcome(
+            asyncio.to_thread(
+                self._put,
+                resource_id,
+                content,
+                media_type,
+                metadata,
+            )
         )
 
     def _put(
@@ -159,7 +162,9 @@ class JsonCatalogStore:
             return content
 
     async def alias(self, alias: str, version: ResourceVersion) -> None:
-        await asyncio.to_thread(self._alias, alias, version)
+        await await_known_outcome(
+            asyncio.to_thread(self._alias, alias, version)
+        )
 
     def _alias(self, alias: str, version: ResourceVersion) -> None:
         with self._files.guard():
@@ -192,7 +197,9 @@ class JsonCatalogStore:
         self,
         active_set: CatalogActiveSetInput,
     ) -> ActiveSetFingerprint:
-        return await asyncio.to_thread(self._record_active_set, active_set)
+        return await await_known_outcome(
+            asyncio.to_thread(self._record_active_set, active_set)
+        )
 
     def _record_active_set(
         self,

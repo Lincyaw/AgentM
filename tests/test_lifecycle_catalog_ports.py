@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
+import fcntl
 from pathlib import Path
 import shlex
 import threading
@@ -78,6 +79,7 @@ from agentm.core.runtime.tool_orchestration import DefaultToolOrchestrator
 from agentm.config import DefaultSessionSpecResolver
 from agentm.environments import LocalBashOperations, LocalEnvironmentOperations
 from agentm.execution import ProcessToolExecutor, SandboxToolExecutor
+from agentm.storage.resources import LocalResourceStore
 
 
 def _model() -> Model:
@@ -750,6 +752,80 @@ async def test_cancelled_spawn_publishes_paired_child_lifecycle() -> None:
     assert ended == started
     assert store.session_children(parent.id) == started
     await parent.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_local_resource_mutations_settle_before_cancellation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    resource_root = tmp_path / "resources"
+    workspace.mkdir()
+    store = LocalResourceStore(
+        workspace_root=workspace,
+        root=resource_root,
+    )
+
+    async def hold_store_lock() -> tuple[threading.Event, asyncio.Task[None]]:
+        ready = threading.Event()
+        release = threading.Event()
+
+        def hold() -> None:
+            resource_root.mkdir(parents=True, exist_ok=True)
+            with (resource_root / "resource.lock").open("a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                ready.set()
+                if not release.wait(timeout=2.0):
+                    raise TimeoutError("test did not release resource lock")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        task = asyncio.create_task(asyncio.to_thread(hold))
+        assert await asyncio.to_thread(ready.wait, 1.0)
+        return release, task
+
+    write_release, write_lock = await hold_store_lock()
+    write = asyncio.create_task(
+        store.write(
+            "value.txt",
+            b"value",
+            rationale="cancellation contract",
+        )
+    )
+    await asyncio.sleep(0.05)
+    write.cancel()
+    await asyncio.sleep(0.05)
+    assert not write.done()
+    write_release.set()
+    await write_lock
+    with pytest.raises(asyncio.CancelledError):
+        await write
+    assert (workspace / "value.txt").read_bytes() == b"value"
+
+    txn = await store.begin_txn(
+        ResourceTxnContext(
+            session_id="session",
+            turn_id="turn",
+            turn_index=0,
+        )
+    )
+    await txn.create(
+        ResourceRef(namespace="workspace", path="staged.txt"),
+        b"staged",
+        rationale="cancellation contract",
+    )
+    prepare_release, prepare_lock = await hold_store_lock()
+    prepare = asyncio.create_task(txn.prepare())
+    await asyncio.sleep(0.05)
+    prepare.cancel()
+    await asyncio.sleep(0.05)
+    assert not prepare.done()
+    prepare_release.set()
+    await prepare_lock
+    with pytest.raises(asyncio.CancelledError):
+        await prepare
+    await txn.abandon()
+    transaction_root = resource_root / "resource_transactions"
+    assert not transaction_root.exists() or not tuple(transaction_root.iterdir())
 
 
 @pytest.mark.asyncio

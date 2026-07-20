@@ -73,6 +73,9 @@ requirements:
       Durable spawned-child handoff completes graph registration and paired
       start/end lifecycle events before propagating caller cancellation;
       trajectory forks record lineage without pretending to be live children.
+      Reference resource transactions and durable catalog mutations settle
+      synchronous filesystem work and update local transaction phase before
+      propagating async caller cancellation.
       External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and
