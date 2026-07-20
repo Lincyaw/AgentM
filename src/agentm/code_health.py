@@ -634,7 +634,13 @@ _LAYER_RULES: Final[list[tuple[str, str, str]]] = [
         "agentm.core.runtime",
         "extensions must depend on core ABI/lib ports, not runtime",
     ),
+    ("cli/", "agentm.core.runtime", "CLI presenters must not import runtime internals"),
     ("authoring/", "agentm.presenter", "authoring must not import from presenter"),
+    (
+        "presenter/",
+        "agentm.core.runtime",
+        "presenters must depend on core ABI/lib ports, not runtime",
+    ),
     ("core/abi/", "agentm.core.runtime", "ABI must not import from runtime"),
     ("core/abi/", "agentm.core._internal", "ABI must not import from _internal"),
     ("core/", "agentm.authoring", "core must not import authoring"),

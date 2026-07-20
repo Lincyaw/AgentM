@@ -66,6 +66,7 @@ def test_build_trace_snapshot_flattens_messages_and_commit_signal() -> None:
     assert snapshot.metrics.committed_turns == 1
     assert snapshot.metrics.tool_errors == 1
     assert snapshot.metrics.cache_write_tokens == 7
+    assert snapshot.turns[0].tool_names == ("bash",)
     assert [row.kind for row in snapshot.rows] == [
         "system",
         "user",
@@ -74,6 +75,8 @@ def test_build_trace_snapshot_flattens_messages_and_commit_signal() -> None:
         "tool_result",
         "control",
     ]
+    tool_call = next(row for row in snapshot.rows if row.kind == "tool_call")
+    assert tool_call.metadata["arguments"] == {"cmd": "echo Set-Cookie"}
     assert snapshot.rows[-1].title == "TURN COMMITTED"
     assert "ModelEndTurn" in snapshot.rows[-1].content
 

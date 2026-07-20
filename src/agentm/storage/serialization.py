@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Mapping
 import math
 from typing import Any, cast
@@ -27,53 +26,11 @@ from agentm.core.abi.trajectory import (
     TrajectoryNodeKind,
     TrajectoryNodeRole,
 )
+from agentm.core.lib.json_value import json_restore, json_safe
 
 
 JsonObject = dict[str, Any]
 STORAGE_RECORD_VERSION = 1
-
-
-def json_safe(value: Any) -> Any:
-    """Return a JSON-safe value without leaking mutable implementation objects."""
-
-    if value is None or isinstance(value, (str, int, float, bool)):
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError("JSON numbers must be finite")
-        return value
-    if isinstance(value, bytes):
-        return {"__bytes_hex__": value.hex()}
-    if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise TypeError("JSON object keys must be strings")
-        return {key: json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_safe(item) for item in value]
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return json_safe(dataclasses.asdict(value))
-    raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
-
-
-def json_restore(value: Any) -> Any:
-    """Restore values encoded by :func:`json_safe` where the type is known."""
-
-    if isinstance(value, dict):
-        if set(value) == {"__bytes_hex__"} and isinstance(value["__bytes_hex__"], str):
-            try:
-                return bytes.fromhex(value["__bytes_hex__"])
-            except ValueError as exc:
-                raise ValueError("invalid encoded bytes value") from exc
-        if not all(isinstance(key, str) for key in value):
-            raise ValueError("encoded JSON object keys must be strings")
-        return {key: json_restore(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [json_restore(item) for item in value]
-    if value is None or isinstance(value, (str, int, bool)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("encoded JSON numbers must be finite")
-        return value
-    raise ValueError(f"encoded value is not JSON-safe: {type(value).__name__}")
 
 
 def _validate_version(data: Mapping[str, Any], path: str) -> None:

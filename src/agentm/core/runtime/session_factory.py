@@ -95,9 +95,9 @@ from agentm.core.runtime.extension import (
 )
 from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_meta import session_meta_config
-from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.lib.async_cancel import await_known_outcome
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
 from agentm.core.lib.trajectory_nodes import turns_to_nodes
 
 if TYPE_CHECKING:

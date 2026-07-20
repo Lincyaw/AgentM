@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal, NotRequired, TypeVar, TypedDict
 
@@ -28,7 +28,13 @@ from agentm.core.abi.query import (
 from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.trigger import UserInput
-from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
+from agentm.presenter.trajectory.model import (
+    TraceRow,
+    TraceSnapshot,
+    TraceTurnSummary,
+    build_trace_snapshot,
+)
 
 TraceFormat = Literal["text", "ndjson"]
 RecordT = TypeVar("RecordT")
@@ -73,6 +79,15 @@ class _ToolRecord(TypedDict):
 @dataclass(frozen=True, slots=True)
 class _TraceContext:
     query: TrajectoryQueryStore
+
+
+def _load_trace_snapshot(
+    query: TrajectoryQueryStore,
+    session_id: str,
+) -> TraceSnapshot:
+    turns = list(query.turns(session_id))
+    checkpoints = list(query.checkpoints(session_id))
+    return build_trace_snapshot(session_id, turns, checkpoints)
 
 
 trace_app = typer.Typer(
@@ -383,61 +398,26 @@ def sessions_cmd(
 # -- turns -------------------------------------------------------------------
 
 
-def _turn_summary(turn: Turn) -> _TurnSummary:
-    tool_names: list[str] = []
-    tool_errors = 0
-    for rnd in turn.rounds:
-        for rec in rnd.tool_results:
-            tool_names.append(rec.call.name)
-            if rec.result.is_error:
-                tool_errors += 1
-    summary: _TurnSummary = {
-        "status": "committed",
-        "turn_index": turn.index,
-        "turn_id": turn.id,
-        "trigger_source": turn.trigger.source,
-        "rounds": len(turn.rounds),
-        "tool_calls": tool_names,
-        "tool_call_count": len(tool_names),
-        "tool_error_count": tool_errors,
-        "input_tokens": turn.meta.total_input_tokens,
-        "output_tokens": turn.meta.total_output_tokens,
-        "cache_read": turn.meta.cache_read_tokens,
-        "model": turn.meta.model_id,
-        "cause": type(turn.outcome.cause).__name__,
+def _turn_summary_record(summary: TraceTurnSummary) -> _TurnSummary:
+    record: _TurnSummary = {
+        "status": summary.status,
+        "turn_index": summary.turn_index,
+        "turn_id": summary.turn_id,
+        "trigger_source": summary.trigger_source,
+        "rounds": summary.rounds,
+        "tool_calls": list(summary.tool_names),
+        "tool_call_count": summary.tool_calls,
+        "tool_error_count": summary.tool_errors,
+        "input_tokens": summary.input_tokens,
+        "output_tokens": summary.output_tokens,
+        "cache_read": summary.cache_read_tokens,
+        "model": summary.model,
+        "cause": summary.cause,
     }
-    if isinstance(turn.outcome.cause, ProviderRequestFailed):
-        summary["error_type"] = turn.outcome.cause.error_type
-        summary["error"] = turn.outcome.cause.detail
-    return summary
-
-
-def _checkpoint_summary(checkpoint: TurnCheckpoint) -> _TurnSummary:
-    tool_names = [
-        record.call.name
-        for round_ in checkpoint.rounds
-        for record in round_.tool_results
-    ]
-    return {
-        "status": "incomplete",
-        "turn_index": checkpoint.index,
-        "turn_id": checkpoint.id,
-        "trigger_source": checkpoint.trigger.source,
-        "rounds": len(checkpoint.rounds),
-        "tool_calls": tool_names,
-        "tool_call_count": len(tool_names),
-        "tool_error_count": sum(
-            1
-            for round_ in checkpoint.rounds
-            for record in round_.tool_results
-            if record.result.is_error
-        ),
-        "input_tokens": checkpoint.meta.total_input_tokens,
-        "output_tokens": checkpoint.meta.total_output_tokens,
-        "cache_read": checkpoint.meta.cache_read_tokens,
-        "model": checkpoint.meta.model_id,
-        "cause": None,
-    }
+    if summary.error_type is not None:
+        record["error_type"] = summary.error_type
+        record["error"] = summary.error or ""
+    return record
 
 
 @trace_app.command("turns")
@@ -451,17 +431,12 @@ def turns_cmd(
     query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session)
     try:
-        turns = list(query.turns(sid))
+        snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
-    checkpoints = list(query.checkpoints(sid))
-    summaries = [
-        *(_turn_summary(turn) for turn in turns),
-        *(_checkpoint_summary(checkpoint) for checkpoint in checkpoints),
-    ]
-    summaries.sort(key=lambda item: item["turn_index"])
+    summaries = [_turn_summary_record(summary) for summary in snapshot.turns]
 
     def _render(d: _TurnSummary) -> str:
         tools = ", ".join(d["tool_calls"]) if d["tool_calls"] else "---"
@@ -476,8 +451,8 @@ def turns_cmd(
 
     if chosen_fmt == "text":
         stderr_console.print(
-            f"[dim]session {sid}: {len(turns)} committed, "
-            f"{len(checkpoints)} incomplete[/dim]"
+            f"[dim]session {sid}: {snapshot.metrics.committed_turns} committed, "
+            f"{snapshot.metrics.incomplete_turns} incomplete[/dim]"
         )
     _emit_records(iter(summaries), chosen_fmt, _render, limit)
 
@@ -731,6 +706,51 @@ def view_cmd(
 # -- tools -------------------------------------------------------------------
 
 
+def _metadata_string(row: TraceRow, key: str) -> str | None:
+    value = row.metadata.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _metadata_mapping(row: TraceRow, key: str) -> dict[str, object]:
+    value = row.metadata.get(key)
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(item_key): item_value for item_key, item_value in value.items()}
+
+
+def _tool_records_from_snapshot(
+    snapshot: TraceSnapshot,
+    *,
+    tool: str | None,
+) -> list[_ToolRecord]:
+    args_by_call_id: dict[str, dict[str, object]] = {}
+    for row in snapshot.rows:
+        if row.kind != "tool_call":
+            continue
+        call_id = _metadata_string(row, "tool_call_id")
+        if call_id is not None:
+            args_by_call_id[call_id] = _metadata_mapping(row, "arguments")
+
+    records: list[_ToolRecord] = []
+    for row in snapshot.rows:
+        if row.kind != "tool_result" or row.tool_name is None:
+            continue
+        if tool and row.tool_name != tool:
+            continue
+        call_id = _metadata_string(row, "tool_call_id")
+        records.append(
+            {
+                "turn_index": row.turn_index or 0,
+                "round_index": row.round_index or 0,
+                "tool": row.tool_name,
+                "args": args_by_call_id.get(call_id or "", {}),
+                "is_error": row.is_error,
+                "result": row.content,
+            }
+        )
+    return records
+
+
 @trace_app.command("tools")
 def tools_cmd(
     ctx: typer.Context,
@@ -743,38 +763,12 @@ def tools_cmd(
     query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session)
     try:
-        turns = list(query.turns(sid))
+        snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
-    records: list[_ToolRecord] = []
-    trajectory_records: list[Turn | TurnCheckpoint] = [
-        *turns,
-        *query.checkpoints(sid),
-    ]
-    trajectory_records.sort(key=lambda item: item.index)
-    for turn_record in trajectory_records:
-        for ri, rnd in enumerate(turn_record.rounds):
-            for rec in rnd.tool_results:
-                name = rec.call.name
-                if tool and name != tool:
-                    continue
-                txt = "".join(
-                    block.text
-                    for block in rec.result.content
-                    if isinstance(block, TextContent)
-                )
-                records.append(
-                    {
-                        "turn_index": turn_record.index,
-                        "round_index": ri,
-                        "tool": name,
-                        "args": dict(rec.call.arguments),
-                        "is_error": rec.result.is_error,
-                        "result": txt,
-                    }
-                )
+    records = _tool_records_from_snapshot(snapshot, tool=tool)
 
     _T_YELLOW = "\033[1;33m"
     _T_RED = "\033[1;31m"

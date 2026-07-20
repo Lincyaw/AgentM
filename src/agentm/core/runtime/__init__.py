@@ -20,7 +20,7 @@ from agentm.core.runtime.execution import Execution
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, QueueClosed
 from agentm.core.runtime.tree import InMemorySessionGraph
-from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.extension import load_extension, ExtensionLoadError
 

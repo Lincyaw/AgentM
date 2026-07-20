@@ -71,8 +71,12 @@ class TraceTurnSummary:
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
+    tool_names: tuple[str, ...] = ()
     model: str | None = None
     cause: str | None = None
+    error_type: str | None = None
+    error: str | None = None
+    trigger_source: str = ""
     trigger: str = ""
 
     @property
@@ -410,12 +414,23 @@ def build_trace_snapshot(
         cause = (
             type(record.outcome.cause).__name__ if isinstance(record, Turn) else None
         )
-        tool_calls = sum(len(round_.tool_results) for round_ in record.rounds)
+        tool_names = tuple(
+            tool_record.call.name
+            for round_ in record.rounds
+            for tool_record in round_.tool_results
+        )
+        tool_calls = len(tool_names)
         tool_errors = sum(
             1
             for round_ in record.rounds
             for tool_record in round_.tool_results
             if tool_record.result.is_error
+        )
+        provider_error = (
+            record.outcome.cause
+            if isinstance(record, Turn)
+            and isinstance(record.outcome.cause, ProviderRequestFailed)
+            else None
         )
         trigger_text = _trigger_text(record)
         summary = TraceTurnSummary(
@@ -426,12 +441,18 @@ def build_trace_snapshot(
             rounds=len(record.rounds),
             tool_calls=tool_calls,
             tool_errors=tool_errors,
+            tool_names=tool_names,
             input_tokens=record.meta.total_input_tokens,
             output_tokens=record.meta.total_output_tokens,
             cache_read_tokens=record.meta.cache_read_tokens,
             cache_write_tokens=record.meta.cache_write_tokens,
             model=record.meta.model_id,
             cause=cause,
+            error_type=provider_error.error_type
+            if provider_error is not None
+            else None,
+            error=provider_error.detail if provider_error is not None else None,
+            trigger_source=record.trigger.source,
             trigger=trigger_text,
         )
         summaries.append(summary)
@@ -519,7 +540,10 @@ def build_trace_snapshot(
                             role="assistant",
                             tool_name=block.name,
                             cause=cause,
-                            metadata={"tool_call_id": block.id},
+                            metadata={
+                                "tool_call_id": block.id,
+                                "arguments": dict(block.arguments),
+                            },
                         )
                     )
 

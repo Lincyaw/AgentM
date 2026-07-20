@@ -81,6 +81,10 @@ from agentm.core.abi.trigger import (
     TriggerPriority,
     UserInput,
 )
+from agentm.core.lib.json_value import (
+    json_restore as _json_restore,
+    json_safe as _json_safe,
+)
 
 
 TRAJECTORY_CODEC_VERSION = 2
@@ -340,39 +344,6 @@ def _deserialize_message_meta(data: dict[str, Any] | None) -> MessageMeta:
         mode=_optional_string(data.get("mode"), "message.meta.mode"),
         tags=tags,
     )
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError("JSON numbers must be finite")
-        return value
-    if isinstance(value, bytes):
-        return {"__bytes_hex__": value.hex()}
-    if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise TypeError("JSON object keys must be strings")
-        return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _json_safe(asdict(value))
-    raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
-
-
-def _json_restore(value: Any) -> Any:
-    if isinstance(value, dict):
-        if set(value) == {"__bytes_hex__"} and isinstance(value["__bytes_hex__"], str):
-            try:
-                return bytes.fromhex(value["__bytes_hex__"])
-            except ValueError as exc:
-                raise ValueError("invalid encoded bytes value") from exc
-        if not all(isinstance(key, str) for key in value):
-            raise ValueError("encoded JSON object keys must be strings")
-        return {key: _json_restore(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_restore(v) for v in value]
-    return value
 
 
 def _serialize_content_block(block: Any) -> dict[str, Any]:

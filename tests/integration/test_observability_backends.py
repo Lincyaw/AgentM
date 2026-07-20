@@ -22,7 +22,7 @@ from agentm.core.abi.query import EventRecord, SpanRecord
 from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trigger import UserInput
-from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
 from agentm.storage.sql import create_sql_engine
 from agentm.storage.query import (
     ClickHouseObservabilityQueryStore,
