@@ -206,15 +206,10 @@ Rules:
 | Listen to events | `api.on(Event.CHANNEL, handler)` |
 | Share state between atoms | `api.services.register(name, obj, protocol)` |
 | Consume another atom's state | `api.services.get(name, protocol)` |
-| Inject system prompt content | Handle `BeforeRunEvent` |
-| Inject per-turn context | Handle `ContextEvent` |
 | JSON Schema from Pydantic | `pydantic_to_tool_schema(Model)` from `agentm.core.lib` |
-| Spawn a child agent (lightweight) | `api.spawn(purpose=..., tools=..., model=...)` |
-| Spawn a child agent (full config) | `api.spawn_child_session(AgentSessionConfig(...))` |
-| Boot a session from host code | `AgentSession.create(AgentSessionConfig(...))` |
 | Validate atom contract compliance | `agentm lint` (CLI) |
 | Emit user-visible diagnostic | Emit `DiagnosticEvent` |
-| Log for debugging | `from loguru import logger` (stdlib logging is forbidden) |
+| Log for debugging | `from loguru import logger` |
 
 For detailed API signatures, read `references/api.md`.
 For session creation APIs, read `references/session-creation.md`.

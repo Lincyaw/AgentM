@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path' | { read -r f; case \"$f\" in *.py) uv run ruff format \"$f\" && uv run ruff check --fix \"$f\";; esac; } 2>/dev/null || true",
+            "command": "jq -r '.tool_input.file_path' | { read -r f; case \"$f\" in *.py) uv run sh -c 'ruff format \"$1\" && ruff check --fix \"$1\"' _ \"$f\";; esac; } 2>/dev/null || true",
             "timeout": 30,
             "statusMessage": "Formatting with ruff..."
           }
