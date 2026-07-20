@@ -55,6 +55,9 @@ requirements:
       globals. File tools share one I/O-free planner across environments and
       perform all reads and planned mutations through the active ResourceTxn
       or ResourceWriter, with no bash/CLI fallback or second state authority.
+      Exact, quote-normalized, and whitespace-normalized edit matching are
+      ordered text-equivalence strategies inside that planner and never change
+      the selected resource backend or bypass stale/unique checks.
       Driver cancellation inputs are construction-time invariants and cannot
       degrade to disconnected internal cancel sources. Every composed session
       owns one replaceable ToolOrchestrator before the driver starts; reaction

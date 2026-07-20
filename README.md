@@ -20,16 +20,16 @@ The SDK is mechanism, not policy. Policy enters through atoms.
 | `Turn` | Durable trajectory unit: trigger, assistant rounds, tool records, structured tool extras, outcome, timing, and usage. |
 | `TrajectoryStore` | The single replaceable persistence boundary for session metadata, incomplete checkpoints, committed turns, message-node indexes, heads, and cache/compaction state. |
 | `TrajectoryNode` | A committed message or compact-boundary index record used for fork, resume, sidechains, compaction, and prompt-cache lookup. Content replacement is state attached atomically to a compact boundary, not another node kind. |
-| `ContextPolicy` | Replaceable context reconstruction policy. Policies may expose `PersistentContextPolicy` state for compaction and content replacement that must survive resume/fork. |
+| `ContextPolicy` | Replaceable context reconstruction policy. Durable compaction and cache decisions use `ContentReplacementState` and `PromptCacheState` in the selected `TrajectoryStore`, so they survive resume/fork without a second policy-owned store. |
 | `EventBus` | Immutable event dispatch surface for observation and policy hooks. |
 | `AtomAPI` | The only surface atoms receive at install time. |
-| `CancelSignal` | Cooperative cancellation boundary shared by provider streams, tools, operations, and optionally foreground child sessions. `ReasonedCancelSignal` carries host-facing reasons such as user cancel, submit interrupt, shutdown, or task stop. |
+| `CancelSignal` | Cooperative cancellation boundary shared by provider streams, tools, operations, and optionally foreground child sessions. Its typed `reason` carries causes such as user cancel, submit interrupt, shutdown, or task stop. |
 | `BackgroundTaskRegistry` | Shared helper for atom-owned detached work: task handles, slot caps, and cooperative cancel. |
 | `StreamFn` / `ProviderConfig` | Replaceable LLM provider boundary. |
 | `ProviderResolver` | Replaceable active-provider selection policy. |
 | `ToolExecutor` | Replaceable tool execution boundary. Tool requirements declare isolation, filesystem/network access, concurrency, and interrupt behavior; executor capabilities declare what the backend can honor. |
 | `ToolOrchestrator` | Replaceable batch scheduler for tool calls: exclusive vs parallel-safe partitioning, sibling-error cascading, and cooperative cancellation. |
-| `PermissionPolicy` | Replaceable typed permission boundary for user, subagent, policy, classifier, and mode-based allow/deny/defer decisions. |
+| `PermissionPolicy` | Replaceable async permission boundary. It returns a final `allow` or `deny`; policies that require user interaction await it internally instead of exposing a deferred runtime state. |
 | `BashOperations` / `ResourceWriter` | Replaceable external-world ports for execution and resource mutation. |
 
 ## Extension Contract

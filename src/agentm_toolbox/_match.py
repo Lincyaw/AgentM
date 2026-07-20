@@ -1,10 +1,12 @@
-"""Fuzzy string matching for the edit tool.
+"""Ordered string-matching strategies for the edit tool.
 
-Aligned with Claude Code's ``findActualString`` — three-level fallback:
+Aligned with Claude Code's ``findActualString``:
 1. Exact match
 2. Quote-normalized match (curly → straight)
 3. Whitespace-trimmed per-line match
 
+These are deterministic text-equivalence strategies within one file. They do
+not switch I/O backends or recover from a failed mutation.
 Always returns the ACTUAL string from the file, not the search string.
 Zero external dependencies.
 """
@@ -30,7 +32,7 @@ def _strip_line_whitespace(s: str) -> str:
 
 
 def find_actual_string(file_content: str, search: str) -> str | None:
-    """Find *search* in *file_content* with progressive fallbacks.
+    """Find *search* using the ordered text-equivalence strategies.
 
     Returns the ACTUAL matched substring from *file_content*, or ``None``.
     """
