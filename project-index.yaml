@@ -118,6 +118,9 @@ requirements:
       import core runtime internals. The constitution-listed extension
       contract validator is the only explicit core-to-extension exception and
       is a required typed mechanism rather than an optional compatibility path.
+      ResourceWriter exposes only single workspace mutations; atomic grouped
+      writes use the recoverable TransactionalResourceWriter contract, never a
+      batch method with backend-dependent guarantees.
     priority: P0
     status: tested
     confidence: confirmed

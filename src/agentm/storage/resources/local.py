@@ -10,9 +10,8 @@ import os
 import re
 import shutil
 import tempfile
-import uuid
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -593,26 +592,6 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
     def classify(self, path: str) -> PathClass:
         return self._files.classify(path)
 
-    @asynccontextmanager
-    async def batch(
-        self,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> AsyncIterator["_LocalBatchHandle"]:
-        handle = _LocalBatchHandle(
-            self,
-            rationale=rationale,
-            author=author,
-        )
-        try:
-            yield handle
-        except BaseException:
-            await handle.abandon()
-            raise
-        else:
-            await handle.commit()
-
     async def begin_txn(self, context: ResourceTxnContext) -> ResourceTxn:
         return _LocalResourceTxn(self, context)
 
@@ -641,86 +620,6 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
             namespace_roots=namespace_roots,
             discover_manifest=True,
         )
-
-
-class _LocalBatchHandle:
-    def __init__(
-        self,
-        store: LocalResourceStore,
-        *,
-        rationale: str,
-        author: WriterAuthor,
-    ) -> None:
-        self._store = store
-        self._rationale = rationale
-        self._author = author
-        batch_id = uuid.uuid4().hex
-        self._txn = _LocalResourceTxn(
-            store,
-            ResourceTxnContext(
-                session_id=f"batch:{batch_id}",
-                turn_id=batch_id,
-                turn_index=0,
-                rationale=rationale,
-                author=author,
-            ),
-        )
-
-    async def write(self, path: str, content: bytes) -> None:
-        ref = ResourceRef(namespace="workspace", path=path)
-        current = await self._txn.read(ref)
-        if current is None:
-            await self._txn.create(
-                ref,
-                content,
-                rationale=self._rationale,
-                author=self._author,
-            )
-        else:
-            await self._txn.replace(
-                ref,
-                current,
-                content,
-                rationale=self._rationale,
-                author=self._author,
-            )
-
-    async def replace(self, path: str, old: bytes, new: bytes) -> None:
-        await self._txn.replace(
-            ResourceRef(namespace="workspace", path=path),
-            old,
-            new,
-            rationale=self._rationale,
-            author=self._author,
-        )
-
-    async def delete(self, path: str) -> None:
-        await self._txn.delete(
-            ResourceRef(namespace="workspace", path=path),
-            rationale=self._rationale,
-            author=self._author,
-        )
-
-    async def commit(self) -> None:
-        await await_known_outcome(self._commit_once())
-
-    async def _commit_once(self) -> None:
-        await self._txn.prepare()
-        try:
-            await self._txn.apply()
-            await self._txn.commit()
-        except BaseException:
-            await self._txn.abandon()
-            raise
-        await await_known_outcome(
-            asyncio.to_thread(
-                self._store._journal.forget,
-                self._txn._transaction_id,
-            )
-        )
-
-    async def abandon(self) -> None:
-        await self._txn.abandon()
 
 
 @dataclass(slots=True)

@@ -167,7 +167,6 @@ from .query import (
     TrajectoryQueryStore,
 )
 from .resource import (
-    BatchHandle,
     EnvironmentForkableResourceWriter,
     PathClass,
     RESOURCE_NAMESPACE_ARTIFACT,
@@ -381,7 +380,6 @@ __all__ = [
     "BackgroundCompletion",
     "BASH_OPERATIONS_SERVICE",
     "BashOperations",
-    "BatchHandle",
     "BindableContextPolicy",
     "CancellableContextPolicy",
     "BeforeRunEvent",

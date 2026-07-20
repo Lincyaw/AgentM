@@ -9,9 +9,7 @@ import posixpath
 import shlex
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
@@ -21,7 +19,6 @@ from agentm import (
     ExecResult,
 )
 from agentm.core.abi import (
-    BatchHandle,
     PathClass,
     WriterAuthor,
     WriteResult,
@@ -340,27 +337,6 @@ class HarborEnvironmentOperations:
         return None
 
 
-@dataclass(frozen=True, slots=True)
-class _Write:
-    path: str
-    content: bytes
-
-
-@dataclass(frozen=True, slots=True)
-class _Replace:
-    path: str
-    old: bytes
-    new: bytes
-
-
-@dataclass(frozen=True, slots=True)
-class _Delete:
-    path: str
-
-
-_PendingMutation = _Write | _Replace | _Delete
-
-
 class HarborResourceWriter:
     """Read and mutate workspace files through Harbor transfer APIs."""
 
@@ -478,73 +454,6 @@ class HarborResourceWriter:
                 error=result.stderr or "delete failed",
             )
         return WriteResult(path=path, path_class="managed")
-
-    def batch(
-        self,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> AbstractAsyncContextManager[BatchHandle]:
-        writer = self
-
-        class _Batch:
-            def __init__(self) -> None:
-                self._mutations: list[_PendingMutation] = []
-
-            async def write(self, path: str, content: bytes) -> None:
-                self._mutations.append(_Write(path, content))
-
-            async def replace(
-                self,
-                path: str,
-                old: bytes,
-                new: bytes,
-            ) -> None:
-                self._mutations.append(_Replace(path, old, new))
-
-            async def delete(self, path: str) -> None:
-                self._mutations.append(_Delete(path))
-
-            async def flush(self) -> None:
-                for mutation in self._mutations:
-                    if isinstance(mutation, _Write):
-                        result = await writer.write(
-                            mutation.path,
-                            mutation.content,
-                            rationale=rationale,
-                            author=author,
-                        )
-                    elif isinstance(mutation, _Replace):
-                        result = await writer.replace(
-                            mutation.path,
-                            mutation.old,
-                            mutation.new,
-                            rationale=rationale,
-                            author=author,
-                        )
-                    else:
-                        result = await writer.delete(
-                            mutation.path,
-                            rationale=rationale,
-                            author=author,
-                        )
-                    if result.error is not None:
-                        raise RuntimeError(
-                            f"Harbor batch mutation failed for {mutation.path!r}: {result.error}"
-                        )
-
-        @asynccontextmanager
-        async def context() -> AsyncIterator[BatchHandle]:
-            batch = _Batch()
-            try:
-                yield batch
-            except BaseException:
-                raise
-            else:
-                await batch.flush()
-
-        return context()
-
 
 def harbor_bindings(
     env: BaseEnvironment,

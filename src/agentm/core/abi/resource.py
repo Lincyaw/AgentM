@@ -9,7 +9,6 @@ how it is audited, or which paths are protected.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 import math
 from types import MappingProxyType
@@ -244,16 +243,6 @@ class WriteResult:
         _require_nonempty_string(self.error, "write result error", optional=True)
 
 
-class BatchHandle(Protocol):
-    """Atomic mutation group returned by ``ResourceWriter.batch``."""
-
-    async def write(self, path: str, content: bytes) -> None: ...
-
-    async def replace(self, path: str, old: bytes, new: bytes) -> None: ...
-
-    async def delete(self, path: str) -> None: ...
-
-
 @runtime_checkable
 class ResourceReader(Protocol):
     """Backend-neutral read authority for logical ``ResourceRef`` values.
@@ -408,13 +397,6 @@ class ResourceWriter(Protocol):
 
     def classify(self, path: str) -> PathClass: ...
 
-    def batch(
-        self,
-        *,
-        rationale: str,
-        author: WriterAuthor = "agent",
-    ) -> AbstractAsyncContextManager[BatchHandle]: ...
-
 
 @runtime_checkable
 class TransactionalResourceWriter(ResourceWriter, Protocol):
@@ -449,7 +431,6 @@ class EnvironmentForkableResourceWriter(Protocol):
 
 __all__ = [
     "EnvironmentForkableResourceWriter",
-    "BatchHandle",
     "PathClass",
     "RESOURCE_NAMESPACE_ARTIFACT",
     "RESOURCE_NAMESPACE_CATALOG",
