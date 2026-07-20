@@ -121,6 +121,9 @@ requirements:
       ResourceWriter exposes only single workspace mutations; atomic grouped
       writes use the recoverable TransactionalResourceWriter contract, never a
       batch method with backend-dependent guarantees.
+      Optional policy atoms must not reinterpret list, lookup, or parse
+      failures as empty state; only derived analytics that cannot affect the
+      authoritative result may fail non-fatally.
     priority: P0
     status: tested
     confidence: confirmed

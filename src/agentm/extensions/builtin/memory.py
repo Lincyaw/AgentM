@@ -67,18 +67,14 @@ class _FrontmatterPost(Protocol):
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
-    """Parse leading YAML frontmatter, returning ``(metadata, body)``.
-
-    On parse failure fall back to the original text with empty metadata.
-    """
+    """Parse leading YAML frontmatter, returning ``(metadata, body)``."""
     try:
         post = cast(_FrontmatterPost, frontmatter.loads(text))
     except Exception as exc:
-        logger.debug("memory: frontmatter parse failed, returning raw text: {}", exc)
-        return {}, text
+        raise ValueError("invalid memory frontmatter") from exc
     metadata = post.metadata
     if not isinstance(metadata, Mapping):
-        return {}, cast(str, post.content)
+        raise ValueError("memory frontmatter metadata must be a mapping")
     return dict(metadata), post.content
 
 
@@ -225,7 +221,11 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
 
     async def _read(args: dict[str, object]) -> ToolResult:
         name = str(args["name"])
-        path = await _resolve_memory_path(writer, base_path, name)
+        try:
+            path = await _resolve_memory_path(writer, base_path, name)
+        except Exception as exc:
+            logger.warning("memory lookup failed for {}: {}", name, exc)
+            return _error(f"lookup failed: {exc}")
         if path is None:
             return _error(f"memory {name!r} not found in {base_path}")
         try:
@@ -248,16 +248,21 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
 
         entries: list[tuple[str, str, str]] = []
         skipped: list[str] = []
-        for path in await _list_memory_files(writer, base_path):
+        try:
+            paths = await _list_memory_files(writer, base_path)
+        except Exception as exc:
+            logger.warning("memory search listing failed for {}: {}", base_path, exc)
+            return _error(f"search failed: {exc}")
+        for path in paths:
             try:
                 data = await writer.read(str(path))
+                meta, _body = parse_frontmatter(
+                    data.decode("utf-8", errors="replace")
+                )
             except Exception as exc:  # noqa: BLE001
-                # Skip an unreadable memory file rather than failing the search,
-                # but record it so the model learns recall may be incomplete.
-                logger.debug("memory: skipping unreadable file {}: {}", path, exc)
+                logger.debug("memory: skipping invalid file {}: {}", path, exc)
                 skipped.append(path.name)
                 continue
-            meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
             name = str(meta.get("name", path.stem))
             description = str(meta.get("description", ""))
             mem_type = str(meta.get("type", ""))
@@ -282,7 +287,11 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
 
     async def _delete(args: dict[str, object]) -> ToolResult:
         name = str(args["name"])
-        path = await _resolve_memory_path(writer, base_path, name)
+        try:
+            path = await _resolve_memory_path(writer, base_path, name)
+        except Exception as exc:
+            logger.warning("memory lookup failed for {}: {}", name, exc)
+            return _error(f"lookup failed: {exc}")
         if path is None:
             return _error(f"memory {name!r} not found in {base_path}")
         rel = _to_cwd_relative(path, cwd)
@@ -374,11 +383,7 @@ async def _list_memory_files(
     writer: ResourceWriter,
     base: Path,
 ) -> list[Path]:
-    try:
-        names = await writer.list_dir(str(base))
-    except Exception as exc:
-        logger.warning(f"memory: failed to list {base}: {exc}")
-        return []
+    names = await writer.list_dir(str(base))
     out: list[Path] = []
     for entry in names:
         if not entry.endswith(".md") or entry == "MEMORY.md":
@@ -395,13 +400,8 @@ async def _resolve_memory_path(
 
     for mem_type in _VALID_TYPES:
         candidate = base / f"{mem_type}_{name}.md"
-        try:
-            if await writer.exists(str(candidate)):
-                return candidate
-        except Exception as exc:  # noqa: BLE001
-            # Access check failed for this type variant — try the next one.
-            logger.debug("memory: access check failed for {}: {}", candidate, exc)
-            continue
+        if await writer.exists(str(candidate)):
+            return candidate
     return None
 
 async def _build_index_block(
@@ -410,13 +410,9 @@ async def _build_index_block(
     max_lines: int,
 ) -> str:
     index_path = base / "MEMORY.md"
-    try:
-        if not await writer.exists(str(index_path)):
-            return ""
-        raw = await writer.read(str(index_path))
-    except Exception as exc:
-        logger.warning(f"memory: failed to read index {index_path}: {exc}")
+    if not await writer.exists(str(index_path)):
         return ""
+    raw = await writer.read(str(index_path))
     text = raw.decode("utf-8", errors="replace").strip()
     if not text:
         return ""
@@ -451,14 +447,18 @@ async def _rewrite_index(
     """Regenerate MEMORY.md from current files. Returns error string or None."""
 
     entries: list[tuple[str, str, str]] = []
-    for path in await _list_memory_files(writer, base):
+    try:
+        paths = await _list_memory_files(writer, base)
+    except Exception as exc:
+        logger.warning("memory index listing failed for {}: {}", base, exc)
+        return f"index rebuild failed: {exc}"
+    for path in paths:
         try:
             data = await writer.read(str(path))
+            meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
         except Exception as exc:  # noqa: BLE001
-            # Skip an unreadable memory file when rebuilding the index.
-            logger.debug("memory: skipping unreadable file {} during reindex: {}", path, exc)
-            continue
-        meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
+            logger.warning("memory index source failed for {}: {}", path, exc)
+            return f"index rebuild failed for {path.name}: {exc}"
         name = str(meta.get("name", path.stem))
         mem_type = str(meta.get("type", ""))
         description = str(meta.get("description", ""))
