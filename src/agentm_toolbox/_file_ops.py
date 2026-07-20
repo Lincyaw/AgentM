@@ -1,18 +1,10 @@
-"""Core file-tool logic: read, write, edit.
-
-Extracted from ``agentm.extensions.builtin.file_tools`` so the same
-logic runs both in-process (local sessions) and inside sandbox
-containers (uploaded and exec'd via CLI).
-
-Zero external dependencies — stdlib only.
-"""
+"""Deterministic file-tool rendering and mutation planning."""
 
 from __future__ import annotations
 
 import os
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import PurePath
 from typing import Final
 
 from agentm_toolbox._match import find_actual_string
@@ -109,44 +101,17 @@ def _check_shrinkage(
     return None
 
 
-def _write_atomic(resolved: str, content: bytes) -> None:
-    """Atomic write: tempfile → fsync → rename."""
-    parent = os.path.dirname(resolved)
-    os.makedirs(parent, exist_ok=True)
-    try:
-        mode = os.stat(resolved).st_mode & 0o777
-    except FileNotFoundError:
-        mode = 0o644
-    fd, tmp = tempfile.mkstemp(
-        prefix=f".{os.path.basename(resolved)}.",
-        dir=parent,
-    )
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, resolved)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 # ---------------------------------------------------------------------------
 # FileToolbox
 # ---------------------------------------------------------------------------
 
 
 class FileToolbox:
-    """Stateful file-tool runtime.  One instance per session.
+    """Stateful, I/O-free file-tool planner. One instance per session.
 
-    Performs I/O directly via ``open()`` — designed to run on the same
-    filesystem as the files being operated on (either the host filesystem
-    for local sessions, or inside the sandbox container).
+    Callers provide the current bytes and apply planned mutations through
+    their authoritative resource backend. This keeps validation and output
+    identical across local, sandbox, remote, and transactional environments.
     """
 
     def __init__(
@@ -165,34 +130,6 @@ class FileToolbox:
         self.state = state or ReadStateStore()
 
     # -- read ---------------------------------------------------------------
-
-    def read(
-        self,
-        path: str,
-        *,
-        offset: int | None = None,
-        limit: int | None = None,
-    ) -> Result:
-        binary_err = _check_binary(path)
-        if binary_err is not None:
-            return Result(text=binary_err, is_error=True)
-
-        resolved = _resolve(self._cwd, path)
-        try:
-            data = Path(resolved).read_bytes()
-        except Exception as exc:
-            return Result(text=f"Failed to read {path!r}: {exc}", is_error=True)
-        try:
-            mtime_ns = os.stat(resolved).st_mtime_ns
-        except OSError:
-            mtime_ns = 0
-        return self.read_bytes(
-            path,
-            data,
-            offset=offset,
-            limit=limit,
-            mtime_ns=mtime_ns,
-        )
 
     def read_bytes(
         self,
@@ -273,33 +210,6 @@ class FileToolbox:
             )
 
     # -- write --------------------------------------------------------------
-
-    def write(self, path: str, content: str) -> Result:
-        resolved = _resolve(self._cwd, path)
-        try:
-            current = Path(resolved).read_bytes()
-        except FileNotFoundError:
-            current = None
-        except Exception as exc:
-            return Result(
-                text=f"Failed to read {path!r} before write: {exc}",
-                is_error=True,
-            )
-        result, content_bytes = self.plan_write(path, current, content)
-        if result.is_error or content_bytes is None:
-            return result
-        try:
-            _write_atomic(resolved, content_bytes)
-        except Exception as exc:
-            return Result(
-                text=f"Failed to write {path!r}: {exc}", is_error=True
-            )
-        try:
-            mtime_ns = os.stat(resolved).st_mtime_ns
-        except OSError:
-            mtime_ns = 0
-        self.accept_content(path, content_bytes, mtime_ns=mtime_ns)
-        return result
 
     def plan_write(
         self,
@@ -386,47 +296,6 @@ class FileToolbox:
         )
 
     # -- edit ---------------------------------------------------------------
-
-    def edit(
-        self,
-        path: str,
-        *,
-        old_string: str | None = None,
-        new_string: str = "",
-        start_line: int | None = None,
-        end_line: int | None = None,
-        replace_all: bool = False,
-    ) -> Result:
-        resolved = _resolve(self._cwd, path)
-        try:
-            current = Path(resolved).read_bytes()
-        except Exception as exc:
-            return Result(
-                text=f"Failed to read {path!r}: {exc}", is_error=True
-            )
-        result, updated = self.plan_edit(
-            path,
-            current,
-            old_string=old_string,
-            new_string=new_string,
-            start_line=start_line,
-            end_line=end_line,
-            replace_all=replace_all,
-        )
-        if result.is_error or updated is None:
-            return result
-        try:
-            _write_atomic(resolved, updated)
-        except Exception as exc:
-            return Result(
-                text=f"Failed to write {path!r}: {exc}", is_error=True
-            )
-        try:
-            mtime_ns = os.stat(resolved).st_mtime_ns
-        except OSError:
-            mtime_ns = 0
-        self.accept_content(path, updated, mtime_ns=mtime_ns)
-        return result
 
     def plan_edit(
         self,

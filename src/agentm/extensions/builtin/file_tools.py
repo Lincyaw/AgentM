@@ -1,22 +1,17 @@
-"""Grouped local file-I/O tool atom: ``read``, ``write``, ``edit``."""
+"""Grouped file-I/O tools over the host-provided resource authority."""
 
 from __future__ import annotations
 
 import fnmatch
-import json
 import os
-import shlex
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from agentm.core.abi import (
+    AtomAPI,
     AtomInstallPriority,
-    BASH_OPERATIONS_SERVICE,
-    BashOperations,
-    EnvironmentOperations,
-    ENVIRONMENT_OPERATIONS_SERVICE,
     FunctionTool,
     ResourceRef,
     ResourceTxn,
@@ -47,8 +42,6 @@ class FileToolsConfig(BaseModel):
     max_size_bytes: int = Field(default=262_144, gt=0)
     require_read: bool = True
     default_limit: int = Field(default=250, gt=0)
-    toolbox_command: str = "python3 -m agentm_toolbox"
-    toolbox_state_file: str | None = None
 
     @field_validator("tools")
     @classmethod
@@ -92,49 +85,8 @@ def _toolbox_to_tool_result(r: ToolboxResult) -> ToolResult:
     return _error(r.text) if r.is_error else _ok(r.text)
 
 
-_PATH_ALIASES: Final[tuple[str, ...]] = ("file_path",)
-
-
-def _required_string_arg(
-    args: dict[str, Any],
-    key: str,
-    tool_name: str,
-    *,
-    aliases: tuple[str, ...] = (),
-    allow_empty: bool = False,
-    hint: str,
-) -> tuple[str | None, ToolResult | None]:
-    supplied_name = next((name for name in (key, *aliases) if name in args), None)
-    if supplied_name is None:
-        alias_text = ""
-        if aliases:
-            alias_text = f" Accepted aliases: {', '.join(repr(a) for a in aliases)}."
-        return (
-            None,
-            _error(
-                f"Invalid {tool_name} call: missing required argument {key!r}."
-                f"{alias_text} Use {hint}."
-            ),
-        )
-
-    value = args[supplied_name]
-    if not isinstance(value, str):
-        return (
-            None,
-            _error(
-                f"Invalid {tool_name} call: argument {supplied_name!r} must be a "
-                f"string, got {type(value).__name__}. Use {hint}."
-            ),
-        )
-    if not allow_empty and value == "":
-        return (
-            None,
-            _error(
-                f"Invalid {tool_name} call: argument {supplied_name!r} must not "
-                f"be empty. Use {hint}."
-            ),
-        )
-    return value, None
+def _invalid_call(tool_name: str, error: ValidationError) -> ToolResult:
+    return _error(f"Invalid {tool_name} call: {error}")
 
 
 def _resolve_globs(value: list[str] | None, cwd: str) -> tuple[str, ...]:
@@ -243,7 +195,7 @@ class _EditArgs(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def install(session: Any, config: FileToolsConfig) -> None:
+def install(session: AtomAPI, config: FileToolsConfig) -> None:
     _FileToolsRuntime(session=session, config=config).install()
 
 
@@ -261,34 +213,23 @@ def _enabled_tools(configured: list[str] | None) -> frozenset[str]:
     return enabled_tools
 
 
-def _coerce_bash_ops(session: Any) -> BashOperations | None:
-    service = session.services.get(BASH_OPERATIONS_SERVICE)
-    if isinstance(service, BashOperations):
-        return service
-    return None
-
-
-def _coerce_environment_id(session: Any) -> str | None:
-    service = session.services.get(ENVIRONMENT_OPERATIONS_SERVICE)
-    if isinstance(service, EnvironmentOperations):
-        ref = service.ref
-        return f"{ref.kind}:{ref.id}"
-    return None
-
-
 class _FileToolsRuntime:
     """Owns file_tools registration and per-session handler state."""
 
-    def __init__(self, *, session: Any, config: FileToolsConfig) -> None:
+    def __init__(self, *, session: AtomAPI, config: FileToolsConfig) -> None:
         self._session = session
         self._config = config
         self._enabled_tools = _enabled_tools(config.tools)
         self._allow_globs = _resolve_globs(config.allow_globs, session.ctx.cwd)
         self._deny_globs = _resolve_globs(config.deny_globs, session.ctx.cwd)
         self._max_size_bytes = config.max_size_bytes
-        self._bash_ops = _coerce_bash_ops(session)
-        self._environment_id = _coerce_environment_id(session)
-        self._toolbox_command = config.toolbox_command
+        writer = session.get_resource_writer()
+        if writer is None:
+            raise RuntimeError(
+                "file_tools requires a ResourceWriter; compose a resource atom "
+                "or inject a host ResourceWriter"
+            )
+        self._writer = writer
         self._toolbox = FileToolbox(
             cwd=session.ctx.cwd,
             max_size=config.max_size_bytes,
@@ -304,41 +245,20 @@ class _FileToolsRuntime:
         if "edit" in self._enabled_tools:
             self._register_edit()
 
-    async def _dispatch(
-        self, tool_name: str, args: dict[str, Any]
-    ) -> ToolboxResult:
-        if self._bash_ops is not None:
-            return await self._exec_toolbox(tool_name, args)
-        if tool_name == "read":
-            return self._toolbox.read(**args)
-        if tool_name == "write":
-            return self._toolbox.write(**args)
-        if tool_name == "edit":
-            return self._toolbox.edit(**args)
-        raise ValueError(f"unsupported file tool: {tool_name}")
-
-    def _resource_writer(self) -> ResourceWriter | None:
-        writer = self._session.get_resource_writer()
-        return writer if isinstance(writer, ResourceWriter) else None
-
     def _resource_txn(self) -> ResourceTxn | None:
-        txn = self._session.get_resource_txn()
-        return txn if isinstance(txn, ResourceTxn) else None
+        return self._session.get_resource_txn()
 
     async def _resource_view(
         self,
         path: str,
-    ) -> tuple[ResourceTxn | ResourceWriter | None, bytes | None]:
+    ) -> tuple[ResourceTxn | ResourceWriter, bytes | None]:
         ref = ResourceRef(namespace="workspace", path=path)
         txn = self._resource_txn()
         if txn is not None:
             return txn, await txn.read(ref)
-        writer = self._resource_writer()
-        if writer is None:
-            return None, None
-        if not await writer.exists(path):
-            return writer, None
-        return writer, await writer.read(path)
+        if not await self._writer.exists(path):
+            return self._writer, None
+        return self._writer, await self._writer.read(path)
 
     async def _resource_read(
         self,
@@ -346,10 +266,8 @@ class _FileToolsRuntime:
         *,
         offset: int | None,
         limit: int | None,
-    ) -> ToolResult | None:
-        authority, current = await self._resource_view(path)
-        if authority is None:
-            return None
+    ) -> ToolResult:
+        _, current = await self._resource_view(path)
         if current is None:
             return _error(f"Failed to read {path!r}: file does not exist")
         return _toolbox_to_tool_result(
@@ -369,8 +287,6 @@ class _FileToolsRuntime:
         rationale: str,
     ) -> ToolResult:
         authority, current = await self._resource_view(path)
-        if authority is None:
-            return _error("write requires a ResourceWriter service")
         result, data = self._toolbox.plan_write(path, current, content)
         if result.is_error or data is None:
             return _toolbox_to_tool_result(result)
@@ -404,22 +320,17 @@ class _FileToolsRuntime:
     async def _resource_edit(
         self,
         path: str,
-        args: dict[str, Any],
-        *,
-        new_string: str,
-        rationale: str,
+        args: _EditArgs,
     ) -> ToolResult:
         authority, current = await self._resource_view(path)
-        if authority is None:
-            return _error("edit requires a ResourceWriter service")
         result, new_bytes = self._toolbox.plan_edit(
             path,
             current,
-            old_string=args.get("old_string"),
-            new_string=new_string,
-            start_line=args.get("start_line"),
-            end_line=args.get("end_line"),
-            replace_all=bool(args.get("replace_all", False)),
+            old_string=args.old_string,
+            new_string=args.new_string,
+            start_line=args.start_line,
+            end_line=args.end_line,
+            replace_all=args.replace_all,
         )
         if result.is_error or new_bytes is None:
             return _toolbox_to_tool_result(result)
@@ -431,85 +342,19 @@ class _FileToolsRuntime:
                 ref,
                 current,
                 new_bytes,
-                rationale=rationale,
+                rationale=args.rationale,
             )
         else:
             write_result = await authority.replace(
                 path,
                 current,
                 new_bytes,
-                rationale=rationale,
+                rationale=args.rationale,
             )
             if write_result.error is not None:
                 return _error(write_result.error)
         self._toolbox.accept_content(path, new_bytes)
         return _toolbox_to_tool_result(result)
-
-    async def _exec_toolbox(
-        self, tool_name: str, args: dict[str, Any]
-    ) -> ToolboxResult:
-        bash_ops = self._bash_ops
-        if bash_ops is None:
-            return ToolboxResult(
-                text=f"toolbox exec unavailable for {tool_name!r}: no bash service",
-                is_error=True,
-            )
-        exec_args = {
-            **args,
-            "_cwd": self._session.ctx.cwd,
-            "_max_size": self._max_size_bytes,
-            "_require_read": self._config.require_read,
-            "_default_limit": self._config.default_limit,
-            "_state_namespace": self._toolbox_state_namespace(),
-        }
-        if self._config.toolbox_state_file:
-            exec_args["_state_file"] = self._config.toolbox_state_file
-        payload = json.dumps(exec_args, ensure_ascii=False).encode("utf-8")
-        command = f"{self._toolbox_command} {shlex.quote(tool_name)} -"
-        result = await bash_ops.exec(
-            command,
-            cwd=self._session.ctx.cwd,
-            timeout=30,
-            stdin=payload,
-        )
-        stdout = result.stdout.decode("utf-8", errors="replace")
-        stderr = result.stderr.decode("utf-8", errors="replace")
-        json_line = next(
-            (line.strip() for line in reversed(stdout.splitlines()) if line.strip()),
-            "",
-        )
-        if not json_line:
-            details = stderr.strip() or stdout.strip() or "no output"
-            if result.timed_out:
-                details = f"timed out; {details}"
-            return ToolboxResult(
-                text=f"toolbox exec failed for {tool_name!r}: {details}",
-                is_error=True,
-            )
-        try:
-            decoded = json.loads(json_line)
-            return ToolboxResult(**decoded)
-        except (TypeError, json.JSONDecodeError) as exc:
-            details = stderr.strip() or stdout.strip() or json_line
-            return ToolboxResult(
-                text=(
-                    f"toolbox output parse error for {tool_name!r}: {exc}; "
-                    f"output: {details}"
-                ),
-                is_error=True,
-            )
-
-    def _toolbox_state_namespace(self) -> str:
-        return json.dumps(
-            {
-                "root_session_id": self._session.ctx.root_session_id,
-                "session_id": self._session.ctx.session_id,
-                "environment_id": self._environment_id,
-                "cwd": self._session.ctx.cwd,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
 
     # -- read ---------------------------------------------------------------
 
@@ -538,35 +383,26 @@ class _FileToolsRuntime:
             )
         )
 
-    async def _read_execute(self, args: dict[str, Any]) -> ToolResult:
-        path, arg_error = _required_string_arg(
-            args, "path", "read",
-            aliases=_PATH_ALIASES, hint='{"path": "..."}',
-        )
-        if arg_error is not None:
-            return arg_error
-        assert path is not None
+    async def _read_execute(self, args: dict[str, object]) -> ToolResult:
+        try:
+            parsed = _ReadArgs.model_validate(args)
+        except ValidationError as error:
+            return _invalid_call("read", error)
 
         gate_error = _check_path_allowed(
-            path, self._session.ctx.cwd, self._allow_globs, self._deny_globs
+            parsed.path,
+            self._session.ctx.cwd,
+            self._allow_globs,
+            self._deny_globs,
         )
         if gate_error is not None:
             return _error(gate_error)
 
-        resource_result = await self._resource_read(
-            path,
-            offset=args.get("offset"),
-            limit=args.get("limit"),
+        return await self._resource_read(
+            parsed.path,
+            offset=parsed.offset,
+            limit=parsed.limit,
         )
-        if resource_result is not None:
-            return resource_result
-
-        result = await self._dispatch("read", {
-            "path": path,
-            "offset": args.get("offset"),
-            "limit": args.get("limit"),
-        })
-        return _toolbox_to_tool_result(result)
 
     # -- write --------------------------------------------------------------
 
@@ -587,38 +423,26 @@ class _FileToolsRuntime:
             )
         )
 
-    async def _write_execute(self, args: dict[str, Any]) -> ToolResult:
-        path, arg_error = _required_string_arg(
-            args, "path", "write",
-            aliases=_PATH_ALIASES,
-            hint='{"path": "...", "content": "..."}',
-        )
-        if arg_error is not None:
-            return arg_error
-        assert path is not None
-
-        content, arg_error = _required_string_arg(
-            args, "content", "write",
-            allow_empty=True,
-            hint='{"path": "...", "content": "..."}',
-        )
-        if arg_error is not None:
-            return arg_error
-        assert content is not None
+    async def _write_execute(self, args: dict[str, object]) -> ToolResult:
+        try:
+            parsed = _WriteArgs.model_validate(args)
+        except ValidationError as error:
+            return _invalid_call("write", error)
 
         gate_error = _check_path_allowed(
-            path, self._session.ctx.cwd, self._allow_globs, self._deny_globs
+            parsed.path,
+            self._session.ctx.cwd,
+            self._allow_globs,
+            self._deny_globs,
         )
         if gate_error is not None:
             return _error(gate_error)
 
-        rationale = str(args.get("rationale") or "agent write via file_tools")
-        resource_result = await self._resource_write(
-            path,
-            content,
-            rationale=rationale,
+        return await self._resource_write(
+            parsed.path,
+            parsed.content,
+            rationale=parsed.rationale,
         )
-        return resource_result
 
     # -- edit ---------------------------------------------------------------
 
@@ -647,36 +471,19 @@ class _FileToolsRuntime:
             )
         )
 
-    async def _edit_execute(self, args: dict[str, Any]) -> ToolResult:
-        path, arg_error = _required_string_arg(
-            args, "path", "edit",
-            aliases=_PATH_ALIASES,
-            hint='{"path": "...", "old_string": "...", "new_string": "..."}',
-        )
-        if arg_error is not None:
-            return arg_error
-        assert path is not None
-
-        new_string, arg_error = _required_string_arg(
-            args, "new_string", "edit",
-            allow_empty=True,
-            hint='{"path": "...", "old_string": "...", "new_string": "..."}',
-        )
-        if arg_error is not None:
-            return arg_error
-        assert new_string is not None
+    async def _edit_execute(self, args: dict[str, object]) -> ToolResult:
+        try:
+            parsed = _EditArgs.model_validate(args)
+        except ValidationError as error:
+            return _invalid_call("edit", error)
 
         gate_error = _check_path_allowed(
-            path, self._session.ctx.cwd, self._allow_globs, self._deny_globs
+            parsed.path,
+            self._session.ctx.cwd,
+            self._allow_globs,
+            self._deny_globs,
         )
         if gate_error is not None:
             return _error(gate_error)
 
-        rationale = str(args.get("rationale") or "agent edit via file_tools")
-        resource_result = await self._resource_edit(
-            path,
-            args,
-            new_string=new_string,
-            rationale=rationale,
-        )
-        return resource_result
+        return await self._resource_edit(parsed.path, parsed)

@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import os
 import re
+import shlex
 import shutil
 import signal
 import tempfile
@@ -25,6 +26,8 @@ from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
     TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
 )
 from agentm.core.abi.stream import AssistantStreamEvent, MessageEnd
 from agentm.core.abi.tool import Tool
@@ -86,6 +89,14 @@ class _FakeHarborEnvironment:
     ) -> HarborExecResult:
         del timeout_sec
         self.exec_cwds.append(cwd)
+        command_parts = shlex.split(command)
+        if len(command_parts) == 3 and command_parts[:2] == ["test", "-e"]:
+            exists = self._local_path(command_parts[2]).exists()
+            return HarborExecResult(
+                stdout="",
+                stderr="",
+                return_code=0 if exists else 1,
+            )
         cancel_match = re.search(
             r"^marker=['\"]?AGENTM_EXEC_ID=([0-9a-f]+)",
             command,
@@ -204,6 +215,64 @@ class _InterruptProvider:
         )
 
 
+class _FileToolProvider:
+    """Drive a read/edit workflow through the public provider boundary."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[AgentMessage, ...]] = []
+        self._step = 0
+
+    async def __call__(
+        self,
+        *,
+        messages: list[AgentMessage],
+        model: Model,
+        tools: list[Tool],
+        system: str | None = None,
+        signal: CancelSignal | None = None,
+        thinking: Literal["off", "low", "medium", "high"] = "off",
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        del model, tools, system, signal, thinking
+        self.requests.append(tuple(messages))
+        content: tuple[ToolCallBlock | TextContent, ...]
+        if self._step == 0:
+            content = (
+                ToolCallBlock(
+                    type="tool_call",
+                    id="read-note",
+                    name="read",
+                    arguments={"path": "note.txt"},
+                ),
+            )
+            stop_reason = "tool_use"
+        elif self._step == 1:
+            content = (
+                ToolCallBlock(
+                    type="tool_call",
+                    id="edit-note",
+                    name="edit",
+                    arguments={
+                        "path": "note.txt",
+                        "old_string": "before",
+                        "new_string": "after",
+                    },
+                ),
+            )
+            stop_reason = "tool_use"
+        else:
+            content = (TextContent(type="text", text="remote-file-updated"),)
+            stop_reason = "end_turn"
+        self._step += 1
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=content,
+                timestamp=0.0,
+                stop_reason=stop_reason,
+            )
+        )
+
+
 def _texts(messages: Sequence[AgentMessage]) -> list[str]:
     return [
         block.text
@@ -270,6 +339,55 @@ async def test_harbor_operations_honor_stdin_cwd_and_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(running, timeout=3.0)
     assert not fake.has_running_processes
+
+
+@pytest.mark.asyncio
+async def test_harbor_file_tools_share_resource_backed_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    sandbox = tmp_path / "sandbox"
+    workspace = sandbox / "workspace"
+    workspace.mkdir(parents=True)
+    note = workspace / "note.txt"
+    note.write_text("before\n")
+    fake = _FakeHarborEnvironment(sandbox)
+    operations, writer = harbor_bindings(
+        cast(BaseEnvironment, fake),
+        HarborOpsConfig(work_dir="/workspace"),
+    )
+    provider = _FileToolProvider()
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd="/workspace",
+            scenario=SCENARIO,
+            scenario_loader=_load_scenario,
+            stream_fn=provider,
+            model=_model(),
+            environment_operations=operations,
+            resource_writer=writer,
+            trajectory_store=JsonlTrajectoryStore(tmp_path / "trajectory"),
+        )
+    )
+    try:
+        transcript = await session.run("update the remote note")
+    finally:
+        await session.shutdown()
+
+    assert note.read_text() == "after\n"
+    assert "remote-file-updated" in _texts(transcript)
+    tool_results = [
+        block
+        for message in provider.requests[-1]
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    ]
+    assert [result.tool_call_id for result in tool_results] == [
+        "read-note",
+        "edit-note",
+    ]
+    assert all(not result.is_error for result in tool_results)
 
 
 @pytest.mark.asyncio

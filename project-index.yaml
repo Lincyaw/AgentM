@@ -40,7 +40,10 @@ requirements:
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and
       can be explicitly replaced for another environment without ambient
-      globals. Extension manifests reject unknown contract fields.
+      globals. File tools share one I/O-free planner across environments and
+      perform all reads and planned mutations through the active ResourceTxn
+      or ResourceWriter, with no bash/CLI fallback or second state authority.
+      Extension manifests reject unknown contract fields.
     priority: P0
     status: tested
     confidence: confirmed
@@ -167,7 +170,6 @@ requirements:
       - path: src/agentm/storage/trajectory/postgres.py
       - path: src/agentm/storage/trajectory/psycopg.py
       - path: src/agentm/storage/trajectory/resolve.py
-      - path: src/agentm_toolbox/__main__.py
       - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py
       - path: contrib/scenarios/chat/manifest.yaml

@@ -1,9 +1,4 @@
-"""agentm-toolbox — standalone file-tool runtime.
-
-Runs both in-process (``import agentm_toolbox``) and as a CLI inside
-sandbox containers (``python3 -m agentm_toolbox read '{...}'``).
-Zero external dependencies.
-"""
+"""I/O-free file-tool policy shared by every AgentM environment."""
 
 from agentm_toolbox._file_ops import FileToolbox, Result
 from agentm_toolbox._state import ReadStateStore, content_hash_for
