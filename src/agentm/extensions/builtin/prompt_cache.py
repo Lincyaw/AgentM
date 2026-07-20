@@ -12,13 +12,7 @@ from agentm.core.abi.compaction import ProjectionReport
 from agentm.core.abi.context import BindableContextPolicy, PolicyContext
 from agentm.core.abi.manifest import AtomInstallPriority
 from agentm.core.abi.messages import AgentMessage
-from agentm.core.abi.provider import (
-    ProviderPromptCacheAdapter,
-    ProviderPromptCacheRequest,
-    ProviderPromptCacheResult,
-)
 from agentm.core.abi.roles import (
-    PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
     TRAJECTORY_STORE_SERVICE,
 )
 from agentm.core.abi.store import TrajectoryStore
@@ -33,13 +27,12 @@ class PromptCacheConfig(BaseModel):
     content_replacement_state_key: str | None = None
     tag_last_messages: int = 1
     provider: str | None = None
-    register_provider_adapter: bool = True
 
 
 MANIFEST = ExtensionManifest(
     name="prompt_cache",
     description="Attach deterministic prompt-cache/content-ref metadata to context.",
-    registers=("context_policy:prompt_cache", "service:provider_prompt_cache_adapter"),
+    registers=("context_policy:prompt_cache",),
     config_schema=PromptCacheConfig,
     requires=(),
     priority=AtomInstallPriority.CONTEXT,
@@ -182,37 +175,8 @@ class PromptCacheContextPolicy(BindableContextPolicy):
         return None
 
 
-class PassthroughPromptCacheAdapter(ProviderPromptCacheAdapter):
-    """Provider-neutral adapter that preserves state without vendor syntax."""
-
-    def apply_prompt_cache(
-        self,
-        request: ProviderPromptCacheRequest,
-    ) -> ProviderPromptCacheResult:
-        state = replace(
-            request.state,
-            provider=request.state.provider or request.model.provider,
-            metadata={
-                **dict(request.state.metadata),
-                "adapter": "passthrough",
-            },
-        )
-        return ProviderPromptCacheResult(
-            messages=request.messages,
-            state=state,
-            metadata={"adapter": "passthrough"},
-        )
-
-
 def install(api: AtomAPI, config: PromptCacheConfig) -> None:
     api.register_context_policy(PromptCacheContextPolicy(config))
-    if config.register_provider_adapter:
-        api.services.register(
-            PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
-            PassthroughPromptCacheAdapter(),
-            ProviderPromptCacheAdapter,
-            scope="tree",
-        )
 
 
 def _tag_message(
@@ -230,7 +194,6 @@ def _tag_message(
 
 
 __all__ = [
-    "PassthroughPromptCacheAdapter",
     "PromptCacheContextPolicy",
     "install",
     "MANIFEST",

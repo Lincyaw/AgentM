@@ -437,6 +437,7 @@ class DriverConfig:
     services: ServiceRegistry
     interrupt: ResettableCancelSource
     shutdown: ResettableCancelSource
+    tool_orchestrator: ToolOrchestrator
     tools: list[Tool] = field(default_factory=list)
     store: TrajectoryStore | None = None
     parent_session_id: str | None = None
@@ -449,7 +450,6 @@ class DriverConfig:
     effect_scope: EffectScope | None = None
     resource_writer: ResourceWriter | None = None
     tool_executor: ToolExecutor | None = None
-    tool_orchestrator: ToolOrchestrator | None = None
     permission_policy: PermissionPolicy | None = None
     max_turns: int | None = None
     thinking: ThinkingLevel = "off"

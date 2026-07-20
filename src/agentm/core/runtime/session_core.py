@@ -112,6 +112,7 @@ from agentm.core.abi.trajectory import (
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
 from agentm.core.runtime.driver import DriverConfig, drive
+from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
 
@@ -170,7 +171,7 @@ class _SessionLifecycle:
     get_effect_scope: Callable[..., EffectScope | None]
     get_resource_writer: Callable[..., ResourceWriter | None]
     get_tool_executor: Callable[..., ToolExecutor | None]
-    get_tool_orchestrator: Callable[..., ToolOrchestrator | None]
+    get_tool_orchestrator: Callable[..., ToolOrchestrator]
     get_permission_policy: Callable[..., PermissionPolicy | None]
     _tool_allowlist: Callable[..., tuple[str, ...] | None]
 
@@ -300,6 +301,8 @@ class _SessionLifecycle:
             self.register_tool_executor(runtime.tool_executor, replace=True)
         if runtime.tool_orchestrator is not None:
             self.register_tool_orchestrator(runtime.tool_orchestrator, replace=True)
+        elif not self.services.has(TOOL_ORCHESTRATOR_SERVICE):
+            self.register_tool_orchestrator(default_tool_orchestrator())
         if runtime.permission_policy is not None:
             self.register_permission_policy(runtime.permission_policy, replace=True)
         if runtime.resource_reader is not None:
@@ -1145,11 +1148,14 @@ class _SessionRuntimeServices(_SessionResourceServices):
             {"service": orchestrator},
         )
 
-    def get_tool_orchestrator(self) -> ToolOrchestrator | None:
-        return self.services.get(
+    def get_tool_orchestrator(self) -> ToolOrchestrator:
+        orchestrator = self.services.get(
             TOOL_ORCHESTRATOR_SERVICE,
             cast(type[ToolOrchestrator], ToolOrchestrator),
         )
+        if orchestrator is None:
+            raise RuntimeError("session has no tool orchestrator")
+        return orchestrator
 
     def register_permission_policy(
         self,

@@ -118,7 +118,6 @@ from agentm.core.abi.trigger import (
     TriggerRenderer,
 )
 from agentm.core.runtime.execution import Execution
-from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 
 if TYPE_CHECKING:
     from agentm.core.runtime.driver import DriverConfig
@@ -1317,9 +1316,8 @@ async def react(
                 )
 
             if work_items:
-                orchestrator = tool_orchestrator or default_tool_orchestrator()
                 requested_items = {item.index: item for item in work_items}
-                async for orch_result in orchestrator.stream_batch(
+                async for orch_result in tool_orchestrator.stream_batch(
                     ToolOrchestrationRequest(
                         items=tuple(work_items),
                         session_id=session_id,

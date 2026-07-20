@@ -46,7 +46,10 @@ requirements:
       perform all reads and planned mutations through the active ResourceTxn
       or ResourceWriter, with no bash/CLI fallback or second state authority.
       Driver cancellation inputs are construction-time invariants and cannot
-      degrade to disconnected internal cancel sources. Extension manifests
+      degrade to disconnected internal cancel sources. Every composed session
+      owns one replaceable ToolOrchestrator before the driver starts; reaction
+      execution never installs a hidden fallback. Prompt-cache policy never
+      advertises provider support through a no-op adapter. Extension manifests
       reject unknown contract fields.
     priority: P0
     status: tested

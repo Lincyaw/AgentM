@@ -265,7 +265,6 @@ def _trajectory_extensions(cache_key: str) -> list[tuple[str, dict[str, object]]
             {
                 "cache_key": cache_key,
                 "tag_last_messages": 2,
-                "register_provider_adapter": False,
             },
         ),
         (_OBSERVABLE_CACHE_ADAPTER, {}),
