@@ -43,9 +43,9 @@ LLM output, use the provider's built-in support through `ProviderConfig`.
 
 ## CLI conventions (typer)
 
-The CLI uses `typer` with a single root `app` in `agentm/cli/main.py`; command
-groups live under `agentm/cli/`, with trace internals grouped under
-`agentm/cli/trace/`.
+The CLI uses `typer` with a single root `app` in `agentm/cli/_app.py`;
+subcommands live under `agentm/cli/` (e.g., `_chat.py`, `_run.py`,
+`_trace.py`, `_config.py`, `_scenario.py`).
 
 ```python
 @app.command()
@@ -56,11 +56,14 @@ def my_subcommand(
     ...
 ```
 
+Available top-level commands: `chat`, `run`, `config`, `scenario`,
+`trace`, `lint`.
+
 Rules:
 - Use `typer.BadParameter` for input validation errors (exit code 2)
 - Use `raise SystemExit(1)` for runtime failures
 - stdout for machine-readable output, stderr for human messages
-- `--format ndjson|table|text` when output has multiple consumers
+- `--format ndjson|text` when output has multiple consumers
 - Non-interactive by default (no prompts, no `input()`)
 
 ---
@@ -72,17 +75,19 @@ Atoms use **two channels** depending on audience:
 ### For observability / debugging (developers)
 
 ```python
-import logging
-logger = logging.getLogger(__name__)
-logger.warning("something unexpected: %s", detail)
+from loguru import logger
+
+logger.warning("something unexpected: {}", detail)
 ```
+
+stdlib `logging` is forbidden (AM024). Always use `loguru`.
 
 ### For user-visible diagnostics (surfaced in TUI/trace)
 
 ```python
 from agentm.core.abi.events import DiagnosticEvent
 
-await api.events.emit(
+await api.bus.emit(
     DiagnosticEvent.CHANNEL,
     DiagnosticEvent(level="warning", source="my_atom", message="...")
 )
