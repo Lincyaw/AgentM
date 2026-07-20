@@ -71,6 +71,7 @@ from agentm.core.abi import (
     UserMessage,
     VendorSpecific,
 )
+from agentm.core.abi.messages import thaw_json
 from pydantic import BaseModel, ConfigDict
 
 from agentm.extensions import ExtensionManifest
@@ -605,7 +606,7 @@ class AnthropicStreamFn:
                 "budget_tokens": self.thinking_budgets[thinking],
             }
 
-        extra = dict(self.extra_body or {})
+        extra: dict[str, Any] = thaw_json(self.extra_body) if self.extra_body else {}  # type: ignore[assignment]
         if self.reasoning_effort is not None:
             extra.setdefault("output_config", {"effort": self.reasoning_effort})
         if extra:

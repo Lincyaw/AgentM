@@ -43,6 +43,13 @@ Single-task runs with full control over env injection and timeout multipliers.
 - ARL gateway running on a Kubernetes cluster with an internal registry
 - Model profile configured in `~/.agentm/config.toml`
 - `ARL_GATEWAY_URL` and `ARL_API_KEY` set in environment
+- SSB dataset cloned locally:
+
+```bash
+mkdir -p ~/.agentm/bench-repos
+git clone https://github.com/snorkel-ai/senior-swe-bench-v2026.06.git \
+    ~/.agentm/bench-repos/senior-swe
+```
 
 **Model profile** (`~/.agentm/config.toml`):
 
@@ -60,7 +67,12 @@ values are passed to an explicit resolver snapshot; the adapter never mutates
 process-wide environment variables, so concurrent trials cannot exchange
 provider or trajectory configuration.
 
-**Run command:**
+**Run command (build from Dockerfile):**
+
+When images are not pre-built, the ARL gateway builds from the task's
+Dockerfile on demand. Pass `--ek build_registry` to tell the gateway where
+to push the built image; omit `image_registry` and `image_tag` so
+`_resolve_image_or_build` falls through to the build path.
 
 ```bash
 ARL_GATEWAY_URL="$ARL_GATEWAY_URL" \
@@ -68,7 +80,40 @@ ARL_API_KEY="$ARL_API_KEY" \
 uv run harbor run \
   -p <path-to-task-dir> \
   -a agentm_harbor:ExternalAgentMAgent \
-  --environment-import-path arl.harbor:ArlEnvironment \
+  --env arl.harbor:ArlEnvironment \
+  -m <model-profile> \
+  --ek gateway_url="$ARL_GATEWAY_URL" \
+  --ek build_registry=<internal-registry-host:port> \
+  --ek build_timeout=1800 \
+  --agent-timeout-multiplier 5 \
+  --verifier-timeout-multiplier 5 \
+  --no-delete -k 1 -y \
+  --ae SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<judge-model> \
+  --ae SSB_OVERRIDE_CLASSIFIER_MODEL=openai/<classifier-model> \
+  --ae OPENAI_API_KEY="$LITELLM_API_KEY" \
+  --ae OPENAI_BASE_URL="$LITELLM_BASE_URL" \
+  --ve SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<judge-model> \
+  --ve SSB_OVERRIDE_CLASSIFIER_MODEL=openai/<classifier-model> \
+  --ve OPENAI_API_KEY="$LITELLM_API_KEY" \
+  --ve OPENAI_BASE_URL="$LITELLM_BASE_URL"
+```
+
+The gateway hashes the Dockerfile context and caches the built image; repeat
+runs with the same task skip the build. First build can take 5-15 minutes
+depending on the task's dependency footprint.
+
+**Run command (pre-built image):**
+
+When images are already in the registry (e.g. from a prior build or a batch
+push), specify `image_registry` and `image_tag` to skip the build entirely.
+
+```bash
+ARL_GATEWAY_URL="$ARL_GATEWAY_URL" \
+ARL_API_KEY="$ARL_API_KEY" \
+uv run harbor run \
+  -p <path-to-task-dir> \
+  -a agentm_harbor:ExternalAgentMAgent \
+  --env arl.harbor:ArlEnvironment \
   -m <model-profile> \
   --ek gateway_url="$ARL_GATEWAY_URL" \
   --ek image_registry=<internal-registry-host:port> \
@@ -152,13 +197,15 @@ cat jobs/<job-dir>/<trial>/verifier/test-stdout.txt
 |---|---|
 | `-p <path>` | Local path to a single task directory |
 | `-a agentm_harbor:ExternalAgentMAgent` | AgentM as the agent harness |
-| `--environment-import-path arl.harbor:ArlEnvironment` | ARL sandbox backend |
+| `--env arl.harbor:ArlEnvironment` | ARL sandbox backend (`--environment-import-path` is deprecated) |
 | `-m <profile>` | Model profile name from `config.toml` |
 | `--ek key=value` | Extra kwargs passed to `ArlEnvironment.__init__` |
 | `--ae KEY=VALUE` | Env var injected into the agent container |
 | `--ve KEY=VALUE` | Env var injected into the verifier container |
 | `--no-delete` | Keep sandbox session alive after the run (for debugging) |
 | `-k N` | Number of trials per task |
+| `--ek build_registry=<host:port>` | Registry to push images built from Dockerfile |
+| `--ek build_timeout=<seconds>` | Build timeout (default 900) |
 | `--ek image_registry=<host:port>` | Internal registry with pre-built task images |
 | `--ek image_tag=<tag>` | Image tag (content hash from first build) |
 
@@ -191,10 +238,44 @@ SDK composition.
 
 ## Human interrupt
 
-`agentm-interrupt <session-id> <message>` queues the operator message with
-immediate priority and cancels the active model/tool request with the
-`submit_interrupt` reason. The command succeeds only after the running session
-acknowledges the message.
+The adapter starts a Unix domain socket server per session at
+`~/.agentm/inbox/<session-id>.sock`. An operator can send feedback to a
+running agent at any time; the server calls `session.prompt(text,
+priority="now", origin="human", mode="interrupt")`, which cancels the
+active turn and queues the message as the next trigger.
+
+**Send via CLI:**
+
+```bash
+# Inline message
+python -m agentm_harbor.interrupt_cli <session-id> "stop using that approach, try X instead"
+
+# From stdin (useful for multi-line feedback)
+echo "install deps first: pnpm install" | python -m agentm_harbor.interrupt_cli <session-id>
+```
+
+The CLI connects to the socket, sends the message, and waits for an `ok`
+acknowledgement from the session before exiting. If the session is not
+running or rejects the message, it exits with a non-zero status.
+
+**Session ID** is logged at agent start:
+
+```
+agentm-external: session <id> started
+```
+
+**Socket lifecycle:** the socket is created after the session starts and
+removed on shutdown. No cleanup is needed if the process crashes; the
+stale socket file is unlinked on the next session start.
+
+**Programmatic use:**
+
+```python
+from agentm_harbor.interrupt_cli import _send
+import asyncio
+
+asyncio.run(_send("abc123", "your feedback here"))
+```
 
 ## Components
 

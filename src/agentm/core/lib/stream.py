@@ -34,7 +34,9 @@ from agentm.core.abi.tool import Tool
 def encode_tool_args(args: Mapping[str, JsonValue]) -> str:
     """Encode tool arguments consistently across provider adapters."""
 
-    return json.dumps(dict(args), ensure_ascii=False)
+    from agentm.core.abi.messages import thaw_json
+
+    return json.dumps(thaw_json(args), ensure_ascii=False)
 
 
 class ToolSpecAdapter(Protocol):

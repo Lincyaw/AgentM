@@ -89,6 +89,7 @@ from agentm.core.lib.async_cancel import (
     OperationCancelledBySignal,
     await_with_cancel_signal,
 )
+from agentm.core.abi.messages import thaw_json
 from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.tool_schema import _force_strict
 
@@ -850,7 +851,7 @@ class OpenAIStreamFn:
                 strict=self.tool_schema_mode == "strict",
             )
 
-        extra = dict(self.extra_body or {})
+        extra: dict[str, Any] = thaw_json(self.extra_body) if self.extra_body else {}  # type: ignore[assignment]
         prompt_cache_key = extra.pop("prompt_cache_key", prompt_cache_key)
         prompt_cache_retention = extra.pop(
             "prompt_cache_retention",

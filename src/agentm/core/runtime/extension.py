@@ -27,6 +27,7 @@ from pydantic import ValidationError as PydanticValidationError
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.events import ExtensionInstallEvent
 from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.messages import thaw_json
 from agentm.core.abi.session_api import (
     ExtensionSource,
     ExtensionSpec,
@@ -124,7 +125,7 @@ def load_extension(
         )
 
     # Validate config via the schema declared by the atom manifest.
-    resolved_config: Any = dict(spec.config)
+    resolved_config: Any = thaw_json(spec.config)
     manifest = module.__dict__.get("MANIFEST")
     if manifest is not None:
         if not isinstance(manifest, ExtensionManifest):

@@ -59,6 +59,22 @@ def freeze_json(value: object) -> JsonValue:
     raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
 
 
+def thaw_json(value: JsonValue) -> object:
+    """Recursively convert frozen JSON back to mutable containers.
+
+    Inverse of :func:`freeze_json`: ``MappingProxyType`` → ``dict``,
+    ``tuple`` → ``list``.  Scalars pass through unchanged.
+    """
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {key: thaw_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [thaw_json(item) for item in value]
+    return value
+
+
 @dataclass(slots=True, frozen=True)
 class MessageMeta:
     """Control-plane metadata for synthetic and injected messages.
@@ -478,4 +494,5 @@ __all__ = [
     "text_message",
     "tool_result",
     "freeze_json",
+    "thaw_json",
 ]
