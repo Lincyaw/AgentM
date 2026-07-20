@@ -435,16 +435,20 @@ class Session(_SessionComposition):
                 ),
             )
 
-        child.bus.on(SessionShutdownEvent.CHANNEL, _on_child_shutdown)
-
-        if child.store is not None and not await asyncio.to_thread(
-            child.store.session_exists,
-            child.id,
-        ):
-            raise RuntimeError(
-                "child session factory returned before persisting session "
-                f"metadata for {child.id}"
+        caller_cancelled = False
+        if child.store is not None:
+            exists, cancelled_during_validation = await settle_known_outcome(
+                asyncio.to_thread(
+                    child.store.session_exists,
+                    child.id,
+                )
             )
+            caller_cancelled = caller_cancelled or cancelled_during_validation
+            if not exists:
+                raise RuntimeError(
+                    "child session factory returned before persisting session "
+                    f"metadata for {child.id}"
+                )
 
         if child.graph is not None:
             child.graph.register(
@@ -454,14 +458,19 @@ class Session(_SessionComposition):
                 edge_kind="spawned",
             )
 
-        await self.bus.emit(
-            ChildSessionStartEvent.CHANNEL,
-            ChildSessionStartEvent(
-                child_session_id=child.id,
-                parent_session_id=self.id,
-                purpose=purpose,
-            ),
+        child.bus.on(SessionShutdownEvent.CHANNEL, _on_child_shutdown)
+        _, cancelled_during_start = await settle_known_outcome(
+            self.bus.emit(
+                ChildSessionStartEvent.CHANNEL,
+                ChildSessionStartEvent(
+                    child_session_id=child.id,
+                    parent_session_id=self.id,
+                    purpose=purpose,
+                ),
+            )
         )
+        if caller_cancelled or cancelled_during_start:
+            raise asyncio.CancelledError
 
     @classmethod
     async def fork(

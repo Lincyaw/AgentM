@@ -70,6 +70,9 @@ requirements:
       Session shutdown is one shared cancellation-safe lifecycle task, so
       concurrent callers cannot return before driver, event, environment,
       telemetry, and presenter cleanup reaches one known outcome.
+      Durable spawned-child handoff completes graph registration and paired
+      start/end lifecycle events before propagating caller cancellation;
+      trajectory forks record lineage without pretending to be live children.
       External hosts inject
       EnvironmentOperations and ResourceWriter through public SDK fields;
       resource-scoped operation bindings inherit across ordinary children and

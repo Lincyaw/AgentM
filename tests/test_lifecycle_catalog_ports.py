@@ -22,6 +22,7 @@ from agentm.core.abi.compaction import (
     ProjectionInput,
     ProjectionReport,
 )
+from agentm.core.abi.events import ChildSessionEndEvent, ChildSessionStartEvent
 from agentm.core.abi.lifecycle import EffectTxn, EnvironmentFork
 from agentm.core.abi.messages import (
     AssistantMessage,
@@ -220,6 +221,27 @@ class _RecordingEnvironmentForkLease:
 
     async def abandon(self) -> None:
         self.abandoned = True
+
+
+class _DelayedChildVisibilityStore(InMemoryTrajectoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parent_session_id: str | None = None
+        self.visibility_started = threading.Event()
+        self.visibility_release = threading.Event()
+        self._child_visibility_checks = 0
+
+    def session_exists(self, session_id: str) -> bool:
+        if (
+            self.parent_session_id is not None
+            and session_id != self.parent_session_id
+        ):
+            self._child_visibility_checks += 1
+            if self._child_visibility_checks == 2:
+                self.visibility_started.set()
+                if not self.visibility_release.wait(timeout=2.0):
+                    raise TimeoutError("test did not release child visibility check")
+        return super().session_exists(session_id)
 
 
 class _RecordingEffectScope:
@@ -692,6 +714,42 @@ async def test_shutdown_has_one_cancellation_safe_cleanup_boundary(
         await cancelled_shutdown
     await concurrent_shutdown
     assert close_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_spawn_publishes_paired_child_lifecycle() -> None:
+    store = _DelayedChildVisibilityStore()
+    parent = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=_StaticStream(),
+            model=_model(),
+            store=store,
+        )
+    )
+    store.parent_session_id = parent.id
+    started: list[str] = []
+    ended: list[str] = []
+    parent.on(
+        ChildSessionStartEvent.CHANNEL,
+        lambda event: started.append(event.child_session_id),
+    )
+    parent.on(
+        ChildSessionEndEvent.CHANNEL,
+        lambda event: ended.append(event.child_session_id),
+    )
+
+    spawn = asyncio.create_task(parent.spawn(purpose="cancelled-child"))
+    assert await asyncio.to_thread(store.visibility_started.wait, 1.0)
+    spawn.cancel()
+    store.visibility_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await spawn
+
+    assert len(started) == 1
+    assert ended == started
+    assert store.session_children(parent.id) == started
+    await parent.shutdown()
 
 
 @pytest.mark.asyncio
