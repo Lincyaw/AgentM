@@ -15,6 +15,7 @@ from rich.text import Text
 
 from agentm.core.abi.messages import (
     ImageContent,
+    OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -102,6 +103,10 @@ def _extract_messages(turn: Turn) -> list[_Message]:
                 text_parts.append(response_block.text)
             elif isinstance(response_block, ThinkingBlock):
                 thinking_parts.append(response_block.text)
+            elif isinstance(response_block, OpaqueThinkingBlock):
+                thinking_parts.append(
+                    f"[opaque reasoning: {response_block.provider}]"
+                )
             elif isinstance(response_block, ToolCallBlock):
                 args_str = json.dumps(
                     dict(response_block.arguments),

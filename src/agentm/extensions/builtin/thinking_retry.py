@@ -24,6 +24,7 @@ from agentm.core.abi import (
     AssistantContent,
     DecideEvent,
     ModelEndTurn,
+    OpaqueThinkingBlock,
     Step,
     Stop,
     TextContent,
@@ -55,7 +56,7 @@ MANIFEST = ExtensionManifest(
 def _is_thinking_only(content: Sequence[AssistantContent]) -> bool:
     has_thinking = False
     for block in content:
-        if isinstance(block, ThinkingBlock):
+        if isinstance(block, (ThinkingBlock, OpaqueThinkingBlock)):
             has_thinking = True
         elif isinstance(block, TextContent) and block.text.strip():
             return False

@@ -14,6 +14,7 @@ from agentm.cli._display import EXIT_NOT_FOUND, is_tty, stderr_console
 from agentm.cli._store import resolve_trajectory_store
 from agentm.core.abi.messages import (
     ImageContent,
+    OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -356,6 +357,11 @@ def messages_cmd(
                     blocks.append(block.text)
                 elif isinstance(block, ThinkingBlock) and not hide_thinking:
                     blocks.append(f"[thinking] {block.text}")
+                elif (
+                    isinstance(block, OpaqueThinkingBlock)
+                    and not hide_thinking
+                ):
+                    blocks.append(f"[opaque thinking: {block.provider}]")
                 elif isinstance(block, ToolCallBlock):
                     arguments = json.dumps(
                         dict(block.arguments),

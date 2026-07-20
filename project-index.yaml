@@ -107,6 +107,9 @@ requirements:
       is reachable only through an empty head's explicit logical parent.
       PostgreSQL protects node/head/cache/content rows with session foreign keys
       and clones content-replacement state in one locked transaction.
+      Provider adapters must preserve provider-owned encrypted reasoning and
+      every supported semantic field for continuation, while failing on known
+      unsupported protocol content rather than silently dropping it.
     priority: P0
     status: tested
     confidence: confirmed
@@ -265,6 +268,7 @@ requirements:
       - path: tests/test_authoring.py
       - path: tests/integration/test_harbor_adapter.py
       - path: tests/integration/test_observability_backends.py
+      - path: tests/integration/test_provider_stream_behaviors.py
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_code_health.py

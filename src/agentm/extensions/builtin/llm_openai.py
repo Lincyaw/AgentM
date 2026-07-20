@@ -54,6 +54,7 @@ from agentm.core.abi import (
     MaxTokens,
     MessageEnd,
     Model,
+    OpaqueThinkingBlock,
     PauseTurn,
     ProviderConfig,
     ProviderError,
@@ -371,6 +372,11 @@ def _encode_assistant_message(
                 if on_drop is not None:
                     on_drop()
                 continue
+        elif isinstance(block, OpaqueThinkingBlock):
+            raise ValueError(
+                "OpenAIStreamFn cannot encode provider-opaque reasoning "
+                f"owned by {block.provider!r}"
+            )
         else:  # pragma: no cover
             raise TypeError(f"unexpected assistant content type: {type(block)!r}")
     out: dict[str, Any] = {"role": "assistant"}
@@ -960,11 +966,27 @@ async def _translate_chunk(
     choices = _sdk_sequence(chunk, "choices")
     if not choices:
         return
+    if len(choices) != 1:
+        raise ValueError(
+            "OpenAIStreamFn supports exactly one streamed choice"
+        )
 
     choice = choices[0]
     delta = _optional_sdk_attr(choice, "delta")
 
     if delta is not None:
+        role = _optional_sdk_string(delta, "role")
+        if role is not None and role != "assistant":
+            raise ValueError(
+                "OpenAI stream delta role must be 'assistant', "
+                f"got {role!r}"
+            )
+        if _optional_sdk_attr(delta, "function_call") is not None:
+            raise ValueError(
+                "OpenAI deprecated function_call deltas are not modeled; "
+                "use tool_calls"
+            )
+
         # 1) Reasoning content (OpenAI o-series, DeepSeek-R1, LiteLLM Kimi).
         reasoning = _optional_sdk_string(delta, "reasoning_content")
         if reasoning:
@@ -977,11 +999,24 @@ async def _translate_chunk(
             state.accumulator.add_text(None, content)
             yield TextDelta(text=content)
 
-        # 3) Tool call deltas. Each entry is identified by ``index``; the
+        # 3) Refusal text is still visible assistant output. The kernel does
+        # not need a provider-specific refusal content type to replay it.
+        refusal = _optional_sdk_string(delta, "refusal")
+        if refusal:
+            state.accumulator.add_text(None, refusal)
+            yield TextDelta(text=refusal)
+
+        # 4) Tool call deltas. Each entry is identified by ``index``; the
         # first entry for a new index carries id + function.name, later
         # entries only carry function.arguments fragments.
         tool_calls = _sdk_sequence(delta, "tool_calls", optional=True)
         for tc in tool_calls:
+            tool_type = _optional_sdk_string(tc, "type")
+            if tool_type is not None and tool_type != "function":
+                raise ValueError(
+                    "OpenAI tool call type must be 'function', "
+                    f"got {tool_type!r}"
+                )
             index = _nonnegative_sdk_int(tc, "index")
             scratch = state.tool_scratch.get(index)
             tc_id = _optional_sdk_string(tc, "id")
@@ -1028,9 +1063,14 @@ async def _translate_chunk(
                         id=scratch["id"], args_json_delta=fn_args
                     )
 
-    # 4) Stop reason — emit pending ToolCallEnd events for tools, then record.
+    # 5) Stop reason — emit pending ToolCallEnd events for tools, then record.
     finish_reason = _optional_sdk_string(choice, "finish_reason")
     if finish_reason is not None:
+        if finish_reason == "function_call":
+            raise ValueError(
+                "OpenAI deprecated function_call completion is not modeled; "
+                "use tool_calls"
+            )
         for index in state.tool_order:
             scratch = state.tool_scratch.get(index)
             if scratch is not None and scratch.get("started") and not scratch.get(

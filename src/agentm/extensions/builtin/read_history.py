@@ -23,6 +23,7 @@ from agentm.core.abi import (
     AtomAPI,
     AtomInstallPriority,
     FunctionTool,
+    OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -177,6 +178,11 @@ def _render_message(
         for a_block in message.content:
             if isinstance(a_block, ThinkingBlock):
                 a_parts.append(f"[assistant thinking] {a_block.text}")
+            elif isinstance(a_block, OpaqueThinkingBlock):
+                a_parts.append(
+                    "[assistant opaque thinking] "
+                    f"provider={a_block.provider}"
+                )
             elif isinstance(a_block, TextContent):
                 a_parts.append(f"[assistant] {a_block.text}")
             elif isinstance(a_block, ToolCallBlock):

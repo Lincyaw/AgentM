@@ -16,7 +16,12 @@ from rich.text import Text
 
 from agentm import AgentSession, AgentSessionConfig
 from agentm.config.resolver import DefaultSessionSpecResolver
-from agentm.core.abi.messages import TextContent, ThinkingBlock, ToolCallBlock
+from agentm.core.abi.messages import (
+    OpaqueThinkingBlock,
+    TextContent,
+    ThinkingBlock,
+    ToolCallBlock,
+)
 from agentm.core.abi.stream import TextDelta, ThinkingDelta
 from agentm.core.abi.events import StreamDeltaEvent
 from agentm.core.abi.termination import SignalAborted
@@ -174,6 +179,10 @@ async def _run_chat(
                 for block in rnd.response.content:
                     if isinstance(block, ThinkingBlock):
                         thinking_parts.append(block.text)
+                    elif isinstance(block, OpaqueThinkingBlock):
+                        thinking_parts.append(
+                            f"[opaque reasoning: {block.provider}]"
+                        )
                     elif isinstance(block, TextContent):
                         text_parts.append(block.text)
                     elif isinstance(block, ToolCallBlock):

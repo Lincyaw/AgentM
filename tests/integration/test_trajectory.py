@@ -19,6 +19,7 @@ import pytest
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
+    OpaqueThinkingBlock,
     TextContent,
     ToolCallBlock,
     UserMessage,
@@ -1189,7 +1190,17 @@ def test_codec_round_trip() -> None:
     trigger = UserInput(content=(TextContent(type="text", text="test input"),))
     response = AssistantMessage(
         role="assistant",
-        content=[TextContent(type="text", text="response text")],
+        content=[
+            TextContent(type="text", text="response text"),
+            OpaqueThinkingBlock(
+                type="opaque_thinking",
+                provider="anthropic",
+                payload={
+                    "type": "redacted_thinking",
+                    "data": "encrypted-reasoning",
+                },
+            ),
+        ],
         timestamp=1234.0,
         stop_reason="end_turn",
     )
@@ -1226,6 +1237,12 @@ def test_codec_round_trip() -> None:
     assert isinstance(restored.trigger, UserInput)
     assert len(restored.rounds) == 1
     assert restored.rounds[0].response.content[0].text == "response text"  # type: ignore[union-attr]
+    opaque = restored.rounds[0].response.content[1]
+    assert isinstance(opaque, OpaqueThinkingBlock)
+    assert dict(opaque.payload) == {
+        "type": "redacted_thinking",
+        "data": "encrypted-reasoning",
+    }
 
 
 def test_codec_custom_trigger() -> None:

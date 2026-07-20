@@ -145,8 +145,8 @@ class ImageContent:
 class ThinkingBlock:
     """An assistant thinking/reasoning block.
 
-    ``signature`` is provider-specific (e.g. Anthropic's redacted-thinking
-    signature); ``None`` for providers that don't sign reasoning.
+    ``signature`` is provider-specific; ``None`` for providers that do not
+    sign visible reasoning.
     """
 
     type: Literal["thinking"]
@@ -159,6 +159,38 @@ class ThinkingBlock:
         _require_string(self.text, "thinking text")
         if self.signature is not None:
             _require_string(self.signature, "thinking signature")
+
+
+@dataclass(slots=True, frozen=True)
+class OpaqueThinkingBlock:
+    """Provider-owned reasoning that the kernel cannot inspect.
+
+    ``provider`` identifies the wire-adapter family, not a session registry
+    alias. The immutable JSON ``payload`` is retained only so that adapter can
+    receive it again during continuation or resume. Kernel policy must not
+    infer meaning from it or expose it as visible reasoning.
+    """
+
+    type: Literal["opaque_thinking"]
+    provider: str
+    payload: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        if self.type != "opaque_thinking":
+            raise ValueError(
+                f"invalid opaque thinking block type: {self.type!r}"
+            )
+        _require_string(
+            self.provider,
+            "opaque thinking provider",
+            allow_empty=False,
+        )
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("opaque thinking payload must be an object")
+        payload = freeze_json(self.payload)
+        if not isinstance(payload, Mapping):
+            raise TypeError("opaque thinking payload must be an object")
+        object.__setattr__(self, "payload", payload)
 
 
 @dataclass(slots=True, frozen=True)
@@ -216,7 +248,7 @@ class ToolResultBlock:
 # Discriminated union of content blocks that can appear inside an assistant
 # message. ``ImageContent`` is intentionally NOT included — the assistant
 # emits text, thinking, or tool calls.
-AssistantContent = TextContent | ToolCallBlock | ThinkingBlock
+AssistantContent = TextContent | ToolCallBlock | ThinkingBlock | OpaqueThinkingBlock
 
 
 @dataclass(slots=True, frozen=True)
@@ -287,11 +319,15 @@ class AssistantMessage:
             raise ValueError(f"invalid assistant message role: {self.role!r}")
         content = tuple(self.content)
         if not all(
-            isinstance(item, (TextContent, ToolCallBlock, ThinkingBlock))
+            isinstance(
+                item,
+                (TextContent, ToolCallBlock, ThinkingBlock, OpaqueThinkingBlock),
+            )
             for item in content
         ):
             raise TypeError(
-                "assistant message content must contain text, thinking, or tool calls"
+                "assistant message content must contain text, visible or "
+                "opaque thinking, or tool calls"
             )
         _require_timestamp(self.timestamp, "assistant message timestamp")
         if self.stop_reason is not None:
@@ -434,6 +470,7 @@ __all__ = [
     "MessageReplayPolicy",
     "MessageTokenAccounting",
     "MessageVisibility",
+    "OpaqueThinkingBlock",
     "TextContent",
     "ThinkingBlock",
     "ToolCallBlock",

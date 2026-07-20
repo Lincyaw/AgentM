@@ -37,6 +37,7 @@ from agentm.core.abi.messages import (
     MessageReplayPolicy,
     MessageTokenAccounting,
     MessageVisibility,
+    OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -384,6 +385,12 @@ def _serialize_content_block(block: Any) -> dict[str, Any]:
         if block.signature is not None:
             d["signature"] = block.signature
         return d
+    if isinstance(block, OpaqueThinkingBlock):
+        return {
+            "type": "opaque_thinking",
+            "provider": block.provider,
+            "payload": _json_safe(block.payload),
+        }
     if isinstance(block, ToolCallBlock):
         return {
             "type": "tool_call",
@@ -444,6 +451,24 @@ def _deserialize_content_block(data: dict[str, Any]) -> Any:
                 data.get("signature"),
                 "thinking content.signature",
             ),
+        )
+    if t == "opaque_thinking":
+        _only_fields(
+            data,
+            {"type", "provider", "payload"},
+            "opaque thinking content",
+        )
+        payload = _json_restore(data.get("payload"))
+        if not isinstance(payload, dict):
+            raise ValueError("opaque thinking content.payload must be an object")
+        return OpaqueThinkingBlock(
+            type="opaque_thinking",
+            provider=_string(
+                data.get("provider"),
+                "opaque thinking content.provider",
+                allow_empty=False,
+            ),
+            payload=payload,
         )
     if t == "tool_call":
         _only_fields(

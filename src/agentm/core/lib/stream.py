@@ -4,7 +4,8 @@ Holds the kernel-side accumulator used by all provider adapters (Anthropic,
 OpenAI-compatible, ...) to build an ``AssistantMessage`` from a sequence of
 provider-specific stream events. Lives in ``core.lib`` because the logic is
 purely about kernel data types (``AssistantContent``, ``ThinkingBlock``,
-``ToolCallBlock``, ``Usage``) and has no provider knowledge.
+``OpaqueThinkingBlock``, ``ToolCallBlock``, ``Usage``) and has no provider
+knowledge.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from agentm.core.abi.messages import (
     AssistantContent,
     AssistantMessage,
     JsonValue,
+    OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -50,6 +52,8 @@ class _ContentEntry:
     index: int | None = None
     text: str = ""
     signature: str | None = None
+    provider: str = ""
+    payload: Mapping[str, JsonValue] | None = None
     tool_call_id: str = ""
     tool_name: str = ""
     args_json: str = ""
@@ -89,6 +93,20 @@ class StreamAccumulator:
             self._by_thinking_index[index] = entry
         entry.signature = (entry.signature or "") + signature
 
+    def add_opaque_thinking(
+        self,
+        index: int | None,
+        *,
+        provider: str,
+        payload: Mapping[str, JsonValue],
+    ) -> None:
+        entry = self._append("opaque_thinking", index=index)
+        entry.provider = provider
+        frozen = freeze_json(payload)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("opaque thinking payload must be an object")
+        entry.payload = frozen
+
     def add_tool_call(
         self, id: str, name: str, args_delta: str, *, index: int | None = None
     ) -> None:
@@ -127,6 +145,16 @@ class StreamAccumulator:
                             signature=entry.signature,
                         )
                     )
+            elif entry.kind == "opaque_thinking":
+                if entry.payload is None:
+                    raise ValueError("opaque thinking entry has no payload")
+                content.append(
+                    OpaqueThinkingBlock(
+                        type="opaque_thinking",
+                        provider=entry.provider,
+                        payload=entry.payload,
+                    )
+                )
             elif entry.kind == "tool_call":
                 content.append(
                     ToolCallBlock(

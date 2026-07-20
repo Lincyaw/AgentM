@@ -50,6 +50,7 @@ from agentm.core.abi import (
     MaxTokens,
     MessageEnd,
     Model,
+    OpaqueThinkingBlock,
     PauseTurn,
     ProviderConfig,
     RetryPolicy,
@@ -192,6 +193,24 @@ def _encode_assistant_content(
             if block.signature is not None:
                 entry["signature"] = block.signature
             out.append(entry)
+        elif isinstance(block, OpaqueThinkingBlock):
+            if block.provider != "anthropic":
+                raise ValueError(
+                    "AnthropicStreamFn cannot encode opaque reasoning owned by "
+                    f"provider {block.provider!r}"
+                )
+            block_type = block.payload.get("type")
+            data = block.payload.get("data")
+            if (
+                block_type != "redacted_thinking"
+                or not isinstance(data, str)
+                or set(block.payload) != {"type", "data"}
+            ):
+                raise ValueError(
+                    "AnthropicStreamFn supports only a redacted_thinking "
+                    "opaque reasoning payload"
+                )
+            out.append(dict(block.payload))
         elif isinstance(block, ToolCallBlock):
             out.append(
                 {
@@ -277,7 +296,6 @@ class _StreamState:
 
     accumulator: StreamAccumulator = field(default_factory=StreamAccumulator)
     scratch: dict[int, dict[str, Any]] = field(default_factory=dict)
-    ignored_blocks: set[int] = field(default_factory=set)
     usage: Usage | None = None
     stop_reason: str | None = None
     termination: TerminationHint | None = None
@@ -341,6 +359,18 @@ def _finalize_block(state: _StreamState, index: int) -> None:
     elif kind == "thinking":
         state.accumulator.add_thinking(index, scratch.get("text", ""))
         state.accumulator.set_thinking_signature(index, scratch.get("signature"))
+    elif kind == "opaque_thinking":
+        payload = scratch.get("payload")
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                f"Anthropic opaque thinking block at index {index} "
+                "has no payload"
+            )
+        state.accumulator.add_opaque_thinking(
+            index,
+            provider="anthropic",
+            payload=payload,
+        )
     elif kind == "tool_use":
         tool_id = scratch.get("id")
         tool_name = scratch.get("name")
@@ -362,6 +392,10 @@ def _finalize_block(state: _StreamState, index: int) -> None:
             name=tool_name,
             args_delta=partial_json,
             index=index,
+        )
+    else:
+        raise ValueError(
+            f"unknown Anthropic scratch block kind at index {index}: {kind!r}"
         )
 
 
@@ -677,7 +711,7 @@ async def _translate_event(
 
     if etype == "content_block_start":
         index = _nonnegative_sdk_int(event, "index")
-        if index in state.scratch or index in state.ignored_blocks:
+        if index in state.scratch:
             raise ValueError(
                 f"Anthropic content block index {index} started twice"
             )
@@ -694,6 +728,18 @@ async def _translate_event(
                 "kind": "thinking",
                 "text": _optional_sdk_string(block, "thinking") or "",
                 "signature": _optional_sdk_string(block, "signature"),
+            }
+        elif block_type == "redacted_thinking":
+            state.scratch[index] = {
+                "kind": "opaque_thinking",
+                "payload": {
+                    "type": "redacted_thinking",
+                    "data": _required_sdk_string(
+                        block,
+                        "data",
+                        allow_empty=False,
+                    ),
+                },
             }
         elif block_type == "tool_use":
             tool_id = _required_sdk_string(
@@ -714,7 +760,10 @@ async def _translate_event(
             }
             yield ToolCallStart(id=tool_id, name=tool_name)
         else:
-            state.ignored_blocks.add(index)
+            raise ValueError(
+                "Anthropic content block type is not modeled by AgentM: "
+                f"{block_type!r}"
+            )
         return
 
     if etype == "content_block_delta":
@@ -725,8 +774,6 @@ async def _translate_event(
             "type",
             allow_empty=False,
         )
-        if index in state.ignored_blocks:
-            return
         scratch = state.scratch.get(index)
         if delta_type == "text_delta":
             if scratch is None or scratch.get("kind") != "text":
@@ -767,13 +814,18 @@ async def _translate_event(
             # Multiple signature deltas are valid; preserve stream order.
             prev = scratch.get("signature") or ""
             scratch["signature"] = prev + sig
+        elif delta_type == "citations_delta":
+            raise ValueError(
+                "Anthropic citation deltas are not modeled by AgentM"
+            )
+        else:
+            raise ValueError(
+                f"unknown Anthropic content delta type: {delta_type!r}"
+            )
         return
 
     if etype == "content_block_stop":
         index = _nonnegative_sdk_int(event, "index")
-        if index in state.ignored_blocks:
-            state.ignored_blocks.remove(index)
-            return
         scratch = state.scratch.get(index)
         if scratch is None:
             raise ValueError(
@@ -823,12 +875,9 @@ async def _translate_event(
         # Some streams flush remaining blocks here; make sure scratch is empty.
         for idx in sorted(state.scratch.keys()):
             _finalize_block(state, idx)
-        state.ignored_blocks.clear()
         return
 
-    # Unknown event types carry no semantics understood by this adapter. They
-    # are ignored for forward compatibility; malformed known events fail.
-    return
+    raise ValueError(f"unknown Anthropic stream event type: {etype!r}")
 
 # --- Extension entrypoint --------------------------------------------------
 
