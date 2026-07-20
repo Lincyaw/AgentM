@@ -171,8 +171,7 @@ async def _resolve_fork_anchor(
         ]
         if not matching_nodes:
             raise RuntimeError(
-                f"trajectory store has no committed boundary for fork turn "
-                f"{turn.id}"
+                f"trajectory store has no committed boundary for fork turn {turn.id}"
             )
         return _ResolvedForkAnchor(
             turn_ref=turn_ref,
@@ -195,19 +194,14 @@ async def _resolve_fork_anchor(
     selected = next((node for node in chain if node.id == node_id), None)
     if selected is None:
         raise ValueError(
-            "trajectory fork node must be reachable from the selected "
-            "source head"
+            "trajectory fork node must be reachable from the selected source head"
         )
     if selected.turn_index is None or selected.turn_id is None:
-        raise ValueError(
-            "trajectory fork node has no committed turn boundary"
-        )
+        raise ValueError("trajectory fork node has no committed turn boundary")
     prefix = source.trajectory.prefix(selected.turn_index)
     turn = prefix.turns[-1]
     if turn.id != selected.turn_id:
-        raise ValueError(
-            "trajectory fork node does not match source committed history"
-        )
+        raise ValueError("trajectory fork node does not match source committed history")
     if selected.kind == "message":
         if source.store is None:
             raise ValueError("message node fork points require a trajectory store")
@@ -310,8 +304,8 @@ class Session(_SessionComposition):
                 services=child_services,
                 store=self.store,
                 graph=self.graph,
-                stream_fn=stream_fn or self._stream_fn,
-                model=model or self._model,
+                stream_fn=self._stream_fn if stream_fn is None else stream_fn,
+                model=self._model if model is None else model,
                 tools=(
                     list(tools) if tools is not None else list(self._external_tools())
                 ),
