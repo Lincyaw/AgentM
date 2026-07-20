@@ -113,6 +113,10 @@ requirements:
       Public service aliases must have an executable producer/consumer path;
       host configuration and standalone query ports are not mirrored into
       registration-only service keys.
+      Core may not import host, extension, or backend implementations, and
+      storage, environment, execution, and extension implementations may not
+      import core runtime internals. The constitution-listed extension
+      contract validator is the only explicit core-to-extension exception.
     priority: P0
     status: tested
     confidence: confirmed
@@ -185,7 +189,6 @@ requirements:
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_meta.py
       - path: src/agentm/core/runtime/stores/query.py
-      - path: src/agentm/core/runtime/stores/memory.py
       - path: src/agentm/core/runtime/tool_orchestration.py
       - path: src/agentm/core/runtime/tree.py
       - path: src/agentm/core/runtime/trigger_queue.py
@@ -244,6 +247,7 @@ requirements:
       - path: src/agentm/storage/serialization.py
       - path: src/agentm/storage/trajectory/__init__.py
       - path: src/agentm/storage/trajectory/jsonl.py
+      - path: src/agentm/storage/trajectory/memory.py
       - path: src/agentm/storage/trajectory/postgres.py
       - path: src/agentm/storage/trajectory/psycopg.py
       - path: src/agentm/storage/trajectory/resolve.py

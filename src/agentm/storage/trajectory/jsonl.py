@@ -36,7 +36,7 @@ from agentm.core.abi.trajectory import (
     TurnCheckpoint,
     TurnRef,
 )
-from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
+from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 from agentm.storage.serialization import (
     deserialize_content_state,
     deserialize_head,

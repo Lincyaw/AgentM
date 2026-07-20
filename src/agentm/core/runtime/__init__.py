@@ -1,7 +1,7 @@
-"""Runtime substrate — sessions, extension loading, and trajectory stores.
+"""Runtime substrate for sessions, extension loading, and execution.
 
 Holds the stateful side of the SDK: the extension loader,
-session factory, driver, and default trajectory stores.
+session factory, driver, and live session state.
 Modules here may touch the filesystem at runtime but perform no side
 effects at module import time (``agentm.core`` stays Jupyter-clean to
 import). Atoms reach this layer only through ``agentm.core.abi.*``
@@ -20,7 +20,6 @@ from agentm.core.runtime.execution import Execution
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, QueueClosed
 from agentm.core.runtime.tree import InMemorySessionGraph
-from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.extension import load_extension, ExtensionLoadError
@@ -30,7 +29,6 @@ __all__ = [
     "ExtensionLoadError",
     "InMemoryAtomCatalog",
     "InMemorySessionGraph",
-    "InMemoryTrajectoryStore",
     "InMemoryVersionedResourceStore",
     "QueueClosed",
     "Session",

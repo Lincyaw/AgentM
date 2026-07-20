@@ -31,8 +31,10 @@ Rules:
   are ignored. Swiss-army-knife signal — consider splitting into composable
   facades.
 - **AM010** ``cross-layer-import``: Imports that violate the layer
-  hierarchy (e.g. gateway → extensions/builtin, extensions → gateway,
-  abi → runtime). Extends §11 to cover the full dependency graph.
+  hierarchy (e.g. core → extension/backend, storage → runtime,
+  gateway → builtin atoms, or ABI → runtime). Extends §11 to cover the
+  full dependency graph. Constitution-listed exceptions require a precise
+  line-level ignore.
 - **AM011** ``hand-written-schema``: Tool ``parameters`` defined as a
   dict literal instead of ``pydantic_to_tool_schema(Model)``. Pydantic
   schemas are the project convention — they stay in sync with
@@ -584,11 +586,46 @@ def _check_god_class(tree: ast.Module, path: str) -> list[Issue]:
 
 
 _LAYER_RULES: Final[list[tuple[str, str, str]]] = [
-    ("gateway/", "extensions/builtin/", "gateway must not import from builtin atoms"),
-    ("extensions/", "gateway/", "extensions must not import from gateway"),
-    ("authoring/", "presenter/", "authoring must not import from presenter"),
-    ("core/abi/", "core/runtime/", "ABI must not import from runtime"),
-    ("core/abi/", "core/_internal/", "ABI must not import from _internal"),
+    (
+        "gateway/",
+        "agentm.extensions.builtin",
+        "gateway must not import from builtin atoms",
+    ),
+    ("extensions/", "agentm.gateway", "extensions must not import from gateway"),
+    (
+        "extensions/",
+        "agentm.core.runtime",
+        "extensions must depend on core ABI/lib ports, not runtime",
+    ),
+    ("authoring/", "agentm.presenter", "authoring must not import from presenter"),
+    ("core/abi/", "agentm.core.runtime", "ABI must not import from runtime"),
+    ("core/abi/", "agentm.core._internal", "ABI must not import from _internal"),
+    ("core/", "agentm.authoring", "core must not import authoring"),
+    ("core/", "agentm.cli", "core must not import CLI presenters"),
+    ("core/", "agentm.config", "core must not import host config resolution"),
+    ("core/", "agentm.environments", "core must not import environment backends"),
+    ("core/", "agentm.execution", "core must not import execution backends"),
+    ("core/", "agentm.extensions", "core must not import extension implementations"),
+    ("core/", "agentm.gateway", "core must not import gateway hosts"),
+    ("core/", "agentm.observability", "core must not import observability backends"),
+    ("core/", "agentm.scenarios", "core must not import scenario loaders"),
+    ("core/", "agentm.sdk", "core must not import the SDK presenter"),
+    ("core/", "agentm.storage", "core must not import storage backends"),
+    (
+        "environments/",
+        "agentm.core.runtime",
+        "environment backends must depend on core ABI/lib ports, not runtime",
+    ),
+    (
+        "execution/",
+        "agentm.core.runtime",
+        "execution backends must depend on core ABI/lib ports, not runtime",
+    ),
+    (
+        "storage/",
+        "agentm.core.runtime",
+        "storage backends must depend on core ABI/lib ports, not runtime",
+    ),
 ]
 
 
@@ -610,8 +647,7 @@ def _check_cross_layer_import(
                 lineno = node.lineno
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    target_dotted = forbidden_target.replace("/", ".").rstrip(".")
-                    if target_dotted not in alias.name:
+                    if not _module_matches(alias.name, forbidden_target):
                         continue
                     if _find_parent_if(tree, node) is not None:
                         continue
@@ -624,8 +660,7 @@ def _check_cross_layer_import(
                 continue
             if module_str is None:
                 continue
-            target_dotted = forbidden_target.replace("/", ".").rstrip(".")
-            if target_dotted in module_str:
+            if _module_matches(module_str, forbidden_target):
                 if _find_parent_if(tree, node) is not None:
                     continue
                 issues.append(Issue(
@@ -635,6 +670,10 @@ def _check_cross_layer_import(
                     message=f"cross-layer import: {msg} ({module_str})",
                 ))
     return issues
+
+
+def _module_matches(module: str, forbidden: str) -> bool:
+    return module == forbidden or module.startswith(f"{forbidden}.")
 
 
 def _find_parent_if(tree: ast.Module, target: ast.AST) -> ast.If | None:

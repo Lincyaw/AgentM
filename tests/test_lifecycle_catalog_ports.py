@@ -74,7 +74,7 @@ from agentm.core.runtime.session_factory import (
     create_from_config,
     create_session,
 )
-from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
+from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.tool_orchestration import DefaultToolOrchestrator
 from agentm.config import DefaultSessionSpecResolver
 from agentm.environments import LocalBashOperations, LocalEnvironmentOperations

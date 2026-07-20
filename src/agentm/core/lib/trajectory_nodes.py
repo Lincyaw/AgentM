@@ -50,7 +50,7 @@ class _TrajectoryStateLockOwner(Protocol):
 _S = TypeVar("_S", bound=_TrajectoryStateLockOwner)
 
 
-def _synchronized_trajectory_state(
+def synchronized_trajectory_state(
     method: Callable[Concatenate[_S, _P], _R],
 ) -> Callable[Concatenate[_S, _P], _R]:
     """Serialize one complete in-memory trajectory-state operation."""
@@ -370,7 +370,7 @@ class TrajectoryIndexState:
     def head_indexes(self) -> tuple[TrajectoryIndexSpec, ...]:
         return TRAJECTORY_HEAD_INDEXES
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def _commit_nodes(
         self,
         session_id: str,
@@ -403,7 +403,7 @@ class TrajectoryIndexState:
         self._node_ids.update(batch_ids)
         self._heads[(session_id, advance_head.head_id)] = advance_head.to_head()
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         if query.session_id:
             self._require_index_session(query.session_id)
@@ -495,7 +495,7 @@ class TrajectoryIndexState:
             nodes = nodes[: query.limit]
         return nodes
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def get_head(
         self,
         session_id: str,
@@ -517,7 +517,7 @@ class TrajectoryIndexState:
             return None
         return head
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def list_heads(
         self,
         session_id: str,
@@ -544,7 +544,7 @@ class TrajectoryIndexState:
         heads.sort(key=lambda head: (head.updated_at, head.head_id))
         return heads
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def load_chain(
         self,
         session_id: str,
@@ -578,7 +578,7 @@ class TrajectoryIndexState:
             include_logical_parent=include_logical_parent,
         )
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def leaves(
         self,
         session_id: str,
@@ -596,7 +596,7 @@ class TrajectoryIndexState:
         )
         return leaf_nodes(nodes)
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def _initialize_index(
         self,
         session_id: str,
@@ -627,7 +627,7 @@ class TrajectoryIndexState:
         self._node_ids.update(batch_ids)
         self._heads[(session_id, head.head_id)] = head
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def save_content_replacement_state(
         self,
         session_id: str,
@@ -636,7 +636,7 @@ class TrajectoryIndexState:
         self._require_index_session(session_id)
         self._content_states[(session_id, state.state_key)] = state
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def load_content_replacement_state(
         self,
         session_id: str,
@@ -645,7 +645,7 @@ class TrajectoryIndexState:
         self._require_index_session(session_id)
         return self._content_states.get((session_id, state_key))
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def clone_content_replacement_state(
         self,
         *,
@@ -668,7 +668,7 @@ class TrajectoryIndexState:
         self.save_content_replacement_state(target_session_id, cloned)
         return cloned
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def save_prompt_cache_state(
         self,
         session_id: str,
@@ -677,7 +677,7 @@ class TrajectoryIndexState:
         self._require_index_session(session_id)
         self._prompt_cache_states[(session_id, state.cache_key)] = state
 
-    @_synchronized_trajectory_state
+    @synchronized_trajectory_state
     def load_prompt_cache_state(
         self,
         session_id: str,
@@ -721,6 +721,7 @@ class TrajectoryIndexState:
 
 __all__ = [
     "TrajectoryIndexState",
+    "synchronized_trajectory_state",
     "build_chain",
     "leaf_nodes",
     "messages_to_nodes",

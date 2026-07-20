@@ -280,7 +280,7 @@ def validate_extension_source(source: ExtensionSource | str) -> None:
         raise TypeError("extension validation requires ExtensionSource or module string")
     module_path = source.module_name
     try:
-        from agentm.extensions.validate import (
+        from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
             extension_helper_imports,
             validate_atom_file,
             validate_atom_package,

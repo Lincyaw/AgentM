@@ -1,5 +1,6 @@
 """Trajectory storage backend implementations."""
 
+from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 from agentm.storage.trajectory.jsonl import JsonlTrajectoryStore
 from agentm.storage.trajectory.postgres import PostgresTrajectoryStore
 from agentm.storage.trajectory.resolve import (
@@ -9,6 +10,7 @@ from agentm.storage.trajectory.resolve import (
 )
 
 __all__ = [
+    "InMemoryTrajectoryStore",
     "JsonlTrajectoryStore",
     "PostgresTrajectoryStore",
     "ResolvedTrajectoryStore",

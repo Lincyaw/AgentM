@@ -119,6 +119,23 @@ def test_code_health_rejects_authoring_presenter_dependency(
     assert "AM010" in rules
 
 
+def test_code_health_rejects_core_and_backend_dependency_inversions(
+    tmp_path: Path,
+) -> None:
+    core_rules = _issues_for(
+        tmp_path,
+        "from agentm.extensions.builtin.retry_policy import Retry\n",
+        relative="src/agentm/core/runtime/session.py",
+    )
+    storage_rules = _issues_for(
+        tmp_path,
+        "from agentm.core.runtime.stores.memory import Store\n",
+        relative="src/agentm/storage/trajectory/jsonl.py",
+    )
+    assert "AM010" in core_rules
+    assert "AM010" in storage_rules
+
+
 def test_code_health_allows_typed_dict_and_precise_ignores(
     tmp_path: Path,
 ) -> None:

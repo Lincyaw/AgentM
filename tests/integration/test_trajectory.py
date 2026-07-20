@@ -84,8 +84,8 @@ from agentm.core.runtime.execution import Execution, StateError
 from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.session_meta import ResumeIdentityError
-from agentm.core.runtime.stores.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.stores.query import TrajectoryStoreQueryAdapter
+from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.storage.trajectory import JsonlTrajectoryStore
 from agentm.core.runtime.trigger_queue import TriggerTerminated
