@@ -176,7 +176,7 @@ class _SessionLifecycle:
     _tool_allowlist: Callable[..., tuple[str, ...] | None]
 
     def __init__(self, config: SessionRuntimeConfig | None = None) -> None:
-        runtime = config or SessionRuntimeConfig()
+        runtime = SessionRuntimeConfig() if config is None else config
         ctx = runtime.ctx
         session_id = runtime.session_id
         trajectory = runtime.trajectory
@@ -210,7 +210,7 @@ class _SessionLifecycle:
             self.trajectory = trajectory
         else:
             self.trajectory = Trajectory()
-        self.bus = bus or EventBus()
+        self.bus = EventBus() if bus is None else bus
         self.store = store
         self.graph = graph
         self.triggers = TriggerQueue()
@@ -236,10 +236,14 @@ class _SessionLifecycle:
         store_codec = (
             store.codec if isinstance(store, CodecBackedTrajectoryStore) else None
         )
-        self.codec = codec or (
-            store_codec if isinstance(store_codec, CodecRegistry) else CodecRegistry()
+        self.codec = (
+            codec
+            if codec is not None
+            else store_codec
+            if isinstance(store_codec, CodecRegistry)
+            else CodecRegistry()
         )
-        self.services = services or ServiceRegistry()
+        self.services = ServiceRegistry() if services is None else services
         if store is not None:
             selected_store = self.services.get(
                 TRAJECTORY_STORE_SERVICE,

@@ -590,8 +590,12 @@ async def create_session(
     thinking = config.thinking
     cancel_signal = config.cancel_signal
 
-    resolved_services = services or ServiceRegistry()
-    effective_loader = scenario_loader or _get_scenario_loader(resolved_services)
+    resolved_services = ServiceRegistry() if services is None else services
+    effective_loader = (
+        _get_scenario_loader(resolved_services)
+        if scenario_loader is None
+        else scenario_loader
+    )
     extension_specs, scenario_dir, scenario_name = _resolve_extensions(
         scenario=scenario,
         extensions=extensions,
@@ -903,7 +907,11 @@ async def create_child_session(
                 scope="session",
             )
 
-    scenario_loader = config.scenario_loader or _get_scenario_loader(child_services)
+    scenario_loader = (
+        _get_scenario_loader(child_services)
+        if config.scenario_loader is None
+        else config.scenario_loader
+    )
     inherit_parent_composition = (
         resolved_spec is None and config.scenario is None and config.extensions is None
     )
@@ -937,7 +945,9 @@ async def create_child_session(
         scenario_dir = parent.ctx.scenario_dir
 
     child_id = config.session_id or uuid.uuid4().hex[:16]
-    child_store = config.trajectory_store or parent.store
+    child_store = (
+        parent.store if config.trajectory_store is None else config.trajectory_store
+    )
     if child_store is not parent.store:
         child_services.unregister(TRAJECTORY_QUERY_STORE_SERVICE)
         child_services.unregister(TRAJECTORY_STORE_SERVICE)
@@ -977,8 +987,10 @@ async def create_child_session(
             ctx=child_ctx,
             trajectory=Trajectory(turns=config.initial_turns),
             bus=config.bus,
-            stream_fn=config.stream_fn or parent._stream_fn,
-            model=config.model or parent._model,
+            stream_fn=(
+                parent._stream_fn if config.stream_fn is None else config.stream_fn
+            ),
+            model=parent._model if config.model is None else config.model,
             system=config.system if config.system is not None else parent.system,
             store=child_store,
             graph=parent.graph,
