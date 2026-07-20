@@ -353,7 +353,7 @@ class _FileToolsRuntime:
             )
             if write_result.error is not None:
                 return _error(write_result.error)
-        self._toolbox.accept_content(path, new_bytes)
+        self._toolbox.accept_content(path, new_bytes, read_ranges=result.read_ranges)
         return _toolbox_to_tool_result(result)
 
     # -- read ---------------------------------------------------------------
@@ -457,8 +457,10 @@ class _FileToolsRuntime:
                     "is set.\n"
                     "2. Line-range replacement: provide start_line + end_line "
                     "+ new_string (1-based, inclusive).\n"
-                    "You MUST read the file first (both modes); an edit whose "
-                    "prior read is stale or partial is rejected. An edit that "
+                    "You MUST read the affected lines first (both modes); "
+                    "a full-file read is not required for targeted edits. "
+                    "An edit whose prior read is stale or does not cover the "
+                    "edited lines is rejected. An edit that "
                     "deletes many more lines than the match explains is also "
                     "rejected — use line-range mode for large intentional "
                     "deletions. Returns a line-numbered diff snippet of the "
