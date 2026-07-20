@@ -14,7 +14,7 @@ import os
 import select
 import sys
 import termios
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from io import StringIO
 
@@ -22,18 +22,13 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.text import Text
 
-from agentm.core.abi.messages import (
-    ImageContent,
-    OpaqueThinkingBlock,
-    TextContent,
-    ThinkingBlock,
-    ToolCallBlock,
-)
-from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
-from agentm.core.abi.trigger import UserInput
-
-_TurnRecord = Turn | TurnCheckpoint
+from agentm.presenter.trajectory.model import (
+    TraceRow,
+    TraceSnapshot,
+    TraceTurnSummary,
+    build_trace_snapshot,
+)
 
 
 # -- Data model --------------------------------------------------------------
@@ -41,7 +36,7 @@ _TurnRecord = Turn | TurnCheckpoint
 
 @dataclass(slots=True)
 class _Message:
-    role: str  # user | assistant | tool_call | tool_result | error
+    role: str  # system | user | assistant | tool_call | tool_result | error
     tool_name: str | None = None
     is_error: bool = False
     content: str = ""
@@ -52,7 +47,7 @@ class _Message:
 
 @dataclass(slots=True)
 class _TurnView:
-    turn: _TurnRecord
+    summary: TraceTurnSummary
     trigger_label: str
     tools_str: str
     cause: str
@@ -71,143 +66,110 @@ class _ViewItem:
     expanded: bool
 
 
-def _build_views(records: list[_TurnRecord]) -> list[_TurnView]:
+def _build_views(snapshot: TraceSnapshot) -> list[_TurnView]:
     views: list[_TurnView] = []
-    for turn in records:
-        tool_names: list[str] = []
-        tool_errors = 0
-        for rnd in turn.rounds:
-            for rec in rnd.tool_results:
-                tool_names.append(rec.call.name)
-                if rec.result.is_error:
-                    tool_errors += 1
+    rows_by_turn: dict[int, list[TraceRow]] = {}
+    for row in snapshot.rows:
+        if row.turn_index is None:
+            continue
+        rows_by_turn.setdefault(row.turn_index, []).append(row)
 
-        trigger_label = turn.trigger.source
-        if isinstance(turn.trigger, UserInput):
-            parts = []
-            for block in turn.trigger.content:
-                if isinstance(block, TextContent):
-                    parts.append(block.text)
-            preview = " ".join(parts).replace("\n", " ")[:50]
-            if preview:
-                trigger_label = f'"{preview}"'
-
-        tools_str = f"{len(tool_names)} tools" if tool_names else "no tools"
-        if tool_errors:
-            tools_str += f" ({tool_errors} err)"
-        if isinstance(turn, Turn):
-            cause = type(turn.outcome.cause).__name__
-        else:
-            cause = "incomplete"
-        in_tok = turn.meta.total_input_tokens
-        out_tok = turn.meta.total_output_tokens
-        model = turn.meta.model_id or "?"
-
-        msgs = _extract_messages(turn)
+    for summary in snapshot.turns:
+        trigger_label = _trigger_label(summary)
+        tools_str = f"{summary.tool_calls} tools" if summary.tool_calls else "no tools"
+        if summary.tool_errors:
+            tools_str += f" ({summary.tool_errors} err)"
+        cause = summary.cause or summary.status
+        model = summary.model or "?"
+        messages = _messages_from_rows(rows_by_turn.get(summary.turn_index, ()))
         views.append(
             _TurnView(
-                turn=turn,
+                summary=summary,
                 trigger_label=trigger_label,
                 tools_str=tools_str,
                 cause=cause,
-                in_tok=in_tok,
-                out_tok=out_tok,
+                in_tok=summary.input_tokens,
+                out_tok=summary.output_tokens,
                 model=model,
-                messages=msgs,
+                messages=messages,
             )
         )
     return views
 
 
-def _extract_messages(turn: _TurnRecord) -> list[_Message]:
+def _trigger_label(summary: TraceTurnSummary) -> str:
+    text = " ".join(
+        line.strip() for line in summary.trigger.splitlines() if line.strip()
+    )
+    if text:
+        preview = text[:50]
+        return f'"{preview}"'
+    return summary.trigger_source or summary.status
+
+
+def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
     msgs: list[_Message] = []
-
-    if isinstance(turn.trigger, UserInput):
-        parts = []
-        for block in turn.trigger.content:
-            if isinstance(block, TextContent):
-                parts.append(block.text)
-            elif isinstance(block, ImageContent):
-                parts.append(f"[image {block.mime_type}, {len(block.data)} bytes]")
-            else:
-                parts.append(f"[{type(block).__name__}]")
-        msgs.append(_Message(role="user", content="\n".join(parts)))
-
-    for ri, rnd in enumerate(turn.rounds):
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-
-        for response_block in rnd.response.content:
-            if isinstance(response_block, TextContent):
-                text_parts.append(response_block.text)
-            elif isinstance(response_block, ThinkingBlock):
-                thinking_parts.append(response_block.text)
-            elif isinstance(response_block, OpaqueThinkingBlock):
-                thinking_parts.append(f"[opaque reasoning: {response_block.provider}]")
-            elif isinstance(response_block, ToolCallBlock):
-                args_str = json.dumps(
-                    dict(response_block.arguments),
-                    ensure_ascii=False,
-                    indent=2,
+    for row in rows:
+        if row.kind == "system":
+            msgs.append(
+                _Message(
+                    role="system",
+                    content=row.content,
+                    round_index=row.round_index,
                 )
-                if text_parts or thinking_parts:
-                    msgs.append(
-                        _Message(
-                            role="assistant",
-                            content="\n".join(text_parts),
-                            thinking="\n".join(thinking_parts)
-                            if thinking_parts
-                            else None,
-                            round_index=ri,
-                        )
-                    )
-                    text_parts = []
-                    thinking_parts = []
-                msgs.append(
-                    _Message(
-                        role="tool_call",
-                        tool_name=response_block.name,
-                        args_json=args_str,
-                        round_index=ri,
-                    )
+            )
+        elif row.kind in {"user", "trigger"}:
+            msgs.append(
+                _Message(
+                    role="user",
+                    content=row.content,
+                    round_index=row.round_index,
                 )
-
-        if text_parts or thinking_parts:
+            )
+        elif row.kind == "assistant":
             msgs.append(
                 _Message(
                     role="assistant",
-                    content="\n".join(text_parts),
-                    thinking="\n".join(thinking_parts) if thinking_parts else None,
-                    round_index=ri,
+                    content=row.content,
+                    round_index=row.round_index,
                 )
             )
-
-        for rec in rnd.tool_results:
-            txt = "".join(
-                result_block.text
-                for result_block in rec.result.content
-                if isinstance(result_block, TextContent)
+        elif row.kind == "thinking":
+            msgs.append(
+                _Message(
+                    role="assistant",
+                    thinking=row.content,
+                    round_index=row.round_index,
+                )
             )
+        elif row.kind == "tool_call":
+            msgs.append(
+                _Message(
+                    role="tool_call",
+                    tool_name=row.tool_name,
+                    args_json=row.content,
+                    round_index=row.round_index,
+                )
+            )
+        elif row.kind == "tool_result":
             msgs.append(
                 _Message(
                     role="tool_result",
-                    tool_name=rec.call.name,
-                    is_error=rec.result.is_error,
-                    content=txt,
-                    round_index=ri,
+                    tool_name=row.tool_name,
+                    is_error=row.is_error,
+                    content=row.content,
+                    round_index=row.round_index,
                 )
             )
-
-    if isinstance(turn, Turn) and isinstance(turn.outcome.cause, ProviderRequestFailed):
-        msgs.append(
-            _Message(
-                role="error",
-                is_error=True,
-                content=(
-                    f"{turn.outcome.cause.error_type}: {turn.outcome.cause.detail}"
-                ),
+        elif row.kind == "error" or (row.kind == "control" and row.is_error):
+            msgs.append(
+                _Message(
+                    role="error",
+                    is_error=True,
+                    content=row.content,
+                    round_index=row.round_index,
+                )
             )
-        )
 
     return msgs
 
@@ -367,7 +329,7 @@ def _render_turn_summary(view: _TurnView, width: int) -> str:
       tail:   " | <tools> | <cause> | in:N out:N | <model>"
       flex:   trigger_label gets whatever remains
     """
-    prefix = f"T{view.turn.index:>2} | "
+    prefix = f"T{view.summary.turn_index:>2} | "
     tail = (
         f" | {view.tools_str} | {view.cause}"
         f" | in:{view.in_tok:>7,} out:{view.out_tok:>5,}"
@@ -396,6 +358,7 @@ def _render_turn_summary(view: _TurnView, width: int) -> str:
 _MAX_BODY_LINES = 60
 
 _ANSI = {
+    "system": "\033[1;35m",
     "user": "\033[1;32m",
     "assistant": "\033[1;34m",
     "tool_call": "\033[1;33m",
@@ -548,6 +511,8 @@ def _render_body_lines(msg: _Message, width: int) -> list[str]:
                     con.print(Text(line, style="dim"))
         elif msg.role == "error":
             con.print(Text(content, style="bold red"))
+        elif msg.role == "system":
+            con.print(Text(content, style="magenta"))
         elif msg.role == "user":
             con.print(Text(content, style="green"))
         else:
@@ -590,9 +555,9 @@ class TraceViewer:
         checkpoints: list[TurnCheckpoint] | None = None,
         reload: Callable[[], tuple[list[Turn], list[TurnCheckpoint]]] | None = None,
     ) -> None:
-        records: list[_TurnRecord] = [*turns, *(checkpoints or [])]
-        records.sort(key=lambda r: r.index)
-        self._views = _build_views(records)
+        self._views = _build_views(
+            build_trace_snapshot(session_id, turns, checkpoints or ())
+        )
         self._session_id = session_id
         self._reload = reload
         # Turn-list state
@@ -654,9 +619,9 @@ class TraceViewer:
         if self._reload is None:
             return
         new_turns, new_checkpoints = self._reload()
-        records: list[_TurnRecord] = [*new_turns, *new_checkpoints]
-        records.sort(key=lambda r: r.index)
-        new_views = _build_views(records)
+        new_views = _build_views(
+            build_trace_snapshot(self._session_id, new_turns, new_checkpoints)
+        )
         if len(new_views) != len(self._views):
             was_at_end = self._cursor >= len(self._views) - 1
             self._views = new_views

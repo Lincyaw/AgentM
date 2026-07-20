@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 from collections.abc import Callable, Iterable, Mapping
@@ -25,7 +24,6 @@ from agentm.core.abi.query import (
     SessionFilter,
     TrajectoryQueryStore,
 )
-from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.trigger import UserInput
 from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
@@ -88,6 +86,77 @@ def _load_trace_snapshot(
     turns = list(query.turns(session_id))
     checkpoints = list(query.checkpoints(session_id))
     return build_trace_snapshot(session_id, turns, checkpoints)
+
+
+def _message_record_from_row(
+    row: TraceRow,
+    *,
+    hide_thinking: bool,
+) -> _MessageRecord | None:
+    if row.turn_index is None:
+        return None
+    if row.kind == "thinking":
+        if hide_thinking:
+            return None
+        return {
+            "turn_index": row.turn_index,
+            "round_index": row.round_index,
+            "role": "assistant",
+            "content": f"[thinking] {row.content}",
+        }
+    if row.kind == "tool_call":
+        arguments = json.dumps(
+            _metadata_mapping(row, "arguments"),
+            ensure_ascii=False,
+        )[:200]
+        return {
+            "turn_index": row.turn_index,
+            "round_index": row.round_index,
+            "role": "assistant",
+            "content": f"[tool_call: {row.tool_name or row.title}({arguments})]",
+        }
+    if row.kind == "tool_result":
+        return {
+            "turn_index": row.turn_index,
+            "round_index": row.round_index,
+            "role": "tool_result",
+            "tool": row.tool_name or "?",
+            "is_error": row.is_error,
+            "content": row.content[:500],
+        }
+    if row.kind == "control":
+        if not row.is_error:
+            return None
+        return {
+            "turn_index": row.turn_index,
+            "round_index": row.round_index,
+            "role": "error",
+            "content": row.content,
+        }
+    if row.kind in {"system", "user", "trigger", "assistant", "error"}:
+        role = row.kind
+        if role == "trigger":
+            role = "user"
+        return {
+            "turn_index": row.turn_index,
+            "round_index": row.round_index,
+            "role": role,
+            "content": row.content,
+        }
+    return None
+
+
+def _message_records_from_snapshot(
+    snapshot: TraceSnapshot,
+    *,
+    hide_thinking: bool,
+) -> list[_MessageRecord]:
+    records: list[_MessageRecord] = []
+    for row in snapshot.rows:
+        record = _message_record_from_row(row, hide_thinking=hide_thinking)
+        if record is not None:
+            records.append(record)
+    return records
 
 
 trace_app = typer.Typer(
@@ -473,105 +542,15 @@ def messages_cmd(
     query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session)
     try:
-        turns = list(query.turns(sid))
+        snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
-    all_msgs: list[_MessageRecord] = []
-    records: list[Turn | TurnCheckpoint] = [
-        *turns,
-        *query.checkpoints(sid),
-    ]
-    records.sort(key=lambda item: item.index)
-    _shown_system_hash: str | None = None
-    for turn_record in records:
-        sp = turn_record.meta.system_prompt
-        if sp is not None:
-            sp_hash = hashlib.sha256(sp.encode("utf-8")).hexdigest()[:16]
-            if sp_hash != _shown_system_hash:
-                _shown_system_hash = sp_hash
-                all_msgs.append(
-                    {
-                        "turn_index": turn_record.index,
-                        "round_index": None,
-                        "role": "system",
-                        "content": sp,
-                    }
-                )
-        if isinstance(turn_record.trigger, UserInput):
-            trigger_content = [
-                block.text
-                if isinstance(block, TextContent)
-                else (
-                    f"[image {block.mime_type}, {len(block.data)} bytes]"
-                    if isinstance(block, ImageContent)
-                    else f"[{type(block).__name__}]"
-                )
-                for block in turn_record.trigger.content
-            ]
-            all_msgs.append(
-                {
-                    "turn_index": turn_record.index,
-                    "round_index": None,
-                    "role": "user",
-                    "content": "\n".join(trigger_content),
-                }
-            )
-        for ri, rnd in enumerate(turn_record.rounds):
-            blocks: list[str] = []
-            for block in rnd.response.content:
-                if isinstance(block, TextContent):
-                    blocks.append(block.text)
-                elif isinstance(block, ThinkingBlock) and not hide_thinking:
-                    blocks.append(f"[thinking] {block.text}")
-                elif isinstance(block, OpaqueThinkingBlock) and not hide_thinking:
-                    blocks.append(f"[opaque thinking: {block.provider}]")
-                elif isinstance(block, ToolCallBlock):
-                    arguments = json.dumps(
-                        dict(block.arguments),
-                        ensure_ascii=False,
-                    )[:200]
-                    blocks.append(f"[tool_call: {block.name}({arguments})]")
-            all_msgs.append(
-                {
-                    "turn_index": turn_record.index,
-                    "round_index": ri,
-                    "role": "assistant",
-                    "content": "\n".join(blocks),
-                }
-            )
-            for rec in rnd.tool_results:
-                txt = "".join(
-                    block.text
-                    for block in rec.result.content
-                    if isinstance(block, TextContent)
-                )[:500]
-                all_msgs.append(
-                    {
-                        "turn_index": turn_record.index,
-                        "round_index": ri,
-                        "role": "tool_result",
-                        "tool": rec.call.name,
-                        "is_error": rec.result.is_error,
-                        "content": txt,
-                    }
-                )
-        if isinstance(turn_record, Turn) and isinstance(
-            turn_record.outcome.cause,
-            ProviderRequestFailed,
-        ):
-            all_msgs.append(
-                {
-                    "turn_index": turn_record.index,
-                    "round_index": None,
-                    "role": "error",
-                    "content": (
-                        f"{turn_record.outcome.cause.error_type}: "
-                        f"{turn_record.outcome.cause.detail}"
-                    ),
-                }
-            )
+    all_msgs = _message_records_from_snapshot(
+        snapshot,
+        hide_thinking=hide_thinking,
+    )
     if role:
         all_msgs = [m for m in all_msgs if m["role"] == role]
 
