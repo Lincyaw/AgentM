@@ -490,6 +490,7 @@ def _meta(
     model: Model | None = None,
     cache_read: int = 0,
     cache_write: int = 0,
+    system_prompt: str | None = None,
 ) -> TurnMeta:
     return TurnMeta(
         total_input_tokens=inp,
@@ -498,6 +499,7 @@ def _meta(
         cache_write_tokens=cache_write,
         duration_ns=time.perf_counter_ns() - start_ns,
         model_id=model.id if model is not None else None,
+        system_prompt=system_prompt,
     )
 
 
@@ -806,18 +808,23 @@ async def react(
             system=system,
         ),
     )
-    veto = _last_key(before_returns, "veto")
-    if veto is not None:
-        if not isinstance(veto, TerminationCause):
-            raise TypeError("BeforeRunEvent veto must be a TerminationCause")
-        return Outcome(cause=veto), _meta(0, 0, start_ns), tool_calls_used
     replacement_msgs = _last_key(before_returns, "messages")
     if isinstance(replacement_msgs, list):
         messages = replacement_msgs
     replacement_sys = _last_key(before_returns, "system")
     if isinstance(replacement_sys, str):
         system = replacement_sys
+    resolved_system_prompt = system
 
+    veto = _last_key(before_returns, "veto")
+    if veto is not None:
+        if not isinstance(veto, TerminationCause):
+            raise TypeError("BeforeRunEvent veto must be a TerminationCause")
+        return (
+            Outcome(cause=veto),
+            _meta(0, 0, start_ns, system_prompt=resolved_system_prompt),
+            tool_calls_used,
+        )
     round_index = 0
     while True:
         if turn_signal.is_set():
@@ -829,6 +836,7 @@ async def react(
                     start_ns,
                     cache_read=total_cache_read,
                     cache_write=total_cache_write,
+                    system_prompt=resolved_system_prompt,
                 ),
                 tool_calls_used,
             )
@@ -856,6 +864,7 @@ async def react(
                         start_ns,
                         cache_read=total_cache_read,
                         cache_write=total_cache_write,
+                        system_prompt=resolved_system_prompt,
                     ),
                     tool_calls_used,
                 )
@@ -913,6 +922,9 @@ async def react(
                 effective_tools = [
                     item for item in replacement_tools if isinstance(item, Tool)
                 ]
+
+        if effective_system is not None:
+            resolved_system_prompt = effective_system
 
         messages = route_messages(messages, session_id=session_id)
         messages = await _apply_provider_prompt_cache(
@@ -1041,6 +1053,7 @@ async def react(
                     effective_model,
                     cache_read=total_cache_read,
                     cache_write=total_cache_write,
+                    system_prompt=resolved_system_prompt,
                 ),
                 tool_calls_used,
             )
@@ -1458,6 +1471,7 @@ async def react(
                     effective_model,
                     cache_read=total_cache_read,
                     cache_write=total_cache_write,
+                    system_prompt=resolved_system_prompt,
                 ),
                 tool_calls_used,
             )

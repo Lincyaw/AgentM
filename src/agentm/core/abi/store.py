@@ -300,9 +300,12 @@ class TrajectoryCommit:
         ):
             raise TypeError("trajectory commit nodes must be a tuple of TrajectoryNode")
         for node in self.nodes:
+            if node.kind == "system_prompt":
+                continue
             if node.kind != "message":
                 raise ValueError(
-                    "trajectory turn commits can contain only message nodes"
+                    "trajectory turn commits can contain only message "
+                    "or system_prompt nodes"
                 )
             if node.turn_id != self.turn.id or node.turn_index != self.turn.index:
                 raise ValueError(

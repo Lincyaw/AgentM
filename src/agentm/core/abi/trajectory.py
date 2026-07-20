@@ -48,6 +48,7 @@ DEFAULT_TRAJECTORY_HEAD_ID = "main"
 TrajectoryNodeKind = Literal[
     "message",
     "compact_boundary",
+    "system_prompt",
 ]
 TrajectoryNodeRole = Literal["user", "assistant", "tool_result", "control"]
 TrajectoryHeadStatus = Literal["active", "dead", "archived"]
@@ -534,7 +535,7 @@ class TrajectoryNode:
         _require_string(self.id, "trajectory node id")
         _require_string(self.session_id, "trajectory node session_id")
         _require_index(self.seq, "trajectory node seq")
-        if self.kind not in {"message", "compact_boundary"}:
+        if self.kind not in {"message", "compact_boundary", "system_prompt"}:
             raise ValueError(f"invalid trajectory node kind: {self.kind!r}")
         for label, string_value in (
             ("root_session_id", self.root_session_id),
@@ -584,6 +585,13 @@ class TrajectoryNode:
                 raise ValueError("message trajectory nodes require a message")
             if self.message.role != self.role:
                 raise ValueError("trajectory node role must match its message role")
+        elif self.kind == "system_prompt":
+            if self.message is not None:
+                raise ValueError("system_prompt nodes cannot carry a message")
+            if self.role != "control":
+                raise ValueError("system_prompt nodes require the control role")
+            if self.content_ref is None:
+                raise ValueError("system_prompt nodes require a content_ref")
         else:
             if self.message is not None:
                 raise ValueError("control trajectory nodes cannot carry a message")
@@ -640,6 +648,7 @@ class TurnMeta:
     duration_ns: int = 0
     model_id: str | None = None
     resource_mutations: tuple[ResourceMutation, ...] = ()
+    system_prompt: str | None = None
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -657,6 +666,8 @@ class TurnMeta:
             raise TypeError(
                 "turn meta resource_mutations must be a tuple of ResourceMutation"
             )
+        if self.system_prompt is not None and not isinstance(self.system_prompt, str):
+            raise TypeError("turn meta system_prompt must be a string or None")
 
 
 def _validate_resource_transaction_anchors(

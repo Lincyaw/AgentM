@@ -1030,7 +1030,7 @@ class CodecRegistry:
 
     @staticmethod
     def _serialize_meta(meta: TurnMeta) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "total_input_tokens": meta.total_input_tokens,
             "total_output_tokens": meta.total_output_tokens,
             "cache_read_tokens": meta.cache_read_tokens,
@@ -1039,6 +1039,9 @@ class CodecRegistry:
             "model_id": meta.model_id,
             "resource_mutations": serialize_resource_mutations(meta.resource_mutations),
         }
+        if meta.system_prompt is not None:
+            data["system_prompt"] = meta.system_prompt
+        return data
 
     @staticmethod
     def _deserialize_meta(data: dict[str, Any]) -> TurnMeta:
@@ -1053,9 +1056,14 @@ class CodecRegistry:
                 "duration_ns",
                 "model_id",
                 "resource_mutations",
+                "system_prompt",
             },
             "turn.meta",
         )
+        raw_system_prompt = data.get("system_prompt")
+        system_prompt: str | None = None
+        if isinstance(raw_system_prompt, str):
+            system_prompt = raw_system_prompt
         return TurnMeta(
             total_input_tokens=_integer(
                 data.get("total_input_tokens"),
@@ -1086,6 +1094,7 @@ class CodecRegistry:
             resource_mutations=deserialize_resource_mutations(
                 data.get("resource_mutations", [])
             ),
+            system_prompt=system_prompt,
         )
 
     # --- Turn ---

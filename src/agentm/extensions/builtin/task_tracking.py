@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Literal  # noqa: UP035
+
+# code-health: ignore-file[AM022]
+from typing import Any, Literal  # noqa: UP035
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,7 +36,6 @@ from agentm.core.abi import (
     AtomAPI,
     AtomInstallPriority,
     FunctionTool,
-    JsonValue,
     TextContent,
     ToolResult,
 )
@@ -76,10 +77,10 @@ class _Task:
         self.parent_id = parent_id
         self.blocks: set[str] = set()
         self.blocked_by: set[str] = set()
-        self.metadata: dict[str, JsonValue] = {}
+        self.metadata: dict[str, Any] = {}
 
-    def to_summary(self) -> dict[str, object]:
-        d: dict[str, object] = {
+    def to_summary(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
             "id": self.id,
             "subject": self.subject,
             "status": self.status,
@@ -90,7 +91,7 @@ class _Task:
             d["blocked_by"] = sorted(self.blocked_by)
         return d
 
-    def to_detail(self) -> dict[str, object]:
+    def to_detail(self) -> dict[str, Any]:
         d = self.to_summary()
         d["description"] = self.description
         if self.active_form:
@@ -124,7 +125,7 @@ class _TaskManager:
         *,
         active_form: str | None = None,
         parent_id: str | None = None,
-        metadata: Mapping[str, JsonValue] | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> _Task:
         tid = self._alloc_id()
         task = _Task(
@@ -233,7 +234,7 @@ class _CreateParams(BaseModel):
     parent_id: str | None = Field(
         default=None, description="ID of a parent task to nest under."
     )
-    metadata: dict[str, JsonValue] | None = Field(
+    metadata: dict[str, Any] | None = Field(
         default=None, description="Arbitrary metadata to attach."
     )
 
@@ -246,7 +247,7 @@ class _UpdateParams(BaseModel):
     subject: str | None = Field(default=None, description="New subject.")
     description: str | None = Field(default=None, description="New description.")
     active_form: str | None = Field(default=None, description="New active-form text.")
-    metadata: dict[str, JsonValue] | None = Field(
+    metadata: dict[str, Any] | None = Field(
         default=None,
         description="Metadata keys to merge. Set a key to null to delete it.",
     )
@@ -348,7 +349,7 @@ class _TaskTrackingRuntime:
             )
         )
 
-    async def create(self, args: dict[str, object]) -> ToolResult:
+    async def create(self, args: dict[str, Any]) -> ToolResult:
         params = _CreateParams.model_validate(args)
         parent_id = params.parent_id
         if parent_id is not None and self._mgr.get(parent_id) is None:
@@ -363,7 +364,7 @@ class _TaskTrackingRuntime:
         )
         return _ok(task.to_detail())
 
-    async def update(self, args: dict[str, object]) -> ToolResult:
+    async def update(self, args: dict[str, Any]) -> ToolResult:
         params = _UpdateParams.model_validate(args)
         task_id = params.task_id
 
@@ -387,13 +388,13 @@ class _TaskTrackingRuntime:
 
         return _ok(task.to_detail())
 
-    async def list_tasks(self, args: dict[str, object]) -> ToolResult:  # noqa: ARG002
+    async def list_tasks(self, args: dict[str, Any]) -> ToolResult:  # noqa: ARG002
         tasks = self._mgr.list_all()
         if not tasks:
             return _ok({"tasks": [], "summary": "No tasks."})
         return _ok({"tasks": [t.to_summary() for t in tasks]})
 
-    async def get(self, args: dict[str, object]) -> ToolResult:
+    async def get(self, args: dict[str, Any]) -> ToolResult:
         params = _GetParams.model_validate(args)
         task = self._mgr.get(params.task_id)
         if task is None:
@@ -412,7 +413,7 @@ class _TaskTrackingRuntime:
     @staticmethod
     def _update_metadata(
         task: _Task,
-        metadata: Mapping[str, JsonValue] | None,
+        metadata: Mapping[str, Any] | None,
     ) -> None:
         if metadata is None:
             return

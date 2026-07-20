@@ -339,7 +339,8 @@ def leaf_nodes(nodes: Iterable[TrajectoryNode]) -> list[TrajectoryLeaf]:
             is_sidechain=node.is_sidechain,
         )
         for node in materialized
-        if node.kind in {"message", "compact_boundary"} and node.id not in parents
+        if node.kind in {"message", "compact_boundary", "system_prompt"}
+        and node.id not in parents
     ]
 
 

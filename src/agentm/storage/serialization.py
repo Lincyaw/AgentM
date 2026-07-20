@@ -253,6 +253,7 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
                 allowed={
                     "message",
                     "compact_boundary",
+                    "system_prompt",
                 },
             ),
         ),

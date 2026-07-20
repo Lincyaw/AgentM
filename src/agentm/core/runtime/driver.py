@@ -11,6 +11,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -404,6 +405,10 @@ def _clear_resource_txn(services: ServiceRegistry) -> None:
     services.unregister(RESOURCE_TXN_SERVICE)
 
 
+def _system_prompt_ref(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # --- Main driver ------------------------------------------------------------
 
 
@@ -474,6 +479,12 @@ async def drive(config: DriverConfig) -> None:
     )
     turns_run = 0
     tool_calls_run = 0
+    _last_system_prompt_ref: str | None = None
+    for _existing_turn in reversed(trajectory.turns):
+        _existing_sp = _existing_turn.meta.system_prompt
+        if _existing_sp is not None:
+            _last_system_prompt_ref = _system_prompt_ref(_existing_sp)
+            break
 
     while True:
         if _shutdown.is_set():
@@ -663,18 +674,51 @@ async def drive(config: DriverConfig) -> None:
             nodes: list[TrajectoryNode] = []
             advance_head: TrajectoryHeadAdvance | None = None
             if node_append_position is not None:
+                sys_text = turn.meta.system_prompt
+                sys_ref = _system_prompt_ref(sys_text) if sys_text else None
+                sys_node: TrajectoryNode | None = None
+                if sys_ref is not None and sys_ref != _last_system_prompt_ref:
+                    sys_node = TrajectoryNode(
+                        id=f"session:{config.session_id}:system_prompt:{sys_ref}",
+                        session_id=config.session_id,
+                        seq=node_append_position.start_seq,
+                        kind="system_prompt",
+                        role="control",
+                        root_session_id=config.root_session_id,
+                        parent_session_id=config.parent_session_id,
+                        branch_id=node_append_position.branch_id,
+                        head_id=node_append_position.head_id,
+                        parent_id=node_append_position.parent_node_id,
+                        logical_parent_id=node_append_position.logical_parent_id,
+                        content_ref=sys_ref,
+                        payload={"text": sys_text},
+                        timestamp=turn.timestamp,
+                    )
+                    _last_system_prompt_ref = sys_ref
+                parent_node_id: str | None
+                logical_parent_id: str | None
+                if sys_node is not None:
+                    start_seq = node_append_position.start_seq + 1
+                    parent_node_id = sys_node.id
+                    logical_parent_id = None
+                else:
+                    start_seq = node_append_position.start_seq
+                    parent_node_id = node_append_position.parent_node_id
+                    logical_parent_id = node_append_position.logical_parent_id
                 nodes = turn_to_nodes(
                     turn,
                     session_id=config.session_id,
-                    start_seq=node_append_position.start_seq,
+                    start_seq=start_seq,
                     root_session_id=config.root_session_id,
                     parent_session_id=config.parent_session_id,
                     branch_id=node_append_position.branch_id,
                     head_id=node_append_position.head_id,
-                    parent_node_id=node_append_position.parent_node_id,
-                    logical_parent_id=node_append_position.logical_parent_id,
+                    parent_node_id=parent_node_id,
+                    logical_parent_id=logical_parent_id,
                     renderers=config.trigger_renderers,
                 )
+                if sys_node is not None:
+                    nodes.insert(0, sys_node)
                 if nodes:
                     advance_head = TrajectoryHeadAdvance(
                         session_id=config.session_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Iterable
@@ -336,7 +337,21 @@ def messages_cmd(
         *query.checkpoints(sid),
     ]
     records.sort(key=lambda item: item.index)
+    _shown_system_hash: str | None = None
     for turn_record in records:
+        sp = turn_record.meta.system_prompt
+        if sp is not None:
+            sp_hash = hashlib.sha256(sp.encode("utf-8")).hexdigest()[:16]
+            if sp_hash != _shown_system_hash:
+                _shown_system_hash = sp_hash
+                all_msgs.append(
+                    {
+                        "turn_index": turn_record.index,
+                        "round_index": None,
+                        "role": "system",
+                        "content": sp,
+                    }
+                )
         if isinstance(turn_record.trigger, UserInput):
             trigger_content = [
                 block.text
@@ -414,6 +429,7 @@ def messages_cmd(
         all_msgs = [m for m in all_msgs if m["role"] == role]
 
     _ROLE_ANSI = {
+        "system": "\033[1;35m",  # bold magenta
         "user": "\033[1;32m",  # bold green
         "assistant": "\033[1;34m",  # bold blue
         "tool_result": "\033[36m",  # cyan
