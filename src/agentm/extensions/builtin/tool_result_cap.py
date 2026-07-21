@@ -1,10 +1,12 @@
 # code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
-"""Cap oversized tool results with middle-out truncation."""
+"""Cap oversized tool results and spill the full text to the workspace."""
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
@@ -12,6 +14,7 @@ from agentm.core.abi import (
     AtomInstallPriority,
     BusPriority,
     ImageContent,
+    ResourceWriter,
     TextContent,
     ToolResult,
     ToolResultEvent,
@@ -23,6 +26,13 @@ from agentm.core.lib.tokens import (
 from agentm.extensions import ExtensionManifest
 
 _DEFAULT_MAX_TOKENS: Final[int] = 50_000
+_SPILL_READ_EXAMPLE_LIMIT: Final[int] = 200
+_SAFE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _safe_path_name(value: str, *, fallback: str) -> str:
+    sanitized = _SAFE_NAME_PATTERN.sub("_", value).strip("._")
+    return sanitized[:120] if sanitized else fallback
 
 
 class ToolResultCapConfig(BaseModel):
@@ -35,12 +45,12 @@ class ToolResultCapConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="tool_result_cap",
     description=(
-        "Cap oversized tool-result text with middle-out truncation while "
-        "preserving image blocks."
+        "Cap oversized tool-result text, spill the full text through the "
+        "workspace ResourceWriter, and preserve image blocks."
     ),
     registers=("event:tool_result",),
     config_schema=ToolResultCapConfig,
-    requires=(),
+    requires=("service:resource_writer",),
     priority=AtomInstallPriority.TOOL,
 )
 
@@ -54,6 +64,15 @@ class _ToolResultCapRuntime:
         self._session = session
         self._max_tokens = config.max_tokens
         self._error_floor_tokens = config.error_floor_tokens
+        writer = session.get_resource_writer()
+        if writer is None:
+            raise RuntimeError("tool_result_cap requires a ResourceWriter service")
+        self._writer: ResourceWriter = writer
+        session_name = _safe_path_name(
+            session.ctx.session_id,
+            fallback="unknown-session",
+        )
+        self._output_dir = f".agentm/tool_outputs/{session_name}"
 
     def install(self) -> None:
         self._session.on(
@@ -85,12 +104,14 @@ class _ToolResultCapRuntime:
             if total_tokens <= effective_max:
                 return None
 
+        spill_path = await self._spill(event.tool_call_id, full_text)
         return self._truncated_result(
             event,
             result=result,
             total_tokens=total_tokens,
             effective_max=effective_max,
             model_name=model_name,
+            spill_path=spill_path,
         )
 
     def _model_name(self) -> str | None:
@@ -104,6 +125,31 @@ class _ToolResultCapRuntime:
                 text_blocks.append(block.text)
         return "\n".join(text_blocks)
 
+    async def _spill(self, tool_call_id: str, full_text: str) -> str | None:
+        filename = f"{_safe_path_name(tool_call_id, fallback='tool-call')}.txt"
+        candidate = f"{self._output_dir}/{filename}"
+        try:
+            result = await self._writer.write(
+                candidate,
+                full_text.encode("utf-8"),
+                rationale="tool_result_cap full output spill",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tool_result_cap failed to spill full output to {}: {}",
+                candidate,
+                exc,
+            )
+            return None
+        if result.error is not None:
+            logger.warning(
+                "tool_result_cap spill was rejected for {}: {}",
+                candidate,
+                result.error,
+            )
+            return None
+        return candidate
+
     def _truncated_result(
         self,
         event: ToolResultEvent,
@@ -112,6 +158,7 @@ class _ToolResultCapRuntime:
         total_tokens: int,
         effective_max: int,
         model_name: str | None,
+        spill_path: str | None,
     ) -> ToolResult:
         remaining_tokens = effective_max
         kept_tokens = 0
@@ -135,13 +182,21 @@ class _ToolResultCapRuntime:
             for block in result.content
             if isinstance(block, TextContent)
         )
+        if spill_path is None:
+            retrieval_notice = "full output could not be saved"
+        else:
+            retrieval_notice = (
+                f"full output saved to {spill_path}; inspect it with paged reads, "
+                f'for example read(path="{spill_path}", offset=1, '
+                f"limit={_SPILL_READ_EXAMPLE_LIMIT})"
+            )
         new_content_trunc.append(
             TextContent(
                 type="text",
                 text=(
-                    f"\n[tool_result_cap: truncated {truncated_tokens} tokens; "
+                    f"\n[truncated {truncated_tokens} tokens; "
                     f"original {total_tokens} tokens / {total_lines} lines "
-                    f"from {event.tool_name}]"
+                    f"from {event.tool_name}; {retrieval_notice}]"
                 ),
             )
         )
