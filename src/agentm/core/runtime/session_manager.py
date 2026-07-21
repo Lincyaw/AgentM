@@ -74,6 +74,23 @@ def _header_to_record(header: SessionHeader) -> dict[str, Any]:
     return asdict(header)
 
 
+_SENSITIVE_CONFIG_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "auth_token",
+    "bearer_token",
+    "key",
+    "secret",
+    "token",
+}
+
+
+def _is_sensitive_config_key(key: Any) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return normalized in _SENSITIVE_CONFIG_KEYS or normalized.endswith("_api_key")
+
+
 def _json_safe(value: Any, _depth: int = 0) -> Any:
     """Reduce *value* to JSON-serializable primitives, replacing live
     objects with their repr.
@@ -89,7 +106,10 @@ def _json_safe(value: Any, _depth: int = 0) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(k): _json_safe(v, _depth + 1) for k, v in value.items()}
+        return {
+            str(k): "<redacted>" if _is_sensitive_config_key(k) else _json_safe(v, _depth + 1)
+            for k, v in value.items()
+        }
     if isinstance(value, (list, tuple, set)):
         return [_json_safe(v, _depth + 1) for v in value]
     return repr(value)[:200]

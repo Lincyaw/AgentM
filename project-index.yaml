@@ -419,6 +419,32 @@ requirements:
     depends_on:
       - REQ-087-builtin-atoms-extension-api
 
+  - id: REQ-106-injection-author-scenario
+    title: AgentM-native adversarial fault-injection author scenario
+    description: >
+      The Aegis fault-injection author loop must be runnable as an AgentM
+      workflow rather than an external Claude/Codex skill session. The workflow
+      orchestrates campaign rounds, injects structured context into a single-round
+      worker scenario, preserves per-system campaign state, records verifier-
+      compatible case-library entries, and keeps a compatibility loop wrapper for
+      process-manager deployments.
+    priority: P2
+    status: implemented
+    confidence: provisional
+    code:
+      - path: contrib/scenarios/injection/workflow.py
+      - path: contrib/scenarios/injection/manifest.yaml
+      - path: contrib/scenarios/injection/injection_context.py
+      - path: contrib/scenarios/injection/loop.sh
+      - path: contrib/scenarios/injection/prompts/author.md
+      - path: contrib/scenarios/injection/knowledge/schema.md
+    tests: []
+    docs:
+      - path: contrib/scenarios/injection/README.md
+    depends_on:
+      - REQ-102-rca-scenario-cleanup
+
+
   - id: REQ-089-file-tool-io-seams
     title: File tool atoms use documented read and write seams
     description: >
