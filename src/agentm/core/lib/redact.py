@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Mapping
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "redact_config",
     "redact_headers",
     "redact_messages",
+    "redact_text_secrets",
 ]
 
 
@@ -66,6 +68,15 @@ _SENSITIVE_CONFIG_SUFFIXES: tuple[str, ...] = (
     "_access_token",
     "_client_secret",
     "_password",
+)
+_URI_CREDENTIALS = re.compile(
+    r"(?P<scheme>\b[a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.I
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(authorization|api[_-]?key|token|password|secret)"
+    r"(\s*[:=]\s*)"
+    r"([^\s,;]+)"
 )
 
 
@@ -251,3 +262,11 @@ def redact_config(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(redact_config(item) for item in value)
     return value
+
+
+def redact_text_secrets(value: str) -> str:
+    """Redact common credential forms from bounded diagnostic text."""
+
+    redacted = _URI_CREDENTIALS.sub(r"\g<scheme>***:***@", value)
+    redacted = _BEARER_TOKEN.sub("Bearer ***", redacted)
+    return _SECRET_ASSIGNMENT.sub(r"\1\2***", redacted)

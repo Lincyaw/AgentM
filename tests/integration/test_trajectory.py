@@ -73,7 +73,13 @@ from agentm.core.abi.resource import ResourceMutation, ResourceRef
 from agentm.core.abi.roles import TRAJECTORY_QUERY_STORE_SERVICE
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig
-from agentm.core.abi.store import SessionMeta, TrajectoryCommit, TrajectoryStore
+from agentm.core.abi.store import (
+    SessionMeta,
+    TrajectoryCommit,
+    TrajectoryDiagnostic,
+    TrajectoryNodeQuery,
+    TrajectoryStore,
+)
 from agentm.core.abi.trajectory import (
     Outcome,
     ToolRecord,
@@ -139,7 +145,7 @@ class MockStreamFn:
         thinking: Any = "off",
     ) -> AsyncIterator[TextDelta | MessageEnd]:
         self._call_count += 1
-        self.calls.append({"messages": list(messages)})
+        self.calls.append({"messages": list(messages), "system": system})
         if not self._responses:
             raise RuntimeError("MockStreamFn: no more responses")
         resp = self._responses.pop(0)
@@ -347,6 +353,48 @@ async def test_prompt_run_commits_tool_and_answer_as_separate_turns() -> None:
     assert any("5" in c.text for c in tr.result.content if isinstance(c, TextContent))
     assert not answer_turn.tool_results
     assert isinstance(answer_turn.outcome.cause, ModelEndTurn)
+
+
+@pytest.mark.asyncio
+async def test_before_send_system_prompt_does_not_accumulate_across_run() -> None:
+    mock = MockStreamFn()
+    mock.enqueue(
+        tool_call_response("add", "call-1", {"a": 2, "b": 3}),
+        text_response("the answer is 5"),
+    )
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[("agentm.extensions.builtin.tool_index", {})],
+            stream_fn=mock,
+            model=make_model(),
+            system="base prompt",
+            tools=[_make_add_tool()],
+        )
+    )
+    before_run_calls = 0
+
+    def extend_run_system(event: BeforeRunEvent) -> dict[str, str]:
+        nonlocal before_run_calls
+        before_run_calls += 1
+        return {"system": f"{event.system}\nrun context"}
+
+    session.bus.on(BeforeRunEvent.CHANNEL, extend_run_system)
+    session.start()
+    try:
+        await session.prompt("add 2 and 3")
+        await _wait_run(session)
+    finally:
+        await session.shutdown()
+
+    expected_base = "base prompt\nrun context"
+    sent_systems = [call["system"] for call in mock.calls]
+    assert before_run_calls == 1
+    assert len(sent_systems) == 2
+    assert all(system.startswith(expected_base) for system in sent_systems)
+    assert all(system.count("# Tools") == 1 for system in sent_systems)
+    assert [
+        turn.meta.system_prompt for turn in session.trajectory.turns
+    ] == sent_systems
 
 
 @pytest.mark.asyncio
@@ -642,6 +690,49 @@ async def test_store_persistence() -> None:
             SessionMeta(id=session.id),
             head=_empty_head(session.id),
         )
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_can_return_to_previous_content() -> None:
+    store = InMemoryTrajectoryStore()
+    mock = MockStreamFn()
+    mock.enqueue(
+        text_response("first"),
+        text_response("second"),
+        text_response("third"),
+    )
+    prompts = iter(("prompt-a", "prompt-b", "prompt-a"))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=mock,
+            model=make_model(),
+            store=store,
+        )
+    )
+
+    def replace_system(event: BeforeSendEvent) -> dict[str, str]:
+        del event
+        return {"system": next(prompts)}
+
+    session.bus.on(BeforeSendEvent.CHANNEL, replace_system)
+    session.start()
+    try:
+        for message in ("one", "two", "three"):
+            await session.prompt(message)
+            await _wait_run(session)
+    finally:
+        await session.shutdown()
+
+    system_nodes = [
+        node
+        for node in store.query_nodes(TrajectoryNodeQuery(session_id=session.id))
+        if node.kind == "system_prompt"
+    ]
+    assert len(system_nodes) == 3
+    assert len({node.id for node in system_nodes}) == 3
+    assert system_nodes[0].content_ref == system_nodes[2].content_ref
+    assert system_nodes[0].content_ref != system_nodes[1].content_ref
 
 
 @pytest.mark.asyncio
@@ -1839,7 +1930,7 @@ async def test_store_append_failure_is_fail_stop() -> None:
         ) -> None:
             fail_count["n"] += 1
             if fail_count["n"] == 1:
-                raise IOError("store write failed")
+                raise IOError("store write failed api_key=very-secret")
             super().commit_turn(session_id, commit)
 
     store = FailingStore()
@@ -1866,6 +1957,25 @@ async def test_store_append_failure_is_fail_stop() -> None:
 
     assert len(session.trajectory) == 0
     assert store.load(session.id)[1] == []
+    checkpoint = store.load_checkpoint(session.id)
+    assert checkpoint is not None
+    diagnostics = store.list_diagnostics(session.id)
+    assert diagnostics == [
+        TrajectoryDiagnostic(
+            id=diagnostics[0].id,
+            session_id=session.id,
+            timestamp=diagnostics[0].timestamp,
+            level="error",
+            source="driver",
+            phase="trajectory_commit",
+            message="turn abandoned: trigger dropped due to internal error",
+            error_type="OSError",
+            error_detail="store write failed api_key=***",
+            turn_id=checkpoint.id,
+            turn_index=checkpoint.index,
+            checkpoint_id=checkpoint.id,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -1948,3 +2058,8 @@ async def test_checkpoint_persist_failure_is_fail_stop() -> None:
 
     assert len(session.trajectory) == 0
     assert mock.call_count == 0
+    diagnostics = store.list_diagnostics(session.id)
+    assert len(diagnostics) == 1
+    assert diagnostics[0].phase == "checkpoint_save"
+    assert diagnostics[0].turn_id is not None
+    assert diagnostics[0].checkpoint_id is None

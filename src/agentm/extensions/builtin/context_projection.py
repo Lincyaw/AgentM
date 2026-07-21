@@ -202,6 +202,9 @@ def _node_message(
     include_replay_only: bool,
     metadata_only_content_refs: bool,
 ) -> AgentMessage | None:
+    # Control nodes affect replay topology or the separate system transport.
+    if node.kind in {"compact_boundary", "system_prompt"}:
+        return None
     message = node.message
     if message is not None:
         meta = message.meta

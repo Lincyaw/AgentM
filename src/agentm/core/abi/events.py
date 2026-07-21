@@ -237,6 +237,12 @@ class DiagnosticEvent(Event):
     level: Literal["info", "warning", "error"] = "info"
     source: str = ""
     message: str = ""
+    phase: str = ""
+    error_type: str | None = None
+    error_detail: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    checkpoint_id: str | None = None
 
 
 # --- SDK domain events ------------------------------------------------------

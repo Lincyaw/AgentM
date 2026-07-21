@@ -18,6 +18,7 @@ from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryCommit,
     TrajectoryCompactionCommit,
+    TrajectoryDiagnostic,
     TrajectoryNodeQuery,
 )
 from agentm.core.abi.trajectory import (
@@ -40,10 +41,12 @@ from agentm.core.abi.trajectory import (
 from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 from agentm.storage.serialization import (
     deserialize_content_state,
+    deserialize_diagnostic,
     deserialize_head,
     deserialize_node,
     deserialize_prompt_cache_state,
     serialize_content_state,
+    serialize_diagnostic,
     serialize_head,
     serialize_node,
     serialize_prompt_cache_state,
@@ -57,6 +60,7 @@ _COMMIT = "turn_commit"
 _COMPACTION_COMMIT = "compaction_commit"
 _CONTENT_STATE = "content_replacement_state"
 _PROMPT_CACHE_STATE = "prompt_cache_state"
+_DIAGNOSTIC = "diagnostic"
 
 
 class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
@@ -229,6 +233,24 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
     def list_sessions(self) -> list[SessionMeta]:
         with self._guard():
             return self._load_all_unlocked().list_sessions()
+
+    def append_diagnostic(self, diagnostic: TrajectoryDiagnostic) -> None:
+        with self._guard():
+            state = self._load_session_unlocked(diagnostic.session_id)
+            state.append_diagnostic(diagnostic)
+            self._normalize_tail_for_append_unlocked(diagnostic.session_id)
+            self._append_record_unlocked(
+                diagnostic.session_id,
+                {
+                    "version": _VERSION,
+                    "record_type": _DIAGNOSTIC,
+                    "diagnostic": serialize_diagnostic(diagnostic),
+                },
+            )
+
+    def list_diagnostics(self, session_id: str) -> list[TrajectoryDiagnostic]:
+        with self._guard():
+            return self._load_session_unlocked(session_id).list_diagnostics(session_id)
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         with self._guard():
@@ -559,6 +581,10 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                 state.save_prompt_cache_state(
                     meta.id,
                     deserialize_prompt_cache_state(_required_mapping(record, "state")),
+                )
+            elif record_type == _DIAGNOSTIC:
+                state.append_diagnostic(
+                    deserialize_diagnostic(_required_mapping(record, "diagnostic"))
                 )
             else:
                 raise ValueError(

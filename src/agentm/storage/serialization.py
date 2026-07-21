@@ -17,6 +17,7 @@ from agentm.core.abi.catalog import (
 )
 from agentm.core.abi.codec import deserialize_message, serialize_message
 from agentm.core.abi.messages import AgentMessage, MessageVisibility
+from agentm.core.abi.store import DiagnosticLevel, TrajectoryDiagnostic
 from agentm.core.abi.trajectory import (
     ContentReplacementState,
     PromptCacheState,
@@ -118,6 +119,90 @@ def _only_fields(data: Mapping[str, Any], allowed: set[str], path: str) -> None:
     unknown = set(data) - allowed
     if unknown:
         raise ValueError(f"{path} has unknown fields: {sorted(unknown)}")
+
+
+def serialize_diagnostic(diagnostic: TrajectoryDiagnostic) -> JsonObject:
+    return {
+        "schema_version": STORAGE_RECORD_VERSION,
+        "id": diagnostic.id,
+        "session_id": diagnostic.session_id,
+        "timestamp": diagnostic.timestamp,
+        "level": diagnostic.level,
+        "source": diagnostic.source,
+        "phase": diagnostic.phase,
+        "message": diagnostic.message,
+        "error_type": diagnostic.error_type,
+        "error_detail": diagnostic.error_detail,
+        "turn_id": diagnostic.turn_id,
+        "turn_index": diagnostic.turn_index,
+        "checkpoint_id": diagnostic.checkpoint_id,
+    }
+
+
+def deserialize_diagnostic(data: Mapping[str, Any]) -> TrajectoryDiagnostic:
+    _only_fields(
+        data,
+        {
+            "schema_version",
+            "id",
+            "session_id",
+            "timestamp",
+            "level",
+            "source",
+            "phase",
+            "message",
+            "error_type",
+            "error_detail",
+            "turn_id",
+            "turn_index",
+            "checkpoint_id",
+        },
+        "trajectory diagnostic",
+    )
+    _validate_version(data, "trajectory diagnostic")
+    level = _enum(
+        data,
+        "level",
+        path="trajectory diagnostic",
+        allowed={"info", "warning", "error"},
+    )
+    return TrajectoryDiagnostic(
+        id=_required_str(data, "id", path="trajectory diagnostic"),
+        session_id=_required_str(
+            data,
+            "session_id",
+            path="trajectory diagnostic",
+        ),
+        timestamp=_required_number(
+            data,
+            "timestamp",
+            path="trajectory diagnostic",
+        ),
+        level=cast(DiagnosticLevel, level),
+        source=_required_str(data, "source", path="trajectory diagnostic"),
+        phase=_required_str(data, "phase", path="trajectory diagnostic"),
+        message=_required_str(data, "message", path="trajectory diagnostic"),
+        error_type=_optional_str(
+            data.get("error_type"),
+            path="trajectory diagnostic.error_type",
+        ),
+        error_detail=_optional_str(
+            data.get("error_detail"),
+            path="trajectory diagnostic.error_detail",
+        ),
+        turn_id=_optional_str(
+            data.get("turn_id"),
+            path="trajectory diagnostic.turn_id",
+        ),
+        turn_index=_optional_int(
+            data.get("turn_index"),
+            path="trajectory diagnostic.turn_index",
+        ),
+        checkpoint_id=_optional_str(
+            data.get("checkpoint_id"),
+            path="trajectory diagnostic.checkpoint_id",
+        ),
+    )
 
 
 def serialize_node(node: TrajectoryNode) -> JsonObject:
@@ -747,6 +832,7 @@ __all__ = [
     "deserialize_atom_activation",
     "deserialize_catalog_record",
     "deserialize_content_state",
+    "deserialize_diagnostic",
     "deserialize_head",
     "deserialize_node",
     "deserialize_prompt_cache_state",
@@ -757,6 +843,7 @@ __all__ = [
     "serialize_atom_activation",
     "serialize_catalog_record",
     "serialize_content_state",
+    "serialize_diagnostic",
     "serialize_head",
     "serialize_node",
     "serialize_prompt_cache_state",

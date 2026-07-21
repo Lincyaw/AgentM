@@ -80,6 +80,7 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.store import (
     TrajectoryCommit,
+    TrajectoryDiagnostic,
     TrajectoryNodeQuery,
     TrajectoryStore,
 )
@@ -110,6 +111,7 @@ from agentm.core.runtime.reaction import (
     record_interruption_message,
 )
 from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
+from agentm.core.lib.redact import redact_text_secrets
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.lib.trajectory_nodes import turn_to_nodes
 from agentm.core.runtime.trigger_queue import (
@@ -250,6 +252,70 @@ async def _save_checkpoint(
     await await_known_outcome(
         asyncio.to_thread(store.save_checkpoint, session_id, checkpoint)
     )
+
+
+def _safe_error_detail(exc: BaseException, *, limit: int = 1_000) -> str:
+    detail = " ".join(str(exc).split())
+    redacted = redact_text_secrets(detail)
+    if len(redacted) <= limit:
+        return redacted
+    return redacted[:limit] + f"... [truncated {len(redacted) - limit} chars]"
+
+
+async def _record_driver_failure(
+    *,
+    store: TrajectoryStore | None,
+    bus: EventBus,
+    session_id: str,
+    phase: str,
+    exc: BaseException,
+    message: str,
+    turn_id: str | None,
+    turn_index: int | None,
+    checkpoint_id: str | None,
+) -> None:
+    detail = _safe_error_detail(exc)
+    diagnostic = TrajectoryDiagnostic(
+        id=uuid4().hex,
+        session_id=session_id,
+        timestamp=time.time(),
+        level="error",
+        source="driver",
+        phase=phase,
+        message=message,
+        error_type=type(exc).__name__,
+        error_detail=detail,
+        turn_id=turn_id,
+        turn_index=turn_index,
+        checkpoint_id=checkpoint_id,
+    )
+    if store is not None:
+        try:
+            await await_known_outcome(
+                asyncio.to_thread(store.append_diagnostic, diagnostic)
+            )
+        except Exception as diagnostic_error:
+            logger.warning(
+                "driver diagnostic persistence failed: {}",
+                diagnostic_error,
+            )
+    try:
+        await bus.emit(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level=diagnostic.level,
+                source=diagnostic.source,
+                message=diagnostic.message,
+                phase=diagnostic.phase,
+                error_type=diagnostic.error_type,
+                error_detail=diagnostic.error_detail,
+                turn_id=diagnostic.turn_id,
+                turn_index=diagnostic.turn_index,
+                checkpoint_id=diagnostic.checkpoint_id,
+            ),
+        )
+    except Exception:
+        logger.debug("diagnostic emit failed after turn abandon; non-fatal")
 
 
 async def _abandon_effect_turn(
@@ -557,12 +623,18 @@ async def drive(config: DriverConfig) -> None:
         durable_turn_committed = False
         turn_published = False
         cancelled_during_rollback = False
+        phase = "turn_begin"
+        active_turn_id: str | None = None
+        active_turn_index: int | None = None
+        active_checkpoint_id: str | None = None
         try:
             execution = trajectory.begin(
                 trigger,
                 run_id=prompt_run.run_id,
                 run_step=prompt_run.run_step,
             )
+            active_turn_id = execution.id
+            active_turn_index = execution.index
             await bus.emit(
                 TurnBeginEvent.CHANNEL,
                 TurnBeginEvent(
@@ -584,13 +656,16 @@ async def drive(config: DriverConfig) -> None:
                 else None
             )
             if checkpoint_writer is not None:
+                phase = "checkpoint_save"
                 await checkpoint_writer(
                     execution.checkpoint(
                         TurnMeta(),
                         trigger_metadata=envelope.metadata,
                     )
                 )
+                active_checkpoint_id = execution.id
 
+            phase = "effect_begin"
             effect_txn, cancelled_during_effect_begin = await settle_known_outcome(
                 _begin_effect_turn(
                     config.effect_scope,
@@ -602,6 +677,7 @@ async def drive(config: DriverConfig) -> None:
             )
             if cancelled_during_effect_begin:
                 raise asyncio.CancelledError
+            phase = "resource_begin"
             resource_txn, cancelled_during_resource_begin = await settle_known_outcome(
                 _begin_resource_txn(
                     config.resource_writer,
@@ -613,7 +689,8 @@ async def drive(config: DriverConfig) -> None:
             )
             if cancelled_during_resource_begin:
                 raise asyncio.CancelledError
-            outcome, meta, tool_calls_used = await react(
+            phase = "reaction"
+            reaction_result = await react(
                 ReactionRequest(
                     execution=execution,
                     trigger=trigger,
@@ -636,7 +713,11 @@ async def drive(config: DriverConfig) -> None:
                     ),
                 )
             )
+            outcome = reaction_result.outcome
+            meta = reaction_result.meta
+            tool_calls_used = reaction_result.tool_calls_used
 
+            phase = "checkpoint_save"
             record_interruption_message(
                 execution,
                 outcome,
@@ -654,6 +735,7 @@ async def drive(config: DriverConfig) -> None:
                 trigger_metadata=envelope.metadata,
             )
             if isinstance(outcome.cause, ProviderRequestFailed):
+                phase = "rollback"
                 rollback = await _rollback_unpublished_turn(
                     resource_txn=resource_txn,
                     abandon_resource=True,
@@ -676,6 +758,7 @@ async def drive(config: DriverConfig) -> None:
                         ],
                     )
             else:
+                phase = "resource_prepare"
                 (
                     resource_mutations,
                     cancelled_during_resource_prepare,
@@ -690,11 +773,13 @@ async def drive(config: DriverConfig) -> None:
                             resource_mutations=resource_mutations,
                         ),
                     )
+                phase = "resource_apply"
                 _, cancelled_during_resource_apply = await settle_known_outcome(
                     _apply_resource_txn(resource_txn)
                 )
                 if cancelled_during_resource_apply:
                     raise asyncio.CancelledError
+                phase = "effect_prepare"
                 _, cancelled_during_effect_prepare = await settle_known_outcome(
                     _prepare_effect_turn(
                         config.effect_scope,
@@ -707,6 +792,7 @@ async def drive(config: DriverConfig) -> None:
                     raise asyncio.CancelledError
             node_append_position: _NodeAppendPosition | None = None
             if config.store is not None:
+                phase = "trajectory_prepare"
                 (
                     node_append_position,
                     cancelled_during_node_position,
@@ -726,7 +812,9 @@ async def drive(config: DriverConfig) -> None:
                 sys_node: TrajectoryNode | None = None
                 if sys_ref is not None and sys_ref != _last_system_prompt_ref:
                     sys_node = TrajectoryNode(
-                        id=f"session:{config.session_id}:system_prompt:{sys_ref}",
+                        id=(
+                            f"session:{config.session_id}:turn:{turn.id}:system_prompt"
+                        ),
                         session_id=config.session_id,
                         seq=node_append_position.start_seq,
                         kind="system_prompt",
@@ -780,6 +868,7 @@ async def drive(config: DriverConfig) -> None:
                     )
             cancelled_during_trajectory_commit = False
             if config.store is not None:
+                phase = "trajectory_commit"
                 cancelled_during_trajectory_commit = await _commit_trajectory_turn(
                     config.store,
                     config.session_id,
@@ -791,6 +880,7 @@ async def drive(config: DriverConfig) -> None:
                 )
                 durable_turn_committed = True
             try:
+                phase = "resource_commit"
                 (
                     _,
                     cancelled_during_resource_commit,
@@ -804,6 +894,7 @@ async def drive(config: DriverConfig) -> None:
             trajectory.finalize_commit(turn)
             turn_published = True
             _clear_resource_txn(config.services)
+            phase = "effect_commit"
             _, cancelled_during_effect_commit = await settle_known_outcome(
                 _commit_effect_turn(config.effect_scope, effect_txn, turn, bus=bus)
             )
@@ -813,13 +904,14 @@ async def drive(config: DriverConfig) -> None:
                 prompt_run = None
             elif isinstance(outcome.cause, PromptRunContinued):
                 prompt_run = prompt_run.continue_with(
-                    system_prompt=turn.meta.system_prompt,
+                    system_prompt=reaction_result.continuation_system_prompt,
                 )
             else:
                 triggers.complete(turn)
                 prompt_run = None
             cancelled_during_event = False
             try:
+                phase = "event_publish"
                 await bus.emit(
                     TurnCommittedEvent.CHANNEL, TurnCommittedEvent(turn=turn)
                 )
@@ -918,17 +1010,17 @@ async def drive(config: DriverConfig) -> None:
                 else "turn abandoned: trigger dropped due to internal error"
             )
             logger.exception("driver: {}", diagnostic_message)
-            try:
-                await bus.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="error",
-                        source="driver",
-                        message=diagnostic_message,
-                    ),
-                )
-            except Exception:
-                logger.debug("diagnostic emit failed after turn abandon; non-fatal")
+            await _record_driver_failure(
+                store=config.store,
+                bus=bus,
+                session_id=config.session_id,
+                phase=phase,
+                exc=exc,
+                message=diagnostic_message,
+                turn_id=active_turn_id,
+                turn_index=active_turn_index,
+                checkpoint_id=active_checkpoint_id,
+            )
             if cancelled_while_rolling_back:
                 raise asyncio.CancelledError
             return

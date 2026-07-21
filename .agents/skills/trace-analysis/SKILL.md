@@ -16,33 +16,40 @@ the backend:
 
 | Backend | When active | Session selector |
 |---------|------------|-----------------|
-| **Local JSONL** (default) | When `.agentm/trajectory/` exists or `AGENTM_TRAJECTORY_DIR` is set | `--session <id>` or `--latest` |
-| **Postgres** | When `AGENTM_TRAJECTORY_DSN` is set | `--session <id>` or `--latest` |
+| **Local JSONL** (default) | When `.agentm/trajectory/` exists or `AGENTM_TRAJECTORY_DIR` is set | `--session <id>` or latest by default |
+| **Postgres** | When `AGENTM_TRAJECTORY_DSN` is set | `--session <id>` or latest by default |
 
-`--latest` picks the most recent session by creation time.
+Use `sessions --latest` to print only the newest matching session.
 
 ## Commands
 
 | Command | Returns |
 |---------|---------|
-| `sessions` | List sessions: `id, parent_session_id, root_session_id, purpose, cwd` |
+| `status` | One session progress snapshot: committed turns, active checkpoint, last diagnostic |
+| `wait` | Block until committed-turn and/or active-checkpoint conditions hold |
+| `watch` | Incremental `checkpoint`, `commit`, `abort`, and `diagnostic` records |
+| `diagnostics` | Durable structured failures with phase, error type/detail, turn, and checkpoint IDs |
+| `sessions` | List sessions; supports `--active` and `--latest` |
 | `turns` | Per-turn summary: `turn_index, trigger_source, rounds, tool_calls, tool_call_count, tool_error_count, input_tokens, output_tokens, cache_read, model, cause` |
 | `messages` | Full conversation in message order (user, assistant, tool_result, error) |
 | `usage` | Aggregate token economics: `turns, input_tokens, cache_read, cache_write, non_cached_input, output_tokens, total_tokens, cache_hit_rate` |
 | `tools` | Per-tool-call: `turn_index, round_index, tool, args, is_error, result` |
 | `view` | Interactive terminal viewer with turn navigation and expand/collapse |
 
-All accept `--session <id>` or `--latest` and `--format ndjson|text`.
-Text is default for TTY, ndjson for pipes.
+Session-scoped commands accept `--session <id>` and otherwise select the
+latest session. Text is default for TTY, ndjson for pipes.
 
 ## Composition patterns
 
 ### Single session
 ```bash
-agentm trace messages --latest                            # your own trajectory
-agentm trace tools --latest --format ndjson | jq '.tool'  # tool names
-agentm trace tools --latest --tool bash --format ndjson   # specific tool
-agentm trace usage --latest                               # token economics
+agentm trace status --format ndjson
+agentm trace messages
+agentm trace tools --format ndjson | jq '.tool'
+agentm trace tools --tool bash --result-chars 2000 --format ndjson
+agentm trace usage
+agentm trace wait -s <sid> --min-committed-turns 1 --timeout 120
+agentm trace watch -s <sid> --format ndjson
 ```
 
 ### Session tree (parent + children)
@@ -73,7 +80,7 @@ agentm trace tools --session <sid> --format ndjson \
 
 ## Analysis order
 
-1. **Find the session** — `--latest`, or `sessions --parent <id>`
+1. **Find the session** — `sessions --latest`, `sessions --active`, or `sessions --parent <id>`
 2. **Token economics** — `usage --session <sid>` (cache hit rate, total spend)
 3. **Turn structure** — `turns --session <sid>` (how many rounds, which tools, error count)
 4. **Specific tools** — `tools --session <sid> --tool <name>`

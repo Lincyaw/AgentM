@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import time
 from collections.abc import Sequence
 
 from pydantic import BaseModel, Field
 
 from agentm.core.abi.cancel import CancelSignal
+from agentm.core.abi.codec import serialize_message
 from agentm.core.abi.compaction import ProjectionReport, TurnRange
 from agentm.core.abi.context import (
     BindableContextPolicy,
@@ -44,13 +46,18 @@ from agentm.core.abi.trajectory import (
 )
 from agentm.core.abi.trigger import TriggerRenderer
 from agentm.core.lib.async_cancel import await_known_outcome
+from agentm.core.lib.tokens import count_text_tokens
 from agentm.extensions import ExtensionManifest
 
 
 class LlmCompactionConfig(BaseModel):
     """Configuration for durable context summarization."""
 
-    max_messages: int = Field(default=80, ge=2)
+    max_messages: int | None = Field(
+        default=None,
+        ge=2,
+        description="Explicit override; by default the model token budget is used.",
+    )
     keep_last_turns: int = Field(default=4, ge=0)
     state_key: str = Field(default="llm_compaction", min_length=1)
     summary_system_prompt: str = (
@@ -137,22 +144,25 @@ class LlmCompactionPolicy(BindableContextPolicy):
             tail = self._render_turns(turns[covered_position + 1 :])
             self._require_suffix(messages, tail)
             projected = [summary_message, *tail]
-            if len(projected) <= self._config.max_messages:
+            within_budget, budget_metadata = self._within_budget(projected, turns)
+            if within_budget:
                 self._record_report(
                     turns,
                     covered_position,
                     ref,
                     decision="reuse",
+                    budget_metadata=budget_metadata,
                 )
                 return projected
 
-        if len(messages) <= self._config.max_messages:
+        within_budget, budget_metadata = self._within_budget(messages, turns)
+        if within_budget:
             self._last_report = ProjectionReport(
                 kept=_turn_range(turns),
                 metadata={
                     "policy": "llm_compaction",
                     "decision": "within_budget",
-                    "message_count": len(messages),
+                    **budget_metadata,
                 },
             )
             return messages
@@ -173,12 +183,13 @@ class LlmCompactionPolicy(BindableContextPolicy):
             len(turns) - self._config.keep_last_turns - 1,
             0,
         )
-        while (
-            target < len(turns) - 1
-            and 1 + len(self._render_turns(turns[target + 1 :]))
-            > self._config.max_messages
-        ):
-            target += 1
+        max_messages = self._config.max_messages
+        if max_messages is not None:
+            while (
+                target < len(turns) - 1
+                and 1 + len(self._render_turns(turns[target + 1 :])) > max_messages
+            ):
+                target += 1
 
         summary_input: list[AgentMessage]
         if active is None:
@@ -304,7 +315,13 @@ class LlmCompactionPolicy(BindableContextPolicy):
             )
         )
 
-        self._record_report(turns, target, ref, decision="compact")
+        self._record_report(
+            turns,
+            target,
+            ref,
+            decision="compact",
+            budget_metadata=budget_metadata,
+        )
         return [
             _summary_message(
                 summary_text,
@@ -425,6 +442,58 @@ class LlmCompactionPolicy(BindableContextPolicy):
             for message in turn_to_messages(turn, self._renderers)
         ]
 
+    def _within_budget(
+        self,
+        messages: Sequence[AgentMessage],
+        turns: Sequence[Turn],
+    ) -> tuple[bool, dict[str, str | int]]:
+        max_messages = self._config.max_messages
+        if max_messages is not None:
+            message_count = len(messages)
+            return (
+                message_count <= max_messages,
+                {
+                    "budget_kind": "messages",
+                    "message_count": message_count,
+                    "message_limit": max_messages,
+                },
+            )
+
+        model = self._model
+        if model is None:
+            raise RuntimeError("llm_compaction requires an active provider")
+        input_limit = max(0, model.context_window - model.max_output_tokens)
+        estimated_input = self._estimate_next_input_tokens(messages, turns, model)
+        return (
+            estimated_input <= input_limit,
+            {
+                "budget_kind": "tokens",
+                "estimated_input_tokens": estimated_input,
+                "input_limit_tokens": input_limit,
+                "remaining_input_tokens": input_limit - estimated_input,
+            },
+        )
+
+    def _estimate_next_input_tokens(
+        self,
+        messages: Sequence[AgentMessage],
+        turns: Sequence[Turn],
+        model: Model,
+    ) -> int:
+        """Combine observed provider usage with the newly committed completion."""
+
+        projected_estimate = _estimate_message_tokens(messages, model.id)
+        latest = turns[-1]
+        if latest.meta.total_input_tokens <= 0:
+            return projected_estimate
+
+        completion = _turn_completion_messages(latest, self._renderers)
+        observed_estimate = latest.meta.total_input_tokens + _estimate_message_tokens(
+            completion,
+            model.id,
+        )
+        return max(projected_estimate, observed_estimate)
+
     @staticmethod
     def _require_suffix(
         messages: Sequence[AgentMessage],
@@ -476,6 +545,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
         ref: ResourceRef,
         *,
         decision: str,
+        budget_metadata: dict[str, str | int],
     ) -> None:
         self._last_report = ProjectionReport(
             summarized=(
@@ -491,6 +561,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
                 "policy": "llm_compaction",
                 "decision": decision,
                 "covered_through_turn_id": turns[covered_position].id,
+                **budget_metadata,
             },
         )
 
@@ -515,6 +586,44 @@ def _summary_message(
             "content_replacement_state_key": state_key,
             "covered_through_turn_id": covered_turn_id,
         },
+    )
+
+
+def _turn_completion_messages(
+    turn: Turn,
+    renderers: dict[str, TriggerRenderer],
+) -> list[AgentMessage]:
+    rendered = turn_to_messages(turn, renderers)
+    if turn.response is None:
+        return list(turn.outcome.injected)
+    response_position = next(
+        (index for index, message in enumerate(rendered) if message is turn.response),
+        len(rendered),
+    )
+    return rendered[response_position:]
+
+
+def _estimate_message_tokens(
+    messages: Sequence[AgentMessage],
+    model_id: str,
+) -> int:
+    provider_shape = []
+    for message in messages:
+        encoded = serialize_message(message)
+        provider_shape.append(
+            {
+                "role": encoded["role"],
+                "content": encoded["content"],
+            }
+        )
+    return count_text_tokens(
+        json.dumps(
+            provider_shape,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        model=model_id,
     )
 
 

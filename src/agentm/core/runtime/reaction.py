@@ -144,6 +144,14 @@ class ReactionRequest:
     checkpoint: Callable[[TurnCheckpoint], Awaitable[None]] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ReactionResult:
+    outcome: Outcome
+    meta: TurnMeta
+    tool_calls_used: int
+    continuation_system_prompt: str | None
+
+
 def _signal_aborted(signal: CancelSignal | None) -> SignalAborted:
     return SignalAborted(reason=cancel_reason(signal) or "")
 
@@ -782,7 +790,7 @@ def _context_budget(model: Model) -> ContextBudget:
 
 async def react(
     request: ReactionRequest,
-) -> tuple[Outcome, TurnMeta, int]:
+) -> ReactionResult:
     """ReAct loop within one turn.  Returns when a Stop action fires."""
 
     config = request.config
@@ -820,7 +828,17 @@ async def react(
     total_cache_read = 0
     total_cache_write = 0
     tool_calls_used = 0
+    continuation_system_prompt = system
     start_ns = time.perf_counter_ns()
+
+    def result(outcome: Outcome, meta: TurnMeta) -> ReactionResult:
+        return ReactionResult(
+            outcome=outcome,
+            meta=meta,
+            tool_calls_used=tool_calls_used,
+            continuation_system_prompt=continuation_system_prompt,
+        )
+
     trigger_messages = apply_trigger_metadata(
         render_trigger(trigger, trigger_renderers),
         trigger_metadata,
@@ -845,14 +863,13 @@ async def react(
             signal=turn_signal,
         )
     except ContextTransformCancelled:
-        return (
+        return result(
             Outcome(cause=_signal_aborted(turn_signal)),
             _meta(
                 0,
                 0,
                 start_ns,
             ),
-            tool_calls_used,
         )
     messages = list(history_messages) + list(trigger_messages)
 
@@ -871,19 +888,19 @@ async def react(
         replacement_sys = _last_key(before_returns, "system")
         if isinstance(replacement_sys, str):
             system = replacement_sys
+    continuation_system_prompt = system
     resolved_system_prompt = system
 
     veto = _last_key(before_returns, "veto")
     if veto is not None:
         if not isinstance(veto, TerminationCause):
             raise TypeError("BeforeRunEvent veto must be a TerminationCause")
-        return (
+        return result(
             Outcome(cause=veto),
             _meta(0, 0, start_ns, system_prompt=resolved_system_prompt),
-            tool_calls_used,
         )
     if turn_signal.is_set():
-        return (
+        return result(
             Outcome(cause=_signal_aborted(turn_signal)),
             _meta(
                 total_input,
@@ -893,7 +910,6 @@ async def react(
                 cache_write=total_cache_write,
                 system_prompt=resolved_system_prompt,
             ),
-            tool_calls_used,
         )
 
     ctx_returns = await bus.emit(
@@ -1037,10 +1053,9 @@ async def react(
                 interrupted_records,
                 checkpoint_meta,
             )
-            return (
+            return result(
                 Outcome(cause=_signal_aborted(turn_signal)),
                 checkpoint_meta,
-                tool_calls_used,
             )
         if isinstance(exc, asyncio.CancelledError) or not isinstance(
             exc,
@@ -1063,7 +1078,7 @@ async def react(
                 [],
                 checkpoint_meta,
             )
-        return (
+        return result(
             Outcome(
                 cause=ProviderRequestFailed(
                     error_type=type(exc).__name__,
@@ -1080,7 +1095,6 @@ async def react(
                 cache_write=total_cache_write,
                 system_prompt=resolved_system_prompt,
             ),
-            tool_calls_used,
         )
     await bus.emit(
         LlmRequestEndEvent.CHANNEL,
@@ -1131,10 +1145,9 @@ async def react(
             tool_records,
             checkpoint_meta,
         )
-        return (
+        return result(
             Outcome(cause=_signal_aborted(turn_signal)),
             checkpoint_meta,
-            tool_calls_used,
         )
 
     if tool_calls:
@@ -1172,10 +1185,9 @@ async def react(
                 tool_records,
                 checkpoint_meta,
             )
-            return (
+            return result(
                 Outcome(cause=BudgetExhausted(detail="max_tool_calls exhausted")),
                 checkpoint_meta,
-                tool_calls_used,
             )
 
         outcomes_by_index: dict[int, ToolOutcome] = {}
@@ -1230,10 +1242,9 @@ async def react(
                     tool_records,
                     checkpoint_meta,
                 )
-                return (
+                return result(
                     Outcome(cause=_signal_aborted(turn_signal)),
                     checkpoint_meta,
-                    tool_calls_used,
                 )
 
             tc_returns = await bus.emit(
@@ -1339,10 +1350,9 @@ async def react(
                     tool_records,
                     checkpoint_meta,
                 )
-                return (
+                return result(
                     Outcome(cause=_signal_aborted(turn_signal)),
                     checkpoint_meta,
-                    tool_calls_used,
                 )
             if permission_outcome is not None:
                 await materialize_tool_outcome(index, permission_outcome)
@@ -1407,10 +1417,9 @@ async def react(
                 tool_records,
                 checkpoint_meta,
             )
-            return (
+            return result(
                 Outcome(cause=_signal_aborted(turn_signal)),
                 checkpoint_meta,
-                tool_calls_used,
             )
 
         missing_indexes = set(range(len(tool_calls))) - outcomes_by_index.keys()
@@ -1451,10 +1460,9 @@ async def react(
             tool_records,
             checkpoint_meta,
         )
-        return (
+        return result(
             Outcome(cause=_signal_aborted(turn_signal)),
             checkpoint_meta,
-            tool_calls_used,
         )
 
     await _record_turn_payload(
@@ -1491,7 +1499,7 @@ async def react(
 
     if isinstance(action, Stop):
         cause = action.cause if action.cause is not None else ModelEndTurn()
-        return (
+        return result(
             Outcome(cause=cause),
             _meta(
                 total_input,
@@ -1502,7 +1510,6 @@ async def react(
                 cache_write=total_cache_write,
                 system_prompt=resolved_system_prompt,
             ),
-            tool_calls_used,
         )
 
     if isinstance(action, Inject):
@@ -1519,7 +1526,7 @@ async def react(
             ),
         )
 
-    return (
+    return result(
         Outcome(cause=PromptRunContinued()),
         _meta(
             total_input,
@@ -1530,8 +1537,12 @@ async def react(
             cache_write=total_cache_write,
             system_prompt=resolved_system_prompt,
         ),
-        tool_calls_used,
     )
 
 
-__all__ = ["ReactionRequest", "react", "record_interruption_message"]
+__all__ = [
+    "ReactionRequest",
+    "ReactionResult",
+    "react",
+    "record_interruption_message",
+]

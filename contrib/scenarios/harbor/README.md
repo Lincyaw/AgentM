@@ -247,11 +247,8 @@ active turn and queues the message as the next trigger.
 **Send via CLI:**
 
 ```bash
-# Inline message
-python -m agentm_harbor.interrupt_cli <session-id> "stop using that approach, try X instead"
-
-# From stdin (useful for multi-line feedback)
-echo "install deps first: pnpm install" | python -m agentm_harbor.interrupt_cli <session-id>
+agentm session interrupt <session-id> \
+  --message "stop using that approach, try X instead"
 ```
 
 The CLI connects to the socket, sends the message, and waits for an `ok`
@@ -271,10 +268,10 @@ stale socket file is unlinked on the next session start.
 **Programmatic use:**
 
 ```python
-from agentm_harbor.interrupt_cli import _send
 import asyncio
+from agentm.control import send_interrupt
 
-asyncio.run(_send("abc123", "your feedback here"))
+asyncio.run(send_interrupt("abc123", "your feedback here"))
 ```
 
 ## Components
@@ -283,5 +280,3 @@ asyncio.run(_send("abc123", "your feedback here"))
 |---|---|
 | `external_agent.py` | `BaseAgent` subclass; sets up env vars, creates AgentM session, reports token counts |
 | `harbor_ops.py` | Host bindings; `HarborEnvironmentOperations` wraps sandbox identity and execution, while `HarborResourceWriter` wraps transfer APIs |
-| `human_interrupt.py` | Presenter-owned Unix socket that uses the public immediate-prompt API |
-| `interrupt_cli.py` | Sends one interrupt and verifies the session acknowledgement |

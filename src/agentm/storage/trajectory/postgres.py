@@ -17,6 +17,7 @@ from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryCommit,
     TrajectoryCompactionCommit,
+    TrajectoryDiagnostic,
     TrajectoryNodeQuery,
 )
 from agentm.core.abi.trajectory import (
@@ -49,10 +50,12 @@ from agentm.core.lib.trajectory_store import (
 )
 from agentm.storage.serialization import (
     deserialize_content_state,
+    deserialize_diagnostic,
     deserialize_head,
     deserialize_node,
     deserialize_prompt_cache_state,
     serialize_content_state,
+    serialize_diagnostic,
     serialize_head,
     serialize_node,
     serialize_prompt_cache_state,
@@ -131,6 +134,10 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
     def create_schema(self) -> None:
         with self._transaction() as cur:
             cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"agentm:trajectory-schema:{self._schema}",),
+            )
+            cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self._table("trajectory_sessions")} (
                     id text PRIMARY KEY,
@@ -165,6 +172,19 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     updated_at double precision NOT NULL,
                     checkpoint_json jsonb NOT NULL,
                     UNIQUE (session_id, turn_id)
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self._table("trajectory_diagnostics")} (
+                    session_id text NOT NULL
+                        CONSTRAINT agentm_trajectory_diagnostics_session_fk
+                        REFERENCES {self._table("trajectory_sessions")}(id),
+                    id text NOT NULL,
+                    timestamp double precision NOT NULL,
+                    diagnostic_json jsonb NOT NULL,
+                    PRIMARY KEY (session_id, id)
                 )
                 """
             )
@@ -281,6 +301,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             for table in (
                 "trajectory_nodes",
                 "trajectory_heads",
+                "trajectory_diagnostics",
                 "trajectory_content_states",
                 "trajectory_prompt_cache_states",
             ):
@@ -308,6 +329,13 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 f"""
                 CREATE INDEX IF NOT EXISTS {self._index("sessions_created_idx")}
                 ON {self._table("trajectory_sessions")} (created_at)
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {self._index("diagnostics_session_time_idx")}
+                ON {self._table("trajectory_diagnostics")}
+                    (session_id, timestamp, id)
                 """
             )
             for statement in _index_statements(self._schema):
@@ -612,6 +640,40 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     continue
                 metas.append(meta)
         return metas
+
+    def append_diagnostic(self, diagnostic: TrajectoryDiagnostic) -> None:
+        payload = _json_dumps(serialize_diagnostic(diagnostic))
+        with self._transaction() as cur:
+            self._require_session(cur, diagnostic.session_id)
+            cur.execute(
+                f"""
+                INSERT INTO {self._table("trajectory_diagnostics")}
+                    (session_id, id, timestamp, diagnostic_json)
+                VALUES (%s, %s, %s, %s::jsonb)
+                """,
+                (
+                    diagnostic.session_id,
+                    diagnostic.id,
+                    diagnostic.timestamp,
+                    payload,
+                ),
+            )
+
+    def list_diagnostics(self, session_id: str) -> list[TrajectoryDiagnostic]:
+        with self._transaction() as cur:
+            self._require_session(cur, session_id)
+            cur.execute(
+                f"""
+                SELECT diagnostic_json
+                FROM {self._table("trajectory_diagnostics")}
+                WHERE session_id = %s
+                ORDER BY timestamp, id
+                """,
+                (session_id,),
+            )
+            return [
+                deserialize_diagnostic(_json_mapping(row[0])) for row in cur.fetchall()
+            ]
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         where, params = _node_query_where(query)

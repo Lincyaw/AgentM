@@ -81,6 +81,7 @@ from agentm.core.abi.session_api import (
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.store import (
     TrajectoryCommit,
+    TrajectoryDiagnostic,
     TrajectoryNodeQuery,
     TrajectoryNodeSort,
     TrajectoryStore,
@@ -169,6 +170,7 @@ __all__ = [
     "ToolExecutor",
     "TraceQueryStore",
     "TrajectoryCommit",
+    "TrajectoryDiagnostic",
     "TrajectoryNodeQuery",
     "TrajectoryNodeSort",
     "TrajectoryQueryStore",

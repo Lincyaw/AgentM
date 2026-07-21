@@ -8,9 +8,6 @@ dependencies = [
     "policy-engine",
 ]
 
-[project.scripts]
-agentm-interrupt = "agentm_harbor.interrupt_cli:main"
-
 [project.optional-dependencies]
 external = ["agentm"]
 

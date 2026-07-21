@@ -27,7 +27,7 @@ from rich.table import Table
 from sqlalchemy.engine import Connection, Engine, RowMapping
 
 from agentm.core.abi.query import SessionFilter, SessionIdentity
-from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.store import TrajectoryDiagnostic, TrajectoryStore
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.storage.sql import create_sqlite_engine
 
@@ -78,6 +78,9 @@ class _TrajectoryStoreQueryAdapter:
     def checkpoints(self, session_id: str) -> Iterable[TurnCheckpoint]:
         checkpoint = self._store.load_checkpoint(session_id)
         return () if checkpoint is None else (checkpoint,)
+
+    def diagnostics(self, session_id: str) -> Iterable[TrajectoryDiagnostic]:
+        return self._store.list_diagnostics(session_id)
 
 
 def _session_matches(row: SessionIdentity, filter: SessionFilter) -> bool:

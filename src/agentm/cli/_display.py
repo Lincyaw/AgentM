@@ -15,6 +15,7 @@ EXIT_NOT_FOUND = 3
 EXIT_AUTH = 4
 EXIT_CANCELLED = 6
 EXIT_MISSING_DEP = 7
+EXIT_TIMEOUT = 8
 
 stderr_console = Console(stderr=True)
 stdout_console = Console()

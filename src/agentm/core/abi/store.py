@@ -93,6 +93,64 @@ class SessionMeta:
         object.__setattr__(self, "config", MappingProxyType(copied_config))
 
 
+DiagnosticLevel = Literal["info", "warning", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryDiagnostic:
+    """One durable, structured failure or warning associated with a session."""
+
+    id: str
+    session_id: str
+    timestamp: float
+    level: DiagnosticLevel
+    source: str
+    phase: str
+    message: str
+    error_type: str | None = None
+    error_detail: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    checkpoint_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("id", self.id),
+            ("session_id", self.session_id),
+            ("source", self.source),
+            ("phase", self.phase),
+            ("message", self.message),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"trajectory diagnostic {label} must be non-empty")
+        if (
+            not isinstance(self.timestamp, (int, float))
+            or isinstance(self.timestamp, bool)
+            or not math.isfinite(self.timestamp)
+        ):
+            raise ValueError("trajectory diagnostic timestamp must be finite")
+        if self.level not in {"info", "warning", "error"}:
+            raise ValueError(f"invalid trajectory diagnostic level: {self.level!r}")
+        for optional_label, optional_value in (
+            ("error_type", self.error_type),
+            ("error_detail", self.error_detail),
+            ("turn_id", self.turn_id),
+            ("checkpoint_id", self.checkpoint_id),
+        ):
+            if optional_value is not None and not isinstance(optional_value, str):
+                raise TypeError(
+                    f"trajectory diagnostic {optional_label} must be a string"
+                )
+        if self.turn_index is not None and (
+            not isinstance(self.turn_index, int)
+            or isinstance(self.turn_index, bool)
+            or self.turn_index < 0
+        ):
+            raise ValueError(
+                "trajectory diagnostic turn_index must be a non-negative integer"
+            )
+
+
 @runtime_checkable
 class TrajectoryStore(Protocol):
     """Single persistence boundary for trajectory state and indexes.
@@ -183,6 +241,14 @@ class TrajectoryStore(Protocol):
     def session_exists(self, session_id: str) -> bool: ...
 
     def list_sessions(self) -> list[SessionMeta]: ...
+
+    def append_diagnostic(self, diagnostic: TrajectoryDiagnostic) -> None:
+        """Append one immutable session diagnostic."""
+        ...
+
+    def list_diagnostics(self, session_id: str) -> list[TrajectoryDiagnostic]:
+        """Return session diagnostics ordered by timestamp and id."""
+        ...
 
     def query_nodes(self, query: TrajectoryNodeQuery) -> list[TrajectoryNode]:
         """Return nodes matching a portable query."""
@@ -530,11 +596,13 @@ def _validate_optional_query_number(value: object, *, label: str) -> None:
 
 
 __all__ = [
+    "DiagnosticLevel",
     "SessionMeta",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
     "TrajectoryCommit",
     "TrajectoryCompactionCommit",
+    "TrajectoryDiagnostic",
     "TrajectoryStore",
     "TrajectoryNodeQuery",
     "TrajectoryNodeSort",

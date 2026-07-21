@@ -140,9 +140,11 @@ requirements:
       - path: src/agentm/cli/_display.py
       - path: src/agentm/cli/_run.py
       - path: src/agentm/cli/_scenario.py
+      - path: src/agentm/cli/_session.py
       - path: src/agentm/cli/_store.py
       - path: src/agentm/cli/_trace.py
       - path: src/agentm/code_health.py
+      - path: src/agentm/control.py
       - path: src/agentm/authoring/__init__.py
       - path: src/agentm/authoring/artifacts.py
       - path: src/agentm/authoring/frontmatter.py
@@ -270,8 +272,6 @@ requirements:
       - path: contrib/scenarios/harbor/src/agentm_harbor/__init__.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/external_agent.py
       - path: contrib/scenarios/harbor/src/agentm_harbor/harbor_ops.py
-      - path: contrib/scenarios/harbor/src/agentm_harbor/human_interrupt.py
-      - path: contrib/scenarios/harbor/src/agentm_harbor/interrupt_cli.py
       - path: contrib/extensions/policy/src/policy_engine/evaluator.py
       - path: tools/otel/docker-compose.yaml
     tests:
@@ -287,10 +287,12 @@ requirements:
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_code_health.py
+      - path: tests/test_control.py
       - path: tests/test_gateway_contracts.py
       - path: tests/test_lifecycle_catalog_ports.py
       - path: tests/test_manifest_contract.py
       - path: tests/test_tool_purpose.py
+      - path: tests/test_trace_cli.py
     docs:
       - path: .claude/index.yaml
       - path: .claude/designs/observability.md

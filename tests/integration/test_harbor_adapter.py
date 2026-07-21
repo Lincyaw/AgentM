@@ -31,6 +31,7 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.stream import AssistantStreamEvent, MessageEnd
 from agentm.core.abi.tool import Tool
+from agentm.control import SessionControlServer, send_interrupt
 from agentm.storage.trajectory import JsonlTrajectoryStore
 from agentm_harbor.external_agent import (
     SCENARIO,
@@ -39,7 +40,6 @@ from agentm_harbor.external_agent import (
     _provision_remote_toolbox,
 )
 from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
-from agentm_harbor.human_interrupt import HumanInterruptServer
 from harbor.environments.base import (
     BaseEnvironment,
     ExecResult as HarborExecResult,
@@ -283,18 +283,6 @@ def _texts(messages: Sequence[AgentMessage]) -> list[str]:
     ]
 
 
-async def _send_interrupt(path: Path, text: str) -> str:
-    reader, writer = await asyncio.open_unix_connection(str(path))
-    try:
-        writer.write(text.encode("utf-8"))
-        writer.write_eof()
-        await writer.drain()
-        return (await reader.readline()).decode("utf-8").strip()
-    finally:
-        writer.close()
-        await writer.wait_closed()
-
-
 def _model() -> Model:
     return Model(
         id="harbor-stub",
@@ -458,7 +446,7 @@ async def test_harbor_host_interrupts_through_public_sdk(
     )
     child: AgentSession | None = None
     with tempfile.TemporaryDirectory(prefix="agentm-harbor-") as inbox:
-        server = HumanInterruptServer(
+        server = SessionControlServer(
             session,
             inbox_root=Path(inbox),
         )
@@ -468,7 +456,11 @@ async def test_harbor_host_interrupts_through_public_sdk(
         initial = asyncio.create_task(session.run("initial-request"))
         try:
             await asyncio.wait_for(provider.started.wait(), timeout=2.0)
-            assert await _send_interrupt(server.path, "operator-feedback") == "ok"
+            await send_interrupt(
+                session.session_id,
+                "operator-feedback",
+                inbox_root=Path(inbox),
+            )
             await asyncio.wait_for(initial, timeout=3.0)
             assert await session.idle(timeout=3.0)
             child = await session.spawn(purpose="harbor-child")

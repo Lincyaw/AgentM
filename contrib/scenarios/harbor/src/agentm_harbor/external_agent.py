@@ -15,6 +15,7 @@ from agentm import (
     load_scenario_manifest,
 )
 from agentm.config import DefaultSessionSpecResolver
+from agentm.control import SessionControlServer
 from agentm.storage.trajectory import resolve_trajectory_store_or_create
 from agentm_toolbox import REMOTE_DEPENDENCIES, ToolboxDependency
 from harbor.agents.base import BaseAgent
@@ -23,7 +24,6 @@ from harbor.models.agent.context import AgentContext
 from loguru import logger
 
 from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
-from agentm_harbor.human_interrupt import HumanInterruptServer
 
 SCENARIO = "arl:harbor"
 _TOOLBOX_SETUP_TIMEOUT = 300
@@ -179,7 +179,7 @@ class ExternalAgentMAgent(BaseAgent):
         errors: list[BaseException] = []
         turns = session.get_turns()
         try:
-            interrupt = HumanInterruptServer(session)
+            interrupt = SessionControlServer(session)
             await interrupt.start()
             try:
                 session.register_cleanup(interrupt.stop)

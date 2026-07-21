@@ -9,6 +9,7 @@ from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryCommit,
     TrajectoryCompactionCommit,
+    TrajectoryDiagnostic,
 )
 from agentm.core.abi.trajectory import (
     TrajectoryHead,
@@ -45,6 +46,7 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
         super().__init__()
         self._sessions: dict[str, tuple[SessionMeta, list[Turn]]] = {}
         self._checkpoints: dict[str, TurnCheckpoint] = {}
+        self._diagnostics: dict[str, list[TrajectoryDiagnostic]] = {}
 
     @synchronized_trajectory_state
     def create_session(
@@ -181,6 +183,22 @@ class InMemoryTrajectoryStore(TrajectoryIndexState):
     @synchronized_trajectory_state
     def list_sessions(self) -> list[SessionMeta]:
         return [meta for meta, _ in self._sessions.values()]
+
+    @synchronized_trajectory_state
+    def append_diagnostic(self, diagnostic: TrajectoryDiagnostic) -> None:
+        if diagnostic.session_id not in self._sessions:
+            raise KeyError(diagnostic.session_id)
+        records = self._diagnostics.setdefault(diagnostic.session_id, [])
+        if any(record.id == diagnostic.id for record in records):
+            raise ValueError(f"duplicate trajectory diagnostic id: {diagnostic.id}")
+        records.append(diagnostic)
+        records.sort(key=lambda record: (record.timestamp, record.id))
+
+    @synchronized_trajectory_state
+    def list_diagnostics(self, session_id: str) -> list[TrajectoryDiagnostic]:
+        if session_id not in self._sessions:
+            raise KeyError(session_id)
+        return list(self._diagnostics.get(session_id, ()))
 
 
 __all__ = ["InMemoryTrajectoryStore"]

@@ -7,6 +7,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,10 +29,13 @@ from agentm.core.abi.messages import (
     TextContent,
     ToolCallBlock,
     ToolResultBlock,
+    Usage,
     text_message,
 )
 from agentm.core.abi.provider import ProviderPromptCacheRequest
 from agentm.core.abi.store import (
+    SessionMeta,
+    TrajectoryDiagnostic,
     TrajectoryNodeQuery,
     TrajectoryStore,
 )
@@ -41,6 +45,7 @@ from agentm.core.abi.tool_executor import ToolExecutionRequirements
 from agentm.core.abi.trajectory import (
     PromptCacheState,
     TrajectoryForkPoint,
+    TrajectoryHead,
     TurnCheckpoint,
 )
 from agentm.core.abi.trigger import UserInput
@@ -192,6 +197,61 @@ def _model() -> Model:
         context_window=128_000,
         max_output_tokens=4_096,
     )
+
+
+def test_selected_trajectory_backend_round_trips_diagnostics(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    session_id = f"diagnostics-{uuid.uuid4().hex}"
+    store = trajectory_backend.connect()
+    store.create_session(
+        SessionMeta(id=session_id, created_at=1.0),
+        head=TrajectoryHead(session_id=session_id),
+    )
+    expected = TrajectoryDiagnostic(
+        id="diagnostic-1",
+        session_id=session_id,
+        timestamp=2.0,
+        level="error",
+        source="driver",
+        phase="trajectory_commit",
+        message="turn abandoned",
+        error_type="UniqueViolation",
+        error_detail="duplicate key",
+        turn_id="turn-1",
+        turn_index=0,
+        checkpoint_id="turn-1",
+    )
+
+    store.append_diagnostic(expected)
+
+    assert trajectory_backend.connect().list_diagnostics(session_id) == [expected]
+
+
+def test_postgres_schema_creation_is_concurrency_safe() -> None:
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres schema contract")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    admin = create_sql_engine(database_url)
+    with admin.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+
+    def create_store(_: int) -> None:
+        engine = create_sql_engine(database_url)
+        try:
+            PostgresTrajectoryStore(engine, schema=schema)
+        finally:
+            engine.dispose()
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(create_store, range(4)))
+    finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
 
 
 @pytest.mark.asyncio
@@ -1430,13 +1490,15 @@ async def test_sdk_compaction_persists_summary_across_resume(
         )
 
     extensions = [
+        (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
+        (_SYSTEM_PROMPT, {"prompt": "Compaction integration test."}),
         (
             _LLM_COMPACTION,
             {
                 "max_messages": 5,
                 "keep_last_turns": 1,
             },
-        )
+        ),
     ]
     provider = _StubProvider(
         "answer-one",
@@ -1506,6 +1568,64 @@ async def test_sdk_compaction_persists_summary_across_resume(
         "question-five",
     ]
     assert _text(transcript)[-2:] == ["question-five", "answer-five"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_compaction_defaults_to_model_input_budget(tmp_path: Path) -> None:
+    def response(
+        text: str, *, input_tokens: int, output_tokens: int
+    ) -> AssistantMessage:
+        return AssistantMessage(
+            role="assistant",
+            content=(TextContent(type="text", text=text),),
+            timestamp=0.0,
+            stop_reason="end_turn",
+            usage=Usage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ),
+        )
+
+    provider = _StubProvider(
+        response("answer-one", input_tokens=30, output_tokens=5),
+        response("answer-two", input_tokens=76, output_tokens=5),
+        "budget-summary",
+        "answer-three",
+    )
+    resources = LocalResourceStore(
+        workspace_root=tmp_path,
+        root=tmp_path / "budget-resources",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[(_LLM_COMPACTION, {"keep_last_turns": 1})],
+            stream_fn=provider,
+            model=Model(
+                id="budget-model",
+                provider="stub",
+                context_window=100,
+                max_output_tokens=20,
+            ),
+            trajectory_store=_jsonl_store(tmp_path / "budget-trajectory"),
+            resource_store=resources,
+            resource_writer=resources,
+        )
+    )
+    try:
+        await session.run("question-one")
+        await session.run("question-two")
+        await session.run("question-three")
+    finally:
+        await session.shutdown()
+
+    assert len(provider.requests) == 4
+    assert _text(provider.requests[2]) == ["question-one", "answer-one"]
+    assert _text(provider.requests[3]) == [
+        "<conversation-summary>\nbudget-summary\n</conversation-summary>",
+        "question-two",
+        "answer-two",
+        "question-three",
+    ]
 
 
 @pytest.mark.asyncio

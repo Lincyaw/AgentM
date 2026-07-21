@@ -250,9 +250,11 @@ from .session_api import (
     normalize_extension_spec,
 )
 from .store import (
+    DiagnosticLevel,
     SessionMeta,
     TrajectoryCommit,
     TrajectoryCompactionCommit,
+    TrajectoryDiagnostic,
     TrajectoryNodeQuery,
     TrajectoryNodeSort,
     TrajectoryStore,
@@ -421,6 +423,7 @@ __all__ = [
     "DEFAULT_TRAJECTORY_HEAD_ID",
     "DecideEvent",
     "DiagnosticEvent",
+    "DiagnosticLevel",
     "EdgeKind",
     "EffectScope",
     "EffectTxn",
@@ -630,6 +633,7 @@ __all__ = [
     "TransactionalResourceWriter",
     "TrajectoryCommit",
     "TrajectoryCompactionCommit",
+    "TrajectoryDiagnostic",
     "TrajectoryIndexField",
     "TrajectoryIndexSpec",
     "TrajectoryBranchId",

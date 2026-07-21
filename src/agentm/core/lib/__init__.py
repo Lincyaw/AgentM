@@ -18,7 +18,12 @@ from agentm.core.lib.serialization import to_jsonable
 from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.tool_result import error_result, text_result, with_model_note
 from agentm.core.lib.tool_schema import pydantic_to_tool_schema
-from agentm.core.lib.redact import redact_config, redact_headers, redact_messages
+from agentm.core.lib.redact import (
+    redact_config,
+    redact_headers,
+    redact_messages,
+    redact_text_secrets,
+)
 
 __all__ = [
     "RUNNING",
@@ -37,6 +42,7 @@ __all__ = [
     "redact_config",
     "redact_headers",
     "redact_messages",
+    "redact_text_secrets",
     "error_result",
     "parse_frontmatter",
     "text_result",

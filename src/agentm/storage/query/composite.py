@@ -14,6 +14,7 @@ from agentm.core.abi.query import (
     TrajectoryQueryStore,
 )
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
+from agentm.core.abi.store import TrajectoryDiagnostic
 
 
 class CompositeTraceQueryStore:
@@ -46,6 +47,9 @@ class CompositeTraceQueryStore:
 
     def checkpoints(self, session_id: str) -> Iterable[TurnCheckpoint]:
         return self._trajectory.checkpoints(session_id)
+
+    def diagnostics(self, session_id: str) -> Iterable[TrajectoryDiagnostic]:
+        return self._trajectory.diagnostics(session_id)
 
     def events(self, session_id: str) -> Iterable[EventRecord]:
         return self._observability.events(session_id)

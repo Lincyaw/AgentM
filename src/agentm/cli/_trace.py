@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal, NotRequired, TypeVar, TypedDict
 
 import typer
 
-from agentm.cli._display import EXIT_NOT_FOUND, is_tty, stderr_console
+from agentm.cli._display import EXIT_NOT_FOUND, EXIT_TIMEOUT, is_tty, stderr_console
 from agentm.cli._store import resolve_trajectory_store
 from agentm.core.abi.messages import (
     ImageContent,
@@ -24,6 +25,8 @@ from agentm.core.abi.query import (
     SessionFilter,
     TrajectoryQueryStore,
 )
+from agentm.core.abi.store import TrajectoryDiagnostic
+from agentm.core.abi.termination import SignalAborted
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.trigger import UserInput
 from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
@@ -36,6 +39,18 @@ from agentm.presenter.trajectory.model import (
 
 TraceFormat = Literal["text", "ndjson"]
 RecordT = TypeVar("RecordT")
+
+_ROLE_ANSI: dict[str, str] = {
+    "system": "\033[1;35m",
+    "user": "\033[1;32m",
+    "assistant": "\033[1;34m",
+    "tool_call": "\033[1;33m",
+    "tool_result": "\033[36m",
+    "error": "\033[1;31m",
+}
+_ANSI_RED = "\033[31m"
+_ANSI_RESET = "\033[0m"
+_ANSI_DIM = "\033[2m"
 
 
 class _TurnSummary(TypedDict):
@@ -75,6 +90,56 @@ class _ToolRecord(TypedDict):
     args: dict[str, object]
     is_error: bool
     result: str
+    result_chars: int
+    result_truncated: bool
+
+
+class _StatusRecord(TypedDict):
+    session_id: str
+    state: Literal["active", "idle", "empty"]
+    committed_turns: int
+    incomplete_turns: int
+    active_checkpoint: bool
+    last_activity_at: float | None
+    last_turn_index: int | None
+    last_turn_id: str | None
+    last_turn_cause: str | None
+    checkpoint_turn_index: int | None
+    checkpoint_turn_id: str | None
+    checkpoint_run_id: str | None
+    checkpoint_run_step: int | None
+    checkpoint_updated_at: float | None
+    diagnostic_count: int
+    last_diagnostic_id: str | None
+
+
+class _DiagnosticRecord(TypedDict):
+    id: str
+    session_id: str
+    timestamp: float
+    level: str
+    source: str
+    phase: str
+    message: str
+    error_type: str | None
+    error_detail: str | None
+    turn_id: str | None
+    turn_index: int | None
+    checkpoint_id: str | None
+
+
+class _WatchEvent(TypedDict):
+    event_id: str
+    type: Literal["checkpoint", "commit", "abort", "diagnostic"]
+    session_id: str
+    timestamp: float
+    turn_index: NotRequired[int]
+    turn_id: NotRequired[str]
+    run_id: NotRequired[str]
+    run_step: NotRequired[int]
+    cause: NotRequired[str]
+    checkpoint_updated_at: NotRequired[float]
+    diagnostic: NotRequired[_DiagnosticRecord]
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +154,122 @@ def _load_trace_snapshot(
     turns = list(query.turns(session_id))
     checkpoints = list(query.checkpoints(session_id))
     return build_trace_snapshot(session_id, turns, checkpoints)
+
+
+def _load_status_record(
+    query: TrajectoryQueryStore,
+    session_id: str,
+) -> _StatusRecord:
+    turns = list(query.turns(session_id))
+    checkpoints = list(query.checkpoints(session_id))
+    diagnostics = list(query.diagnostics(session_id))
+    checkpoint = checkpoints[0] if checkpoints else None
+    last_turn = turns[-1] if turns else None
+    last_diagnostic = diagnostics[-1] if diagnostics else None
+    activity = [turn.timestamp for turn in turns]
+    activity.extend(item.updated_at for item in checkpoints)
+    activity.extend(item.timestamp for item in diagnostics)
+    state: Literal["active", "idle", "empty"]
+    if checkpoint is not None:
+        state = "active"
+    elif turns:
+        state = "idle"
+    else:
+        state = "empty"
+    return {
+        "session_id": session_id,
+        "state": state,
+        "committed_turns": len(turns),
+        "incomplete_turns": len(checkpoints),
+        "active_checkpoint": checkpoint is not None,
+        "last_activity_at": max(activity) if activity else None,
+        "last_turn_index": last_turn.index if last_turn is not None else None,
+        "last_turn_id": last_turn.id if last_turn is not None else None,
+        "last_turn_cause": (
+            type(last_turn.outcome.cause).__name__ if last_turn is not None else None
+        ),
+        "checkpoint_turn_index": (checkpoint.index if checkpoint is not None else None),
+        "checkpoint_turn_id": checkpoint.id if checkpoint is not None else None,
+        "checkpoint_run_id": checkpoint.run_id if checkpoint is not None else None,
+        "checkpoint_run_step": (
+            checkpoint.run_step if checkpoint is not None else None
+        ),
+        "checkpoint_updated_at": (
+            checkpoint.updated_at if checkpoint is not None else None
+        ),
+        "diagnostic_count": len(diagnostics),
+        "last_diagnostic_id": (
+            last_diagnostic.id if last_diagnostic is not None else None
+        ),
+    }
+
+
+def _diagnostic_record(diagnostic: TrajectoryDiagnostic) -> _DiagnosticRecord:
+    return {
+        "id": diagnostic.id,
+        "session_id": diagnostic.session_id,
+        "timestamp": diagnostic.timestamp,
+        "level": diagnostic.level,
+        "source": diagnostic.source,
+        "phase": diagnostic.phase,
+        "message": diagnostic.message,
+        "error_type": diagnostic.error_type,
+        "error_detail": diagnostic.error_detail,
+        "turn_id": diagnostic.turn_id,
+        "turn_index": diagnostic.turn_index,
+        "checkpoint_id": diagnostic.checkpoint_id,
+    }
+
+
+def _watch_events(
+    query: TrajectoryQueryStore,
+    session_id: str,
+) -> list[_WatchEvent]:
+    turns = list(query.turns(session_id))
+    checkpoints = list(query.checkpoints(session_id))
+    diagnostics = list(query.diagnostics(session_id))
+    events: list[_WatchEvent] = []
+    for turn in turns:
+        aborted = isinstance(turn.outcome.cause, SignalAborted)
+        events.append(
+            {
+                "event_id": f"turn:{turn.id}",
+                "type": "abort" if aborted else "commit",
+                "session_id": session_id,
+                "timestamp": turn.timestamp,
+                "turn_index": turn.index,
+                "turn_id": turn.id,
+                "run_id": turn.run_id,
+                "run_step": turn.run_step,
+                "cause": type(turn.outcome.cause).__name__,
+            }
+        )
+    for checkpoint in checkpoints:
+        events.append(
+            {
+                "event_id": f"checkpoint:{checkpoint.id}:{checkpoint.updated_at}",
+                "type": "checkpoint",
+                "session_id": session_id,
+                "timestamp": checkpoint.updated_at,
+                "turn_index": checkpoint.index,
+                "turn_id": checkpoint.id,
+                "run_id": checkpoint.run_id,
+                "run_step": checkpoint.run_step,
+                "checkpoint_updated_at": checkpoint.updated_at,
+            }
+        )
+    for diagnostic in diagnostics:
+        events.append(
+            {
+                "event_id": f"diagnostic:{diagnostic.id}",
+                "type": "diagnostic",
+                "session_id": session_id,
+                "timestamp": diagnostic.timestamp,
+                "diagnostic": _diagnostic_record(diagnostic),
+            }
+        )
+    events.sort(key=lambda event: (event["timestamp"], event["event_id"]))
+    return events
 
 
 def _message_record_from_row(
@@ -239,17 +420,6 @@ def _resolve_session_id(
 # -- follow ----------------------------------------------------------------
 
 
-_F_COLORS: dict[str, str] = {
-    "user": "\033[1;32m",
-    "assistant": "\033[1;34m",
-    "tool_call": "\033[1;33m",
-    "tool_result": "\033[36m",
-    "error": "\033[1;31m",
-}
-_F_RST = "\033[0m"
-_F_DIM = "\033[2m"
-
-
 def _follow_print(
     role: str,
     label: str,
@@ -257,10 +427,10 @@ def _follow_print(
     *,
     dim: bool = False,
 ) -> None:
-    color = _F_COLORS.get(role, "")
-    sys.stdout.write(f"{color}── {label} ──{_F_RST}\n")
+    color = _ROLE_ANSI.get(role, "")
+    sys.stdout.write(f"{color}── {label} ──{_ANSI_RESET}\n")
     if dim:
-        sys.stdout.write(f"{_F_DIM}{content}{_F_RST}\n\n")
+        sys.stdout.write(f"{_ANSI_DIM}{content}{_ANSI_RESET}\n\n")
     else:
         sys.stdout.write(f"{content}\n\n")
     sys.stdout.flush()
@@ -325,7 +495,7 @@ def _follow_print_commit(turn: Turn) -> None:
     inp = turn.meta.total_input_tokens
     out = turn.meta.total_output_tokens
     sys.stdout.write(
-        f"{_F_DIM}── committed: {cause}  in:{inp:,} out:{out:,} ──{_F_RST}\n\n"
+        f"{_ANSI_DIM}── committed: {cause}  in:{inp:,} out:{out:,} ──{_ANSI_RESET}\n\n"
     )
     sys.stdout.flush()
 
@@ -334,8 +504,6 @@ def _follow_session(
     ctx: typer.Context,
     session: str | None,
 ) -> None:
-    import time
-
     query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session)
 
@@ -401,6 +569,7 @@ def _resolve_format(fmt: str | None) -> TraceFormat:
 
 def _emit_json(obj: object) -> None:
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
 
 
 def _emit_records(
@@ -421,6 +590,225 @@ def _emit_records(
     return count
 
 
+# -- live status -------------------------------------------------------------
+
+
+def _render_status(status: _StatusRecord) -> str:
+    checkpoint = (
+        f"turn={status['checkpoint_turn_index']} id={status['checkpoint_turn_id']}"
+        if status["active_checkpoint"]
+        else "---"
+    )
+    return (
+        f"session:             {status['session_id']}\n"
+        f"state:               {status['state']}\n"
+        f"committed turns:     {status['committed_turns']}\n"
+        f"incomplete turns:    {status['incomplete_turns']}\n"
+        f"active checkpoint:   {checkpoint}\n"
+        f"diagnostics:         {status['diagnostic_count']}"
+    )
+
+
+def _emit_status(status: _StatusRecord, fmt: TraceFormat) -> None:
+    if fmt == "ndjson":
+        _emit_json(status)
+    else:
+        sys.stdout.write(_render_status(status) + "\n")
+
+
+def _validate_poll_options(
+    *,
+    timeout: float | None,
+    poll_interval: float,
+) -> None:
+    if timeout is not None and timeout < 0:
+        raise typer.BadParameter("timeout must be non-negative", param_hint="--timeout")
+    if poll_interval <= 0:
+        raise typer.BadParameter(
+            "poll interval must be positive",
+            param_hint="--poll-interval",
+        )
+
+
+@trace_app.command("status")
+def status_cmd(
+    ctx: typer.Context,
+    session: str | None = typer.Option(None, "--session", "-s"),
+    fmt: str | None = typer.Option(None, "--format"),
+) -> None:
+    """Print one scriptable snapshot of session trajectory progress."""
+    query = _get_query_store(ctx)
+    sid = _resolve_session_id(query, session)
+    try:
+        status = _load_status_record(query, sid)
+    except KeyError:
+        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        raise typer.Exit(EXIT_NOT_FOUND)
+    _emit_status(status, _resolve_format(fmt))
+
+
+@trace_app.command("wait")
+def wait_cmd(
+    ctx: typer.Context,
+    session: str | None = typer.Option(None, "--session", "-s"),
+    min_committed_turns: int | None = typer.Option(
+        None,
+        "--min-committed-turns",
+    ),
+    require_active_checkpoint: bool = typer.Option(
+        False,
+        "--require-active-checkpoint",
+    ),
+    timeout: float = typer.Option(120.0, "--timeout"),
+    poll_interval: float = typer.Option(0.25, "--poll-interval"),
+    fmt: str | None = typer.Option(None, "--format"),
+) -> None:
+    """Wait until typed trajectory progress conditions are satisfied."""
+    _validate_poll_options(timeout=timeout, poll_interval=poll_interval)
+    if min_committed_turns is not None and min_committed_turns < 0:
+        raise typer.BadParameter(
+            "minimum committed turns must be non-negative",
+            param_hint="--min-committed-turns",
+        )
+    if min_committed_turns is None and not require_active_checkpoint:
+        raise typer.BadParameter(
+            "provide --min-committed-turns and/or --require-active-checkpoint"
+        )
+    query = _get_query_store(ctx)
+    sid = _resolve_session_id(query, session)
+    deadline = time.monotonic() + timeout
+    chosen_fmt = _resolve_format(fmt)
+    while True:
+        try:
+            status = _load_status_record(query, sid)
+        except KeyError:
+            stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+            raise typer.Exit(EXIT_NOT_FOUND)
+        enough_turns = (
+            min_committed_turns is None
+            or status["committed_turns"] >= min_committed_turns
+        )
+        checkpoint_ready = not require_active_checkpoint or status["active_checkpoint"]
+        if enough_turns and checkpoint_ready:
+            _emit_status(status, chosen_fmt)
+            return
+        if time.monotonic() >= deadline:
+            _emit_status(status, chosen_fmt)
+            stderr_console.print(
+                f"[red]error: trace wait timed out after {timeout:g}s[/red]"
+            )
+            raise typer.Exit(EXIT_TIMEOUT)
+        time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+
+
+@trace_app.command("watch")
+def watch_cmd(
+    ctx: typer.Context,
+    session: str | None = typer.Option(None, "--session", "-s"),
+    include_existing: bool = typer.Option(
+        False,
+        "--include-existing",
+        help="Emit current trajectory records before watching for new deltas.",
+    ),
+    timeout: float | None = typer.Option(None, "--timeout"),
+    poll_interval: float = typer.Option(0.25, "--poll-interval"),
+    limit: int | None = typer.Option(None, "--limit"),
+    fmt: str | None = typer.Option(None, "--format"),
+) -> None:
+    """Stream checkpoint, commit, abort, and diagnostic deltas."""
+    _validate_poll_options(timeout=timeout, poll_interval=poll_interval)
+    if limit is not None and limit < 0:
+        raise typer.BadParameter("limit must be non-negative", param_hint="--limit")
+    query = _get_query_store(ctx)
+    sid = _resolve_session_id(query, session)
+    chosen_fmt = _resolve_format(fmt)
+    seen: set[str] = set()
+    try:
+        initial = _watch_events(query, sid)
+    except KeyError:
+        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        raise typer.Exit(EXIT_NOT_FOUND)
+    if not include_existing:
+        seen.update(event["event_id"] for event in initial)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    emitted = 0
+    try:
+        while limit is None or emitted < limit:
+            events = _watch_events(query, sid)
+            for event in events:
+                if event["event_id"] in seen:
+                    continue
+                seen.add(event["event_id"])
+                if chosen_fmt == "ndjson":
+                    _emit_json(event)
+                else:
+                    sys.stdout.write(
+                        f"{event['timestamp']:.3f} {event['type']:<10} "
+                        f"turn={event.get('turn_index', '-')} "
+                        f"id={event.get('turn_id', event['event_id'])}\n"
+                    )
+                    sys.stdout.flush()
+                emitted += 1
+                if limit is not None and emitted >= limit:
+                    return
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            sleep_for = poll_interval
+            if deadline is not None:
+                sleep_for = min(sleep_for, max(0.0, deadline - time.monotonic()))
+            time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        stderr_console.print("\n[dim]stopped[/dim]")
+
+
+# -- diagnostics ------------------------------------------------------------
+
+
+@trace_app.command("diagnostics")
+def diagnostics_cmd(
+    ctx: typer.Context,
+    session: str | None = typer.Option(None, "--session", "-s"),
+    level: str | None = typer.Option(None, "--level"),
+    phase: str | None = typer.Option(None, "--phase"),
+    limit: int | None = typer.Option(None, "--limit"),
+    fmt: str | None = typer.Option(None, "--format"),
+) -> None:
+    """Print durable structured session diagnostics."""
+    if level is not None and level not in {"info", "warning", "error"}:
+        raise typer.BadParameter(
+            "level must be 'info', 'warning', or 'error'",
+            param_hint="--level",
+        )
+    if limit is not None and limit < 0:
+        raise typer.BadParameter("limit must be non-negative", param_hint="--limit")
+    query = _get_query_store(ctx)
+    sid = _resolve_session_id(query, session)
+    try:
+        records = [
+            _diagnostic_record(diagnostic)
+            for diagnostic in query.diagnostics(sid)
+            if (level is None or diagnostic.level == level)
+            and (phase is None or diagnostic.phase == phase)
+        ]
+    except KeyError:
+        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        raise typer.Exit(EXIT_NOT_FOUND)
+    chosen_fmt = _resolve_format(fmt)
+
+    def _render(record: _DiagnosticRecord) -> str:
+        location = f"turn={record['turn_index']} checkpoint={record['checkpoint_id']}"
+        error = ""
+        if record["error_type"] is not None:
+            error = f"\n  {record['error_type']}: {record['error_detail']}"
+        return (
+            f"{record['timestamp']:.3f} {record['level']} "
+            f"phase={record['phase']} {location}\n"
+            f"  {record['message']}{error}"
+        )
+
+    _emit_records(iter(records), chosen_fmt, _render, limit)
+
+
 # -- sessions ----------------------------------------------------------------
 
 
@@ -429,31 +817,54 @@ def sessions_cmd(
     ctx: typer.Context,
     purpose: str | None = typer.Option(None, "--purpose"),
     parent: str | None = typer.Option(None, "--parent"),
+    active: bool = typer.Option(
+        False,
+        "--active",
+        help="Only sessions with a current incomplete checkpoint.",
+    ),
+    latest: bool = typer.Option(
+        False,
+        "--latest",
+        help="Return only the newest matching session.",
+    ),
     limit: int | None = typer.Option(None, "--limit"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
     """List sessions in the trajectory store."""
+    if limit is not None and limit < 0:
+        raise typer.BadParameter("limit must be non-negative", param_hint="--limit")
     query = _get_query_store(ctx)
     rows = list(
         query.sessions(
             SessionFilter(
                 parent_session_id=parent,
                 purpose=purpose,
-                limit=limit,
             )
         )
     )
+    rows_with_checkpoints = [
+        (row, bool(list(query.checkpoints(row.id)))) for row in rows
+    ]
+    if active:
+        rows_with_checkpoints = [item for item in rows_with_checkpoints if item[1]]
+    if latest and rows_with_checkpoints:
+        rows_with_checkpoints = [
+            max(rows_with_checkpoints, key=lambda item: item[0].created_at)
+        ]
+    if limit is not None:
+        rows_with_checkpoints = rows_with_checkpoints[:limit]
     chosen_fmt = _resolve_format(fmt)
 
     if chosen_fmt == "text":
-        stderr_console.print(f"[dim]{len(rows)} session(s)[/dim]")
-        for row in rows:
+        stderr_console.print(f"[dim]{len(rows_with_checkpoints)} session(s)[/dim]")
+        for row, has_checkpoint in rows_with_checkpoints:
             parent_id = row.parent_session_id or "---"
             sys.stdout.write(
-                f"  {row.id:<20} purpose={row.purpose:<8} parent={parent_id}\n"
+                f"  {row.id:<20} purpose={row.purpose:<8} "
+                f"active={str(has_checkpoint).lower():<5} parent={parent_id}\n"
             )
     else:
-        for row in rows:
+        for row, has_checkpoint in rows_with_checkpoints:
             _emit_json(
                 {
                     "id": row.id,
@@ -462,6 +873,7 @@ def sessions_cmd(
                     "purpose": row.purpose,
                     "cwd": row.cwd,
                     "created_at": row.created_at,
+                    "active_checkpoint": has_checkpoint,
                 }
             )
 
@@ -496,6 +908,9 @@ def _turn_summary_record(summary: TraceTurnSummary) -> _TurnSummary:
 def turns_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
+    status: str | None = typer.Option(None, "--status"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+    from_turn: int | None = typer.Option(None, "--from-turn"),
     limit: int | None = typer.Option(None, "--limit"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
@@ -509,16 +924,36 @@ def turns_cmd(
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
     summaries = [_turn_summary_record(summary) for summary in snapshot.turns]
+    if status is not None:
+        if status not in {"committed", "incomplete"}:
+            raise typer.BadParameter(
+                "status must be 'committed' or 'incomplete'",
+                param_hint="--status",
+            )
+        summaries = [summary for summary in summaries if summary["status"] == status]
+    if run_id is not None:
+        summaries = [summary for summary in summaries if summary["run_id"] == run_id]
+    if from_turn is not None:
+        if from_turn < 0:
+            raise typer.BadParameter(
+                "from turn must be non-negative",
+                param_hint="--from-turn",
+            )
+        summaries = [
+            summary for summary in summaries if summary["turn_index"] >= from_turn
+        ]
 
-    def _render(d: _TurnSummary) -> str:
-        tools = ", ".join(d["tool_calls"]) if d["tool_calls"] else "---"
-        state = d["cause"] if d["cause"] is not None else d["status"]
+    def _render(summary: _TurnSummary) -> str:
+        tools = ", ".join(summary["tool_calls"]) if summary["tool_calls"] else "---"
+        state = summary["cause"] if summary["cause"] is not None else summary["status"]
         rendered = (
-            f"  [{d['turn_index']}] {state:<20} tools=[{tools}] "
-            f"in={d['input_tokens']} out={d['output_tokens']}"
+            f"  [{summary['turn_index']}] {state:<20} tools=[{tools}] "
+            f"in={summary['input_tokens']} out={summary['output_tokens']}"
         )
-        if "error_type" in d:
-            rendered += f"\n      error={d['error_type']}: {d.get('error', '')}"
+        if "error_type" in summary:
+            rendered += (
+                f"\n      error={summary['error_type']}: {summary.get('error', '')}"
+            )
         return rendered
 
     if chosen_fmt == "text":
@@ -557,30 +992,20 @@ def messages_cmd(
     if role:
         all_msgs = [m for m in all_msgs if m["role"] == role]
 
-    _ROLE_ANSI = {
-        "system": "\033[1;35m",  # bold magenta
-        "user": "\033[1;32m",  # bold green
-        "assistant": "\033[1;34m",  # bold blue
-        "tool_result": "\033[36m",  # cyan
-        "error": "\033[1;31m",  # bold red
-    }
-    _RESET = "\033[0m"
-    _DIM = "\033[2m"
-
-    def _render(m: _MessageRecord) -> str:
-        role = m["role"]
+    def _render(message: _MessageRecord) -> str:
+        role = message["role"]
         color = _ROLE_ANSI.get(role, "")
-        hdr = f"{color}── {role.upper()} ── turn={m['turn_index']}"
+        header = f"{color}── {role.upper()} ── turn={message['turn_index']}"
         if role == "tool_result":
-            error = " ERROR" if m.get("is_error") else ""
-            hdr += f" tool={m.get('tool', '?')}{error}"
-        hdr += f" {'─' * 20}{_RESET}"
-        content = m["content"]
-        if role == "tool_result" and not m.get("is_error"):
-            content = f"{_DIM}{content}{_RESET}"
+            error = " ERROR" if message.get("is_error") else ""
+            header += f" tool={message.get('tool', '?')}{error}"
+        header += f" {'─' * 20}{_ANSI_RESET}"
+        content = message["content"]
+        if role == "tool_result" and not message.get("is_error"):
+            content = f"{_ANSI_DIM}{content}{_ANSI_RESET}"
         elif role == "error":
-            content = f"\033[31m{content}{_RESET}"
-        return f"{hdr}\n{content}\n"
+            content = f"{_ANSI_RED}{content}{_ANSI_RESET}"
+        return f"{header}\n{content}\n"
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]{len(all_msgs)} message(s)[/dim]")
@@ -703,6 +1128,7 @@ def _tool_records_from_snapshot(
     snapshot: TraceSnapshot,
     *,
     tool: str | None,
+    result_chars: int | None,
 ) -> list[_ToolRecord]:
     args_by_call_id: dict[str, dict[str, object]] = {}
     for row in snapshot.rows:
@@ -719,6 +1145,8 @@ def _tool_records_from_snapshot(
         if tool and row.tool_name != tool:
             continue
         call_id = _metadata_string(row, "tool_call_id")
+        full_result = row.content
+        result = full_result[:result_chars] if result_chars is not None else full_result
         records.append(
             {
                 "turn_index": row.turn_index or 0,
@@ -727,7 +1155,9 @@ def _tool_records_from_snapshot(
                 "tool": row.tool_name,
                 "args": args_by_call_id.get(call_id or "", {}),
                 "is_error": row.is_error,
-                "result": row.content,
+                "result": result,
+                "result_chars": len(full_result),
+                "result_truncated": len(result) < len(full_result),
             }
         )
     return records
@@ -738,6 +1168,7 @@ def tools_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     tool: str | None = typer.Option(None, "--tool"),
+    result_chars: int | None = typer.Option(None, "--result-chars"),
     limit: int | None = typer.Option(None, "--limit"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
@@ -750,25 +1181,37 @@ def tools_cmd(
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_format(fmt)
-    records = _tool_records_from_snapshot(snapshot, tool=tool)
+    if result_chars is not None and result_chars < 0:
+        raise typer.BadParameter(
+            "result chars must be non-negative",
+            param_hint="--result-chars",
+        )
+    records = _tool_records_from_snapshot(
+        snapshot,
+        tool=tool,
+        result_chars=result_chars,
+    )
 
-    _T_YELLOW = "\033[1;33m"
-    _T_RED = "\033[1;31m"
-    _T_DIM = "\033[2m"
-    _T_RESET = "\033[0m"
-
-    def _render(d: _ToolRecord) -> str:
-        a = json.dumps(d["args"], ensure_ascii=False, indent=2)[:600]
-        r = d["result"][:800]
-        error_tag = f" {_T_RED}ERROR{_T_RESET}" if d["is_error"] else ""
-        hdr = (
-            f"{_T_YELLOW}── {d['tool']}{error_tag}{_T_YELLOW} ── "
-            f"turn={d['turn_index']} {'─' * 10}{_T_RESET}"
+    def _render(record: _ToolRecord) -> str:
+        arguments = json.dumps(record["args"], ensure_ascii=False, indent=2)[:600]
+        result = record["result"]
+        if record["result_truncated"]:
+            truncated_chars = record["result_chars"] - len(record["result"])
+            result += f"\n... ({truncated_chars} chars truncated)"
+        error_tag = (
+            f" {_ROLE_ANSI['error']}ERROR{_ANSI_RESET}" if record["is_error"] else ""
+        )
+        tool_color = _ROLE_ANSI["tool_call"]
+        header = (
+            f"{tool_color}── {record['tool']}{error_tag}{tool_color} ── "
+            f"turn={record['turn_index']} {'─' * 10}{_ANSI_RESET}"
         )
         result_styled = (
-            f"{_T_RED}{r}{_T_RESET}" if d["is_error"] else f"{_T_DIM}{r}{_T_RESET}"
+            f"{_ROLE_ANSI['error']}{result}{_ANSI_RESET}"
+            if record["is_error"]
+            else f"{_ANSI_DIM}{result}{_ANSI_RESET}"
         )
-        return f"{hdr}\n  args:\n{a}\n  result:\n{result_styled}\n"
+        return f"{header}\n  args:\n{arguments}\n  result:\n{result_styled}\n"
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]{len(records)} tool call(s)[/dim]")
