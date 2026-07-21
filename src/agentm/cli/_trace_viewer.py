@@ -42,7 +42,6 @@ class _Message:
     content: str = ""
     thinking: str | None = None
     args_json: str | None = None
-    round_index: int | None = None
 
 
 @dataclass(slots=True)
@@ -115,7 +114,6 @@ def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
                 _Message(
                     role="system",
                     content=row.content,
-                    round_index=row.round_index,
                 )
             )
         elif row.kind in {"user", "trigger"}:
@@ -123,7 +121,6 @@ def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
                 _Message(
                     role="user",
                     content=row.content,
-                    round_index=row.round_index,
                 )
             )
         elif row.kind == "assistant":
@@ -131,7 +128,6 @@ def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
                 _Message(
                     role="assistant",
                     content=row.content,
-                    round_index=row.round_index,
                 )
             )
         elif row.kind == "thinking":
@@ -139,7 +135,6 @@ def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
                 _Message(
                     role="assistant",
                     thinking=row.content,
-                    round_index=row.round_index,
                 )
             )
         elif row.kind == "tool_call":
@@ -148,7 +143,6 @@ def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
                     role="tool_call",
                     tool_name=row.tool_name,
                     args_json=row.content,
-                    round_index=row.round_index,
                 )
             )
         elif row.kind == "tool_result":
@@ -158,7 +152,6 @@ def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
                     tool_name=row.tool_name,
                     is_error=row.is_error,
                     content=row.content,
-                    round_index=row.round_index,
                 )
             )
         elif row.kind == "error" or (row.kind == "control" and row.is_error):
@@ -167,7 +160,6 @@ def _messages_from_rows(rows: Sequence[TraceRow]) -> list[_Message]:
                     role="error",
                     is_error=True,
                     content=row.content,
-                    round_index=row.round_index,
                 )
             )
 
@@ -395,8 +387,6 @@ def _render_item_header(item: _ViewItem, width: int, *, selected: bool = False) 
     color = _ANSI.get(msg.role, "")
 
     label = msg.role.upper()
-    if msg.round_index is not None:
-        label += f" R{msg.round_index}"
     if msg.tool_name:
         label += f": {msg.tool_name}"
     if msg.is_error and msg.role != "error":

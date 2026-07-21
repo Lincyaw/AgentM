@@ -186,7 +186,8 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     is_sidechain boolean NOT NULL DEFAULT false,
                     turn_id text,
                     turn_index bigint,
-                    round_index bigint,
+                    run_id text,
+                    run_step bigint,
                     message_index bigint,
                     kind text NOT NULL,
                     role text NOT NULL,
@@ -200,6 +201,18 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     UNIQUE (session_id, seq),
                     UNIQUE (session_id, id)
                 )
+                """
+            )
+            cur.execute(
+                f"""
+                ALTER TABLE {self._table("trajectory_nodes")}
+                ADD COLUMN IF NOT EXISTS run_id text
+                """
+            )
+            cur.execute(
+                f"""
+                ALTER TABLE {self._table("trajectory_nodes")}
+                ADD COLUMN IF NOT EXISTS run_step bigint
                 """
             )
             cur.execute(
@@ -937,14 +950,14 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             INSERT INTO {self._table("trajectory_nodes")} (
                 id, session_id, root_session_id, parent_session_id, seq,
                 parent_id, logical_parent_id, branch_id, head_id, agent_id,
-                is_sidechain, turn_id, turn_index, round_index, message_index,
+                is_sidechain, turn_id, turn_index, run_id, run_step, message_index,
                 kind, role, visibility, tool_call_ids, tool_names, cache_key,
                 content_ref, timestamp, node_json
             )
             VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s::jsonb, %s::jsonb, %s,
                 %s, %s, %s::jsonb
             )
@@ -963,7 +976,8 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 node.is_sidechain,
                 node.turn_id,
                 node.turn_index,
-                node.round_index,
+                node.run_id,
+                node.run_step,
                 node.message_index,
                 node.kind,
                 node.role,
@@ -1214,7 +1228,8 @@ def _index_statements(schema: str) -> tuple[str, ...]:
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_logical_parent_idx ON {prefix} (logical_parent_id, session_id, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_agent_leaf_idx ON {prefix} (session_id, agent_id, is_sidechain, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_root_session_seq_idx ON {prefix} (root_session_id, session_id, seq)",
-        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_turn_idx ON {prefix} (session_id, turn_index, round_index, message_index, turn_id)",
+        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_turn_v3_idx ON {prefix} (session_id, turn_index, message_index, turn_id)",
+        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_prompt_run_idx ON {prefix} (session_id, run_id, run_step, message_index)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_tool_call_idx ON {prefix} USING gin (tool_call_ids)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_tool_name_idx ON {prefix} USING gin (tool_names)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_cache_idx ON {prefix} (root_session_id, cache_key, session_id, seq)",
@@ -1254,8 +1269,9 @@ def _node_query_where(
     equal("turn_id", query.turn_id)
     if query.turn_index is not None:
         equal("turn_index", query.turn_index)
-    if query.round_index is not None:
-        equal("round_index", query.round_index)
+    equal("run_id", query.run_id)
+    if query.run_step is not None:
+        equal("run_step", query.run_step)
     if query.message_index is not None:
         equal("message_index", query.message_index)
     if query.tool_call_id is not None:

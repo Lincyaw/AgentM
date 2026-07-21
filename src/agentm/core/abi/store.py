@@ -407,7 +407,8 @@ class TrajectoryNodeQuery:
     logical_parent_id: str | None = None
     turn_id: str | None = None
     turn_index: int | None = None
-    round_index: int | None = None
+    run_id: str | None = None
+    run_step: int | None = None
     message_index: int | None = None
     tool_call_id: str | None = None
     tool_name: str | None = None
@@ -434,6 +435,7 @@ class TrajectoryNodeQuery:
             ("parent_id", self.parent_id),
             ("logical_parent_id", self.logical_parent_id),
             ("turn_id", self.turn_id),
+            ("run_id", self.run_id),
             ("tool_call_id", self.tool_call_id),
             ("tool_name", self.tool_name),
             ("cache_key", self.cache_key),
@@ -468,7 +470,7 @@ class TrajectoryNodeQuery:
             )
         for label, index_value in (
             ("turn_index", self.turn_index),
-            ("round_index", self.round_index),
+            ("run_step", self.run_step),
             ("message_index", self.message_index),
             ("after_seq", self.after_seq),
             ("before_seq", self.before_seq),

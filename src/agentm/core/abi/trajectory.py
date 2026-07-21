@@ -8,9 +8,8 @@ Type hierarchy::
 
     Turn
       ├── trigger: Trigger    (what caused this turn)
-      ├── rounds: tuple[Round, ...]
-      │     ├── response: AssistantMessage
-      │     └── tool_results: tuple[ToolRecord, ...]
+      ├── response: AssistantMessage | None
+      ├── tool_results: tuple[ToolRecord, ...]
       ├── outcome: Outcome    (step / stop / inject)
       └── meta: TurnMeta      (observability data)
 """
@@ -65,7 +64,8 @@ TrajectoryIndexField = Literal[
     "logical_parent_id",
     "turn_id",
     "turn_index",
-    "round_index",
+    "run_id",
+    "run_step",
     "message_index",
     "agent_id",
     "is_sidechain",
@@ -188,8 +188,13 @@ TRAJECTORY_NODE_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
     ),
     TrajectoryIndexSpec(
         name="trajectory_nodes_turn",
-        fields=("session_id", "turn_index", "round_index", "message_index", "turn_id"),
+        fields=("session_id", "turn_index", "message_index", "turn_id"),
         purpose="committed turn/message ordering and trace joins",
+    ),
+    TrajectoryIndexSpec(
+        name="trajectory_nodes_prompt_run",
+        fields=("session_id", "run_id", "run_step", "message_index"),
+        purpose="prompt-run step ordering and continuation diagnostics",
     ),
     TrajectoryIndexSpec(
         name="trajectory_nodes_tool_call",
@@ -519,7 +524,8 @@ class TrajectoryNode:
     logical_parent_id: str | None = None
     turn_id: str | None = None
     turn_index: int | None = None
-    round_index: int | None = None
+    run_id: str | None = None
+    run_step: int | None = None
     message_index: int | None = None
     agent_id: str | None = None
     is_sidechain: bool = False
@@ -544,6 +550,7 @@ class TrajectoryNode:
             ("parent_id", self.parent_id),
             ("logical_parent_id", self.logical_parent_id),
             ("turn_id", self.turn_id),
+            ("run_id", self.run_id),
             ("agent_id", self.agent_id),
             ("cache_key", self.cache_key),
             ("content_ref", self.content_ref),
@@ -559,7 +566,7 @@ class TrajectoryNode:
             raise ValueError(f"invalid trajectory node role: {self.role!r}")
         for label, index_value in (
             ("turn_index", self.turn_index),
-            ("round_index", self.round_index),
+            ("run_step", self.run_step),
             ("message_index", self.message_index),
         ):
             _require_index(
@@ -708,87 +715,71 @@ class ToolRecord:
             raise TypeError("tool record backgrounded must be a bool")
 
 
-@dataclass(frozen=True, slots=True)
-class Round:
-    """One LLM call and its consequent tool executions."""
-
-    response: AssistantMessage
-    tool_results: tuple[ToolRecord, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.response, AssistantMessage):
-            raise TypeError("round response must be AssistantMessage")
-        if not isinstance(self.tool_results, tuple) or not all(
-            isinstance(item, ToolRecord) for item in self.tool_results
-        ):
-            raise TypeError("round tool_results must be a tuple of ToolRecord")
-        call_ids = {
-            block.id
-            for block in self.response.content
-            if isinstance(block, ToolCallBlock)
-        }
-        result_ids = [record.call.id for record in self.tool_results]
-        if len(result_ids) != len(set(result_ids)):
-            raise ValueError("round tool results contain duplicate call ids")
-        if not set(result_ids).issubset(call_ids):
-            raise ValueError(
-                "round tool results must reference calls from the response"
-            )
+def _validate_turn_payload(
+    response: AssistantMessage | None,
+    tool_results: tuple[ToolRecord, ...],
+    *,
+    label: str,
+) -> None:
+    if response is not None and not isinstance(response, AssistantMessage):
+        raise TypeError(f"{label} response must be AssistantMessage or None")
+    if not isinstance(tool_results, tuple) or not all(
+        isinstance(item, ToolRecord) for item in tool_results
+    ):
+        raise TypeError(f"{label} tool_results must be a tuple of ToolRecord")
+    if response is None:
+        if tool_results:
+            raise ValueError(f"{label} without a response cannot have tool results")
+        return
+    call_ids = {
+        block.id for block in response.content if isinstance(block, ToolCallBlock)
+    }
+    result_ids = [record.call.id for record in tool_results]
+    if len(result_ids) != len(set(result_ids)):
+        raise ValueError(f"{label} tool results contain duplicate call ids")
+    if not set(result_ids).issubset(call_ids):
+        raise ValueError(f"{label} tool results must reference calls from the response")
 
 
-@dataclass(frozen=True, slots=True)
-class InjectedMessages:
-    """Messages causally inserted after one completed ReAct round."""
-
-    after_round: int
-    messages: tuple[AgentMessage, ...] = ()
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.after_round, int)
-            or isinstance(self.after_round, bool)
-            or self.after_round < -1
-        ):
-            raise ValueError("injected after_round must be -1 or a round index")
-        if not isinstance(self.messages, tuple) or not all(
-            isinstance(item, (UserMessage, AssistantMessage, ToolResultMessage))
-            for item in self.messages
-        ):
-            raise TypeError("injected messages must be a tuple of AgentMessage")
+def _validate_injected(
+    injected: tuple[AgentMessage, ...],
+    *,
+    label: str,
+) -> None:
+    if not isinstance(injected, tuple) or not all(
+        isinstance(item, (UserMessage, AssistantMessage, ToolResultMessage))
+        for item in injected
+    ):
+        raise TypeError(f"{label} must be a tuple of AgentMessage")
 
 
 @dataclass(frozen=True, slots=True)
 class Outcome:
-    """Why a turn ended and causally anchored inline injections."""
+    """Why one durable turn ended and messages injected after it."""
 
     cause: TerminationCause
-    injected: tuple[InjectedMessages, ...] = ()
+    injected: tuple[AgentMessage, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.cause, TerminationCause):
             raise TypeError("outcome cause must be a TerminationCause")
-        if not isinstance(self.injected, tuple) or not all(
-            isinstance(item, InjectedMessages) for item in self.injected
-        ):
-            raise TypeError("outcome injected must be a tuple of InjectedMessages")
+        _validate_injected(self.injected, label="outcome injected")
 
 
 @dataclass(frozen=True, slots=True)
 class TurnCheckpoint:
-    """Latest durable execution state for one incomplete turn.
-
-    A checkpoint deliberately has no ``Outcome``: it is diagnostic and
-    crash-recovery evidence, not a committed trajectory turn. Resume and
-    context construction consume ``Turn`` records only.
-    """
+    """Latest durable state for one incomplete model/tool transaction."""
 
     index: int
     id: str
+    run_id: str
+    run_step: int
     trigger: Trigger
-    rounds: tuple[Round, ...]
+    response: AssistantMessage | None
+    tool_results: tuple[ToolRecord, ...]
     updated_at: float
     meta: TurnMeta = field(default_factory=TurnMeta)
-    injected: tuple[InjectedMessages, ...] = ()
+    injected: tuple[AgentMessage, ...] = ()
     trigger_metadata: TriggerMetadata | None = None
 
     def __post_init__(self) -> None:
@@ -796,24 +787,17 @@ class TurnCheckpoint:
 
         _require_index(self.index, "turn checkpoint index")
         _require_string(self.id, "turn checkpoint id")
+        _require_string(self.run_id, "turn checkpoint run_id")
+        _require_index(self.run_step, "turn checkpoint run_step")
         if not isinstance(self.trigger, Trigger):
             raise TypeError("turn checkpoint trigger must implement Trigger")
         _require_string(self.trigger.source, "turn checkpoint trigger source")
-        if not isinstance(self.rounds, tuple) or not all(
-            isinstance(item, Round) for item in self.rounds
-        ):
-            raise TypeError("turn checkpoint rounds must be a tuple of Round")
-        if not isinstance(self.injected, tuple) or not all(
-            isinstance(item, InjectedMessages) for item in self.injected
-        ):
-            raise TypeError(
-                "turn checkpoint injected must be a tuple of InjectedMessages"
-            )
-        for injection in self.injected:
-            if injection.after_round >= len(self.rounds):
-                raise ValueError(
-                    "checkpoint injection anchor must reference a materialized round"
-                )
+        _validate_turn_payload(
+            self.response,
+            self.tool_results,
+            label="turn checkpoint",
+        )
+        _validate_injected(self.injected, label="turn checkpoint injected")
         _require_finite(self.updated_at, "turn checkpoint updated_at")
         if not isinstance(self.meta, TurnMeta):
             raise TypeError("turn checkpoint meta must be TurnMeta")
@@ -834,12 +818,15 @@ class TurnCheckpoint:
 
 @dataclass(frozen=True, slots=True)
 class Turn:
-    """One committed turn in a trajectory.  Immutable after commit."""
+    """One committed assistant response and its complete tool-result set."""
 
     index: int
     id: str
+    run_id: str
+    run_step: int
     trigger: Trigger
-    rounds: tuple[Round, ...]
+    response: AssistantMessage | None
+    tool_results: tuple[ToolRecord, ...]
     outcome: Outcome
     timestamp: float
     meta: TurnMeta = field(default_factory=TurnMeta)
@@ -850,20 +837,14 @@ class Turn:
 
         _require_index(self.index, "turn index")
         _require_string(self.id, "turn id")
+        _require_string(self.run_id, "turn run_id")
+        _require_index(self.run_step, "turn run_step")
         if not isinstance(self.trigger, Trigger):
             raise TypeError("turn trigger must implement Trigger")
         _require_string(self.trigger.source, "turn trigger source")
-        if not isinstance(self.rounds, tuple) or not all(
-            isinstance(item, Round) for item in self.rounds
-        ):
-            raise TypeError("turn rounds must be a tuple of Round")
+        _validate_turn_payload(self.response, self.tool_results, label="turn")
         if not isinstance(self.outcome, Outcome):
             raise TypeError("turn outcome must be Outcome")
-        for injection in self.outcome.injected:
-            if injection.after_round >= len(self.rounds):
-                raise ValueError(
-                    "injected message anchor must reference a completed round"
-                )
         _require_finite(self.timestamp, "turn timestamp")
         if not isinstance(self.meta, TurnMeta):
             raise TypeError("turn meta must be TurnMeta")
@@ -924,10 +905,8 @@ __all__ = [
     "ContentReplacementState",
     "DEFAULT_TRAJECTORY_BRANCH_ID",
     "DEFAULT_TRAJECTORY_HEAD_ID",
-    "InjectedMessages",
     "Outcome",
     "PromptCacheState",
-    "Round",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
     "ToolRecord",

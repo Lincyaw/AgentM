@@ -49,3 +49,8 @@ extensions:
   - module: agentm.extensions.builtin.goal
 
   - module: policy_engine
+    config:
+      ifg_realtime: true
+      ifg_repository_scan: true
+      ifg_repository_search_roots:
+        - /repo

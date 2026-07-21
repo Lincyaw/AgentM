@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>AgentM IFG</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="identity">
+          <span class="mark" aria-hidden="true">IFG</span>
+          <div>
+            <strong>Live flow</strong>
+            <span id="session-label" class="session-label">Connecting</span>
+          </div>
+        </div>
+
+        <div id="headline-stats" class="headline-stats" aria-label="Graph counts"></div>
+
+        <div class="toolbar" aria-label="Graph controls">
+          <button id="toggle-components" class="icon-button mobile-only" type="button" title="Components" aria-label="Components">☷</button>
+          <button id="zoom-out" class="icon-button" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+          <button id="zoom-in" class="icon-button" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+          <button id="fit-graph" class="icon-button" type="button" title="Fit graph" aria-label="Fit graph">⌖</button>
+          <button id="pause-live" class="icon-button" type="button" title="Pause live updates" aria-label="Pause live updates">Ⅱ</button>
+          <button id="toggle-inspector" class="icon-button mobile-only" type="button" title="Inspector" aria-label="Inspector">ⓘ</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside id="component-panel" class="component-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Focus</span>
+              <h1>Components</h1>
+            </div>
+            <span id="component-count" class="count-label">0</span>
+          </div>
+
+          <label class="search-control">
+            <span class="visually-hidden">Search graph</span>
+            <input id="graph-search" type="search" placeholder="Find node or path" autocomplete="off">
+            <kbd>/</kbd>
+          </label>
+
+          <div class="filter-section">
+            <span class="filter-label">Tools</span>
+            <div id="tool-filters" class="tool-filters"></div>
+          </div>
+
+          <div class="filter-section symbol-controls">
+            <label class="check-control">
+              <input id="show-symbols" type="checkbox">
+              <span>Symbols</span>
+            </label>
+            <div id="symbol-options" class="compact-row symbol-options" hidden>
+              <label class="check-control">
+                <input id="show-modules" type="checkbox">
+                <span>Modules</span>
+              </label>
+              <label class="check-control">
+                <input id="show-mentions" type="checkbox">
+                <span>Mentions</span>
+              </label>
+              <label class="check-control">
+                <input id="show-symbol-links" type="checkbox">
+                <span>Symbol links</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="filter-section">
+            <span class="filter-label">Confidence</span>
+            <div class="segmented" role="group" aria-label="Minimum confidence">
+              <button class="confidence-option active" data-confidence="low" type="button">All</button>
+              <button class="confidence-option" data-confidence="medium" type="button">Medium+</button>
+              <button class="confidence-option" data-confidence="high" type="button">High</button>
+            </div>
+          </div>
+
+          <div class="component-actions">
+            <button id="latest-component" class="text-button active" type="button">Latest</button>
+            <button id="largest-component" class="text-button" type="button">Largest</button>
+            <button id="all-components" class="text-button" type="button">All</button>
+            <label class="check-control push-right">
+              <input id="connected-only" type="checkbox" checked>
+              <span>Connected</span>
+            </label>
+          </div>
+
+          <div id="component-list" class="component-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="graph-stage symbols-hidden" aria-label="Information flow graph">
+          <div class="lane-grid" aria-hidden="true">
+            <div class="lane lane-actions"><span>Actions</span><b id="lane-actions-count">0</b></div>
+            <div class="lane lane-symbols"><span>Symbols</span><b id="lane-symbols-count">0</b></div>
+            <div class="lane lane-files"><span>Files</span><b id="lane-files-count">0</b></div>
+          </div>
+          <div id="graph" role="application" aria-label="Interactive IFG"></div>
+          <div id="graph-message" class="graph-message" hidden></div>
+          <div class="graph-footer">
+            <div class="legend" aria-label="Node legend">
+              <span><i class="legend-swatch bash"></i>Bash</span>
+              <span><i class="legend-swatch read"></i>Read</span>
+              <span><i class="legend-swatch edit"></i>Edit</span>
+              <span><i class="legend-swatch write"></i>Write</span>
+              <span class="symbol-entry"><i class="legend-swatch symbol"></i>Symbol</span>
+              <span><i class="legend-swatch file"></i>File</span>
+            </div>
+            <span id="visible-count" class="visible-count">0 nodes</span>
+          </div>
+        </section>
+
+        <aside id="inspector-panel" class="inspector-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Evidence</span>
+              <h2 id="inspector-title">Selection</h2>
+            </div>
+            <button id="close-inspector" class="icon-button mobile-only" type="button" title="Close inspector" aria-label="Close inspector">×</button>
+          </div>
+          <div id="inspector-content" class="inspector-content"></div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="/vendor/cytoscape.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

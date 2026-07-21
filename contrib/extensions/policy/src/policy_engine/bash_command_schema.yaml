@@ -1,0 +1,89 @@
+version: 1
+defaults:
+  option_value_roles:
+    -A: num
+    -B: num
+    -C: num
+    -e: pattern
+    -f: pattern
+    -m: num
+    --after-context: num
+    --before-context: num
+    --context: num
+    --exclude: pattern
+    --exclude-dir: pattern
+    --glob: pattern
+    --include: pattern
+    --max-count: num
+    --regexp: pattern
+
+commands:
+  ack: {action: read, strategy: search}
+  ag: {action: read, strategy: search}
+  awk: {action: read, strategy: file_operands}
+  cat: {action: read, strategy: file_operands}
+  cd: {action: control, strategy: generic}
+  cp: {action: write, strategy: source_dest}
+  echo: {action: control, strategy: generic}
+  fd: {action: read, strategy: search}
+  find:
+    action: read
+    strategy: find
+    pattern_flags: [-name, -path, -regex, -wholename]
+    numeric_flags: [-maxdepth, -mindepth]
+  grep: {action: read, strategy: search}
+  head: {action: read, strategy: file_operands}
+  ls: {action: read, strategy: path_scope}
+  mkdir: {action: write, strategy: path_scope}
+  mv: {action: write, strategy: source_dest}
+  nl: {action: read, strategy: file_operands}
+  perl:
+    action: read
+    strategy: file_operands
+    edit_when_option_contains: i
+  pwd: {action: control, strategy: generic}
+  readlink: {action: control, strategy: path_scope}
+  rg: {action: read, strategy: search}
+  rm: {action: write, strategy: mixed_operands}
+  sed:
+    action: read
+    strategy: sed
+    edit_when_option_prefix: [-i]
+  tail: {action: read, strategy: file_operands}
+  tee: {action: write, strategy: file_operands}
+  timeout: {action: exec, strategy: timeout}
+  touch: {action: write, strategy: file_operands}
+  tree: {action: read, strategy: path_scope}
+  truncate: {action: write, strategy: file_operands}
+  wc: {action: read, strategy: file_operands}
+  which: {action: control, strategy: generic}
+  xargs: {action: exec, strategy: generic}
+  git:
+    action: exec
+    strategy: git
+    read_subcommands:
+      - check-ignore
+      - diff
+      - grep
+      - log
+      - ls-files
+      - show
+      - status
+  npm:
+    action: exec
+    strategy: package
+    test_subcommands: [test, vitest]
+  npx:
+    action: exec
+    strategy: package
+    test_subcommands: [pytest, vitest]
+  pnpm:
+    action: exec
+    strategy: package
+    test_subcommands: [test, vitest]
+  yarn:
+    action: exec
+    strategy: package
+    test_subcommands: [test, vitest]
+  pytest: {action: test, strategy: mixed_operands}
+  vitest: {action: test, strategy: mixed_operands}

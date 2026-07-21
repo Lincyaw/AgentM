@@ -8,12 +8,13 @@ full design.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections import Counter
 from collections.abc import Mapping, Sequence
 import json
-import os
 from pathlib import Path
+import time
 
 from loguru import logger
 
@@ -23,6 +24,9 @@ from agentm.core.abi import (
     AgentMessage as AgentMessage,
     AtomAPI,
     AtomInstallPriority,
+    BASH_OPERATIONS_SERVICE,
+    BashOperations,
+    BeforeRunEvent,
     BusPriority,
     FunctionTool,
     ImageContent,
@@ -37,6 +41,7 @@ from agentm.core.abi.events import (
     ChildSessionStartEvent,
     ContextEvent,
     DiagnosticEvent,
+    SessionReadyEvent,
     SessionShutdownEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -50,6 +55,13 @@ from .evaluator import PolicyEvaluator
 from .ifc import IFCEngine
 from .loader import load_policy_bundle, resolve_policy_path
 from .persistence import PolicyPersistence
+from .paths import default_policy_db_path
+from .repository_index import (
+    REPOSITORY_INDEX_SERVICE,
+    RepositoryIndex,
+    RepositoryRefreshPlan,
+    repository_refresh_plan,
+)
 from .state import PolicyState, SessionEntry
 from .types import RuleInstance, ToolArgs, ToolLogEntry
 
@@ -65,6 +77,11 @@ class PolicyEngineConfig(BaseModel):
     policy_files: list[str] = []
     extraction_mode: str = "heuristic"
     db_path: str | None = None
+    ifg_realtime: bool = True
+    ifg_repository_scan: bool = True
+    ifg_repository_scan_timeout: float = Field(default=120.0, gt=0)
+    ifg_repository_refresh_timeout: float = Field(default=30.0, gt=0)
+    ifg_repository_search_roots: list[str] = Field(default_factory=list)
 
 
 class _NoArgs(BaseModel):
@@ -85,9 +102,14 @@ class _PolicyExplainArgs(BaseModel):
 MANIFEST = ExtensionManifest(
     name="policy_engine",
     description="DSL-driven policy detection and enforcement over agent events.",
-    registers=("tool:reload_policies", "tool:policy_explain", "tool:policy_stats"),
+    registers=(
+        "tool:reload_policies",
+        "tool:policy_explain",
+        "tool:policy_stats",
+        f"service:{REPOSITORY_INDEX_SERVICE}",
+    ),
     config_schema=PolicyEngineConfig,
-    requires=(),
+    requires=("service:operations:bash",),
     priority=AtomInstallPriority.POLICY,
 )
 
@@ -326,7 +348,7 @@ class _PolicyEngineRuntime:
     def __init__(self, session: AtomAPI, config: PolicyEngineConfig) -> None:
         self._session = session
         self._config = config
-        self._state = PolicyState()
+        self._state = PolicyState(cwd=session.ctx.cwd)
         self._entity_registry = EntityRegistry()
         self._ifc: IFCEngine | None = None
         self._evaluator: PolicyEvaluator = None  # type: ignore[assignment]
@@ -335,12 +357,17 @@ class _PolicyEngineRuntime:
         self._pending_diagnostics: list[str] = []
         self._file_mtimes: dict[str, float] = {}
         self._pending_tool_args: dict[str, ToolArgs] = {}  # call_id → args
+        self._ifg_pending_tool_args: dict[str, ToolArgs] = {}
+        self._repository_index: RepositoryIndex | None = None
+        self._repository_scan_task: asyncio.Task[bool] | None = None
+        self._repository_refresh_plans: dict[str, RepositoryRefreshPlan] = {}
         self._persisted_effect_count = 0
 
     def install(self) -> None:
         self._load_rules()
         self._setup_ifc()
         self._setup_persistence()
+        self._setup_repository_index()
 
         self._evaluator = PolicyEvaluator(self._rules, self._state)
         self._evaluator.set_entity_evidence_fn(self._entity_registry.entity_evidence)
@@ -352,11 +379,35 @@ class _PolicyEngineRuntime:
 
         s = self._session
         s.on(ToolCallEvent.CHANNEL, self._on_tool_call, priority=BusPriority.PRE)
+        s.on(
+            ToolCallEvent.CHANNEL,
+            self._on_repository_tool_call,
+            priority=BusPriority.NORMAL,
+        )
         s.on(ToolResultEvent.CHANNEL, self._on_tool_result, priority=BusPriority.PRE)
+        s.on(
+            ToolResultEvent.CHANNEL,
+            self._on_repository_tool_result,
+            priority=BusPriority.NORMAL,
+        )
+        s.on(
+            ToolResultEvent.CHANNEL, self._on_tool_result_ifg, priority=BusPriority.POST
+        )
         s.on(TurnCommittedEvent.CHANNEL, self._on_turn_committed)
+        s.on(SessionReadyEvent.CHANNEL, self._on_repository_session_ready)
+        s.on(
+            BeforeRunEvent.CHANNEL,
+            self._on_before_run_repository,
+            priority=BusPriority.PRE,
+        )
         s.on(ChildSessionStartEvent.CHANNEL, self._on_child_session_start)
         s.on(ContextEvent.CHANNEL, self._on_context)
         s.on(BeforeSendEvent.CHANNEL, self._on_before_send)
+        s.on(
+            SessionShutdownEvent.CHANNEL,
+            self._on_repository_shutdown,
+            priority=BusPriority.PRE,
+        )
         s.on(SessionShutdownEvent.CHANNEL, self._on_session_shutdown)
 
         s.register_tool(
@@ -416,11 +467,7 @@ class _PolicyEngineRuntime:
     def _setup_persistence(self) -> None:
         db_path = self._config.db_path
         if not db_path:
-            agentm_home = Path(
-                os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm"))
-            )
-            db_dir = agentm_home / "policy_state"
-            db_path = str(db_dir / "policy.db")
+            db_path = str(default_policy_db_path())
         self._persistence = PolicyPersistence(Path(db_path))
         try:
             self._persistence.open()
@@ -428,7 +475,118 @@ class _PolicyEngineRuntime:
             logger.warning("policy persistence failed to open: {}", e)
             self._persistence = None
 
+    def _setup_repository_index(self) -> None:
+        if not self._config.ifg_realtime or not self._config.ifg_repository_scan:
+            return
+        bash = self._session.services.get(BASH_OPERATIONS_SERVICE, BashOperations)
+        if bash is None:
+            logger.warning("policy repository index disabled: bash operations missing")
+            return
+        self._repository_index = RepositoryIndex(
+            root=self._session.ctx.cwd,
+            bash=bash,
+            scan_timeout=self._config.ifg_repository_scan_timeout,
+            refresh_timeout=self._config.ifg_repository_refresh_timeout,
+            search_roots=self._config.ifg_repository_search_roots,
+        )
+        self._state.ifg_investigation.configure_repository(
+            contains_file=self._repository_index.contains_file,
+            canonicalize=self._repository_index.canonical_path,
+        )
+        self._session.services.register(
+            REPOSITORY_INDEX_SERVICE,
+            self._repository_index,
+            scope="session",
+        )
+
     # --- Event handlers ---
+
+    def _on_repository_session_ready(self, event: SessionReadyEvent) -> None:
+        del event
+        self._start_repository_scan()
+
+    def _start_repository_scan(self) -> asyncio.Task[bool] | None:
+        if self._repository_index is None:
+            return None
+        if self._repository_scan_task is None:
+            self._repository_scan_task = asyncio.create_task(
+                self._scan_repository_on_mount(),
+                name=f"policy-repository-scan-{self._session.ctx.session_id}",
+            )
+        return self._repository_scan_task
+
+    async def _scan_repository_on_mount(self) -> bool:
+        repository_index = self._repository_index
+        if repository_index is None:
+            return False
+        with self._session.track_background():
+            success = await repository_index.scan_all()
+        status = repository_index.status
+        if success:
+            logger.info(
+                "policy repository index ready: {} files under {}",
+                status.files,
+                status.root,
+            )
+        else:
+            logger.warning(
+                "policy repository index scan failed for {}: {}",
+                status.root,
+                status.last_error,
+            )
+        return success
+
+    async def _on_before_run_repository(self, event: BeforeRunEvent) -> None:
+        del event
+        await self._ensure_repository_scanned()
+
+    def _on_repository_tool_call(self, event: ToolCallEvent) -> None:
+        if self._repository_index is None:
+            return
+        plan = repository_refresh_plan(
+            tool_name=event.tool_name,
+            args=event.args,
+            cwd=self._session.ctx.cwd,
+        )
+        if plan is not None:
+            self._repository_refresh_plans[event.tool_call_id] = plan
+
+    async def _on_repository_tool_result(self, event: ToolResultEvent) -> None:
+        repository_index = self._repository_index
+        plan = self._repository_refresh_plans.pop(event.tool_call_id, None)
+        if repository_index is None or event.result is None or event.result.is_error:
+            return
+        if plan is None:
+            plan = repository_refresh_plan(
+                tool_name=event.tool_name,
+                args=event.args,
+                cwd=self._session.ctx.cwd,
+            )
+        if plan is None:
+            return
+        await self._ensure_repository_scanned()
+        success = await repository_index.refresh(plan)
+        if not success:
+            logger.warning(
+                "policy repository index refresh failed ({}): {}",
+                plan.reason,
+                repository_index.status.last_error,
+            )
+
+    async def _ensure_repository_scanned(self) -> bool:
+        repository_index = self._repository_index
+        if repository_index is None:
+            return False
+        task = self._start_repository_scan()
+        return await asyncio.shield(task) if task is not None else False
+
+    async def _on_repository_shutdown(self, event: SessionShutdownEvent) -> None:
+        del event
+        task = self._repository_scan_task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._repository_refresh_plans.clear()
 
     def _on_tool_call(self, event: ToolCallEvent) -> dict[str, object] | None:
         """Handle tool_call_pre: run reactions + evaluate rules."""
@@ -439,6 +597,7 @@ class _PolicyEngineRuntime:
 
         # Cache args for tool_result phase
         self._pending_tool_args[event.tool_call_id] = event.args
+        self._ifg_pending_tool_args[event.tool_call_id] = event.args
 
         # Evaluate rules on tool_call channel
         effects = self._evaluator.evaluate(
@@ -450,6 +609,7 @@ class _PolicyEngineRuntime:
         self._queue_tool_event_pre(event)
         self._queue_state_snapshot()
         self._flush_policy_persistence()
+        self._persist_ifg_tool_event_pre(event)
 
         if not effects:
             return None
@@ -525,6 +685,7 @@ class _PolicyEngineRuntime:
         effects = self._evaluator.evaluate(
             channel="tool_result",
             tool_name=event.tool_name,
+            args=args,
             result=result_for_eval,
         )
         self._persist_new_effects()
@@ -535,12 +696,44 @@ class _PolicyEngineRuntime:
             processed=_processed_tool_result(event, text, error, metadata),
         )
         self._queue_state_snapshot()
+        self._queue_session_summary()
         self._flush_policy_persistence()
 
         for _rule_id, effect_type, diagnostic in effects:
             if effect_type == "abort":
                 raise RuntimeError(f"[PolicyEngine:abort] {diagnostic}")
             self._pending_diagnostics.append(diagnostic)
+
+    def _on_tool_result_ifg(self, event: ToolResultEvent) -> None:
+        """Persist IFG facts after result handlers have had a chance to run."""
+        if not self._persistence or not self._config.ifg_realtime:
+            return
+        text: str | None = None
+        error: str | None = None
+        if event.result and event.result.content:
+            text_parts = [
+                c.text for c in event.result.content if isinstance(c, TextContent)
+            ]
+            text = "\n".join(text_parts) if text_parts else None
+            if event.result.is_error:
+                error = text or "unknown error"
+        args = dict(
+            event.args or self._ifg_pending_tool_args.pop(event.tool_call_id, {})
+        )
+        self._ifg_pending_tool_args.pop(event.tool_call_id, None)
+        metadata = _tool_event_metadata(event)
+        raw_result = _raw_tool_result(event.result)
+        processed = _processed_tool_result(event, text, error, metadata)
+        entry = self._latest_tool_log_entry()
+        if entry is not None:
+            processed["error_fingerprint"] = entry.error_fingerprint
+            processed["error_category"] = entry.error_category
+        self._persist_ifg_tool_event_post(
+            event,
+            args,
+            raw_result=raw_result,
+            processed=processed,
+        )
 
     def _on_turn_committed(self, event: TurnCommittedEvent) -> None:
         """Handle turn end: advance turn, record summary, evaluate rules, flush."""
@@ -676,10 +869,7 @@ class _PolicyEngineRuntime:
             return
         self._persist_new_effects()
         self._queue_state_snapshot()
-        self._persistence.queue_session_summary(
-            self._session.ctx.session_id,
-            self._session_summary(),
-        )
+        self._queue_session_summary()
         self._persistence.flush()
         self._persistence.close()
         self._persistence = None
@@ -794,7 +984,16 @@ class _PolicyEngineRuntime:
             "max_context_tokens": max_context_tokens,
             "max_context_usage_pct": max_context_usage_pct,
             "error_count": sum(1 for entry in tool_entries if entry.error),
+            "intervention": self._state.ifg_interventions.summary(),
+            "investigation": self._state.ifg_investigation.summary(),
         }
+
+    def _queue_session_summary(self) -> None:
+        if self._persistence:
+            self._persistence.queue_session_summary(
+                self._session.ctx.session_id,
+                self._session_summary(),
+            )
 
     # --- Hot reload ---
 
@@ -864,6 +1063,7 @@ class _PolicyEngineRuntime:
             tool_name=event.tool_name,
             args=event.args,
             taint_labels=self._taint_labels(event.args),
+            cwd=self._session.ctx.cwd,
         )
 
     def _queue_tool_event_post(
@@ -890,6 +1090,7 @@ class _PolicyEngineRuntime:
             entry=entry,
             result=raw_result,
             processed=processed,
+            cwd=self._session.ctx.cwd,
         )
 
     def _queue_context_state(
@@ -932,6 +1133,92 @@ class _PolicyEngineRuntime:
     def _flush_policy_persistence(self) -> None:
         if self._persistence:
             self._persistence.flush()
+
+    def _persist_ifg_tool_event_pre(self, event: ToolCallEvent) -> None:
+        if not self._persistence or not self._config.ifg_realtime:
+            return
+        self._persist_ifg_tool_event(
+            phase="pre",
+            tool_call_id=event.tool_call_id,
+            tool_name=event.tool_name,
+            args=event.args,
+            result={},
+            processed={},
+            state={"taint_labels": list(self._taint_labels(event.args))},
+            raw_evidence={
+                "source": "ToolCallEvent",
+                "tool_call_id": event.tool_call_id,
+                "tool_name": event.tool_name,
+                "args": event.args,
+            },
+        )
+
+    def _persist_ifg_tool_event_post(
+        self,
+        event: ToolResultEvent,
+        args: ToolArgs,
+        *,
+        raw_result: Mapping[str, object],
+        processed: Mapping[str, object | None],
+    ) -> None:
+        if not self._persistence or not self._config.ifg_realtime:
+            return
+        self._persist_ifg_tool_event(
+            phase="post",
+            tool_call_id=event.tool_call_id,
+            tool_name=event.tool_name,
+            args=args,
+            result=raw_result,
+            processed=processed,
+            state={"processed": dict(processed)},
+            raw_evidence={
+                "source": "ToolResultEvent",
+                "tool_call_id": event.tool_call_id,
+                "tool_name": event.tool_name,
+                "args": args,
+                "result": raw_result,
+                "processed": dict(processed),
+            },
+        )
+
+    def _persist_ifg_tool_event(
+        self,
+        *,
+        phase: str,
+        tool_call_id: str,
+        tool_name: str,
+        args: Mapping[str, object],
+        result: Mapping[str, object],
+        processed: Mapping[str, object | None],
+        state: Mapping[str, object],
+        raw_evidence: Mapping[str, object],
+    ) -> None:
+        from .ifg import IfgToolEvent
+
+        persistence = self._persistence
+        if persistence is None:
+            return
+
+        event = IfgToolEvent(
+            session_id=self._session.ctx.session_id,
+            turn=self._state.turn_count,
+            event_id=None,
+            tool_call_id=tool_call_id,
+            phase=phase,
+            tool_name=tool_name,
+            args=dict(args),
+            result=dict(result),
+            processed=dict(processed),
+            state=dict(state),
+            cwd=self._session.ctx.cwd,
+            ts=time.time(),
+            source="policy_runtime",
+            raw_evidence=dict(raw_evidence),
+        )
+        persistence.persist_ifg_tool_events(
+            (event,),
+            repository_index=self._repository_index,
+        )
 
     def _taint_labels(self, args: ToolArgs) -> tuple[str, ...]:
         if not self._ifc:
@@ -995,9 +1282,16 @@ class _PolicyEngineRuntime:
             f"Tool log entries: {len(self._state.tool_log)}",
             f"Effect log entries: {len(self._state.effect_log.entries())}",
             f"Entities tracked: {len(self._entity_registry._entities)}",
-            "",
-            "Recent firings:",
         ]
+        if self._repository_index is not None:
+            status = self._repository_index.status
+            lines.append(
+                "Repository index: "
+                f"{'ready' if status.ready else 'warming'} "
+                f"({status.files} files, {status.scans} scans, "
+                f"{status.refreshes} refreshes)"
+            )
+        lines.extend(("", "Recent firings:"))
         for rec in list(self._state.effect_log.entries())[-5:]:
             lines.append(
                 f"  [{rec.mode}] {rec.rule_id} → {rec.effect} (turn {rec.turn})"

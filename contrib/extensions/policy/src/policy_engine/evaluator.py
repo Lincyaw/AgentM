@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from .effects import build_diagnostic, resolve_effects
+from .ifg_regions import IfgQuery
 from .query import (
     EffectLogQuery,
     FileStateQuery,
@@ -261,6 +262,7 @@ class PolicyEvaluator:
                     effect=rule.effect.effect,
                     reason=diagnostic,
                     turn=turn,
+                    context=ctx_value,
                 )
             )
 
@@ -298,6 +300,11 @@ class PolicyEvaluator:
             "tool_log": tool_log_q,
             "file_state": file_state_q,
             "effect_log": effect_log_q,
+            "ifg": IfgQuery(
+                state.ifg_regions,
+                state.ifg_interventions,
+                state.ifg_investigation,
+            ),
             "streak": lambda where, last=None: streak(
                 state.tool_log.entries, where, last
             ),

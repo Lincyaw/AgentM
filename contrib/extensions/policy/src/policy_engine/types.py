@@ -221,8 +221,9 @@ class EffectRecord:
     effect: str
     reason: str
     turn: int
+    context: object = None
 
-    def get(self, field: str, default: str | int | None = None) -> str | int | None:
+    def get(self, field: str, default: object = None) -> object:
         try:
             return object.__getattribute__(self, field)
         except AttributeError:

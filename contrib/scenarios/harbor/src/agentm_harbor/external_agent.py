@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -15,8 +16,9 @@ from agentm import (
 )
 from agentm.config import DefaultSessionSpecResolver
 from agentm.storage.trajectory import resolve_trajectory_store_or_create
+from agentm_toolbox import REMOTE_DEPENDENCIES, ToolboxDependency
 from harbor.agents.base import BaseAgent
-from harbor.environments.base import BaseEnvironment
+from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 from loguru import logger
 
@@ -24,6 +26,32 @@ from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
 from agentm_harbor.human_interrupt import HumanInterruptServer
 
 SCENARIO = "arl:harbor"
+_TOOLBOX_SETUP_TIMEOUT = 300
+
+
+def _toolbox_setup_command(dependency: ToolboxDependency) -> str:
+    executable = shlex.quote(dependency.executable)
+    requirement = shlex.quote(dependency.requirement)
+    return (
+        f"if command -v {executable} >/dev/null 2>&1; then exit 0; fi; "
+        "python3 -m pip install --quiet --disable-pip-version-check "
+        f"{requirement}; command -v {executable} >/dev/null 2>&1"
+    )
+
+
+async def _provision_remote_toolbox(environment: BaseEnvironment) -> None:
+    for dependency in REMOTE_DEPENDENCIES:
+        result: ExecResult = await environment.exec(
+            _toolbox_setup_command(dependency),
+            cwd="/",
+            timeout_sec=_TOOLBOX_SETUP_TIMEOUT,
+        )
+        if result.return_code == 0:
+            continue
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        raise RuntimeError(
+            f"could not provision toolbox dependency {dependency.requirement}: {detail[:500]}"
+        )
 
 
 def _find_scenario_yaml(configured: str | None = None) -> Path:
@@ -94,7 +122,7 @@ class ExternalAgentMAgent(BaseAgent):
         return None
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        del environment
+        await _provision_remote_toolbox(environment)
 
     async def run(
         self,

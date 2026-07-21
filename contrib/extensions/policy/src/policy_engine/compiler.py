@@ -99,6 +99,7 @@ NAMESPACE_NAMES: frozenset[str] = frozenset(
         "tool_log",
         "file_state",
         "effect_log",
+        "ifg",
         "streak",
         "trend",
         "ratio",

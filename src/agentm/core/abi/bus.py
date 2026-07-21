@@ -1,4 +1,4 @@
-"""Simplified EventBus for v2.
+"""Immutable-event dispatch bus.
 
 Events are frozen dataclasses. Handlers express intent through return values,
 not mutation. Each emission gets a dispatch id passed to observers; the event
@@ -24,7 +24,7 @@ Handler = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """Base for all v2 events.  Frozen — handlers cannot mutate."""
+    """Base for frozen events that handlers cannot mutate."""
 
     pass
 
@@ -129,7 +129,7 @@ class EventBus:
             except Exception as exc:
                 error = exc
                 logger.exception(
-                    "v2 event handler raised on channel {!r}; suppressing.",
+                    "event handler raised on channel {!r}; suppressing.",
                     channel,
                 )
                 value = None
@@ -180,7 +180,7 @@ class EventBus:
             except Exception as exc:
                 error = exc
                 logger.exception(
-                    "v2 event handler raised on channel {!r}; suppressing.",
+                    "event handler raised on channel {!r}; suppressing.",
                     channel,
                 )
                 value = None

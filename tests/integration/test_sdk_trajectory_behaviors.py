@@ -40,7 +40,6 @@ from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.abi.tool_executor import ToolExecutionRequirements
 from agentm.core.abi.trajectory import (
     PromptCacheState,
-    Round,
     TrajectoryForkPoint,
     TurnCheckpoint,
 )
@@ -896,6 +895,24 @@ async def test_sdk_file_toolbox_transactions_share_behavior_and_protect_constitu
 
     assert (workspace / "note.txt").read_text() == "done\n"
     assert not (protected / "hacked.py").exists()
+    edit_turns = [
+        turn
+        for turn in session.trajectory.turns
+        if turn.tool_results
+        and turn.tool_results[0].call.id in {"edit-note-1", "edit-note-2"}
+    ]
+    assert len(edit_turns) == 2
+    edit_transactions = []
+    for turn in edit_turns:
+        assert len(turn.meta.resource_mutations) == 1
+        transaction = turn.meta.resource_mutations[0].transaction
+        assert transaction is not None
+        assert (transaction.turn_id, transaction.turn_index) == (
+            turn.id,
+            turn.index,
+        )
+        edit_transactions.append(transaction.id)
+    assert len(set(edit_transactions)) == 2
     protected_results = [
         block
         for message in provider.requests[-1]
@@ -1264,21 +1281,18 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
             checkpoint = store.load_checkpoint(session.session_id)
             if (
                 checkpoint is not None
-                and checkpoint.rounds
-                and checkpoint.rounds[0].tool_results
+                and checkpoint.response is not None
+                and checkpoint.tool_results
             ):
                 break
             await asyncio.sleep(0.01)
         assert checkpoint is not None
         assert checkpoint.index == 0
-        assert len(checkpoint.rounds) == 1
-        assert checkpoint.rounds[0].response == tool_response
-        assert [record.call.id for record in checkpoint.rounds[0].tool_results] == [
-            "fast-call"
-        ]
+        assert checkpoint.response == tool_response
+        assert [record.call.id for record in checkpoint.tool_results] == ["fast-call"]
         assert [
             block.text
-            for record in checkpoint.rounds[0].tool_results
+            for record in checkpoint.tool_results
             for block in record.result.content
             if isinstance(block, TextContent)
         ] == ["fast-result"]
@@ -1306,10 +1320,13 @@ async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
         TurnCheckpoint(
             index=1,
             id="orphan-turn",
+            run_id="orphan-run",
+            run_step=0,
             trigger=UserInput(
                 content=(TextContent(type="text", text="orphan-question"),)
             ),
-            rounds=(Round(response=orphan_response),),
+            response=orphan_response,
+            tool_results=(),
             updated_at=time.time(),
         ),
     )

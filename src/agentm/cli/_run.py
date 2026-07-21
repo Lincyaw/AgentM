@@ -83,8 +83,8 @@ async def _execute(
     stats.update_from_turn(last)
 
     text_parts: list[str] = []
-    for rnd in last.rounds:
-        for block in rnd.response.content:
+    if last.response is not None:
+        for block in last.response.content:
             if isinstance(block, TextContent):
                 text_parts.append(block.text)
     text = "\n".join(text_parts)

@@ -37,7 +37,7 @@ from agentm.core.abi.query import TrajectoryQueryStore
 
 _TableRows = tuple[tuple[str, tuple[str, ...], int], ...]
 
-_DEFAULT_TURN_PANE_WIDTH = 32
+_DEFAULT_TURN_PANE_WIDTH = 40
 _MIN_TURN_PANE_WIDTH = 24
 _MAX_TURN_PANE_WIDTH = 96
 _MIN_MAIN_PANE_WIDTH = 48
@@ -391,8 +391,9 @@ class TraceConsoleApp(App[None]):
         turns.cursor_type = "row"
         turns.zebra_stripes = True
         turns.add_column("T")
+        turns.add_column("Run")
+        turns.add_column("S")
         turns.add_column("State")
-        turns.add_column("R")
         turns.add_column("Tools")
 
         rows = self.query_one("#rows", DataTable)
@@ -463,8 +464,9 @@ class TraceConsoleApp(App[None]):
                 tools += f"/{summary.tool_errors}e"
             cells = (
                 str(summary.turn_index),
+                summary.run_id[:8],
+                str(summary.run_step),
                 summary.state_label,
-                str(summary.rounds),
                 tools,
             )
             next_rows.append((summary.key, cells, 0))
@@ -821,6 +823,7 @@ def _detail_header(row: TraceRow) -> str:
     header = [
         f"key: {row.key}",
         f"location: {row.location}",
+        f"run: {row.run_id or '-'} step:{row.run_step if row.run_step is not None else '-'}",
         f"kind: {row.kind}",
         f"status: {row.status or '-'}",
         f"cause: {row.cause or '-'}",

@@ -35,7 +35,7 @@ atom_config:
       - policies/custom.yaml
 ```
 
-The base policy (13 rules) loads automatically. User/scenario files layer
+The base policy (18 rules) loads automatically. User/scenario files layer
 on top with composition semantics (can add rules, can disable non-abort rules).
 
 ## File Structure
@@ -49,7 +49,7 @@ labels:          # IFC taint labels (optional)
     min_length: 8
 
 disable:         # names of inherited rules to disable (optional)
-  - exploration-without-action
+  - exploration-not-converging
 
 rules:           # detection rules
   - name: my-rule
@@ -100,6 +100,7 @@ query namespace. Must evaluate to a truthy value for the rule to fire.
 | `tool_log` | TableQuery | Rolling-window tool call log (max 500) |
 | `file_state` | FileStateQuery | Per-file read/write tracking |
 | `effect_log` | EffectLogQuery | Rule firing history |
+| `ifg` | IfgQuery | Source-region and intervention-epoch metrics |
 | `EMPTY` | sentinel | Falsy, `.attr` returns -1 |
 
 ### Query Primitives (on `tool_log` / `effect_log`)
@@ -136,6 +137,38 @@ file_state.get(path).write_count
 file_state.get(path).last_read_turn
 file_state.get(path).last_write_turn
 ```
+
+### `ifg` Queries
+
+```python
+# Active unchanged source coverage.
+ifg.region_reads.overlap_ratio(last=20)
+ifg.region_reads.overlap_count(last=20, min_ratio=0.8, min_lines=10)
+ifg.region_reads.summary(last=20)
+
+# Mutation-to-validation convergence epoch.
+ifg.intervention.mutation_count()
+ifg.intervention.mutation_density()
+ifg.intervention.distinct_target_files()
+ifg.intervention.effective_targets()
+ifg.intervention.novel_files()
+ifg.intervention.frontier_pressure()
+ifg.intervention.calls_since_last_mutation()
+ifg.intervention.summary()
+
+# Threshold-free structural investigation evidence. These transitions are
+# neutral facts intended for a later semantic diagnosis stage.
+ifg.investigation.became_unchanged_reentry()
+ifg.investigation.became_artifact_replacement()
+ifg.investigation.became_state_cycle()
+ifg.investigation.summary()
+```
+
+Intervention rules should normally use the transition predicates
+`became_expanding()`, `became_target_drifting()`, and
+`became_unvalidated()`. Their support and patience thresholds adapt to the
+observed pre-mutation file frontier and mutation cadence, so policy YAML does
+not need fixed call or file counts.
 
 ### Entity Evidence
 
@@ -271,8 +304,13 @@ rules (safety rules cannot be weakened).
 | stuck-loop | observe | escalate | 3+ failures, no strategy change |
 | weak-grounding-edit | observe | escalate | Edit path with no tool evidence |
 | premature-irreversible | observe | escalate | Push/delete at turn ≤4 |
-| exploration-without-action | observe | notify | 10+ read turns, 0 writes |
-| file-churn | observe | notify | Same file edited 3+ times |
+| exploration-not-converging | observe | escalate | File frontier keeps expanding after mutation |
+| mutation-target-drift | observe | escalate | Mutations spread across too many effective targets |
+| unvalidated-intervention | observe | escalate | Active intervention exceeds its adaptive validation horizon |
+| unchanged-anchor-reentry | observe | notify | Re-enters an unchanged repository anchor |
+| created-artifact-replacement | observe | notify | Successive write-first artifacts execute without a repository mutation |
+| unchanged-investigation-state-cycle | observe | notify | An execution phase returns to the same repository state |
+| repeated-region-reading | observe | escalate | Re-reads unchanged source regions with high overlap |
 | cross-session-repeat | observe | escalate | Error seen in 3+ sessions |
 | no-secrets-to-network | enforce | abort | Tainted value in bash args |
 | abort-on-persistent-stagnation | enforce | abort | stuck-loop escalated 2+ times |

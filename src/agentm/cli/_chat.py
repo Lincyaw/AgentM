@@ -169,23 +169,20 @@ async def _run_chat(
                 console.print(
                     f"[yellow]⚡ interrupted: {last.outcome.cause.reason}[/yellow]"
                 )
-                for rnd in last.rounds:
-                    for tr in rnd.tool_results:
-                        t = "".join(
-                            b.text
-                            for b in tr.result.content
-                            if isinstance(b, TextContent)
-                        )
-                        if t:
-                            err = " ERROR" if tr.result.is_error else ""
-                            console.print(f"[dim]  [tool{err}] {t}[/dim]")
+                for tr in last.tool_results:
+                    t = "".join(
+                        b.text for b in tr.result.content if isinstance(b, TextContent)
+                    )
+                    if t:
+                        err = " ERROR" if tr.result.is_error else ""
+                        console.print(f"[dim]  [tool{err}] {t}[/dim]")
                 console.print(f"[dim]─ {stats.status_line()}[/dim]\n")
                 continue
 
-            for rnd in last.rounds:
+            if last.response is not None:
                 thinking_parts: list[str] = []
                 text_parts: list[str] = []
-                for block in rnd.response.content:
+                for block in last.response.content:
                     if isinstance(block, ThinkingBlock):
                         thinking_parts.append(block.text)
                     elif isinstance(block, OpaqueThinkingBlock):
@@ -207,15 +204,15 @@ async def _run_chat(
                 if text_parts:
                     console.print("\n".join(text_parts))
 
-                for tr in rnd.tool_results:
-                    t = "".join(
-                        b.text for b in tr.result.content if isinstance(b, TextContent)
-                    )
-                    if tr.result.is_error:
-                        console.print(f"[red]  ✗ {t}[/red]")
-                    else:
-                        preview = t[:200] + ("..." if len(t) > 200 else "")
-                        console.print(f"[dim]  → {preview}[/dim]")
+            for tr in last.tool_results:
+                t = "".join(
+                    b.text for b in tr.result.content if isinstance(b, TextContent)
+                )
+                if tr.result.is_error:
+                    console.print(f"[red]  ✗ {t}[/red]")
+                else:
+                    preview = t[:200] + ("..." if len(t) > 200 else "")
+                    console.print(f"[dim]  → {preview}[/dim]")
             console.print(f"[dim]─ {stats.status_line()}[/dim]\n")
     finally:
         loop.remove_signal_handler(signal.SIGINT)

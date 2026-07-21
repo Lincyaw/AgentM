@@ -25,7 +25,7 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
-from agentm.core.abi.trigger import UserInput
+from agentm.core.abi.trigger import ContinueTrigger, UserInput
 
 TraceRecordStatus = Literal["committed", "incomplete"]
 TraceRowKind = Literal[
@@ -63,8 +63,9 @@ class TraceTurnSummary:
     key: str
     turn_index: int
     turn_id: str
+    run_id: str
+    run_step: int
     status: TraceRecordStatus
-    rounds: int
     tool_calls: int
     tool_errors: int
     input_tokens: int
@@ -81,6 +82,8 @@ class TraceTurnSummary:
 
     @property
     def state_label(self) -> str:
+        if self.cause == "PromptRunContinued":
+            return "Continued"
         return self.cause or self.status
 
 
@@ -92,7 +95,8 @@ class TraceRow:
     preview: str
     content: str
     turn_index: int | None = None
-    round_index: int | None = None
+    run_id: str | None = None
+    run_step: int | None = None
     message_index: int | None = None
     status: TraceRecordStatus | None = None
     role: str | None = None
@@ -110,9 +114,7 @@ class TraceRow:
     def location(self) -> str:
         if self.turn_index is None:
             return "-"
-        if self.round_index is None:
-            return f"T{self.turn_index}"
-        return f"T{self.turn_index} R{self.round_index}"
+        return f"T{self.turn_index}"
 
     @property
     def searchable_text(self) -> str:
@@ -125,6 +127,8 @@ class TraceRow:
             self.role or "",
             self.tool_name or "",
             self.display_name or "",
+            self.run_id or "",
+            str(self.run_step) if self.run_step is not None else "",
             self.status or "",
             self.cause or "",
             self.location,
@@ -173,7 +177,8 @@ class TraceQuery:
     statuses: tuple[str, ...] = ()
     causes: tuple[str, ...] = ()
     turn_indices: tuple[int, ...] = ()
-    round_indices: tuple[int, ...] = ()
+    run_ids: tuple[str, ...] = ()
+    run_steps: tuple[int, ...] = ()
     id_fragments: tuple[str, ...] = ()
     errors_only: bool = False
     token_predicates: tuple[TokenPredicate, ...] = ()
@@ -189,7 +194,8 @@ class TraceQuery:
                 self.statuses,
                 self.causes,
                 self.turn_indices,
-                self.round_indices,
+                self.run_ids,
+                self.run_steps,
                 self.id_fragments,
                 self.errors_only,
                 self.token_predicates,
@@ -277,7 +283,7 @@ def parse_trace_query(raw: str) -> TraceQuery:
 
     Supported filters:
       role:<name>, kind:<name>, tool:<name>, status:<committed|incomplete>,
-      cause:<name>, turn:<n>, round:<n>, id:<fragment>, error/is:error, and
+      cause:<name>, turn:<n>, run:<id>, step:<n>, id:<fragment>, error/is:error, and
       tokens/in/out/cache comparisons such as tokens>100000.
     """
 
@@ -295,7 +301,8 @@ def parse_trace_query(raw: str) -> TraceQuery:
     statuses: list[str] = []
     causes: list[str] = []
     turn_indices: list[int] = []
-    round_indices: list[int] = []
+    run_ids: list[str] = []
+    run_steps: list[int] = []
     id_fragments: list[str] = []
     token_predicates: list[TokenPredicate] = []
     errors_only = False
@@ -334,8 +341,10 @@ def parse_trace_query(raw: str) -> TraceQuery:
             causes.append(value_lower)
         elif field_name == "turn":
             _append_int(turn_indices, value)
-        elif field_name == "round":
-            _append_int(round_indices, value)
+        elif field_name == "run":
+            run_ids.append(value)
+        elif field_name == "step":
+            _append_int(run_steps, value)
         elif field_name == "id":
             id_fragments.append(value_lower)
         elif field_name in {"text", "q", "path"}:
@@ -352,7 +361,8 @@ def parse_trace_query(raw: str) -> TraceQuery:
         statuses=tuple(statuses),
         causes=tuple(causes),
         turn_indices=tuple(turn_indices),
-        round_indices=tuple(round_indices),
+        run_ids=tuple(run_ids),
+        run_steps=tuple(run_steps),
         id_fragments=tuple(id_fragments),
         errors_only=errors_only,
         token_predicates=tuple(token_predicates),
@@ -381,7 +391,11 @@ def trace_row_matches(row: TraceRow, query: TraceQuery) -> bool:
         return False
     if query.turn_indices and row.turn_index not in query.turn_indices:
         return False
-    if query.round_indices and row.round_index not in query.round_indices:
+    if query.run_ids and not any(
+        (row.run_id or "").lower().startswith(run_id) for run_id in query.run_ids
+    ):
+        return False
+    if query.run_steps and row.run_step not in query.run_steps:
         return False
     if query.errors_only and not row.is_error:
         return False
@@ -414,17 +428,10 @@ def build_trace_snapshot(
         cause = (
             type(record.outcome.cause).__name__ if isinstance(record, Turn) else None
         )
-        tool_names = tuple(
-            tool_record.call.name
-            for round_ in record.rounds
-            for tool_record in round_.tool_results
-        )
+        tool_names = tuple(tool_record.call.name for tool_record in record.tool_results)
         tool_calls = len(tool_names)
         tool_errors = sum(
-            1
-            for round_ in record.rounds
-            for tool_record in round_.tool_results
-            if tool_record.result.is_error
+            1 for tool_record in record.tool_results if tool_record.result.is_error
         )
         provider_error = (
             record.outcome.cause
@@ -437,8 +444,9 @@ def build_trace_snapshot(
             key=f"turn:{record.index}:{record.id}",
             turn_index=record.index,
             turn_id=record.id,
+            run_id=record.run_id,
+            run_step=record.run_step,
             status=status,
-            rounds=len(record.rounds),
             tool_calls=tool_calls,
             tool_errors=tool_errors,
             tool_names=tool_names,
@@ -469,7 +477,6 @@ def build_trace_snapshot(
                         "system",
                         title="SYSTEM",
                         content=system_prompt,
-                        cause=cause,
                     )
                 )
 
@@ -482,14 +489,13 @@ def build_trace_snapshot(
                     title=record.trigger.source.upper(),
                     content=trigger_text,
                     role="user" if isinstance(record.trigger, UserInput) else "control",
-                    cause=cause,
                 )
             )
 
-        for round_index, round_ in enumerate(record.rounds):
+        if record.response is not None:
             assistant_text: list[str] = []
             thinking_text: list[str] = []
-            for block in round_.response.content:
+            for block in record.response.content:
                 if isinstance(block, TextContent):
                     assistant_text.append(block.text)
                 elif isinstance(block, ThinkingBlock):
@@ -505,9 +511,7 @@ def build_trace_snapshot(
                                 "assistant",
                                 title="ASSISTANT",
                                 content="\n".join(assistant_text),
-                                round_index=round_index,
                                 role="assistant",
-                                cause=cause,
                             )
                         )
                         assistant_text = []
@@ -519,9 +523,7 @@ def build_trace_snapshot(
                                 "thinking",
                                 title="THINKING",
                                 content="\n".join(thinking_text),
-                                round_index=round_index,
                                 role="assistant",
-                                cause=cause,
                             )
                         )
                         thinking_text = []
@@ -536,10 +538,8 @@ def build_trace_snapshot(
                                 ensure_ascii=False,
                                 indent=2,
                             ),
-                            round_index=round_index,
                             role="assistant",
                             tool_name=block.name,
-                            cause=cause,
                             metadata={
                                 "tool_call_id": block.id,
                                 "arguments": dict(block.arguments),
@@ -555,9 +555,7 @@ def build_trace_snapshot(
                         "thinking",
                         title="THINKING",
                         content="\n".join(thinking_text),
-                        round_index=round_index,
                         role="assistant",
-                        cause=cause,
                     )
                 )
             if assistant_text:
@@ -568,31 +566,27 @@ def build_trace_snapshot(
                         "assistant",
                         title="ASSISTANT",
                         content="\n".join(assistant_text),
-                        round_index=round_index,
                         role="assistant",
-                        cause=cause,
                     )
                 )
 
-            for tool_record in round_.tool_results:
-                rows.append(
-                    _row(
-                        record,
-                        status,
-                        "tool_result",
-                        title=f"RESULT {tool_record.call.name}",
-                        content=_tool_result_text(tool_record.result.content),
-                        round_index=round_index,
-                        role="tool_result",
-                        tool_name=tool_record.call.name,
-                        is_error=tool_record.result.is_error,
-                        cause=cause,
-                        metadata={
-                            "tool_call_id": tool_record.call.id,
-                            "backgrounded": tool_record.backgrounded,
-                        },
-                    )
+        for tool_record in record.tool_results:
+            rows.append(
+                _row(
+                    record,
+                    status,
+                    "tool_result",
+                    title=f"RESULT {tool_record.call.name}",
+                    content=_tool_result_text(tool_record.result.content),
+                    role="tool_result",
+                    tool_name=tool_record.call.name,
+                    is_error=tool_record.result.is_error,
+                    metadata={
+                        "tool_call_id": tool_record.call.id,
+                        "backgrounded": tool_record.backgrounded,
+                    },
                 )
+            )
 
         if isinstance(record, Turn):
             content = f"committed: {cause}"
@@ -790,7 +784,6 @@ def _row(
     *,
     title: str,
     content: str,
-    round_index: int | None = None,
     role: str | None = None,
     tool_name: str | None = None,
     is_error: bool = False,
@@ -799,13 +792,14 @@ def _row(
 ) -> TraceRow:
     preview = _preview(content)
     return TraceRow(
-        key=f"{record.index}:{round_index if round_index is not None else '-'}:{kind}:{len(content)}:{title}",
+        key=f"{record.index}:{kind}:{len(content)}:{title}",
         kind=kind,
         title=title,
         preview=preview,
         content=content,
         turn_index=record.index,
-        round_index=round_index,
+        run_id=record.run_id,
+        run_step=record.run_step,
         status=status,
         role=role,
         tool_name=tool_name,
@@ -830,7 +824,8 @@ def _with_message_indices(rows: Sequence[TraceRow]) -> tuple[TraceRow, ...]:
                 preview=row.preview,
                 content=row.content,
                 turn_index=row.turn_index,
-                round_index=row.round_index,
+                run_id=row.run_id,
+                run_step=row.run_step,
                 message_index=index,
                 status=row.status,
                 role=row.role,
@@ -877,6 +872,8 @@ def _compute_metrics(
 
 
 def _trigger_text(record: Turn | TurnCheckpoint) -> str:
+    if isinstance(record.trigger, ContinueTrigger):
+        return ""
     if isinstance(record.trigger, UserInput):
         parts: list[str] = []
         for block in record.trigger.content:

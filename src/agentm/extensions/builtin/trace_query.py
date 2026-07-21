@@ -74,12 +74,14 @@ def _load_parent_turns(api: AtomAPI) -> list[Turn] | None:
 
 def _turn_summary(turn: Turn) -> dict[str, object]:
     tool_names: list[str] = []
-    for rnd in turn.rounds:
-        for block in rnd.response.content:
+    if turn.response is not None:
+        for block in turn.response.content:
             if isinstance(block, ToolCallBlock):
                 tool_names.append(block.name)
     return {
         "turn_index": turn.index,
+        "run_id": turn.run_id,
+        "run_step": turn.run_step,
         "tool_calls": tool_names,
         "input_tokens": turn.meta.total_input_tokens,
         "output_tokens": turn.meta.total_output_tokens,
@@ -89,25 +91,27 @@ def _turn_summary(turn: Turn) -> dict[str, object]:
 def _message_records(turns: list[Turn]) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for turn in turns:
-        for rnd in turn.rounds:
-            records.append(_assistant_record(rnd.response, turn.index))
-            for tr in rnd.tool_results:
-                records.append(
-                    {
-                        "role": "tool_result",
-                        "turn_index": turn.index,
-                        "blocks": [
-                            {"text": c.text if isinstance(c, TextContent) else str(c)}
-                            for c in (tr.result.content if tr.result else [])
-                        ],
-                        "is_error": tr.result.is_error if tr.result else False,
-                        "tool_name": tr.call.name,
-                    }
-                )
+        if turn.response is not None:
+            records.append(_assistant_record(turn.response, turn))
+        for tr in turn.tool_results:
+            records.append(
+                {
+                    "role": "tool_result",
+                    "turn_index": turn.index,
+                    "run_id": turn.run_id,
+                    "run_step": turn.run_step,
+                    "blocks": [
+                        {"text": c.text if isinstance(c, TextContent) else str(c)}
+                        for c in (tr.result.content if tr.result else [])
+                    ],
+                    "is_error": tr.result.is_error if tr.result else False,
+                    "tool_name": tr.call.name,
+                }
+            )
     return records
 
 
-def _assistant_record(msg: AssistantMessage, turn_index: int) -> dict[str, object]:
+def _assistant_record(msg: AssistantMessage, turn: Turn) -> dict[str, object]:
     blocks: list[dict[str, object]] = []
     for block in msg.content:
         if isinstance(block, TextContent):
@@ -120,27 +124,35 @@ def _assistant_record(msg: AssistantMessage, turn_index: int) -> dict[str, objec
                     "arguments": block.arguments,
                 }
             )
-    return {"role": "assistant", "turn_index": turn_index, "blocks": blocks}
+    return {
+        "role": "assistant",
+        "turn_index": turn.index,
+        "run_id": turn.run_id,
+        "run_step": turn.run_step,
+        "blocks": blocks,
+    }
 
 
 def _tool_call_records(turns: list[Turn]) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for turn in turns:
-        for rnd in turn.rounds:
-            for tr in rnd.tool_results:
-                result_text = ""
-                if tr.result:
-                    for c in tr.result.content:
-                        if isinstance(c, TextContent):
-                            result_text += c.text
-                records.append(
-                    {
-                        "tool": tr.call.name,
-                        "args": tr.call.arguments,
-                        "result_preview": result_text[:500],
-                        "is_error": tr.result.is_error if tr.result else False,
-                    }
-                )
+        for tr in turn.tool_results:
+            result_text = ""
+            if tr.result:
+                for c in tr.result.content:
+                    if isinstance(c, TextContent):
+                        result_text += c.text
+            records.append(
+                {
+                    "turn_index": turn.index,
+                    "run_id": turn.run_id,
+                    "run_step": turn.run_step,
+                    "tool": tr.call.name,
+                    "args": tr.call.arguments,
+                    "result_preview": result_text[:500],
+                    "is_error": tr.result.is_error if tr.result else False,
+                }
+            )
     return records
 
 
@@ -244,7 +256,8 @@ class _TraceQueryRuntime:
                 ", ".join(tool_calls) if isinstance(tool_calls, list) else ""
             ) or "—"
             lines.append(
-                f"  [{s['turn_index']}] tools=[{tool_str}] "
+                f"  [{s['turn_index']}] run={str(s['run_id'])[:8]} "
+                f"step={s['run_step']} tools=[{tool_str}] "
                 f"in={s['input_tokens']} out={s['output_tokens']}"
             )
         return text_result("\n".join(lines))

@@ -36,6 +36,7 @@ from agentm_harbor.external_agent import (
     SCENARIO,
     ExternalAgentMAgent,
     _load_scenario,
+    _provision_remote_toolbox,
 )
 from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
 from agentm_harbor.human_interrupt import HumanInterruptServer
@@ -303,6 +304,46 @@ def _model() -> Model:
     )
 
 
+def test_harbor_scenario_configures_policy_repository_scan() -> None:
+    spec = _load_scenario(SCENARIO)
+    policy = next(
+        extension
+        for extension in spec.extensions
+        if extension.module_path == "policy_engine"
+    )
+
+    assert dict(policy.config) == {
+        "ifg_realtime": True,
+        "ifg_repository_scan": True,
+        "ifg_repository_search_roots": ("/repo",),
+    }
+
+
+@pytest.mark.asyncio
+async def test_harbor_setup_provisions_remote_toolbox_dependencies() -> None:
+    class SetupEnvironment:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+
+        async def exec(
+            self,
+            command: str,
+            cwd: str | None = None,
+            timeout_sec: int | None = None,
+        ) -> HarborExecResult:
+            assert cwd == "/"
+            assert timeout_sec == 300
+            self.commands.append(command)
+            return HarborExecResult(stdout="", stderr="", return_code=0)
+
+    environment = SetupEnvironment()
+    await _provision_remote_toolbox(environment)  # type: ignore[arg-type]
+
+    assert len(environment.commands) == 1
+    assert "command -v ast-grep" in environment.commands[0]
+    assert "ast-grep-cli==0.44.1" in environment.commands[0]
+
+
 @pytest.mark.asyncio
 async def test_harbor_operations_honor_stdin_cwd_and_cancellation(
     tmp_path: Path,
@@ -491,6 +532,5 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
     assert len(sessions) == 1
     _, turns = store.load(sessions[0].id)
     assert len(turns) == 1
-    assert "harbor-provider-completed" in _texts(
-        (turns[0].rounds[0].response,),
-    )
+    assert turns[0].response is not None
+    assert "harbor-provider-completed" in _texts((turns[0].response,))

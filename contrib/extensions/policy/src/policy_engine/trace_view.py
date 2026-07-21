@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import shlex
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -16,7 +14,14 @@ from pathlib import Path
 from loguru import logger
 from sqlalchemy.engine import Connection, RowMapping
 
-from policy_engine.bash_parser import BashRedirect, BashSegment, parse_bash_segments
+from policy_engine.ifg.schema import IFG_EXTRACTOR_VERSION
+from policy_engine.paths import default_policy_db_path, resolve_policy_db_path
+from policy_engine.source_parser import (
+    BashRedirect,
+    BashSegment,
+    parse_bash_segments,
+)
+from policy_engine.source_semantics import analyze_bash_segment
 
 from agentm.presenter.trajectory import (
     TraceQuery,
@@ -43,6 +48,23 @@ _POLICY_TABLES = (
     "policy_session_summary",
     "policy_eval_error",
 )
+_IFG_TABLES = (
+    "ifg_normalized_tool_events",
+    "ifg_actions",
+    "ifg_files",
+    "ifg_action_file_edges",
+    "ifg_source_units",
+    "ifg_path_candidates",
+    "ifg_symbol_mentions",
+    "ifg_symbols",
+    "ifg_action_symbol_edges",
+    "ifg_file_symbol_edges",
+    "ifg_symbol_symbol_edges",
+    "ifg_nodes",
+    "ifg_edges",
+    "ifg_extraction_error",
+    "ifg_session_summary",
+)
 
 _SUMMARY_CATEGORIES = frozenset({"summary"})
 _EFFECT_CATEGORIES = frozenset({"effects"})
@@ -52,6 +74,10 @@ _FILE_STREAM_CATEGORIES = frozenset({"file_stream"})
 _FILE_TOOL_STREAM_CATEGORIES = frozenset({"file_tool_stream"})
 _BASH_FILE_STREAM_CATEGORIES = frozenset({"bash_file_stream"})
 _BASH_COMMAND_CATEGORIES = frozenset({"bash_commands"})
+_IFG_ACTION_CATEGORIES = frozenset({"ifg_actions"})
+_IFG_SOURCE_UNIT_CATEGORIES = frozenset({"ifg_source_units"})
+_IFG_FILE_CATEGORIES = frozenset({"ifg_files"})
+_IFG_SYMBOL_CATEGORIES = frozenset({"ifg_symbols"})
 _ENTITY_CATEGORIES = frozenset({"entities"})
 _ERROR_CATEGORIES = frozenset({"errors"})
 
@@ -96,30 +122,47 @@ _BASH_COMMAND_COLUMNS = (
     TraceTableColumn("last_turn", "Last", max_width=7),
     TraceTableColumn("example", "Example", max_width=72),
 )
+_IFG_ACTION_COLUMNS = (
+    TraceTableColumn("location", "Loc", max_width=8),
+    TraceTableColumn("action_kind", "Action", max_width=10),
+    TraceTableColumn("family", "Family", max_width=10),
+    TraceTableColumn("command", "Command", max_width=14),
+    TraceTableColumn("template", "Template", max_width=82),
+    TraceTableColumn("confidence", "Conf", max_width=7),
+    TraceTableColumn("source", "Source", max_width=22),
+    TraceTableColumn("tool", "Tool", max_width=14),
+)
+_IFG_FILE_COLUMNS = (
+    TraceTableColumn("location", "Loc", max_width=8),
+    TraceTableColumn("name", "File", max_width=38),
+    TraceTableColumn("reads", "Reads", max_width=6),
+    TraceTableColumn("writes", "Writes", max_width=6),
+    TraceTableColumn("refs", "Refs", max_width=5),
+    TraceTableColumn("evidence", "Evidence", max_width=9),
+    TraceTableColumn("existence", "Exists", max_width=11),
+    TraceTableColumn("confidence", "Conf", max_width=5),
+)
+_IFG_SOURCE_UNIT_COLUMNS = (
+    TraceTableColumn("location", "Loc", max_width=8),
+    TraceTableColumn("source_kind", "Kind", max_width=18),
+    TraceTableColumn("relation", "Rel", max_width=8),
+    TraceTableColumn("path", "Path", max_width=58),
+    TraceTableColumn("origin", "Origin", max_width=16),
+    TraceTableColumn("content_state", "State", max_width=18),
+    TraceTableColumn("preview", "Preview", max_width=72),
+)
+_IFG_SYMBOL_COLUMNS = (
+    TraceTableColumn("location", "Loc", max_width=8),
+    TraceTableColumn("symbol_kind", "Kind", max_width=10),
+    TraceTableColumn("name", "Symbol", max_width=24),
+    TraceTableColumn("file", "File", max_width=34),
+    TraceTableColumn("validation_state", "Valid", max_width=11),
+    TraceTableColumn("confidence", "Conf", max_width=6),
+    TraceTableColumn("observations", "Obs", max_width=4),
+)
 
-_HEREDOC_RE = re.compile(
-    r"<<-?\s*(?:(?P<quote>['\"])(?P<quoted>[^'\"]+)(?P=quote)|(?P<bare>[A-Za-z0-9_./-]+))"
-)
-_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "|&", "\n"})
-_SHELL_REDIRECTS = frozenset(
-    {">", ">>", "<", "<<", "<<-", "<<<", "<>", ">|", "&>", "&>>"}
-)
-_FILE_READER_COMMANDS = frozenset({"awk", "cat", "head", "nl", "sed", "tail", "wc"})
-_FILE_QUERY_COMMANDS = frozenset(
-    {"ack", "ag", "fd", "find", "grep", "ls", "locate", "rg", "tree"}
-)
-_GIT_QUERY_SUBCOMMANDS = frozenset(
-    {"check-ignore", "diff", "grep", "log", "ls-files", "show", "status"}
-)
-_FILE_WRITER_COMMANDS = frozenset(
-    {"cp", "mkdir", "mv", "perl", "rm", "sed", "tee", "touch", "truncate"}
-)
 _STRUCTURED_FILE_TOOL_NAMES = frozenset({"read", "write", "edit"})
-_SUBCOMMAND_TOOLS = frozenset({"git", "npm", "npx", "pnpm", "yarn"})
-_CONTROL_COMMANDS = frozenset({"cd", "echo", "pwd", "readlink", "which"})
 _IDENTIFIER_RE = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]{2,}\b")
-_HEX_TOKEN_RE = re.compile(r"[0-9a-fA-F]{7,64}")
-_NUMERIC_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +209,8 @@ class PolicyTraceViewProvider:
     """Register policy projection rows into the shared trace viewer."""
 
     db_path: Path | None = None
+    cwd: Path | None = None
+    ifg_extractor_version: str = IFG_EXTRACTOR_VERSION
 
     def trace_view_specs(self) -> Sequence[TraceViewSpec]:
         return (
@@ -184,119 +229,67 @@ class PolicyTraceViewProvider:
             ),
             TraceViewSpec(
                 id="policy-effects",
-                title="Policy Effects",
+                title="Effects",
                 description="Persisted policy rule firings.",
                 shortcut="",
                 build=lambda snapshot, query: self._build_view(
                     "policy-effects",
-                    "Policy Effects",
+                    "Effects",
                     snapshot,
                     query,
                     categories=_EFFECT_CATEGORIES,
                 ),
             ),
             TraceViewSpec(
-                id="policy-tools",
-                title="Policy Tools",
-                description="Raw and processed tool observations seen by policy.",
+                id="policy-ifg-actions",
+                title="Actions",
+                description="Information-flow actions extracted from tool events.",
                 shortcut="",
                 build=lambda snapshot, query: self._build_view(
-                    "policy-tools",
-                    "Policy Tools",
+                    "policy-ifg-actions",
+                    "Actions",
                     snapshot,
                     query,
-                    categories=_TOOL_CATEGORIES,
+                    categories=_IFG_ACTION_CATEGORIES,
                 ),
             ),
             TraceViewSpec(
-                id="policy-files",
-                title="Policy Files",
-                description="Per-file read/write history.",
+                id="policy-ifg-source-units",
+                title="Source Units",
+                description="Source fragments linking tool I/O to code symbols.",
                 shortcut="",
                 build=lambda snapshot, query: self._build_view(
-                    "policy-files",
-                    "Policy Files",
+                    "policy-ifg-source-units",
+                    "Source Units",
                     snapshot,
                     query,
-                    categories=_FILE_CATEGORIES,
+                    categories=_IFG_SOURCE_UNIT_CATEGORIES,
                 ),
             ),
             TraceViewSpec(
-                id="policy-file-tool-stream",
-                title="File Tool Stream",
-                description="Direct read/write/edit file-tool stream.",
+                id="policy-ifg-files",
+                title="Files",
+                description="Information-flow file nodes and relation counts.",
                 shortcut="",
                 build=lambda snapshot, query: self._build_view(
-                    "policy-file-tool-stream",
-                    "File Tool Stream",
+                    "policy-ifg-files",
+                    "Files",
                     snapshot,
                     query,
-                    categories=_FILE_TOOL_STREAM_CATEGORIES,
+                    categories=_IFG_FILE_CATEGORIES,
                 ),
             ),
             TraceViewSpec(
-                id="policy-bash-commands",
-                title="Bash Commands",
-                description="Bash command templates clustered from token sequences.",
+                id="policy-ifg-symbols",
+                title="Symbols",
+                description="Code symbols and unresolved symbol mentions in the IFG.",
                 shortcut="",
                 build=lambda snapshot, query: self._build_view(
-                    "policy-bash-commands",
-                    "Bash Commands",
+                    "policy-ifg-symbols",
+                    "Symbols",
                     snapshot,
                     query,
-                    categories=_BASH_COMMAND_CATEGORIES,
-                ),
-            ),
-            TraceViewSpec(
-                id="policy-bash-file-stream",
-                title="Bash File Stream",
-                description="Bash-derived file operations and references.",
-                shortcut="",
-                build=lambda snapshot, query: self._build_view(
-                    "policy-bash-file-stream",
-                    "Bash File Stream",
-                    snapshot,
-                    query,
-                    categories=_BASH_FILE_STREAM_CATEGORIES,
-                ),
-            ),
-            TraceViewSpec(
-                id="policy-file-stream",
-                title="File Stream",
-                description="Chronological structured file-tool event stream.",
-                shortcut="",
-                build=lambda snapshot, query: self._build_view(
-                    "policy-file-stream",
-                    "File Stream",
-                    snapshot,
-                    query,
-                    categories=_FILE_STREAM_CATEGORIES,
-                ),
-            ),
-            TraceViewSpec(
-                id="policy-entities",
-                title="Policy Entities",
-                description="Entity/evidence state extracted by policy.",
-                shortcut="",
-                build=lambda snapshot, query: self._build_view(
-                    "policy-entities",
-                    "Policy Entities",
-                    snapshot,
-                    query,
-                    categories=_ENTITY_CATEGORIES,
-                ),
-            ),
-            TraceViewSpec(
-                id="policy-errors",
-                title="Policy Errors",
-                description="Policy evaluation errors.",
-                shortcut="",
-                build=lambda snapshot, query: self._build_view(
-                    "policy-errors",
-                    "Policy Errors",
-                    snapshot,
-                    query,
-                    categories=_ERROR_CATEGORIES,
+                    categories=_IFG_SYMBOL_CATEGORIES,
                 ),
             ),
         )
@@ -310,11 +303,15 @@ class PolicyTraceViewProvider:
         *,
         categories: frozenset[str],
     ) -> TraceView:
-        db_path = self.db_path or default_policy_db_path()
+        db_path = self.db_path or resolve_policy_db_path(
+            session_id=snapshot.session_id,
+            cwd=self.cwd,
+        )
         rows = load_policy_trace_rows(
             db_path,
             snapshot.session_id,
             categories=categories,
+            ifg_extractor_version=self.ifg_extractor_version,
         )
         filtered = filter_trace_rows(rows, query)
         return TraceView(
@@ -340,13 +337,27 @@ def _columns_for_categories(
         return _BASH_FILE_STREAM_COLUMNS
     if categories == _BASH_COMMAND_CATEGORIES:
         return _BASH_COMMAND_COLUMNS
+    if categories == _IFG_ACTION_CATEGORIES:
+        return _IFG_ACTION_COLUMNS
+    if categories == _IFG_SOURCE_UNIT_CATEGORIES:
+        return _IFG_SOURCE_UNIT_COLUMNS
+    if categories == _IFG_FILE_CATEGORIES:
+        return _IFG_FILE_COLUMNS
+    if categories == _IFG_SYMBOL_CATEGORIES:
+        return _IFG_SYMBOL_COLUMNS
     return ()
 
 
-def build_policy_trace_view_registry(db_path: Path | None = None) -> TraceViewRegistry:
+def build_policy_trace_view_registry(
+    db_path: Path | None = None,
+    *,
+    cwd: Path | None = None,
+) -> TraceViewRegistry:
     """Build AgentM's shared trajectory app registry with policy tabs."""
 
-    return build_trace_view_registry((PolicyTraceViewProvider(db_path=db_path),))
+    return build_trace_view_registry(
+        (PolicyTraceViewProvider(db_path=db_path, cwd=cwd),)
+    )
 
 
 def run_policy_trace_viewer(
@@ -354,6 +365,7 @@ def run_policy_trace_viewer(
     session_id: str,
     *,
     db_path: Path | None = None,
+    cwd: Path | None = None,
     follow: bool = False,
 ) -> None:
     """Run AgentM's shared Textual trace viewer with policy projection tabs."""
@@ -362,13 +374,8 @@ def run_policy_trace_viewer(
         query,
         session_id,
         follow=follow,
-        registry=build_policy_trace_view_registry(db_path),
+        registry=build_policy_trace_view_registry(db_path, cwd=cwd),
     )
-
-
-def default_policy_db_path() -> Path:
-    agentm_home = os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm"))
-    return Path(agentm_home) / "policy_state" / "policy.db"
 
 
 def load_policy_trace_rows(
@@ -376,6 +383,7 @@ def load_policy_trace_rows(
     session_id: str,
     *,
     categories: frozenset[str],
+    ifg_extractor_version: str = IFG_EXTRACTOR_VERSION,
 ) -> tuple[TraceRow, ...]:
     if not db_path.exists():
         return (
@@ -396,7 +404,7 @@ def load_policy_trace_rows(
     try:
         with engine.connect() as conn:
             existing = _existing_tables(conn)
-            if not existing.intersection(_POLICY_TABLES):
+            if not existing.intersection((*_POLICY_TABLES, *_IFG_TABLES)):
                 return (
                     _diagnostic_row(
                         session_id,
@@ -405,10 +413,24 @@ def load_policy_trace_rows(
                         content=f"No policy projection tables were found in {db_path}",
                     ),
                 )
-            counts = _session_counts(conn, session_id, existing)
+            counts = _session_counts(
+                conn,
+                session_id,
+                existing,
+                ifg_extractor_version=ifg_extractor_version,
+            )
             rows: list[TraceRow] = []
             if "summary" in categories:
-                rows.extend(_summary_rows(conn, session_id, db_path, existing, counts))
+                rows.extend(
+                    _summary_rows(
+                        conn,
+                        session_id,
+                        db_path,
+                        existing,
+                        counts,
+                        ifg_extractor_version=ifg_extractor_version,
+                    )
+                )
             if "effects" in categories and "event_log" in existing:
                 rows.extend(_effect_rows(conn, session_id))
             if "tools" in categories and "policy_tool_events" in existing:
@@ -445,6 +467,16 @@ def load_policy_trace_rows(
                 )
             if "bash_commands" in categories and "policy_tool_events" in existing:
                 rows.extend(_bash_command_rows(conn, session_id))
+            if "ifg_actions" in categories and "ifg_actions" in existing:
+                rows.extend(_ifg_action_rows(conn, session_id, ifg_extractor_version))
+            if "ifg_source_units" in categories and "ifg_source_units" in existing:
+                rows.extend(
+                    _ifg_source_unit_rows(conn, session_id, ifg_extractor_version)
+                )
+            if "ifg_files" in categories and "ifg_files" in existing:
+                rows.extend(_ifg_file_rows(conn, session_id, ifg_extractor_version))
+            if "ifg_symbols" in categories and "ifg_symbols" in existing:
+                rows.extend(_ifg_symbol_rows(conn, session_id, ifg_extractor_version))
             if "entities" in categories and "policy_entity_state" in existing:
                 rows.extend(_entity_rows(conn, session_id))
             if "errors" in categories and "policy_eval_error" in existing:
@@ -480,6 +512,8 @@ def _summary_rows(
     db_path: Path,
     existing: set[str],
     counts: Mapping[str, int],
+    *,
+    ifg_extractor_version: str,
 ) -> list[TraceRow]:
     rows = [
         TraceRow(
@@ -491,10 +525,15 @@ def _summary_rows(
                 {
                     "session_id": session_id,
                     "db_path": str(db_path),
+                    "ifg_extractor_version": ifg_extractor_version,
                     "counts": dict(counts),
                 }
             ),
-            metadata={"category": "summary", "db_path": str(db_path)},
+            metadata={
+                "category": "summary",
+                "db_path": str(db_path),
+                "ifg_extractor_version": ifg_extractor_version,
+            },
         )
     ]
 
@@ -524,6 +563,39 @@ def _summary_rows(
                         }
                     ),
                     metadata={"category": "summary"},
+                )
+            )
+
+    if "ifg_session_summary" in existing:
+        row = _row(
+            conn,
+            """
+            SELECT updated_at, summary_json
+            FROM ifg_session_summary
+            WHERE session_id = ? AND extractor_version = ?
+            """,
+            (session_id, ifg_extractor_version),
+        )
+        if row is not None:
+            summary = _loads(row["summary_json"])
+            rows.append(
+                TraceRow(
+                    key=f"policy:summary:ifg:{session_id}:{ifg_extractor_version}",
+                    kind="policy",
+                    title="IFG Model Summary",
+                    preview=_json_preview(summary),
+                    content=_json_content(
+                        {
+                            "session_id": session_id,
+                            "extractor_version": ifg_extractor_version,
+                            "updated_at": row["updated_at"],
+                            "summary": summary,
+                        }
+                    ),
+                    metadata={
+                        "category": "summary",
+                        "extractor_version": ifg_extractor_version,
+                    },
                 )
             )
 
@@ -854,7 +926,7 @@ def _file_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
         reads = sum(1 for event in history if event.event.operation == "read")
         writes = sum(1 for event in history if event.event.operation == "write")
         refs = sum(1 for event in history if event.event.operation == "reference")
-        latest = history[-1]
+        latest_event = history[-1]
         state = f"r:{reads} w:{writes} ref:{refs} ev:{len(history)}"
         latest_label = _latest_file_event(history)
         content_signals = _file_content_signals(history)
@@ -872,7 +944,7 @@ def _file_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
                     "content_signals": content_signals,
                 }
             ),
-            turn_index=latest.event.turn,
+            turn_index=latest_event.event.turn,
             cause=state,
             metadata={
                 "category": "file",
@@ -1020,6 +1092,362 @@ def _bash_command_rows(conn: Connection, session_id: str) -> Iterable[TraceRow]:
         )
 
 
+def _ifg_action_rows(
+    conn: Connection,
+    session_id: str,
+    extractor_version: str,
+) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
+        """
+        SELECT *
+        FROM ifg_actions
+        WHERE session_id = ? AND extractor_version = ?
+        ORDER BY turn ASC, event_id ASC, segment_index ASC, action_id ASC
+        """,
+        (session_id, extractor_version),
+    ):
+        raw_evidence = _loads(row["raw_evidence_json"])
+        template = row["template"] or row["command"] or row["action_kind"]
+        yield TraceRow(
+            key=f"ifg:action:{row['action_id']}",
+            kind="policy",
+            title=str(template),
+            preview=(
+                f"{row['action_kind']} {row['confidence']} {row['source']} "
+                f"tool:{row['tool_name']}"
+            ),
+            content=_json_content(
+                {
+                    "session_id": row["session_id"],
+                    "action_id": row["action_id"],
+                    "turn": row["turn"],
+                    "event_id": row["event_id"],
+                    "tool_call_id": row["tool_call_id"],
+                    "tool_name": row["tool_name"],
+                    "segment_index": row["segment_index"],
+                    "command": row["command"],
+                    "action_kind": row["action_kind"],
+                    "family": row["family"],
+                    "template": row["template"],
+                    "source": row["source"],
+                    "confidence": row["confidence"],
+                    "extractor_version": row["extractor_version"],
+                    "raw_evidence": raw_evidence,
+                }
+            ),
+            turn_index=row["turn"],
+            tool_name=row["tool_name"],
+            display_name=str(template),
+            cause=row["action_kind"],
+            metadata={
+                "category": "ifg_action",
+                "action_kind": row["action_kind"],
+                "family": row["family"],
+                "command": row["command"] or "",
+                "template": row["template"] or "",
+                "confidence": row["confidence"],
+                "source": row["source"],
+                "tool": row["tool_name"],
+                "extractor_version": row["extractor_version"],
+            },
+        )
+
+
+def _ifg_source_unit_rows(
+    conn: Connection,
+    session_id: str,
+    extractor_version: str,
+) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
+        """
+        SELECT *
+        FROM ifg_source_units
+        WHERE session_id = ? AND extractor_version = ?
+        ORDER BY turn ASC, event_id ASC, kind ASC, source_unit_id ASC
+        """,
+        (session_id, extractor_version),
+    ):
+        metadata = _loads(row["metadata_json"])
+        raw_evidence = _loads(row["raw_evidence_json"])
+        line_range = _loads(row["line_range_json"])
+        span = _loads(row["span_json"])
+        text = row["content_text"] or ""
+        path = row["path"] or ""
+        target = path or row["origin"]
+        preview = (
+            f"{row['kind']} {row['relation']} {target} {_single_line(text, limit=140)}"
+        ).strip()
+        confidence = (
+            metadata.get("confidence", "") if isinstance(metadata, Mapping) else ""
+        )
+        yield TraceRow(
+            key=f"ifg:source-unit:{row['source_unit_id']}",
+            kind="policy",
+            title=f"{row['kind']} {target}",
+            preview=preview,
+            content=_json_content(
+                {
+                    "session_id": row["session_id"],
+                    "source_unit_id": row["source_unit_id"],
+                    "action_id": row["action_id"],
+                    "turn": row["turn"],
+                    "event_id": row["event_id"],
+                    "tool_name": row["tool_name"],
+                    "kind": row["kind"],
+                    "origin": row["origin"],
+                    "path": row["path"],
+                    "relation": row["relation"],
+                    "language": row["language"],
+                    "content_hash": row["content_hash"],
+                    "previous_content_hash": row["previous_content_hash"],
+                    "result_content_hash": row["result_content_hash"],
+                    "unit_hash": row["unit_hash"],
+                    "content_state": row["content_state"],
+                    "line_range": line_range,
+                    "span": span,
+                    "content_text": row["content_text"],
+                    "extractor_version": row["extractor_version"],
+                    "metadata": metadata,
+                    "raw_evidence": raw_evidence,
+                }
+            ),
+            turn_index=row["turn"],
+            tool_name=row["tool_name"],
+            display_name=str(target),
+            cause=row["relation"],
+            metadata={
+                "category": "ifg_source_unit",
+                "kind": row["kind"],
+                "source_kind": row["kind"],
+                "origin": row["origin"],
+                "relation": row["relation"],
+                "path": path,
+                "state": row["content_state"],
+                "content_state": row["content_state"],
+                "confidence": str(confidence),
+                "preview": _single_line(text, limit=240),
+                "extractor_version": row["extractor_version"],
+            },
+        )
+
+
+def _ifg_file_rows(
+    conn: Connection,
+    session_id: str,
+    extractor_version: str,
+) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
+        """
+        SELECT *
+        FROM ifg_files
+        WHERE session_id = ? AND extractor_version = ?
+        ORDER BY last_seen_turn DESC, observation_count DESC, path ASC
+        """,
+        (session_id, extractor_version),
+    ):
+        metadata = _loads(row["metadata_json"])
+        raw_evidence = _loads(row["raw_evidence_json"])
+        relation_counts = (
+            metadata.get("relation_counts", {}) if isinstance(metadata, Mapping) else {}
+        )
+        if not isinstance(relation_counts, Mapping):
+            relation_counts = {}
+        reads = _count_relations(relation_counts, "read")
+        writes = sum(
+            _count_relations(relation_counts, relation)
+            for relation in ("write", "edit", "delete")
+        )
+        refs = _count_relations(relation_counts, "reference")
+        anchor_count = _coerce_int(metadata.get("anchor_count")) or 0
+        resolved_count = _coerce_int(metadata.get("resolved_candidate_count")) or 0
+        evidence = f"{anchor_count}A+{resolved_count}R"
+        existence_counts = metadata.get("existence_counts")
+        existence = _ifg_existence_label(existence_counts)
+        display_path = _path_tail(row["path"], parts=3)
+        history = _ifg_file_history(
+            conn, session_id, row["path"], row["extractor_version"]
+        )
+        preview = (
+            f"r:{reads} w:{writes} ref:{refs} "
+            f"obs:{row['observation_count']} last:T{row['last_seen_turn']}"
+        )
+        yield TraceRow(
+            key=f"ifg:file:{row['extractor_version']}:{row['path']}",
+            kind="policy",
+            title=row["path"],
+            preview=preview,
+            content=_json_content(
+                {
+                    "session_id": row["session_id"],
+                    "path": row["path"],
+                    "first_seen_turn": row["first_seen_turn"],
+                    "last_seen_turn": row["last_seen_turn"],
+                    "observation_count": row["observation_count"],
+                    "source": row["source"],
+                    "confidence": row["confidence"],
+                    "extractor_version": row["extractor_version"],
+                    "metadata": metadata,
+                    "raw_evidence": raw_evidence,
+                    "history": history,
+                }
+            ),
+            turn_index=row["last_seen_turn"],
+            display_name=display_path,
+            cause=preview,
+            metadata={
+                "category": "ifg_file",
+                "name": display_path,
+                "path": row["path"],
+                "reads": reads,
+                "writes": writes,
+                "refs": refs,
+                "evidence": evidence,
+                "existence": existence,
+                "confidence": row["confidence"],
+                "preview": preview,
+                "extractor_version": row["extractor_version"],
+            },
+        )
+
+
+def _ifg_symbol_rows(
+    conn: Connection,
+    session_id: str,
+    extractor_version: str,
+) -> Iterable[TraceRow]:
+    for row in _rows(
+        conn,
+        """
+        SELECT *
+        FROM ifg_symbols
+        WHERE session_id = ? AND extractor_version = ?
+        ORDER BY last_seen_turn DESC, kind ASC, qualified_name ASC, symbol_id ASC
+        """,
+        (session_id, extractor_version),
+    ):
+        metadata = _loads(row["metadata_json"])
+        raw_evidence = _loads(row["raw_evidence_json"])
+        path = row["path"] or ""
+        validation = metadata.get("validation", "unavailable")
+        preview = (
+            f"{row['kind']} {row['qualified_name']} {path} "
+            f"obs:{row['observation_count']}"
+        ).strip()
+        yield TraceRow(
+            key=f"ifg:symbol:{row['symbol_id']}",
+            kind="policy",
+            title=row["qualified_name"],
+            preview=preview,
+            content=_json_content(
+                {
+                    "session_id": row["session_id"],
+                    "symbol_id": row["symbol_id"],
+                    "kind": row["kind"],
+                    "qualified_name": row["qualified_name"],
+                    "path": row["path"],
+                    "stable_key": row["stable_key"],
+                    "first_seen_turn": row["first_seen_turn"],
+                    "last_seen_turn": row["last_seen_turn"],
+                    "observation_count": row["observation_count"],
+                    "source": row["source"],
+                    "confidence": row["confidence"],
+                    "extractor_version": row["extractor_version"],
+                    "metadata": metadata,
+                    "raw_evidence": raw_evidence,
+                }
+            ),
+            turn_index=row["last_seen_turn"],
+            display_name=row["qualified_name"],
+            cause=row["kind"],
+            metadata={
+                "category": "ifg_symbol",
+                "kind": row["kind"],
+                "symbol_kind": row["kind"],
+                "name": row["qualified_name"],
+                "path": path,
+                "file": Path(path).name if path else "-",
+                "source": row["source"],
+                "validation": validation,
+                "validation_state": (
+                    "repo"
+                    if validation == "repository_present"
+                    else "observed"
+                    if validation == "trajectory_observed"
+                    else "unavailable"
+                ),
+                "confidence": row["confidence"],
+                "observations": row["observation_count"],
+                "preview": preview,
+                "extractor_version": row["extractor_version"],
+            },
+        )
+
+
+def _ifg_file_history(
+    conn: Connection,
+    session_id: str,
+    path: str,
+    extractor_version: str,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "turn": row["turn"],
+            "event_id": row["event_id"],
+            "relation": row["relation"],
+            "source": row["source"],
+            "confidence": row["confidence"],
+            "action_id": row["action_id"],
+            "action_kind": row["action_kind"],
+            "command": row["command"],
+            "template": row["template"],
+            "tool_name": row["tool_name"],
+        }
+        for row in _rows(
+            conn,
+            """
+            SELECT e.*, a.action_kind, a.command, a.template, a.tool_name
+            FROM ifg_action_file_edges e
+            LEFT JOIN ifg_actions a ON a.action_id = e.action_id
+            WHERE e.session_id = ?
+              AND e.path = ?
+              AND e.extractor_version = ?
+            ORDER BY e.turn ASC, e.event_id ASC, e.edge_id ASC
+            LIMIT 200
+            """,
+            (session_id, path, extractor_version),
+        )
+    ]
+
+
+def _count_relations(relation_counts: Mapping[object, object], relation: str) -> int:
+    value = relation_counts.get(relation)
+    return _coerce_int(value) or 0
+
+
+def _ifg_existence_label(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return "unknown"
+    states = {str(key) for key in value}
+    if "present_now" in states:
+        return "repo"
+    observed = bool(states & {"observed_at_event", "present_after_event"})
+    if observed and "unknown" in states:
+        return "observed+?"
+    if observed:
+        return "observed"
+    return "unknown"
+
+
+def _path_tail(path: str, *, parts: int) -> str:
+    path_parts = Path(path).parts
+    if len(path_parts) <= parts:
+        return path
+    return "/".join(path_parts[-parts:])
+
+
 def _preferred_bash_tool_rows(
     conn: Connection,
     session_id: str,
@@ -1062,7 +1490,8 @@ def _bash_command_segments(row: RowMapping) -> Iterable[dict[str, object]]:
         command = list(segment.argv)
         if not command:
             continue
-        template_tokens = _bash_segment_template_tokens(segment)
+        analysis = analyze_bash_segment(segment)
+        template_tokens = analysis.template_tokens
         command_text = _bash_segment_text(segment)
         segments.append(
             {
@@ -1071,11 +1500,13 @@ def _bash_command_segments(row: RowMapping) -> Iterable[dict[str, object]]:
                 "phase": row["phase"],
                 "tool_call_id": row["tool_call_id"],
                 "command_index": index,
-                "command": _command_name(command),
-                "family": _bash_segment_family(segment),
+                "command": analysis.command,
+                "family": analysis.family,
+                "action_kind": analysis.action_kind,
+                "confidence": analysis.confidence,
                 "tokens": list(command),
                 "template_tokens": list(template_tokens),
-                "template": " ".join(template_tokens),
+                "template": analysis.template,
                 "command_text": command_text,
                 "full_command": _single_line(cmd, limit=600),
                 "parser": segment.parser,
@@ -1341,12 +1772,14 @@ def _file_operation(
         return "read"
     if tool_name in {"edit", "write"}:
         return "write"
-    if source == "cmd.redirect.write":
+    if source in {"cmd.write", "cmd.redirect.write"}:
         return "write"
-    if source in {"cmd.reader", "cmd.redirect.read"}:
+    if source in {"cmd.read", "cmd.reader", "cmd.redirect.read"}:
         return "read"
     if source == "cmd.query":
         return "query"
+    if source in {"cmd.edit", "cmd.delete"}:
+        return "write"
     if source == "cmd.known":
         return _bash_file_operation(_command_text(args))
     return "reference"
@@ -1354,7 +1787,8 @@ def _file_operation(
 
 def _bash_file_operation(cmd: str) -> str:
     categories = [
-        _bash_segment_category(segment) for segment in parse_bash_segments(cmd)
+        analyze_bash_segment(segment).action_kind
+        for segment in parse_bash_segments(cmd)
     ]
     if "write" in categories:
         return "write"
@@ -1399,7 +1833,15 @@ def _file_evidence_label(event: _FileEvent, source: str) -> str:
     if "cmd.query" in source_parts:
         return "query"
     if source_parts.intersection(
-        {"cmd.reader", "cmd.redirect.read", "cmd.redirect.write"}
+        {
+            "cmd.read",
+            "cmd.reader",
+            "cmd.write",
+            "cmd.edit",
+            "cmd.delete",
+            "cmd.redirect.read",
+            "cmd.redirect.write",
+        }
     ):
         return "shell-op"
     return "reference"
@@ -1519,18 +1961,20 @@ def _paths_from_command(
     candidates: list[tuple[str, str]] = []
 
     for segment in parse_bash_segments(cmd):
+        analysis = analyze_bash_segment(segment)
         command = segment.argv
-        command_category = _bash_segment_category(segment)
         candidates.extend(
             _known_paths_from_tokens(
                 command,
                 known_paths,
-                source=_known_path_source_for_command(command_category),
+                source=_known_path_source_for_command(analysis.action_kind),
             )
         )
-        candidates.extend(_redirect_paths_from_segment(segment))
-        candidates.extend(_reader_paths_from_command(command))
-        candidates.extend(_query_paths_from_command(command))
+        candidates.extend(
+            (ref.path, ref.source)
+            for ref in analysis.path_refs
+            if ref.path_kind == "file"
+        )
 
     seen: set[tuple[str, str]] = set()
     result: list[tuple[str, str]] = []
@@ -1546,175 +1990,10 @@ def _paths_from_command(
     return result
 
 
-def _strip_heredoc_bodies(cmd: str) -> str:
-    lines = cmd.splitlines()
-    if not lines:
-        return cmd
-
-    kept: list[str] = []
-    markers: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if markers:
-            if stripped == markers[0]:
-                markers.pop(0)
-            continue
-
-        kept.append(line)
-        for match in _HEREDOC_RE.finditer(line):
-            marker = match.group("quoted") or match.group("bare")
-            if marker:
-                markers.append(marker)
-    return "\n".join(kept)
-
-
-def _shell_tokens(cmd: str) -> list[str]:
-    try:
-        lexer = shlex.shlex(
-            cmd.replace("\n", " ; "), posix=True, punctuation_chars=True
-        )
-        lexer.whitespace_split = True
-        return list(lexer)
-    except ValueError:
-        return cmd.split()
-
-
-def _shell_commands(tokens: Sequence[str]) -> Iterable[list[str]]:
-    command: list[str] = []
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            if command:
-                yield command
-                command = []
-            continue
-        command.append(token)
-    if command:
-        yield command
-
-
-def _bash_segment_template_tokens(segment: BashSegment) -> tuple[str, ...]:
-    tokens = list(_bash_command_template_tokens(segment.argv))
-    for redirect in segment.redirects:
-        operator = redirect.operator
-        if redirect.descriptor:
-            operator = f"{redirect.descriptor}{operator}"
-        if operator:
-            tokens.append(operator)
-        if redirect.kind == "heredoc":
-            tokens.append("<heredoc>")
-        elif redirect.destination:
-            tokens.append(_normalized_bash_template_token(redirect.destination))
-    return tuple(tokens)
-
-
 def _bash_segment_text(segment: BashSegment) -> str:
     if not segment.redirects or segment.parser == "shlex-fallback":
         return segment.text
     return " ".join([segment.text, *(redirect.text for redirect in segment.redirects)])
-
-
-def _bash_command_template_tokens(command: Sequence[str]) -> tuple[str, ...]:
-    pattern_indexes = _bash_pattern_token_indexes(command)
-    return tuple(
-        _bash_template_token(command, index, pattern_indexes)
-        for index in range(len(command))
-    )
-
-
-def _bash_pattern_token_indexes(command: Sequence[str]) -> set[int]:
-    name = _command_name(command)
-    if name == "timeout":
-        inner_index = _timeout_inner_index(command)
-        inner_indexes = _bash_pattern_token_indexes(command[inner_index:])
-        return {inner_index + index for index in inner_indexes}
-    indexes: set[int] = set()
-    if name in {"grep", "rg", "ag", "ack", "fd"} or _is_git_query(command):
-        operands = _query_operand_indexes(command)
-        if operands:
-            indexes.add(operands[0])
-    if name == "find":
-        for index, token in enumerate(command[:-1]):
-            if token in {"-name", "-path", "-regex", "-wholename"}:
-                indexes.add(index + 1)
-    return indexes
-
-
-def _bash_template_token(
-    command: Sequence[str],
-    index: int,
-    pattern_indexes: set[int],
-) -> str:
-    token = command[index]
-    if index in pattern_indexes:
-        return "<pattern>"
-    if _preserve_bash_template_token(command, index):
-        return _normalize_flag_assignment(token)
-    return _normalized_bash_template_token(token)
-
-
-def _preserve_bash_template_token(command: Sequence[str], index: int) -> bool:
-    token = command[index]
-    name = _command_name(command)
-    if index == 0 or token in _SHELL_REDIRECTS:
-        return True
-    if token.startswith("-") and "=" not in token:
-        return True
-    if name in _SUBCOMMAND_TOOLS and index == 1 and not token.startswith("-"):
-        return True
-    if name == "timeout":
-        inner_index = _timeout_inner_index(command)
-        if index == inner_index:
-            return True
-        if inner_index < len(command):
-            inner_name = _command_name(command[inner_index:])
-            if inner_name in _SUBCOMMAND_TOOLS and index in {
-                inner_index + 1,
-                inner_index + 2,
-            }:
-                return not token.startswith("-")
-    return False
-
-
-def _normalize_flag_assignment(token: str) -> str:
-    if token.startswith("-") and "=" in token:
-        key, value = token.split("=", 1)
-        return f"{key}={_normalized_bash_template_token(value)}"
-    return token
-
-
-def _normalized_bash_template_token(token: str) -> str:
-    if not token:
-        return "<arg>"
-    if _NUMERIC_TOKEN_RE.fullmatch(token):
-        return "<num>"
-    if _HEX_TOKEN_RE.fullmatch(token):
-        return "<hash>"
-    if _is_probable_shell_path(token):
-        return "<path>"
-    if _looks_like_glob_or_pattern(token):
-        return "<pattern>"
-    if any(ch.isspace() for ch in token) or len(token) > 80:
-        return "<arg>"
-    if any(ch in token for ch in "{}()[],:"):
-        return "<arg>"
-    return token
-
-
-def _looks_like_glob_or_pattern(token: str) -> bool:
-    return any(char in token for char in "*?[]")
-
-
-def _query_operand_indexes(command: Sequence[str]) -> list[int]:
-    indexes: list[int] = []
-    after_options = False
-    for index, token in enumerate(command[1:], start=1):
-        if token == "--":
-            after_options = True
-            continue
-        if not after_options and token.startswith("-"):
-            continue
-        indexes.append(index)
-    return indexes
 
 
 def _known_paths_from_tokens(
@@ -1758,215 +2037,6 @@ def _known_path_variants(path: str) -> Iterable[str]:
         parts = [part for part in clean.split("/") if part]
         variants.extend("/".join(parts[index:]) for index in range(1, len(parts) - 1))
     return variants
-
-
-def _redirect_paths_from_segment(segment: BashSegment) -> Iterable[tuple[str, str]]:
-    paths: list[tuple[str, str]] = []
-    for redirect in segment.redirects:
-        if redirect.kind != "file":
-            continue
-        if redirect.operator in {"<", "<>"}:
-            source = "cmd.redirect.read"
-        elif redirect.operator in {">", ">>", ">|", "&>", "&>>"}:
-            source = "cmd.redirect.write"
-        else:
-            continue
-        if _is_probable_shell_path(redirect.destination):
-            paths.append((redirect.destination, source))
-    return paths
-
-
-def _redirect_paths_from_command(command: Sequence[str]) -> Iterable[tuple[str, str]]:
-    paths: list[tuple[str, str]] = []
-    for index, token in enumerate(command[:-1]):
-        if token not in _SHELL_REDIRECTS:
-            continue
-        target = command[index + 1]
-        if token in {"<", "<>"}:
-            source = "cmd.redirect.read"
-        elif token in {"<<", "<<-", "<<<"}:
-            continue
-        else:
-            source = "cmd.redirect.write"
-        if _is_probable_shell_path(target):
-            paths.append((target, source))
-    return paths
-
-
-def _reader_paths_from_command(command: Sequence[str]) -> Iterable[tuple[str, str]]:
-    if not command:
-        return ()
-    if _bash_command_category(command) != "read":
-        return ()
-
-    paths: list[tuple[str, str]] = []
-    skip_next = False
-    for token in command[1:]:
-        if skip_next:
-            skip_next = False
-            continue
-        if token in _SHELL_REDIRECTS:
-            skip_next = token not in {"<<", "<<-", "<<<"}
-            continue
-        if token.startswith("-"):
-            continue
-        if _is_probable_shell_path(token):
-            paths.append((token, "cmd.reader"))
-    return paths
-
-
-def _query_paths_from_command(command: Sequence[str]) -> Iterable[tuple[str, str]]:
-    if _bash_command_category(command) != "query":
-        return ()
-    name = _command_name(command)
-    if name == "find":
-        return _find_query_paths(command)
-    if name in {"ls", "tree"}:
-        return _all_path_operands(command[1:], "cmd.query")
-    operands = _query_operands(command)
-    if name in {"grep", "rg", "ag", "ack", "fd"} or _is_git_query(command):
-        operands = operands[1:]
-    return _all_path_operands(operands, "cmd.query")
-
-
-def _query_operands(command: Sequence[str]) -> list[str]:
-    return [command[index] for index in _query_operand_indexes(command)]
-
-
-def _find_query_paths(command: Sequence[str]) -> Iterable[tuple[str, str]]:
-    paths: list[tuple[str, str]] = []
-    for token in command[1:]:
-        if token in {"!", "(", ")"} or token.startswith("-"):
-            break
-        if _is_probable_shell_path(token):
-            paths.append((token, "cmd.query"))
-    return paths
-
-
-def _all_path_operands(
-    operands: Iterable[str],
-    source: str,
-) -> Iterable[tuple[str, str]]:
-    paths: list[tuple[str, str]] = []
-    for token in operands:
-        if token.startswith("-"):
-            continue
-        if _is_probable_shell_path(token):
-            paths.append((token, source))
-    return paths
-
-
-def _bash_segment_category(segment: BashSegment) -> str:
-    if _segment_has_write_redirect(segment):
-        return "write"
-    return _bash_command_category(segment.argv)
-
-
-def _segment_has_write_redirect(segment: BashSegment) -> bool:
-    for redirect in segment.redirects:
-        if redirect.kind != "file" or redirect.operator not in {
-            ">",
-            ">>",
-            "<>",
-            ">|",
-            "&>",
-            "&>>",
-        }:
-            continue
-        if redirect.descriptor == "2":
-            continue
-        if _is_virtual_filesystem_path(_clean_path(redirect.destination) or ""):
-            continue
-        return True
-    return False
-
-
-def _bash_command_category(command: Sequence[str]) -> str:
-    name = _command_name(command)
-    if not name:
-        return "reference"
-    if _has_write_redirect(command):
-        return "write"
-    if name == "timeout":
-        return _bash_command_category(_timeout_inner_command(command))
-    if _is_git_query(command) or name in _FILE_QUERY_COMMANDS:
-        return "query"
-    if name == "sed" and any(token.startswith("-i") for token in command[1:]):
-        return "write"
-    if name == "perl" and any(
-        "i" in token for token in command[1:] if token.startswith("-")
-    ):
-        return "write"
-    if name in _FILE_READER_COMMANDS:
-        return "read"
-    if name in _FILE_WRITER_COMMANDS:
-        return "write"
-    if name == "xargs" and any(
-        _command_name((token,)) in _FILE_QUERY_COMMANDS for token in command[1:]
-    ):
-        return "query"
-    return "reference"
-
-
-def _bash_segment_family(segment: BashSegment) -> str:
-    category = _bash_segment_category(segment)
-    if category != "reference":
-        return category
-    name = _command_name(segment.argv)
-    if name in _CONTROL_COMMANDS:
-        return "control"
-    if name:
-        return "exec"
-    return "unknown"
-
-
-def _has_write_redirect(command: Sequence[str]) -> bool:
-    for index, token in enumerate(command[:-1]):
-        if token in {">", ">>", "<>", ">|", "&>", "&>>"}:
-            if index > 0 and command[index - 1] == "2":
-                continue
-            if _is_virtual_filesystem_path(_clean_path(command[index + 1]) or ""):
-                continue
-            return True
-    return False
-
-
-def _bash_command_family(command: Sequence[str]) -> str:
-    category = _bash_command_category(command)
-    if category != "reference":
-        return category
-    name = _command_name(command)
-    if name in _CONTROL_COMMANDS:
-        return "control"
-    if name:
-        return "exec"
-    return "unknown"
-
-
-def _timeout_inner_command(command: Sequence[str]) -> Sequence[str]:
-    return command[_timeout_inner_index(command) :]
-
-
-def _timeout_inner_index(command: Sequence[str]) -> int:
-    for index, token in enumerate(command[1:], start=1):
-        if token.startswith("-") or token.replace(".", "", 1).isdigit():
-            continue
-        return index
-    return len(command)
-
-
-def _is_git_query(command: Sequence[str]) -> bool:
-    return (
-        len(command) > 1
-        and _command_name(command) == "git"
-        and command[1] in _GIT_QUERY_SUBCOMMANDS
-    )
-
-
-def _command_name(command: Sequence[str]) -> str:
-    if not command:
-        return ""
-    return Path(command[0]).name
 
 
 def _is_probable_shell_path(value: object) -> bool:
@@ -2115,6 +2185,22 @@ def _empty_category_row(
     elif categories == _BASH_COMMAND_CATEGORIES:
         title = "No Policy Bash Commands"
         preview = "No bash command templates could be derived for this session."
+    elif categories == _IFG_ACTION_CATEGORIES:
+        title = "No IFG Actions"
+        preview = "No persisted IFG actions for this session."
+        hint = f"Run policy_engine ifg backfill --session {session_id}."
+    elif categories == _IFG_SOURCE_UNIT_CATEGORIES:
+        title = "No IFG Source Units"
+        preview = "No persisted IFG source units for this session."
+        hint = f"Run policy_engine ifg backfill --session {session_id}."
+    elif categories == _IFG_FILE_CATEGORIES:
+        title = "No IFG Files"
+        preview = "No persisted IFG file nodes for this session."
+        hint = f"Run policy_engine ifg backfill --session {session_id}."
+    elif categories == _IFG_SYMBOL_CATEGORIES:
+        title = "No IFG Symbols"
+        preview = "No persisted IFG symbols for this session."
+        hint = f"Run policy_engine ifg backfill --session {session_id}."
     elif categories == _ENTITY_CATEGORIES:
         title = "No Policy Entity State"
         preview = "No persisted policy entity state for this session."
@@ -2148,17 +2234,27 @@ def _session_counts(
     conn: Connection,
     session_id: str,
     existing: set[str],
+    *,
+    ifg_extractor_version: str,
 ) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for table in _POLICY_TABLES:
+    for table in (*_POLICY_TABLES, *_IFG_TABLES):
         if table not in existing:
             counts[table] = 0
             continue
-        row = _row(
-            conn,
-            f"SELECT COUNT(*) AS count FROM {table} WHERE session_id = ?",  # noqa: S608
-            (session_id,),
-        )
+        if table in _IFG_TABLES:
+            row = _row(
+                conn,
+                f"SELECT COUNT(*) AS count FROM {table} "  # noqa: S608
+                "WHERE session_id = ? AND extractor_version = ?",
+                (session_id, ifg_extractor_version),
+            )
+        else:
+            row = _row(
+                conn,
+                f"SELECT COUNT(*) AS count FROM {table} WHERE session_id = ?",  # noqa: S608
+                (session_id,),
+            )
         counts[table] = int(row["count"]) if row is not None else 0
     return counts
 
@@ -2197,6 +2293,11 @@ def _counts_preview(counts: Mapping[str, int]) -> str:
         f"files:{counts.get('policy_file_state', 0)}",
         f"entities:{counts.get('policy_entity_state', 0)}",
         f"errors:{counts.get('policy_eval_error', 0)}",
+        f"ifg-actions:{counts.get('ifg_actions', 0)}",
+        f"source-units:{counts.get('ifg_source_units', 0)}",
+        f"path-candidates:{counts.get('ifg_path_candidates', 0)}",
+        f"ifg-files:{counts.get('ifg_files', 0)}",
+        f"symbols:{counts.get('ifg_symbols', 0)}",
     ]
     return " ".join(parts)
 

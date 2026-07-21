@@ -1,4 +1,4 @@
-"""v2 event taxonomy — frozen dataclasses for bus dispatch.
+"""Event taxonomy for frozen bus-dispatch DTOs.
 
 All events are frozen.  Handlers express intent through return values:
 
@@ -58,6 +58,8 @@ class TurnBeginEvent(Event):
     index: int = 0
     turn_index: int = 0
     turn_id: str = ""
+    run_id: str = ""
+    run_step: int = 0
     trigger: Trigger | None = None
 
 
@@ -167,13 +169,13 @@ class DecideEvent(Event):
 
 @dataclass(frozen=True, slots=True)
 class BeforeRunEvent(Event):
-    """Fired before the ReAct loop starts.
+    """Fired when an external trigger starts a PromptRun.
 
     Handlers return ``{"veto": TerminationCause}`` to abort, or
     ``{"messages": [...]}`` / ``{"system": "..."}`` to override.
-    ``system`` override persists across all rounds; ``messages``
-    override applies to round 0 only (subsequent rounds rebuild
-    context from trajectory + policies).
+    ``system`` persists across continuation Turns; ``messages`` applies only
+    to the initial Turn because later Turns rebuild context from committed
+    trajectory state and policies.
     """
 
     CHANNEL: ClassVar[str] = "before_run"

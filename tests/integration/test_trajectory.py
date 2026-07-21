@@ -1,4 +1,4 @@
-"""Integration tests for the v2 trajectory model.
+"""Integration tests for the trajectory model.
 
 Tests the full session driver loop with a mock LLM provider, verifying
 turn lifecycle, tool execution, event bus dispatch, context policies,
@@ -57,6 +57,7 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.termination import (
     BudgetExhausted,
+    PromptRunContinued,
     MaxTurnsExhausted,
     ModelEndTurn,
     ProviderRequestFailed,
@@ -75,10 +76,10 @@ from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.abi.store import SessionMeta, TrajectoryCommit, TrajectoryStore
 from agentm.core.abi.trajectory import (
     Outcome,
-    Round,
     ToolRecord,
     TrajectoryHead,
     Turn,
+    TurnCheckpoint,
     TurnMeta,
 )
 from agentm.core.abi.trigger import (
@@ -247,20 +248,9 @@ class EventCollector:
         return h
 
 
-async def _wait_turn(session: Session, *, timeout: float = 5.0) -> None:
-    """Wait for the current driver run to commit a turn and stop."""
-    ev = asyncio.Event()
-
-    def _on_commit(_: Any) -> None:
-        ev.set()
-
-    unsub = session.bus.on(TurnCommittedEvent.CHANNEL, _on_commit)
-    try:
-        await asyncio.wait_for(ev.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
-    finally:
-        unsub()
+async def _wait_run(session: Session, *, timeout: float = 5.0) -> None:
+    """Wait until the accepted prompt run and all of its Turns finish."""
+    assert await session.idle(timeout=timeout)
 
 
 def _make_add_tool() -> FunctionTool:
@@ -309,25 +299,24 @@ async def test_single_turn_text() -> None:
     )
     session.start()
     await session.prompt("hi")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert len(session.trajectory) == 1
     turn = session.trajectory.turns[0]
     assert turn.id
     assert turn.timestamp > 0
-    assert len(turn.rounds) == 1
     assert turn.outcome.cause is not None
     assert isinstance(turn.outcome.cause, ModelEndTurn)
     assert isinstance(turn.trigger, UserInput)
     assert turn.meta.model_id == "mock-model"
-    rnd = turn.rounds[0]
-    assert isinstance(rnd.response.content[0], TextContent)
-    assert rnd.response.content[0].text == "hello"
+    assert turn.response is not None
+    assert isinstance(turn.response.content[0], TextContent)
+    assert turn.response.content[0].text == "hello"
 
 
 @pytest.mark.asyncio
-async def test_multi_round_tool_call() -> None:
+async def test_prompt_run_commits_tool_and_answer_as_separate_turns() -> None:
     mock = MockStreamFn()
     mock.enqueue(
         tool_call_response("add", "call-1", {"a": 2, "b": 3}),
@@ -343,20 +332,21 @@ async def test_multi_round_tool_call() -> None:
     )
     session.start()
     await session.prompt("add 2 and 3")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
-    turn = session.trajectory.turns[0]
-    assert len(turn.rounds) == 2
-    rnd0 = turn.rounds[0]
-    assert len(rnd0.tool_results) == 1
-    tr = rnd0.tool_results[0]
+    assert len(session.trajectory) == 2
+    tool_turn, answer_turn = session.trajectory.turns
+    assert isinstance(tool_turn.outcome.cause, PromptRunContinued)
+    assert tool_turn.run_id == answer_turn.run_id
+    assert (tool_turn.run_step, answer_turn.run_step) == (0, 1)
+    assert len(tool_turn.tool_results) == 1
+    tr = tool_turn.tool_results[0]
     assert tr.call.name == "add"
     assert not tr.result.is_error
     assert any("5" in c.text for c in tr.result.content if isinstance(c, TextContent))
-    rnd1 = turn.rounds[1]
-    assert len(rnd1.tool_results) == 0
+    assert not answer_turn.tool_results
+    assert isinstance(answer_turn.outcome.cause, ModelEndTurn)
 
 
 @pytest.mark.asyncio
@@ -373,7 +363,7 @@ async def test_tool_terminate() -> None:
     )
     session.start()
     await session.prompt("finish")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert len(session.trajectory) == 1
@@ -473,17 +463,17 @@ async def test_cross_atom_services() -> None:
     )
     session.start()
     await session.prompt("increment then report")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert counter["value"] == 1
     assert services.get("counter") is counter
 
-    assert len(session.trajectory) == 1
-    turn = session.trajectory.turns[0]
-    assert len(turn.rounds) == 3
-    # Round 1: report tool result should contain "1"
-    tr_report = turn.rounds[1].tool_results[0]
+    assert len(session.trajectory) == 3
+    assert {turn.run_id for turn in session.trajectory.turns} == {
+        session.trajectory.turns[0].run_id
+    }
+    tr_report = session.trajectory.turns[1].tool_results[0]
     assert "1" in tr_report.result.content[0].text  # type: ignore[union-attr]
 
 
@@ -529,7 +519,7 @@ async def test_context_policy() -> None:
 
     session.start()
     await session.prompt("hi")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert bind_called["called"]
@@ -559,7 +549,7 @@ async def test_event_coverage() -> None:
     collector = EventCollector(session.bus)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert len(collector.events[TurnBeginEvent.CHANNEL]) >= 1
@@ -619,7 +609,7 @@ async def test_store_persistence() -> None:
     )
     session.start()
     await session.prompt("one")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     # Create a new session for the second turn
@@ -638,7 +628,7 @@ async def test_store_persistence() -> None:
     # Session reuses ID but store already has it, so we don't re-create
     session2.start()
     await session2.prompt("two")
-    await _wait_turn(session2)
+    await _wait_run(session2)
     await session2.shutdown()
 
     meta, turns = store.load(session.id)
@@ -671,7 +661,7 @@ async def test_session_resume() -> None:
     )
     session.start()
     await session.prompt("first")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert len(session.trajectory) == 1
@@ -691,12 +681,14 @@ async def test_session_resume() -> None:
 
     # Trajectory was loaded from store
     assert len(resumed.trajectory) == 1
-    assert resumed.trajectory.turns[0].rounds[0].response.content[0].text == "turn-1"  # type: ignore[union-attr]
+    first_response = resumed.trajectory.turns[0].response
+    assert first_response is not None
+    assert first_response.content[0].text == "turn-1"  # type: ignore[union-attr]
     assert resumed.ctx.session_id == session.id
 
     resumed.start()
     await resumed.prompt("second")
-    await _wait_turn(resumed)
+    await _wait_run(resumed)
     await resumed.shutdown()
     assert len(resumed.trajectory) == 2
     assert resumed.trajectory.turns[1].index == 1
@@ -717,7 +709,7 @@ async def test_resume_rejects_unversioned_session_metadata() -> None:
     )
     session.start()
     await session.prompt("first")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     legacy_store = InMemoryTrajectoryStore()
@@ -750,8 +742,11 @@ def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
     turn = Turn(
         index=0,
         id="turn-0",
+        run_id="run-0",
+        run_step=0,
         trigger=UserInput(content=(TextContent(type="text", text="one"),)),
-        rounds=(Round(response=text_response("done")),),
+        response=text_response("done"),
+        tool_results=(),
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=1.0,
     )
@@ -764,8 +759,11 @@ def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
     next_turn = Turn(
         index=1,
         id="turn-1",
+        run_id="run-1",
+        run_step=0,
         trigger=UserInput(content=(TextContent(type="text", text="two"),)),
-        rounds=(Round(response=text_response("done again")),),
+        response=text_response("done again"),
+        tool_results=(),
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=2.0,
     )
@@ -785,8 +783,11 @@ def test_jsonl_create_with_turns_has_no_partial_session(tmp_path: Path) -> None:
     bad_turn = Turn(
         index=1,
         id="bad",
+        run_id="bad-run",
+        run_step=0,
         trigger=ContinueTrigger(),
-        rounds=(),
+        response=None,
+        tool_results=(),
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=0.0,
     )
@@ -799,21 +800,82 @@ def test_jsonl_create_with_turns_has_no_partial_session(tmp_path: Path) -> None:
     assert not store.session_exists(meta.id)
 
 
+def test_store_rejects_invalid_prompt_run_sequences() -> None:
+    trigger = UserInput(content=(TextContent(type="text", text="start"),))
+    invalid_first = Turn(
+        index=0,
+        id="invalid-first",
+        run_id="run-a",
+        run_step=1,
+        trigger=trigger,
+        response=text_response("done"),
+        tool_results=(),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=1.0,
+    )
+    store = InMemoryTrajectoryStore()
+    with pytest.raises(ValueError, match="run_step 0"):
+        store.create_session(
+            SessionMeta(id="invalid-run-start"),
+            turns=(invalid_first,),
+            head=_empty_head("invalid-run-start"),
+        )
+
+    terminal = Turn(
+        index=0,
+        id="terminal",
+        run_id="run-b",
+        run_step=0,
+        trigger=trigger,
+        response=text_response("done"),
+        tool_results=(),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=1.0,
+    )
+    store.create_session(
+        SessionMeta(id="invalid-run-continuation"),
+        turns=(terminal,),
+        head=_empty_head("invalid-run-continuation"),
+    )
+    invalid_continuation = Turn(
+        index=1,
+        id="invalid-continuation",
+        run_id=terminal.run_id,
+        run_step=1,
+        trigger=ContinueTrigger(),
+        response=text_response("late"),
+        tool_results=(),
+        outcome=Outcome(cause=ModelEndTurn()),
+        timestamp=2.0,
+    )
+    with pytest.raises(ValueError, match="terminal Turn"):
+        store.commit_turn(
+            "invalid-run-continuation",
+            TrajectoryCommit(invalid_continuation, (), None),
+        )
+
+
 def test_trajectory_query_store_adapter_filters_sessions_and_turns() -> None:
     store = InMemoryTrajectoryStore()
     root_turn = Turn(
         index=0,
         id="root-turn",
+        run_id="root-run",
+        run_step=0,
         trigger=UserInput(content=(TextContent(type="text", text="root"),)),
-        rounds=(Round(response=text_response("root done")),),
+        response=text_response("root done"),
+        tool_results=(),
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=1.0,
     )
     child_turn = Turn(
         index=0,
         id="child-turn",
+        run_id="child-run",
+        run_step=0,
         trigger=UserInput(content=(TextContent(type="text", text="child"),)),
-        rounds=(Round(response=text_response("child done")),),
+        response=text_response("child done"),
+        tool_results=(),
         outcome=Outcome(cause=ModelEndTurn()),
         timestamp=2.0,
     )
@@ -906,7 +968,7 @@ async def test_spawn_inheritance() -> None:
     parent.services.register("test_svc", {"data": 42})
     parent.start()
     await parent.prompt("go")
-    await _wait_turn(parent)
+    await _wait_run(parent)
 
     child = await parent.spawn(purpose="child-task")
 
@@ -945,7 +1007,7 @@ async def test_fork_lifecycle() -> None:
     )
     session.start()
     await session.prompt("first")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     mock2 = MockStreamFn()
@@ -962,7 +1024,7 @@ async def test_fork_lifecycle() -> None:
     )
     session2.start()
     await session2.prompt("second")
-    await _wait_turn(session2)
+    await _wait_run(session2)
     await session2.shutdown()
 
     assert len(session.trajectory) >= 1
@@ -1038,23 +1100,23 @@ async def test_inject_inline() -> None:
     session.bus.on(DecideEvent.CHANNEL, decide_handler)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
-    turn = session.trajectory.turns[0]
-    assert len(turn.rounds) == 2
+    assert len(session.trajectory) == 2
+    first_turn, final_turn = session.trajectory.turns
+    assert isinstance(first_turn.outcome.cause, PromptRunContinued)
+    assert first_turn.outcome.injected == (inject_msg,)
     live_messages = list(mock.calls[1]["messages"])
     cold_messages = build_context_sync(session.trajectory.turns)
     assert cold_messages[:-1] == live_messages
-    assert cold_messages[-1] == turn.rounds[-1].response
+    assert cold_messages[-1] == final_turn.response
 
 
 @pytest.mark.asyncio
 async def test_signal_abort() -> None:
     mock = MockStreamFn()
-    # Use a tool call to get a multi-round turn. The signal set during
-    # round 1 is caught at the top of round 2.
+    # Interrupting from the tool result aborts that model/tool transaction.
     mock.enqueue(
         tool_call_response("add", "sa1", {"a": 1, "b": 1}),
         text_response("should not reach"),
@@ -1074,7 +1136,7 @@ async def test_signal_abort() -> None:
     session.bus.on(ToolResultEvent.CHANNEL, on_result)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     turns = session.trajectory.turns
@@ -1082,6 +1144,77 @@ async def test_signal_abort() -> None:
     turn = turns[0]
     assert turn.outcome.cause is not None
     assert isinstance(turn.outcome.cause, SignalAborted)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_only_aborts_active_continuation_turn() -> None:
+    class ToolThenWaitStream:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.continuation_started = asyncio.Event()
+
+        async def __call__(
+            self,
+            *,
+            messages: Any,
+            model: Any,
+            tools: Any,
+            system: Any = None,
+            signal: Any = None,
+            thinking: Any = "off",
+        ) -> AsyncIterator[MessageEnd]:
+            del messages, model, tools, system, thinking
+            self.calls += 1
+            if self.calls == 1:
+                yield MessageEnd(
+                    message=tool_call_response(
+                        "add",
+                        "committed-call",
+                        {"a": 1, "b": 2},
+                    )
+                )
+                return
+            if signal is None:
+                raise AssertionError("runtime did not pass a cancellation signal")
+            self.continuation_started.set()
+            await signal.wait()
+            raise RuntimeError("provider request cancelled")
+
+    stream = ToolThenWaitStream()
+    store = InMemoryTrajectoryStore()
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=stream,
+            model=make_model(),
+            system="test",
+            tools=[_make_add_tool()],
+            store=store,
+        )
+    )
+    session.start()
+    receipt = await session.prompt("go")
+    try:
+        await asyncio.wait_for(stream.continuation_started.wait(), timeout=2.0)
+        assert len(session.trajectory.turns) == 1
+        assert isinstance(session.trajectory.turns[0].outcome.cause, PromptRunContinued)
+
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(receipt.wait(), timeout=2.0)
+        await _wait_run(session)
+    finally:
+        await session.shutdown()
+
+    first, interrupted = session.trajectory.turns
+    assert first.run_id == interrupted.run_id
+    assert (first.run_step, interrupted.run_step) == (0, 1)
+    assert isinstance(first.outcome.cause, PromptRunContinued)
+    assert isinstance(interrupted.outcome.cause, SignalAborted)
+    _, stored_turns = store.load(session.id)
+    assert [type(turn.outcome.cause) for turn in stored_turns] == [
+        PromptRunContinued,
+        SignalAborted,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1098,7 +1231,7 @@ async def test_before_run_veto() -> None:
     session.bus.on(BeforeRunEvent.CHANNEL, veto_handler)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert len(session.trajectory) == 1
@@ -1147,12 +1280,12 @@ async def test_tool_call_blocked() -> None:
     session.bus.on(ToolCallEvent.CHANNEL, block_handler)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert not tool_executed["called"]
     turn = session.trajectory.turns[0]
-    tr = turn.rounds[0].tool_results[0]
+    tr = turn.tool_results[0]
     assert tr.result.is_error
     assert "blocked" in tr.result.content[0].text  # type: ignore[union-attr]
 
@@ -1201,11 +1334,11 @@ async def test_tool_result_replaced() -> None:
     session.bus.on(DecideEvent.CHANNEL, observe_decision)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     turn = session.trajectory.turns[0]
-    tr = turn.rounds[0].tool_results[0]
+    tr = turn.tool_results[0]
     assert tr.result.content[0].text == "replaced"  # type: ignore[union-attr]
     assert isinstance(tr.result.extras, Mapping)
     assert "agentm_runtime" in tr.result.extras
@@ -1360,13 +1493,11 @@ def test_codec_round_trip() -> None:
     turn = Turn(
         index=0,
         id="turn-abc",
+        run_id="run-abc",
+        run_step=0,
         trigger=trigger,
-        rounds=(
-            Round(
-                response=response,
-                tool_results=(ToolRecord(call=tool_call, result=tool_result),),
-            ),
-        ),
+        response=response,
+        tool_results=(ToolRecord(call=tool_call, result=tool_result),),
         outcome=outcome,
         timestamp=1234.0,
         meta=meta,
@@ -1384,15 +1515,17 @@ def test_codec_round_trip() -> None:
     assert restored.meta.model_id == "mock-model"
     assert restored.meta.resource_mutations == meta.resource_mutations
     assert isinstance(restored.trigger, UserInput)
-    assert len(restored.rounds) == 1
-    assert restored.rounds[0].response.content[0].text == "response text"  # type: ignore[union-attr]
-    restored_tool_result = restored.rounds[0].tool_results[0].result
+    assert restored.run_id == "run-abc"
+    assert restored.run_step == 0
+    assert restored.response is not None
+    assert restored.response.content[0].text == "response text"  # type: ignore[union-attr]
+    restored_tool_result = restored.tool_results[0].result
     assert isinstance(restored_tool_result.extras, Mapping)
     assert restored_tool_result.extras["exit_code"] == 0
     restored_runtime = restored_tool_result.extras["agentm_runtime"]
     assert isinstance(restored_runtime, Mapping)
     assert restored_runtime["duration_ms"] == 12
-    opaque = restored.rounds[0].response.content[1]
+    opaque = restored.response.content[1]
     assert isinstance(opaque, OpaqueThinkingBlock)
     assert dict(opaque.payload) == {
         "type": "redacted_thinking",
@@ -1437,7 +1570,7 @@ def test_codec_custom_trigger() -> None:
 
 def test_execution_state_errors() -> None:
     trigger = UserInput(content=(TextContent(type="text", text="x"),))
-    ex = Execution(index=0, trigger=trigger)
+    ex = Execution(index=0, trigger=trigger, run_id="run-0", run_step=0)
     ex.abandon()
 
     with pytest.raises(StateError):
@@ -1446,9 +1579,9 @@ def test_execution_state_errors() -> None:
             content=[],
             timestamp=0.0,
         )
-        ex.add_round(response, [])
+        ex.set_result(response, [])
 
-    ex2 = Execution(index=0, trigger=trigger)
+    ex2 = Execution(index=0, trigger=trigger, run_id="run-1", run_step=0)
     outcome = Outcome(cause=ModelEndTurn())
     meta = TurnMeta()
     ex2.commit(outcome, meta)
@@ -1457,9 +1590,9 @@ def test_execution_state_errors() -> None:
         ex2.commit(outcome, meta)
 
     traj = Trajectory()
-    traj.begin(trigger)
+    traj.begin(trigger, run_id="run-2", run_step=0)
     with pytest.raises(StateError):
-        traj.begin(trigger)
+        traj.begin(trigger, run_id="run-3", run_step=0)
 
 
 # ---------------------------------------------------------------------------
@@ -1495,12 +1628,12 @@ async def test_tool_exception_becomes_error_result() -> None:
     collector = EventCollector(session.bus)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
+    assert len(session.trajectory) == 2
     turn = session.trajectory.turns[0]
-    tr = turn.rounds[0].tool_results[0]
+    tr = turn.tool_results[0]
     assert tr.result.is_error
     assert "tool crashed" in tr.result.content[0].text  # type: ignore[union-attr]
     assert len(collector.events[ToolErrorEvent.CHANNEL]) >= 1
@@ -1518,12 +1651,12 @@ async def test_unknown_tool_error() -> None:
     )
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
+    assert len(session.trajectory) == 2
     turn = session.trajectory.turns[0]
-    tr = turn.rounds[0].tool_results[0]
+    tr = turn.tool_results[0]
     assert tr.result.is_error
     assert "unknown tool" in tr.result.content[0].text  # type: ignore[union-attr]
 
@@ -1560,11 +1693,11 @@ async def test_tool_error_event_custom_text() -> None:
     session.bus.on(ToolErrorEvent.CHANNEL, custom_error)
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     turn = session.trajectory.turns[0]
-    tr = turn.rounds[0].tool_results[0]
+    tr = turn.tool_results[0]
     assert tr.result.content[0].text == "please retry"  # type: ignore[union-attr]
 
 
@@ -1577,13 +1710,14 @@ async def test_empty_llm_response() -> None:
     )
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
     assert len(session.trajectory) == 1
     turn = session.trajectory.turns[0]
     assert turn.outcome.cause is not None
-    assert len(turn.rounds[0].response.content) == 0
+    assert turn.response is not None
+    assert len(turn.response.content) == 0
 
 
 @pytest.mark.asyncio
@@ -1613,12 +1747,12 @@ async def test_tool_empty_result() -> None:
     )
     session.start()
     await session.prompt("go")
-    await _wait_turn(session)
+    await _wait_run(session)
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
+    assert len(session.trajectory) == 2
     turn = session.trajectory.turns[0]
-    tr = turn.rounds[0].tool_results[0]
+    tr = turn.tool_results[0]
     assert not tr.result.is_error
     assert len(tr.result.content) == 0
 
@@ -1780,17 +1914,17 @@ async def test_consecutive_stream_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_durable_round_persist_failure() -> None:
-    class FailingRoundStore(InMemoryTrajectoryStore):
-        def append_round(
+async def test_checkpoint_persist_failure_is_fail_stop() -> None:
+    class FailingCheckpointStore(InMemoryTrajectoryStore):
+        def save_checkpoint(
             self,
             session_id: str,
-            turn_id: str,
-            round_data: dict[str, object],
+            checkpoint: TurnCheckpoint,
         ) -> None:
-            raise IOError("round persist failed")
+            del session_id, checkpoint
+            raise IOError("checkpoint persist failed")
 
-    store = FailingRoundStore()
+    store = FailingCheckpointStore()
     mock = MockStreamFn()
     mock.enqueue(text_response("ok"))
 
@@ -1807,10 +1941,10 @@ async def test_durable_round_persist_failure() -> None:
         head=_empty_head(session.id),
     )
     session.start()
-    await session.prompt("go")
-    await _wait_turn(session)
+    receipt = await session.prompt("go")
+    with pytest.raises(OSError, match="checkpoint persist failed"):
+        await receipt.wait()
     await session.shutdown()
 
-    assert len(session.trajectory) == 1
-    turn = session.trajectory.turns[0]
-    assert turn.outcome.cause is not None
+    assert len(session.trajectory) == 0
+    assert mock.call_count == 0

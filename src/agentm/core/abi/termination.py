@@ -47,6 +47,11 @@ class ModelEndTurn(TerminationCause):
 
 
 @dataclass(frozen=True, slots=True)
+class PromptRunContinued(TerminationCause):
+    """The durable turn completed and the same prompt run needs another turn."""
+
+
+@dataclass(frozen=True, slots=True)
 class ToolTerminated(TerminationCause):
     """A tool explicitly terminated the session."""
 
@@ -181,6 +186,7 @@ __all__ = [
     "Aborted",
     "BudgetExhausted",
     "EndTurn",
+    "PromptRunContinued",
     "MaxTokens",
     "MaxTurnsExhausted",
     "ModelEndTurn",

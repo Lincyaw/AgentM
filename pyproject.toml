@@ -15,6 +15,7 @@ dependencies = [
     "textual[syntax]>=2.0",
     "policy-engine",
     "sqlalchemy>=2.0",
+    "ast-grep-cli>=0.44.1",
 ]
 
 [project.optional-dependencies]

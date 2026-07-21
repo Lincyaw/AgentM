@@ -42,8 +42,9 @@ class _TurnSummary(TypedDict):
     status: Literal["committed", "incomplete"]
     turn_index: int
     turn_id: str
+    run_id: str
+    run_step: int
     trigger_source: str
-    rounds: int
     tool_calls: list[str]
     tool_call_count: int
     tool_error_count: int
@@ -58,7 +59,8 @@ class _TurnSummary(TypedDict):
 
 class _MessageRecord(TypedDict):
     turn_index: int
-    round_index: int | None
+    run_id: str
+    run_step: int
     role: str
     content: str
     tool: NotRequired[str]
@@ -67,7 +69,8 @@ class _MessageRecord(TypedDict):
 
 class _ToolRecord(TypedDict):
     turn_index: int
-    round_index: int
+    run_id: str
+    run_step: int
     tool: str
     args: dict[str, object]
     is_error: bool
@@ -100,7 +103,8 @@ def _message_record_from_row(
             return None
         return {
             "turn_index": row.turn_index,
-            "round_index": row.round_index,
+            "run_id": row.run_id or "",
+            "run_step": row.run_step or 0,
             "role": "assistant",
             "content": f"[thinking] {row.content}",
         }
@@ -111,14 +115,16 @@ def _message_record_from_row(
         )[:200]
         return {
             "turn_index": row.turn_index,
-            "round_index": row.round_index,
+            "run_id": row.run_id or "",
+            "run_step": row.run_step or 0,
             "role": "assistant",
             "content": f"[tool_call: {row.tool_name or row.title}({arguments})]",
         }
     if row.kind == "tool_result":
         return {
             "turn_index": row.turn_index,
-            "round_index": row.round_index,
+            "run_id": row.run_id or "",
+            "run_step": row.run_step or 0,
             "role": "tool_result",
             "tool": row.tool_name or "?",
             "is_error": row.is_error,
@@ -129,7 +135,8 @@ def _message_record_from_row(
             return None
         return {
             "turn_index": row.turn_index,
-            "round_index": row.round_index,
+            "run_id": row.run_id or "",
+            "run_step": row.run_step or 0,
             "role": "error",
             "content": row.content,
         }
@@ -139,7 +146,8 @@ def _message_record_from_row(
             role = "user"
         return {
             "turn_index": row.turn_index,
-            "round_index": row.round_index,
+            "run_id": row.run_id or "",
+            "run_step": row.run_step or 0,
             "role": role,
             "content": row.content,
         }
@@ -274,35 +282,31 @@ def _follow_print_trigger(
     _follow_print("user", f"USER  turn={record.index}", "\n".join(parts))
 
 
-def _follow_print_round(
-    record: Turn | TurnCheckpoint,
-    ri: int,
-) -> None:
-    rnd = record.rounds[ri]
-
+def _follow_print_turn_payload(record: Turn | TurnCheckpoint) -> None:
     # assistant response
     text_parts: list[str] = []
-    for block in rnd.response.content:
-        if isinstance(block, TextContent):
-            text_parts.append(block.text)
-        elif isinstance(block, ThinkingBlock):
-            text_parts.append(f"[thinking] {block.text[:200]}")
-        elif isinstance(block, OpaqueThinkingBlock):
-            text_parts.append(f"[thinking: {block.provider}]")
-        elif isinstance(block, ToolCallBlock):
-            args = json.dumps(dict(block.arguments), ensure_ascii=False)[:120]
-            text_parts.append(f"[call: {block.name}({args})]")
+    if record.response is not None:
+        for block in record.response.content:
+            if isinstance(block, TextContent):
+                text_parts.append(block.text)
+            elif isinstance(block, ThinkingBlock):
+                text_parts.append(f"[thinking] {block.text[:200]}")
+            elif isinstance(block, OpaqueThinkingBlock):
+                text_parts.append(f"[thinking: {block.provider}]")
+            elif isinstance(block, ToolCallBlock):
+                args = json.dumps(dict(block.arguments), ensure_ascii=False)[:120]
+                text_parts.append(f"[call: {block.name}({args})]")
     if text_parts:
         _follow_print(
             "assistant",
-            f"ASSISTANT  turn={record.index} round={ri}",
+            f"ASSISTANT  turn={record.index}",
             "\n".join(text_parts),
         )
 
     # tool results
-    for rec in rnd.tool_results:
+    for rec in record.tool_results:
         txt = "".join(b.text for b in rec.result.content if isinstance(b, TextContent))
-        label = f"RESULT: {rec.call.name}  turn={record.index} round={ri}"
+        label = f"RESULT: {rec.call.name}  turn={record.index}"
         if rec.result.is_error:
             label += " [ERROR]"
         preview = txt[:500]
@@ -337,7 +341,7 @@ def _follow_session(
 
     shown_turn_ids: set[str] = set()
     checkpoint_id: str | None = None
-    checkpoint_rounds = 0
+    checkpoint_payload_shown = False
 
     stderr_console.print(f"[dim]following {sid} (Ctrl+C to stop)[/dim]")
 
@@ -355,29 +359,27 @@ def _follow_session(
                 shown_turn_ids.add(turn.id)
 
                 if turn.id == checkpoint_id:
-                    # was being followed as checkpoint — print remaining rounds
-                    for ri in range(checkpoint_rounds, len(turn.rounds)):
-                        _follow_print_round(turn, ri)
+                    if not checkpoint_payload_shown:
+                        _follow_print_turn_payload(turn)
                 else:
                     _follow_print_trigger(turn)
-                    for ri in range(len(turn.rounds)):
-                        _follow_print_round(turn, ri)
+                    _follow_print_turn_payload(turn)
 
                 _follow_print_commit(turn)
                 checkpoint_id = None
-                checkpoint_rounds = 0
+                checkpoint_payload_shown = False
 
             checkpoints = list(query.checkpoints(sid))
             if checkpoints:
                 cp = checkpoints[0]
                 if cp.id != checkpoint_id:
                     checkpoint_id = cp.id
-                    checkpoint_rounds = 0
+                    checkpoint_payload_shown = False
                     _follow_print_trigger(cp)
 
-                for ri in range(checkpoint_rounds, len(cp.rounds)):
-                    _follow_print_round(cp, ri)
-                checkpoint_rounds = len(cp.rounds)
+                if cp.response is not None and not checkpoint_payload_shown:
+                    _follow_print_turn_payload(cp)
+                    checkpoint_payload_shown = True
 
             time.sleep(1)
     except KeyboardInterrupt:
@@ -472,8 +474,9 @@ def _turn_summary_record(summary: TraceTurnSummary) -> _TurnSummary:
         "status": summary.status,
         "turn_index": summary.turn_index,
         "turn_id": summary.turn_id,
+        "run_id": summary.run_id,
+        "run_step": summary.run_step,
         "trigger_source": summary.trigger_source,
-        "rounds": summary.rounds,
         "tool_calls": list(summary.tool_names),
         "tool_call_count": summary.tool_calls,
         "tool_error_count": summary.tool_errors,
@@ -565,10 +568,9 @@ def messages_cmd(
     _DIM = "\033[2m"
 
     def _render(m: _MessageRecord) -> str:
-        round_label = str(m["round_index"]) if m["round_index"] is not None else "---"
         role = m["role"]
         color = _ROLE_ANSI.get(role, "")
-        hdr = f"{color}── {role.upper()} ── turn={m['turn_index']} round={round_label}"
+        hdr = f"{color}── {role.upper()} ── turn={m['turn_index']}"
         if role == "tool_result":
             error = " ERROR" if m.get("is_error") else ""
             hdr += f" tool={m.get('tool', '?')}{error}"
@@ -720,7 +722,8 @@ def _tool_records_from_snapshot(
         records.append(
             {
                 "turn_index": row.turn_index or 0,
-                "round_index": row.round_index or 0,
+                "run_id": row.run_id or "",
+                "run_step": row.run_step or 0,
                 "tool": row.tool_name,
                 "args": args_by_call_id.get(call_id or "", {}),
                 "is_error": row.is_error,
@@ -760,7 +763,7 @@ def tools_cmd(
         error_tag = f" {_T_RED}ERROR{_T_RESET}" if d["is_error"] else ""
         hdr = (
             f"{_T_YELLOW}── {d['tool']}{error_tag}{_T_YELLOW} ── "
-            f"turn={d['turn_index']} round={d['round_index']} {'─' * 10}{_T_RESET}"
+            f"turn={d['turn_index']} {'─' * 10}{_T_RESET}"
         )
         result_styled = (
             f"{_T_RED}{r}{_T_RESET}" if d["is_error"] else f"{_T_DIM}{r}{_T_RESET}"

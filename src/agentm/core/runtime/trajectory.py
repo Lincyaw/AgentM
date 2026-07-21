@@ -35,11 +35,22 @@ class Trajectory:
     def is_executing(self) -> bool:
         return self._active is not None
 
-    def begin(self, trigger: Trigger) -> Execution:
+    def begin(
+        self,
+        trigger: Trigger,
+        *,
+        run_id: str,
+        run_step: int,
+    ) -> Execution:
         """Start a new turn, returning its mutable Execution."""
         if self._active is not None:
             raise StateError("an execution is already active")
-        self._active = Execution(index=len(self._turns), trigger=trigger)
+        self._active = Execution(
+            index=len(self._turns),
+            trigger=trigger,
+            run_id=run_id,
+            run_step=run_step,
+        )
         return self._active
 
     def prepare_commit(self, outcome: Outcome, meta: TurnMeta) -> Turn:

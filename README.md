@@ -16,8 +16,9 @@ The SDK is mechanism, not policy. Policy enters through atoms.
 | `Driver` | Persistent async loop: consume triggers, call the provider, execute tools, commit turns. |
 | `Trigger` | Unified input shape for user input, background completion, monitor fire, subagent result, continuation, and injection. |
 | `TriggerEnvelope` | Queue/routing metadata around a trigger: priority (`now`/`next`/`later`), target identity, origin, mode, and presenter/system flags. |
+| `PromptRun` | Lifecycle of one accepted external trigger. Its receipt stays open across model/tool continuations, while `run_id` and `run_step` group the resulting turns. |
 | `MessageMeta` | Control-plane metadata for synthetic messages, hidden attachments, no-response prompts, replay policy, token accounting, origin, mode, and target identity. |
-| `Turn` | Durable trajectory unit: trigger, assistant rounds, tool records, structured tool extras, outcome, timing, and usage. |
+| `Turn` | Durable transaction unit: exactly one assistant response, all tool results requested by that response, outcome, timing, and usage. |
 | `TrajectoryStore` | The single replaceable persistence boundary for session metadata, incomplete checkpoints, committed turns, message-node indexes, heads, and cache/compaction state. |
 | `TrajectoryNode` | A committed message or compact-boundary index record used for fork, resume, sidechains, compaction, and prompt-cache lookup. Content replacement is state attached atomically to a compact boundary, not another node kind. |
 | `ContextPolicy` | Replaceable context reconstruction policy. Durable compaction and cache decisions use `ContentReplacementState` and `PromptCacheState` in the selected `TrajectoryStore`, so they survive resume/fork without a second policy-owned store. |
@@ -96,10 +97,12 @@ install `agentm[provider-openai,packaged-minimal]` when using the example above.
 
 ## Persistence
 
-`TrajectoryStore` owns durable session metadata, cumulative incomplete
-checkpoints, committed turns, message nodes, explicit heads, and cache/compaction
-state. A committed turn and its node/head indexes share one atomic publication
-boundary. Root metadata is created automatically before the session starts;
+`TrajectoryStore` owns durable session metadata, the current incomplete Turn
+checkpoint, committed turns, message nodes, explicit heads, and cache/compaction
+state. Every model/tool continuation commits a separate Turn with its own
+resource/effect transaction; all Turns produced by one external trigger share a
+`run_id` and increasing `run_step`. A committed Turn and its node/head indexes
+share one atomic publication boundary. Root metadata is created automatically before the session starts;
 child and forked sessions register their own metadata through the session graph
 path. `SessionMeta.config` persists the minimal resumable context
 (`root_session_id`, `depth`, `scenario`, and `scenario_dir`) so a child or fork
@@ -133,7 +136,7 @@ node ids and portable index fields:
 | Identity | `id`, `session_id`, `root_session_id`, `parent_session_id`, `seq` | Stable lookup, per-session append order, and trace-scope scans. |
 | Links | `parent_id`, `logical_parent_id` | Visible chain reconstruction, fork prefix sharing, and compact-boundary lineage. |
 | Ownership | `agent_id`, `is_sidechain` | Subagent sidechains and agent-specific resume. |
-| Turn join | `turn_id`, `turn_index`, `round_index`, `message_index` | Join message nodes back to committed turns and tool records. |
+| Turn join | `turn_id`, `turn_index`, `run_id`, `run_step`, `message_index` | Join message nodes back to committed Turns and group them by PromptRun. |
 | Shape | `kind`, `role`, `timestamp` | Distinguish committed message and compact-boundary nodes, then filter message roles such as user, assistant, and tool result. Incomplete checkpoints are turn-level records outside the committed node graph. |
 
 SQL stores implement these as normal indexed columns. JSONL stores replay the

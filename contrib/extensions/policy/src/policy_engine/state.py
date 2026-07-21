@@ -10,6 +10,9 @@ from collections import Counter, deque
 
 from dataclasses import dataclass
 
+from .ifg_interventions import IfgInterventionState
+from .ifg_investigation import IfgInvestigationState
+from .ifg_regions import IfgRegionState
 from .types import EffectRecord, FileStateEntry, ToolArgs, ToolLogEntry
 
 
@@ -191,7 +194,7 @@ class SessionTree:
 class PolicyState:
     """Holds all state tables for one session."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, cwd: str | None = None) -> None:
         self.tool_log: RollingLog[ToolLogEntry] = RollingLog(500)
         self.file_state = FileState()
         self.turn_summary: IndexedTable[int, dict[str, object]] = IndexedTable()
@@ -199,6 +202,9 @@ class PolicyState:
         self.error_log: RollingLog[ToolLogEntry] = RollingLog(200)
         self.context_state: IndexedTable[int, dict[str, object]] = IndexedTable()
         self.effect_log: RollingLog[EffectRecord] = RollingLog(500)
+        self.ifg_regions = IfgRegionState()
+        self.ifg_interventions = IfgInterventionState()
+        self.ifg_investigation = IfgInvestigationState(cwd=cwd)
         self._turn_count: int = 0
         self._repeat_counter: Counter[tuple[str, str]] = Counter()
 
@@ -270,3 +276,7 @@ class PolicyState:
                 error_category=_classify_error(error),
             )
             self.error_log.append(err_entry)
+
+        self.ifg_regions.record(tool_name, args, result, self._turn_count)
+        self.ifg_interventions.record(tool_name, args, result)
+        self.ifg_investigation.record(tool_name, args, result)

@@ -10,7 +10,6 @@ Protocols and ``api.*`` hooks.
 
 from __future__ import annotations
 
-# v2 session model
 from agentm.core.runtime.catalog import (
     InMemoryAtomCatalog,
     InMemoryVersionedResourceStore,

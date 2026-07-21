@@ -10,13 +10,13 @@ discipline, system reminders, and any future context transformation.
 
 Two context-transform mechanisms exist by design:
 
-- **ContextPolicy** — runs inside ``build_context`` at the START of
-  each round.  Sees committed turns only.  Async.  Has access to
+- **ContextPolicy** — runs inside ``build_context`` before each provider
+  request. Sees committed Turns only. Async. Has access to
   session identity and services via ``bind()``.  Use for transforms
   that depend on the full trajectory structure (compaction, summary).
 
-- **ContextEvent** (bus) — runs AFTER ``build_context``, inside the
-  round loop.  Sees committed turns + trigger + in-flight messages.
+- **ContextEvent** (bus) — runs after ``build_context`` for the active Turn.
+  Sees committed Turns + trigger + in-flight messages.
   Async.  Use for transforms that need the live tail (cache-discipline
   suffix, token injection).
 
@@ -194,15 +194,9 @@ def turn_to_messages(
         )
     )
 
-    injected_by_round: dict[int, list[AgentMessage]] = {}
-    for injection in turn.outcome.injected:
-        injected_by_round.setdefault(injection.after_round, []).extend(
-            injection.messages
-        )
-    messages.extend(injected_by_round.get(-1, ()))
-    for round_index, rnd in enumerate(turn.rounds):
-        messages.append(rnd.response)
-        if rnd.tool_results:
+    if turn.response is not None:
+        messages.append(turn.response)
+        if turn.tool_results:
             result_blocks = [
                 ToolResultBlock(
                     type="tool_result",
@@ -212,7 +206,7 @@ def turn_to_messages(
                     deterministic=tr.result.deterministic,
                     extras=tr.result.extras,
                 )
-                for tr in rnd.tool_results
+                for tr in turn.tool_results
             ]
             messages.append(
                 ToolResultMessage(
@@ -221,7 +215,7 @@ def turn_to_messages(
                     timestamp=0.0,
                 )
             )
-        messages.extend(injected_by_round.get(round_index, ()))
+    messages.extend(turn.outcome.injected)
 
     return messages
 

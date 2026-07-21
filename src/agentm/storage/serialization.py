@@ -30,7 +30,7 @@ from agentm.core.lib.json_value import json_restore, json_safe
 
 
 JsonObject = dict[str, Any]
-STORAGE_RECORD_VERSION = 1
+STORAGE_RECORD_VERSION = 2
 
 
 def _validate_version(data: Mapping[str, Any], path: str) -> None:
@@ -136,7 +136,8 @@ def serialize_node(node: TrajectoryNode) -> JsonObject:
         "logical_parent_id": node.logical_parent_id,
         "turn_id": node.turn_id,
         "turn_index": node.turn_index,
-        "round_index": node.round_index,
+        "run_id": node.run_id,
+        "run_step": node.run_step,
         "message_index": node.message_index,
         "agent_id": node.agent_id,
         "is_sidechain": node.is_sidechain,
@@ -171,7 +172,8 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
             "logical_parent_id",
             "turn_id",
             "turn_index",
-            "round_index",
+            "run_id",
+            "run_step",
             "message_index",
             "agent_id",
             "is_sidechain",
@@ -250,9 +252,13 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
             data.get("turn_index"),
             path="trajectory node.turn_index",
         ),
-        round_index=_optional_int(
-            data.get("round_index"),
-            path="trajectory node.round_index",
+        run_id=_optional_str(
+            data.get("run_id"),
+            path="trajectory node.run_id",
+        ),
+        run_step=_optional_int(
+            data.get("run_step"),
+            path="trajectory node.run_step",
         ),
         message_index=_optional_int(
             data.get("message_index"),

@@ -91,29 +91,80 @@ rules:
     mode: observe
     reason: "Irreversible action at turn {session.turn_count} with insufficient reads."
 
-  - name: exploration-without-action
-    on: turn_end
-    when: |
-      session.turn_count > 10
-      and tool_log.count(last=10, where={tool: "read|glob|find"}) > 0
-      and ratio(
-        tool_log.count(last=10, where={tool: "read|glob|find"}),
-        max(tool_log.count(last=10), 1)
-      ) > 0.8
-      and tool_log.count(last=10, where={tool: "edit|write"}) == 0
-    effect: notify
+  - name: exploration-not-converging
+    on: tool_call_post
+    match: {tool: "read|edit|write"}
+    when: "ifg.intervention.became_expanding()"
+    effect: escalate
     mode: observe
-    reason: "10+ turns of mostly reading with no writes — consider taking action."
+    escalate_context: "ifg.intervention.summary()"
+    reason: "The file frontier is still expanding faster than interventions can resolve it."
 
-  - name: file-churn
+  - name: mutation-target-drift
     on: tool_call_post
     match: {tool: "edit|write"}
-    when: |
-      file_state.get(event.args.get('path', ''))
-      and file_state.get(event.args.get('path', '')).write_count > 3
+    when: "ifg.intervention.became_target_drifting()"
+    effect: escalate
+    mode: observe
+    escalate_context: "ifg.intervention.summary()"
+    reason: "Mutations are spreading across an adaptively large set of targets."
+
+  - name: unvalidated-intervention
+    on: tool_call_post
+    match: {tool: "read|bash|glob|find"}
+    when: "ifg.intervention.became_unvalidated()"
+    effect: escalate
+    mode: observe
+    escalate_context: "ifg.intervention.summary()"
+    reason: "The active intervention has exceeded its adaptive validation horizon."
+
+  - name: unchanged-anchor-reentry
+    on: tool_call_post
+    match: {tool: "bash|read|edit|write"}
+    when: "ifg.investigation.became_unchanged_reentry()"
     effect: notify
     mode: observe
-    reason: "Multiple modifications to the same file — likely thrashing."
+    escalate_context: "ifg.investigation.summary()"
+    reason: "Structural evidence: an unchanged repository anchor was re-entered."
+
+  - name: created-artifact-replacement
+    on: tool_call_post
+    match: {tool: bash}
+    when: "ifg.investigation.became_artifact_replacement()"
+    effect: notify
+    mode: observe
+    escalate_context: "ifg.investigation.summary()"
+    reason: "Structural evidence: one write-first executed artifact followed another without a repository mutation."
+
+  - name: unchanged-investigation-state-cycle
+    on: tool_call_post
+    match: {tool: bash}
+    when: "ifg.investigation.became_state_cycle()"
+    effect: notify
+    mode: observe
+    escalate_context: "ifg.investigation.summary()"
+    reason: "Structural evidence: an investigation phase returned to an unchanged repository state."
+
+  - name: repeated-region-reading
+    on: tool_call_post
+    match: {tool: read}
+    when: |
+      ifg.region_reads.overlap_count(
+        last=20,
+        min_ratio=0.8,
+        min_lines=10
+      ) >= 3
+      and ifg.region_reads.overlap_ratio(last=20) >= 0.15
+    effect: escalate
+    mode: observe
+    cooldown: 5 turns
+    escalate_context: |
+      ifg.region_reads.summary(
+        last=20,
+        min_ratio=0.8,
+        min_lines=10
+      )
+    reason: "Agent repeatedly read active, unchanged source regions."
 
   - name: cross-session-repeat
     on: tool_call_post

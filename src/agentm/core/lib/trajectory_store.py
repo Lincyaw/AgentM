@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from agentm.core.abi.store import TrajectoryCompactionCommit
+from agentm.core.abi.termination import PromptRunContinued
 from agentm.core.abi.trajectory import (
     TrajectoryHead,
     TrajectoryHeadAdvance,
@@ -177,6 +178,7 @@ def validate_turn_sequence(turns: Sequence[Turn]) -> None:
             )
         if turn.id in turn_ids:
             raise ValueError(f"duplicate turn id in session: {turn.id}")
+        _validate_prompt_run_position(turns[:expected], turn.run_id, turn.run_step)
         turn_ids.add(turn.id)
 
 
@@ -187,6 +189,7 @@ def validate_turn_append(turns: Sequence[Turn], turn: Turn) -> None:
         raise ValueError(f"turn index {turn.index} does not follow {expected - 1}")
     if any(existing.id == turn.id for existing in turns):
         raise ValueError(f"duplicate turn id in session: {turn.id}")
+    _validate_prompt_run_position(turns, turn.run_id, turn.run_step)
 
 
 def validate_turn_checkpoint(
@@ -203,10 +206,16 @@ def validate_turn_checkpoint(
         )
     if any(turn.id == checkpoint.id for turn in turns):
         raise ValueError(f"checkpoint id duplicates a committed turn: {checkpoint.id}")
+    _validate_prompt_run_position(turns, checkpoint.run_id, checkpoint.run_step)
     if existing is not None and (
-        existing.index != checkpoint.index or existing.id != checkpoint.id
+        existing.index != checkpoint.index
+        or existing.id != checkpoint.id
+        or existing.run_id != checkpoint.run_id
+        or existing.run_step != checkpoint.run_step
     ):
-        raise ValueError("checkpoint replacement must preserve turn index and id")
+        raise ValueError(
+            "checkpoint replacement must preserve turn and prompt-run identity"
+        )
 
 
 def validate_checkpoint_commit(
@@ -216,8 +225,37 @@ def validate_checkpoint_commit(
     """Require a final turn to identify the checkpoint it supersedes."""
     if checkpoint is None:
         return
-    if checkpoint.index != turn.index or checkpoint.id != turn.id:
+    if (
+        checkpoint.index != turn.index
+        or checkpoint.id != turn.id
+        or checkpoint.run_id != turn.run_id
+        or checkpoint.run_step != turn.run_step
+    ):
         raise ValueError("committed turn does not match the active checkpoint")
+
+
+def _validate_prompt_run_position(
+    turns: Sequence[Turn],
+    run_id: str,
+    run_step: int,
+) -> None:
+    if not turns:
+        if run_step != 0:
+            raise ValueError("first prompt-run Turn must have run_step 0")
+        return
+
+    previous = turns[-1]
+    if previous.run_id == run_id:
+        if not isinstance(previous.outcome.cause, PromptRunContinued):
+            raise ValueError("a terminal Turn cannot continue the same prompt run")
+        if run_step != previous.run_step + 1:
+            raise ValueError("prompt-run steps must be contiguous")
+        return
+
+    if any(turn.run_id == run_id for turn in turns):
+        raise ValueError("a prompt run cannot resume after another run started")
+    if run_step != 0:
+        raise ValueError("a new prompt run must start at run_step 0")
 
 
 def validate_checkpoint_discard(

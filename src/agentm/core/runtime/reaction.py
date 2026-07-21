@@ -94,6 +94,7 @@ from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.termination import (
     Aborted,
     BudgetExhausted,
+    PromptRunContinued,
     ModelEndTurn,
     ProviderRequestFailed,
     ProviderTruncated,
@@ -114,6 +115,7 @@ from agentm.core.abi.trajectory import (
 )
 from agentm.core.abi.trigger import (
     BackgroundCompletion,
+    ContinueTrigger,
     SubagentResult,
     Trigger,
     TriggerMetadata,
@@ -270,8 +272,8 @@ def record_interruption_message(
     if not isinstance(cause, SignalAborted) or policy is None:
         return
     reason = cause.reason or "unknown"
-    for_tool_use = any(
-        _extract_tool_calls(round_.response) for round_ in execution.rounds
+    for_tool_use = execution.response is not None and bool(
+        _extract_tool_calls(execution.response)
     )
     message = policy.interruption_message(
         reason,
@@ -610,49 +612,14 @@ async def _save_execution_checkpoint(
     )
 
 
-async def _record_round(
+async def _record_turn_payload(
     request: ReactionRequest,
     response: AssistantMessage,
     tool_records: list[ToolRecord],
     meta: TurnMeta,
 ) -> None:
-    request.execution.add_round(response, tool_records)
+    request.execution.set_result(response, tool_records)
     await _save_execution_checkpoint(request, meta)
-
-
-def _execution_to_messages(
-    execution: Execution,
-    trigger_messages: list[AgentMessage],
-) -> list[AgentMessage]:
-    messages: list[AgentMessage] = list(trigger_messages)
-    inject_by_round: dict[int, list[AgentMessage]] = {}
-    for round_idx, msgs in execution.injected:
-        inject_by_round.setdefault(round_idx, []).extend(msgs)
-
-    for i, rnd in enumerate(execution.rounds):
-        messages.append(rnd.response)
-        if rnd.tool_results:
-            result_blocks = [
-                ToolResultBlock(
-                    type="tool_result",
-                    tool_call_id=tr.call.id,
-                    content=list(tr.result.content),
-                    is_error=tr.result.is_error,
-                    deterministic=tr.result.deterministic,
-                    extras=tr.result.extras,
-                )
-                for tr in rnd.tool_results
-            ]
-            messages.append(
-                ToolResultMessage(
-                    role="tool_result",
-                    content=result_blocks,
-                    timestamp=0.0,
-                )
-            )
-        if i in inject_by_round:
-            messages.extend(inject_by_round[i])
-    return messages
 
 
 async def _history_messages(
@@ -889,19 +856,21 @@ async def react(
         )
     messages = list(history_messages) + list(trigger_messages)
 
-    before_returns = await bus.emit(
-        BeforeRunEvent.CHANNEL,
-        BeforeRunEvent(
-            messages=tuple(messages),
-            system=system,
-        ),
-    )
-    replacement_msgs = _last_key(before_returns, "messages")
-    if isinstance(replacement_msgs, list):
-        messages = replacement_msgs
-    replacement_sys = _last_key(before_returns, "system")
-    if isinstance(replacement_sys, str):
-        system = replacement_sys
+    before_returns: list[object] = []
+    if not isinstance(trigger, ContinueTrigger):
+        before_returns = await bus.emit(
+            BeforeRunEvent.CHANNEL,
+            BeforeRunEvent(
+                messages=tuple(messages),
+                system=system,
+            ),
+        )
+        replacement_msgs = _last_key(before_returns, "messages")
+        if isinstance(replacement_msgs, list):
+            messages = replacement_msgs
+        replacement_sys = _last_key(before_returns, "system")
+        if isinstance(replacement_sys, str):
+            system = replacement_sys
     resolved_system_prompt = system
 
     veto = _last_key(before_returns, "veto")
@@ -913,238 +882,126 @@ async def react(
             _meta(0, 0, start_ns, system_prompt=resolved_system_prompt),
             tool_calls_used,
         )
-    round_index = 0
-    while True:
-        if turn_signal.is_set():
-            return (
-                Outcome(cause=_signal_aborted(turn_signal)),
-                _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
-                    system_prompt=resolved_system_prompt,
-                ),
-                tool_calls_used,
-            )
-
-        if round_index > 0:
-            try:
-                history_messages = await _history_messages(
-                    turns=trajectory.turns,
-                    policies=policies,
-                    trigger_renderers=trigger_renderers,
-                    projection=context_projection,
-                    budget=context_budget,
-                    trajectory_store=trajectory_store,
-                    session_id=session_id,
-                    root_session_id=root_session_id,
-                    parent_session_id=parent_session_id,
-                    signal=turn_signal,
-                )
-            except ContextTransformCancelled:
-                return (
-                    Outcome(cause=_signal_aborted(turn_signal)),
-                    _meta(
-                        total_input,
-                        total_output,
-                        start_ns,
-                        cache_read=total_cache_read,
-                        cache_write=total_cache_write,
-                        system_prompt=resolved_system_prompt,
-                    ),
-                    tool_calls_used,
-                )
-            round_messages = _execution_to_messages(execution, trigger_messages)
-            messages = list(history_messages) + round_messages
-
-        ctx_returns = await bus.emit(
-            ContextEvent.CHANNEL,
-            ContextEvent(messages=tuple(messages), turn_index=execution.index),
-        )
-        ctx_replacement = _last_messages(ctx_returns)
-        if ctx_replacement is not None:
-            messages = ctx_replacement
-
-        send_returns = await bus.emit(
-            BeforeSendEvent.CHANNEL,
-            BeforeSendEvent(
-                messages=tuple(messages),
-                system=system,
-                tools=tuple(tools),
-                model=model,
-                turn_index=execution.index,
+    if turn_signal.is_set():
+        return (
+            Outcome(cause=_signal_aborted(turn_signal)),
+            _meta(
+                total_input,
+                total_output,
+                start_ns,
+                cache_read=total_cache_read,
+                cache_write=total_cache_write,
+                system_prompt=resolved_system_prompt,
             ),
+            tool_calls_used,
         )
-        effective_system = system
-        effective_model = model
-        effective_tools = list(tools)
-        for ret in send_returns:
-            if not isinstance(ret, Mapping):
-                continue
-            if "messages" in ret:
-                replacement_messages = _message_list(ret["messages"])
-                if replacement_messages is None:
-                    raise TypeError("BeforeSendEvent messages must be a message list")
-                messages = replacement_messages
-            if "system" in ret:
-                replacement_system = ret["system"]
-                if replacement_system is not None and not isinstance(
-                    replacement_system,
-                    str,
-                ):
-                    raise TypeError("BeforeSendEvent system must be str or None")
-                effective_system = replacement_system
-            if "model" in ret:
-                replacement_model = ret["model"]
-                if not isinstance(replacement_model, Model):
-                    raise TypeError("BeforeSendEvent model must be a Model")
-                effective_model = replacement_model
-            if "tools" in ret:
-                replacement_tools = ret["tools"]
-                if not isinstance(replacement_tools, list) or not all(
-                    isinstance(item, Tool) for item in replacement_tools
-                ):
-                    raise TypeError("BeforeSendEvent tools must be a Tool list")
-                effective_tools = [
-                    item for item in replacement_tools if isinstance(item, Tool)
-                ]
 
-        if effective_system is not None:
-            resolved_system_prompt = effective_system
+    ctx_returns = await bus.emit(
+        ContextEvent.CHANNEL,
+        ContextEvent(messages=tuple(messages), turn_index=execution.index),
+    )
+    ctx_replacement = _last_messages(ctx_returns)
+    if ctx_replacement is not None:
+        messages = ctx_replacement
 
-        messages = route_messages(messages, session_id=session_id)
-        messages = await _apply_provider_prompt_cache(
+    send_returns = await bus.emit(
+        BeforeSendEvent.CHANNEL,
+        BeforeSendEvent(
+            messages=tuple(messages),
+            system=system,
+            tools=tuple(tools),
+            model=model,
+            turn_index=execution.index,
+        ),
+    )
+    effective_system = system
+    effective_model = model
+    effective_tools = list(tools)
+    for ret in send_returns:
+        if not isinstance(ret, Mapping):
+            continue
+        if "messages" in ret:
+            replacement_messages = _message_list(ret["messages"])
+            if replacement_messages is None:
+                raise TypeError("BeforeSendEvent messages must be a message list")
+            messages = replacement_messages
+        if "system" in ret:
+            replacement_system = ret["system"]
+            if replacement_system is not None and not isinstance(
+                replacement_system,
+                str,
+            ):
+                raise TypeError("BeforeSendEvent system must be str or None")
+            effective_system = replacement_system
+        if "model" in ret:
+            replacement_model = ret["model"]
+            if not isinstance(replacement_model, Model):
+                raise TypeError("BeforeSendEvent model must be a Model")
+            effective_model = replacement_model
+        if "tools" in ret:
+            replacement_tools = ret["tools"]
+            if not isinstance(replacement_tools, list) or not all(
+                isinstance(item, Tool) for item in replacement_tools
+            ):
+                raise TypeError("BeforeSendEvent tools must be a Tool list")
+            effective_tools = [
+                item for item in replacement_tools if isinstance(item, Tool)
+            ]
+
+    if effective_system is not None:
+        resolved_system_prompt = effective_system
+
+    messages = route_messages(messages, session_id=session_id)
+    messages = await _apply_provider_prompt_cache(
+        messages=messages,
+        model=effective_model,
+        adapter=prompt_cache_adapter,
+        store=trajectory_store,
+        session_id=session_id,
+    )
+
+    allowed_tool_names = set(tool_allowlist) if tool_allowlist is not None else None
+    if allowed_tool_names is not None:
+        effective_tools = [
+            tool for tool in effective_tools if tool.name in allowed_tool_names
+        ]
+    if tool_calls_remaining is not None and tool_calls_used >= tool_calls_remaining:
+        effective_tools = []
+    tool_index = {t.name: t for t in effective_tools}
+
+    stream_events: list[AssistantStreamEvent] = []
+    llm_start_ns = time.perf_counter_ns()
+    system_text = effective_system or ""
+    await bus.emit(
+        LlmRequestStartEvent.CHANNEL,
+        LlmRequestStartEvent(
+            turn_index=execution.index,
+            turn_id=execution.id,
+            model_id=effective_model.id,
+            message_count=len(messages),
+            tool_count=len(effective_tools),
+            system_chars=len(system_text),
+            system_text=system_text or None,
+        ),
+    )
+    try:
+        async for ev in stream_fn(
             messages=messages,
             model=effective_model,
-            adapter=prompt_cache_adapter,
-            store=trajectory_store,
-            session_id=session_id,
-        )
-
-        allowed_tool_names = set(tool_allowlist) if tool_allowlist is not None else None
-        if allowed_tool_names is not None:
-            effective_tools = [
-                tool for tool in effective_tools if tool.name in allowed_tool_names
-            ]
-        if tool_calls_remaining is not None and tool_calls_used >= tool_calls_remaining:
-            effective_tools = []
-        tool_index = {t.name: t for t in effective_tools}
-
-        stream_events: list[AssistantStreamEvent] = []
-        llm_start_ns = time.perf_counter_ns()
-        system_text = effective_system or ""
-        await bus.emit(
-            LlmRequestStartEvent.CHANNEL,
-            LlmRequestStartEvent(
-                turn_index=execution.index,
-                turn_id=execution.id,
-                model_id=effective_model.id,
-                message_count=len(messages),
-                tool_count=len(effective_tools),
-                system_chars=len(system_text),
-                system_text=system_text or None,
-            ),
-        )
-        try:
-            async for ev in stream_fn(
-                messages=messages,
-                model=effective_model,
-                tools=effective_tools,
-                system=effective_system,
-                signal=turn_signal,
-                thinking=thinking,
-            ):
-                stream_events.append(ev)
-                await bus.emit(
-                    StreamDeltaEvent.CHANNEL,
-                    StreamDeltaEvent(
-                        turn_index=execution.index,
-                        delta=ev,
-                    ),
-                )
-        except BaseException as exc:
+            tools=effective_tools,
+            system=effective_system,
+            signal=turn_signal,
+            thinking=thinking,
+        ):
+            stream_events.append(ev)
             await bus.emit(
-                LlmRequestEndEvent.CHANNEL,
-                LlmRequestEndEvent(
+                StreamDeltaEvent.CHANNEL,
+                StreamDeltaEvent(
                     turn_index=execution.index,
-                    turn_id=execution.id,
-                    chunk_count=len(stream_events),
-                    duration_ns=time.perf_counter_ns() - llm_start_ns,
-                    error=f"{type(exc).__name__}: {exc}",
+                    delta=ev,
                 ),
             )
-            if turn_signal.is_set():
-                response = _assemble_assistant_message(stream_events)
-                reason = cancel_reason(turn_signal) or "unknown"
-                interrupted_records = [
-                    _interrupted_tool_record(
-                        call,
-                        reason=reason,
-                        policy=interruption_policy,
-                    )
-                    for call in _extract_tool_calls(response)
-                ]
-                checkpoint_meta = _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    effective_model,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
-                )
-                await _record_round(
-                    request,
-                    response,
-                    interrupted_records,
-                    checkpoint_meta,
-                )
-                return (
-                    Outcome(cause=_signal_aborted(turn_signal)),
-                    checkpoint_meta,
-                    tool_calls_used,
-                )
-            if isinstance(exc, asyncio.CancelledError) or not isinstance(
-                exc,
-                Exception,
-            ):
-                raise
-            if stream_events:
-                partial_response = _assemble_assistant_message(stream_events)
-                checkpoint_meta = _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    effective_model,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
-                )
-                await _record_round(
-                    request,
-                    partial_response,
-                    [],
-                    checkpoint_meta,
-                )
-            return (
-                Outcome(
-                    cause=ProviderRequestFailed(
-                        error_type=type(exc).__name__,
-                        detail=str(exc),
-                        partial_event_count=len(stream_events),
-                    )
-                ),
-                _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    effective_model,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
-                    system_prompt=resolved_system_prompt,
-                ),
-                tool_calls_used,
-            )
+    except BaseException as exc:
         await bus.emit(
             LlmRequestEndEvent.CHANNEL,
             LlmRequestEndEvent(
@@ -1152,358 +1009,20 @@ async def react(
                 turn_id=execution.id,
                 chunk_count=len(stream_events),
                 duration_ns=time.perf_counter_ns() - llm_start_ns,
+                error=f"{type(exc).__name__}: {exc}",
             ),
         )
-
-        response = _assemble_assistant_message(stream_events)
-        if response.usage is not None:
-            total_input += response.usage.input_tokens
-            total_output += response.usage.output_tokens
-            total_cache_read += response.usage.cache_read
-            total_cache_write += response.usage.cache_write
-
-        messages.append(response)
-
-        tool_calls = _extract_tool_calls(response)
-        tool_records: list[ToolRecord] = []
-        paired_outcomes: list[tuple[str, ToolOutcome]] = []
-        checkpoint_meta = _meta(
-            total_input,
-            total_output,
-            start_ns,
-            effective_model,
-            cache_read=total_cache_read,
-            cache_write=total_cache_write,
-        )
-        await _save_execution_checkpoint(
-            request,
-            checkpoint_meta,
-            pending_response=response,
-        )
-
-        if turn_signal.is_set() or isinstance(response.termination, Aborted):
-            _append_interrupted_tool_records(
-                calls=tool_calls,
-                records=tool_records,
-                reason=cancel_reason(turn_signal) or "unknown",
-                policy=interruption_policy,
-            )
-            await _record_round(
-                request,
-                response,
-                tool_records,
-                checkpoint_meta,
-            )
-            return (
-                Outcome(cause=_signal_aborted(turn_signal)),
-                checkpoint_meta,
-                tool_calls_used,
-            )
-
-        if tool_calls:
-            if tool_calls_remaining is not None and len(tool_calls) > max(
-                0, tool_calls_remaining - tool_calls_used
-            ):
-                for call in tool_calls:
-                    tool_records.append(
-                        ToolRecord(
-                            call=call,
-                            result=ToolResultBlock(
-                                type="tool_result",
-                                tool_call_id=call.id,
-                                content=[
-                                    TextContent(
-                                        type="text",
-                                        text=(
-                                            "Tool call skipped: max_tool_calls "
-                                            "exhausted"
-                                        ),
-                                    )
-                                ],
-                                is_error=True,
-                            ),
-                        )
-                    )
-                    await _save_execution_checkpoint(
-                        request,
-                        checkpoint_meta,
-                        pending_response=response,
-                        pending_tool_results=tool_records,
-                    )
-                await _record_round(
-                    request,
-                    response,
-                    tool_records,
-                    checkpoint_meta,
-                )
-                return (
-                    Outcome(cause=BudgetExhausted(detail="max_tool_calls exhausted")),
-                    checkpoint_meta,
-                    tool_calls_used,
-                )
-
-            outcomes_by_index: dict[int, ToolOutcome] = {}
-            records_by_index: dict[int, ToolRecord] = {}
-            work_items: list[ToolWorkItem] = []
-            tool_args_by_index: dict[int, Mapping[str, object]] = {}
-
-            async def materialize_tool_outcome(
-                index: int,
-                outcome: ToolOutcome,
-                *,
-                duration_ms: int | None = None,
-            ) -> None:
-                nonlocal tool_calls_used
-                if index in outcomes_by_index:
-                    raise RuntimeError(
-                        f"tool orchestrator produced duplicate result index {index}"
-                    )
-                record, final_outcome = await _finalize_tool_outcome(
-                    bus=bus,
-                    call=tool_calls[index],
-                    outcome=outcome,
-                    args=tool_args_by_index.get(index),
-                    duration_ms=duration_ms,
-                )
-                outcomes_by_index[index] = final_outcome
-                records_by_index[index] = record
-                tool_calls_used += 1
-                materialized_records = [
-                    records_by_index[record_index]
-                    for record_index in sorted(records_by_index)
-                ]
-                await _save_execution_checkpoint(
-                    request,
-                    checkpoint_meta,
-                    pending_response=response,
-                    pending_tool_results=materialized_records,
-                )
-
-            for index, tc in enumerate(tool_calls):
-                tool_args_by_index[index] = dict(tc.arguments)
-                if turn_signal.is_set():
-                    tool_records = _cancelled_tool_records(
-                        calls=tool_calls,
-                        outcomes=outcomes_by_index,
-                        reason=cancel_reason(turn_signal) or "unknown",
-                        policy=interruption_policy,
-                    )
-                    await _record_round(
-                        request,
-                        response,
-                        tool_records,
-                        checkpoint_meta,
-                    )
-                    return (
-                        Outcome(cause=_signal_aborted(turn_signal)),
-                        checkpoint_meta,
-                        tool_calls_used,
-                    )
-
-                tc_returns = await bus.emit(
-                    ToolCallEvent.CHANNEL,
-                    ToolCallEvent(
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        args=dict(tc.arguments),
-                    ),
-                )
-                blocked = _last_key(tc_returns, "block")
-
-                if blocked:
-                    returned_reason = _last_key(tc_returns, "reason")
-                    if returned_reason is not None and not isinstance(
-                        returned_reason,
-                        str,
-                    ):
-                        raise TypeError("ToolCallEvent reason must be a string")
-                    reason = returned_reason or "blocked"
-                    await materialize_tool_outcome(
-                        index,
-                        ToolContinue(
-                            result=ToolResult(
-                                content=[
-                                    TextContent(
-                                        type="text",
-                                        text=f"blocked: {reason}",
-                                    )
-                                ],
-                                is_error=True,
-                            )
-                        ),
-                    )
-                    continue
-
-                rewrite = _last_key(tc_returns, "rewrite")
-                args = dict(tc.arguments)
-                if rewrite is not None:
-                    if not isinstance(rewrite, Mapping):
-                        raise TypeError("ToolCallEvent rewrite must be an object")
-                    frozen_rewrite = freeze_json(rewrite)
-                    if not isinstance(frozen_rewrite, Mapping):
-                        raise TypeError("ToolCallEvent rewrite must be an object")
-                    args.update(frozen_rewrite)
-                tool_args_by_index[index] = dict(args)
-                if allowed_tool_names is not None and tc.name not in allowed_tool_names:
-                    await materialize_tool_outcome(
-                        index,
-                        ToolContinue(
-                            result=ToolResult(
-                                content=[
-                                    TextContent(
-                                        type="text",
-                                        text=f"blocked by tool_allowlist: {tc.name}",
-                                    )
-                                ],
-                                is_error=True,
-                            )
-                        ),
-                    )
-                    continue
-
-                tool = tool_index.get(tc.name)
-                if tool is None:
-                    await materialize_tool_outcome(
-                        index,
-                        ToolContinue(
-                            result=ToolResult(
-                                content=[
-                                    TextContent(
-                                        type="text",
-                                        text=f"unknown tool: {tc.name}",
-                                    )
-                                ],
-                                is_error=True,
-                            )
-                        ),
-                    )
-                    continue
-
-                permission_outcome = await _permission_outcome(
-                    policy=permission_policy,
-                    request=_permission_request(
-                        tc=tc,
-                        args=args,
-                        session_id=session_id,
-                        execution=execution,
-                        audience=permission_audience,
-                    ),
-                    signal=turn_signal,
-                )
-                if turn_signal.is_set():
-                    tool_records = _cancelled_tool_records(
-                        calls=tool_calls,
-                        outcomes=outcomes_by_index,
-                        reason=cancel_reason(turn_signal) or "unknown",
-                        policy=interruption_policy,
-                    )
-                    await _record_round(
-                        request,
-                        response,
-                        tool_records,
-                        checkpoint_meta,
-                    )
-                    return (
-                        Outcome(cause=_signal_aborted(turn_signal)),
-                        checkpoint_meta,
-                        tool_calls_used,
-                    )
-                if permission_outcome is not None:
-                    await materialize_tool_outcome(index, permission_outcome)
-                    continue
-
-                work_items.append(
-                    ToolWorkItem(
-                        index=index,
-                        call=tc,
-                        tool=tool,
-                        args=args,
-                        requirements=tool_execution_requirements(tool),
-                    )
-                )
-
-            if work_items:
-                requested_items = {item.index: item for item in work_items}
-                async for orch_result in tool_orchestrator.stream_batch(
-                    ToolOrchestrationRequest(
-                        items=tuple(work_items),
-                        session_id=session_id,
-                        turn_id=execution.id,
-                        turn_index=execution.index,
-                    ),
-                    signal=turn_signal,
-                    executor=tool_executor,
-                ):
-                    expected_item = requested_items.get(orch_result.item.index)
-                    if expected_item is None or orch_result.item is not expected_item:
-                        raise RuntimeError(
-                            "tool orchestrator returned a result that does not "
-                            "reference its original request item"
-                        )
-                    if turn_signal.is_set() and orch_result.status in {
-                        "cancelled",
-                        "skipped",
-                    }:
-                        continue
-                    if (
-                        orch_result.status == "completed"
-                        and orch_result.output is not None
-                    ):
-                        outcome = _normalize_tool_output(orch_result.output)
-                    else:
-                        outcome = await _orchestration_failure_outcome(
-                            result=orch_result,
-                            bus=bus,
-                        )
-                    await materialize_tool_outcome(
-                        orch_result.item.index,
-                        outcome,
-                        duration_ms=orch_result.duration_ms,
-                    )
-
-            if turn_signal.is_set() and len(outcomes_by_index) < len(tool_calls):
-                tool_records = _cancelled_tool_records(
-                    calls=tool_calls,
-                    outcomes=outcomes_by_index,
-                    reason=cancel_reason(turn_signal) or "unknown",
+        if turn_signal.is_set():
+            response = _assemble_assistant_message(stream_events)
+            reason = cancel_reason(turn_signal) or "unknown"
+            interrupted_records = [
+                _interrupted_tool_record(
+                    call,
+                    reason=reason,
                     policy=interruption_policy,
                 )
-                await _record_round(
-                    request,
-                    response,
-                    tool_records,
-                    checkpoint_meta,
-                )
-                return (
-                    Outcome(cause=_signal_aborted(turn_signal)),
-                    checkpoint_meta,
-                    tool_calls_used,
-                )
-
-            missing_indexes = set(range(len(tool_calls))) - outcomes_by_index.keys()
-            if missing_indexes:
-                raise RuntimeError(
-                    "tool orchestrator omitted terminal results for indexes "
-                    f"{sorted(missing_indexes)}"
-                )
-
-            tool_records = [records_by_index[index] for index in range(len(tool_calls))]
-            paired_outcomes = [
-                (tool_calls[index].name, outcomes_by_index[index])
-                for index in range(len(tool_calls))
+                for call in _extract_tool_calls(response)
             ]
-            result_blocks = [record.result for record in tool_records]
-
-            if result_blocks:
-                messages.append(
-                    ToolResultMessage(
-                        role="tool_result",
-                        content=result_blocks,
-                        timestamp=time.time(),
-                    )
-                )
-
-        if turn_signal.is_set():
             checkpoint_meta = _meta(
                 total_input,
                 total_output,
@@ -1512,7 +1031,377 @@ async def react(
                 cache_read=total_cache_read,
                 cache_write=total_cache_write,
             )
-            await _record_round(
+            await _record_turn_payload(
+                request,
+                response,
+                interrupted_records,
+                checkpoint_meta,
+            )
+            return (
+                Outcome(cause=_signal_aborted(turn_signal)),
+                checkpoint_meta,
+                tool_calls_used,
+            )
+        if isinstance(exc, asyncio.CancelledError) or not isinstance(
+            exc,
+            Exception,
+        ):
+            raise
+        if stream_events:
+            partial_response = _assemble_assistant_message(stream_events)
+            checkpoint_meta = _meta(
+                total_input,
+                total_output,
+                start_ns,
+                effective_model,
+                cache_read=total_cache_read,
+                cache_write=total_cache_write,
+            )
+            await _record_turn_payload(
+                request,
+                partial_response,
+                [],
+                checkpoint_meta,
+            )
+        return (
+            Outcome(
+                cause=ProviderRequestFailed(
+                    error_type=type(exc).__name__,
+                    detail=str(exc),
+                    partial_event_count=len(stream_events),
+                )
+            ),
+            _meta(
+                total_input,
+                total_output,
+                start_ns,
+                effective_model,
+                cache_read=total_cache_read,
+                cache_write=total_cache_write,
+                system_prompt=resolved_system_prompt,
+            ),
+            tool_calls_used,
+        )
+    await bus.emit(
+        LlmRequestEndEvent.CHANNEL,
+        LlmRequestEndEvent(
+            turn_index=execution.index,
+            turn_id=execution.id,
+            chunk_count=len(stream_events),
+            duration_ns=time.perf_counter_ns() - llm_start_ns,
+        ),
+    )
+
+    response = _assemble_assistant_message(stream_events)
+    if response.usage is not None:
+        total_input += response.usage.input_tokens
+        total_output += response.usage.output_tokens
+        total_cache_read += response.usage.cache_read
+        total_cache_write += response.usage.cache_write
+
+    messages.append(response)
+
+    tool_calls = _extract_tool_calls(response)
+    tool_records: list[ToolRecord] = []
+    paired_outcomes: list[tuple[str, ToolOutcome]] = []
+    checkpoint_meta = _meta(
+        total_input,
+        total_output,
+        start_ns,
+        effective_model,
+        cache_read=total_cache_read,
+        cache_write=total_cache_write,
+    )
+    await _save_execution_checkpoint(
+        request,
+        checkpoint_meta,
+        pending_response=response,
+    )
+
+    if turn_signal.is_set() or isinstance(response.termination, Aborted):
+        _append_interrupted_tool_records(
+            calls=tool_calls,
+            records=tool_records,
+            reason=cancel_reason(turn_signal) or "unknown",
+            policy=interruption_policy,
+        )
+        await _record_turn_payload(
+            request,
+            response,
+            tool_records,
+            checkpoint_meta,
+        )
+        return (
+            Outcome(cause=_signal_aborted(turn_signal)),
+            checkpoint_meta,
+            tool_calls_used,
+        )
+
+    if tool_calls:
+        if tool_calls_remaining is not None and len(tool_calls) > max(
+            0, tool_calls_remaining - tool_calls_used
+        ):
+            for call in tool_calls:
+                tool_records.append(
+                    ToolRecord(
+                        call=call,
+                        result=ToolResultBlock(
+                            type="tool_result",
+                            tool_call_id=call.id,
+                            content=[
+                                TextContent(
+                                    type="text",
+                                    text=(
+                                        "Tool call skipped: max_tool_calls exhausted"
+                                    ),
+                                )
+                            ],
+                            is_error=True,
+                        ),
+                    )
+                )
+                await _save_execution_checkpoint(
+                    request,
+                    checkpoint_meta,
+                    pending_response=response,
+                    pending_tool_results=tool_records,
+                )
+            await _record_turn_payload(
+                request,
+                response,
+                tool_records,
+                checkpoint_meta,
+            )
+            return (
+                Outcome(cause=BudgetExhausted(detail="max_tool_calls exhausted")),
+                checkpoint_meta,
+                tool_calls_used,
+            )
+
+        outcomes_by_index: dict[int, ToolOutcome] = {}
+        records_by_index: dict[int, ToolRecord] = {}
+        work_items: list[ToolWorkItem] = []
+        tool_args_by_index: dict[int, Mapping[str, object]] = {}
+
+        async def materialize_tool_outcome(
+            index: int,
+            outcome: ToolOutcome,
+            *,
+            duration_ms: int | None = None,
+        ) -> None:
+            nonlocal tool_calls_used
+            if index in outcomes_by_index:
+                raise RuntimeError(
+                    f"tool orchestrator produced duplicate result index {index}"
+                )
+            record, final_outcome = await _finalize_tool_outcome(
+                bus=bus,
+                call=tool_calls[index],
+                outcome=outcome,
+                args=tool_args_by_index.get(index),
+                duration_ms=duration_ms,
+            )
+            outcomes_by_index[index] = final_outcome
+            records_by_index[index] = record
+            tool_calls_used += 1
+            materialized_records = [
+                records_by_index[record_index]
+                for record_index in sorted(records_by_index)
+            ]
+            await _save_execution_checkpoint(
+                request,
+                checkpoint_meta,
+                pending_response=response,
+                pending_tool_results=materialized_records,
+            )
+
+        for index, tc in enumerate(tool_calls):
+            tool_args_by_index[index] = dict(tc.arguments)
+            if turn_signal.is_set():
+                tool_records = _cancelled_tool_records(
+                    calls=tool_calls,
+                    outcomes=outcomes_by_index,
+                    reason=cancel_reason(turn_signal) or "unknown",
+                    policy=interruption_policy,
+                )
+                await _record_turn_payload(
+                    request,
+                    response,
+                    tool_records,
+                    checkpoint_meta,
+                )
+                return (
+                    Outcome(cause=_signal_aborted(turn_signal)),
+                    checkpoint_meta,
+                    tool_calls_used,
+                )
+
+            tc_returns = await bus.emit(
+                ToolCallEvent.CHANNEL,
+                ToolCallEvent(
+                    tool_call_id=tc.id,
+                    tool_name=tc.name,
+                    args=dict(tc.arguments),
+                ),
+            )
+            blocked = _last_key(tc_returns, "block")
+
+            if blocked:
+                returned_reason = _last_key(tc_returns, "reason")
+                if returned_reason is not None and not isinstance(
+                    returned_reason,
+                    str,
+                ):
+                    raise TypeError("ToolCallEvent reason must be a string")
+                reason = returned_reason or "blocked"
+                await materialize_tool_outcome(
+                    index,
+                    ToolContinue(
+                        result=ToolResult(
+                            content=[
+                                TextContent(
+                                    type="text",
+                                    text=f"blocked: {reason}",
+                                )
+                            ],
+                            is_error=True,
+                        )
+                    ),
+                )
+                continue
+
+            rewrite = _last_key(tc_returns, "rewrite")
+            args = dict(tc.arguments)
+            if rewrite is not None:
+                if not isinstance(rewrite, Mapping):
+                    raise TypeError("ToolCallEvent rewrite must be an object")
+                frozen_rewrite = freeze_json(rewrite)
+                if not isinstance(frozen_rewrite, Mapping):
+                    raise TypeError("ToolCallEvent rewrite must be an object")
+                args.update(frozen_rewrite)
+            tool_args_by_index[index] = dict(args)
+            if allowed_tool_names is not None and tc.name not in allowed_tool_names:
+                await materialize_tool_outcome(
+                    index,
+                    ToolContinue(
+                        result=ToolResult(
+                            content=[
+                                TextContent(
+                                    type="text",
+                                    text=f"blocked by tool_allowlist: {tc.name}",
+                                )
+                            ],
+                            is_error=True,
+                        )
+                    ),
+                )
+                continue
+
+            tool = tool_index.get(tc.name)
+            if tool is None:
+                await materialize_tool_outcome(
+                    index,
+                    ToolContinue(
+                        result=ToolResult(
+                            content=[
+                                TextContent(
+                                    type="text",
+                                    text=f"unknown tool: {tc.name}",
+                                )
+                            ],
+                            is_error=True,
+                        )
+                    ),
+                )
+                continue
+
+            permission_outcome = await _permission_outcome(
+                policy=permission_policy,
+                request=_permission_request(
+                    tc=tc,
+                    args=args,
+                    session_id=session_id,
+                    execution=execution,
+                    audience=permission_audience,
+                ),
+                signal=turn_signal,
+            )
+            if turn_signal.is_set():
+                tool_records = _cancelled_tool_records(
+                    calls=tool_calls,
+                    outcomes=outcomes_by_index,
+                    reason=cancel_reason(turn_signal) or "unknown",
+                    policy=interruption_policy,
+                )
+                await _record_turn_payload(
+                    request,
+                    response,
+                    tool_records,
+                    checkpoint_meta,
+                )
+                return (
+                    Outcome(cause=_signal_aborted(turn_signal)),
+                    checkpoint_meta,
+                    tool_calls_used,
+                )
+            if permission_outcome is not None:
+                await materialize_tool_outcome(index, permission_outcome)
+                continue
+
+            work_items.append(
+                ToolWorkItem(
+                    index=index,
+                    call=tc,
+                    tool=tool,
+                    args=args,
+                    requirements=tool_execution_requirements(tool),
+                )
+            )
+
+        if work_items:
+            requested_items = {item.index: item for item in work_items}
+            async for orch_result in tool_orchestrator.stream_batch(
+                ToolOrchestrationRequest(
+                    items=tuple(work_items),
+                    session_id=session_id,
+                    turn_id=execution.id,
+                    turn_index=execution.index,
+                ),
+                signal=turn_signal,
+                executor=tool_executor,
+            ):
+                expected_item = requested_items.get(orch_result.item.index)
+                if expected_item is None or orch_result.item is not expected_item:
+                    raise RuntimeError(
+                        "tool orchestrator returned a result that does not "
+                        "reference its original request item"
+                    )
+                if turn_signal.is_set() and orch_result.status in {
+                    "cancelled",
+                    "skipped",
+                }:
+                    continue
+                if orch_result.status == "completed" and orch_result.output is not None:
+                    outcome = _normalize_tool_output(orch_result.output)
+                else:
+                    outcome = await _orchestration_failure_outcome(
+                        result=orch_result,
+                        bus=bus,
+                    )
+                await materialize_tool_outcome(
+                    orch_result.item.index,
+                    outcome,
+                    duration_ms=orch_result.duration_ms,
+                )
+
+        if turn_signal.is_set() and len(outcomes_by_index) < len(tool_calls):
+            tool_records = _cancelled_tool_records(
+                calls=tool_calls,
+                outcomes=outcomes_by_index,
+                reason=cancel_reason(turn_signal) or "unknown",
+                policy=interruption_policy,
+            )
+            await _record_turn_payload(
                 request,
                 response,
                 tool_records,
@@ -1524,10 +1413,102 @@ async def react(
                 tool_calls_used,
             )
 
-        await _record_round(
+        missing_indexes = set(range(len(tool_calls))) - outcomes_by_index.keys()
+        if missing_indexes:
+            raise RuntimeError(
+                "tool orchestrator omitted terminal results for indexes "
+                f"{sorted(missing_indexes)}"
+            )
+
+        tool_records = [records_by_index[index] for index in range(len(tool_calls))]
+        paired_outcomes = [
+            (tool_calls[index].name, outcomes_by_index[index])
+            for index in range(len(tool_calls))
+        ]
+        result_blocks = [record.result for record in tool_records]
+
+        if result_blocks:
+            messages.append(
+                ToolResultMessage(
+                    role="tool_result",
+                    content=result_blocks,
+                    timestamp=time.time(),
+                )
+            )
+
+    if turn_signal.is_set():
+        checkpoint_meta = _meta(
+            total_input,
+            total_output,
+            start_ns,
+            effective_model,
+            cache_read=total_cache_read,
+            cache_write=total_cache_write,
+        )
+        await _record_turn_payload(
             request,
             response,
             tool_records,
+            checkpoint_meta,
+        )
+        return (
+            Outcome(cause=_signal_aborted(turn_signal)),
+            checkpoint_meta,
+            tool_calls_used,
+        )
+
+    await _record_turn_payload(
+        request,
+        response,
+        tool_records,
+        _meta(
+            total_input,
+            total_output,
+            start_ns,
+            effective_model,
+            cache_read=total_cache_read,
+            cache_write=total_cache_write,
+        ),
+    )
+
+    terminal_from_trigger = _trigger_carries_terminal(trigger)
+    default = _default_action(response, paired_outcomes)
+    if terminal_from_trigger is not None and isinstance(default, Step):
+        default = Stop(cause=terminal_from_trigger)
+
+    decide_returns = await bus.emit(
+        DecideEvent.CHANNEL,
+        DecideEvent(
+            observation=TurnObservation(
+                turn_index=execution.index,
+                assistant_message=response,
+                tool_outcomes=tuple(paired_outcomes),
+                default_action=default,
+            ),
+        ),
+    )
+    action = _resolve_action(default, decide_returns)
+
+    if isinstance(action, Stop):
+        cause = action.cause if action.cause is not None else ModelEndTurn()
+        return (
+            Outcome(cause=cause),
+            _meta(
+                total_input,
+                total_output,
+                start_ns,
+                effective_model,
+                cache_read=total_cache_read,
+                cache_write=total_cache_write,
+                system_prompt=resolved_system_prompt,
+            ),
+            tool_calls_used,
+        )
+
+    if isinstance(action, Inject):
+        execution.add_injected(list(action.messages))
+        await _save_execution_checkpoint(
+            request,
             _meta(
                 total_input,
                 total_output,
@@ -1538,55 +1519,19 @@ async def react(
             ),
         )
 
-        terminal_from_trigger = _trigger_carries_terminal(trigger)
-        default = _default_action(response, paired_outcomes)
-        if terminal_from_trigger is not None and isinstance(default, Step):
-            default = Stop(cause=terminal_from_trigger)
-
-        decide_returns = await bus.emit(
-            DecideEvent.CHANNEL,
-            DecideEvent(
-                observation=TurnObservation(
-                    turn_index=execution.index,
-                    assistant_message=response,
-                    tool_outcomes=tuple(paired_outcomes),
-                    default_action=default,
-                ),
-            ),
-        )
-        action = _resolve_action(default, decide_returns)
-
-        if isinstance(action, Stop):
-            cause = action.cause if action.cause is not None else ModelEndTurn()
-            return (
-                Outcome(cause=cause),
-                _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    effective_model,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
-                    system_prompt=resolved_system_prompt,
-                ),
-                tool_calls_used,
-            )
-
-        if isinstance(action, Inject):
-            execution.add_injected(list(action.messages))
-            await _save_execution_checkpoint(
-                request,
-                _meta(
-                    total_input,
-                    total_output,
-                    start_ns,
-                    effective_model,
-                    cache_read=total_cache_read,
-                    cache_write=total_cache_write,
-                ),
-            )
-
-        round_index += 1
+    return (
+        Outcome(cause=PromptRunContinued()),
+        _meta(
+            total_input,
+            total_output,
+            start_ns,
+            effective_model,
+            cache_read=total_cache_read,
+            cache_write=total_cache_write,
+            system_prompt=resolved_system_prompt,
+        ),
+        tool_calls_used,
+    )
 
 
 __all__ = ["ReactionRequest", "react", "record_interruption_message"]

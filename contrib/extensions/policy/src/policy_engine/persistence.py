@@ -7,6 +7,7 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loguru import logger
 from sqlalchemy.engine import Connection, Engine
@@ -16,6 +17,10 @@ from agentm.storage.sql import create_sqlite_engine, execute_script
 
 from .state import args_hash
 from .types import EffectRecord, EntityRecord, FileStateEntry, ToolArgs, ToolLogEntry
+
+if TYPE_CHECKING:
+    from .ifg import IfgToolEvent
+    from .repository_index import RepositoryIndex
 
 
 _SCHEMA_SQL = """
@@ -60,7 +65,8 @@ CREATE TABLE IF NOT EXISTS policy_tool_events (
     processed_json TEXT,
     exit_code INTEGER,
     duration_ms INTEGER,
-    result_content_hash TEXT
+    result_content_hash TEXT,
+    cwd TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_tool_events_session
@@ -141,6 +147,7 @@ _POLICY_TOOL_EVENTS_COLUMNS = {
     "exit_code": "INTEGER",
     "duration_ms": "INTEGER",
     "result_content_hash": "TEXT",
+    "cwd": "TEXT",
 }
 
 
@@ -197,6 +204,7 @@ class PolicyPersistence:
         result: Mapping[str, object | None] | None = None,
         processed: Mapping[str, object | None] | None = None,
         taint_labels: Sequence[str] = (),
+        cwd: str | None = None,
     ) -> None:
         """Queue a policy-observed tool event with raw + processed payloads."""
         state: dict[str, object] = {"taint_labels": list(taint_labels)}
@@ -223,6 +231,7 @@ class PolicyPersistence:
                     if processed is not None
                     else None
                 ),
+                "cwd": cwd,
             }
         )
 
@@ -357,6 +366,28 @@ class PolicyPersistence:
         except SQLAlchemyError as e:
             logger.warning("policy persistence flush failed: {}", e)
 
+    def persist_ifg_tool_events(
+        self,
+        events: Sequence["IfgToolEvent"],
+        *,
+        repository_index: "RepositoryIndex | None" = None,
+    ) -> None:
+        """Write IFG facts for runtime-observed tool events."""
+        if not self._engine or not events:
+            return
+        from .ifg import persist_ifg_tool_events
+
+        try:
+            with self._engine.begin() as conn:
+                persist_ifg_tool_events(
+                    conn,
+                    events,
+                    update_summary=False,
+                    repository_index=repository_index,
+                )
+        except Exception as e:
+            logger.warning("policy IFG realtime extraction failed: {}", e)
+
     def count_cross_session(
         self,
         rule_id: str | None = None,
@@ -401,6 +432,8 @@ class PolicyPersistence:
             "policy_eval_error",
         )
         try:
+            from .ifg import delete_ifg_session
+
             deleted = 0
             with self._engine.begin() as conn:
                 for table in tables:
@@ -409,6 +442,7 @@ class PolicyPersistence:
                         (session_id,),
                     )
                     deleted += cursor.rowcount
+                deleted += delete_ifg_session(conn, session_id)
             return deleted
         except SQLAlchemyError:
             return 0
@@ -488,7 +522,12 @@ class PolicyPersistence:
                     rec.effect,
                     rec.reason,
                     rec.turn,
-                    _to_json({"channel": rec.channel}),
+                    _to_json(
+                        {
+                            "channel": rec.channel,
+                            "evidence": rec.context,
+                        }
+                    ),
                 ),
             )
 
@@ -499,8 +538,8 @@ class PolicyPersistence:
                 INSERT INTO policy_tool_events
                     (ts, session_id, turn, phase, tool_call_id, tool_name,
                      args_hash, args_json, result_json, state_json,
-                     processed_json, exit_code, duration_ms, result_content_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     processed_json, exit_code, duration_ms, result_content_hash, cwd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now,
@@ -517,6 +556,7 @@ class PolicyPersistence:
                     row["exit_code"],
                     row["duration_ms"],
                     row["result_content_hash"],
+                    row["cwd"],
                 ),
             )
 

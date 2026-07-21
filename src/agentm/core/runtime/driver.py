@@ -2,9 +2,10 @@
 """Session driver — persistent loop that converts triggers into committed turns.
 
 Design:
-- Outer loop: one trigger → one Turn.  Exits on shutdown / queue-closed / max_turns.
-- Inner loop (_react_loop): ReAct rounds within one turn.  Exits on Stop action.
-- interrupt: aborts current turn only (SignalAborted), driver continues.
+- One accepted trigger owns a prompt run and one completion receipt.
+- Every provider response and its tool results commit as one Turn and transaction.
+- A continuation Turn stays attached to the accepted trigger until Stop.
+- interrupt: aborts only the active Turn; already committed Turns stay intact.
 - shutdown: aborts current turn AND exits driver.
 - ToolTerminate: sets shutdown, turn commits, driver exits.
 """
@@ -17,6 +18,7 @@ import time
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import cast
+from uuid import uuid4
 
 from loguru import logger
 
@@ -82,6 +84,7 @@ from agentm.core.abi.store import (
     TrajectoryStore,
 )
 from agentm.core.abi.termination import (
+    PromptRunContinued,
     MaxTurnsExhausted,
     ProviderRequestFailed,
 )
@@ -96,6 +99,9 @@ from agentm.core.abi.trajectory import (
     TurnMeta,
 )
 from agentm.core.abi.trigger import (
+    ContinueTrigger,
+    TriggerEnvelope,
+    TriggerMetadata,
     TriggerRenderer,
 )
 from agentm.core.runtime.reaction import (
@@ -447,11 +453,36 @@ class DriverConfig:
     tool_allowlist: tuple[str, ...] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PromptRun:
+    """One accepted external trigger and its internal continuation state."""
+
+    run_id: str
+    run_step: int
+    envelope: TriggerEnvelope
+    system_prompt: str | None
+
+    def continue_with(self, *, system_prompt: str | None) -> _PromptRun:
+        return replace(
+            self,
+            run_step=self.run_step + 1,
+            envelope=TriggerEnvelope(
+                trigger=ContinueTrigger(),
+                metadata=TriggerMetadata(
+                    priority="now",
+                    origin="runtime",
+                    mode="continue",
+                ),
+            ),
+            system_prompt=system_prompt,
+        )
+
+
 async def drive(config: DriverConfig) -> None:
     """Persistent driver loop.
 
-    Processes triggers one at a time.  Each trigger becomes one Turn
-    (potentially with multiple ReAct rounds).  Exits when:
+    Processes one external trigger as a PromptRun. Each provider response and
+    its complete tool-result set becomes a separate Turn. Exits when:
     - shutdown is set
     - trigger queue is closed (QueueClosed)
     - max_turns committed turns reached
@@ -487,6 +518,7 @@ async def drive(config: DriverConfig) -> None:
             _last_system_prompt_ref = _system_prompt_ref(_existing_sp)
             break
 
+    prompt_run: _PromptRun | None = None
     while True:
         if _shutdown.is_set():
             triggers.terminate(TriggerTerminated("session shut down"))
@@ -502,15 +534,22 @@ async def drive(config: DriverConfig) -> None:
             )
             return
 
-        try:
-            envelope = await triggers.wait_envelope()
-            trigger = envelope.trigger
-        except QueueClosed:
-            triggers.terminate(TriggerTerminated("trigger queue closed"))
-            await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
-            return
-
-        _interrupt.clear()
+        if prompt_run is None:
+            try:
+                external_envelope = await triggers.wait_envelope()
+            except QueueClosed:
+                triggers.terminate(TriggerTerminated("trigger queue closed"))
+                await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
+                return
+            _interrupt.clear()
+            prompt_run = _PromptRun(
+                run_id=uuid4().hex,
+                run_step=0,
+                envelope=external_envelope,
+                system_prompt=config.system,
+            )
+        envelope = prompt_run.envelope
+        trigger = envelope.trigger
 
         effect_txn: EffectTxn | None = None
         resource_txn: ResourceTxn | None = None
@@ -519,13 +558,19 @@ async def drive(config: DriverConfig) -> None:
         turn_published = False
         cancelled_during_rollback = False
         try:
-            execution = trajectory.begin(trigger)
+            execution = trajectory.begin(
+                trigger,
+                run_id=prompt_run.run_id,
+                run_step=prompt_run.run_step,
+            )
             await bus.emit(
                 TurnBeginEvent.CHANNEL,
                 TurnBeginEvent(
                     index=execution.index,
                     turn_index=execution.index,
                     turn_id=execution.id,
+                    run_id=execution.run_id,
+                    run_step=execution.run_step,
                     trigger=trigger,
                 ),
             )
@@ -578,6 +623,7 @@ async def drive(config: DriverConfig) -> None:
                         context_policies=policies,
                         interrupt=_interrupt,
                         shutdown=_shutdown,
+                        system=prompt_run.system_prompt,
                     ),
                     context_projection=context_projection,
                     prompt_cache_adapter=prompt_cache_adapter,
@@ -764,8 +810,14 @@ async def drive(config: DriverConfig) -> None:
 
             if isinstance(outcome.cause, ProviderRequestFailed):
                 triggers.fail(TriggerTerminated(outcome.cause))
+                prompt_run = None
+            elif isinstance(outcome.cause, PromptRunContinued):
+                prompt_run = prompt_run.continue_with(
+                    system_prompt=turn.meta.system_prompt,
+                )
             else:
                 triggers.complete(turn)
+                prompt_run = None
             cancelled_during_event = False
             try:
                 await bus.emit(

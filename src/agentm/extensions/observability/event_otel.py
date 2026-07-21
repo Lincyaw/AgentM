@@ -115,6 +115,8 @@ def _turn_begin_to_otel(event: TurnBeginEvent, telemetry: Any) -> None:
             **{
                 "agentm.turn.index": event.turn_index,
                 "agentm.turn.id": event.turn_id,
+                "agentm.prompt_run.id": event.run_id,
+                "agentm.prompt_run.step": event.run_step,
                 "agentm.trigger": telemetry.to_otel_attr(to_jsonable(event.trigger)),
             },
         ),
@@ -219,13 +221,13 @@ def _turn_committed_to_otel(event: TurnCommittedEvent, telemetry: Any) -> None:
     tool_calls: list[str] = []
     tool_error_count = 0
     tool_result_chars = 0
-    for round_ in turn.rounds:
-        for block in round_.response.content:
+    if turn.response is not None:
+        for block in turn.response.content:
             if isinstance(block, ToolCallBlock):
                 tool_calls.append(block.name)
-        for record in round_.tool_results:
-            tool_error_count += 1 if record.result.is_error else 0
-            tool_result_chars += _tool_text_chars(record.result)
+    for record in turn.tool_results:
+        tool_error_count += 1 if record.result.is_error else 0
+        tool_result_chars += _tool_text_chars(record.result)
 
     span = telemetry.pop_span(_SPAN_TURN, turn.id)
     if span is not None:
@@ -244,6 +246,8 @@ def _turn_committed_to_otel(event: TurnCommittedEvent, telemetry: Any) -> None:
         body={
             "turn_index": turn.index,
             "turn_id": turn.id,
+            "run_id": turn.run_id,
+            "run_step": turn.run_step,
             "duration_ns": duration_ns,
             "tool_calls": tool_calls,
             "tool_call_count": len(tool_calls),
@@ -257,6 +261,8 @@ def _turn_committed_to_otel(event: TurnCommittedEvent, telemetry: Any) -> None:
             **{
                 "agentm.turn.index": turn.index,
                 "agentm.turn.id": turn.id,
+                "agentm.prompt_run.id": turn.run_id,
+                "agentm.prompt_run.step": turn.run_step,
                 "agentm.turn.duration_ns": duration_ns,
                 "agentm.turn.tool_call_count": len(tool_calls),
                 "agentm.turn.tool_error_count": tool_error_count,

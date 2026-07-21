@@ -53,6 +53,7 @@ from agentm.core.abi._resource_codec import (
 )
 from agentm.core.abi.termination import (
     BudgetExhausted,
+    PromptRunContinued,
     MaxTurnsExhausted,
     ModelEndTurn,
     ProviderRequestFailed,
@@ -62,9 +63,7 @@ from agentm.core.abi.termination import (
     ToolTerminated,
 )
 from agentm.core.abi.trajectory import (
-    InjectedMessages,
     Outcome,
-    Round,
     ToolRecord,
     Turn,
     TurnCheckpoint,
@@ -87,7 +86,7 @@ from agentm.core.lib.json_value import (
 )
 
 
-TRAJECTORY_CODEC_VERSION = 2
+TRAJECTORY_CODEC_VERSION = 3
 
 
 @runtime_checkable
@@ -177,56 +176,20 @@ def _only_fields(data: Mapping[str, Any], allowed: set[str], path: str) -> None:
         raise ValueError(f"{path} has unknown fields: {sorted(unknown)}")
 
 
-def _serialize_injected(
-    injected: tuple[InjectedMessages, ...],
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "after_round": injection.after_round,
-            "messages": [serialize_message(message) for message in injection.messages],
-        }
-        for injection in injected
-    ]
+def _serialize_injected(injected: tuple[AgentMessage, ...]) -> list[dict[str, Any]]:
+    return [serialize_message(message) for message in injected]
 
 
 def _deserialize_injected(
     data: Any,
     *,
     path: str,
-) -> tuple[InjectedMessages, ...]:
+) -> tuple[AgentMessage, ...]:
     raw_injected = _array(data, path)
-    records: list[InjectedMessages] = []
-    for index, raw_entry in enumerate(raw_injected):
-        entry_path = f"{path}[{index}]"
-        entry = _object(raw_entry, entry_path)
-        _only_fields(
-            entry,
-            {"after_round", "messages"},
-            entry_path,
-        )
-        raw_messages = _array(
-            entry.get("messages"),
-            f"{entry_path}.messages",
-        )
-        records.append(
-            InjectedMessages(
-                after_round=_integer(
-                    entry.get("after_round"),
-                    f"{entry_path}.after_round",
-                    minimum=-1,
-                ),
-                messages=tuple(
-                    deserialize_message(
-                        _object(
-                            message,
-                            f"{entry_path}.messages[{message_index}]",
-                        )
-                    )
-                    for message_index, message in enumerate(raw_messages)
-                ),
-            )
-        )
-    return tuple(records)
+    return tuple(
+        deserialize_message(_object(message, f"{path}[{index}]"))
+        for index, message in enumerate(raw_injected)
+    )
 
 
 def _serialize_trigger_metadata(
@@ -794,6 +757,7 @@ _BUILTIN_CAUSES: Final[dict[str, type[TerminationCause]]] = {
     cls.__qualname__: cls
     for cls in (
         ModelEndTurn,
+        PromptRunContinued,
         ToolTerminated,
         MaxTurnsExhausted,
         SignalAborted,
@@ -915,29 +879,6 @@ class CodecRegistry:
                 "tool record.backgrounded",
             ),
         )
-
-    # --- Round ---
-
-    def _serialize_round(self, rnd: Round) -> dict[str, Any]:
-        return {
-            "response": serialize_message(rnd.response),
-            "tool_results": [
-                self._serialize_tool_record(tr) for tr in rnd.tool_results
-            ],
-        }
-
-    def _deserialize_round(self, data: dict[str, Any]) -> Round:
-        data = _object(data, "round")
-        _only_fields(data, {"response", "tool_results"}, "round")
-        response = deserialize_message(_object(data.get("response"), "round.response"))
-        if not isinstance(response, AssistantMessage):
-            raise ValueError("serialized round response must be an assistant message")
-        raw_results = _array(data.get("tool_results"), "round.tool_results")
-        tool_results = tuple(
-            self._deserialize_tool_record(_object(item, f"round.tool_results[{index}]"))
-            for index, item in enumerate(raw_results)
-        )
-        return Round(response=response, tool_results=tool_results)
 
     # --- Outcome ---
 
@@ -1080,8 +1021,18 @@ class CodecRegistry:
             "schema_version": TRAJECTORY_CODEC_VERSION,
             "index": checkpoint.index,
             "id": checkpoint.id,
+            "run_id": checkpoint.run_id,
+            "run_step": checkpoint.run_step,
             "trigger": self.serialize_trigger(checkpoint.trigger),
-            "rounds": [self._serialize_round(r) for r in checkpoint.rounds],
+            "response": (
+                serialize_message(checkpoint.response)
+                if checkpoint.response is not None
+                else None
+            ),
+            "tool_results": [
+                self._serialize_tool_record(record)
+                for record in checkpoint.tool_results
+            ],
             "updated_at": checkpoint.updated_at,
             "meta": self._serialize_meta(checkpoint.meta),
             "injected": _serialize_injected(checkpoint.injected),
@@ -1102,8 +1053,11 @@ class CodecRegistry:
                 "schema_version",
                 "index",
                 "id",
+                "run_id",
+                "run_step",
                 "trigger",
-                "rounds",
+                "response",
+                "tool_results",
                 "updated_at",
                 "meta",
                 "injected",
@@ -1117,7 +1071,18 @@ class CodecRegistry:
         )
         if version != TRAJECTORY_CODEC_VERSION:
             raise ValueError(f"unsupported turn checkpoint schema version: {version}")
-        raw_rounds = _array(data.get("rounds"), "turn checkpoint.rounds")
+        raw_response = data.get("response")
+        response = (
+            None
+            if raw_response is None
+            else deserialize_message(_object(raw_response, "turn checkpoint.response"))
+        )
+        if response is not None and not isinstance(response, AssistantMessage):
+            raise ValueError("turn checkpoint response must be an assistant message")
+        raw_results = _array(
+            data.get("tool_results"),
+            "turn checkpoint.tool_results",
+        )
         return TurnCheckpoint(
             index=_integer(
                 data.get("index"),
@@ -1129,14 +1094,25 @@ class CodecRegistry:
                 "turn checkpoint.id",
                 allow_empty=False,
             ),
+            run_id=_string(
+                data.get("run_id"),
+                "turn checkpoint.run_id",
+                allow_empty=False,
+            ),
+            run_step=_integer(
+                data.get("run_step"),
+                "turn checkpoint.run_step",
+                minimum=0,
+            ),
             trigger=self.deserialize_trigger(
                 _object(data.get("trigger"), "turn checkpoint.trigger")
             ),
-            rounds=tuple(
-                self._deserialize_round(
-                    _object(item, f"turn checkpoint.rounds[{index}]")
+            response=response,
+            tool_results=tuple(
+                self._deserialize_tool_record(
+                    _object(item, f"turn checkpoint.tool_results[{index}]")
                 )
-                for index, item in enumerate(raw_rounds)
+                for index, item in enumerate(raw_results)
             ),
             updated_at=_number(
                 data.get("updated_at"),
@@ -1160,8 +1136,15 @@ class CodecRegistry:
             "schema_version": TRAJECTORY_CODEC_VERSION,
             "index": turn.index,
             "id": turn.id,
+            "run_id": turn.run_id,
+            "run_step": turn.run_step,
             "trigger": self.serialize_trigger(turn.trigger),
-            "rounds": [self._serialize_round(r) for r in turn.rounds],
+            "response": (
+                serialize_message(turn.response) if turn.response is not None else None
+            ),
+            "tool_results": [
+                self._serialize_tool_record(record) for record in turn.tool_results
+            ],
             "outcome": self._serialize_outcome(turn.outcome),
             "timestamp": turn.timestamp,
             "meta": self._serialize_meta(turn.meta),
@@ -1177,8 +1160,11 @@ class CodecRegistry:
                 "schema_version",
                 "index",
                 "id",
+                "run_id",
+                "run_step",
                 "trigger",
-                "rounds",
+                "response",
+                "tool_results",
                 "outcome",
                 "timestamp",
                 "meta",
@@ -1189,16 +1175,29 @@ class CodecRegistry:
         version = _integer(data.get("schema_version"), "turn.schema_version")
         if version != TRAJECTORY_CODEC_VERSION:
             raise ValueError(f"unsupported turn schema version: {version}")
-        raw_rounds = _array(data.get("rounds"), "turn.rounds")
+        raw_response = data.get("response")
+        response = (
+            None
+            if raw_response is None
+            else deserialize_message(_object(raw_response, "turn.response"))
+        )
+        if response is not None and not isinstance(response, AssistantMessage):
+            raise ValueError("turn response must be an assistant message")
+        raw_results = _array(data.get("tool_results"), "turn.tool_results")
         return Turn(
             index=_integer(data.get("index"), "turn.index", minimum=0),
             id=_string(data.get("id"), "turn.id", allow_empty=False),
+            run_id=_string(data.get("run_id"), "turn.run_id", allow_empty=False),
+            run_step=_integer(data.get("run_step"), "turn.run_step", minimum=0),
             trigger=self.deserialize_trigger(
                 _object(data.get("trigger"), "turn.trigger")
             ),
-            rounds=tuple(
-                self._deserialize_round(_object(item, f"turn.rounds[{index}]"))
-                for index, item in enumerate(raw_rounds)
+            response=response,
+            tool_results=tuple(
+                self._deserialize_tool_record(
+                    _object(item, f"turn.tool_results[{index}]")
+                )
+                for index, item in enumerate(raw_results)
             ),
             outcome=self._deserialize_outcome(
                 _object(data.get("outcome"), "turn.outcome")

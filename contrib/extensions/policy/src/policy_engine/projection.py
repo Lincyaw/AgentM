@@ -22,7 +22,6 @@ from .types import RuleInstance, ToolArgs, ToolLogEntry
 @dataclass(frozen=True, slots=True)
 class PolicyToolCallProjectionEvent:
     turn_index: int
-    round_index: int
     tool_call_id: str
     tool_name: str
     args: ToolArgs
@@ -31,7 +30,6 @@ class PolicyToolCallProjectionEvent:
 @dataclass(frozen=True, slots=True)
 class PolicyToolResultProjectionEvent:
     turn_index: int
-    round_index: int
     tool_call_id: str
     tool_name: str
     args: ToolArgs
@@ -188,6 +186,7 @@ class PolicyProjector:
         self._evaluator.evaluate(
             channel="tool_result",
             tool_name=event.tool_name,
+            args=args,
             result=result_for_eval,
         )
         self._persist_new_effects()
@@ -198,6 +197,7 @@ class PolicyProjector:
             processed=_projection_processed_result(event, error, metadata),
         )
         self._queue_state_snapshot()
+        self._queue_session_summary()
         self._flush_policy_persistence()
 
     def _on_turn_end(self, event: PolicyTurnEndProjectionEvent) -> None:
@@ -358,6 +358,8 @@ class PolicyProjector:
                 "file_read_count": sum(entry.read_count for entry in file_entries),
                 "file_write_count": sum(entry.write_count for entry in file_entries),
                 "error_count": sum(1 for entry in tool_entries if entry.error),
+                "intervention": self._state.ifg_interventions.summary(),
+                "investigation": self._state.ifg_investigation.summary(),
             },
         )
 
@@ -398,27 +400,24 @@ def events_from_turns(
     turns: Iterable[Turn | TurnCheckpoint],
 ) -> Iterable[PolicyProjectionEvent]:
     for turn in turns:
-        for round_index, round_ in enumerate(turn.rounds):
-            for record in round_.tool_results:
-                args = dict(record.call.arguments)
-                yield PolicyToolCallProjectionEvent(
-                    turn_index=turn.index,
-                    round_index=round_index,
-                    tool_call_id=record.call.id,
-                    tool_name=record.call.name,
-                    args=args,  # type: ignore[arg-type]
-                )
-                yield PolicyToolResultProjectionEvent(
-                    turn_index=turn.index,
-                    round_index=round_index,
-                    tool_call_id=record.call.id,
-                    tool_name=record.call.name,
-                    args=args,  # type: ignore[arg-type]
-                    result_text=_tool_result_text(record.result.content),
-                    is_error=record.result.is_error,
-                    extras=_mapping_or_none(record.result.extras),
-                    raw_result=_tool_result_json(record.result),
-                )
+        for record in turn.tool_results:
+            args = dict(record.call.arguments)
+            yield PolicyToolCallProjectionEvent(
+                turn_index=turn.index,
+                tool_call_id=record.call.id,
+                tool_name=record.call.name,
+                args=args,  # type: ignore[arg-type]
+            )
+            yield PolicyToolResultProjectionEvent(
+                turn_index=turn.index,
+                tool_call_id=record.call.id,
+                tool_name=record.call.name,
+                args=args,  # type: ignore[arg-type]
+                result_text=_tool_result_text(record.result.content),
+                is_error=record.result.is_error,
+                extras=_mapping_or_none(record.result.extras),
+                raw_result=_tool_result_json(record.result),
+            )
         yield PolicyTurnEndProjectionEvent(turn_index=turn.index)
 
 

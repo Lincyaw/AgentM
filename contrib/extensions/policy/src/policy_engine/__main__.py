@@ -31,11 +31,19 @@ from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.storage.sql import create_sqlite_engine
 
+from .paths import resolve_policy_db_path
+
 app = typer.Typer(
     name="policy",
     add_completion=False,
     help="Policy engine data queries and rule management.",
 )
+ifg_app = typer.Typer(
+    name="ifg",
+    add_completion=False,
+    help="Information Flow Graph extraction and queries.",
+)
+app.add_typer(ifg_app, name="ifg")
 console = Console()
 
 
@@ -94,15 +102,12 @@ def _session_matches(row: SessionIdentity, filter: SessionFilter) -> bool:
     return True
 
 
-def _db_path() -> Path:
-    import os
-
-    agentm_home = os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm"))
-    return Path(agentm_home) / "policy_state" / "policy.db"
+def _db_path(*, session_id: str | None = None, cwd: Path | None = None) -> Path:
+    return resolve_policy_db_path(session_id=session_id, cwd=cwd)
 
 
-def _connect() -> Engine | None:
-    path = _db_path()
+def _connect(*, session_id: str | None = None) -> Engine | None:
+    path = _db_path(session_id=session_id)
     if not path.exists():
         console.print(f"[yellow]No policy database at {path}[/yellow]")
         return None
@@ -134,6 +139,17 @@ def _table_exists(conn: Connection, table: str) -> bool:
     return row is not None
 
 
+def _has_policy_tool_events(conn: Connection, session: str) -> bool:
+    if not _table_exists(conn, "policy_tool_events"):
+        return False
+    row = _row(
+        conn,
+        "SELECT 1 FROM policy_tool_events WHERE session_id = ? LIMIT 1",
+        (session,),
+    )
+    return row is not None
+
+
 def _short_json(raw: str | None, *, max_chars: int = 80) -> str:
     if not raw:
         return ""
@@ -155,7 +171,7 @@ def stats(
     days: int = typer.Option(7, "--days", "-d", help="Look back N days"),
 ) -> None:
     """Show per-rule firing statistics."""
-    engine = _connect()
+    engine = _connect(session_id=session)
     if not engine:
         return
 
@@ -213,7 +229,7 @@ def log(
     limit: int = typer.Option(20, "--limit", "-n", help="Max rows"),
 ) -> None:
     """Show recent effect_log entries."""
-    engine = _connect()
+    engine = _connect(session_id=session)
     if not engine:
         return
 
@@ -309,7 +325,8 @@ def backfill(
         )
         raise typer.Exit(1)
 
-    persistence = PolicyPersistence(db_path or _db_path())
+    resolved_db_path = db_path or _db_path(session_id=session, cwd=cwd)
+    persistence = PolicyPersistence(resolved_db_path)
     try:
         persistence.open()
         try:
@@ -344,7 +361,7 @@ def backfill(
         f"session={result.session_id} turns={result.turns} "
         f"committed={len(turns)} checkpoint={1 if checkpoint is not None else 0} "
         f"tool_calls={result.tool_calls} effects={result.effects} "
-        f"eval_errors={result.eval_errors} deleted={deleted} db={db_path or _db_path()}"
+        f"eval_errors={result.eval_errors} deleted={deleted} db={resolved_db_path}"
     )
 
 
@@ -389,7 +406,8 @@ def view(
         run_policy_trace_viewer(
             query,
             sid,
-            db_path=db_path or _db_path(),
+            db_path=db_path,
+            cwd=cwd or Path.cwd(),
             follow=follow,
         )
     finally:
@@ -415,7 +433,7 @@ def events(
     limit: int = typer.Option(20, "--limit", "-n", help="Max rows"),
 ) -> None:
     """Show persisted policy-observed tool events."""
-    engine = _connect()
+    engine = _connect(session_id=session)
     if not engine:
         return
     try:
@@ -483,7 +501,7 @@ def state(
     limit: int = typer.Option(20, "--limit", "-n", help="Max rows"),
 ) -> None:
     """Show persisted policy intermediate state snapshots."""
-    engine = _connect()
+    engine = _connect(session_id=session)
     if not engine:
         return
 
@@ -783,6 +801,408 @@ def lint(
         raise typer.Exit(1)
     else:
         console.print(f"[green]All {ok_count} rules compiled successfully.[/green]")
+
+
+@ifg_app.command("backfill")
+def ifg_backfill(
+    session: str = typer.Option(..., "--session", "-s", help="Session ID to extract"),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="Policy SQLite db path. Defaults to $AGENTM_HOME/policy_state/policy.db.",
+    ),
+    source: str = typer.Option(
+        "policy",
+        "--source",
+        help="Input source: policy, trajectory, or auto.",
+    ),
+    cwd: Path | None = typer.Option(
+        None,
+        "--cwd",
+        help="Project cwd for resolving trajectory source.",
+    ),
+    extractor_version: str | None = typer.Option(
+        None,
+        "--extractor-version",
+        help="Override IFG extractor version for controlled re-runs.",
+    ),
+    replace: bool = typer.Option(
+        True,
+        "--replace/--append",
+        help="Delete existing IFG rows for this session/version before extraction.",
+    ),
+    include_checkpoint: bool = typer.Option(
+        True,
+        "--include-checkpoint/--committed-only",
+        help="With trajectory source, include the latest incomplete checkpoint.",
+    ),
+) -> None:
+    """Build IFG facts from policy events or the selected trajectory store."""
+    from .ifg import (
+        IFG_EXTRACTOR_VERSION,
+        backfill_ifg_from_policy_events,
+        backfill_ifg_from_trajectory_turns,
+    )
+
+    path = db_path or _db_path(session_id=session, cwd=cwd)
+    normalized_source = source.lower()
+    if normalized_source not in {"policy", "trajectory", "auto"}:
+        console.print("[red]Invalid --source. Use policy, trajectory, or auto.[/red]")
+        raise typer.Exit(2)
+    if normalized_source == "policy" and not path.exists():
+        console.print(f"[red]No policy database at {path}[/red]")
+        raise typer.Exit(1)
+    if normalized_source in {"trajectory", "auto"}:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    version = extractor_version or IFG_EXTRACTOR_VERSION
+    used_source = normalized_source
+    committed_turns: int | None = None
+    checkpoint_count: int | None = None
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            if normalized_source in {"policy", "auto"} and _has_policy_tool_events(
+                conn,
+                session,
+            ):
+                result = backfill_ifg_from_policy_events(
+                    conn,
+                    session,
+                    replace=replace,
+                    extractor_version=version,
+                )
+                used_source = "policy"
+            elif normalized_source == "policy":
+                console.print(
+                    "[yellow]No policy_tool_events for session.[/yellow] "
+                    "Run `policy_engine backfill --session ...` first, or use "
+                    "`policy_engine ifg backfill --source trajectory`."
+                )
+                return
+            else:
+                from agentm.storage.trajectory.resolve import resolve_trajectory_store
+
+                resolved = resolve_trajectory_store(str(cwd) if cwd else None)
+                if resolved is None:
+                    console.print(
+                        "[red]No trajectory store found.[/red]\n"
+                        "[dim]Run from a project with agentm.toml, or set "
+                        "AGENTM_TRAJECTORY_DSN / AGENTM_TRAJECTORY_DIR.[/dim]"
+                    )
+                    raise typer.Exit(1)
+                try:
+                    try:
+                        meta, turns = resolved.store.load(session)
+                    except KeyError:
+                        console.print(f"[red]Session not found: {session}[/red]")
+                        raise typer.Exit(1)
+                    checkpoint = (
+                        resolved.store.load_checkpoint(session)
+                        if include_checkpoint
+                        else None
+                    )
+                    trajectory_records = list(turns)
+                    if checkpoint is not None:
+                        trajectory_records.append(checkpoint)
+                    committed_turns = len(turns)
+                    checkpoint_count = 1 if checkpoint is not None else 0
+                    trajectory_cwd = (
+                        str(Path(meta.cwd)) if meta.cwd else str(cwd or Path.cwd())
+                    )
+                    result = backfill_ifg_from_trajectory_turns(
+                        conn,
+                        session,
+                        trajectory_records,
+                        cwd=trajectory_cwd,
+                        replace=replace,
+                        extractor_version=version,
+                    )
+                finally:
+                    resolved.close()
+                used_source = "trajectory"
+    finally:
+        engine.dispose()
+
+    if result.source_events == 0:
+        console.print(
+            f"[yellow]No IFG source tool events for session via {used_source}.[/yellow]"
+        )
+        return
+
+    console.print(
+        "[green]Backfilled IFG[/green] "
+        f"session={result.session_id} source={used_source} "
+        f"version={result.extractor_version} "
+        f"source_events={result.source_events} actions={result.actions} "
+        f"nodes={result.graph_nodes} edges={result.graph_edges} "
+        f"files={result.files} file_edges={result.file_edges} "
+        f"source_units={result.source_units} path_candidates={result.path_candidates} "
+        f"unresolved_path_candidates={result.unresolved_path_candidates} "
+        f"symbols={result.symbols} action_symbol_edges={result.action_symbol_edges} "
+        f"file_symbol_edges={result.file_symbol_edges} "
+        f"symbol_symbol_edges={result.symbol_symbol_edges} "
+        f"symbol_mentions={result.symbol_mentions} "
+        f"unresolved_symbol_mentions={result.unresolved_symbol_mentions} "
+        f"errors={result.errors} "
+        f"deleted={result.deleted} db={path}"
+    )
+    if result.action_kinds:
+        console.print(
+            "[dim]action_kinds="
+            + ", ".join(
+                f"{kind}:{count}" for kind, count in sorted(result.action_kinds.items())
+            )
+            + "[/dim]"
+        )
+    if used_source == "trajectory":
+        console.print(
+            f"[dim]trajectory_turns={committed_turns} "
+            f"checkpoint={checkpoint_count}[/dim]"
+        )
+
+
+@ifg_app.command("status")
+def ifg_status(
+    session: str = typer.Option(..., "--session", "-s", help="Session ID to inspect"),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="Policy SQLite db path. Defaults to $AGENTM_HOME/policy_state/policy.db.",
+    ),
+    extractor_version: str | None = typer.Option(
+        None,
+        "--extractor-version",
+        help="Filter by extractor version.",
+    ),
+) -> None:
+    """Show persisted IFG extraction counts for a session."""
+    path = db_path or _db_path(session_id=session)
+    if not path.exists():
+        console.print(f"[red]No policy database at {path}[/red]")
+        raise typer.Exit(1)
+
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.connect() as conn:
+            if not _table_exists(conn, "ifg_actions"):
+                console.print(
+                    "[dim]No IFG tables found. Run `policy_engine ifg backfill`.[/dim]"
+                )
+                return
+            counts = _ifg_counts(conn, session, extractor_version)
+            action_kinds = _ifg_action_kind_counts(conn, session, extractor_version)
+            summary = _ifg_latest_summary(conn, session, extractor_version)
+    finally:
+        engine.dispose()
+
+    table = Table(title="IFG Status")
+    table.add_column("Table", style="cyan")
+    table.add_column("Rows", justify="right")
+    for name, count in counts.items():
+        table.add_row(name, str(count))
+    console.print(table)
+
+    if action_kinds:
+        kinds = Table(title="IFG Action Kinds")
+        kinds.add_column("Kind", style="cyan")
+        kinds.add_column("Count", justify="right")
+        for kind, count in action_kinds:
+            kinds.add_row(kind, str(count))
+        console.print(kinds)
+    if summary:
+        console.print(
+            f"[dim]latest_summary={_short_json(summary, max_chars=220)}[/dim]"
+        )
+
+
+@ifg_app.command("clear")
+def ifg_clear(
+    session: str = typer.Option(..., "--session", "-s", help="Session ID to clear"),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="Policy SQLite db path. Defaults to $AGENTM_HOME/policy_state/policy.db.",
+    ),
+    extractor_version: str | None = typer.Option(
+        None,
+        "--extractor-version",
+        help="Only clear rows for this extractor version.",
+    ),
+) -> None:
+    """Delete persisted IFG rows for a session."""
+    from .ifg import delete_ifg_session
+
+    path = db_path or _db_path(session_id=session)
+    if not path.exists():
+        console.print(f"[red]No policy database at {path}[/red]")
+        raise typer.Exit(1)
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            deleted = delete_ifg_session(
+                conn,
+                session,
+                extractor_version=extractor_version,
+            )
+    finally:
+        engine.dispose()
+    scope = extractor_version or "all versions"
+    console.print(f"Deleted {deleted} IFG rows for session={session} scope={scope}.")
+
+
+@ifg_app.command("serve")
+def ifg_serve(
+    session: str = typer.Option(..., "--session", "-s", help="Session ID to view"),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="Policy SQLite DB path. Auto-detected from the session by default.",
+    ),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="HTTP bind host.",
+    ),
+    port: int = typer.Option(
+        8765,
+        "--port",
+        min=0,
+        max=65535,
+        help="HTTP port. Use 0 to select an available port.",
+    ),
+    refresh_ms: int = typer.Option(
+        1500,
+        "--refresh-ms",
+        min=250,
+        max=60_000,
+        help="Browser refresh interval in milliseconds.",
+    ),
+    open_browser: bool = typer.Option(
+        False,
+        "--open/--no-open",
+        help="Open the viewer in the default browser.",
+    ),
+) -> None:
+    """Serve a live, component-aware IFG graph in the browser."""
+    from .ifg.web import create_ifg_web_server
+
+    path = db_path or _db_path(session_id=session)
+    if not path.exists():
+        console.print(f"[red]No policy database at {path}[/red]")
+        raise typer.Exit(1)
+
+    server = create_ifg_web_server(
+        path,
+        session,
+        host=host,
+        port=port,
+        refresh_ms=refresh_ms,
+    )
+    bound_host, bound_port = server.server_address[:2]
+    visible_host = "127.0.0.1" if bound_host in {"0.0.0.0", "::"} else bound_host
+    url = f"http://{visible_host}:{bound_port}/"
+    console.print(f"[green]IFG viewer[/green] {url}")
+    console.print(
+        f"[dim]session={session} db={path} refresh={refresh_ms}ms (Ctrl+C to stop)[/dim]"
+    )
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(url)
+    try:
+        server.serve_forever(poll_interval=0.25)
+    except KeyboardInterrupt:
+        console.print("\n[dim]IFG viewer stopped.[/dim]")
+    finally:
+        server.server_close()
+
+
+def _ifg_counts(
+    conn: Connection,
+    session: str,
+    extractor_version: str | None,
+) -> dict[str, int]:
+    tables = (
+        "ifg_nodes",
+        "ifg_edges",
+        "ifg_normalized_tool_events",
+        "ifg_actions",
+        "ifg_files",
+        "ifg_action_file_edges",
+        "ifg_source_units",
+        "ifg_path_candidates",
+        "ifg_symbols",
+        "ifg_action_symbol_edges",
+        "ifg_file_symbol_edges",
+        "ifg_symbol_symbol_edges",
+        "ifg_symbol_mentions",
+        "ifg_extraction_error",
+    )
+    counts: dict[str, int] = {}
+    for table_name in tables:
+        if not _table_exists(conn, table_name):
+            counts[table_name] = 0
+            continue
+        where, params = _ifg_session_filter(session, extractor_version)
+        row = conn.exec_driver_sql(
+            f"SELECT COUNT(*) FROM {table_name} {where}",  # noqa: S608
+            tuple(params),
+        ).fetchone()
+        counts[table_name] = int(row[0]) if row else 0
+    return counts
+
+
+def _ifg_action_kind_counts(
+    conn: Connection,
+    session: str,
+    extractor_version: str | None,
+) -> list[tuple[str, int]]:
+    where, params = _ifg_session_filter(session, extractor_version)
+    rows = conn.exec_driver_sql(
+        f"""
+        SELECT action_kind, COUNT(*) AS count
+        FROM ifg_actions
+        {where}
+        GROUP BY action_kind
+        ORDER BY count DESC, action_kind ASC
+        """,  # noqa: S608
+        tuple(params),
+    ).fetchall()
+    return [(str(row[0]), int(row[1])) for row in rows]
+
+
+def _ifg_latest_summary(
+    conn: Connection,
+    session: str,
+    extractor_version: str | None,
+) -> str | None:
+    if not _table_exists(conn, "ifg_session_summary"):
+        return None
+    where, params = _ifg_session_filter(session, extractor_version)
+    row = conn.exec_driver_sql(
+        f"""
+        SELECT summary_json
+        FROM ifg_session_summary
+        {where}
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,  # noqa: S608
+        tuple(params),
+    ).fetchone()
+    return str(row[0]) if row else None
+
+
+def _ifg_session_filter(
+    session: str,
+    extractor_version: str | None,
+) -> tuple[str, list[str]]:
+    conditions = ["session_id = ?"]
+    params = [session]
+    if extractor_version:
+        conditions.append("extractor_version = ?")
+        params.append(extractor_version)
+    return f"WHERE {' AND '.join(conditions)}", params
 
 
 @app.command()

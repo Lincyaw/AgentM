@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from functools import wraps
 from typing import Concatenate, ParamSpec, Protocol, TypeVar
 
-from agentm.core.abi.context import render_trigger
+from agentm.core.abi.context import apply_trigger_metadata, render_trigger
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
@@ -83,7 +83,8 @@ class NodeProjectionContext:
     logical_parent_id: str | None = None
     turn_id: str | None = None
     turn_index: int | None = None
-    round_indexes: Sequence[int | None] | None = None
+    run_id: str | None = None
+    run_step: int | None = None
     message_index_start: int = 0
     agent_id: str | None = None
     is_sidechain: bool = False
@@ -114,12 +115,8 @@ def messages_to_nodes(
             logical_parent_id=(context.logical_parent_id if offset == 0 else None),
             turn_id=context.turn_id,
             turn_index=context.turn_index,
-            round_index=(
-                context.round_indexes[offset]
-                if context.round_indexes is not None
-                and offset < len(context.round_indexes)
-                else None
-            ),
+            run_id=context.run_id,
+            run_step=context.run_step,
             message_index=context.message_index_start + offset,
             agent_id=context.agent_id,
             is_sidechain=context.is_sidechain,
@@ -153,14 +150,12 @@ def turn_to_nodes(
 ) -> list[TrajectoryNode]:
     """Project one committed turn into message-level linked nodes."""
 
-    indexed_messages = _turn_indexed_messages(turn, renderers)
-    messages = [message for message, _ in indexed_messages]
+    messages = _turn_messages(turn, renderers)
     if not turn.outcome.cause.replayable:
         messages = [
             replace(message, meta=replace(message.meta, replay="skip"))
             for message in messages
         ]
-    round_indexes = [round_index for _, round_index in indexed_messages]
     return messages_to_nodes(
         messages,
         NodeProjectionContext(
@@ -175,7 +170,8 @@ def turn_to_nodes(
             logical_parent_id=logical_parent_id,
             turn_id=turn.id,
             turn_index=turn.index,
-            round_indexes=round_indexes,
+            run_id=turn.run_id,
+            run_step=turn.run_step,
             agent_id=agent_id,
             is_sidechain=is_sidechain,
             timestamp=turn.timestamp,
@@ -228,24 +224,20 @@ def turns_to_nodes(
     return nodes
 
 
-def _turn_indexed_messages(
+def _turn_messages(
     turn: Turn,
     renderers: dict[str, TriggerRenderer] | None,
-) -> list[tuple[AgentMessage, int | None]]:
-    messages: list[tuple[AgentMessage, int | None]] = []
+) -> list[AgentMessage]:
+    messages: list[AgentMessage] = []
     messages.extend(
-        (message, None) for message in render_trigger(turn.trigger, renderers)
-    )
-
-    injected_by_round: dict[int, list[AgentMessage]] = {}
-    for injection in turn.outcome.injected:
-        injected_by_round.setdefault(injection.after_round, []).extend(
-            injection.messages
+        apply_trigger_metadata(
+            render_trigger(turn.trigger, renderers),
+            turn.trigger_metadata,
         )
-    messages.extend((message, None) for message in injected_by_round.get(-1, ()))
-    for round_index, rnd in enumerate(turn.rounds):
-        messages.append((rnd.response, round_index))
-        if rnd.tool_results:
+    )
+    if turn.response is not None:
+        messages.append(turn.response)
+        if turn.tool_results:
             result_blocks = [
                 ToolResultBlock(
                     type="tool_result",
@@ -255,21 +247,16 @@ def _turn_indexed_messages(
                     deterministic=tr.result.deterministic,
                     extras=tr.result.extras,
                 )
-                for tr in rnd.tool_results
+                for tr in turn.tool_results
             ]
             messages.append(
-                (
-                    ToolResultMessage(
-                        role="tool_result",
-                        content=result_blocks,
-                        timestamp=0.0,
-                    ),
-                    round_index,
+                ToolResultMessage(
+                    role="tool_result",
+                    content=result_blocks,
+                    timestamp=0.0,
                 )
             )
-        messages.extend(
-            (message, round_index) for message in injected_by_round.get(round_index, ())
-        )
+    messages.extend(turn.outcome.injected)
     return messages
 
 
@@ -444,8 +431,10 @@ class TrajectoryIndexState:
             nodes = [node for node in nodes if node.turn_id == query.turn_id]
         if query.turn_index is not None:
             nodes = [node for node in nodes if node.turn_index == query.turn_index]
-        if query.round_index is not None:
-            nodes = [node for node in nodes if node.round_index == query.round_index]
+        if query.run_id is not None:
+            nodes = [node for node in nodes if node.run_id == query.run_id]
+        if query.run_step is not None:
+            nodes = [node for node in nodes if node.run_step == query.run_step]
         if query.message_index is not None:
             nodes = [
                 node for node in nodes if node.message_index == query.message_index
