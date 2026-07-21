@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AtomAPI,
@@ -36,7 +36,9 @@ from agentm.extensions import ExtensionManifest
 
 
 class ThinkingRetryConfig(BaseModel):
-    max_retries: int = 3
+    model_config = ConfigDict(extra="forbid")
+
+    max_retries: int = Field(default=3, ge=0)
 
 
 MANIFEST = ExtensionManifest(

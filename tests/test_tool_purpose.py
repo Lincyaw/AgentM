@@ -92,18 +92,20 @@ def _install_api(
     return api
 
 
-def test_tool_purpose_injects_required_purpose_in_place() -> None:
+def test_tool_purpose_injects_required_purpose_without_mutating_tool() -> None:
     tool = _tool()
     api = _install_api(ToolPurposeConfig())
     handler = api.handlers[BeforeSendEvent.CHANNEL]
 
     result = handler(BeforeSendEvent(tools=(tool,)))
 
-    assert result is None
-    properties = tool.parameters["properties"]
+    assert isinstance(result, dict)
+    transformed = result["tools"][0]
+    properties = transformed.parameters["properties"]
     assert isinstance(properties, dict)
     assert "purpose" in properties
-    assert tool.parameters["required"] == ["path", "purpose"]
+    assert transformed.parameters["required"] == ["path", "purpose"]
+    assert tool.parameters["required"] == ["path"]
 
 
 @pytest.mark.asyncio
@@ -132,7 +134,8 @@ def test_tool_purpose_honors_exclude() -> None:
 
     result = handler(BeforeSendEvent(tools=(tool,)))
 
-    assert result is None
+    assert isinstance(result, dict)
+    assert result["tools"] == [tool]
     properties = tool.parameters["properties"]
     assert isinstance(properties, dict)
     assert "purpose" not in properties
@@ -153,5 +156,6 @@ def test_tool_purpose_preserves_native_purpose_parameter() -> None:
 
     result = handler(BeforeSendEvent(tools=(tool,)))
 
-    assert result is None
+    assert isinstance(result, dict)
+    assert result["tools"] == [tool]
     assert tool.parameters["required"] == ["purpose"]

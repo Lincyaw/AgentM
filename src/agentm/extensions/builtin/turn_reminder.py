@@ -18,7 +18,7 @@ from __future__ import annotations
 import time as _time
 from dataclasses import replace
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AgentMessage,
@@ -38,7 +38,9 @@ from agentm.extensions import ExtensionManifest
 
 
 class TurnReminderConfig(BaseModel):
-    warn_within: int = 5
+    model_config = ConfigDict(extra="forbid")
+
+    warn_within: int = Field(default=5, ge=0)
     finalize_tool: str = ""
 
 
@@ -55,7 +57,7 @@ MANIFEST = ExtensionManifest(
         "event:before_send",
     ),
     config_schema=TurnReminderConfig,
-    requires=(),
+    requires=("service:loop_budget",),
     priority=AtomInstallPriority.CONTEXT,
 )
 

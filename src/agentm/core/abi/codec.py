@@ -952,6 +952,8 @@ class CodecRegistry:
             "model_id": meta.model_id,
             "resource_mutations": serialize_resource_mutations(meta.resource_mutations),
         }
+        if meta.model_context_window is not None:
+            data["model_context_window"] = meta.model_context_window
         if meta.system_prompt is not None:
             data["system_prompt"] = meta.system_prompt
         return data
@@ -968,6 +970,7 @@ class CodecRegistry:
                 "cache_write_tokens",
                 "duration_ns",
                 "model_id",
+                "model_context_window",
                 "resource_mutations",
                 "system_prompt",
             },
@@ -1004,6 +1007,15 @@ class CodecRegistry:
                 minimum=0,
             ),
             model_id=_optional_string(data.get("model_id"), "turn.meta.model_id"),
+            model_context_window=(
+                _integer(
+                    data.get("model_context_window"),
+                    "turn.meta.model_context_window",
+                    minimum=1,
+                )
+                if data.get("model_context_window") is not None
+                else None
+            ),
             resource_mutations=deserialize_resource_mutations(
                 data.get("resource_mutations", [])
             ),

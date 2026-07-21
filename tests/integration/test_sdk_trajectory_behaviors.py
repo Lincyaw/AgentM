@@ -67,11 +67,11 @@ _PROMPT_CACHE = "agentm.extensions.builtin.prompt_cache"
 _OBSERVABLE_CACHE_ADAPTER = "tests.fixtures.prompt_cache_adapter"
 _CUSTOM_TRIGGER = "tests.fixtures.custom_trigger"
 _FILE_TOOLS = "agentm.extensions.builtin.file_tools"
-_LOCAL_RESOURCES = "agentm.extensions.builtin.local_resources"
-_OPERATIONS = "agentm.extensions.builtin.operations"
+_LOCAL_RESOURCES = "agentm.extensions.builtin.local_backend"
+_OPERATIONS = "agentm.extensions.builtin.local_backend"
 _BACKGROUND_EXEC = "agentm.extensions.builtin.background_exec"
 _MEMORY = "agentm.extensions.builtin.memory"
-_SYSTEM_PROMPT = "agentm.extensions.builtin.system_prompt"
+_SYSTEM_PROMPT = "agentm.extensions.builtin.prompt_assembly"
 _SUB_AGENT = "agentm.extensions.builtin.sub_agent"
 _WAIT_FOR_CANCEL = object()
 
@@ -1571,7 +1571,7 @@ async def test_sdk_compaction_persists_summary_across_resume(
 
 
 @pytest.mark.asyncio
-async def test_sdk_compaction_defaults_to_model_input_budget(tmp_path: Path) -> None:
+async def test_sdk_compaction_uses_explicit_context_reserve(tmp_path: Path) -> None:
     def response(
         text: str, *, input_tokens: int, output_tokens: int
     ) -> AssistantMessage:
@@ -1598,7 +1598,12 @@ async def test_sdk_compaction_defaults_to_model_input_budget(tmp_path: Path) -> 
     )
     session = await AgentSession.create(
         AgentSessionConfig(
-            extensions=[(_LLM_COMPACTION, {"keep_last_turns": 1})],
+            extensions=[
+                (
+                    _LLM_COMPACTION,
+                    {"keep_last_turns": 1, "reserve_tokens": 20},
+                )
+            ],
             stream_fn=provider,
             model=Model(
                 id="budget-model",
@@ -1625,6 +1630,54 @@ async def test_sdk_compaction_defaults_to_model_input_budget(tmp_path: Path) -> 
         "question-two",
         "answer-two",
         "question-three",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_compaction_ignores_model_max_output_tokens(tmp_path: Path) -> None:
+    first = AssistantMessage(
+        role="assistant",
+        content=(TextContent(type="text", text="answer-one"),),
+        timestamp=0.0,
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=150, output_tokens=4),
+    )
+    provider = _StubProvider(first, "answer-two")
+    resources = LocalResourceStore(
+        workspace_root=tmp_path,
+        root=tmp_path / "max-output-resources",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[
+                (
+                    _LLM_COMPACTION,
+                    {"keep_last_turns": 1, "reserve_tokens": 20},
+                )
+            ],
+            stream_fn=provider,
+            model=Model(
+                id="large-output-model",
+                provider="stub",
+                context_window=200,
+                max_output_tokens=160,
+            ),
+            trajectory_store=_jsonl_store(tmp_path / "max-output-trajectory"),
+            resource_store=resources,
+            resource_writer=resources,
+        )
+    )
+    try:
+        await session.run("question-one")
+        await session.run("question-two")
+    finally:
+        await session.shutdown()
+
+    assert len(provider.requests) == 2
+    assert _text(provider.requests[1]) == [
+        "question-one",
+        "answer-one",
+        "question-two",
     ]
 
 

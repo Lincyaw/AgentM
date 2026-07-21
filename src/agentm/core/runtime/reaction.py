@@ -8,7 +8,7 @@ import hashlib
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, TypeVar
 
 from agentm.core.abi.cancel import (
@@ -185,17 +185,69 @@ def _message_list(value: object) -> list[AgentMessage] | None:
     ]
 
 
-def _last_messages(returns: Sequence[object]) -> list[AgentMessage] | None:
-    chosen: list[AgentMessage] | None = None
-    for value in returns:
-        direct = _message_list(value)
-        if direct is not None:
-            chosen = direct
-        elif isinstance(value, Mapping):
-            nested = _message_list(value.get("messages"))
-            if nested is not None:
-                chosen = nested
-    return chosen
+def _reduce_before_run(event: BeforeRunEvent, value: object) -> BeforeRunEvent:
+    if not isinstance(value, Mapping):
+        return event
+    messages = event.messages
+    system = event.system
+    if "messages" in value:
+        replacement_messages = _message_list(value["messages"])
+        if replacement_messages is None:
+            raise TypeError("BeforeRunEvent messages must be a message list")
+        messages = tuple(replacement_messages)
+    if "system" in value:
+        replacement_system = value["system"]
+        if replacement_system is not None and not isinstance(replacement_system, str):
+            raise TypeError("BeforeRunEvent system must be str or None")
+        system = replacement_system
+    return replace(event, messages=messages, system=system)
+
+
+def _reduce_context(event: ContextEvent, value: object) -> ContextEvent:
+    replacement_messages = _message_list(value)
+    if replacement_messages is None and isinstance(value, Mapping):
+        replacement_messages = _message_list(value.get("messages"))
+    if replacement_messages is None:
+        raise TypeError("ContextEvent handlers must return a message list or None")
+    return replace(event, messages=tuple(replacement_messages))
+
+
+def _reduce_before_send(event: BeforeSendEvent, value: object) -> BeforeSendEvent:
+    if not isinstance(value, Mapping):
+        return event
+    messages = event.messages
+    system = event.system
+    model = event.model
+    tools = event.tools
+    if "messages" in value:
+        replacement_messages = _message_list(value["messages"])
+        if replacement_messages is None:
+            raise TypeError("BeforeSendEvent messages must be a message list")
+        messages = tuple(replacement_messages)
+    if "system" in value:
+        replacement_system = value["system"]
+        if replacement_system is not None and not isinstance(replacement_system, str):
+            raise TypeError("BeforeSendEvent system must be str or None")
+        system = replacement_system
+    if "model" in value:
+        replacement_model = value["model"]
+        if not isinstance(replacement_model, Model):
+            raise TypeError("BeforeSendEvent model must be a Model")
+        model = replacement_model
+    if "tools" in value:
+        replacement_tools = value["tools"]
+        if not isinstance(replacement_tools, list) or not all(
+            isinstance(item, Tool) for item in replacement_tools
+        ):
+            raise TypeError("BeforeSendEvent tools must be a Tool list")
+        tools = tuple(replacement_tools)
+    return replace(
+        event,
+        messages=messages,
+        system=system,
+        model=model,
+        tools=tools,
+    )
 
 
 def _extract_tool_calls(msg: AssistantMessage) -> list[ToolCallBlock]:
@@ -597,6 +649,7 @@ def _meta(
         cache_write_tokens=cache_write,
         duration_ns=time.perf_counter_ns() - start_ns,
         model_id=model.id if model is not None else None,
+        model_context_window=model.context_window if model is not None else None,
         system_prompt=system_prompt,
     )
 
@@ -784,7 +837,6 @@ async def _projection_input(
 def _context_budget(model: Model) -> ContextBudget:
     return ContextBudget(
         max_input_tokens=model.context_window,
-        reserved_output_tokens=model.max_output_tokens,
     )
 
 
@@ -875,19 +927,16 @@ async def react(
 
     before_returns: list[object] = []
     if not isinstance(trigger, ContinueTrigger):
-        before_returns = await bus.emit(
+        before_event, before_returns = await bus.emit_reduced(
             BeforeRunEvent.CHANNEL,
             BeforeRunEvent(
                 messages=tuple(messages),
                 system=system,
             ),
+            _reduce_before_run,
         )
-        replacement_msgs = _last_key(before_returns, "messages")
-        if isinstance(replacement_msgs, list):
-            messages = replacement_msgs
-        replacement_sys = _last_key(before_returns, "system")
-        if isinstance(replacement_sys, str):
-            system = replacement_sys
+        messages = list(before_event.messages)
+        system = before_event.system
     continuation_system_prompt = system
     resolved_system_prompt = system
 
@@ -912,57 +961,37 @@ async def react(
             ),
         )
 
-    ctx_returns = await bus.emit(
+    context_event, _ctx_returns = await bus.emit_reduced(
         ContextEvent.CHANNEL,
         ContextEvent(messages=tuple(messages), turn_index=execution.index),
+        _reduce_context,
     )
-    ctx_replacement = _last_messages(ctx_returns)
-    if ctx_replacement is not None:
-        messages = ctx_replacement
+    messages = list(context_event.messages)
 
-    send_returns = await bus.emit(
+    allowed_tool_names = set(tool_allowlist) if tool_allowlist is not None else None
+    send_tools = list(tools)
+    if allowed_tool_names is not None:
+        send_tools = [tool for tool in send_tools if tool.name in allowed_tool_names]
+    if tool_calls_remaining is not None and tool_calls_used >= tool_calls_remaining:
+        send_tools = []
+
+    send_event, _send_returns = await bus.emit_reduced(
         BeforeSendEvent.CHANNEL,
         BeforeSendEvent(
             messages=tuple(messages),
             system=system,
-            tools=tuple(tools),
+            tools=tuple(send_tools),
             model=model,
             turn_index=execution.index,
         ),
+        _reduce_before_send,
     )
-    effective_system = system
-    effective_model = model
-    effective_tools = list(tools)
-    for ret in send_returns:
-        if not isinstance(ret, Mapping):
-            continue
-        if "messages" in ret:
-            replacement_messages = _message_list(ret["messages"])
-            if replacement_messages is None:
-                raise TypeError("BeforeSendEvent messages must be a message list")
-            messages = replacement_messages
-        if "system" in ret:
-            replacement_system = ret["system"]
-            if replacement_system is not None and not isinstance(
-                replacement_system,
-                str,
-            ):
-                raise TypeError("BeforeSendEvent system must be str or None")
-            effective_system = replacement_system
-        if "model" in ret:
-            replacement_model = ret["model"]
-            if not isinstance(replacement_model, Model):
-                raise TypeError("BeforeSendEvent model must be a Model")
-            effective_model = replacement_model
-        if "tools" in ret:
-            replacement_tools = ret["tools"]
-            if not isinstance(replacement_tools, list) or not all(
-                isinstance(item, Tool) for item in replacement_tools
-            ):
-                raise TypeError("BeforeSendEvent tools must be a Tool list")
-            effective_tools = [
-                item for item in replacement_tools if isinstance(item, Tool)
-            ]
+    messages = list(send_event.messages)
+    effective_system = send_event.system
+    effective_model = send_event.model
+    if effective_model is None:
+        raise TypeError("BeforeSendEvent model cannot be None after reduction")
+    effective_tools = list(send_event.tools)
 
     if effective_system is not None:
         resolved_system_prompt = effective_system
@@ -976,7 +1005,7 @@ async def react(
         session_id=session_id,
     )
 
-    allowed_tool_names = set(tool_allowlist) if tool_allowlist is not None else None
+    # Runtime constraints remain authoritative even if a transform adds tools.
     if allowed_tool_names is not None:
         effective_tools = [
             tool for tool in effective_tools if tool.name in allowed_tool_names

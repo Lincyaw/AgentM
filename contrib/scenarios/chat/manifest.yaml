@@ -3,53 +3,37 @@ description: |
   General-purpose chat agent with file I/O and shell access.
 
 extensions:
-  # --- infrastructure ---
   - module: agentm.extensions.builtin.observability
-  - module: agentm.extensions.builtin.operations
-  - module: agentm.extensions.builtin.local_resources
-  - module: agentm.extensions.builtin.retry_policy
+  - module: agentm.extensions.builtin.local_backend
 
-  # --- context ---
-  - module: agentm.extensions.builtin.runtime_context
-  - module: agentm.extensions.builtin.context_projection
-  - module: agentm.extensions.builtin.system_prompt
+  - module: agentm.extensions.builtin.prompt_assembly
     config:
+      include_runtime_context: true
+      include_tool_index: true
       prompt: |
         You are a helpful assistant with file and shell access.
         Be concise. Reply in the user's language.
   - module: agentm.extensions.builtin.skill_loader
   - module: agentm.extensions.builtin.memory
-  - module: agentm.extensions.builtin.prompt_cache
   - module: agentm.extensions.builtin.llm_compaction
+    config:
+      keep_last_turns: 4
+      reserve_tokens: 20000
   - module: agentm.extensions.builtin.message_patterns
-  - module: agentm.extensions.builtin.tool_index
 
-  # --- tools ---
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.tool_result_cap
   - module: agentm.extensions.builtin.tool_error_messages
-  # - module: agentm.extensions.builtin.task_tracking  # pydantic recursion bug
-  - module: agentm.extensions.builtin.structured_output
   - module: agentm.extensions.builtin.read_history
     config:
       tool_result_max_tokens: 200
       total_max_tokens: 1000
-  - module: agentm.extensions.builtin.sub_agent
-  - module: agentm.extensions.builtin.background_exec
-  - module: agentm.extensions.builtin.workflow
-
-  # --- policy ---
-  - module: agentm.extensions.builtin.tool_bash_guard
-  - module: agentm.extensions.builtin.tool_filter
-  - module: agentm.extensions.builtin.permission
+  - module: agentm.extensions.builtin.tool_policy
+    config:
+      protect_file_mutations: true
   - module: agentm.extensions.builtin.thinking_retry
   - module: agentm.extensions.builtin.loop_budget
     config:
       max_turns: 128
   - module: agentm.extensions.builtin.turn_reminder
-
-  # --- not included ---
-  # llm_anthropic / llm_openai: provider injected externally (CLI / gateway)
-  # goal: requires explicit condition config
-  # trace_query: requires parent session

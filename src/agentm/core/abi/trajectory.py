@@ -655,6 +655,7 @@ class TurnMeta:
     cache_write_tokens: int = 0
     duration_ns: int = 0
     model_id: str | None = None
+    model_context_window: int | None = None
     resource_mutations: tuple[ResourceMutation, ...] = ()
     system_prompt: str | None = None
 
@@ -668,6 +669,11 @@ class TurnMeta:
         ):
             _require_index(value, f"turn meta {label}")
         _require_string(self.model_id, "turn meta model_id", optional=True)
+        _require_index(
+            self.model_context_window,
+            "turn meta model_context_window",
+            optional=True,
+        )
         if not isinstance(self.resource_mutations, tuple) or not all(
             isinstance(item, ResourceMutation) for item in self.resource_mutations
         ):

@@ -111,6 +111,7 @@ from agentm.core.runtime.reaction import (
     record_interruption_message,
 )
 from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
+from agentm.core.lib.context_projection import ExactNodeChainProjection
 from agentm.core.lib.redact import redact_text_secrets
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.lib.trajectory_nodes import turn_to_nodes
@@ -565,6 +566,8 @@ async def drive(config: DriverConfig) -> None:
         CONTEXT_PROJECTION_SERVICE,
         cast(type[ContextProjection], ContextProjection),
     )
+    if context_projection is None and config.store is not None:
+        context_projection = ExactNodeChainProjection()
     prompt_cache_adapter = config.prompt_cache_adapter
     if prompt_cache_adapter is None:
         prompt_cache_adapter = config.services.get(

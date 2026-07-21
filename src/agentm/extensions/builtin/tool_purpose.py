@@ -7,6 +7,7 @@ strips that synthetic argument before delegating to the real tool.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -92,19 +93,22 @@ class _ToolPurposeRuntime:
         )
         self._api.on(BeforeSendEvent.CHANNEL, self.on_before_send)
 
-    def on_before_send(self, event: BeforeSendEvent) -> None:
-        for tool in event.tools:
-            self._inject(tool)
+    def on_before_send(self, event: BeforeSendEvent) -> dict[str, list[Tool]]:
+        return {"tools": [self._inject(tool) for tool in event.tools]}
 
-    def _inject(self, tool: Tool) -> None:
+    def _inject(self, tool: Tool) -> Tool:
         if tool.name in self._exclude:
-            return
-        parameters = tool.parameters
+            return tool
+        properties = tool.parameters.get("properties")
+        if not isinstance(properties, dict) or _FIELD_NAME in properties:
+            return tool
+
+        cloned = copy.copy(tool)
+        cloned.parameters = copy.deepcopy(tool.parameters)
+        parameters = cloned.parameters
         properties = parameters.get("properties")
         if not isinstance(properties, dict):
-            return
-        if _FIELD_NAME in properties:
-            return
+            raise TypeError("copied tool schema lost its properties object")
         properties[_FIELD_NAME] = dict(_FIELD_SCHEMA)
         required = parameters.get("required")
         if isinstance(required, list) and _FIELD_NAME not in required:
@@ -117,6 +121,7 @@ class _ToolPurposeRuntime:
         elif not isinstance(required, list):
             parameters["required"] = [_FIELD_NAME]
         self._injected_tools.add(tool.name)
+        return cloned
 
 
 def install(api: AtomAPI, config: ToolPurposeConfig) -> None:

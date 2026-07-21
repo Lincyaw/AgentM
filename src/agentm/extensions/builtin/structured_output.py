@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agentm.core.abi import (
     AtomAPI,
@@ -27,12 +27,20 @@ from agentm.extensions import ExtensionManifest
 
 
 class StructuredOutputConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     result_schema: dict[str, object] = Field(default_factory=dict)
 
     def __init__(self, **data: object) -> None:
         if "schema" in data and "result_schema" not in data:
             data["result_schema"] = data.pop("schema")
         super().__init__(**data)
+
+    @model_validator(mode="after")
+    def _require_schema(self) -> "StructuredOutputConfig":
+        if not self.result_schema:
+            raise ValueError("structured_output requires a non-empty result_schema")
+        return self
 
 
 MANIFEST = ExtensionManifest(
@@ -49,19 +57,16 @@ MANIFEST = ExtensionManifest(
 
 class _SchemaValidator:
     def __init__(self) -> None:
-        self._validate_fn: Callable[[JsonValue, dict[str, object]], None] | None = None
-        self._error_cls: type[Exception] | None = None
         try:
             from jsonschema import validate, ValidationError  # type: ignore[import-untyped]
-
-            self._validate_fn = validate
-            self._error_cls = ValidationError
-        except ImportError:
-            pass
+        except ImportError as exc:
+            raise RuntimeError(
+                "structured_output requires the jsonschema dependency"
+            ) from exc
+        self._validate_fn: Callable[[JsonValue, dict[str, object]], None] = validate
+        self._error_cls: type[Exception] = ValidationError
 
     def check(self, result: JsonValue, schema: dict[str, object]) -> str | None:
-        if self._validate_fn is None or self._error_cls is None:
-            return None
         try:
             self._validate_fn(result, schema)
         except self._error_cls as exc:

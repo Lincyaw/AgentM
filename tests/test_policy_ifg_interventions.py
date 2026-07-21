@@ -23,7 +23,7 @@ from policy_engine.state import PolicyState
 def _base_rules(*names: str):
     policy_path = (
         Path(__file__).parents[1]
-        / "contrib/extensions/policy/src/policy_engine/base_policy.yaml"
+        / "contrib/extensions/policy/src/policy_engine/ifg_evidence.yaml"
     )
     rules, _disabled = compile_policy_file(policy_path.read_text(encoding="utf-8"))
     selected = set(names)

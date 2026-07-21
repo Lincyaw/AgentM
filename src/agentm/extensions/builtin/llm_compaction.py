@@ -9,7 +9,7 @@ import json
 import time
 from collections.abc import Sequence
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.codec import serialize_message
@@ -53,12 +53,22 @@ from agentm.extensions import ExtensionManifest
 class LlmCompactionConfig(BaseModel):
     """Configuration for durable context summarization."""
 
+    model_config = ConfigDict(extra="forbid")
+
     max_messages: int | None = Field(
         default=None,
         ge=2,
-        description="Explicit override; by default the model token budget is used.",
+        description="Explicit message-count trigger; mutually exclusive with reserve_tokens.",
     )
-    keep_last_turns: int = Field(default=4, ge=0)
+    keep_last_turns: int = Field(ge=0)
+    reserve_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Context space reserved before compaction. This is independent of "
+            "the provider's maximum output-token setting."
+        ),
+    )
     state_key: str = Field(default="llm_compaction", min_length=1)
     summary_system_prompt: str = (
         "Summarize the supplied conversation prefix for another model that "
@@ -66,6 +76,18 @@ class LlmCompactionConfig(BaseModel):
         "intent, unresolved work, tool outcomes, identifiers, and exact facts "
         "needed to continue. Do not add commentary or invent information."
     )
+
+    @model_validator(mode="after")
+    def _require_explicit_trigger(self) -> LlmCompactionConfig:
+        configured = sum(
+            value is not None for value in (self.max_messages, self.reserve_tokens)
+        )
+        if configured != 1:
+            raise ValueError(
+                "configure exactly one llm_compaction trigger: max_messages or "
+                "reserve_tokens"
+            )
+        return self
 
 
 MANIFEST = ExtensionManifest(
@@ -462,13 +484,23 @@ class LlmCompactionPolicy(BindableContextPolicy):
         model = self._model
         if model is None:
             raise RuntimeError("llm_compaction requires an active provider")
-        input_limit = max(0, model.context_window - model.max_output_tokens)
+        reserve_tokens = self._config.reserve_tokens
+        if reserve_tokens is None:
+            raise RuntimeError("llm_compaction reserve_tokens is not configured")
+        if reserve_tokens >= model.context_window:
+            raise RuntimeError(
+                "llm_compaction reserve_tokens must be smaller than the model "
+                f"context window ({reserve_tokens} >= {model.context_window})"
+            )
+        input_limit = model.context_window - reserve_tokens
         estimated_input = self._estimate_next_input_tokens(messages, turns, model)
         return (
             estimated_input <= input_limit,
             {
                 "budget_kind": "tokens",
                 "estimated_input_tokens": estimated_input,
+                "context_window_tokens": model.context_window,
+                "reserve_tokens": reserve_tokens,
                 "input_limit_tokens": input_limit,
                 "remaining_input_tokens": input_limit - estimated_input,
             },
@@ -487,12 +519,14 @@ class LlmCompactionPolicy(BindableContextPolicy):
         if latest.meta.total_input_tokens <= 0:
             return projected_estimate
 
+        if latest.meta.model_id not in (None, model.id):
+            return projected_estimate
+
         completion = _turn_completion_messages(latest, self._renderers)
-        observed_estimate = latest.meta.total_input_tokens + _estimate_message_tokens(
+        return latest.meta.total_input_tokens + _estimate_message_tokens(
             completion,
             model.id,
         )
-        return max(projected_estimate, observed_estimate)
 
     @staticmethod
     def _require_suffix(
@@ -593,6 +627,8 @@ def _turn_completion_messages(
     turn: Turn,
     renderers: dict[str, TriggerRenderer],
 ) -> list[AgentMessage]:
+    """Provider-visible messages committed after the last request input."""
+
     rendered = turn_to_messages(turn, renderers)
     if turn.response is None:
         return list(turn.outcome.injected)

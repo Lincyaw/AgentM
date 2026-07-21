@@ -16,6 +16,7 @@ from agentm import (
 )
 from agentm.config import DefaultSessionSpecResolver
 from agentm.control import SessionControlServer
+from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import resolve_trajectory_store_or_create
 from agentm_toolbox import REMOTE_DEPENDENCIES, ToolboxDependency
 from harbor.agents.base import BaseAgent
@@ -34,8 +35,18 @@ def _toolbox_setup_command(dependency: ToolboxDependency) -> str:
     requirement = shlex.quote(dependency.requirement)
     return (
         f"if command -v {executable} >/dev/null 2>&1; then exit 0; fi; "
+        "agentm_pip_break_flag=''; "
+        "if python3 -m pip install --help 2>&1 "
+        "| grep -q -- '--break-system-packages'; then "
+        "agentm_pip_break_flag='--break-system-packages'; fi; "
         "python3 -m pip install --quiet --disable-pip-version-check "
-        f"{requirement}; command -v {executable} >/dev/null 2>&1"
+        f"$agentm_pip_break_flag {requirement}; "
+        f"if ! command -v {executable} >/dev/null 2>&1; then "
+        "agentm_scripts_dir=$(python3 -c "
+        "'import sysconfig; print(sysconfig.get_path(\"scripts\"))'); "
+        f'ln -sf "$agentm_scripts_dir"/{executable} '
+        f"/usr/local/bin/{executable}; fi; "
+        f"command -v {executable} >/dev/null 2>&1"
     )
 
 
@@ -150,6 +161,11 @@ class ExternalAgentMAgent(BaseAgent):
             str(self.logs_dir),
             env=effective_env,
         )
+        resource_store = LocalResourceStore(
+            workspace_root=self.logs_dir,
+            root=self.logs_dir / "resources",
+            discover_manifest=False,
+        )
         operations, writer = harbor_bindings(
             environment,
             HarborOpsConfig(work_dir="/"),
@@ -162,6 +178,7 @@ class ExternalAgentMAgent(BaseAgent):
                     scenario_loader=_scenario_loader(scenario_path),
                     spec_resolver=spec_resolver,
                     environment_operations=operations,
+                    resource_store=resource_store,
                     resource_writer=writer,
                     trajectory_store=trajectory.store,
                 )

@@ -556,6 +556,10 @@ class AtomAPI(Protocol):
         """Push a trigger into the session's queue."""
         ...
 
+    def interrupt(self, reason: CancelReason | str = "user_cancel") -> None:
+        """Request cooperative cancellation of the session's active work."""
+        ...
+
     def track_background(self) -> AbstractContextManager[None]:
         """Bracket a background unit so idle() waits for it."""
         ...

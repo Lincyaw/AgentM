@@ -86,7 +86,8 @@ class BeforeSendEvent(Event):
     """Final preflight before LLM call.
 
     Handlers return a dict of overrides (``messages``, ``system``,
-    ``tools``, ``model``) or None.  Last non-None wins per field.
+    ``tools``, ``model``) or None. Handlers run in priority order and each
+    handler receives the event produced by the preceding handler.
     """
 
     CHANNEL: ClassVar[str] = "before_send"

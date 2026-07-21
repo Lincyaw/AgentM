@@ -5,3 +5,25 @@ description: |
 
 includes:
   - base.yaml
+
+extensions:
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      keep_last_turns: 4
+      reserve_tokens: 20000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 200
+      total_max_tokens: 1000
+  - module: agentm.extensions.builtin.skill_loader
+  - module: agentm.extensions.builtin.tool_policy
+    config:
+      protect_file_mutations: true
+  - module: policy_engine
+    config:
+      policy_files:
+        - package:ifg_evidence.yaml
+      ifg_realtime: true
+      ifg_repository_scan: true
+      ifg_repository_search_roots:
+        - /repo

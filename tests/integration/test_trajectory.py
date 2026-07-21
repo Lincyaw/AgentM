@@ -364,7 +364,15 @@ async def test_before_send_system_prompt_does_not_accumulate_across_run() -> Non
     )
     session = await create_session(
         SessionBuildConfig(
-            extensions=[("agentm.extensions.builtin.tool_index", {})],
+            extensions=[
+                (
+                    "agentm.extensions.builtin.prompt_assembly",
+                    {
+                        "discover_project_context": False,
+                        "include_tool_index": True,
+                    },
+                )
+            ],
             stream_fn=mock,
             model=make_model(),
             system="base prompt",
@@ -1572,6 +1580,7 @@ def test_codec_round_trip() -> None:
         total_input_tokens=100,
         total_output_tokens=50,
         model_id="mock-model",
+        model_context_window=128_000,
         resource_mutations=(
             ResourceMutation(
                 ref=ResourceRef(namespace="workspace", path="out.txt"),
@@ -1603,6 +1612,7 @@ def test_codec_round_trip() -> None:
     assert type(restored.outcome.cause).__name__ == type(turn.outcome.cause).__name__
     assert isinstance(restored.outcome.cause, ModelEndTurn)
     assert restored.meta.total_input_tokens == 100
+    assert restored.meta.model_context_window == 128_000
     assert restored.meta.model_id == "mock-model"
     assert restored.meta.resource_mutations == meta.resource_mutations
     assert isinstance(restored.trigger, UserInput)

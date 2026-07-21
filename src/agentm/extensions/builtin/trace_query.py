@@ -317,6 +317,6 @@ def install(api: AtomAPI, config: dict[str, JsonValue] | None = None) -> None:
     del config
     turns = _load_parent_turns(api)
     if turns is None:
-        logger.debug("trace_query: no parent trajectory available — tools disabled")
-        return
+        logger.debug("trace_query: no parent trajectory available")
+        turns = []
     _TraceQueryRuntime(api, turns).install()

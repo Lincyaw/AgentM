@@ -32,6 +32,7 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.stream import AssistantStreamEvent, MessageEnd
 from agentm.core.abi.tool import Tool
 from agentm.control import SessionControlServer, send_interrupt
+from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import JsonlTrajectoryStore
 from agentm_harbor.external_agent import (
     SCENARIO,
@@ -287,7 +288,7 @@ def _model() -> Model:
     return Model(
         id="harbor-stub",
         provider="stub",
-        context_window=4096,
+        context_window=262144,
         max_output_tokens=512,
     )
 
@@ -301,6 +302,7 @@ def test_harbor_scenario_configures_policy_repository_scan() -> None:
     )
 
     assert dict(policy.config) == {
+        "policy_files": ("package:ifg_evidence.yaml",),
         "ifg_realtime": True,
         "ifg_repository_scan": True,
         "ifg_repository_search_roots": ("/repo",),
@@ -328,8 +330,13 @@ async def test_harbor_setup_provisions_remote_toolbox_dependencies() -> None:
     await _provision_remote_toolbox(environment)  # type: ignore[arg-type]
 
     assert len(environment.commands) == 1
-    assert "command -v ast-grep" in environment.commands[0]
-    assert "ast-grep-cli==0.44.1" in environment.commands[0]
+    command = environment.commands[0]
+    assert "command -v ast-grep" in command
+    assert "python3 -m pip install --help" in command
+    assert "python3 -m pip install" in command
+    assert "--break-system-packages" in command
+    assert "ast-grep-cli==0.44.1" in command
+    assert 'ln -sf "$agentm_scripts_dir"/ast-grep /usr/local/bin/ast-grep' in command
 
 
 @pytest.mark.asyncio
@@ -387,6 +394,11 @@ async def test_harbor_file_tools_share_resource_backed_behavior(
         HarborOpsConfig(work_dir="/workspace"),
     )
     provider = _FileToolProvider()
+    resources = LocalResourceStore(
+        workspace_root=tmp_path,
+        root=tmp_path / "resources",
+        discover_manifest=False,
+    )
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd="/workspace",
@@ -395,6 +407,7 @@ async def test_harbor_file_tools_share_resource_backed_behavior(
             stream_fn=provider,
             model=_model(),
             environment_operations=operations,
+            resource_store=resources,
             resource_writer=writer,
             trajectory_store=JsonlTrajectoryStore(tmp_path / "trajectory"),
         )
@@ -432,6 +445,11 @@ async def test_harbor_host_interrupts_through_public_sdk(
     )
     provider = _InterruptProvider()
     store = JsonlTrajectoryStore(tmp_path / "trajectory")
+    resources = LocalResourceStore(
+        workspace_root=tmp_path,
+        root=tmp_path / "resources",
+        discover_manifest=False,
+    )
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd="/",
@@ -440,6 +458,7 @@ async def test_harbor_host_interrupts_through_public_sdk(
             stream_fn=provider,
             model=_model(),
             environment_operations=operations,
+            resource_store=resources,
             resource_writer=writer,
             trajectory_store=store,
         )
@@ -526,3 +545,47 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
     assert len(turns) == 1
     assert turns[0].response is not None
     assert "harbor-provider-completed" in _texts((turns[0].response,))
+
+
+@pytest.mark.asyncio
+async def test_harbor_external_agent_persists_compaction_under_trial_logs(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        "\n".join(
+            (
+                "[models.harbor-profile]",
+                'provider = "tests.fixtures.harbor_provider"',
+                'model = "stub-compaction-model"',
+                "",
+                "[atoms.llm_compaction]",
+                "reserve_tokens = 4000",
+                "keep_last_turns = 0",
+            )
+        ),
+        encoding="utf-8",
+    )
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    trajectory_path = tmp_path / "trajectory"
+    fake = _FakeHarborEnvironment(tmp_path / "sandbox")
+    agent = ExternalAgentMAgent(
+        logs_dir=logs,
+        model_name="harbor-profile",
+        extra_env={
+            "AGENTM_HOME": str(home),
+            "AGENTM_TRAJECTORY_DIR": str(trajectory_path),
+        },
+    )
+
+    await agent.run(
+        "complete-after-compaction",
+        cast(BaseEnvironment, fake),
+        AgentContext(),
+    )
+
+    summaries = list((logs / "resources" / "summary").rglob("*.txt"))
+    assert len(summaries) == 1
+    assert summaries[0].read_text() == "harbor-compaction-summary"

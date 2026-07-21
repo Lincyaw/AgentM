@@ -31,7 +31,6 @@ class ContextBudget:
 
     max_messages: int | None = None
     max_input_tokens: int | None = None
-    reserved_output_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

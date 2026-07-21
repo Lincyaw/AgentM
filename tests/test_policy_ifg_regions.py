@@ -19,7 +19,7 @@ def _result(start: int, end: int, *, content_hash: str = "same") -> dict[str, ob
 def _base_rule(name: str):
     policy_path = (
         Path(__file__).parents[1]
-        / "contrib/extensions/policy/src/policy_engine/base_policy.yaml"
+        / "contrib/extensions/policy/src/policy_engine/ifg_evidence.yaml"
     )
     rules, _disabled = compile_policy_file(policy_path.read_text(encoding="utf-8"))
     return next(rule for rule in rules if rule.rule_id == name)
@@ -123,7 +123,7 @@ def test_repeated_region_rule_fires_from_dsl_namespace() -> None:
 def test_base_policy_compiles_repeated_region_rule() -> None:
     policy_path = (
         Path(__file__).parents[1]
-        / "contrib/extensions/policy/src/policy_engine/base_policy.yaml"
+        / "contrib/extensions/policy/src/policy_engine/ifg_evidence.yaml"
     )
     rules, disabled = compile_policy_file(policy_path.read_text(encoding="utf-8"))
 

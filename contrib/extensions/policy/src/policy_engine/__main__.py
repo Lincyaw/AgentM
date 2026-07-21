@@ -708,15 +708,10 @@ def _show_eval_errors(
 
 @app.command()
 def rules(
-    file: Path = typer.Argument(
-        None, help="Policy YAML file to inspect (default: base_policy.yaml)"
-    ),
+    file: Path = typer.Argument(..., help="Policy YAML file to inspect"),
 ) -> None:
     """List compiled rules from a policy file."""
     from .compiler import compile_policy_file
-
-    if file is None:
-        file = Path(__file__).parent / "base_policy.yaml"
 
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
@@ -905,7 +900,7 @@ def ifg_backfill(
                         if include_checkpoint
                         else None
                     )
-                    trajectory_records = list(turns)
+                    trajectory_records: list[Turn | TurnCheckpoint] = list(turns)
                     if checkpoint is not None:
                         trajectory_records.append(checkpoint)
                     committed_turns = len(turns)
@@ -1103,7 +1098,12 @@ def ifg_serve(
         refresh_ms=refresh_ms,
     )
     bound_host, bound_port = server.server_address[:2]
-    visible_host = "127.0.0.1" if bound_host in {"0.0.0.0", "::"} else bound_host
+    bound_host_text = (
+        bound_host.decode() if isinstance(bound_host, bytes) else str(bound_host)
+    )
+    visible_host = (
+        "127.0.0.1" if bound_host_text in {"0.0.0.0", "::"} else bound_host_text
+    )
     url = f"http://{visible_host}:{bound_port}/"
     console.print(f"[green]IFG viewer[/green] {url}")
     console.print(

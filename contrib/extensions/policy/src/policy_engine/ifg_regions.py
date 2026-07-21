@@ -105,6 +105,7 @@ class IfgRegionState:
         self._content_hashes: dict[str, str] = {}
         self._reads: deque[RegionReadEntry] = deque(maxlen=max_reads)
         self._sequence = 0
+        self._became_redundant = False
 
     def entries(self) -> deque[RegionReadEntry]:
         return self._reads
@@ -116,6 +117,7 @@ class IfgRegionState:
         result: Mapping[str, object] | None,
         turn: int,
     ) -> None:
+        self._became_redundant = False
         if tool_name not in {"read", "edit", "write"} or not result:
             return
         if result.get("error"):
@@ -157,19 +159,19 @@ class IfgRegionState:
         read_lines = _interval_size(intervals)
         overlap_lines = _intersection_size(intervals, coverage)
         self._sequence += 1
-        self._reads.append(
-            RegionReadEntry(
-                sequence=self._sequence,
-                turn=turn,
-                path=path,
-                start_line=intervals[0][0],
-                end_line=intervals[-1][1],
-                read_lines=read_lines,
-                overlap_lines=overlap_lines,
-                novel_lines=read_lines - overlap_lines,
-                overlap_ratio=overlap_lines / read_lines,
-            )
+        entry = RegionReadEntry(
+            sequence=self._sequence,
+            turn=turn,
+            path=path,
+            start_line=intervals[0][0],
+            end_line=intervals[-1][1],
+            read_lines=read_lines,
+            overlap_lines=overlap_lines,
+            novel_lines=read_lines - overlap_lines,
+            overlap_ratio=overlap_lines / read_lines,
         )
+        self._reads.append(entry)
+        self._became_redundant = entry.novel_lines == 0
         self._coverage[path] = _merge_intervals([*coverage, *intervals])
         self._update_hash(path, content_hash)
 
@@ -208,6 +210,9 @@ class IfgRegionState:
         if content_hash:
             self._content_hashes[path] = content_hash
 
+    def became_redundant(self) -> bool:
+        return self._became_redundant
+
 
 class RegionReadQuery:
     """DSL query methods over regional read observations."""
@@ -217,6 +222,26 @@ class RegionReadQuery:
 
     def count(self, *, last: int | None = None, path: str | None = None) -> int:
         return len(self._window(last=last, path=path))
+
+    def became_redundant(self) -> bool:
+        """Whether the latest read added no active source-line coverage."""
+
+        return self._state.became_redundant()
+
+    def latest_summary(self) -> dict[str, object]:
+        entries = self._window(last=1)
+        if not entries:
+            return {}
+        entry = entries[0]
+        return {
+            "path": entry.path,
+            "start_line": entry.start_line,
+            "end_line": entry.end_line,
+            "read_lines": entry.read_lines,
+            "overlap_lines": entry.overlap_lines,
+            "novel_lines": entry.novel_lines,
+            "overlap_ratio": round(entry.overlap_ratio, 3),
+        }
 
     def overlap_count(
         self,

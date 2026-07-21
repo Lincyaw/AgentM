@@ -8,7 +8,7 @@ this atom with ``config``, exactly like any other capability.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     AtomAPI,
@@ -20,6 +20,8 @@ from agentm.extensions import ExtensionManifest
 
 
 class LoopBudgetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_turns: int | None = None
     max_tool_calls: int | None = None
 

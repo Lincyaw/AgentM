@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 import json
 from pathlib import Path
 import time
+from typing import cast
 
 from loguru import logger
 
@@ -53,7 +54,7 @@ from agentm.extensions import ExtensionManifest
 from .entity import EntityRegistry
 from .evaluator import PolicyEvaluator
 from .ifc import IFCEngine
-from .loader import load_policy_bundle, resolve_policy_path
+from .loader import load_policy_bundle
 from .persistence import PolicyPersistence
 from .paths import default_policy_db_path
 from .repository_index import (
@@ -72,13 +73,12 @@ from .types import RuleInstance, ToolArgs, ToolLogEntry
 
 
 class PolicyEngineConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    policy_files: list[str] = []
-    extraction_mode: str = "heuristic"
+    policy_files: list[str] = Field(default_factory=list)
     db_path: str | None = None
     ifg_realtime: bool = True
-    ifg_repository_scan: bool = True
+    ifg_repository_scan: bool = False
     ifg_repository_scan_timeout: float = Field(default=120.0, gt=0)
     ifg_repository_refresh_timeout: float = Field(default=30.0, gt=0)
     ifg_repository_search_roots: list[str] = Field(default_factory=list)
@@ -106,10 +106,9 @@ MANIFEST = ExtensionManifest(
         "tool:reload_policies",
         "tool:policy_explain",
         "tool:policy_stats",
-        f"service:{REPOSITORY_INDEX_SERVICE}",
     ),
     config_schema=PolicyEngineConfig,
-    requires=("service:operations:bash",),
+    requires=(),
     priority=AtomInstallPriority.POLICY,
 )
 
@@ -448,13 +447,15 @@ class _PolicyEngineRuntime:
         bundle = load_policy_bundle(
             self._config.policy_files,
             cwd=Path(self._session.ctx.cwd),
+            scenario_dir=(
+                Path(self._session.ctx.scenario_dir)
+                if self._session.ctx.scenario_dir
+                else None
+            ),
         )
         self._rules = bundle.rules
         self._ifc = bundle.ifc
         self._file_mtimes = bundle.file_mtimes
-
-    def _resolve_policy_path(self, file_ref: str) -> Path | None:
-        return resolve_policy_path(file_ref, cwd=Path(self._session.ctx.cwd))
 
     # --- IFC setup ---
 
@@ -469,19 +470,19 @@ class _PolicyEngineRuntime:
         if not db_path:
             db_path = str(default_policy_db_path())
         self._persistence = PolicyPersistence(Path(db_path))
-        try:
-            self._persistence.open()
-        except Exception as e:
-            logger.warning("policy persistence failed to open: {}", e)
-            self._persistence = None
+        self._persistence.open()
 
     def _setup_repository_index(self) -> None:
         if not self._config.ifg_realtime or not self._config.ifg_repository_scan:
             return
-        bash = self._session.services.get(BASH_OPERATIONS_SERVICE, BashOperations)
+        bash = self._session.services.get(
+            BASH_OPERATIONS_SERVICE,
+            cast(type[BashOperations], BashOperations),
+        )
         if bash is None:
-            logger.warning("policy repository index disabled: bash operations missing")
-            return
+            raise RuntimeError(
+                "ifg_repository_scan requires a BashOperations host capability"
+            )
         self._repository_index = RepositoryIndex(
             root=self._session.ctx.cwd,
             bash=bash,
@@ -616,7 +617,8 @@ class _PolicyEngineRuntime:
 
         for _rule_id, effect_type, diagnostic in effects:
             if effect_type == "abort":
-                raise RuntimeError(f"[PolicyEngine:abort] {diagnostic}")
+                self._abort(diagnostic)
+                return {"block": True, "reason": diagnostic}
             if effect_type == "block":
                 return {"block": True, "reason": diagnostic}
             # escalate/notify → queue for context injection
@@ -701,7 +703,8 @@ class _PolicyEngineRuntime:
 
         for _rule_id, effect_type, diagnostic in effects:
             if effect_type == "abort":
-                raise RuntimeError(f"[PolicyEngine:abort] {diagnostic}")
+                self._abort(diagnostic)
+                continue
             self._pending_diagnostics.append(diagnostic)
 
     def _on_tool_result_ifg(self, event: ToolResultEvent) -> None:
@@ -770,7 +773,8 @@ class _PolicyEngineRuntime:
 
         for _rule_id, effect_type, diagnostic in effects:
             if effect_type == "abort":
-                raise RuntimeError(f"[PolicyEngine:abort] {diagnostic}")
+                self._abort(diagnostic)
+                continue
             self._pending_diagnostics.append(diagnostic)
 
         # Hot reload: check policy file mtime
@@ -797,7 +801,10 @@ class _PolicyEngineRuntime:
         self._persist_new_effects()
         self._queue_state_snapshot()
         self._flush_policy_persistence()
-        for _rule_id, _effect_type, diagnostic in effects:
+        for _rule_id, effect_type, diagnostic in effects:
+            if effect_type == "abort":
+                self._abort(diagnostic)
+                continue
             self._pending_diagnostics.append(diagnostic)
 
     def _on_context(self, event: ContextEvent) -> list | None:
@@ -903,13 +910,10 @@ class _PolicyEngineRuntime:
             image_blocks += image_count
         context_window = model.context_window if model is not None else None
         max_output_tokens = model.max_output_tokens if model is not None else None
-        input_budget = None
+        input_budget = context_window
         context_usage_pct = None
         if context_window is not None:
-            input_budget = context_window
-            if max_output_tokens is not None:
-                input_budget = max(1, context_window - max_output_tokens)
-            context_usage_pct = round((total_tokens / input_budget) * 100, 2)
+            context_usage_pct = round((total_tokens / context_window) * 100, 2)
         return {
             "turn_index": turn_index,
             "total_context_tokens": total_tokens,
@@ -918,8 +922,6 @@ class _PolicyEngineRuntime:
             "context_window": context_window,
             "max_output_tokens": max_output_tokens,
             "input_budget_tokens": input_budget,
-            "compaction_happened": False,
-            "turns_since_user_message": 0,
             "injected_content_count": len(self._pending_diagnostics),
             "message_count": len(messages),
             "text_block_count": text_blocks,
@@ -999,17 +1001,26 @@ class _PolicyEngineRuntime:
 
     def _check_hot_reload(self) -> None:
         """Check if any policy file has been modified and reload if so."""
-        for file_ref in self._config.policy_files:
-            path = self._resolve_policy_path(file_ref)
-            if not path or not path.exists():
-                continue
+        for path_text, previous_mtime in tuple(self._file_mtimes.items()):
+            path = Path(path_text)
             mtime = path.stat().st_mtime
-            prev = self._file_mtimes.get(str(path))
-            if prev is not None and mtime > prev:
+            if mtime > previous_mtime:
                 logger.info("policy file changed: {}, reloading", path)
                 self._do_reload()
                 return
             self._file_mtimes[str(path)] = mtime
+
+    def _abort(self, diagnostic: str) -> None:
+        self._pending_diagnostics.append(diagnostic)
+        self._session.bus.emit_sync(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="error",
+                source="policy_engine",
+                message=diagnostic,
+            ),
+        )
+        self._session.interrupt("policy_abort")
 
     def _do_reload(self) -> None:
         """Reload all rules and rebuild evaluator."""
@@ -1131,8 +1142,22 @@ class _PolicyEngineRuntime:
         )
 
     def _flush_policy_persistence(self) -> None:
-        if self._persistence:
+        if not self._persistence:
+            return
+        try:
             self._persistence.flush()
+        except Exception as exc:
+            diagnostic = f"policy persistence failed: {type(exc).__name__}: {exc}"
+            self._session.bus.emit_sync(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="error",
+                    source="policy_engine",
+                    message=diagnostic,
+                ),
+            )
+            self._session.interrupt("policy_persistence_failure")
+            raise
 
     def _persist_ifg_tool_event_pre(self, event: ToolCallEvent) -> None:
         if not self._persistence or not self._config.ifg_realtime:

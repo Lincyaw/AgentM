@@ -54,6 +54,10 @@ class TraceMetrics:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    peak_context_tokens: int = 0
+    peak_context_turn: int | None = None
+    peak_context_model: str | None = None
+    peak_context_window: int | None = None
     by_tool: Mapping[str, int] = field(default_factory=dict)
     by_kind: Mapping[str, int] = field(default_factory=dict)
 
@@ -74,6 +78,7 @@ class TraceTurnSummary:
     cache_write_tokens: int
     tool_names: tuple[str, ...] = ()
     model: str | None = None
+    model_context_window: int | None = None
     cause: str | None = None
     error_type: str | None = None
     error: str | None = None
@@ -455,6 +460,7 @@ def build_trace_snapshot(
             cache_read_tokens=record.meta.cache_read_tokens,
             cache_write_tokens=record.meta.cache_write_tokens,
             model=record.meta.model_id,
+            model_context_window=record.meta.model_context_window,
             cause=cause,
             error_type=provider_error.error_type
             if provider_error is not None
@@ -733,6 +739,19 @@ def _build_metrics_view(snapshot: TraceSnapshot, query: TraceQuery) -> TraceView
             ),
         ),
         TraceRow(
+            key="metric:context",
+            kind="metric",
+            title="Peak Context",
+            preview=_peak_context_preview(metrics),
+            content=_peak_context_content(metrics),
+            turn_index=metrics.peak_context_turn,
+            input_tokens=metrics.peak_context_tokens,
+            metadata={
+                "model": metrics.peak_context_model or "",
+                "context_window": metrics.peak_context_window or 0,
+            },
+        ),
+        TraceRow(
             key="metric:tokens",
             kind="metric",
             title="Tokens",
@@ -852,6 +871,9 @@ def _compute_metrics(
     for row in rows:
         if row.kind == "tool_result" and row.tool_name:
             by_tool[row.tool_name] += 1
+    peak = max(summaries, key=lambda summary: summary.input_tokens, default=None)
+    if peak is not None and peak.input_tokens == 0:
+        peak = None
     return TraceMetrics(
         committed_turns=sum(
             1 for summary in summaries if summary.status == "committed"
@@ -866,9 +888,50 @@ def _compute_metrics(
         output_tokens=sum(summary.output_tokens for summary in summaries),
         cache_read_tokens=sum(summary.cache_read_tokens for summary in summaries),
         cache_write_tokens=sum(summary.cache_write_tokens for summary in summaries),
+        peak_context_tokens=peak.input_tokens if peak is not None else 0,
+        peak_context_turn=peak.turn_index if peak is not None else None,
+        peak_context_model=peak.model if peak is not None else None,
+        peak_context_window=(peak.model_context_window if peak is not None else None),
         by_tool=dict(by_tool),
         by_kind=dict(by_kind),
     )
+
+
+def _peak_context_preview(metrics: TraceMetrics) -> str:
+    if metrics.peak_context_turn is None:
+        return "No provider context usage recorded."
+    location = f"T{metrics.peak_context_turn}"
+    if metrics.peak_context_window:
+        utilization = metrics.peak_context_tokens / metrics.peak_context_window * 100
+        return (
+            f"{metrics.peak_context_tokens:,} / {metrics.peak_context_window:,} "
+            f"input tokens at {location} ({utilization:.1f}%)"
+        )
+    return f"{metrics.peak_context_tokens:,} input tokens at {location}"
+
+
+def _peak_context_content(metrics: TraceMetrics) -> str:
+    turn = (
+        f"T{metrics.peak_context_turn}"
+        if metrics.peak_context_turn is not None
+        else "-"
+    )
+    lines = [
+        f"peak_input_tokens: {metrics.peak_context_tokens:,}",
+        f"turn: {turn}",
+        f"model: {metrics.peak_context_model or '-'}",
+    ]
+    if metrics.peak_context_window is not None:
+        remaining = metrics.peak_context_window - metrics.peak_context_tokens
+        utilization = metrics.peak_context_tokens / metrics.peak_context_window * 100
+        lines.extend(
+            (
+                f"model_context_window: {metrics.peak_context_window:,}",
+                f"remaining_context_tokens: {remaining:,}",
+                f"utilization: {utilization:.1f}%",
+            )
+        )
+    return "\n".join(lines)
 
 
 def _trigger_text(record: Turn | TurnCheckpoint) -> str:

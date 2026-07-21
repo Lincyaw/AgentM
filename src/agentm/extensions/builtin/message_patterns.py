@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import html
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.manifest import AtomInstallPriority
 from agentm.core.abi.messages import (
-    AgentMessage,
     InterruptionMessagePolicy,
     MessageMeta,
     TextContent,
@@ -20,7 +18,6 @@ from agentm.core.abi.messages import (
     UserMessage,
 )
 from agentm.core.abi.roles import INTERRUPTION_MESSAGE_POLICY_SERVICE
-from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.session_api import AtomAPI
 from agentm.extensions import ExtensionManifest
 
@@ -55,16 +52,13 @@ LOCAL_COMMAND_CAVEAT = (
 
 
 class MessagePatternsConfig(BaseModel):
-    attachments: dict[str, str] = Field(default_factory=dict)
-    memory_reminders: list[str] = Field(default_factory=list)
-    budget_nudge: str | None = None
-    inject_once: bool = True
+    model_config = ConfigDict(extra="forbid")
 
 
 MANIFEST = ExtensionManifest(
     name="message_patterns",
-    description="Register synthetic message factories and optional reminders.",
-    registers=("service:message_patterns", "context_policy:message_patterns"),
+    description="Render synthetic messages for interrupted model and tool work.",
+    registers=("service:interruption_message_policy",),
     config_schema=MessagePatternsConfig,
     requires=(),
     priority=AtomInstallPriority.CONTEXT,
@@ -285,38 +279,8 @@ class MessagePatternFactory:
         )
 
 
-class MessagePatternsPolicy(ContextPolicy):
-    """Inject static reminder attachments at the context boundary."""
-
-    def __init__(
-        self, config: MessagePatternsConfig, factory: MessagePatternFactory
-    ) -> None:
-        self._config = config
-        self._factory = factory
-        self._used = False
-
-    async def transform(
-        self,
-        messages: list[AgentMessage],
-        turns: Sequence[Turn],
-    ) -> list[AgentMessage]:
-        del turns
-        if self._config.inject_once and self._used:
-            return messages
-        injected: list[AgentMessage] = []
-        for reminder in self._config.memory_reminders:
-            injected.append(self._factory.attachment("relevant_memories", reminder))
-        if self._config.budget_nudge:
-            injected.append(
-                self._factory.attachment("budget_usd", self._config.budget_nudge)
-            )
-        for kind, body in self._config.attachments.items():
-            injected.append(self._factory.attachment(kind, body))
-        self._used = True
-        return injected + messages
-
-
 def install(api: AtomAPI, config: MessagePatternsConfig) -> None:
+    del config
     factory = MessagePatternFactory()
     api.services.register(
         MESSAGE_PATTERNS_SERVICE,
@@ -324,8 +288,6 @@ def install(api: AtomAPI, config: MessagePatternsConfig) -> None:
         InterruptionMessagePolicy,
         scope="tree",
     )
-    if config.attachments or config.memory_reminders or config.budget_nudge:
-        api.register_context_policy(MessagePatternsPolicy(config, factory))
 
 
 def _synthetic(
@@ -363,7 +325,6 @@ __all__ = [
     "INTERRUPT_MESSAGE_FOR_TOOL_USE",
     "MESSAGE_PATTERNS_SERVICE",
     "MessagePatternFactory",
-    "MessagePatternsPolicy",
     "install",
     "MANIFEST",
 ]

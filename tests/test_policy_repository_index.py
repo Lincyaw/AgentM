@@ -305,7 +305,10 @@ async def test_policy_atom_mounts_scan_and_refresh_handlers(tmp_path) -> None:
     api = _FakeAPI(root=root, bash=bash)
     runtime = _PolicyEngineRuntime(
         api,  # type: ignore[arg-type]
-        PolicyEngineConfig(db_path=str(tmp_path / "policy.db")),
+        PolicyEngineConfig(
+            db_path=str(tmp_path / "policy.db"),
+            ifg_repository_scan=True,
+        ),
     )
     runtime.install()
 

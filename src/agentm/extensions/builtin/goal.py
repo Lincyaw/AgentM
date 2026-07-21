@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from loguru import logger
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from agentm.core.abi import (
     AgentMessage,
@@ -115,16 +115,6 @@ _CHECKER_VERDICT_TOOL: Final = FunctionTool(
     fn=_checker_submit_verdict,
 )
 
-_CHECKER_TURN_REMINDER_EXT: Final[tuple[str, dict[str, JsonValue]]] = (
-    "agentm.extensions.builtin.turn_reminder",
-    {"warn_within": 4, "finalize_tool": "submit_verdict"},
-)
-
-_DERIVER_TURN_REMINDER_EXT: Final[tuple[str, dict[str, JsonValue]]] = (
-    "agentm.extensions.builtin.turn_reminder",
-    {"warn_within": 6, "finalize_tool": "submit_result"},
-)
-
 
 class _ConditionSchema(BaseModel):
     goal: str = Field(description="The final acceptance criterion.")
@@ -142,6 +132,8 @@ _AGENT_ENV_SESSION_SERVICE: Final[str] = "agent_env.session_id"
 
 
 class GoalConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     condition: str | None = None
     checker_scenario: str = "local"
     checker_max_turns: int = 10
@@ -152,6 +144,14 @@ class GoalConfig(BaseModel):
     auto_init_max_turns: int = 16
     auto_init_retries: int = 3
     max_rejects: int = 5
+
+    @model_validator(mode="after")
+    def _require_goal_source(self) -> "GoalConfig":
+        if not self.condition and not self.auto_init:
+            raise ValueError("goal requires condition or auto_init=true")
+        if self.auto_init and not self.auto_init_scenario:
+            raise ValueError("goal auto_init requires auto_init_scenario")
+        return self
 
 
 class _ConditionPayload(BaseModel):
@@ -264,7 +264,7 @@ async def _evaluate_checker(
         max_turns,
         prompt,
         "goal_checker",
-        extra_extensions=[_TRACE_QUERY_EXT, _CHECKER_TURN_REMINDER_EXT],
+        extra_extensions=[_TRACE_QUERY_EXT],
         extra_tools=[_CHECKER_VERDICT_TOOL],
         atom_config_overrides=_env_attach_overrides(api),
     )
@@ -412,7 +412,7 @@ class _GoalRuntime:
                 self._auto_init_max_turns,
                 prompt,
                 "goal_derivation",
-                extra_extensions=[_STRUCTURED_OUTPUT_EXT, _DERIVER_TURN_REMINDER_EXT],
+                extra_extensions=[_STRUCTURED_OUTPUT_EXT],
                 atom_config_overrides=_env_attach_overrides(self._api),
             )
             if messages is None:
@@ -475,8 +475,15 @@ class _GoalRuntime:
         state.last_reason = reason
 
         if is_met is None:
-            logger.warning("goal: checker unavailable — allowing stop")
-            return None
+            logger.error("goal: checker unavailable — refusing unverified stop")
+            return Inject(
+                messages=(
+                    text_message(
+                        "[Goal checker unavailable] Completion could not be "
+                        f"verified: {reason}. Continue only with new evidence."
+                    ),
+                )
+            )
 
         if is_met:
             state.achieved = True

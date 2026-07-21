@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AtomAPI,
@@ -250,7 +250,9 @@ def _format_skills_for_prompt(skills: list[SkillRecord]) -> str:
 
 
 class SkillLoaderConfig(BaseModel):
-    skill_paths: list[str] = []
+    model_config = ConfigDict(extra="forbid")
+
+    skill_paths: list[str] = Field(default_factory=list)
     include_defaults: bool = True
     inherit_claude: bool | None = None
 

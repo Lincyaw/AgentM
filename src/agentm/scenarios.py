@@ -32,14 +32,12 @@ _BUILTIN_SCENARIOS: dict[str, ScenarioSpec] = {
             ExtensionSpec.from_module(module)
             for module in (
                 "agentm.extensions.builtin.observability",
-                "agentm.extensions.builtin.operations",
-                "agentm.extensions.builtin.local_resources",
-                "agentm.extensions.builtin.retry_policy",
+                "agentm.extensions.builtin.local_backend",
                 "agentm.extensions.builtin.tool_result_cap",
                 "agentm.extensions.builtin.tool_error_messages",
                 "agentm.extensions.builtin.file_tools",
                 "agentm.extensions.builtin.tool_bash",
-                "agentm.extensions.builtin.system_prompt",
+                "agentm.extensions.builtin.prompt_assembly",
             )
         ),
     ),

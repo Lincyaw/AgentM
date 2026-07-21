@@ -26,21 +26,16 @@ def load_policy_bundle(
     policy_files: Sequence[str],
     *,
     cwd: Path,
+    scenario_dir: Path | None = None,
 ) -> PolicyBundle:
-    """Load base policy plus user/scenario overlays."""
+    """Load only the explicitly configured policy layers."""
     layers: list[tuple[list[RuleInstance], list[str]]] = []
     file_mtimes: dict[str, float] = {}
     paths: list[Path] = []
     labels = []
 
-    for path in _policy_paths(policy_files, cwd=cwd):
-        if path is None:
-            continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning("failed to read policy file {}: {}", path, exc)
-            continue
+    for path in _policy_paths(policy_files, cwd=cwd, scenario_dir=scenario_dir):
+        content = path.read_text(encoding="utf-8")
 
         rules, disabled = compile_policy_file(content)
         layers.append((rules, disabled))
@@ -57,13 +52,29 @@ def load_policy_bundle(
     )
 
 
-def resolve_policy_path(file_ref: str, *, cwd: Path) -> Path | None:
+def resolve_policy_path(
+    file_ref: str,
+    *,
+    cwd: Path,
+    scenario_dir: Path | None = None,
+) -> Path | None:
+    package_prefix = "package:"
+    if file_ref.startswith(package_prefix):
+        relative = Path(file_ref.removeprefix(package_prefix))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"invalid package policy path: {file_ref}")
+        package_candidate = Path(__file__).parent / relative
+        return package_candidate if package_candidate.exists() else None
     path = Path(file_ref)
     if path.is_absolute() and path.exists():
         return path
     candidate = cwd / file_ref
     if candidate.exists():
         return candidate
+    if scenario_dir is not None:
+        scenario_candidate = scenario_dir / file_ref
+        if scenario_candidate.exists():
+            return scenario_candidate
     home_candidate = Path.home() / ".agentm" / "policies" / file_ref
     if home_candidate.exists():
         return home_candidate
@@ -74,13 +85,17 @@ def _policy_paths(
     policy_files: Sequence[str],
     *,
     cwd: Path,
-) -> tuple[Path | None, ...]:
-    base_path = Path(__file__).parent / "base_policy.yaml"
-    resolved: list[Path | None] = [base_path if base_path.exists() else None]
+    scenario_dir: Path | None,
+) -> tuple[Path, ...]:
+    resolved: list[Path] = []
     for file_ref in policy_files:
-        path = resolve_policy_path(file_ref, cwd=cwd)
+        path = resolve_policy_path(
+            file_ref,
+            cwd=cwd,
+            scenario_dir=scenario_dir,
+        )
         if path is None:
-            logger.warning("policy file not found: {}", file_ref)
+            raise FileNotFoundError(f"policy file not found: {file_ref}")
         resolved.append(path)
     return tuple(resolved)
 

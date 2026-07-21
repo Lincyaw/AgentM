@@ -7,7 +7,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import replace
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from agentm.core.abi.compaction import ProjectionReport
 from agentm.core.abi.context import BindableContextPolicy, PolicyContext
@@ -24,11 +24,24 @@ from agentm.extensions import ExtensionManifest
 
 
 class PromptCacheConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     cache_key: str | None = None
     content_ref: str | None = None
     content_replacement_state_key: str | None = None
     tag_last_messages: int = 1
     provider: str | None = None
+
+    @model_validator(mode="after")
+    def _require_explicit_identity(self) -> "PromptCacheConfig":
+        if not (
+            self.cache_key or self.content_ref or self.content_replacement_state_key
+        ):
+            raise ValueError(
+                "prompt_cache requires cache_key, content_ref, or "
+                "content_replacement_state_key"
+            )
+        return self
 
 
 MANIFEST = ExtensionManifest(
@@ -174,8 +187,7 @@ class PromptCacheContextPolicy(BindableContextPolicy):
             return self._config.cache_key
         if self._config.content_replacement_state_key:
             return f"content-replacement:{self._config.content_replacement_state_key}"
-        if turns:
-            return f"turn-prefix:{turns[-1].id}"
+        del turns
         return None
 
 

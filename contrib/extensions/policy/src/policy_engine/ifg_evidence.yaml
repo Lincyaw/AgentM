@@ -1,0 +1,67 @@
+version: 1
+
+# These rules turn structural IFG transitions into evidence. They do not infer
+# task semantics and contain no fixed observation windows or numeric cutoffs.
+rules:
+  - name: exploration-not-converging
+    on: tool_call_post
+    match: {tool: "read|edit|write"}
+    when: "ifg.intervention.became_expanding()"
+    effect: escalate
+    mode: observe
+    escalate_context: "ifg.intervention.summary()"
+    reason: "The file frontier is still expanding faster than interventions can resolve it."
+
+  - name: mutation-target-drift
+    on: tool_call_post
+    match: {tool: "edit|write"}
+    when: "ifg.intervention.became_target_drifting()"
+    effect: escalate
+    mode: observe
+    escalate_context: "ifg.intervention.summary()"
+    reason: "Mutations are spreading across an adaptively large set of targets."
+
+  - name: unvalidated-intervention
+    on: tool_call_post
+    match: {tool: "read|bash|glob|find"}
+    when: "ifg.intervention.became_unvalidated()"
+    effect: escalate
+    mode: observe
+    escalate_context: "ifg.intervention.summary()"
+    reason: "The active intervention has exceeded its adaptive validation horizon."
+
+  - name: unchanged-anchor-reentry
+    on: tool_call_post
+    match: {tool: "bash|read|edit|write"}
+    when: "ifg.investigation.became_unchanged_reentry()"
+    effect: notify
+    mode: observe
+    escalate_context: "ifg.investigation.summary()"
+    reason: "Structural evidence: an unchanged repository anchor was re-entered."
+
+  - name: created-artifact-replacement
+    on: tool_call_post
+    match: {tool: bash}
+    when: "ifg.investigation.became_artifact_replacement()"
+    effect: notify
+    mode: observe
+    escalate_context: "ifg.investigation.summary()"
+    reason: "Structural evidence: one write-first executed artifact followed another without a repository mutation."
+
+  - name: unchanged-investigation-state-cycle
+    on: tool_call_post
+    match: {tool: bash}
+    when: "ifg.investigation.became_state_cycle()"
+    effect: notify
+    mode: observe
+    escalate_context: "ifg.investigation.summary()"
+    reason: "Structural evidence: an investigation phase returned to an unchanged repository state."
+
+  - name: repeated-region-reading
+    on: tool_call_post
+    match: {tool: read}
+    when: "ifg.region_reads.became_redundant()"
+    effect: notify
+    mode: observe
+    escalate_context: "ifg.region_reads.latest_summary()"
+    reason: "The latest read added no active source-region coverage."
