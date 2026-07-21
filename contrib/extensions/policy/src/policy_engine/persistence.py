@@ -371,6 +371,7 @@ class PolicyPersistence:
         events: Sequence["IfgToolEvent"],
         *,
         repository_index: "RepositoryIndex | None" = None,
+        rebuild_projection: bool = True,
     ) -> None:
         """Write IFG facts for runtime-observed tool events."""
         if not self._engine or not events:
@@ -384,9 +385,32 @@ class PolicyPersistence:
                     events,
                     update_summary=False,
                     repository_index=repository_index,
+                    rebuild_projection=rebuild_projection,
                 )
         except Exception as e:
             logger.warning("policy IFG realtime extraction failed: {}", e)
+
+    def rebuild_ifg_session(
+        self,
+        session_id: str,
+        *,
+        repository_index: "RepositoryIndex | None" = None,
+    ) -> None:
+        """Materialize one session's derived IFG projection from atomic rows."""
+
+        if not self._engine:
+            return
+        from .ifg.service import rebuild_ifg_projection
+
+        try:
+            with self._engine.begin() as conn:
+                rebuild_ifg_projection(
+                    conn,
+                    session_id,
+                    repository_index=repository_index,
+                )
+        except Exception as e:
+            logger.warning("policy IFG projection rebuild failed: {}", e)
 
     def count_cross_session(
         self,

@@ -14,6 +14,7 @@ from .service import (
     backfill_ifg_from_policy_events,
     backfill_ifg_from_trajectory_turns,
     persist_ifg_tool_events,
+    rebuild_ifg_projection,
 )
 from .types import (
     IfgActionFileEdgeRow,
@@ -58,4 +59,5 @@ __all__ = [
     "extract_ifg_from_policy_tool_rows",
     "extract_ifg_from_tool_events",
     "persist_ifg_tool_events",
+    "rebuild_ifg_projection",
 ]

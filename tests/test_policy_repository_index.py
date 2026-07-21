@@ -178,6 +178,57 @@ async def test_repository_index_scans_and_incrementally_replaces_symbols() -> No
 
 
 @pytest.mark.asyncio
+async def test_repository_index_keeps_full_outline_in_remote_worker() -> None:
+    path = "/remote/repo/src/app.py"
+    document = _document(path, "foo")
+    bash = _FakeBash(
+        [
+            "/remote/repo\n",
+            {
+                "version": 1,
+                "ok": True,
+                "root": "/remote/repo",
+                "files": 1,
+                "paths": [path],
+                "documents": [],
+            },
+            {
+                "version": 1,
+                "ok": True,
+                "root": "/remote/repo",
+                "files": 1,
+                "paths": [path],
+                "documents": [document],
+            },
+        ]
+    )
+    index = RepositoryIndex(
+        root="/remote/repo",
+        bash=bash,
+        remote_worker_command=(
+            "PYTHONPATH=/opt/agentm-toolbox python3 -m agentm_toolbox"
+        ),
+        remote_db_path="/logs/artifacts/agentm/repository-index.sqlite",
+    )
+
+    assert await index.scan_all()
+    assert index.contains_file(path)
+    assert not index.extract_symbols(
+        (_symbol_input(path),), extractor_version="test"
+    ).symbols
+
+    assert await index.refresh(RepositoryRefreshPlan(paths=(path,), reason="read"))
+    symbols = index.extract_symbols(
+        (_symbol_input(path),), extractor_version="test"
+    ).symbols
+
+    assert [symbol.qualified_name for symbol in symbols] == ["foo"]
+    assert "repository-index" in bash.commands[1]
+    assert "--replace" in bash.commands[1]
+    assert "--include-documents" in bash.commands[2]
+
+
+@pytest.mark.asyncio
 async def test_ifg_uses_remote_repository_index_for_bash_file_and_symbol() -> None:
     path = "/remote/repo/src/app.py"
     index = RepositoryIndex(

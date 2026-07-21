@@ -77,11 +77,15 @@ class PolicyEngineConfig(BaseModel):
 
     policy_files: list[str] = Field(default_factory=list)
     db_path: str | None = None
+    db_session_scoped: bool = False
     ifg_realtime: bool = True
+    ifg_defer_projection: bool = False
     ifg_repository_scan: bool = False
     ifg_repository_scan_timeout: float = Field(default=120.0, gt=0)
     ifg_repository_refresh_timeout: float = Field(default=30.0, gt=0)
     ifg_repository_search_roots: list[str] = Field(default_factory=list)
+    ifg_repository_worker_command: str | None = None
+    ifg_repository_remote_db_path: str | None = None
 
 
 class _NoArgs(BaseModel):
@@ -128,6 +132,14 @@ def _invalid_tool_call(tool_name: str, exc: ValidationError) -> ToolResult:
         content=[TextContent(type="text", text=f"Invalid {tool_name} call: {exc}")],
         is_error=True,
     )
+
+
+def _session_policy_db_path(base_path: Path, session_id: str) -> Path:
+    safe_session_id = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in session_id
+    )[:128]
+    return base_path.parent / "sessions" / f"{safe_session_id or 'session'}.db"
 
 
 def _tool_event_metadata(event: ToolResultEvent) -> dict[str, object]:
@@ -469,7 +481,13 @@ class _PolicyEngineRuntime:
         db_path = self._config.db_path
         if not db_path:
             db_path = str(default_policy_db_path())
-        self._persistence = PolicyPersistence(Path(db_path))
+        resolved_db_path = Path(db_path)
+        if self._config.db_session_scoped:
+            resolved_db_path = _session_policy_db_path(
+                resolved_db_path,
+                self._session.ctx.session_id,
+            )
+        self._persistence = PolicyPersistence(resolved_db_path)
         self._persistence.open()
 
     def _setup_repository_index(self) -> None:
@@ -489,6 +507,8 @@ class _PolicyEngineRuntime:
             scan_timeout=self._config.ifg_repository_scan_timeout,
             refresh_timeout=self._config.ifg_repository_refresh_timeout,
             search_roots=self._config.ifg_repository_search_roots,
+            remote_worker_command=self._config.ifg_repository_worker_command,
+            remote_db_path=self._config.ifg_repository_remote_db_path,
         )
         self._state.ifg_investigation.configure_repository(
             contains_file=self._repository_index.contains_file,
@@ -588,6 +608,18 @@ class _PolicyEngineRuntime:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self._repository_refresh_plans.clear()
+        persistence = self._persistence
+        if (
+            persistence is not None
+            and self._config.ifg_realtime
+            and self._config.ifg_defer_projection
+        ):
+            with self._session.track_background():
+                await asyncio.to_thread(
+                    persistence.rebuild_ifg_session,
+                    self._session.ctx.session_id,
+                    repository_index=self._repository_index,
+                )
 
     def _on_tool_call(self, event: ToolCallEvent) -> dict[str, object] | None:
         """Handle tool_call_pre: run reactions + evaluate rules."""
@@ -1243,6 +1275,7 @@ class _PolicyEngineRuntime:
         persistence.persist_ifg_tool_events(
             (event,),
             repository_index=self._repository_index,
+            rebuild_projection=not self._config.ifg_defer_projection,
         )
 
     def _taint_labels(self, args: ToolArgs) -> tuple[str, ...]:

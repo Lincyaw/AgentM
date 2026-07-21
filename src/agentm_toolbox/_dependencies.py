@@ -20,5 +20,13 @@ REMOTE_DEPENDENCIES = (
     ToolboxDependency(distribution="ast-grep-cli", executable="ast-grep"),
 )
 
+REMOTE_TOOLBOX_ROOT = "/opt/agentm-toolbox"
+REMOTE_TOOLBOX_COMMAND = f"PYTHONPATH={REMOTE_TOOLBOX_ROOT} python3 -m agentm_toolbox"
 
-__all__ = ["REMOTE_DEPENDENCIES", "ToolboxDependency"]
+
+__all__ = [
+    "REMOTE_DEPENDENCIES",
+    "REMOTE_TOOLBOX_COMMAND",
+    "REMOTE_TOOLBOX_ROOT",
+    "ToolboxDependency",
+]

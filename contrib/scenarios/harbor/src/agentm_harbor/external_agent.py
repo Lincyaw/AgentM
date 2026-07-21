@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM021,AM025] -- Harbor exposes optional ARL metadata dynamically
 """Harbor external agent backed by an embedded AgentM SDK session."""
 
 from __future__ import annotations
@@ -7,6 +8,7 @@ import shlex
 from collections.abc import Mapping
 from pathlib import Path
 
+import agentm_toolbox
 from agentm import (
     AgentSession,
     AgentSessionConfig,
@@ -18,7 +20,12 @@ from agentm.config import DefaultSessionSpecResolver
 from agentm.control import SessionControlServer
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import resolve_trajectory_store_or_create
-from agentm_toolbox import REMOTE_DEPENDENCIES, ToolboxDependency
+from agentm_toolbox import (
+    REMOTE_DEPENDENCIES,
+    REMOTE_TOOLBOX_COMMAND,
+    REMOTE_TOOLBOX_ROOT,
+    ToolboxDependency,
+)
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
@@ -63,6 +70,27 @@ async def _provision_remote_toolbox(environment: BaseEnvironment) -> None:
         raise RuntimeError(
             f"could not provision toolbox dependency {dependency.requirement}: {detail[:500]}"
         )
+
+    package_source = Path(agentm_toolbox.__file__).resolve()
+    package_source = package_source.parent
+    package_target = f"{REMOTE_TOOLBOX_ROOT}/agentm_toolbox"
+    prepare = await environment.exec(
+        f"mkdir -p -- {shlex.quote(REMOTE_TOOLBOX_ROOT)}",
+        cwd="/",
+        timeout_sec=_TOOLBOX_SETUP_TIMEOUT,
+    )
+    if prepare.return_code != 0:
+        detail = (prepare.stderr or prepare.stdout or "unknown error").strip()
+        raise RuntimeError(f"could not prepare remote toolbox: {detail[:500]}")
+    await environment.upload_dir(package_source, package_target)
+    verify = await environment.exec(
+        f"{REMOTE_TOOLBOX_COMMAND} repository-index --help >/dev/null",
+        cwd="/",
+        timeout_sec=_TOOLBOX_SETUP_TIMEOUT,
+    )
+    if verify.return_code != 0:
+        detail = (verify.stderr or verify.stdout or "unknown error").strip()
+        raise RuntimeError(f"could not activate remote toolbox: {detail[:500]}")
 
 
 def _find_scenario_yaml(configured: str | None = None) -> Path:

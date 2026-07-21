@@ -799,42 +799,24 @@ def _symbol_symbol_edges_from_facts(
 
     edges: list[IfgSymbolSymbolEdgeRow] = []
     for path, path_groups in by_path.items():
-        imports = [
-            (symbol, facts)
-            for symbol, facts in path_groups
-            if symbol.kind == "import"
-            or any(fact.file_relation == "imports" for fact in facts)
-        ]
         local_symbols = [
             (symbol, facts)
             for symbol, facts in path_groups
             if symbol.kind != "import"
             and any(fact.file_relation in {"defines", "exports"} for fact in facts)
         ]
-        for source_symbol, source_facts in local_symbols:
-            for target_symbol, target_facts in imports:
-                if source_symbol.symbol_id == target_symbol.symbol_id:
-                    continue
-                edges.append(
-                    _symbol_symbol_edge_from_facts(
-                        source_symbol=source_symbol,
-                        target_symbol=target_symbol,
-                        source_fact=source_facts[0],
-                        target_fact=target_facts[0],
-                        path=path,
-                    )
-                )
-
-        relation_targets = [
-            (symbol, facts, _symbol_relation_for_facts(facts))
-            for symbol, facts in path_groups
-        ]
-        relation_targets = [
-            (symbol, facts, relation)
-            for symbol, facts, relation in relation_targets
-            if relation in {"calls", "uses", "extends", "references"}
-        ]
-        for target_symbol, target_facts, relation in relation_targets:
+        # Import declarations already have precise file→symbol edges. Linking
+        # every local symbol to every import creates a quadratic, inferred graph
+        # with no evidence that a particular symbol uses that import.
+        for target_symbol, target_facts in path_groups:
+            relation = _symbol_relation_for_facts(target_facts)
+            if relation is None or relation not in {
+                "calls",
+                "uses",
+                "extends",
+                "references",
+            }:
+                continue
             target_fact = target_facts[0]
             for source_symbol, source_facts in _containing_source_groups(
                 local_symbols,

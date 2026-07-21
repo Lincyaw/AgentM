@@ -27,7 +27,15 @@ def resolve_policy_db_path(
     """
 
     if os.environ.get("AGENTM_HOME"):
-        return default_policy_db_path()
+        default_path = default_policy_db_path()
+        candidates = _agentm_home_policy_db_candidates(default_path)
+        if session_id:
+            for candidate in candidates:
+                if _database_has_session(candidate, session_id):
+                    return candidate
+        if default_path.is_file() or not candidates:
+            return default_path
+        return max(candidates, key=_modified_at)
 
     candidates = _project_policy_db_candidates(cwd or Path.cwd())
     if session_id:
@@ -44,10 +52,22 @@ def _project_policy_db_candidates(cwd: Path) -> tuple[Path, ...]:
     agentm_dir = project_root / ".agentm"
     paths = {
         path.resolve()
-        for pattern in ("policy_state/policy.db", "*/policy_state/policy.db")
+        for pattern in (
+            "policy_state/policy.db",
+            "policy_state/sessions/*.db",
+            "*/policy_state/policy.db",
+            "*/policy_state/sessions/*.db",
+        )
         for path in agentm_dir.glob(pattern)
         if path.is_file()
     }
+    return tuple(sorted(paths))
+
+
+def _agentm_home_policy_db_candidates(default_path: Path) -> tuple[Path, ...]:
+    paths = {path.resolve() for path in default_path.parent.glob("sessions/*.db")}
+    if default_path.is_file():
+        paths.add(default_path.resolve())
     return tuple(sorted(paths))
 
 

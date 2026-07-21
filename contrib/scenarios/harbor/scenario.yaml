@@ -23,7 +23,12 @@ extensions:
     config:
       policy_files:
         - package:ifg_evidence.yaml
+      db_session_scoped: true
       ifg_realtime: true
+      ifg_defer_projection: true
       ifg_repository_scan: true
       ifg_repository_search_roots:
         - /repo
+      ifg_repository_worker_command: >-
+        PYTHONPATH=/opt/agentm-toolbox python3 -m agentm_toolbox
+      ifg_repository_remote_db_path: /logs/artifacts/agentm/policy/repository-index.sqlite

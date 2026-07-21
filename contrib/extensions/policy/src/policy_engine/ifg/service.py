@@ -103,6 +103,7 @@ def persist_ifg_tool_events(
     deleted: int = 0,
     update_summary: bool = False,
     repository_index: RepositoryIndex | None = None,
+    rebuild_projection: bool = True,
 ) -> IfgBackfillResult:
     ensure_ifg_schema(conn)
     source_events = tuple(events)
@@ -124,23 +125,28 @@ def persist_ifg_tool_events(
         now=now,
     )
 
-    sessions = _event_sessions(source_events, fallback=resolved_session_id)
     primary_projection: IfgExtractionRows | None = None
-    for rebuild_session_id in sessions:
-        projection = _rebuild_derived_projection(
-            conn,
-            rebuild_session_id,
-            extractor_version,
-            now,
-            repository_index=repository_index,
-        )
-        if rebuild_session_id == resolved_session_id:
-            primary_projection = projection
+    if rebuild_projection:
+        sessions = _event_sessions(source_events, fallback=resolved_session_id)
+        for rebuild_session_id in sessions:
+            projection = rebuild_ifg_projection(
+                conn,
+                rebuild_session_id,
+                extractor_version=extractor_version,
+                now=now,
+                repository_index=repository_index,
+            )
+            if rebuild_session_id == resolved_session_id:
+                primary_projection = projection
     if primary_projection is None:
-        primary_projection = _projection_from_atomic_rows(
-            atomic_rows,
-            extractor_version=extractor_version,
-            repository_index=repository_index,
+        primary_projection = (
+            _projection_from_atomic_rows(
+                atomic_rows,
+                extractor_version=extractor_version,
+                repository_index=repository_index,
+            )
+            if rebuild_projection
+            else atomic_rows
         )
     result = _backfill_result(
         session_id=resolved_session_id,
@@ -183,14 +189,18 @@ def persist_ifg_tool_events(
     return result
 
 
-def _rebuild_derived_projection(
+def rebuild_ifg_projection(
     conn: Connection,
     session_id: str,
-    extractor_version: str,
-    now: float,
     *,
+    extractor_version: str = IFG_EXTRACTOR_VERSION,
+    now: float | None = None,
     repository_index: RepositoryIndex | None = None,
 ) -> IfgExtractionRows:
+    """Rebuild the complete derived graph once from durable atomic rows."""
+
+    ensure_ifg_schema(conn)
+    effective_now = time.time() if now is None else now
     atomic_rows = read_atomic_rows(
         conn,
         session_id=session_id,
@@ -206,7 +216,7 @@ def _rebuild_derived_projection(
         session_id=session_id,
         extractor_version=extractor_version,
         projection=projection,
-        now=now,
+        now=effective_now,
     )
     return projection
 

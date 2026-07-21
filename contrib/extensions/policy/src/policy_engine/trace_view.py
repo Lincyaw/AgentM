@@ -22,6 +22,7 @@ from policy_engine.source_parser import (
     parse_bash_segments,
 )
 from policy_engine.source_semantics import analyze_bash_segment
+from policy_engine.trace_indicators import load_policy_indicator_rows
 
 from agentm.presenter.trajectory import (
     TraceQuery,
@@ -549,6 +550,14 @@ def _summary_rows(
         )
         if row is not None:
             summary = _loads(row["summary_json"])
+            rows.extend(
+                load_policy_indicator_rows(
+                    conn,
+                    session_id,
+                    existing,
+                    summary,
+                )
+            )
             rows.append(
                 TraceRow(
                     key=f"policy:summary:session:{session_id}",

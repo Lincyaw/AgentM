@@ -47,8 +47,15 @@ class RepositoryIndexStatus:
     last_error: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _RepositoryScanResult:
+    documents: Mapping[str, Mapping[str, object]]
+    paths: tuple[str, ...]
+    files: int
+
+
 class RepositoryIndex:
-    """Session-local cache of ast-grep's bundled repository outline."""
+    """Session-local facade over a local or sandbox-resident outline index."""
 
     def __init__(
         self,
@@ -58,6 +65,8 @@ class RepositoryIndex:
         scan_timeout: float = 120.0,
         refresh_timeout: float = 30.0,
         search_roots: Sequence[str] = (),
+        remote_worker_command: str | None = None,
+        remote_db_path: str | None = None,
     ) -> None:
         self._root = _normalize_root(root)
         self._search_roots = tuple(
@@ -66,7 +75,12 @@ class RepositoryIndex:
         self._bash = bash
         self._scan_timeout = scan_timeout
         self._refresh_timeout = refresh_timeout
+        self._remote_worker_command = remote_worker_command
+        self._remote_db_path = remote_db_path
+        if self._remote_worker_command and not self._remote_db_path:
+            raise ValueError("remote repository worker requires a remote db path")
         self._documents: dict[str, Mapping[str, object]] = {}
+        self._paths: set[str] = set()
         self._refresh_lock = asyncio.Lock()
         self._ready = False
         self._scans = 0
@@ -86,7 +100,7 @@ class RepositoryIndex:
         return RepositoryIndexStatus(
             root=self._root,
             ready=self._ready,
-            files=len(self._documents),
+            files=len(self._paths),
             scans=self._scans,
             refreshes=self._refreshes,
             last_error=self._last_error,
@@ -102,15 +116,20 @@ class RepositoryIndex:
                 self._last_error = root_error
                 return False
             self._root = repository_root
-            documents, error = await self._scan_target(
+            scan, error = await self._scan_target(
                 self._root,
                 timeout=self._scan_timeout,
+                replace=True,
             )
             self._scans += 1
             if error is not None:
                 self._last_error = error
                 return False
-            self._documents = documents
+            if scan is None:
+                self._last_error = "repository scan returned no result"
+                return False
+            self._documents = dict(scan.documents)
+            self._paths = set(scan.paths)
             self._ready = True
             self._last_error = None
             return True
@@ -176,23 +195,29 @@ class RepositoryIndex:
         async with self._refresh_lock:
             success = True
             for path in plan.paths:
-                documents, error = await self._scan_target(
+                scan, error = await self._scan_target(
                     path,
                     timeout=self._refresh_timeout,
+                    replace=False,
                 )
                 self._refreshes += 1
                 if error is not None:
                     self._last_error = error
                     success = False
                     continue
+                if scan is None:
+                    self._last_error = "repository refresh returned no result"
+                    success = False
+                    continue
                 self._remove_scope(path)
-                self._documents.update(documents)
+                self._paths.update(scan.paths)
+                self._documents.update(scan.documents)
             if success:
                 self._last_error = None
             return success
 
     def contains_file(self, path: str) -> bool:
-        return self._normalize_path(path) in self._documents
+        return self._normalize_path(path) in self._paths
 
     def canonical_path(self, path: str) -> str:
         """Return the repository index's canonical path for an event path."""
@@ -222,8 +247,15 @@ class RepositoryIndex:
         target: str,
         *,
         timeout: float,
-    ) -> tuple[dict[str, Mapping[str, object]], str | None]:
+        replace: bool,
+    ) -> tuple[_RepositoryScanResult | None, str | None]:
         normalized = self._normalize_path(target)
+        if self._remote_worker_command is not None:
+            return await self._scan_target_remote(
+                normalized,
+                timeout=timeout,
+                replace=replace,
+            )
         quoted = shlex.quote(normalized)
         command = (
             f"if [ -e {quoted} ]; then "
@@ -234,21 +266,21 @@ class RepositoryIndex:
         try:
             result = await self._bash.exec(command, cwd=self._root, timeout=timeout)
         except Exception as exc:
-            return {}, f"outline execution failed: {type(exc).__name__}: {exc}"
+            return None, f"outline execution failed: {type(exc).__name__}: {exc}"
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         if result.timed_out:
-            return {}, f"outline timed out after {timeout:g}s"
+            return None, f"outline timed out after {timeout:g}s"
         if result.exit_code != 0:
             detail = stderr[:500] if stderr else f"exit {result.exit_code}"
-            return {}, f"outline failed: {detail}"
+            return None, f"outline failed: {detail}"
         try:
             payload = json.loads(
                 result.stdout.decode("utf-8", errors="replace") or "[]"
             )
         except json.JSONDecodeError as exc:
-            return {}, f"outline returned invalid JSON: {exc}"
+            return None, f"outline returned invalid JSON: {exc}"
         if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
-            return {}, "outline returned a non-array payload"
+            return None, "outline returned a non-array payload"
         documents: dict[str, Mapping[str, object]] = {}
         for raw_document in payload:
             if not isinstance(raw_document, Mapping):
@@ -258,7 +290,82 @@ class RepositoryIndex:
                 continue
             path = self._normalize_path(raw_path)
             documents[path] = {**dict(raw_document), "path": path}
-        return documents, None
+        return _RepositoryScanResult(
+            documents=documents,
+            paths=tuple(documents),
+            files=len(documents),
+        ), None
+
+    async def _scan_target_remote(
+        self,
+        target: str,
+        *,
+        timeout: float,
+        replace: bool,
+    ) -> tuple[_RepositoryScanResult | None, str | None]:
+        worker = self._remote_worker_command
+        database = self._remote_db_path
+        if worker is None or database is None:
+            return None, "remote repository worker is not configured"
+        flags = " --replace" if replace else " --include-documents"
+        command = (
+            f"{worker} repository-index"
+            f" --root {shlex.quote(self._root)}"
+            f" --target {shlex.quote(target)}"
+            f" --db {shlex.quote(database)}{flags}"
+        )
+        try:
+            result = await self._bash.exec(command, cwd=self._root, timeout=timeout)
+        except Exception as exc:
+            return None, f"remote index execution failed: {type(exc).__name__}: {exc}"
+        stdout = result.stdout.decode("utf-8", errors="replace").strip()
+        payload: object = None
+        if stdout:
+            try:
+                payload = json.loads(stdout.splitlines()[-1])
+            except json.JSONDecodeError as exc:
+                return None, f"remote index returned invalid JSON: {exc}"
+        if result.timed_out:
+            return None, f"remote index timed out after {timeout:g}s"
+        if not isinstance(payload, Mapping):
+            detail = result.stderr.decode("utf-8", errors="replace").strip()[:500]
+            return None, detail or f"remote index failed with exit {result.exit_code}"
+        if result.exit_code != 0 or payload.get("ok") is not True:
+            error = payload.get("error")
+            detail = error if isinstance(error, str) else f"exit {result.exit_code}"
+            return None, f"remote index failed: {detail}"
+
+        raw_paths = payload.get("paths")
+        paths = (
+            tuple(
+                self._normalize_path(path)
+                for path in raw_paths
+                if isinstance(path, str) and path
+            )
+            if isinstance(raw_paths, Sequence)
+            and not isinstance(raw_paths, (str, bytes))
+            else ()
+        )
+        raw_documents = payload.get("documents")
+        documents: dict[str, Mapping[str, object]] = {}
+        if isinstance(raw_documents, Sequence) and not isinstance(
+            raw_documents, (str, bytes)
+        ):
+            for raw_document in raw_documents:
+                if not isinstance(raw_document, Mapping):
+                    continue
+                raw_path = raw_document.get("path")
+                if not isinstance(raw_path, str) or not raw_path:
+                    continue
+                path = self._normalize_path(raw_path)
+                documents[path] = {**dict(raw_document), "path": path}
+        raw_files = payload.get("files")
+        files = raw_files if isinstance(raw_files, int) else len(paths)
+        return _RepositoryScanResult(
+            documents=documents,
+            paths=paths,
+            files=files,
+        ), None
 
     def _remove_scope(self, path: str) -> None:
         normalized = self._normalize_path(path)
@@ -266,6 +373,11 @@ class RepositoryIndex:
         for indexed_path in tuple(self._documents):
             if indexed_path == normalized or indexed_path.startswith(prefix):
                 del self._documents[indexed_path]
+        self._paths = {
+            indexed_path
+            for indexed_path in self._paths
+            if indexed_path != normalized and not indexed_path.startswith(prefix)
+        }
 
     def _normalize_path(self, path: str) -> str:
         if posixpath.isabs(path):

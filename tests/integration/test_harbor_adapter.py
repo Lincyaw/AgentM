@@ -317,9 +317,17 @@ def test_harbor_scenario_configures_policy_repository_scan() -> None:
 
     assert dict(policy.config) == {
         "policy_files": ("package:ifg_evidence.yaml",),
+        "db_session_scoped": True,
         "ifg_realtime": True,
+        "ifg_defer_projection": True,
         "ifg_repository_scan": True,
         "ifg_repository_search_roots": ("/repo",),
+        "ifg_repository_worker_command": (
+            "PYTHONPATH=/opt/agentm-toolbox python3 -m agentm_toolbox"
+        ),
+        "ifg_repository_remote_db_path": (
+            "/logs/artifacts/agentm/policy/repository-index.sqlite"
+        ),
     }
 
 
@@ -328,6 +336,7 @@ async def test_harbor_setup_provisions_remote_toolbox_dependencies() -> None:
     class SetupEnvironment:
         def __init__(self) -> None:
             self.commands: list[str] = []
+            self.uploads: list[tuple[Path, str]] = []
 
         async def exec(
             self,
@@ -340,17 +349,27 @@ async def test_harbor_setup_provisions_remote_toolbox_dependencies() -> None:
             self.commands.append(command)
             return HarborExecResult(stdout="", stderr="", return_code=0)
 
+        async def upload_dir(self, source: Path, target: str) -> None:
+            self.uploads.append((source, target))
+
     environment = SetupEnvironment()
     await _provision_remote_toolbox(environment)  # type: ignore[arg-type]
 
-    assert len(environment.commands) == 1
-    command = environment.commands[0]
+    assert len(environment.commands) == 3
+    command, prepare, verify = environment.commands
     assert "command -v ast-grep" in command
     assert "python3 -m pip install --help" in command
     assert "python3 -m pip install" in command
     assert "--break-system-packages" in command
     assert "ast-grep-cli==0.44.1" in command
     assert 'ln -sf "$agentm_scripts_dir"/ast-grep /usr/local/bin/ast-grep' in command
+    assert prepare == "mkdir -p -- /opt/agentm-toolbox"
+    assert environment.uploads[0][0].name == "agentm_toolbox"
+    assert environment.uploads[0][1] == "/opt/agentm-toolbox/agentm_toolbox"
+    assert verify == (
+        "PYTHONPATH=/opt/agentm-toolbox python3 -m agentm_toolbox "
+        "repository-index --help >/dev/null"
+    )
 
 
 @pytest.mark.asyncio

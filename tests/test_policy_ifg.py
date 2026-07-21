@@ -13,6 +13,7 @@ from policy_engine.ifg import (
     IfgToolEvent,
     extract_ifg_from_tool_events,
     persist_ifg_tool_events,
+    rebuild_ifg_projection,
 )
 from policy_engine.ifg.schema import ensure_ifg_schema
 from policy_engine.paths import default_policy_db_path, resolve_policy_db_path
@@ -186,6 +187,33 @@ def test_ifg_persistence_uses_source_unit_tables() -> None:
     assert summary["source_units"] == 7
     assert summary["symbol_mentions"] == 2
     assert summary["unresolved_symbol_mentions"] == 0
+
+
+def test_ifg_projection_can_be_deferred_until_session_shutdown() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    session_id = "session-deferred"
+    with engine.begin() as conn:
+        persist_ifg_tool_events(
+            conn,
+            _source_events(session_id),
+            session_id=session_id,
+            rebuild_projection=False,
+        )
+        assert conn.exec_driver_sql("SELECT COUNT(*) FROM ifg_actions").scalar_one()
+        assert conn.exec_driver_sql("SELECT COUNT(*) FROM ifg_nodes").scalar_one() == 0
+
+        projection = rebuild_ifg_projection(conn, session_id)
+
+        assert projection.graph_nodes
+        assert conn.exec_driver_sql("SELECT COUNT(*) FROM ifg_nodes").scalar_one()
+        assert (
+            conn.exec_driver_sql(
+                "SELECT COUNT(*) FROM ifg_symbol_symbol_edges WHERE relation = 'imports'"
+            ).scalar_one()
+            == 0
+        )
+
+    engine.dispose()
 
 
 def test_policy_trace_view_only_shows_current_ifg_model(tmp_path: Path) -> None:

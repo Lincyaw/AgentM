@@ -254,6 +254,18 @@ AgentM policy/tool atoms. It is intentionally separate from source-tree CLI
 scenarios: installing the Harbor extra must not change or shadow the default
 SDK composition.
 
+### Remote repository index
+
+During Harbor setup the adapter uploads `agentm_toolbox` to
+`/opt/agentm-toolbox` and provisions its `ast-grep` executable dependency.
+The policy repository scan then runs completely in the sandbox and stores its
+full outline at `/logs/artifacts/agentm/policy/repository-index.sqlite`.
+Only the repository path manifest and compact outlines for files touched by a
+tool call cross back to the host. Harbor also uses one host policy database per
+AgentM session and materializes the derived IFG once during shutdown, so
+concurrent trials do not share a SQLite WAL or rebuild the graph after every
+tool event.
+
 ## Human interrupt
 
 The adapter starts a Unix domain socket server per session at
@@ -296,5 +308,5 @@ asyncio.run(send_interrupt("abc123", "your feedback here"))
 
 | File | Role |
 |---|---|
-| `external_agent.py` | `BaseAgent` subclass; sets up env vars, creates AgentM session, reports token counts |
+| `external_agent.py` | `BaseAgent` subclass; provisions the remote toolbox, creates/resumes AgentM sessions, and reports token counts |
 | `harbor_ops.py` | Host bindings; `HarborEnvironmentOperations` wraps sandbox identity and execution, while `HarborResourceWriter` wraps transfer APIs |
