@@ -15,7 +15,7 @@ import json
 import uuid
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from agentm.core.abi.bus import EventBus
@@ -752,11 +752,6 @@ async def create_from_config(
             scope="host",
         )
     resolved_spec = _resolve_session_spec(config)
-    if resolved_spec is not None and restored_provider_identity is not None:
-        resolved_spec = replace(
-            resolved_spec,
-            provider_identity=restored_provider_identity,
-        )
     if resolved_spec is not None:
         services.register(
             RESOLVED_SESSION_SPEC_SERVICE,

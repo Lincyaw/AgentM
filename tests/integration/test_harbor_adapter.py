@@ -12,6 +12,7 @@ import signal
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
@@ -49,6 +50,19 @@ from harbor.environments.base import (
 from harbor.models.agent.context import AgentContext
 
 _OutputCallback = Callable[[str, OutputStream], Awaitable[None]]
+
+
+@dataclass
+class _FakeArlStep:
+    step_index: int
+
+
+@dataclass
+class _FakeArlInfo:
+    session_id: str
+    parent_session_id: str = ""
+    fork_step: int = 0
+    steps: list[_FakeArlStep] = field(default_factory=list)
 
 
 class _FakeHarborEnvironment:
@@ -511,6 +525,9 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
                 "[models.harbor-profile]",
                 'provider = "tests.fixtures.harbor_provider"',
                 'model = "stub-model"',
+                "",
+                "[atoms.llm_compaction]",
+                "reserve_tokens = 1000",
             )
         ),
         encoding="utf-8",
@@ -519,6 +536,12 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
     logs.mkdir()
     trajectory_path = tmp_path / "trajectory"
     fake = _FakeHarborEnvironment(tmp_path / "sandbox")
+    fake.arl = _FakeArlInfo(
+        session_id="arl-current",
+        parent_session_id="arl-parent",
+        fork_step=7,
+        steps=[_FakeArlStep(step_index=11)],
+    )
     agent = ExternalAgentMAgent(
         logs_dir=logs,
         model_name="harbor-profile",
@@ -528,7 +551,7 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
             "TRIAL_ONLY_VALUE": "trial-only-secret",
         },
     )
-    context = AgentContext()
+    context = AgentContext(metadata={"trial_key": "preserved"})
     process_env_before = dict(os.environ)
 
     await agent.run(
@@ -545,6 +568,25 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
     assert len(turns) == 1
     assert turns[0].response is not None
     assert "harbor-provider-completed" in _texts((turns[0].response,))
+    assert context.metadata == {
+        "trial_key": "preserved",
+        "agentm_session_id": sessions[0].id,
+        "arl_session_id": "arl-current",
+        "arl_parent_session_id": "arl-parent",
+        "arl_fork_step": 7,
+        "arl_step": 11,
+    }
+
+    await agent.resume(
+        "continue-through-harbor-host",
+        cast(BaseEnvironment, fake),
+        context,
+    )
+
+    _, resumed_turns = store.load(sessions[0].id)
+    assert len(resumed_turns) == 2
+    assert resumed_turns[-1].response is not None
+    assert "harbor-provider-completed" in _texts((resumed_turns[-1].response,))
 
 
 @pytest.mark.asyncio

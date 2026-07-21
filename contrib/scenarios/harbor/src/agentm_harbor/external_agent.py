@@ -122,8 +122,59 @@ def _raise_run_errors(errors: list[BaseException]) -> None:
     )
 
 
+def _resume_session_id(context: AgentContext) -> str:
+    metadata = context.metadata or {}
+    session_id = metadata.get("agentm_session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("AgentM Harbor resume requires context.metadata['agentm_session_id']")
+    return session_id
+
+
+def _sync_execution_metadata(
+    context: AgentContext,
+    environment: BaseEnvironment,
+    *,
+    agentm_session_id: str | None = None,
+) -> None:
+    metadata = dict(context.metadata or {})
+    if agentm_session_id is not None:
+        metadata["agentm_session_id"] = agentm_session_id
+
+    arl = getattr(environment, "arl", None)
+    arl_session_id = getattr(arl, "session_id", None)
+    if not isinstance(arl_session_id, str) or not arl_session_id:
+        context.metadata = metadata or None
+        return
+
+    previous_arl_session_id = metadata.get("arl_session_id")
+    metadata["arl_session_id"] = arl_session_id
+
+    parent_session_id = getattr(arl, "parent_session_id", None)
+    if isinstance(parent_session_id, str) and parent_session_id:
+        metadata["arl_parent_session_id"] = parent_session_id
+        fork_step = getattr(arl, "fork_step", None)
+        if isinstance(fork_step, int) and not isinstance(fork_step, bool):
+            metadata["arl_fork_step"] = fork_step
+    else:
+        metadata.pop("arl_parent_session_id", None)
+        metadata.pop("arl_fork_step", None)
+
+    steps = getattr(arl, "steps", None)
+    if isinstance(steps, list) and steps:
+        step_index = getattr(steps[-1], "step_index", None)
+        if isinstance(step_index, int) and not isinstance(step_index, bool):
+            metadata["arl_step"] = step_index
+    elif previous_arl_session_id != arl_session_id:
+        # A fresh or forked ARL session has no checkpoint of its own yet.
+        metadata.pop("arl_step", None)
+
+    context.metadata = metadata
+
+
 class ExternalAgentMAgent(BaseAgent):
     """Run AgentM locally while Harbor owns the sandbox lifecycle."""
+
+    SUPPORTS_RESUME = True
 
     @staticmethod
     def name() -> str:
@@ -140,6 +191,34 @@ class ExternalAgentMAgent(BaseAgent):
         instruction: str,
         environment: BaseEnvironment,
         context: AgentContext,
+    ) -> None:
+        await self._run_session(
+            instruction,
+            environment,
+            context,
+            resume_session_id=None,
+        )
+
+    async def resume(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        await self._run_session(
+            instruction,
+            environment,
+            context,
+            resume_session_id=_resume_session_id(context),
+        )
+
+    async def _run_session(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+        *,
+        resume_session_id: str | None,
     ) -> None:
         effective_env = _effective_env(os.environ, self.extra_env)
         if "AGENTM_API_KEY" not in effective_env:
@@ -170,17 +249,25 @@ class ExternalAgentMAgent(BaseAgent):
             environment,
             HarborOpsConfig(work_dir="/"),
         )
+        session_config = AgentSessionConfig(
+            cwd="/",
+            scenario=SCENARIO,
+            scenario_loader=_scenario_loader(scenario_path),
+            spec_resolver=spec_resolver,
+            environment_operations=operations,
+            resource_store=resource_store,
+            resource_writer=writer,
+            trajectory_store=trajectory.store,
+        )
+        _sync_execution_metadata(context, environment)
         try:
-            session = await AgentSession.create(
-                AgentSessionConfig(
-                    cwd="/",
-                    scenario=SCENARIO,
-                    scenario_loader=_scenario_loader(scenario_path),
-                    spec_resolver=spec_resolver,
-                    environment_operations=operations,
-                    resource_store=resource_store,
-                    resource_writer=writer,
-                    trajectory_store=trajectory.store,
+            session = (
+                await AgentSession.create(session_config)
+                if resume_session_id is None
+                else await AgentSession.resume(
+                    resume_session_id,
+                    trajectory.store,
+                    session_config,
                 )
             )
         except BaseException as creation_error:
@@ -193,6 +280,11 @@ class ExternalAgentMAgent(BaseAgent):
                 ) from creation_error
             raise
 
+        _sync_execution_metadata(
+            context,
+            environment,
+            agentm_session_id=session.session_id,
+        )
         errors: list[BaseException] = []
         turns = session.get_turns()
         try:
@@ -222,6 +314,11 @@ class ExternalAgentMAgent(BaseAgent):
             context.n_output_tokens = sum(turn.meta.total_output_tokens for turn in turns)
             context.n_cache_tokens = sum(
                 turn.meta.cache_read_tokens + turn.meta.cache_write_tokens for turn in turns
+            )
+            _sync_execution_metadata(
+                context,
+                environment,
+                agentm_session_id=session.session_id,
             )
             try:
                 await session.shutdown()

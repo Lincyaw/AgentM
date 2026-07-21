@@ -910,6 +910,21 @@ class _SessionProviders(_SessionRegistration):
 
         self._freeze_provider_after_commits()
         if self._provider_identity is not None:
+            active_set = self._active_set_fingerprint()
+            if active_set is not None:
+                bound_digest = self._provider_identity.active_set_digest
+                if bound_digest is None:
+                    self._set_provider_identity(
+                        replace(
+                            self._provider_identity,
+                            active_set_digest=active_set.digest,
+                        )
+                    )
+                elif bound_digest != active_set.digest:
+                    raise RuntimeError(
+                        "provider identity active set does not match the session: "
+                        f"{bound_digest} != {active_set.digest}"
+                    )
             return self._provider_identity
         if self._active_provider_name is None:
             self._activate_provider()

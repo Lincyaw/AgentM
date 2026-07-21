@@ -226,6 +226,24 @@ agentm trace usage    --session <session-id>
 Session ID is logged at agent start:
 `agentm-external: session <id> started`.
 
+When the selected environment is `arl.harbor:ArlEnvironment`, the adapter also
+persists the continuation checkpoint in Harbor's `AgentContext.metadata`:
+
+| Key | Meaning |
+|---|---|
+| `agentm_session_id` | AgentM trajectory session to continue |
+| `arl_session_id` | ARL environment session to resume or fork |
+| `arl_step` | Last 0-based ARL checkpoint step available for `fork_step` |
+| `arl_parent_session_id` | Source ARL session when the environment is a fork |
+| `arl_fork_step` | Source checkpoint used to create the ARL fork |
+
+The adapter's Harbor `resume()` implementation continues
+`agentm_session_id`. Configure a new ARL environment with
+`--ek resume_from=<arl_session_id>` to reattach to the same environment, or
+with `--ek fork_from=<arl_session_id> --ek fork_step=<arl_step>` to branch its
+filesystem state. `arl_step` is omitted until the current ARL session has
+produced a checkpoint.
+
 ## Scenario manifest
 
 The adapter owns and packages
