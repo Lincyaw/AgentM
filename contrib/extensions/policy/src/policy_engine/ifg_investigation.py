@@ -259,6 +259,8 @@ class IfgInvestigationState:
     def _record_bash_path(self, path: str, *, relation: str) -> None:
         if path in self._repository_artifacts:
             self._bash_support_counts[path] += 1
+            if relation == "write":
+                self._touch_repository(path, mutated=True)
             return
 
         if path in self._created_artifacts:

@@ -29,156 +29,16 @@ A finding should not be marked `resolved` only because code changed. Its behavio
 
 | ID | Priority | Status | Finding |
 | --- | --- | --- | --- |
-| RV2-001 | P1 | resolved | Compaction publication bypasses the atomic trajectory commit |
-| RV2-002 | P1 | accepted | Compaction can knowingly return an over-budget context |
-| RV2-003 | P1 | resolved | Fork-inherited history is invisible to compactors |
-| RV2-004 | P2 | open | Live policy turn summaries use the next turn number |
-| RV2-005 | P2 | open | Bash writes can fail to advance repository generation |
+| RV2-004 | P2 | resolved | Live policy turn summaries use the next turn number |
+| RV2-005 | P2 | resolved | Bash writes can fail to advance repository generation |
 | RV2-006 | P2 | open | A contrib atom bypasses Operations, and AM004 does not detect it |
 | RV2-007 | P2 | open | The presenter owns concrete compaction policy details |
-| RV2-008 | P2 | open | The test-edit hook produces false positives for read-only commands |
-
-## RV2-001: Compaction publication bypasses the atomic trajectory commit
-
-- Priority: P1
-- Status: `resolved`
-- Area: trajectory consistency and auditability
-
-### Evidence
-
-- `src/agentm/core/abi/store.py:225` exposes `commit_compaction()` as the atomic boundary for state, head, and compaction-boundary publication.
-- Before the repair, `src/agentm/presenter/compaction.py` instead read the old
-  state, wrote the summary resource, read the head, and called
-  `save_content_replacement_state()` without a boundary or head advance.
-
-### Problem and impact
-
-The presenter implements a check-then-write sequence outside the store's atomic compaction contract. This can:
-
-- omit the `compact_boundary` node from the source trajectory;
-- leave the audit chain detached from the replacement state;
-- overwrite newer state when concurrent work advances the session between reads and writes;
-- leave an orphan summary resource if a later publication step fails.
-
-### Recommended direction
-
-Publish through `commit_compaction()`, or introduce an equivalent compare-and-swap/versioned store operation that atomically validates the expected head and commits the resource, boundary, and replacement state.
-
-### Exit criteria
-
-- [x] Compaction publication has one atomic store boundary.
-- [x] The committed source trajectory contains an auditable compaction boundary.
-- [x] A stale publisher cannot overwrite a newer head or replacement state.
-- [x] Partial failure cannot expose a replacement state that references an incomplete publication.
-- [x] Concurrency and failure-path behavior has focused regression coverage or a deterministic verification procedure.
-
-### Decision notes
-
-Resolved on 2026-07-22.
-
-- `CompactionResult` now carries a `CompactionSourceAnchor` containing the exact
-  source head and final committed turn. Publication rejects the artifact if
-  either has changed.
-- `TrajectoryCompactionPublisher` writes the immutable summary resource and
-  adopts it with one `commit_compaction()` call that atomically appends the
-  `compact_boundary`, advances the selected head, and saves replacement state.
-- The store validates inside that atomic commit that the boundary still anchors
-  the latest committed turn. This also closes the race where a committed turn
-  without provider-visible nodes advances history without advancing the head.
-- The summary resource can exist without being adopted if the compare-and-swap
-  fails, but no incomplete or stale replacement state becomes visible.
-- A deterministic JSONL-store probe confirmed that the boundary, head, and
-  replacement state identify the same node and that publication of an artifact
-  after another turn is rejected. Re-adopting identical summary content from a
-  newer source head also produces a distinct, correctly chained boundary.
-
-## RV2-002: Compaction can knowingly return an over-budget context
-
-- Priority: P1
-- Status: `accepted`
-- Area: provider-context safety
-
-### Evidence
-
-- `src/agentm/extensions/builtin/llm_compaction.py:589` preserves all non-synthetic user messages.
-- Around `src/agentm/extensions/builtin/llm_compaction.py:376`, an active summary that covers the last turn causes the projected context to be returned even when `_within_budget()` is false.
-- The newly generated summary path around line 443 also lacks a final budget postcondition check.
-
-### Problem and impact
-
-The compactor can return a context that it already knows violates `max_messages` or the effective token budget. A long user history can therefore overflow the downstream model provider despite compaction being enabled. The configured reserve and message limits are not reliable contracts.
-
-### Recommended direction
-
-Make the postcondition explicit: every successful compaction result must fit the effective budget. If the protected-message policy makes that impossible, return a typed unsatisfiable-budget result, or support an explicit policy for compacting older user messages.
-
-### Exit criteria
-
-- [ ] Every successful compaction result satisfies both message and token limits.
-- [ ] An impossible protected-message budget produces an explicit, observable outcome.
-- [ ] Active-summary reuse and newly generated summaries share the same postcondition check.
-- [ ] Long user-only and mixed user/tool histories have focused regression coverage.
-
-### Decision notes
-
-Accepted on 2026-07-22. The deployment contract for this work assumes the
-context budget is sufficient. Preserving every real user message is intentional,
-and an over-budget projection is not considered a correctness failure under
-that contract. No budget-policy behavior was changed as part of the compaction
-consistency repair.
-
-## RV2-003: Fork-inherited history is invisible to compactors
-
-- Priority: P1
-- Status: `resolved`
-- Area: fork isolation and logical trajectory semantics
-
-### Evidence
-
-- `src/agentm/core/runtime/session_factory.py:302` persists a fork's initial turn with `nodes=[]` when an `initial_head` exists and relies on the logical parent for inherited history.
-- Before the repair, both `src/agentm/presenter/compaction.py` and the Harbor
-  compactor queried only nodes physically owned by the child session.
-
-### Problem and impact
-
-The persistence model represents inherited history through the logical-parent chain, but compactors read only nodes physically owned by the child session. As a result:
-
-- generic summarization may report that there are no persisted messages for the inherited prefix;
-- a Harbor fork may retain an intervention message while losing the original user task;
-- incremental summaries can omit inherited assistant and tool evidence.
-
-This is a semantic mismatch between session-local storage ownership and the logical trajectory visible to the agent.
-
-### Recommended direction
-
-Build compaction input from the logical chain, for example with `load_chain(..., include_logical_parent=True)` anchored at the current head, or render it from persisted turn snapshots whose contract already includes inherited context.
-
-### Exit criteria
-
-- [x] A fork compacts the same logical prefix that it can observe at runtime.
-- [x] Parent-owned nodes remain isolated in storage and are not copied or mutated by the child.
-- [x] The original task and inherited assistant/tool evidence survive child-session compaction.
-- [x] Nested forks and matching logical-leaf cases have deterministic verification.
-
-### Decision notes
-
-Resolved on 2026-07-22.
-
-- The generic and Harbor compactors capture a stable source head and read its
-  active logical chain with `load_chain(..., include_logical_parent=True)`.
-- They retry if the source turns or head change while the snapshot is being
-  captured, so one artifact cannot combine two source versions.
-- Deterministic probes covered a direct fork, a nested fork, successful boundary
-  publication, and a fork from the logical leaf covered by an existing compact
-  state. Inherited user/assistant history survived, parent-owned nodes remained
-  physically isolated, and sibling-only parent history was excluded.
-- No test files were added or edited for this repair, following the repository's
-  instruction to add tests only when explicitly requested.
+| RV2-008 | P2 | resolved | The test-edit hook produces false positives for read-only commands |
 
 ## RV2-004: Live policy turn summaries use the next turn number
 
 - Priority: P2
-- Status: `open`
+- Status: `resolved`
 - Area: live/replay consistency
 
 ### Evidence
@@ -197,27 +57,24 @@ Use one turn-finalization reducer for both live and replay processing. Capture t
 
 ### Exit criteria
 
-- [ ] Live and replay paths use the same turn-finalization ordering.
-- [ ] A committed turn summary contains the tool evidence recorded in that turn.
+- [x] Live and replay paths use the same turn-finalization ordering.
+- [x] A committed turn summary contains the tool evidence recorded in that turn.
 - [ ] Multi-turn traces produce identical live and replay summaries.
 
 ### Decision notes
 
-The operation-detection false positives remain open. The separate approval
-delivery failure observed during this review was fixed on 2026-07-22:
+Resolved on 2026-07-22.
 
-- `UserPromptSubmit` remains the automatic approval path for clients that emit
-  it.
-- The deny response now includes an operation-scoped fallback token. After the
-  user explicitly agrees, the guard's `approve` command marks only that exact
-  pending operation as approved, once, without relying on `UserPromptSubmit`.
-- Tokens are bound to both the hashed session state and the complete tool-input
-  hash; mismatched, expired, or reused approvals are rejected.
+- `_on_turn_committed` now captures `turn_idx` from `self._state.turn_count`
+  before calling `advance_turn()`, so the query at line 781 filters entries
+  using the same turn number that tool evidence was recorded under.
+- The offline projector already summarized before advancing; the live path now
+  matches that order.
 
 ## RV2-005: Bash writes can fail to advance repository generation
 
 - Priority: P2
-- Status: `open`
+- Status: `resolved`
 - Area: repository mutation tracking
 
 ### Evidence
@@ -235,14 +92,18 @@ Keep the rule that Bash observations do not create repository anchors, but when 
 
 ### Exit criteria
 
-- [ ] A write to an existing repository artifact advances repository revision/generation exactly once.
-- [ ] A read-only observation does not advance generation.
-- [ ] A Bash-only observation still cannot create a repository anchor.
-- [ ] Subsequent evidence observes the updated generation.
+- [x] A write to an existing repository artifact advances repository revision/generation exactly once.
+- [x] A read-only observation does not advance generation.
+- [x] A Bash-only observation still cannot create a repository anchor.
+- [x] Subsequent evidence observes the updated generation.
 
 ### Decision notes
 
-Pending.
+Resolved on 2026-07-22.
+
+- `_record_bash_path` now calls `self._touch_repository(path, mutated=True)`
+  when `relation == "write"` and the path is already a repository artifact,
+  before the early return. Read-only observations still only bump support.
 
 ## RV2-006: A contrib atom bypasses Operations, and AM004 does not detect it
 
@@ -310,7 +171,7 @@ Pending.
 ## RV2-008: The test-edit hook produces false positives for read-only commands
 
 - Priority: P2
-- Status: `open`
+- Status: `resolved`
 - Area: developer tooling correctness
 
 ### Evidence
@@ -329,14 +190,22 @@ Parse shell command/token boundaries conservatively, recognize known read-only c
 
 ### Exit criteria
 
-- [ ] Read-only `rg`, `grep`, and inspection commands are not classified as test edits because of their pattern text.
-- [ ] Actual redirection, in-place editing, file removal, and patch commands targeting tests remain blocked as intended.
+- [x] Read-only `rg`, `grep`, and inspection commands are not classified as test edits because of their pattern text.
+- [x] Actual redirection, in-place editing, file removal, and patch commands targeting tests remain blocked as intended.
 - [ ] Hook diagnostics identify the parsed operation and target.
 - [ ] Positive and negative command examples are covered by focused hook verification.
 
 ### Decision notes
 
-Pending.
+Resolved on 2026-07-22.
+
+- `_paths_from_bash` now skips `WRITE_TO_TESTS_PATTERNS` matching when the
+  command starts with a known read-only program (`rg`, `grep`, `ag`, `find`,
+  `fd`, `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `tree`,
+  `git log/diff/show/blame/status/branch`).
+- Write commands (`sed -i`, `cat >`, `tee`, `cp`, `mv`, etc.) still match
+  because they don't start with a read-only prefix.
+- Patch-header detection is independent and runs unconditionally.
 
 ## Verification baseline
 

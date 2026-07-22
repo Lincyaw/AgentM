@@ -772,8 +772,8 @@ class _PolicyEngineRuntime:
 
     def _on_turn_committed(self, event: TurnCommittedEvent) -> None:
         """Handle turn end: advance turn, record summary, evaluate rules, flush."""
-        self._state.advance_turn()
         turn_idx = self._state.turn_count
+        self._state.advance_turn()
 
         # Record turn_summary
 

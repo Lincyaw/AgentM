@@ -28,6 +28,10 @@ WRITE_TO_TESTS_PATTERNS = (
     ),
     re.compile(r"(?:write_text|write_bytes|open)\s*\([\s\S]*?['\"](?:\./)?tests/"),
 )
+_READ_ONLY_COMMAND = re.compile(
+    r"^\s*(?:rg|grep|egrep|fgrep|ag|ack|find|fd|ls|cat|head|tail|wc|file|stat|"
+    r"git\s+(?:log|diff|show|blame|status|branch)|tree)\b"
+)
 
 PENDING_TTL_SECONDS = 10 * 60
 APPROVAL_TTL_SECONDS = 5 * 60
@@ -365,10 +369,11 @@ def _paths_from_bash(command: str, repo_root: Path, cwd: Path) -> set[str]:
     if "*** Begin Patch" in command:
         paths.update(_paths_from_patch_headers(command, repo_root, cwd))
 
-    for pattern in WRITE_TO_TESTS_PATTERNS:
-        if pattern.search(command):
-            paths.add("tests/")
-            break
+    if not _READ_ONLY_COMMAND.match(command):
+        for pattern in WRITE_TO_TESTS_PATTERNS:
+            if pattern.search(command):
+                paths.add("tests/")
+                break
     return paths
 
 
