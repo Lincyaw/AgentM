@@ -9,15 +9,16 @@ import sys
 
 import typer
 
-from agentm import AgentSessionConfig, CompactionRequest
+from agentm import CompactionRequest
 from agentm.cli._display import EXIT_ERROR, EXIT_NOT_FOUND, is_tty, stderr_console
-from agentm.config.resolver import DefaultSessionSpecResolver
 from agentm.control import (
     InterruptDeliveryError,
     send_interrupt,
 )
-from agentm.extensions.builtin.llm_compaction import LlmCompactionConfig
-from agentm.presenter.compaction import AgentSessionCompactor
+from agentm.extensions.builtin.llm_compaction import (
+    AgentSessionCompactor,
+    LlmCompactionConfig,
+)
 
 
 session_app = typer.Typer(
@@ -108,21 +109,13 @@ def compact_cmd(
 ) -> None:
     """Generate an auditable summary from committed session history."""
     chosen_format = _select_format(fmt)
-    cwd = Path.cwd()
-    project_config = cwd / "agentm.toml"
-    resolver = DefaultSessionSpecResolver(
-        project_config=project_config if project_config.exists() else None,
-    )
+    from agentm.storage.trajectory.resolve import resolve_trajectory_store_or_create
+
+    resolved = resolve_trajectory_store_or_create(str(Path.cwd()))
     strategy = LlmCompactionConfig(
         keep_last_turns=4,
     )
-    compactor = AgentSessionCompactor(
-        AgentSessionConfig(
-            cwd=str(cwd),
-            extensions=[],
-            spec_resolver=resolver,
-        )
-    )
+    compactor = AgentSessionCompactor(store=resolved.store)
     try:
         result = asyncio.run(
             compactor.compact(

@@ -6,13 +6,8 @@ import asyncio
 from dataclasses import replace
 from typing import cast
 
-from agentm.core.abi.compaction import CompactionPublisher, SessionCompactor
-from agentm.core.abi.roles import (
-    COMPACTION_PUBLISHER_SERVICE,
-    SESSION_COMPACTOR_SERVICE,
-)
-from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import AgentSessionConfig
+from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_core import SessionRuntimeConfig
@@ -48,8 +43,10 @@ class AgentSession(Session):
     @classmethod
     async def create(cls, config: AgentSessionConfig) -> "AgentSession":
         if config.trajectory_store is not None:
-            session = await create_from_config(config, session_type=cls)
-            return _configure_default_compaction(session, config)
+            return cast(
+                AgentSession,
+                await create_from_config(config, session_type=cls),
+            )
 
         resolved = resolve_trajectory_store_or_create(config.cwd or None)
         host_services = ServiceRegistry()
@@ -78,7 +75,7 @@ class AgentSession(Session):
                 ) from creation_error
             raise
 
-        return _configure_default_compaction(session, config)
+        return cast(AgentSession, session)
 
     @classmethod
     async def resume(
@@ -87,56 +84,9 @@ class AgentSession(Session):
         store: TrajectoryStore,
         config: AgentSessionConfig,
     ) -> "AgentSession":
-        session = await super().resume(session_id, store, config)
-        return _configure_default_compaction(session, config)
-
-
-def _configure_default_compaction(
-    session: Session,
-    config: AgentSessionConfig,
-) -> AgentSession:
-    result = cast(AgentSession, session)
-    _register_default_compaction_services(result, config)
-    return result
-
-
-def _register_default_compaction_services(
-    session: AgentSession,
-    config: AgentSessionConfig,
-) -> None:
-    from agentm.presenter.compaction import (
-        AgentSessionCompactor,
-        TrajectoryCompactionPublisher,
-    )
-
-    store = session.store
-    if store is None:
-        return
-    resource_store = session.get_resource_store()
-    if not session.services.has(SESSION_COMPACTOR_SERVICE):
-        session.services.register(
-            SESSION_COMPACTOR_SERVICE,
-            AgentSessionCompactor(
-                replace(
-                    config,
-                    trajectory_store=store,
-                    resource_store=resource_store,
-                )
-            ),
-            SessionCompactor,
-            scope="host",
-        )
-    if resource_store is not None and not session.services.has(
-        COMPACTION_PUBLISHER_SERVICE
-    ):
-        session.services.register(
-            COMPACTION_PUBLISHER_SERVICE,
-            TrajectoryCompactionPublisher(
-                store=store,
-                resource_store=resource_store,
-            ),
-            CompactionPublisher,
-            scope="host",
+        return cast(
+            AgentSession,
+            await super().resume(session_id, store, config),
         )
 
 
