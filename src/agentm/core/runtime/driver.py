@@ -24,9 +24,11 @@ from loguru import logger
 
 from agentm.core.abi.cancel import (
     CancelSignal,
+    CompositeCancelSignal,
     ResettableCancelSource,
 )
 from agentm.core.abi.compaction import (
+    ContextCompactionService,
     ContextProjection,
 )
 from agentm.core.abi.lifecycle import EffectScope, EffectTxn
@@ -48,6 +50,7 @@ from agentm.core.abi.resource import (
     TransactionalResourceWriter,
 )
 from agentm.core.abi.roles import (
+    CONTEXT_COMPACTION_SERVICE,
     CONTEXT_PROJECTION_SERVICE,
     INTERRUPTION_MESSAGE_POLICY_SERVICE,
     PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
@@ -100,6 +103,7 @@ from agentm.core.abi.trajectory import (
     TurnMeta,
 )
 from agentm.core.abi.trigger import (
+    CompactTrigger,
     ContinueTrigger,
     TriggerEnvelope,
     TriggerMetadata,
@@ -578,6 +582,18 @@ async def drive(config: DriverConfig) -> None:
         INTERRUPTION_MESSAGE_POLICY_SERVICE,
         cast(type[InterruptionMessagePolicy], InterruptionMessagePolicy),
     )
+    compaction = config.services.get(
+        CONTEXT_COMPACTION_SERVICE,
+        cast(type[ContextCompactionService], ContextCompactionService),
+    )
+
+    def _compaction_signal() -> CancelSignal:
+        return CompositeCancelSignal(
+            _shutdown,
+            config.cancel_signal,
+            _interrupt,
+        )
+
     turns_run = 0
     tool_calls_run = 0
     _last_system_prompt_ref: str | None = None
@@ -593,6 +609,23 @@ async def drive(config: DriverConfig) -> None:
             triggers.terminate(TriggerTerminated("session shut down"))
             await bus.emit(RunEndEvent.CHANNEL, RunEndEvent())
             return
+
+        if compaction is not None and compaction.pending:
+            if prompt_run is None:
+                _interrupt.clear()
+            try:
+                await compaction.execute(
+                    tuple(trajectory.turns),
+                    signal=_compaction_signal(),
+                )
+            except Exception as exc:
+                logger.warning("step-boundary context compaction failed: {}", exc)
+                await _emit_lifecycle_diagnostic(
+                    bus,
+                    boundary="context compaction",
+                    action="execute",
+                    exc=exc,
+                )
 
         if config.max_turns is not None and turns_run >= config.max_turns:
             cause = MaxTurnsExhausted()
@@ -619,6 +652,28 @@ async def drive(config: DriverConfig) -> None:
             )
         envelope = prompt_run.envelope
         trigger = envelope.trigger
+
+        if isinstance(trigger, CompactTrigger):
+            if compaction is None:
+                triggers.fail(
+                    RuntimeError(
+                        "session has no context compaction service; "
+                        "install llm_compaction"
+                    )
+                )
+            else:
+                try:
+                    report = await compaction.execute(
+                        tuple(trajectory.turns),
+                        signal=_compaction_signal(),
+                    )
+                except Exception as exc:
+                    logger.warning("queued context compaction failed: {}", exc)
+                    triggers.fail(exc)
+                else:
+                    triggers.complete(report)
+            prompt_run = None
+            continue
 
         effect_txn: EffectTxn | None = None
         resource_txn: ResourceTxn | None = None

@@ -13,9 +13,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.codec import serialize_message
-from agentm.core.abi.compaction import ProjectionReport, TurnRange
+from agentm.core.abi.compaction import (
+    ContextCompactionService,
+    ProjectionReport,
+    TurnRange,
+)
 from agentm.core.abi.context import (
     BindableContextPolicy,
+    ContextTransformCancelled,
     PolicyContext,
     turn_to_messages,
 )
@@ -28,6 +33,7 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.resource import ResourceRef, ResourceStore
 from agentm.core.abi.roles import (
+    CONTEXT_COMPACTION_SERVICE,
     RESOURCE_STORE_SERVICE,
     TRAJECTORY_STORE_SERVICE,
 )
@@ -44,7 +50,7 @@ from agentm.core.abi.trajectory import (
     TrajectoryNode,
     Turn,
 )
-from agentm.core.abi.trigger import TriggerRenderer
+from agentm.core.abi.trigger import CompactTrigger, TriggerRenderer
 from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.lib.tokens import count_text_tokens
 from agentm.extensions import ExtensionManifest
@@ -93,7 +99,10 @@ class LlmCompactionConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="llm_compaction",
     description="Compact old context into durable provider-generated summaries.",
-    registers=("context_policy:llm_compaction",),
+    registers=(
+        "context_policy:llm_compaction",
+        f"service:{CONTEXT_COMPACTION_SERVICE}",
+    ),
     config_schema=LlmCompactionConfig,
     requires=(
         "service:resource_store",
@@ -138,7 +147,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
         messages: list[AgentMessage],
         turns: Sequence[Turn],
     ) -> list[AgentMessage]:
-        return await self._transform(messages, turns, signal=None)
+        return await self._transform(messages, turns, signal=None, force=False)
 
     async def transform_with_signal(
         self,
@@ -147,7 +156,32 @@ class LlmCompactionPolicy(BindableContextPolicy):
         *,
         signal: CancelSignal,
     ) -> list[AgentMessage]:
-        return await self._transform(messages, turns, signal=signal)
+        return await self._transform(messages, turns, signal=signal, force=False)
+
+    async def compact(
+        self,
+        turns: Sequence[Turn],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ProjectionReport:
+        """Force compaction independently of the configured threshold."""
+
+        if not turns:
+            raise ValueError("cannot compact a session with no committed turns")
+        if signal is not None and signal.is_set():
+            raise ContextTransformCancelled
+        try:
+            await self._transform(
+                self._render_turns(turns),
+                turns,
+                signal=signal,
+                force=True,
+            )
+        except BaseException as exc:
+            if signal is not None and signal.is_set():
+                raise ContextTransformCancelled from exc
+            raise
+        return self.explain()
 
     async def _transform(
         self,
@@ -155,6 +189,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
         turns: Sequence[Turn],
         *,
         signal: CancelSignal | None,
+        force: bool,
     ) -> list[AgentMessage]:
         if not turns:
             return messages
@@ -167,7 +202,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
             self._require_suffix(messages, tail)
             projected = [summary_message, *tail]
             within_budget, budget_metadata = self._within_budget(projected, turns)
-            if within_budget:
+            if within_budget and not force:
                 self._record_report(
                     turns,
                     covered_position,
@@ -178,7 +213,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
                 return projected
 
         within_budget, budget_metadata = self._within_budget(messages, turns)
-        if within_budget:
+        if within_budget and not force:
             self._last_report = ProjectionReport(
                 kept=_turn_range(turns),
                 metadata={
@@ -200,6 +235,15 @@ class LlmCompactionPolicy(BindableContextPolicy):
             )
 
         previous_covered = active[0] if active is not None else -1
+        if active is not None and previous_covered >= len(turns) - 1:
+            self._record_report(
+                turns,
+                previous_covered,
+                active[2],
+                decision="reuse",
+                budget_metadata={**budget_metadata, "forced": force},
+            )
+            return [active[1]]
         target = max(
             previous_covered + 1,
             len(turns) - self._config.keep_last_turns - 1,
@@ -342,7 +386,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
             target,
             ref,
             decision="compact",
-            budget_metadata=budget_metadata,
+            budget_metadata={**budget_metadata, "forced": force},
         )
         return [
             _summary_message(
@@ -579,7 +623,7 @@ class LlmCompactionPolicy(BindableContextPolicy):
         ref: ResourceRef,
         *,
         decision: str,
-        budget_metadata: dict[str, str | int],
+        budget_metadata: dict[str, str | int | bool],
     ) -> None:
         self._last_report = ProjectionReport(
             summarized=(
@@ -600,8 +644,53 @@ class LlmCompactionPolicy(BindableContextPolicy):
         )
 
 
+class LlmCompactionService:
+    """Coalesce requests and wake the driver without interrupting active work."""
+
+    __slots__ = ("_api", "_pending", "_policy")
+
+    def __init__(self, api: AtomAPI, policy: LlmCompactionPolicy) -> None:
+        self._api = api
+        self._policy = policy
+        self._pending = False
+
+    @property
+    def pending(self) -> bool:
+        return self._pending
+
+    def request(self) -> None:
+        if self._pending:
+            return
+        self._api.push_trigger(
+            CompactTrigger(),
+            priority="next",
+            origin="compaction",
+            mode="compact",
+            is_meta=True,
+        )
+        self._pending = True
+
+    async def execute(
+        self,
+        turns: Sequence[Turn],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ProjectionReport | None:
+        if not self._pending:
+            return None
+        self._pending = False
+        return await self._policy.compact(turns, signal=signal)
+
+
 def install(api: AtomAPI, config: LlmCompactionConfig) -> None:
-    api.register_context_policy(LlmCompactionPolicy(config), priority=400)
+    policy = LlmCompactionPolicy(config)
+    api.register_context_policy(policy, priority=400)
+    api.services.register(
+        CONTEXT_COMPACTION_SERVICE,
+        LlmCompactionService(api, policy),
+        ContextCompactionService,
+        scope="session",
+    )
 
 
 def _summary_message(
@@ -718,6 +807,7 @@ def _turn_range(turns: Sequence[Turn]) -> tuple[TurnRange, ...]:
 __all__ = [
     "LlmCompactionConfig",
     "LlmCompactionPolicy",
+    "LlmCompactionService",
     "MANIFEST",
     "install",
 ]

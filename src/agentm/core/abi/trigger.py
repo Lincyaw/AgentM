@@ -152,6 +152,13 @@ class ContinueTrigger:
 
 
 @dataclass(frozen=True, slots=True)
+class CompactTrigger:
+    """Run a maintenance compaction pass without creating a conversation turn."""
+
+    source: str = "compact"
+
+
+@dataclass(frozen=True, slots=True)
 class Injection:
     """Extension-injected messages (from a decide_turn_action Inject override)."""
 
@@ -161,6 +168,7 @@ class Injection:
 
 __all__ = [
     "BackgroundCompletion",
+    "CompactTrigger",
     "ContinueTrigger",
     "Injection",
     "MonitorFire",

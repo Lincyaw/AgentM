@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
+from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.messages import AgentMessage
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
@@ -107,8 +108,30 @@ class ContextProjection(Protocol):
     def explain(self) -> ProjectionReport: ...
 
 
+@runtime_checkable
+class ContextCompactionService(Protocol):
+    """Schedule and execute compaction at a driver step boundary."""
+
+    @property
+    def pending(self) -> bool: ...
+
+    def request(self) -> None:
+        """Schedule compaction after the active step without interrupting it."""
+        ...
+
+    async def execute(
+        self,
+        turns: Sequence[Turn],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ProjectionReport | None:
+        """Consume a pending request; called by the session driver only."""
+        ...
+
+
 __all__ = [
     "ContextBudget",
+    "ContextCompactionService",
     "ContextProjection",
     "ProjectionInput",
     "ProjectionReport",

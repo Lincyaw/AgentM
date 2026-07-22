@@ -64,6 +64,9 @@ RESOLVED_SESSION_SPEC_SERVICE: Final = "resolved_session_spec"
 CONTEXT_PROJECTION_SERVICE: Final = "context_projection"
 """Service key for host/session context projection policy."""
 
+CONTEXT_COMPACTION_SERVICE: Final = "context_compaction"
+"""Service key for step-boundary context compaction requests."""
+
 EFFECT_SCOPE_SERVICE: Final = "effect_scope"
 """Service key for the host-provided world-effect lifecycle port."""
 
@@ -92,6 +95,7 @@ __all__ = [
     "ATOM_CATALOG_SERVICE",
     "BASH_OPERATIONS_SERVICE",
     "CATALOG_QUERY_SERVICE",
+    "CONTEXT_COMPACTION_SERVICE",
     "CONTEXT_PROJECTION_SERVICE",
     "EFFECT_SCOPE_SERVICE",
     "ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE",

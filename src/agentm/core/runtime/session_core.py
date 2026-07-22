@@ -33,6 +33,7 @@ from agentm.core.abi.catalog import (
     AtomCatalogQuery,
     VersionedResourceStore,
 )
+from agentm.core.abi.compaction import ContextCompactionService
 from agentm.core.abi.lifecycle import (
     EffectScope,
     EnvironmentRestoreFailureHandler,
@@ -83,6 +84,7 @@ from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_SERVICE,
     CATALOG_QUERY_SERVICE,
     BASH_OPERATIONS_SERVICE,
+    CONTEXT_COMPACTION_SERVICE,
     EFFECT_SCOPE_SERVICE,
     ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
     ENVIRONMENT_RESTORE_STATUS_SERVICE,
@@ -111,7 +113,12 @@ from agentm.core.abi.trajectory import (
     Turn,
 )
 from agentm.core.abi.tree import SessionGraphProtocol
-from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer, UserInput
+from agentm.core.abi.trigger import (
+    Trigger,
+    TriggerPriority,
+    TriggerRenderer,
+    UserInput,
+)
 from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
@@ -567,6 +574,23 @@ class _SessionLifecycle:
 
     def interrupt(self, reason: CancelReason | str = "user_cancel") -> None:
         self._interrupt.set(reason)
+
+    def compact(self) -> None:
+        """Schedule compaction after the active step without interrupting it."""
+
+        if self._closed:
+            raise RuntimeError("cannot compact a closed session")
+        compaction = self.services.get(
+            CONTEXT_COMPACTION_SERVICE,
+            cast(type[ContextCompactionService], ContextCompactionService),
+        )
+        if compaction is None:
+            raise RuntimeError(
+                "session has no context compaction service; install llm_compaction"
+            )
+        if self._driver_task is None:
+            self.start()
+        compaction.request()
 
     def register_cleanup(
         self,

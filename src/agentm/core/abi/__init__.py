@@ -35,6 +35,7 @@ from .codec import (
 )
 from .compaction import (
     ContextBudget,
+    ContextCompactionService,
     ContextProjection,
     ProjectionInput,
     ProjectionReport,
@@ -198,6 +199,7 @@ from .roles import (
     ATOM_CATALOG_SERVICE,
     BASH_OPERATIONS_SERVICE,
     CATALOG_QUERY_SERVICE,
+    CONTEXT_COMPACTION_SERVICE,
     CONTEXT_PROJECTION_SERVICE,
     EFFECT_SCOPE_SERVICE,
     ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
@@ -355,6 +357,7 @@ from .trajectory import (
 from .tree import EdgeKind, SessionEdge, SessionGraphProtocol, SessionNode
 from .trigger import (
     BackgroundCompletion,
+    CompactTrigger,
     ContinueTrigger,
     Injection,
     MonitorFire,
@@ -408,15 +411,18 @@ __all__ = [
     "ChildSessionStartEvent",
     "ChildCancellationMode",
     "CodecRegistry",
+    "CompactTrigger",
     "ConfigSource",
     "ConfigValueProvenance",
     "ContextBudget",
+    "ContextCompactionService",
     "ContextEvent",
     "ContextPolicy",
     "ContextTransformCancelled",
     "ContextProjection",
     "ContentReplacementState",
     "ContinueTrigger",
+    "CONTEXT_COMPACTION_SERVICE",
     "CONTEXT_PROJECTION_SERVICE",
     "DEFAULT_CODEC",
     "DEFAULT_TRAJECTORY_BRANCH_ID",
