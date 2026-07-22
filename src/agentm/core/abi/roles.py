@@ -40,6 +40,9 @@ ENVIRONMENT_OPERATIONS_SERVICE: Final = "operations:environment"
 BASH_OPERATIONS_SERVICE: Final = "operations:bash"
 """Service key for shell execution operations."""
 
+HOST_BASH_OPERATIONS_SERVICE: Final = "operations:bash:host"
+"""Service key for host-local shell execution, independent of session environment."""
+
 TOOL_EXECUTOR_SERVICE: Final = "tool_executor"
 """Service key for the host-provided tool execution boundary."""
 
@@ -100,6 +103,7 @@ __all__ = [
     "ACTIVE_SET_FINGERPRINT_SERVICE",
     "ATOM_CATALOG_SERVICE",
     "BASH_OPERATIONS_SERVICE",
+    "HOST_BASH_OPERATIONS_SERVICE",
     "CATALOG_QUERY_SERVICE",
     "COMPACTION_PUBLISHER_SERVICE",
     "CONTEXT_COMPACTION_SERVICE",

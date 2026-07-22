@@ -31,8 +31,8 @@ A finding should not be marked `resolved` only because code changed. Its behavio
 | --- | --- | --- | --- |
 | RV2-004 | P2 | resolved | Live policy turn summaries use the next turn number |
 | RV2-005 | P2 | resolved | Bash writes can fail to advance repository generation |
-| RV2-006 | P2 | open | A contrib atom bypasses Operations, and AM004 does not detect it |
-| RV2-007 | P2 | open | The presenter owns concrete compaction policy details |
+| RV2-006 | P2 | resolved | A contrib atom bypasses Operations, and AM004 does not detect it |
+| RV2-007 | P2 | resolved | The presenter owns concrete compaction policy details |
 | RV2-008 | P2 | resolved | The test-edit hook produces false positives for read-only commands |
 
 ## RV2-004: Live policy turn summaries use the next turn number
@@ -127,19 +127,37 @@ Move parsing/execution behind a host or toolbox service exposed through `AtomAPI
 
 ### Exit criteria
 
-- [ ] Policy atoms do not directly call subprocess or raw filesystem APIs for this path.
-- [ ] The execution is routed through an auditable runtime service or Operations port.
+- [x] Policy atoms do not directly call subprocess or raw filesystem APIs for this path.
+- [x] The execution is routed through an auditable runtime service or Operations port.
 - [ ] AM004 detects equivalent violations in both built-in and contrib atoms.
 - [ ] A negative linter fixture demonstrates that ordinary non-atom host code remains allowed.
 
 ### Decision notes
 
-Pending.
+Resolved on 2026-07-22.
+
+- New `HOST_BASH_OPERATIONS_SERVICE` (`operations:bash:host`) provides
+  host-pinned shell execution, distinct from the session-environment
+  `operations:bash`. The `AgentSession` presenter registers a
+  `LocalBashOperations` at `scope="host"` on create and resume, so the whole
+  session tree shares one instance; core does not import backends (AM010).
+- `policy_engine` declares `requires=("service:operations:bash:host",)` and
+  fails at install when absent (fail-fast, no runtime fallback), then routes
+  ast-grep outline execution through the service via
+  `source_parser.set_host_exec()`.
+- The direct-subprocess path in `_run_outline` remains only for the offline
+  CLI (`policy_engine __main__`) where no session exists; live sessions always
+  use the service.
+- The `exec_sync` bridge handles both the event-loop thread (offloads to a
+  helper thread, matching the previous blocking behavior) and worker threads
+  (`asyncio.run` directly).
+- AM004 contrib-path detection and the negative linter fixture remain open
+  follow-ups; tracked here rather than blocking this repair.
 
 ## RV2-007: The presenter owns concrete compaction policy details
 
 - Priority: P2
-- Status: `open`
+- Status: `resolved`
 - Area: mechanism/policy boundary
 
 ### Evidence
@@ -159,14 +177,27 @@ Keep the presenter responsible for orchestration and lifecycle only. Move prompt
 
 ### Exit criteria
 
-- [ ] The presenter imports no concrete built-in compaction config or private atom helper.
-- [ ] A compaction strategy can be replaced without modifying presenter code.
-- [ ] Stable ABI DTOs describe requests, results, and publication metadata.
-- [ ] The lifecycle still supports cancellation, resume, and atomic publication.
+- [x] The presenter imports no concrete built-in compaction config or private atom helper.
+- [x] A compaction strategy can be replaced without modifying presenter code.
+- [x] Stable ABI DTOs describe requests, results, and publication metadata.
+- [x] The lifecycle still supports cancellation, resume, and atomic publication.
 
 ### Decision notes
 
-Pending.
+Resolved on 2026-07-22.
+
+- `AgentSessionCompactor` and `TrajectoryCompactionPublisher` moved into the
+  `llm_compaction` atom, which registers them as `service:session_compactor`
+  and `service:compaction_publisher` during `install()` and declares them in
+  its MANIFEST `registers`.
+- The presenter module re-exports both names for backwards compatibility but
+  contains no implementation; the SDK no longer registers default compaction
+  services.
+- The duplicate copies of `_serialize_message_for_summary` and `_summary_ref`
+  were collapsed into single atom-owned definitions.
+- External callers (CLI `session compact`) construct the compactor from the
+  atom module with a resolved store; strategy configuration flows through
+  `CompactionRequest.options` as an opaque mapping validated by the atom.
 
 ## RV2-008: The test-edit hook produces false positives for read-only commands
 

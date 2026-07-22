@@ -672,6 +672,8 @@ class Session(_SessionComposition):
         session_id: str,
         store: TrajectoryStore,
         config: AgentSessionConfig,
+        *,
+        host_services: ServiceRegistry | None = None,
     ) -> Self:
         meta, turns = await asyncio.to_thread(store.load, session_id)
         checkpoint = await asyncio.to_thread(store.load_checkpoint, session_id)
@@ -699,6 +701,7 @@ class Session(_SessionComposition):
             restored_context=ctx,
             restored_provider_identity=provider_identity,
             session_type=cls,
+            host_services=host_services,
         )
         try:
             restored_turns = _rehydrate_turn_triggers(turns, session.codec)

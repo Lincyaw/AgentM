@@ -13,14 +13,30 @@ import posixpath
 import shlex
 import json
 import shutil
-import subprocess
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+
+@dataclass(frozen=True, slots=True)
+class HostExecResult:
+    stdout: str
+    stderr: str
+    returncode: int
+
+
+HostExec = Callable[[Sequence[str], float | None], HostExecResult]
+
+_active_host_exec: HostExec | None = None
+
+
+def set_host_exec(host_exec: HostExec) -> None:
+    global _active_host_exec  # noqa: PLW0603
+    _active_host_exec = host_exec
 
 
 SYMBOL_EXTRACTOR_VERSION = "ast-grep-outline-v2"
@@ -426,26 +442,21 @@ def extract_symbols_from_source_units(
             path_to_unit[str(temp_file.resolve())] = unit
             path_to_unit[temp_file.name] = unit
 
+        argv = [
+            binary,
+            "outline",
+            str(tmp_path),
+            "--json=compact",
+            "--items",
+            "all",
+            "--view",
+            "expanded",
+            "--threads",
+            "1",
+        ]
         try:
-            completed = subprocess.run(
-                [
-                    binary,
-                    "outline",
-                    str(tmp_path),
-                    "--json=compact",
-                    "--items",
-                    "all",
-                    "--view",
-                    "expanded",
-                    "--threads",
-                    "1",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            completed = _run_outline(argv, timeout=30)
+        except (OSError, TimeoutError) as exc:
             return SymbolExtractionResult(
                 symbols=(),
                 errors=tuple(
@@ -536,26 +547,21 @@ def extract_symbols_from_repository_files(
         path_to_unit[resolved] = unit
         path_to_unit[path.name] = unit
 
+    argv = [
+        binary,
+        "outline",
+        *paths,
+        "--json=compact",
+        "--items",
+        "all",
+        "--view",
+        "expanded",
+        "--threads",
+        "1",
+    ]
     try:
-        completed = subprocess.run(
-            [
-                binary,
-                "outline",
-                *paths,
-                "--json=compact",
-                "--items",
-                "all",
-                "--view",
-                "expanded",
-                "--threads",
-                "1",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        completed = _run_outline(argv, timeout=30)
+    except (OSError, TimeoutError) as exc:
         return SymbolExtractionResult(
             symbols=(),
             errors=tuple(
@@ -836,6 +842,32 @@ def _outline_span(raw_range: object) -> Mapping[str, int]:
 
 def _ast_grep_binary() -> str | None:
     return shutil.which("ast-grep") or shutil.which("sg")
+
+
+def _run_outline(
+    argv: Sequence[str],
+    *,
+    timeout: float | None,
+) -> HostExecResult:
+    if _active_host_exec is not None:
+        return _active_host_exec(argv, timeout)
+    import subprocess  # noqa: PLC0415
+
+    try:
+        completed = subprocess.run(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(str(exc)) from exc
+    return HostExecResult(
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        returncode=completed.returncode,
+    )
 
 
 def _source_suffix(path: str) -> str:

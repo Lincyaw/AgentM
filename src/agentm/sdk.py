@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import replace
 from typing import cast
 
+from agentm.core.abi.operations import BashOperations
+from agentm.core.abi.roles import HOST_BASH_OPERATIONS_SERVICE
 from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.store import TrajectoryStore
@@ -18,6 +20,24 @@ from agentm.storage.trajectory.resolve import (
 )
 
 _STORE_OWNER_SERVICE = "agentm.sdk.trajectory_store_owner"
+
+
+def _host_services_with_host_bash() -> ServiceRegistry:
+    """Host defaults: shell execution pinned to the SDK host machine.
+
+    Registered at scope="host" so the whole session tree shares one instance
+    regardless of each session's own environment backend.
+    """
+    from agentm.environments.local import LocalBashOperations
+
+    services = ServiceRegistry()
+    services.register(
+        HOST_BASH_OPERATIONS_SERVICE,
+        LocalBashOperations(),
+        BashOperations,
+        scope="host",
+    )
+    return services
 
 
 class AgentSession(Session):
@@ -42,14 +62,18 @@ class AgentSession(Session):
 
     @classmethod
     async def create(cls, config: AgentSessionConfig) -> "AgentSession":
+        host_services = _host_services_with_host_bash()
         if config.trajectory_store is not None:
             return cast(
                 AgentSession,
-                await create_from_config(config, session_type=cls),
+                await create_from_config(
+                    config,
+                    session_type=cls,
+                    host_services=host_services,
+                ),
             )
 
         resolved = resolve_trajectory_store_or_create(config.cwd or None)
-        host_services = ServiceRegistry()
         host_services.register(
             _STORE_OWNER_SERVICE,
             resolved,
@@ -83,10 +107,20 @@ class AgentSession(Session):
         session_id: str,
         store: TrajectoryStore,
         config: AgentSessionConfig,
+        *,
+        host_services: ServiceRegistry | None = None,
     ) -> "AgentSession":
+        merged = _host_services_with_host_bash()
+        if host_services is not None:
+            merged.inherit_from(host_services)
         return cast(
             AgentSession,
-            await super().resume(session_id, store, config),
+            await super().resume(
+                session_id,
+                store,
+                config,
+                host_services=merged,
+            ),
         )
 
 

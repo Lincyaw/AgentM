@@ -27,6 +27,7 @@ from agentm.core.abi import (
     AtomInstallPriority,
     BASH_OPERATIONS_SERVICE,
     BashOperations,
+    HOST_BASH_OPERATIONS_SERVICE,
     BeforeRunEvent,
     BusPriority,
     FunctionTool,
@@ -112,7 +113,7 @@ MANIFEST = ExtensionManifest(
         "tool:policy_stats",
     ),
     config_schema=PolicyEngineConfig,
-    requires=(),
+    requires=(f"service:{HOST_BASH_OPERATIONS_SERVICE}",),
     priority=AtomInstallPriority.POLICY,
 )
 
@@ -125,6 +126,45 @@ MANIFEST = ExtensionManifest(
 def install(session: AtomAPI, config: PolicyEngineConfig) -> None:
     engine = _PolicyEngineRuntime(session, config)
     engine.install()
+
+
+def _install_host_exec(session: AtomAPI) -> None:
+    """Route ast-grep symbol extraction through the host bash service."""
+    from .source_parser import HostExecResult, set_host_exec
+
+    host_bash = session.services.get(
+        HOST_BASH_OPERATIONS_SERVICE,
+        cast(type[BashOperations], BashOperations),
+    )
+    if host_bash is None:
+        raise RuntimeError(
+            "policy_engine requires service:operations:bash:host; "
+            "the session factory registers it for every session"
+        )
+
+    def exec_sync(argv: Sequence[str], timeout: float | None = None) -> HostExecResult:
+        import concurrent.futures  # noqa: PLC0415
+        import shlex as _shlex  # noqa: PLC0415
+
+        cmd = _shlex.join(str(a) for a in argv)
+        coro = host_bash.exec(cmd, cwd="/tmp", timeout=timeout)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            result = asyncio.run(coro)
+        else:
+            # Called on the event-loop thread (sync IFG handler chain); run
+            # the coroutine on a helper thread. Blocking here matches the
+            # previous direct subprocess.run behavior of this call site.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(asyncio.run, coro).result()
+        return HostExecResult(
+            stdout=result.stdout.decode("utf-8", errors="replace"),
+            stderr=result.stderr.decode("utf-8", errors="replace"),
+            returncode=result.exit_code,
+        )
+
+    set_host_exec(exec_sync)
 
 
 def _invalid_tool_call(tool_name: str, exc: ValidationError) -> ToolResult:
@@ -375,6 +415,7 @@ class _PolicyEngineRuntime:
         self._persisted_effect_count = 0
 
     def install(self) -> None:
+        _install_host_exec(self._session)
         self._load_rules()
         self._setup_ifc()
         self._setup_persistence()
