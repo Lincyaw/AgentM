@@ -153,6 +153,57 @@ enforced) vs host-level code (not enforced). A file in the package that is not
 reachable from `install()` is free to import `core.runtime` — it is a
 host-level tool, not atom code.
 
+### Exposing atom capabilities for external callers
+
+Service registration is the one mechanism for making an atom callable
+from outside the agent loop (presenter, CLI, gateway, other atoms).
+Declare the service in `registers`, implement an ABI Protocol, register
+in `install()`:
+
+```python
+MANIFEST = ExtensionManifest(
+    name="llm_compaction",
+    registers=(f"service:{SESSION_COMPACTOR_SERVICE}",),
+    ...
+)
+
+def install(api: AtomAPI, config: ...) -> None:
+    api.services.register(
+        SESSION_COMPACTOR_SERVICE, AgentSessionCompactor(store=...),
+        SessionCompactor, scope="host",
+    )
+```
+
+External callers reach it through the session, typed by the Protocol —
+never by importing the atom:
+
+```python
+compactor = session.services.get(SESSION_COMPACTOR_SERVICE, SessionCompactor)
+await compactor.compact(request)
+```
+
+This is how compaction, interrupt delivery, and policy stats are (or
+should be) exposed. If a presenter needs an atom behavior that has no
+service, the fix is to register one — not to import the atom's
+internals. Scope `"host"` shares one instance with every descendant
+session; `"session"` keeps it session-local.
+
+### Host-pinned execution (`operations:bash:host`)
+
+`operations:bash` runs in the **session environment** (which may be a
+remote sandbox). Atoms that must run tooling on the machine hosting the
+AgentM process (e.g. policy ast-grep analysis) consume
+`HOST_BASH_OPERATIONS_SERVICE` (`operations:bash:host`) instead — same
+`BashOperations` protocol, always host-local. The `AgentSession`
+presenter registers it at `scope="host"` on create/resume.
+
+Declare it as a hard dependency and fail at install when absent; do not
+fall back to `subprocess` mid-run:
+
+```python
+MANIFEST = ExtensionManifest(..., requires=(f"service:{HOST_BASH_OPERATIONS_SERVICE}",))
+```
+
 ### Config resolution
 
 Atom config comes from three sources (highest wins):
@@ -206,6 +257,8 @@ Rules:
 | Listen to events | `api.on(Event.CHANNEL, handler)` |
 | Share state between atoms | `api.services.register(name, obj, protocol)` |
 | Consume another atom's state | `api.services.get(name, protocol)` |
+| Expose an atom capability to host/CLI | Register a Protocol service; declare `service:<name>` in `registers` |
+| Run a command on the host (not the sandbox) | `api.services.get(HOST_BASH_OPERATIONS_SERVICE, BashOperations)` |
 | JSON Schema from Pydantic | `pydantic_to_tool_schema(Model)` from `agentm.core.lib` |
 | Validate atom contract compliance | `agentm lint` (CLI) |
 | Emit user-visible diagnostic | Emit `DiagnosticEvent` |
@@ -231,7 +284,10 @@ For provider layer, CLI conventions, and logging, read
 ### Abstraction bypasses
 
 - **Direct filesystem I/O in tool handlers** — Use Operations.
-- **`subprocess.run()` for shell commands** — Use `BashOperations.exec()`.
+- **`subprocess.run()` for shell commands** — Use `BashOperations.exec()`;
+  for host-side analysis tooling, the `operations:bash:host` service.
+- **Presenter importing atom internals** — Register a Protocol service in
+  the atom; the presenter consumes `session.services.get(...)`.
 - **Hand-writing JSON Schema next to a Pydantic model** — Use
   `pydantic_to_tool_schema`.
 - **`print()` or stdout writes in atoms** — Use `loguru.logger` or
