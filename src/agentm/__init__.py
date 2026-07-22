@@ -18,6 +18,7 @@ from agentm.core.abi.compaction import (
     CompactionPublisher,
     CompactionRequest,
     CompactionResult,
+    CompactionSourceAnchor,
     SessionCompactor,
 )
 from agentm.core.abi.lifecycle import (
@@ -134,6 +135,7 @@ __all__ = [
     "CompactionPublisher",
     "CompactionRequest",
     "CompactionResult",
+    "CompactionSourceAnchor",
     "EffectScope",
     "EffectTxn",
     "EnvironmentCheckpoint",

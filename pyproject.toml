@@ -49,7 +49,7 @@ packaged-minimal = [
 ]
 harbor = [
     "agentm-harbor",
-    "arl-env>=0.23.2",
+    "arl-env>=0.24.0",
     "dockerfile-parse",
 ]
 

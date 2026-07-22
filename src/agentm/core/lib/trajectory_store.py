@@ -276,15 +276,18 @@ def validate_compaction_commit(
     turns: Sequence[Turn],
     commit: TrajectoryCompactionCommit,
 ) -> None:
-    """Require every control node to anchor an existing committed turn."""
+    """Require every control node to anchor the latest committed turn."""
 
-    turns_by_index = {turn.index: turn for turn in turns}
     boundary = commit.boundary
     if boundary.turn_index is None or boundary.turn_id is None:
         raise ValueError("trajectory compact boundary requires a committed turn anchor")
-    turn = turns_by_index.get(boundary.turn_index)
-    if turn is None or turn.id != boundary.turn_id:
-        raise ValueError("trajectory compact boundary does not match committed history")
+    if not turns:
+        raise ValueError("trajectory compact boundary requires committed history")
+    latest = turns[-1]
+    if latest.index != boundary.turn_index or latest.id != boundary.turn_id:
+        raise ValueError(
+            "trajectory compact boundary does not match the latest committed turn"
+        )
 
 
 def turn_prefix_cut(turns: Sequence[Turn], up_to: TurnRef) -> int:

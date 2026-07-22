@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import agentm_toolbox
@@ -158,15 +160,39 @@ def _resume_session_id(context: AgentContext) -> str:
     return session_id
 
 
+def _fork_request(env: Mapping[str, str]) -> tuple[str, int] | None:
+    source_session_id = env.get("AGENTM_FORK_FROM_SESSION", "").strip()
+    raw_turn = env.get("AGENTM_FORK_TURN", "").strip()
+    if not source_session_id:
+        if raw_turn:
+            raise ValueError("AGENTM_FORK_TURN requires AGENTM_FORK_FROM_SESSION")
+        return None
+    if not raw_turn:
+        raise ValueError("AGENTM_FORK_FROM_SESSION requires AGENTM_FORK_TURN")
+    try:
+        turn = int(raw_turn)
+    except ValueError as exc:
+        raise ValueError("AGENTM_FORK_TURN must be a non-negative integer") from exc
+    if turn < 0:
+        raise ValueError("AGENTM_FORK_TURN must be a non-negative integer")
+    return source_session_id, turn
+
+
 def _sync_execution_metadata(
     context: AgentContext,
     environment: BaseEnvironment,
     *,
     agentm_session_id: str | None = None,
+    agentm_parent_session_id: str | None = None,
+    agentm_fork_turn: int | None = None,
 ) -> None:
     metadata = dict(context.metadata or {})
     if agentm_session_id is not None:
         metadata["agentm_session_id"] = agentm_session_id
+    if agentm_parent_session_id is not None:
+        metadata["agentm_parent_session_id"] = agentm_parent_session_id
+    if agentm_fork_turn is not None:
+        metadata["agentm_fork_turn"] = agentm_fork_turn
 
     arl = getattr(environment, "arl", None)
     arl_session_id = getattr(arl, "session_id", None)
@@ -259,6 +285,12 @@ class ExternalAgentMAgent(BaseAgent):
                 effective_env["AGENTM_BASE_URL"] = openai_base_url
         if self.model_name:
             effective_env["AGENTM_PROVIDER"] = self.model_name
+        fork_request = _fork_request(effective_env)
+        fork_prompt = effective_env.get("AGENTM_FORK_PROMPT", "").strip()
+        if resume_session_id is not None and fork_request is not None:
+            raise ValueError("AgentM Harbor cannot resume and fork in the same run")
+        if fork_request is None and fork_prompt:
+            raise ValueError("AGENTM_FORK_PROMPT requires AGENTM_FORK_FROM_SESSION")
         scenario_path = _find_scenario_yaml(effective_env.get("AGENTM_SCENARIO_YAML"))
         spec_resolver = DefaultSessionSpecResolver(
             user_config=_user_config_path(effective_env),
@@ -288,30 +320,67 @@ class ExternalAgentMAgent(BaseAgent):
             trajectory_store=trajectory.store,
         )
         _sync_execution_metadata(context, environment)
+        fork_source: AgentSession | None = None
         try:
-            session = (
-                await AgentSession.create(session_config)
-                if resume_session_id is None
-                else await AgentSession.resume(
+            if resume_session_id is not None:
+                session = await AgentSession.resume(
                     resume_session_id,
                     trajectory.store,
                     session_config,
                 )
-            )
+            elif fork_request is not None:
+                source_session_id, fork_turn = fork_request
+                source_meta, source_turns = await asyncio.to_thread(
+                    trajectory.store.load_prefix,
+                    source_session_id,
+                    fork_turn,
+                )
+                root_session_id = source_meta.config.get("root_session_id")
+                if not isinstance(root_session_id, str) or not root_session_id:
+                    raise ValueError("fork source metadata has no valid root_session_id")
+                fork_source = await AgentSession.create(
+                    replace(
+                        session_config,
+                        purpose="harbor-fork-source",
+                        session_id=source_session_id,
+                        root_session_id=root_session_id,
+                        parent_session_id=None,
+                        initial_turns=source_turns,
+                    )
+                )
+                session = await AgentSession.fork(
+                    fork_source,
+                    at=fork_turn,
+                    purpose="harbor-fork",
+                )
+            else:
+                session = await AgentSession.create(session_config)
         except BaseException as creation_error:
+            cleanup_errors: list[BaseException] = []
+            if fork_source is not None:
+                try:
+                    await fork_source.shutdown()
+                except BaseException as source_shutdown_error:
+                    cleanup_errors.append(source_shutdown_error)
             try:
                 trajectory.close()
             except Exception as close_error:
+                cleanup_errors.append(close_error)
+            if cleanup_errors:
                 raise BaseExceptionGroup(
-                    "AgentM session creation and trajectory cleanup failed",
-                    (creation_error, close_error),
+                    "AgentM session creation and cleanup failed",
+                    (creation_error, *cleanup_errors),
                 ) from creation_error
             raise
 
+        fork_parent_session_id = session.ctx.parent_session_id
+        selected_fork_turn = fork_request[1] if fork_request is not None else None
         _sync_execution_metadata(
             context,
             environment,
             agentm_session_id=session.session_id,
+            agentm_parent_session_id=fork_parent_session_id,
+            agentm_fork_turn=selected_fork_turn,
         )
         errors: list[BaseException] = []
         turns = session.get_turns()
@@ -327,7 +396,14 @@ class ExternalAgentMAgent(BaseAgent):
                 "agentm-external: session {} started",
                 session.session_id,
             )
-            await session.run(instruction)
+            if fork_parent_session_id is not None and selected_fork_turn is not None:
+                logger.info(
+                    "agentm-external: session {} forked from {} at turn {}",
+                    session.session_id,
+                    fork_parent_session_id,
+                    selected_fork_turn,
+                )
+            await session.run(fork_prompt or instruction)
             await session.idle()
         except BaseException as run_error:
             errors.append(run_error)
@@ -347,11 +423,18 @@ class ExternalAgentMAgent(BaseAgent):
                 context,
                 environment,
                 agentm_session_id=session.session_id,
+                agentm_parent_session_id=fork_parent_session_id,
+                agentm_fork_turn=selected_fork_turn,
             )
             try:
                 await session.shutdown()
             except BaseException as shutdown_error:
                 errors.append(shutdown_error)
+            if fork_source is not None:
+                try:
+                    await fork_source.shutdown()
+                except BaseException as source_shutdown_error:
+                    errors.append(source_shutdown_error)
             try:
                 trajectory.close()
             except Exception as close_error:

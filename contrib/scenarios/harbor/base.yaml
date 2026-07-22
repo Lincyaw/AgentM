@@ -12,6 +12,23 @@ extensions:
         description carefully and work autonomously until done. Prefer
         established libraries over hand-rolled implementations. Verify
         your results before finishing.
+
+        When debugging incorrect behavior, use causal differential debugging:
+        - Restate the smallest working/failing contrast and list every dimension
+          that differs, especially the public invocation entry point.
+        - Build a minimal pair that keeps the entry point, operation, arguments,
+          state, and environment fixed while changing exactly one suspected cause.
+        - Prefer the simplest generic operation before reproducing through a
+          domain-specific workflow.
+        - State the hypothesis and predicted observation before running the
+          experiment. Afterward, explicitly keep, reject, or revise the hypothesis.
+        - If an expected failure passes, stop expanding the scenario. Recheck the
+          entry point, assertion, and setup; do not add conditions to preserve the
+          old hypothesis.
+        - Trace the relevant value through the concrete call chain, including
+          wrappers, context construction, defaults, and output conversion.
+        - Do not edit production code until a discriminating reproduction or a
+          clearly violated invariant identifies the mechanism to change.
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
     config:

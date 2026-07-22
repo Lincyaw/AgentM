@@ -12,7 +12,6 @@ from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
     TextContent,
-    ToolCallBlock,
 )
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.session_api import AtomAPI
@@ -48,41 +47,19 @@ async def _stream(
     signal: CancelSignal | None = None,
     thinking: str = "off",
 ) -> AsyncIterator[AssistantStreamEvent]:
-    del signal, thinking
-    if model.id == "stub-compaction-model" and not tools:
-        text = "harbor-compaction-summary"
-        content: tuple[TextContent | ToolCallBlock, ...] = (
-            TextContent(type="text", text=text),
-        )
-        stop_reason = "end_turn"
-    elif model.id == "stub-compaction-model" and not any(
-        isinstance(block, TextContent) and "<conversation-summary>" in block.text
-        for message in messages
-        for block in message.content
-    ):
-        content = (
-            ToolCallBlock(
-                type="tool_call",
-                id="compaction-bash",
-                name="bash",
-                arguments={"cmd": "printf compaction-ready"},
-            ),
-        )
-        stop_reason = "tool_use"
-    else:
-        content = (
-            TextContent(
-                type="text",
-                text="harbor-provider-completed",
-            ),
-        )
-        stop_reason = "end_turn"
+    del messages, model, tools, system, signal, thinking
+    content = (
+        TextContent(
+            type="text",
+            text="harbor-provider-completed",
+        ),
+    )
     yield MessageEnd(
         message=AssistantMessage(
             role="assistant",
             content=content,
             timestamp=0.0,
-            stop_reason=stop_reason,
+            stop_reason="end_turn",
         )
     )
 

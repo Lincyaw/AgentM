@@ -7,6 +7,7 @@ includes:
   - base.yaml
 
 extensions:
+  - module: agentm_harbor.compaction
   - module: agentm.extensions.builtin.llm_compaction
     config:
       keep_last_turns: 4
@@ -32,3 +33,4 @@ extensions:
       ifg_repository_worker_command: >-
         PYTHONPATH=/opt/agentm-toolbox python3 -m agentm_toolbox
       ifg_repository_remote_db_path: /logs/artifacts/agentm/policy/repository-index.sqlite
+  - module: agentm.extensions.builtin.tool_purpose

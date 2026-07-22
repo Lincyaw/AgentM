@@ -8,11 +8,13 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 import hashlib
+import time
 
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.compaction import (
     CompactionRequest,
     CompactionResult,
+    CompactionSourceAnchor,
     TurnRange,
 )
 from agentm.core.abi.messages import (
@@ -24,8 +26,19 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.resource import ResourceStore
 from agentm.core.abi.session_api import AgentSessionConfig, LoopConfig
-from agentm.core.abi.store import TrajectoryNodeQuery, TrajectoryStore
-from agentm.core.abi.trajectory import ContentReplacementState, Turn
+from agentm.core.abi.store import (
+    SessionMeta,
+    TrajectoryCompactionCommit,
+    TrajectoryNodeQuery,
+    TrajectoryStore,
+)
+from agentm.core.abi.trajectory import (
+    ContentReplacementState,
+    TrajectoryHead,
+    TrajectoryHeadAdvance,
+    TrajectoryNode,
+    Turn,
+)
 from agentm.core.lib.async_cancel import (
     OperationCancelledBySignal,
     await_known_outcome,
@@ -81,7 +94,10 @@ class AgentSessionCompactor:
         store: TrajectoryStore,
         signal: CancelSignal | None,
     ) -> CompactionResult:
-        meta, turns = await asyncio.to_thread(store.load, request.source_session_id)
+        meta, turns, source_head, source_nodes = await _load_source_snapshot(
+            store,
+            session_id=request.source_session_id,
+        )
         if not turns:
             raise ValueError("cannot compact a session with no committed turns")
         strategy_config = _strategy_config(request.options)
@@ -127,9 +143,8 @@ class AgentSessionCompactor:
             model = child.model
             if model is None:
                 raise RuntimeError("compaction session has no active provider")
-            messages_by_turn = await _persisted_messages_by_turn(
-                store,
-                session_id=request.source_session_id,
+            messages_by_turn = _persisted_messages_by_turn(
+                source_nodes,
                 turns=selected_turns,
             )
             conversation = _serialize_compaction_input(
@@ -156,7 +171,11 @@ class AgentSessionCompactor:
             )
         covered_turn = turns[target]
         return CompactionResult(
-            source_session_id=request.source_session_id,
+            source=CompactionSourceAnchor(
+                head=source_head,
+                last_turn_id=turns[-1].id,
+                last_turn_index=turns[-1].index,
+            ),
             covered=TurnRange(start=turns[0].index, end=covered_turn.index),
             covered_through_turn_id=covered_turn.id,
             summary=summary,
@@ -173,7 +192,7 @@ class AgentSessionCompactor:
 
 
 class TrajectoryCompactionPublisher:
-    """Publish an artifact as projection state without advancing source head."""
+    """Atomically adopt an immutable artifact at its exact source head."""
 
     __slots__ = ("_resource_store", "_store")
 
@@ -202,6 +221,29 @@ class TrajectoryCompactionPublisher:
             self._store.load,
             result.source_session_id,
         )
+        if not turns:
+            raise RuntimeError("cannot publish compaction without committed turns")
+        source = result.source
+        latest_turn = turns[-1]
+        if (
+            latest_turn.id != source.last_turn_id
+            or latest_turn.index != source.last_turn_index
+        ):
+            raise RuntimeError(
+                "refusing to publish compaction after source history advanced"
+            )
+        head = await asyncio.to_thread(
+            self._store.get_head,
+            result.source_session_id,
+            head_id=source.head.head_id,
+            branch_id=source.head.branch_id,
+            agent_id=source.head.agent_id,
+            is_sidechain=source.head.is_sidechain,
+        )
+        if head != source.head:
+            raise RuntimeError(
+                "refusing to publish compaction after source head changed"
+            )
         covered_position = next(
             (
                 position
@@ -244,14 +286,48 @@ class TrajectoryCompactionPublisher:
                 ),
             )
         )
-        head = await asyncio.to_thread(
-            self._store.get_head,
-            result.source_session_id,
+        latest_nodes = await asyncio.to_thread(
+            self._store.query_nodes,
+            TrajectoryNodeQuery(
+                session_id=result.source_session_id,
+                sort="desc",
+                limit=1,
+            ),
         )
-        if head is None:
-            raise RuntimeError("cannot publish compaction without a source head")
 
         resource_uri = ref.uri()
+        timestamp = time.time()
+        boundary = TrajectoryNode(
+            id=_boundary_id(
+                state_key=state_key,
+                session_id=result.source_session_id,
+                turn_id=source.last_turn_id,
+                resource_uri=resource_uri,
+                source_leaf_id=head.node_id or head.logical_parent_id,
+            ),
+            session_id=result.source_session_id,
+            seq=latest_nodes[0].seq + 1 if latest_nodes else 0,
+            kind="compact_boundary",
+            root_session_id=head.root_session_id,
+            parent_session_id=head.parent_session_id,
+            branch_id=head.branch_id,
+            head_id=head.head_id,
+            role="control",
+            logical_parent_id=head.node_id or head.logical_parent_id,
+            turn_id=source.last_turn_id,
+            turn_index=source.last_turn_index,
+            agent_id=head.agent_id,
+            is_sidechain=head.is_sidechain,
+            content_ref=resource_uri,
+            visibility="replay_only",
+            payload={
+                "state_key": state_key,
+                "covered_through_turn_id": result.covered_through_turn_id,
+                "covered_through_turn_index": turns[covered_position].index,
+                "producer_ref": result.producer_ref,
+            },
+            timestamp=timestamp,
+        )
         replacements = dict(existing.replacements) if existing is not None else {}
         replacements[f"through:{result.covered_through_turn_id}"] = resource_uri
         metadata: dict[str, object] = (
@@ -279,16 +355,32 @@ class TrajectoryCompactionPublisher:
                 existing.source_session_id if existing is not None else None
             ),
             source_leaf_id=(existing.source_leaf_id if existing is not None else None),
-            leaf_node_id=head.node_id or head.logical_parent_id,
+            leaf_node_id=boundary.id,
             branch_id=head.branch_id,
             head_id=head.head_id,
             metadata=metadata,
         )
         await await_known_outcome(
             asyncio.to_thread(
-                self._store.save_content_replacement_state,
+                self._store.commit_compaction,
                 result.source_session_id,
-                state,
+                TrajectoryCompactionCommit(
+                    boundary=boundary,
+                    advance_head=TrajectoryHeadAdvance(
+                        session_id=result.source_session_id,
+                        node_id=boundary.id,
+                        seq=boundary.seq,
+                        previous_node_id=head.node_id,
+                        head_id=head.head_id,
+                        branch_id=head.branch_id,
+                        root_session_id=head.root_session_id,
+                        parent_session_id=head.parent_session_id,
+                        agent_id=head.agent_id,
+                        is_sidechain=head.is_sidechain,
+                        updated_at=timestamp,
+                    ),
+                    content_replacement_state=state,
+                ),
             )
         )
         return replace(result, resource_ref=resource_uri)
@@ -332,27 +424,61 @@ def _turn_position(turns: Sequence[Turn], turn_id: str) -> int:
     return position
 
 
-async def _persisted_messages_by_turn(
+async def _load_source_snapshot(
     store: TrajectoryStore,
     *,
     session_id: str,
+) -> tuple[SessionMeta, list[Turn], TrajectoryHead, list[TrajectoryNode]]:
+    for _attempt in range(2):
+        meta, turns = await asyncio.to_thread(store.load, session_id)
+        head = await asyncio.to_thread(store.get_head, session_id)
+        if head is None:
+            raise RuntimeError("cannot compact a session without an active head")
+        leaf_node_id = head.node_id or head.logical_parent_id
+        nodes = (
+            await asyncio.to_thread(
+                store.load_chain,
+                session_id,
+                leaf_node_id,
+                include_logical_parent=True,
+            )
+            if leaf_node_id is not None
+            else []
+        )
+        _, current_turns = await asyncio.to_thread(store.load, session_id)
+        current_head = await asyncio.to_thread(store.get_head, session_id)
+        if current_head == head and current_turns == turns:
+            return meta, turns, head, nodes
+    raise RuntimeError("source trajectory changed while taking compaction snapshot")
+
+
+def _persisted_messages_by_turn(
+    nodes: Sequence[TrajectoryNode],
+    *,
     turns: Sequence[Turn],
 ) -> Mapping[str, tuple[AgentMessage, ...]]:
     selected_ids = {turn.id for turn in turns}
-    nodes = await asyncio.to_thread(
-        store.query_nodes,
-        TrajectoryNodeQuery(
-            session_id=session_id,
-            kinds=("message",),
-            sort="asc",
-        ),
-    )
     grouped: dict[str, list[AgentMessage]] = {}
     for node in nodes:
         if node.turn_id not in selected_ids or node.message is None:
             continue
         grouped.setdefault(node.turn_id, []).append(node.message)
     return {turn_id: tuple(messages) for turn_id, messages in grouped.items()}
+
+
+def _boundary_id(
+    *,
+    state_key: str,
+    session_id: str,
+    turn_id: str,
+    resource_uri: str,
+    source_leaf_id: str | None,
+) -> str:
+    material = "\0".join(
+        (state_key, session_id, turn_id, resource_uri, source_leaf_id or "")
+    ).encode("utf-8")
+    digest = hashlib.sha256(material).hexdigest()[:24]
+    return f"session:{session_id}:compact:{digest}"
 
 
 def _serialize_compaction_input(

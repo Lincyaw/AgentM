@@ -19,6 +19,7 @@ from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
     TrajectoryBranchId,
+    TrajectoryHead,
     TrajectoryHeadId,
     TrajectoryNode,
     Turn,
@@ -42,6 +43,34 @@ class TurnRange:
 
     start: int
     end: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionSourceAnchor:
+    """Exact committed source state from which an artifact was derived.
+
+    The head distinguishes compactions performed before and after a fork at the
+    same message node.  The final committed turn also detects source progress
+    that does not append a provider-visible message node.
+    """
+
+    head: TrajectoryHead
+    last_turn_id: str
+    last_turn_index: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.head, TrajectoryHead):
+            raise TypeError("compaction source anchor head must be a TrajectoryHead")
+        if not isinstance(self.last_turn_id, str) or not self.last_turn_id:
+            raise ValueError("compaction source anchor last_turn_id must be non-empty")
+        if (
+            not isinstance(self.last_turn_index, int)
+            or isinstance(self.last_turn_index, bool)
+            or self.last_turn_index < 0
+        ):
+            raise ValueError(
+                "compaction source anchor last_turn_index must be non-negative"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +127,7 @@ class CompactionRequest:
 class CompactionResult:
     """Auditable summary artifact produced from one committed prefix."""
 
-    source_session_id: str
+    source: CompactionSourceAnchor
     covered: TurnRange
     covered_through_turn_id: str
     summary: str
@@ -107,8 +136,9 @@ class CompactionResult:
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.source, CompactionSourceAnchor):
+            raise TypeError("compaction result source must be a CompactionSourceAnchor")
         for label, value in (
-            ("source_session_id", self.source_session_id),
             ("covered_through_turn_id", self.covered_through_turn_id),
             ("summary", self.summary),
             ("producer_ref", self.producer_ref),
@@ -127,6 +157,12 @@ class CompactionResult:
         if not isinstance(frozen_metadata, Mapping):
             raise TypeError("compaction result metadata must be an object")
         object.__setattr__(self, "metadata", frozen_metadata)
+
+    @property
+    def source_session_id(self) -> str:
+        """Session whose exact committed state produced this artifact."""
+
+        return self.source.head.session_id
 
 
 @runtime_checkable
@@ -244,6 +280,7 @@ __all__ = [
     "CompactionPublisher",
     "CompactionRequest",
     "CompactionResult",
+    "CompactionSourceAnchor",
     "ContextBudget",
     "ContextCompactionService",
     "ContextProjection",

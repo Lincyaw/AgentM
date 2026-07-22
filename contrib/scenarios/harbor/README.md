@@ -80,7 +80,7 @@ ARL_API_KEY="$ARL_API_KEY" \
 uv run harbor run \
   -p <path-to-task-dir> \
   -a agentm_harbor:ExternalAgentMAgent \
-  --env arl.harbor:ArlEnvironment \
+  --env agentm_harbor:ArlEnvironment \
   -m <model-profile> \
   --ek gateway_url="$ARL_GATEWAY_URL" \
   --ek build_registry=<internal-registry-host:port> \
@@ -94,6 +94,7 @@ uv run harbor run \
   --ae OPENAI_BASE_URL="$LITELLM_BASE_URL" \
   --ve SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<judge-model> \
   --ve SSB_OVERRIDE_CLASSIFIER_MODEL=openai/<classifier-model> \
+  --ve SSB_OVERRIDE_VA_MODEL=openai/<validation-agent-model> \
   --ve OPENAI_API_KEY="$LITELLM_API_KEY" \
   --ve OPENAI_BASE_URL="$LITELLM_BASE_URL"
 ```
@@ -113,7 +114,7 @@ ARL_API_KEY="$ARL_API_KEY" \
 uv run harbor run \
   -p <path-to-task-dir> \
   -a agentm_harbor:ExternalAgentMAgent \
-  --env arl.harbor:ArlEnvironment \
+  --env agentm_harbor:ArlEnvironment \
   -m <model-profile> \
   --ek gateway_url="$ARL_GATEWAY_URL" \
   --ek image_registry=<internal-registry-host:port> \
@@ -127,6 +128,7 @@ uv run harbor run \
   --ae OPENAI_BASE_URL="$LITELLM_BASE_URL" \
   --ve SSB_OVERRIDE_ALL_JUDGE_MODEL=openai/<judge-model> \
   --ve SSB_OVERRIDE_CLASSIFIER_MODEL=openai/<classifier-model> \
+  --ve SSB_OVERRIDE_VA_MODEL=openai/<validation-agent-model> \
   --ve OPENAI_API_KEY="$LITELLM_API_KEY" \
   --ve OPENAI_BASE_URL="$LITELLM_BASE_URL"
 ```
@@ -197,9 +199,10 @@ cat jobs/<job-dir>/<trial>/verifier/test-stdout.txt
 |---|---|
 | `-p <path>` | Local path to a single task directory |
 | `-a agentm_harbor:ExternalAgentMAgent` | AgentM as the agent harness |
-| `--env arl.harbor:ArlEnvironment` | ARL sandbox backend (`--environment-import-path` is deprecated) |
+| `--env agentm_harbor:ArlEnvironment` | ARL sandbox backend with a 30-minute default exec timeout (`--environment-import-path` is deprecated) |
 | `-m <profile>` | Model profile name from `config.toml` |
 | `--ek key=value` | Extra kwargs passed to `ArlEnvironment.__init__` |
+| `--ek default_exec_timeout_seconds=<seconds>` | Override the 1800-second default for exec calls without an explicit timeout |
 | `--ae KEY=VALUE` | Env var injected into the agent container |
 | `--ve KEY=VALUE` | Env var injected into the verifier container |
 | `--no-delete` | Keep sandbox session alive after the run (for debugging) |
@@ -226,7 +229,7 @@ agentm trace usage    --session <session-id>
 Session ID is logged at agent start:
 `agentm-external: session <id> started`.
 
-When the selected environment is `arl.harbor:ArlEnvironment`, the adapter also
+When the selected environment is `agentm_harbor:ArlEnvironment`, the adapter also
 persists the continuation checkpoint in Harbor's `AgentContext.metadata`:
 
 | Key | Meaning |
@@ -243,6 +246,19 @@ The adapter's Harbor `resume()` implementation continues
 with `--ek fork_from=<arl_session_id> --ek fork_step=<arl_step>` to branch its
 filesystem state. `arl_step` is omitted until the current ARL session has
 produced a checkpoint.
+
+To branch only the AgentM trajectory, keep the standard ExternalAgent entry
+point and pass `--ae AGENTM_FORK_FROM_SESSION=<agentm_session_id>` together
+with `--ae AGENTM_FORK_TURN=<zero-based-turn-index>`. The adapter resumes the
+source prefix from the configured trajectory store under the current Harbor
+composition, creates the child with `AgentSession.fork()`, and records
+`agentm_parent_session_id` plus
+`agentm_fork_turn` in Harbor metadata. An optional
+`--ae AGENTM_FORK_PROMPT=<message>` replaces the task instruction for the
+first child turn. Loading the prefix under the current composition makes this
+an explicit trajectory migration when the source atom active set is no longer
+available. AgentM trajectory forking can be combined with the ARL environment
+fork flags when the source sandbox checkpoint is still available.
 
 ## Scenario manifest
 

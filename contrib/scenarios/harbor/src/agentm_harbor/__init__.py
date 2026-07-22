@@ -10,6 +10,7 @@ is managed by AgentM's selected ``TrajectoryStore``.
         --agent-import-path agentm_harbor:ExternalAgentMAgent ...
 """
 
+from agentm_harbor.arl_environment import ArlEnvironment
 from agentm_harbor.external_agent import ExternalAgentMAgent
 
-__all__ = ["ExternalAgentMAgent"]
+__all__ = ["ArlEnvironment", "ExternalAgentMAgent"]

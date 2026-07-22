@@ -81,7 +81,7 @@ dev = [
 requires-dist = [
     { name = "agentm-harbor", marker = "extra == 'harbor'", editable = "contrib/scenarios/harbor" },
     { name = "anthropic", marker = "extra == 'provider-anthropic'", specifier = ">=0.86.0" },
-    { name = "arl-env", marker = "extra == 'harbor'", specifier = ">=0.23.2" },
+    { name = "arl-env", marker = "extra == 'harbor'", specifier = ">=0.24.0" },
     { name = "ast-grep-cli", specifier = ">=0.44.1" },
     { name = "clickhouse-connect", marker = "extra == 'storage-clickhouse'", specifier = ">=0.7.0" },
     { name = "dockerfile-parse", marker = "extra == 'harbor'" },
@@ -124,6 +124,7 @@ name = "agentm-harbor"
 version = "0.1.0"
 source = { editable = "contrib/scenarios/harbor" }
 dependencies = [
+    { name = "arl-env" },
     { name = "harbor" },
     { name = "policy-engine" },
 ]
@@ -136,6 +137,7 @@ external = [
 [package.metadata]
 requires-dist = [
     { name = "agentm", marker = "extra == 'external'", editable = "." },
+    { name = "arl-env", specifier = ">=0.24.0" },
     { name = "harbor", specifier = "==0.19.0" },
     { name = "policy-engine", editable = "contrib/extensions/policy" },
 ]
@@ -315,7 +317,7 @@ wheels = [
 
 [[package]]
 name = "arl-env"
-version = "0.23.2"
+version = "0.24.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -323,9 +325,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/be/a0/43d482b13eb64c29bc7b77b671de00db7450e1a9b11daf562dc7d1b540b9/arl_env-0.23.2.tar.gz", hash = "sha256:d4a016ff38a63f1c02fce9e6338d7542a73a520ce0281c273ef91b25d550ac4e", size = 57178, upload-time = "2026-07-21T15:36:58.704Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/ac/990cbcd9a06affe2eaaa0df9800d0723594ae8482ff74a156a5a40e247a4/arl_env-0.24.0.tar.gz", hash = "sha256:6daa6887b46dfc7ef9506a6c4e0508e5ae5af7beb90e52f381156fb5ddc507a4", size = 57289, upload-time = "2026-07-22T10:01:38.098Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e0/cc/9fd5e268189744261031c6138902a20c8684ed6a4272239c3e71da5f57a9/arl_env-0.23.2-py3-none-any.whl", hash = "sha256:e0fcb8c37bb5e7b92390d4f0ae6319dd808ca886176dc01bdfca147f901c50e8", size = 54672, upload-time = "2026-07-21T15:36:57.759Z" },
+    { url = "https://files.pythonhosted.org/packages/64/bf/274bf7a6a35c93f945ac1c13e54fe65673a9f3716ffaa445e092b1c2b879/arl_env-0.24.0-py3-none-any.whl", hash = "sha256:ded119aa6d54df147d11a58244f067066891b5e68661322bdc695a4b6f933444", size = 54787, upload-time = "2026-07-22T10:01:36.967Z" },
 ]
 
 [[package]]
