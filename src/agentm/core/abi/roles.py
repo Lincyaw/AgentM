@@ -67,6 +67,12 @@ CONTEXT_PROJECTION_SERVICE: Final = "context_projection"
 CONTEXT_COMPACTION_SERVICE: Final = "context_compaction"
 """Service key for step-boundary context compaction requests."""
 
+SESSION_COMPACTOR_SERVICE: Final = "session_compactor"
+"""Service key for store-driven compaction artifact generation."""
+
+COMPACTION_PUBLISHER_SERVICE: Final = "compaction_publisher"
+"""Service key for publishing compaction artifacts to context projection."""
+
 EFFECT_SCOPE_SERVICE: Final = "effect_scope"
 """Service key for the host-provided world-effect lifecycle port."""
 
@@ -95,6 +101,7 @@ __all__ = [
     "ATOM_CATALOG_SERVICE",
     "BASH_OPERATIONS_SERVICE",
     "CATALOG_QUERY_SERVICE",
+    "COMPACTION_PUBLISHER_SERVICE",
     "CONTEXT_COMPACTION_SERVICE",
     "CONTEXT_PROJECTION_SERVICE",
     "EFFECT_SCOPE_SERVICE",
@@ -114,6 +121,7 @@ __all__ = [
     "RESOURCE_TXN_SERVICE",
     "RESOLVED_SESSION_SPEC_SERVICE",
     "SCENARIO_LOADER_SERVICE",
+    "SESSION_COMPACTOR_SERVICE",
     "TOOL_EXECUTOR_SERVICE",
     "TOOL_ORCHESTRATOR_SERVICE",
     "TRAJECTORY_STORE_SERVICE",

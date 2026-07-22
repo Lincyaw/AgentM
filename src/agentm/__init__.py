@@ -14,6 +14,12 @@ from agentm.core.abi.cancel import (
     CancelSource,
     CompositeCancelSignal,
 )
+from agentm.core.abi.compaction import (
+    CompactionPublisher,
+    CompactionRequest,
+    CompactionResult,
+    SessionCompactor,
+)
 from agentm.core.abi.lifecycle import (
     EffectScope,
     EffectTxn,
@@ -101,6 +107,10 @@ from agentm.core.abi.trigger import (
 )
 from agentm.core.runtime.session import Session
 from agentm.sdk import AgentSession
+from agentm.presenter.compaction import (
+    AgentSessionCompactor,
+    TrajectoryCompactionPublisher,
+)
 from agentm.scenarios import (
     builtin_scenario_loader,
     load_scenario_manifest,
@@ -110,6 +120,7 @@ from agentm.scenarios import (
 __all__ = [
     "ActiveSetFingerprint",
     "AgentSession",
+    "AgentSessionCompactor",
     "AgentSessionConfig",
     "AtomActivation",
     "AtomCatalog",
@@ -120,6 +131,9 @@ __all__ = [
     "CatalogActiveSetInput",
     "ChildCancellationMode",
     "CompositeCancelSignal",
+    "CompactionPublisher",
+    "CompactionRequest",
+    "CompactionResult",
     "EffectScope",
     "EffectTxn",
     "EnvironmentCheckpoint",
@@ -164,6 +178,7 @@ __all__ = [
     "ScenarioLoader",
     "ScenarioSpec",
     "Session",
+    "SessionCompactor",
     "SessionSpecResolver",
     "StreamFn",
     "ToolExecutionRequirements",
@@ -175,6 +190,7 @@ __all__ = [
     "TrajectoryNodeSort",
     "TrajectoryQueryStore",
     "TrajectoryStore",
+    "TrajectoryCompactionPublisher",
     "Trigger",
     "TriggerMetadata",
     "TriggerPriority",

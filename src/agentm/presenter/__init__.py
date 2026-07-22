@@ -1,3 +1,3 @@
 """Presenter-side helpers built on SDK protocols."""
 
-__all__ = ["trajectory"]
+__all__ = ["compaction", "trajectory"]

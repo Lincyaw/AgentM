@@ -20,6 +20,7 @@ from typing import Callable, Literal, Protocol, TypeAlias, runtime_checkable
 
 from agentm.core.abi.cancel import CancelReason, CancelSignal
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
+from agentm.core.abi.compaction import CompactionPublisher, SessionCompactor
 from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
 from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
 from agentm.core.abi.permission import PermissionPolicy
@@ -257,6 +258,8 @@ class AgentSessionConfig:
     atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
     trajectory_store: TrajectoryStore | None = None
+    session_compactor: SessionCompactor | None = None
+    compaction_publisher: CompactionPublisher | None = None
     initial_turns: list[Turn] = field(default_factory=list)
     tool_allowlist: list[str] | None = None
     purpose: str = "subagent"

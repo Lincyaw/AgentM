@@ -23,6 +23,7 @@ from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.cancel import CompositeCancelSignal
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.context import ContextPolicy
+from agentm.core.abi.compaction import CompactionPublisher, SessionCompactor
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
@@ -52,11 +53,13 @@ from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_SERVICE,
     ATOM_CATALOG_SERVICE,
     CATALOG_QUERY_SERVICE,
+    COMPACTION_PUBLISHER_SERVICE,
     ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
     LOOP_BUDGET_SERVICE,
     PROVIDER_RESOLVER_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
     SCENARIO_LOADER_SERVICE,
+    SESSION_COMPACTOR_SERVICE,
     TRAJECTORY_QUERY_STORE_SERVICE,
     TRAJECTORY_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_SERVICE,
@@ -365,6 +368,26 @@ def _register_default_query_store(
         TrajectoryStoreQueryAdapter(store),
         scope="resource",
     )
+
+
+def _register_compaction_services(
+    services: ServiceRegistry,
+    config: "AgentSessionConfig",
+) -> None:
+    if config.session_compactor is not None:
+        services.register(
+            SESSION_COMPACTOR_SERVICE,
+            config.session_compactor,
+            SessionCompactor,
+            scope="host",
+        )
+    if config.compaction_publisher is not None:
+        services.register(
+            COMPACTION_PUBLISHER_SERVICE,
+            config.compaction_publisher,
+            CompactionPublisher,
+            scope="host",
+        )
 
 
 def _resolve_session_spec(config: "AgentSessionConfig") -> ResolvedSessionSpec | None:
@@ -742,6 +765,7 @@ async def create_from_config(
         services.register("experiment", experiment, scope="tree")
     if config.loop_config is not None:
         services.register(LOOP_BUDGET_SERVICE, config.loop_config, scope="session")
+    _register_compaction_services(services, config)
     if config.scenario_loader is not None:
         services.register(SCENARIO_LOADER_SERVICE, config.scenario_loader, scope="host")
     if config.environment_restore_failure_handler is not None:
@@ -851,6 +875,7 @@ async def create_child_session(
         child_services.register(
             LOOP_BUDGET_SERVICE, config.loop_config, scope="session"
         )
+    _register_compaction_services(child_services, config)
     if config.scenario_loader is not None:
         child_services.register(
             SCENARIO_LOADER_SERVICE,

@@ -1,25 +1,28 @@
-"""Commands that control live AgentM sessions."""
+"""Commands that inspect or control AgentM sessions."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import sys
 
 import typer
 
+from agentm import AgentSessionConfig, CompactionRequest
 from agentm.cli._display import EXIT_ERROR, EXIT_NOT_FOUND, is_tty, stderr_console
+from agentm.config.resolver import DefaultSessionSpecResolver
 from agentm.control import (
-    CompactionDeliveryError,
     InterruptDeliveryError,
-    send_compact,
     send_interrupt,
 )
+from agentm.extensions.builtin.llm_compaction import LlmCompactionConfig
+from agentm.presenter.compaction import AgentSessionCompactor
 
 
 session_app = typer.Typer(
     name="session",
-    help="Control running AgentM sessions.",
+    help="Inspect or control AgentM sessions.",
     add_completion=False,
 )
 
@@ -103,11 +106,34 @@ def compact_cmd(
     session_id: str = typer.Argument(..., metavar="SESSION_ID"),
     fmt: str | None = typer.Option(None, "--format"),
 ) -> None:
-    """Schedule context compaction after the active step."""
+    """Generate an auditable summary from committed session history."""
     chosen_format = _select_format(fmt)
+    cwd = Path.cwd()
+    project_config = cwd / "agentm.toml"
+    resolver = DefaultSessionSpecResolver(
+        project_config=project_config if project_config.exists() else None,
+    )
+    strategy = LlmCompactionConfig(
+        keep_last_turns=4,
+        reserve_tokens=20_000,
+    )
+    compactor = AgentSessionCompactor(
+        AgentSessionConfig(
+            cwd=str(cwd),
+            extensions=[],
+            spec_resolver=resolver,
+        )
+    )
     try:
-        asyncio.run(send_compact(session_id))
-    except FileNotFoundError as exc:
+        result = asyncio.run(
+            compactor.compact(
+                CompactionRequest(
+                    source_session_id=session_id,
+                    options=strategy.model_dump(mode="json"),
+                )
+            )
+        )
+    except (FileNotFoundError, KeyError) as exc:
         _emit_error(
             session_id=session_id,
             error_type="session_not_found",
@@ -115,7 +141,7 @@ def compact_cmd(
             fmt=chosen_format,
         )
         raise typer.Exit(EXIT_NOT_FOUND)
-    except (CompactionDeliveryError, OSError, ValueError) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         _emit_error(
             session_id=session_id,
             error_type=type(exc).__name__,
@@ -126,13 +152,18 @@ def compact_cmd(
 
     record = {
         "session_id": session_id,
-        "status": "scheduled",
+        "status": "complete",
         "operation": "compact",
+        "covered_start_turn_index": result.covered.start,
+        "covered_end_turn_index": result.covered.end,
+        "covered_through_turn_id": result.covered_through_turn_id,
+        "producer_ref": result.producer_ref,
+        "summary": result.summary,
     }
     if chosen_format == "ndjson":
         sys.stdout.write(json.dumps(record) + "\n")
     else:
-        sys.stdout.write(f"compaction scheduled for session {session_id}\n")
+        sys.stdout.write(result.summary + "\n")
 
 
 __all__ = ["session_app"]
