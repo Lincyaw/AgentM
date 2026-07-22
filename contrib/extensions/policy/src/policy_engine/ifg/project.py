@@ -278,22 +278,6 @@ def build_ifg_symbols(
     )
     action_symbol_edges.extend(resolved_edges)
 
-    for symbol_text, mentions in _group_symbol_mentions(unresolved_mentions).items():
-        symbol = _symbol_from_mentions(
-            symbol_text,
-            mentions,
-            extractor_version=extractor_version,
-        )
-        symbols.append(symbol)
-        for mention in mentions:
-            action_symbol_edges.append(
-                _action_symbol_edge_from_mention(
-                    mention,
-                    symbol,
-                    resolution="unresolved",
-                )
-            )
-
     symbol_symbol_edges = _symbol_symbol_edges_from_facts(fact_groups)
     return IfgExtractionRows(
         actions=(),
@@ -347,35 +331,25 @@ def resolve_path_candidates(
     anchor_edges: Sequence[IfgActionFileEdgeRow],
     candidates: Sequence[IfgPathCandidateRow],
     extractor_version: str,
-    repository_index: RepositoryIndex | None = None,
 ) -> tuple[IfgActionFileEdgeRow, ...]:
-    """Resolve bash paths against trajectory anchors, then the live repository."""
+    """Attach bash support evidence only to files anchored by file operations."""
 
     anchors = unique_file_edges(anchor_edges)
     anchored_paths = {edge.path for edge in anchors}
     resolved: list[IfgActionFileEdgeRow] = list(anchors)
     for candidate in candidates:
         if (
-            candidate.normalized_path in anchored_paths
-            and candidate.path_kind != "pattern"
+            candidate.normalized_path not in anchored_paths
+            or candidate.path_kind == "pattern"
         ):
-            resolution = "trajectory_anchor"
-            existence = "observed_at_event"
-            confidence = candidate.confidence
-        elif candidate.path_kind == "file" and _repository_contains_file(
-            candidate.normalized_path,
-            repository_index=repository_index,
-        ):
-            resolution = "repository"
-            existence = "present_now"
-            confidence = "high"
-        else:
             continue
+        resolution = "trajectory_anchor"
+        relation = "supports"
         edge_id = _stable_id(
             "edge",
             candidate.action_id,
             candidate.normalized_path,
-            candidate.relation,
+            relation,
             candidate.source,
             resolution,
             extractor_version,
@@ -386,11 +360,11 @@ def resolve_path_candidates(
                 session_id=candidate.session_id,
                 action_id=candidate.action_id,
                 path=candidate.normalized_path,
-                relation=candidate.relation,
+                relation=relation,
                 turn=candidate.turn,
                 event_id=candidate.event_id,
                 source=candidate.source,
-                confidence=confidence,
+                confidence=candidate.confidence,
                 is_anchor=False,
                 extractor_version=extractor_version,
                 content_hash=None,
@@ -406,7 +380,9 @@ def resolve_path_candidates(
                     "source_unit_id": candidate.source_unit_id,
                     "entity_kind": "file",
                     "evidence": candidate.source,
-                    "existence": existence,
+                    "evidence_role": "support",
+                    "observed_relation": candidate.relation,
+                    "existence": "anchored_by_fileop",
                     "resolution": resolution,
                 },
                 raw_evidence=candidate.raw_evidence,
@@ -488,15 +464,19 @@ def _repository_symbol_inputs(
     units_by_id = {unit.source_unit_id: unit for unit in source_units}
     units_by_path: dict[str, IfgSourceUnitRow] = {}
     for unit in source_units:
-        if unit.path:
+        if unit.path and unit.tool_name in {"read", "write", "edit"}:
             units_by_path.setdefault(unit.path, unit)
 
     inputs: list[SymbolExtractionInput] = []
     seen_paths: set[str] = set()
     for edge in file_edges:
-        if edge.path in seen_paths or not _repository_contains_file(
-            edge.path,
-            repository_index=repository_index,
+        if (
+            not edge.is_anchor
+            or edge.path in seen_paths
+            or not _repository_contains_file(
+                edge.path,
+                repository_index=repository_index,
+            )
         ):
             continue
         source_unit_id = edge.metadata.get("source_unit_id")
@@ -646,15 +626,6 @@ def _group_file_edges(
     for edge in edges:
         by_path.setdefault(edge.path, []).append(edge)
     return by_path
-
-
-def _group_symbol_mentions(
-    mentions: Sequence[IfgSymbolMentionRow],
-) -> dict[str, list[IfgSymbolMentionRow]]:
-    by_text: dict[str, list[IfgSymbolMentionRow]] = {}
-    for mention in mentions:
-        by_text.setdefault(mention.symbol_text, []).append(mention)
-    return by_text
 
 
 def _group_symbol_facts(
@@ -939,36 +910,6 @@ def _symbol_symbol_edge_from_facts(
             "target_symbol_id": target_symbol.symbol_id,
             "source_fact": source_fact.raw_evidence,
             "target_fact": target_fact.raw_evidence,
-        },
-    )
-
-
-def _symbol_from_mentions(
-    symbol_text: str,
-    mentions: Sequence[IfgSymbolMentionRow],
-    *,
-    extractor_version: str,
-) -> IfgSymbolRow:
-    first = mentions[0]
-    stable_key = f"mention:{symbol_text}"
-    paths = tuple(dict.fromkeys(mention.path for mention in mentions if mention.path))
-    return IfgSymbolRow(
-        symbol_id=_symbol_id(first.session_id, extractor_version, stable_key),
-        session_id=first.session_id,
-        extractor_version=extractor_version,
-        kind="mention",
-        qualified_name=symbol_text,
-        path=paths[0] if len(paths) == 1 else None,
-        stable_key=stable_key,
-        first_seen_turn=min(mention.turn for mention in mentions),
-        last_seen_turn=max(mention.turn for mention in mentions),
-        observation_count=len(mentions),
-        source="symbol_mentions",
-        confidence=_aggregate_confidence(mention.confidence for mention in mentions),
-        metadata={"mention_count": len(mentions), "paths": list(paths)},
-        raw_evidence={
-            "mention_ids": [mention.mention_id for mention in mentions[:100]],
-            "symbol_text": symbol_text,
         },
     )
 

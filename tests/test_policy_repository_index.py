@@ -23,7 +23,6 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.operations import ExecResult
 from policy_engine import PolicyEngineConfig, _PolicyEngineRuntime
-from policy_engine.ifg import IfgToolEvent, extract_ifg_from_tool_events
 from policy_engine.repository_index import (
     REPOSITORY_INDEX_SERVICE,
     RepositoryIndex,
@@ -228,43 +227,7 @@ async def test_repository_index_keeps_full_outline_in_remote_worker() -> None:
     assert "--include-documents" in bash.commands[2]
 
 
-@pytest.mark.asyncio
-async def test_ifg_uses_remote_repository_index_for_bash_file_and_symbol() -> None:
-    path = "/remote/repo/src/app.py"
-    index = RepositoryIndex(
-        root="/remote/repo",
-        bash=_FakeBash(["/remote/repo\n", [_document(path, "foo")]]),
-    )
-    assert await index.scan_all()
-    event = IfgToolEvent(
-        session_id="session-1",
-        turn=0,
-        event_id=None,
-        tool_call_id="bash-1",
-        phase="post",
-        tool_name="bash",
-        args={"cmd": "rg foo src/app.py"},
-        result={},
-        processed={},
-        state={},
-        cwd="/remote/repo",
-        ts=0.0,
-        source="test",
-        raw_evidence={},
-    )
-
-    rows = extract_ifg_from_tool_events((event,), repository_index=index)
-
-    assert len(rows.file_edges) == 1
-    assert rows.file_edges[0].metadata["resolution"] == "repository"
-    assert any(symbol.qualified_name == "foo" for symbol in rows.symbols)
-    assert any(
-        edge.metadata.get("resolution") != "unresolved"
-        for edge in rows.action_symbol_edges
-    )
-
-
-def test_repository_refresh_plan_is_targeted_until_bash_scope_is_unknown() -> None:
+def test_repository_refresh_plan_skips_read_only_bash() -> None:
     read_plan = repository_refresh_plan(
         tool_name="read",
         args={"path": "src/app.py"},
@@ -285,9 +248,7 @@ def test_repository_refresh_plan_is_targeted_until_bash_scope_is_unknown() -> No
         paths=("/repo/src/app.py",),
         reason="tool:read",
     )
-    assert search_plan is not None
-    assert search_plan.paths == ("/repo/src/app.py",)
-    assert not search_plan.full_scan
+    assert search_plan is None
     assert git_plan is not None and git_plan.full_scan
 
 

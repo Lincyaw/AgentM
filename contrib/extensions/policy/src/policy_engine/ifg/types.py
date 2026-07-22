@@ -137,7 +137,7 @@ class IfgActionFileEdgeRow:
 
 @dataclass(frozen=True, slots=True)
 class IfgPathCandidateRow:
-    """A bash-derived path that must resolve before it can become a file edge."""
+    """A bash-derived path that may support an independently anchored file."""
 
     candidate_id: str
     session_id: str

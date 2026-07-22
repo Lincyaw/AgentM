@@ -163,23 +163,31 @@ def _investigation_row(
     evidence_counts = metrics.get("evidence_counts")
     counts = evidence_counts if isinstance(evidence_counts, Mapping) else {}
     reentries = _coerce_int(counts.get("unchanged_anchor_reentry")) or 0
+    churn = _coerce_int(counts.get("unchanged_anchor_churn")) or 0
     replacements = _coerce_int(counts.get("created_artifact_replacement")) or 0
     cycles = _coerce_int(counts.get("unchanged_investigation_state_cycle")) or 0
     phases = _coerce_int(metrics.get("completed_phases")) or 0
     generation = _coerce_int(metrics.get("repository_generation")) or 0
-    evidence_total = reentries + replacements + cycles
+    generation_reentries = _coerce_int(metrics.get("generation_reentries")) or 0
+    adaptive_support = _coerce_int(metrics.get("adaptive_reentry_support")) or 0
+    bash_support = _coerce_int(metrics.get("bash_support_observations")) or 0
+    bash_candidates = _coerce_int(metrics.get("bash_path_candidates")) or 0
+    evidence_total = reentries + churn + replacements + cycles
     return TraceRow(
         key=f"policy:indicator:investigation:{session_id}",
         kind="policy",
         title="Investigation Metrics",
         preview=(
-            f"reentries:{reentries} replacements:{replacements} cycles:{cycles} "
-            f"phases:{phases} repository-generation:{generation}"
+            f"reentries:{generation_reentries}/{adaptive_support} churn:{churn} "
+            f"replacements:{replacements} cycles:{cycles} phases:{phases} "
+            f"bash-support:{bash_support} candidates:{bash_candidates} "
+            f"repository-generation:{generation}"
         ),
         content=_json_content(
             {
                 "rules": [
                     "unchanged-anchor-reentry",
+                    "investigation-anchor-churn",
                     "created-artifact-replacement",
                     "unchanged-investigation-state-cycle",
                 ],

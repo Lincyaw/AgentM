@@ -170,7 +170,6 @@ def extract_ifg_from_tool_events(
         anchor_edges=unique_file_edges(file_edges),
         candidates=unique_candidates,
         extractor_version=extractor_version,
-        repository_index=repository_index,
     )
     symbol_projection = build_ifg_symbols(
         source_units=unique_units,
@@ -596,7 +595,7 @@ def _search_result_rows(
             kind="bash_search_result",
             origin="result.stdout",
             path=normalized_path,
-            relation="read",
+            relation="supports",
             prepared=_PreparedText(
                 text=content_text,
                 line_range=line_range,
@@ -605,9 +604,10 @@ def _search_result_rows(
             ),
             extractor_version=extractor_version,
             metadata={
-                "parse_symbols": True,
+                "parse_symbols": False,
                 "confidence": "medium",
                 "content_scope": "matched_lines",
+                "evidence_role": "support",
                 "match_count": len(path_matches),
                 **path_info,
             },

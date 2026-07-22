@@ -104,7 +104,7 @@ def test_ifg_source_units_bridge_tool_io_to_code_symbols() -> None:
     assert {(unit.kind, unit.relation, unit.path) for unit in rows.source_units} == {
         ("read_result", "read", "/tmp/repo/src/app.py"),
         ("bash_segment", "read", None),
-        ("bash_search_result", "read", "/tmp/repo/src/app.py"),
+        ("bash_search_result", "supports", "/tmp/repo/src/app.py"),
         ("edit_old", "read", "/tmp/repo/src/app.py"),
         ("edit_new", "edit", "/tmp/repo/src/app.py"),
         ("edit_result_snippet", "edit", "/tmp/repo/src/app.py"),
@@ -409,7 +409,7 @@ def test_later_read_anchor_reconnects_an_earlier_bash_candidate(
     assert json.loads(resolved["metadata_json"])["resolution"] == "trajectory_anchor"
 
 
-def test_repository_backed_bash_can_anchor_and_validate_symbols(
+def test_repository_existence_does_not_promote_bash_evidence(
     tmp_path: Path,
 ) -> None:
     source_path = tmp_path / "app.py"
@@ -426,15 +426,12 @@ def test_repository_backed_bash_can_anchor_and_validate_symbols(
 
     rows = extract_ifg_from_tool_events((event,))
 
-    assert len(rows.file_edges) == 1
-    assert rows.file_edges[0].path == str(source_path)
-    assert rows.file_edges[0].metadata["resolution"] == "repository"
-    foo = next(symbol for symbol in rows.symbols if symbol.qualified_name == "foo")
-    assert foo.metadata["validation"] == "repository_present"
-    assert any(
-        edge.symbol_id == foo.symbol_id and edge.metadata.get("resolution") == "path"
-        for edge in rows.action_symbol_edges
-    )
+    assert rows.file_edges == ()
+    assert rows.symbols == ()
+    assert {candidate.path_text for candidate in rows.path_candidates} == {
+        str(source_path)
+    }
+    assert {mention.symbol_text for mention in rows.symbol_mentions} == {"foo"}
 
 
 def test_ifg_schema_adds_anchor_column_before_its_index() -> None:

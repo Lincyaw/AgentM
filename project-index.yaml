@@ -298,6 +298,8 @@ requirements:
       - path: .claude/designs/observability.md
       - path: README.md
       - path: contrib/scenarios/harbor/README.md
+      - path: docs/policy-guided-context-recovery.md
+      - path: docs/policy-trajectory-failure-observability.md
       - path: docs/refactor-abstract-inventory.md
       - path: tools/otel/README.md
     depends_on: []

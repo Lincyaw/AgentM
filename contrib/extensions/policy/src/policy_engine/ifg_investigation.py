@@ -8,6 +8,7 @@ interpret with semantic context.
 
 from __future__ import annotations
 
+import math
 import posixpath
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -19,6 +20,7 @@ from .types import ToolArgs
 
 
 _EVIDENCE_UNCHANGED_REENTRY = "unchanged_anchor_reentry"
+_EVIDENCE_ANCHOR_CHURN = "unchanged_anchor_churn"
 _EVIDENCE_ARTIFACT_REPLACEMENT = "created_artifact_replacement"
 _EVIDENCE_STATE_CYCLE = "unchanged_investigation_state_cycle"
 _EXECUTION_ACTIONS = frozenset({"exec", "test"})
@@ -26,7 +28,7 @@ _EXECUTION_ACTIONS = frozenset({"exec", "test"})
 
 @dataclass(frozen=True, slots=True)
 class InvestigationEvidence:
-    """One threshold-free structural transition."""
+    """One structural investigation transition."""
 
     kind: str
     sequence: int
@@ -75,7 +77,7 @@ class _InvestigationPhase:
 
 
 class IfgInvestigationState:
-    """Collect structural evidence without semantic or numeric heuristics."""
+    """Collect semantic-free structural evidence with adaptive support."""
 
     def __init__(self, *, cwd: str | None = None) -> None:
         self._cwd = posixpath.normpath(cwd) if cwd else None
@@ -85,8 +87,12 @@ class IfgInvestigationState:
         self._repository_generation = 0
         self._repository_artifacts: dict[str, _RepositoryArtifact] = {}
         self._created_artifacts: dict[str, _CreatedArtifact] = {}
+        self._bash_support_counts: Counter[str] = Counter()
+        self._bash_path_candidates: Counter[str] = Counter()
         self._last_focus_path: str | None = None
         self._last_focus_revision: dict[str, int] = {}
+        self._generation_reentries = 0
+        self._anchor_churn_reported = False
         self._phase_focus: set[str] = set()
         self._phases: list[_InvestigationPhase] = []
         self._seen_phase_states: dict[
@@ -127,6 +133,10 @@ class IfgInvestigationState:
         return self._has_current(_EVIDENCE_UNCHANGED_REENTRY)
 
     @property
+    def became_anchor_churn(self) -> bool:
+        return self._has_current(_EVIDENCE_ANCHOR_CHURN)
+
+    @property
     def became_artifact_replacement(self) -> bool:
         return self._has_current(_EVIDENCE_ARTIFACT_REPLACEMENT)
 
@@ -140,7 +150,12 @@ class IfgInvestigationState:
             "sequence": self._sequence,
             "repository_artifacts": len(self._repository_artifacts),
             "created_artifacts": len(self._created_artifacts),
+            "bash_supported_paths": len(self._bash_support_counts),
+            "bash_support_observations": sum(self._bash_support_counts.values()),
+            "bash_path_candidates": len(self._bash_path_candidates),
             "repository_generation": self._repository_generation,
+            "generation_reentries": self._generation_reentries,
+            "adaptive_reentry_support": self._adaptive_reentry_support(),
             "current_anchor": self._last_focus_path,
             "phase_focus": sorted(self._phase_focus),
             "completed_phases": len(self._phases),
@@ -157,6 +172,25 @@ class IfgInvestigationState:
             },
         }
 
+    def churn_summary(self) -> dict[str, object]:
+        """Return the compact evidence packet used for churn escalation."""
+
+        evidence = self._latest_evidence.get(_EVIDENCE_ANCHOR_CHURN)
+        return {
+            "sequence": self._sequence,
+            "repository_generation": self._repository_generation,
+            "repository_artifacts": len(self._repository_artifacts),
+            "created_artifacts": len(self._created_artifacts),
+            "generation_reentries": self._generation_reentries,
+            "adaptive_reentry_support": self._adaptive_reentry_support(),
+            "current_anchor": self._last_focus_path,
+            "phase_focus_size": len(self._phase_focus),
+            "completed_phases": len(self._phases),
+            "bash_support_observations": sum(self._bash_support_counts.values()),
+            "bash_path_candidates": len(self._bash_path_candidates),
+            "transition": evidence.as_dict() if evidence is not None else None,
+        }
+
     def _record_structured_file_tool(
         self,
         tool_name: str,
@@ -171,6 +205,10 @@ class IfgInvestigationState:
         path = self._path(raw_path)
 
         if tool_name == "read":
+            created = self._created_artifacts.get(path)
+            if created is not None:
+                created.last_sequence = self._sequence
+                return
             self._ensure_repository_artifact(path, anchor_source="read")
             self._touch_repository(path, mutated=False)
             return
@@ -219,26 +257,18 @@ class IfgInvestigationState:
                     self._record_created_artifact_execution(executed)
 
     def _record_bash_path(self, path: str, *, relation: str) -> None:
-        role = self._path_role(path)
-        if relation == "write":
-            if role == "repository":
-                self._ensure_repository_artifact(
-                    path,
-                    anchor_source="repository_index",
-                )
-                self._touch_repository(path, mutated=True)
-            else:
-                self._record_created_artifact(path)
+        if path in self._repository_artifacts:
+            self._bash_support_counts[path] += 1
             return
 
-        if role == "repository":
-            self._ensure_repository_artifact(
-                path,
-                anchor_source="repository_index",
-            )
-            self._touch_repository(path, mutated=False)
-        elif role == "created":
+        if path in self._created_artifacts:
+            self._bash_support_counts[path] += 1
             self._created_artifacts[path].last_sequence = self._sequence
+            return
+
+        self._bash_path_candidates[path] += 1
+        if relation == "write" and self._path_role(path) != "repository":
+            self._record_created_artifact(path)
 
     def _ensure_repository_artifact(self, path: str, *, anchor_source: str) -> None:
         if path in self._repository_artifacts:
@@ -248,6 +278,7 @@ class IfgInvestigationState:
             first_sequence=self._sequence,
             anchor_source=anchor_source,
         )
+        self._promote_bash_candidate(path)
         self._created_artifacts.pop(path, None)
 
     def _record_created_artifact(self, path: str) -> None:
@@ -260,12 +291,20 @@ class IfgInvestigationState:
             created_sequence=self._sequence,
             last_sequence=self._sequence,
         )
+        self._promote_bash_candidate(path)
+
+    def _promote_bash_candidate(self, path: str) -> None:
+        observations = self._bash_path_candidates.pop(path, 0)
+        if observations:
+            self._bash_support_counts[path] += observations
 
     def _touch_repository(self, path: str, *, mutated: bool) -> None:
         artifact = self._repository_artifacts[path]
         if mutated:
             artifact.revision += 1
             self._repository_generation += 1
+            self._generation_reentries = 0
+            self._anchor_churn_reported = False
 
         previous_revision = self._last_focus_revision.get(path)
         if (
@@ -275,18 +314,35 @@ class IfgInvestigationState:
             and self._last_focus_path != path
             and previous_revision == artifact.revision
         ):
+            self._generation_reentries += 1
+            metadata = {
+                "revision": artifact.revision,
+                "from_anchor": self._last_focus_path,
+                "repository_generation": self._repository_generation,
+                "generation_reentries": self._generation_reentries,
+                "adaptive_support": self._adaptive_reentry_support(),
+            }
             self._emit(
                 InvestigationEvidence(
                     kind=_EVIDENCE_UNCHANGED_REENTRY,
                     sequence=self._sequence,
                     paths=(path,),
-                    metadata={
-                        "revision": artifact.revision,
-                        "from_anchor": self._last_focus_path,
-                        "repository_generation": self._repository_generation,
-                    },
+                    metadata=metadata,
                 )
             )
+            if (
+                not self._anchor_churn_reported
+                and self._generation_reentries > self._adaptive_reentry_support()
+            ):
+                self._anchor_churn_reported = True
+                self._emit(
+                    InvestigationEvidence(
+                        kind=_EVIDENCE_ANCHOR_CHURN,
+                        sequence=self._sequence,
+                        paths=(path,),
+                        metadata=metadata,
+                    )
+                )
 
         self._last_focus_path = path
         self._last_focus_revision[path] = artifact.revision
@@ -435,6 +491,9 @@ class IfgInvestigationState:
     def _previous_phase(self) -> _InvestigationPhase | None:
         return self._phases[-2] if len(self._phases) > 1 else None
 
+    def _adaptive_reentry_support(self) -> int:
+        return max(1, math.ceil(math.sqrt(len(self._repository_artifacts))))
+
 
 class InvestigationQuery:
     """DSL facade for neutral investigation evidence."""
@@ -445,6 +504,9 @@ class InvestigationQuery:
     def became_unchanged_reentry(self) -> bool:
         return self._state.became_unchanged_reentry
 
+    def became_anchor_churn(self) -> bool:
+        return self._state.became_anchor_churn
+
     def became_artifact_replacement(self) -> bool:
         return self._state.became_artifact_replacement
 
@@ -453,6 +515,9 @@ class InvestigationQuery:
 
     def summary(self) -> dict[str, object]:
         return self._state.summary()
+
+    def churn_summary(self) -> dict[str, object]:
+        return self._state.churn_summary()
 
 
 def _phase_dict(

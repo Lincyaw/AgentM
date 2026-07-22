@@ -39,6 +39,15 @@ rules:
     escalate_context: "ifg.investigation.summary()"
     reason: "Structural evidence: an unchanged repository anchor was re-entered."
 
+  - name: investigation-anchor-churn
+    on: tool_call_post
+    match: {tool: read}
+    when: "ifg.investigation.became_anchor_churn()"
+    effect: escalate
+    mode: observe
+    escalate_context: "ifg.investigation.churn_summary()"
+    reason: "The unchanged anchor revisit pressure exceeded the adaptive support derived from the observed file frontier without a repository generation. Re-check the task constraint and smallest authoritative edit before expanding the investigation."
+
   - name: created-artifact-replacement
     on: tool_call_post
     match: {tool: bash}

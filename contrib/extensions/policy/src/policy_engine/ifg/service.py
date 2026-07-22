@@ -245,7 +245,6 @@ def _projection_from_atomic_rows(
         anchor_edges=atomic_rows.file_edges,
         candidates=atomic_rows.path_candidates,
         extractor_version=extractor_version,
-        repository_index=repository_index,
     )
     symbol_projection = build_ifg_symbols(
         source_units=atomic_rows.source_units,
@@ -315,13 +314,7 @@ def _backfill_result(
         file_symbol_edges=len(projection.file_symbol_edges),
         symbol_symbol_edges=len(projection.symbol_symbol_edges),
         symbol_mentions=len(projection.symbol_mentions),
-        unresolved_symbol_mentions=len(
-            {
-                edge.metadata.get("mention_id")
-                for edge in projection.action_symbol_edges
-                if edge.metadata.get("resolution") == "unresolved"
-            }
-        ),
+        unresolved_symbol_mentions=_unresolved_symbol_mention_count(projection),
         errors=errors,
         deleted=deleted,
         action_kinds=dict(action_kinds),
@@ -337,6 +330,17 @@ def _unresolved_path_candidate_count(projection: IfgExtractionRows) -> int:
     return sum(
         candidate.candidate_id not in resolved_ids
         for candidate in projection.path_candidates
+    )
+
+
+def _unresolved_symbol_mention_count(projection: IfgExtractionRows) -> int:
+    resolved_ids = {
+        edge.metadata.get("mention_id")
+        for edge in projection.action_symbol_edges
+        if edge.metadata.get("mention_id")
+    }
+    return sum(
+        mention.mention_id not in resolved_ids for mention in projection.symbol_mentions
     )
 
 

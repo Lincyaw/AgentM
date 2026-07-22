@@ -195,10 +195,15 @@ class RepositoryIndex:
         async with self._refresh_lock:
             success = True
             for path in plan.paths:
+                load_only = (
+                    self._remote_worker_command is not None
+                    and plan.reason == "tool:read"
+                )
                 scan, error = await self._scan_target(
                     path,
                     timeout=self._refresh_timeout,
                     replace=False,
+                    load_only=load_only,
                 )
                 self._refreshes += 1
                 if error is not None:
@@ -209,7 +214,8 @@ class RepositoryIndex:
                     self._last_error = "repository refresh returned no result"
                     success = False
                     continue
-                self._remove_scope(path)
+                if not load_only:
+                    self._remove_scope(path)
                 self._paths.update(scan.paths)
                 self._documents.update(scan.documents)
             if success:
@@ -248,6 +254,7 @@ class RepositoryIndex:
         *,
         timeout: float,
         replace: bool,
+        load_only: bool = False,
     ) -> tuple[_RepositoryScanResult | None, str | None]:
         normalized = self._normalize_path(target)
         if self._remote_worker_command is not None:
@@ -255,6 +262,7 @@ class RepositoryIndex:
                 normalized,
                 timeout=timeout,
                 replace=replace,
+                load_only=load_only,
             )
         quoted = shlex.quote(normalized)
         command = (
@@ -302,12 +310,16 @@ class RepositoryIndex:
         *,
         timeout: float,
         replace: bool,
+        load_only: bool,
     ) -> tuple[_RepositoryScanResult | None, str | None]:
         worker = self._remote_worker_command
         database = self._remote_db_path
         if worker is None or database is None:
             return None, "remote repository worker is not configured"
-        flags = " --replace" if replace else " --include-documents"
+        if load_only:
+            flags = " --include-documents --load-only"
+        else:
+            flags = " --replace" if replace else " --include-documents"
         command = (
             f"{worker} repository-index"
             f" --root {shlex.quote(self._root)}"
@@ -440,9 +452,8 @@ def _bash_refresh_plan(command: str, *, cwd: str) -> RepositoryRefreshPlan | Non
                     full_scan = True
                     reasons.append(f"bash:{command_name}:pattern")
                 continue
-            normalized = _normalize_event_path(ref.path, current_cwd)
-            if ref.path_kind == "file" or mutates:
-                paths.append(normalized)
+            if mutates:
+                paths.append(_normalize_event_path(ref.path, current_cwd))
                 concrete_refs += 1
         if mutates and concrete_refs == 0:
             full_scan = True

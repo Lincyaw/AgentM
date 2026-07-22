@@ -121,6 +121,69 @@ def update_repository_index(
     }
 
 
+def load_repository_documents(
+    *,
+    root: str,
+    target: str,
+    db_path: str,
+) -> dict[str, object]:
+    """Load cached outline documents without rescanning repository files."""
+
+    normalized_root = _normalize(root)
+    normalized_target = _normalize_target(normalized_root, target)
+    database = Path(db_path)
+    if not database.is_file():
+        raise RepositoryIndexWorkerError(f"repository index not found: {database}")
+
+    with sqlite3.connect(database) as connection:
+        stored_root = connection.execute(
+            "SELECT value FROM repository_metadata WHERE key = 'root'"
+        ).fetchone()
+        if stored_root is None or _normalize(str(stored_root[0])) != normalized_root:
+            raise RepositoryIndexWorkerError(
+                "repository index root does not match the requested repository"
+            )
+        prefix = f"{normalized_target.rstrip('/')}/*"
+        rows = connection.execute(
+            """
+            SELECT path, document_json
+            FROM repository_documents
+            WHERE path = ? OR path GLOB ?
+            ORDER BY path
+            LIMIT ?
+            """,
+            (normalized_target, prefix, _MAX_RETURNED_DOCUMENTS + 1),
+        ).fetchall()
+        file_count = connection.execute(
+            "SELECT COUNT(*) FROM repository_documents"
+        ).fetchone()
+
+    documents: list[Mapping[str, object]] = []
+    for path, raw_document in rows[:_MAX_RETURNED_DOCUMENTS]:
+        try:
+            document = json.loads(str(raw_document))
+        except json.JSONDecodeError as exc:
+            raise RepositoryIndexWorkerError(
+                f"repository index contains invalid JSON for {path}: {exc}"
+            ) from exc
+        if isinstance(document, Mapping):
+            documents.append(document)
+
+    return {
+        "version": 1,
+        "ok": True,
+        "root": normalized_root,
+        "target": normalized_target,
+        "replace": False,
+        "files": int(file_count[0]) if file_count is not None else 0,
+        "paths": [str(path) for path, _document in rows],
+        "removed_paths": [],
+        "documents": documents,
+        "documents_truncated": len(rows) > _MAX_RETURNED_DOCUMENTS,
+        "cache": "hit",
+    }
+
+
 def _scan_target(root: str, target: str) -> dict[str, Mapping[str, object]]:
     if not os.path.exists(target):
         return {}
@@ -236,4 +299,8 @@ def _normalize_target(root: str, target: str) -> str:
     return _normalize(os.path.join(root, target))
 
 
-__all__ = ["RepositoryIndexWorkerError", "update_repository_index"]
+__all__ = [
+    "RepositoryIndexWorkerError",
+    "load_repository_documents",
+    "update_repository_index",
+]
