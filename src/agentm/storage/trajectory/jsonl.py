@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
+from loguru import logger
+
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.store import (
     SessionMeta,
@@ -444,7 +446,8 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
         for path in sorted(self._directory.glob("*.jsonl")):
             try:
                 self._replay_file(path, state)
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError) as exc:
+                logger.warning("skipping corrupt session file {}: {}", path.name, exc)
                 continue
         return state
 
@@ -643,6 +646,11 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
         try:
             value: object = json.loads(tail)
         except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning(
+                "truncating unparseable tail in session {}: {} bytes discarded",
+                session_id,
+                len(tail),
+            )
             value = None
         if isinstance(value, Mapping) and value.get("version") == _VERSION:
             with path.open("ab") as handle:
@@ -650,6 +658,11 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                 handle.flush()
                 os.fsync(handle.fileno())
             return
+        logger.debug(
+            "truncating torn trailing record in session {}: {} bytes",
+            session_id,
+            len(tail),
+        )
         with path.open("r+b") as handle:
             handle.truncate(last_newline + 1)
             handle.flush()

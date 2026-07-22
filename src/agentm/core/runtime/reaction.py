@@ -791,7 +791,10 @@ async def _projection_input(
     if projection.source != "node_chain":
         raise ValueError(f"unsupported context projection source {projection.source!r}")
     if trajectory_store is None:
-        raise RuntimeError("node-chain ContextProjection requires a trajectory store")
+        raise RuntimeError(
+            f"session {session_id}: node-chain ContextProjection requires "
+            "a trajectory store"
+        )
     head = await asyncio.to_thread(
         trajectory_store.get_head,
         session_id,
@@ -802,7 +805,8 @@ async def _projection_input(
     if head is None:
         if turns:
             raise RuntimeError(
-                "node-chain ContextProjection requires an active trajectory head"
+                f"session {session_id}: node-chain ContextProjection requires "
+                "an active trajectory head"
             )
         return ProjectionInput(
             turns=turns,

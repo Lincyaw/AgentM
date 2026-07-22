@@ -361,9 +361,9 @@ class _SessionLifecycle:
             return
         self._activate_provider()
         if self._stream_fn is None:
-            raise RuntimeError("cannot start: no stream_fn")
+            raise RuntimeError(f"session {self.id}: cannot start without stream_fn")
         if self._model is None:
-            raise RuntimeError("cannot start: no model")
+            raise RuntimeError(f"session {self.id}: cannot start without model")
 
         policy_ctx = PolicyContext(
             session_id=self.id,
@@ -447,10 +447,10 @@ class _SessionLifecycle:
                 )
             )
         except asyncio.CancelledError:
-            pass
+            logger.debug("session {} driver cancelled", self.id)
         except Exception as exc:
             self._driver_error = str(exc)
-            logger.exception("session driver crashed")
+            logger.exception("session {} driver crashed", self.id)
 
     async def shutdown(self) -> None:
         shutdown_task = self._shutdown_task
@@ -472,13 +472,17 @@ class _SessionLifecycle:
             try:
                 await asyncio.wait_for(self._driver_task, timeout=30.0)
             except TimeoutError:
+                logger.warning(
+                    "session {} driver did not stop within 30s, force-cancelling",
+                    self.id,
+                )
                 self._driver_task.cancel()
                 try:
                     await self._driver_task
-                except (asyncio.CancelledError, Exception):
-                    logger.debug("driver post-cancel cleanup")
+                except (asyncio.CancelledError, Exception) as exc:
+                    logger.debug("session {} driver post-cancel: {}", self.id, exc)
             except asyncio.CancelledError:
-                pass
+                logger.debug("session {} shutdown waiter cancelled", self.id)
         cleanup_errors: list[BaseException] = []
         try:
             await self.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent())

@@ -115,7 +115,6 @@ def compact_cmd(
     )
     strategy = LlmCompactionConfig(
         keep_last_turns=4,
-        reserve_tokens=20_000,
     )
     compactor = AgentSessionCompactor(
         AgentSessionConfig(

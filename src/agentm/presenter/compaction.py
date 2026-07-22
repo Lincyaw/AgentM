@@ -8,7 +8,10 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 import hashlib
+import json
 import time
+
+from loguru import logger
 
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.compaction import (
@@ -24,7 +27,7 @@ from agentm.core.abi.messages import (
     TextContent,
     thaw_json,
 )
-from agentm.core.abi.resource import ResourceStore
+from agentm.core.abi.resource import ResourceRef, ResourceStore
 from agentm.core.abi.session_api import AgentSessionConfig, LoopConfig
 from agentm.core.abi.store import (
     SessionMeta,
@@ -43,11 +46,8 @@ from agentm.core.lib.async_cancel import (
     OperationCancelledBySignal,
     await_known_outcome,
 )
-from agentm.extensions.builtin.llm_compaction import (
-    LlmCompactionConfig,
-    _serialize_message_for_summary,
-    _summary_ref,
-)
+from agentm.core.lib.tokens import truncate_text_tokens
+from agentm.extensions.builtin.llm_compaction import LlmCompactionConfig
 from agentm.storage.trajectory.resolve import (
     ResolvedTrajectoryStore,
     resolve_trajectory_store_or_create,
@@ -142,7 +142,9 @@ class AgentSessionCompactor:
         try:
             model = child.model
             if model is None:
-                raise RuntimeError("compaction session has no active provider")
+                raise RuntimeError(
+                    f"compaction session {child.session_id} has no active provider"
+                )
             messages_by_turn = _persisted_messages_by_turn(
                 source_nodes,
                 turns=selected_turns,
@@ -222,7 +224,10 @@ class TrajectoryCompactionPublisher:
             result.source_session_id,
         )
         if not turns:
-            raise RuntimeError("cannot publish compaction without committed turns")
+            raise RuntimeError(
+                f"session {result.source_session_id}: "
+                "cannot publish compaction without committed turns"
+            )
         source = result.source
         latest_turn = turns[-1]
         if (
@@ -360,29 +365,41 @@ class TrajectoryCompactionPublisher:
             head_id=head.head_id,
             metadata=metadata,
         )
-        await await_known_outcome(
-            asyncio.to_thread(
-                self._store.commit_compaction,
-                result.source_session_id,
-                TrajectoryCompactionCommit(
-                    boundary=boundary,
-                    advance_head=TrajectoryHeadAdvance(
-                        session_id=result.source_session_id,
-                        node_id=boundary.id,
-                        seq=boundary.seq,
-                        previous_node_id=head.node_id,
-                        head_id=head.head_id,
-                        branch_id=head.branch_id,
-                        root_session_id=head.root_session_id,
-                        parent_session_id=head.parent_session_id,
-                        agent_id=head.agent_id,
-                        is_sidechain=head.is_sidechain,
-                        updated_at=timestamp,
+        try:
+            await await_known_outcome(
+                asyncio.to_thread(
+                    self._store.commit_compaction,
+                    result.source_session_id,
+                    TrajectoryCompactionCommit(
+                        boundary=boundary,
+                        advance_head=TrajectoryHeadAdvance(
+                            session_id=result.source_session_id,
+                            node_id=boundary.id,
+                            seq=boundary.seq,
+                            previous_node_id=head.node_id,
+                            head_id=head.head_id,
+                            branch_id=head.branch_id,
+                            root_session_id=head.root_session_id,
+                            parent_session_id=head.parent_session_id,
+                            agent_id=head.agent_id,
+                            is_sidechain=head.is_sidechain,
+                            updated_at=timestamp,
+                        ),
+                        content_replacement_state=state,
                     ),
-                    content_replacement_state=state,
-                ),
+                )
             )
-        )
+        except Exception:
+            logger.warning(
+                "compaction commit failed after resource was persisted; "
+                "orphan_resource={} session={} expected_head_node={} "
+                "producer={}",
+                resource_uri,
+                result.source_session_id,
+                head.node_id,
+                result.producer_ref,
+            )
+            raise
         return replace(result, resource_ref=resource_uri)
 
 
@@ -433,7 +450,9 @@ async def _load_source_snapshot(
         meta, turns = await asyncio.to_thread(store.load, session_id)
         head = await asyncio.to_thread(store.get_head, session_id)
         if head is None:
-            raise RuntimeError("cannot compact a session without an active head")
+            raise RuntimeError(
+                f"session {session_id}: cannot compact without an active head"
+            )
         leaf_node_id = head.node_id or head.logical_parent_id
         nodes = (
             await asyncio.to_thread(
@@ -449,7 +468,10 @@ async def _load_source_snapshot(
         current_head = await asyncio.to_thread(store.get_head, session_id)
         if current_head == head and current_turns == turns:
             return meta, turns, head, nodes
-    raise RuntimeError("source trajectory changed while taking compaction snapshot")
+    raise RuntimeError(
+        f"session {session_id}: source trajectory changed while taking "
+        "compaction snapshot"
+    )
 
 
 def _persisted_messages_by_turn(
@@ -552,6 +574,121 @@ def _state_covered_position(
         (index for index, turn in enumerate(turns) if turn.id == turn_id),
         None,
     )
+
+
+def _serialize_message_for_summary(
+    message: AgentMessage,
+    *,
+    tool_result_max_tokens: int,
+    model_id: str,
+) -> list[str]:
+    from agentm.core.abi.messages import (
+        ImageContent,
+        OpaqueThinkingBlock,
+        ThinkingBlock,
+        ToolCallBlock,
+        UserMessage,
+    )
+
+    if isinstance(message, UserMessage):
+        sections: list[str] = []
+        text = "\n".join(
+            user_block.text
+            for user_block in message.content
+            if isinstance(user_block, TextContent)
+        )
+        if text:
+            sections.append(f"[User]: {text}")
+        sections.extend(
+            f"[User image]: mime_type={user_block.mime_type}; "
+            f"bytes={len(user_block.data)}"
+            for user_block in message.content
+            if isinstance(user_block, ImageContent)
+        )
+        return sections or ["[User]: (empty)"]
+
+    if isinstance(message, AssistantMessage):
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        opaque_thinking: list[str] = []
+        tool_calls: list[str] = []
+        for assistant_block in message.content:
+            if isinstance(assistant_block, TextContent):
+                text_parts.append(assistant_block.text)
+            elif isinstance(assistant_block, ThinkingBlock):
+                thinking_parts.append(assistant_block.text)
+            elif isinstance(assistant_block, OpaqueThinkingBlock):
+                opaque_thinking.append(assistant_block.provider)
+            elif isinstance(assistant_block, ToolCallBlock):
+                arguments = json.dumps(
+                    thaw_json(assistant_block.arguments),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                tool_calls.append(
+                    f"{assistant_block.name}({arguments}) "
+                    f"[tool_call_id={assistant_block.id}]"
+                )
+        sections = []
+        if thinking_parts:
+            sections.append("[Assistant thinking]: " + "\n".join(thinking_parts))
+        if opaque_thinking:
+            sections.append(
+                "[Assistant opaque thinking]: provider=" + ",".join(opaque_thinking)
+            )
+        if text_parts:
+            sections.append("[Assistant]: " + "\n".join(text_parts))
+        if tool_calls:
+            sections.append("[Assistant tool calls]: " + "; ".join(tool_calls))
+        return sections or ["[Assistant]: (empty)"]
+
+    sections = []
+    for result_block in message.content:
+        content_parts = [
+            part.text for part in result_block.content if isinstance(part, TextContent)
+        ]
+        content_parts.extend(
+            f"[image mime_type={part.mime_type}; bytes={len(part.data)}]"
+            for part in result_block.content
+            if isinstance(part, ImageContent)
+        )
+        content = "\n".join(content_parts) or "(empty)"
+        truncated = truncate_text_tokens(
+            content,
+            tool_result_max_tokens,
+            model=model_id,
+        )
+        if truncated.was_truncated:
+            content = (
+                truncated.text
+                + f"\n[... {truncated.truncated_tokens} more tokens truncated]"
+            )
+        status = "error" if result_block.is_error else "success"
+        sections.append(
+            f"[Tool result {status}; tool_call_id={result_block.tool_call_id}]: "
+            f"{content}"
+        )
+    return sections or ["[Tool result]: (empty)"]
+
+
+def _summary_ref(
+    *,
+    state_key: str,
+    session_id: str,
+    turn_id: str,
+    summary: str,
+) -> ResourceRef:
+    digest = hashlib.sha256(summary.encode("utf-8")).hexdigest()
+    path = (
+        f"{_path_token(state_key)}/{_path_token(session_id)}/"
+        f"{_path_token(turn_id)}-{digest[:16]}.txt"
+    )
+    return ResourceRef(namespace="summary", path=path)
+
+
+def _path_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
 
 
 __all__ = [

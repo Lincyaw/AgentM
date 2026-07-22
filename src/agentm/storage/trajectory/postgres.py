@@ -10,6 +10,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 
+from loguru import logger
 from sqlalchemy.engine import Connection, CursorResult, Engine
 
 from agentm.core.abi.codec import CodecRegistry
@@ -634,7 +635,10 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     meta = self._codec.deserialize_session_meta(  # type: ignore[arg-type]
                         dict(_json_mapping(raw))
                     )
-                except (ValueError, KeyError, TypeError):
+                except (ValueError, KeyError, TypeError) as exc:
+                    logger.warning(
+                        "skipping corrupt session row in list_sessions: {}", exc
+                    )
                     continue
                 if not isinstance(meta, SessionMeta):
                     continue

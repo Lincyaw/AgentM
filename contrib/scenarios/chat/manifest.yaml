@@ -18,7 +18,6 @@ extensions:
   - module: agentm.extensions.builtin.llm_compaction
     config:
       keep_last_turns: 4
-      reserve_tokens: 20000
   - module: agentm.extensions.builtin.message_patterns
 
   - module: agentm.extensions.builtin.file_tools

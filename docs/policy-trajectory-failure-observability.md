@@ -1,6 +1,9 @@
 # Structural Observability for Agent Failure Detection
 
-Status: analysis and design note
+Status: analysis and design note; superseded in part by
+`docs/policy-anomaly-detection.md` (two-stage positioning, coarse-grained
+action model replacing command enumeration, recall-under-budget calibration,
+and the corrected `DecideEvent` finding)
 
 Date: 2026-07-22
 
@@ -428,10 +431,12 @@ expressible as a live rule.
 
 ### No terminal policy decision point
 
-The runtime currently evaluates tool-call and turn channels, but does not use a
-candidate-stop or final-answer decision event as a policy gate. Session shutdown
-is too late to provide corrective feedback. Terminal closure rules require a
-decision point immediately before the agent commits to stopping.
+Correction (2026-07-22, later the same day): the mechanism exists in core.
+`DecideEvent` fires every turn with a `default_action` that becomes `Stop`
+when the model ends its turn, and handlers may return `Inject`
+(`goal.py` already uses this pattern). The policy engine simply does not
+subscribe to that channel yet. Session shutdown remains too late; the
+pre-stop gate is one subscription away, with no core change required.
 
 ## Proposed normalized observations
 
@@ -498,20 +503,15 @@ standalone counts.
 
 ## Recommended implementation order
 
-1. Fix validation command normalization, including wrappers and the languages
-   observed in these 12 trajectories.
-2. Persist runner, selector, scope, outcome, provenance, and repository
-   generation for every validation attempt.
-3. Relate each validation to mutations since the preceding relevant validation.
-4. Model unresolved failures and successful supersession by equal or broader
-   scope.
-5. Add a pre-stop decision channel so terminal closure can be observed or
-   enforced before shutdown.
-6. Add compound observe-mode rules for recency, resolution, breadth,
-   independence, and diversity.
-7. Evaluate those rules against both failed and successful trajectories before
-   enabling intervention.
-8. Only then consider critic activation or task-semantic review.
+Superseded by `docs/policy-anomaly-detection.md`. Steps 1 and 2 (validation
+command normalization and runner/selector/scope persistence) are dropped in
+favor of the coarse-grained action model: bash is assumed to only search and
+execute, and supersession, breadth, and provenance are approximated by three
+syntactic relations (template identity, argv subset, argv-path intersection
+with the session mutation set) plus the declared `purpose` field. Step 5 is
+resolved by subscribing to the existing `DecideEvent` channel. Steps 6 to 8
+are replaced by the two-stage design in which structural signals are cheap
+critic triggers rather than standalone rules.
 
 ## Evaluation criteria for new signals
 

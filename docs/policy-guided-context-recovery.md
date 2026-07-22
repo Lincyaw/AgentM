@@ -2,6 +2,12 @@
 
 Status: design note and experiment protocol
 
+Alignment note (2026-07-22): under the two-stage design in
+`docs/policy-anomaly-detection.md`, Stage 1 injection is gated by critic
+confirmation rather than sent directly on a structural transition; the raw
+structural signal never reaches the working model. The fork experiment below
+remains valid as an experiment on raw injection.
+
 This note records a proposed closed-loop response to structurally detected
 agent investigation churn. The motivating case is Harbor session
 `e3a4838f995540e6`, which completed normally but solved an adjacent OAuth

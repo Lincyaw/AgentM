@@ -1495,7 +1495,7 @@ async def test_sdk_compaction_ignores_model_max_output_tokens(tmp_path: Path) ->
             extensions=[
                 (
                     _LLM_COMPACTION,
-                    {"keep_last_turns": 1, "reserve_tokens": 20},
+                    {"keep_last_turns": 1},
                 )
             ],
             stream_fn=provider,

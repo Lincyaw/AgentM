@@ -12,14 +12,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import hashlib
-import json
 from collections.abc import Sequence
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.codec import serialize_message
 from agentm.core.abi.compaction import (
     CompactionPublisher,
     CompactionRequest,
@@ -38,15 +36,8 @@ from agentm.core.abi.context import (
 from agentm.core.abi.manifest import AtomInstallPriority
 from agentm.core.abi.messages import (
     AgentMessage,
-    AssistantMessage,
-    ImageContent,
-    OpaqueThinkingBlock,
-    TextContent,
-    ThinkingBlock,
-    ToolCallBlock,
     UserMessage,
     synthetic_user_message,
-    thaw_json,
 )
 from agentm.core.abi.resource import ResourceRef, ResourceStore
 from agentm.core.abi.roles import (
@@ -58,11 +49,9 @@ from agentm.core.abi.roles import (
 )
 from agentm.core.abi.session_api import AtomAPI
 from agentm.core.abi.store import TrajectoryStore
-from agentm.core.abi.stream import Model
 from agentm.core.abi.trajectory import ContentReplacementState, Turn
 from agentm.core.abi.trigger import CompactTrigger, TriggerRenderer
 from agentm.core.lib.async_cancel import await_known_outcome
-from agentm.core.lib.tokens import count_text_tokens, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
 
@@ -174,20 +163,7 @@ class LlmCompactionConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_messages: int | None = Field(
-        default=None,
-        ge=2,
-        description="Explicit message-count trigger; mutually exclusive with reserve_tokens.",
-    )
     keep_last_turns: int = Field(ge=0)
-    reserve_tokens: int | None = Field(
-        default=None,
-        ge=0,
-        description=(
-            "Context space reserved before compaction. This is independent of "
-            "the provider's maximum output-token setting."
-        ),
-    )
     tool_result_max_tokens: int = Field(
         default=8_000,
         gt=0,
@@ -211,18 +187,6 @@ class LlmCompactionConfig(BaseModel):
         min_length=1,
         description="Optional scenario-specific focus appended to summary prompts.",
     )
-
-    @model_validator(mode="after")
-    def _require_explicit_trigger(self) -> LlmCompactionConfig:
-        configured = sum(
-            value is not None for value in (self.max_messages, self.reserve_tokens)
-        )
-        if configured != 1:
-            raise ValueError(
-                "configure exactly one llm_compaction trigger: max_messages or "
-                "reserve_tokens"
-            )
-        return self
 
 
 MANIFEST = ExtensionManifest(
@@ -260,7 +224,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
         self._parent_session_id: str | None = None
         self._resource_store: ResourceStore | None = None
         self._trajectory_store: TrajectoryStore | None = None
-        self._model: Model | None = None
         self._renderers: dict[str, TriggerRenderer] = {}
         self._last_report = ProjectionReport(
             metadata={"policy": "llm_compaction", "decision": "not_run"}
@@ -276,7 +239,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
         trajectory_candidate = services.get(TRAJECTORY_STORE_SERVICE)
         if isinstance(trajectory_candidate, TrajectoryStore):
             self._trajectory_store = trajectory_candidate
-        self._model = ctx.model
         self._renderers = dict(ctx.trigger_renderers or {})
 
     async def transform(
@@ -333,37 +295,48 @@ class LlmCompactionPolicy(BindableContextPolicy):
 
         state = await self._load_state(turns)
         active = await self._active_summary(state, turns)
+
         if active is not None:
             tail = self._render_turns(turns[active.covered_position + 1 :])
             self._require_suffix(messages, tail)
-            projected = self._projected_messages(
-                active.message,
-                turns,
-                active.covered_position,
-            )
-            within_budget, budget_metadata = self._within_budget(projected, turns)
-            if within_budget and not force:
+
+        if not force:
+            if active is not None:
                 self._record_report(
                     turns,
                     active.covered_position,
                     active.ref,
                     decision="reuse",
-                    budget_metadata=budget_metadata,
                     compaction_session_id=active.compaction_session_id,
                 )
-                return projected
-
-        within_budget, budget_metadata = self._within_budget(messages, turns)
-        if within_budget and not force:
+                return self._projected_messages(
+                    active.message,
+                    turns,
+                    active.covered_position,
+                )
             self._last_report = ProjectionReport(
                 kept=_turn_range(turns),
                 metadata={
                     "policy": "llm_compaction",
-                    "decision": "within_budget",
-                    **budget_metadata,
+                    "decision": "pass_through",
                 },
             )
             return messages
+
+        previous_covered = active.covered_position if active is not None else -1
+        if active is not None and previous_covered >= len(turns) - 1:
+            self._record_report(
+                turns,
+                previous_covered,
+                active.ref,
+                decision="reuse",
+                compaction_session_id=active.compaction_session_id,
+            )
+            return self._projected_messages(
+                active.message,
+                turns,
+                previous_covered,
+            )
 
         self._require_dependencies()
         rendered = self._render_turns(turns)
@@ -373,36 +346,11 @@ class LlmCompactionPolicy(BindableContextPolicy):
                 "the committed turn sequence"
             )
 
-        previous_covered = active.covered_position if active is not None else -1
-        if active is not None and previous_covered >= len(turns) - 1:
-            self._record_report(
-                turns,
-                previous_covered,
-                active.ref,
-                decision="reuse",
-                budget_metadata={**budget_metadata, "forced": force},
-                compaction_session_id=active.compaction_session_id,
-            )
-            return self._projected_messages(
-                active.message,
-                turns,
-                previous_covered,
-            )
         target = max(
             previous_covered + 1,
             len(turns) - self._config.keep_last_turns - 1,
             0,
         )
-        max_messages = self._config.max_messages
-        if max_messages is not None:
-            while target < len(turns) - 1:
-                projected_count = self._projected_message_count(turns, target)
-                if projected_count <= max_messages:
-                    break
-                next_count = self._projected_message_count(turns, target + 1)
-                if next_count >= projected_count:
-                    break
-                target += 1
 
         covered_turn = turns[target]
         compactor, publisher = self._require_compaction_ports()
@@ -437,7 +385,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
             target,
             ref,
             decision="compact",
-            budget_metadata={**budget_metadata, "forced": force},
             compaction_session_id=compaction_session_id,
         )
         return self._projected_messages(
@@ -555,8 +502,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
             raise RuntimeError("llm_compaction requires a registered ResourceStore")
         if self._trajectory_store is None:
             raise RuntimeError("llm_compaction requires a TrajectoryStore")
-        if self._model is None:
-            raise RuntimeError("llm_compaction requires an active provider")
 
     def _require_compaction_ports(
         self,
@@ -598,17 +543,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
             *self._render_turns(turns[covered_position + 1 :]),
         ]
 
-    def _projected_message_count(
-        self,
-        turns: Sequence[Turn],
-        covered_position: int,
-    ) -> int:
-        return (
-            1
-            + len(self._preserved_user_messages(turns[: covered_position + 1]))
-            + len(self._render_turns(turns[covered_position + 1 :]))
-        )
-
     def _preserved_user_messages(
         self,
         turns: Sequence[Turn],
@@ -618,70 +552,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
             for message in self._render_turns(turns)
             if isinstance(message, UserMessage) and not message.meta.synthetic
         ]
-
-    def _within_budget(
-        self,
-        messages: Sequence[AgentMessage],
-        turns: Sequence[Turn],
-    ) -> tuple[bool, dict[str, str | int]]:
-        max_messages = self._config.max_messages
-        if max_messages is not None:
-            message_count = len(messages)
-            return (
-                message_count <= max_messages,
-                {
-                    "budget_kind": "messages",
-                    "message_count": message_count,
-                    "message_limit": max_messages,
-                },
-            )
-
-        model = self._model
-        if model is None:
-            raise RuntimeError("llm_compaction requires an active provider")
-        reserve_tokens = self._config.reserve_tokens
-        if reserve_tokens is None:
-            raise RuntimeError("llm_compaction reserve_tokens is not configured")
-        if reserve_tokens >= model.context_window:
-            raise RuntimeError(
-                "llm_compaction reserve_tokens must be smaller than the model "
-                f"context window ({reserve_tokens} >= {model.context_window})"
-            )
-        input_limit = model.context_window - reserve_tokens
-        estimated_input = self._estimate_next_input_tokens(messages, turns, model)
-        return (
-            estimated_input <= input_limit,
-            {
-                "budget_kind": "tokens",
-                "estimated_input_tokens": estimated_input,
-                "context_window_tokens": model.context_window,
-                "reserve_tokens": reserve_tokens,
-                "input_limit_tokens": input_limit,
-                "remaining_input_tokens": input_limit - estimated_input,
-            },
-        )
-
-    def _estimate_next_input_tokens(
-        self,
-        messages: Sequence[AgentMessage],
-        turns: Sequence[Turn],
-        model: Model,
-    ) -> int:
-        """Combine observed provider usage with the newly committed completion."""
-
-        projected_estimate = _estimate_message_tokens(messages, model.id)
-        latest = turns[-1]
-        if latest.meta.total_input_tokens <= 0:
-            return projected_estimate
-
-        if latest.meta.model_id not in (None, model.id):
-            return projected_estimate
-
-        completion = _turn_completion_messages(latest, self._renderers)
-        return latest.meta.total_input_tokens + _estimate_message_tokens(
-            completion,
-            model.id,
-        )
 
     @staticmethod
     def _require_suffix(
@@ -701,7 +571,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
         ref: ResourceRef,
         *,
         decision: str,
-        budget_metadata: dict[str, str | int | bool],
         compaction_session_id: str | None,
     ) -> None:
         self._last_report = ProjectionReport(
@@ -726,7 +595,6 @@ class LlmCompactionPolicy(BindableContextPolicy):
                     if compaction_session_id is not None
                     else {}
                 ),
-                **budget_metadata,
             },
         )
 
@@ -815,134 +683,6 @@ def _compaction_session_id(result: CompactionResult) -> str | None:
     return None
 
 
-def _serialize_message_for_summary(
-    message: AgentMessage,
-    *,
-    tool_result_max_tokens: int,
-    model_id: str,
-) -> list[str]:
-    if isinstance(message, UserMessage):
-        sections: list[str] = []
-        text = "\n".join(
-            user_block.text
-            for user_block in message.content
-            if isinstance(user_block, TextContent)
-        )
-        if text:
-            sections.append(f"[User]: {text}")
-        sections.extend(
-            f"[User image]: mime_type={user_block.mime_type}; "
-            f"bytes={len(user_block.data)}"
-            for user_block in message.content
-            if isinstance(user_block, ImageContent)
-        )
-        return sections or ["[User]: (empty)"]
-
-    if isinstance(message, AssistantMessage):
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        opaque_thinking: list[str] = []
-        tool_calls: list[str] = []
-        for assistant_block in message.content:
-            if isinstance(assistant_block, TextContent):
-                text_parts.append(assistant_block.text)
-            elif isinstance(assistant_block, ThinkingBlock):
-                thinking_parts.append(assistant_block.text)
-            elif isinstance(assistant_block, OpaqueThinkingBlock):
-                opaque_thinking.append(assistant_block.provider)
-            elif isinstance(assistant_block, ToolCallBlock):
-                arguments = json.dumps(
-                    thaw_json(assistant_block.arguments),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
-                tool_calls.append(
-                    f"{assistant_block.name}({arguments}) "
-                    f"[tool_call_id={assistant_block.id}]"
-                )
-        sections = []
-        if thinking_parts:
-            sections.append("[Assistant thinking]: " + "\n".join(thinking_parts))
-        if opaque_thinking:
-            sections.append(
-                "[Assistant opaque thinking]: provider=" + ",".join(opaque_thinking)
-            )
-        if text_parts:
-            sections.append("[Assistant]: " + "\n".join(text_parts))
-        if tool_calls:
-            sections.append("[Assistant tool calls]: " + "; ".join(tool_calls))
-        return sections or ["[Assistant]: (empty)"]
-
-    sections = []
-    for result_block in message.content:
-        content_parts = [
-            part.text for part in result_block.content if isinstance(part, TextContent)
-        ]
-        content_parts.extend(
-            f"[image mime_type={part.mime_type}; bytes={len(part.data)}]"
-            for part in result_block.content
-            if isinstance(part, ImageContent)
-        )
-        content = "\n".join(content_parts) or "(empty)"
-        truncated = truncate_text_tokens(
-            content,
-            tool_result_max_tokens,
-            model=model_id,
-        )
-        if truncated.was_truncated:
-            content = (
-                truncated.text
-                + f"\n[... {truncated.truncated_tokens} more tokens truncated]"
-            )
-        status = "error" if result_block.is_error else "success"
-        sections.append(
-            f"[Tool result {status}; tool_call_id={result_block.tool_call_id}]: "
-            f"{content}"
-        )
-    return sections or ["[Tool result]: (empty)"]
-
-
-def _turn_completion_messages(
-    turn: Turn,
-    renderers: dict[str, TriggerRenderer],
-) -> list[AgentMessage]:
-    """Provider-visible messages committed after the last request input."""
-
-    rendered = turn_to_messages(turn, renderers)
-    if turn.response is None:
-        return list(turn.outcome.injected)
-    response_position = next(
-        (index for index, message in enumerate(rendered) if message is turn.response),
-        len(rendered),
-    )
-    return rendered[response_position:]
-
-
-def _estimate_message_tokens(
-    messages: Sequence[AgentMessage],
-    model_id: str,
-) -> int:
-    provider_shape = []
-    for message in messages:
-        encoded = serialize_message(message)
-        provider_shape.append(
-            {
-                "role": encoded["role"],
-                "content": encoded["content"],
-            }
-        )
-    return count_text_tokens(
-        json.dumps(
-            provider_shape,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        model=model_id,
-    )
-
-
 def _covered_position(
     state: ContentReplacementState,
     turns: Sequence[Turn],
@@ -954,25 +694,6 @@ def _covered_position(
         (position for position, turn in enumerate(turns) if turn.id == covered_turn_id),
         None,
     )
-
-
-def _summary_ref(
-    *,
-    state_key: str,
-    session_id: str,
-    turn_id: str,
-    summary: str,
-) -> ResourceRef:
-    digest = hashlib.sha256(summary.encode("utf-8")).hexdigest()
-    path = (
-        f"{_path_token(state_key)}/{_path_token(session_id)}/"
-        f"{_path_token(turn_id)}-{digest[:16]}.txt"
-    )
-    return ResourceRef(namespace="summary", path=path)
-
-
-def _path_token(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
 
 
 def _turn_range(turns: Sequence[Turn]) -> tuple[TurnRange, ...]:
