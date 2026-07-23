@@ -20,6 +20,12 @@ from agentm import (
 )
 from agentm.config import DefaultSessionSpecResolver
 from agentm.control import SessionControlServer
+from agentm.core.abi.roles import (
+    RESOURCE_WRITER,
+    bind_environment_operations,
+    bind_resource_store,
+)
+from agentm.core.abi.services import ServiceRegistry
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import resolve_trajectory_store_or_create
 from agentm_toolbox import (
@@ -309,14 +315,15 @@ class ExternalAgentMAgent(BaseAgent):
             environment,
             HarborOpsConfig(work_dir="/"),
         )
+        host_services = ServiceRegistry()
+        bind_resource_store(host_services, resource_store)
+        host_services.bind(RESOURCE_WRITER, writer)
+        bind_environment_operations(host_services, operations)
         session_config = AgentSessionConfig(
             cwd="/",
             scenario=SCENARIO,
             scenario_loader=_scenario_loader(scenario_path),
             spec_resolver=spec_resolver,
-            environment_operations=operations,
-            resource_store=resource_store,
-            resource_writer=writer,
             trajectory_store=trajectory.store,
         )
         _sync_execution_metadata(context, environment)
@@ -327,6 +334,7 @@ class ExternalAgentMAgent(BaseAgent):
                     resume_session_id,
                     trajectory.store,
                     session_config,
+                    host_services=host_services,
                 )
             elif fork_request is not None:
                 source_session_id, fork_turn = fork_request
@@ -346,7 +354,8 @@ class ExternalAgentMAgent(BaseAgent):
                         root_session_id=root_session_id,
                         parent_session_id=None,
                         initial_turns=source_turns,
-                    )
+                    ),
+                    host_services=host_services,
                 )
                 session = await AgentSession.fork(
                     fork_source,
@@ -354,7 +363,7 @@ class ExternalAgentMAgent(BaseAgent):
                     purpose="harbor-fork",
                 )
             else:
-                session = await AgentSession.create(session_config)
+                session = await AgentSession.create(session_config, host_services=host_services)
         except BaseException as creation_error:
             cleanup_errors: list[BaseException] = []
             if fork_source is not None:

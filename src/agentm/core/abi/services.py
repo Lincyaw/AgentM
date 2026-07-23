@@ -19,6 +19,7 @@ from typing import Final, Generic, Literal, TypeVar, cast, overload
 
 T = TypeVar("T")
 ServiceScope = Literal["session", "tree"]
+"""Whether a service is local to one session or inherited by child sessions."""
 _INHERITED_SCOPES: Final[frozenset[ServiceScope]] = frozenset({"tree"})
 
 BindObserver = Callable[[str, object, ServiceScope], None]

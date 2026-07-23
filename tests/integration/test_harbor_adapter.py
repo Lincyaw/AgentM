@@ -30,6 +30,12 @@ from agentm.core.abi.messages import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from agentm.core.abi.roles import (
+    RESOURCE_WRITER,
+    bind_environment_operations,
+    bind_resource_store,
+)
+from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.stream import AssistantStreamEvent, MessageEnd
 from agentm.core.abi.tool import Tool
 from agentm.control import SessionControlServer, send_interrupt
@@ -50,6 +56,20 @@ from harbor.environments.base import (
 from harbor.models.agent.context import AgentContext
 
 _OutputCallback = Callable[[str, OutputStream], Awaitable[None]]
+
+
+def _harbor_host_services(
+    operations: object,
+    resource_store: object,
+    writer: object,
+) -> ServiceRegistry:
+    """Bind harbor's environment/resource boundaries for create/resume."""
+
+    services = ServiceRegistry()
+    bind_resource_store(services, resource_store)  # type: ignore[arg-type]
+    services.bind(RESOURCE_WRITER, writer)  # type: ignore[arg-type]
+    bind_environment_operations(services, operations)  # type: ignore[arg-type]
+    return services
 
 
 @dataclass
@@ -439,11 +459,9 @@ async def test_harbor_file_tools_share_resource_backed_behavior(
             scenario_loader=_load_scenario,
             stream_fn=provider,
             model=_model(),
-            environment_operations=operations,
-            resource_store=resources,
-            resource_writer=writer,
             trajectory_store=JsonlTrajectoryStore(tmp_path / "trajectory"),
-        )
+        ),
+        host_services=_harbor_host_services(operations, resources, writer),
     )
     try:
         transcript = await session.run("update the remote note")
@@ -490,11 +508,9 @@ async def test_harbor_host_interrupts_through_public_sdk(
             scenario_loader=_load_scenario,
             stream_fn=provider,
             model=_model(),
-            environment_operations=operations,
-            resource_store=resources,
-            resource_writer=writer,
             trajectory_store=store,
-        )
+        ),
+        host_services=_harbor_host_services(operations, resources, writer),
     )
     child: AgentSession | None = None
     with tempfile.TemporaryDirectory(prefix="agentm-harbor-") as inbox:
@@ -546,7 +562,7 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
                 'model = "stub-model"',
                 "",
                 "[atoms.llm_compaction]",
-                "reserve_tokens = 1000",
+                "tool_result_max_tokens = 1000",
             )
         ),
         encoding="utf-8",

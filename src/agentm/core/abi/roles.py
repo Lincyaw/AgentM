@@ -37,7 +37,7 @@ from agentm.core.abi.resource import (
     ResourceTxn,
     ResourceWriter,
 )
-from agentm.core.abi.services import ServiceRegistry, ServiceRole
+from agentm.core.abi.services import ServiceRegistry, ServiceRole, ServiceScope
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.telemetry import SessionTelemetry
 from agentm.core.abi.tool_executor import ToolExecutor
@@ -272,6 +272,24 @@ def bind_atom_catalog(
         services.bind(CATALOG_QUERY, catalog, replace=replace)
 
 
+def bind_environment_operations(
+    services: ServiceRegistry,
+    operations: EnvironmentOperations,
+    *,
+    scope: ServiceScope = "tree",
+    replace: bool = False,
+) -> None:
+    """Bind an EnvironmentOperations and expose its bash sub-port.
+
+    Tree-scoped by default so child sessions inherit a host-injected
+    environment; ``operations.bash`` is bound under the bash role at the same
+    scope.
+    """
+
+    services.bind(ENVIRONMENT_OPERATIONS, operations, replace=replace, scope=scope)
+    services.bind(BASH_OPERATIONS_ROLE, operations.bash, replace=replace, scope=scope)
+
+
 __all__ = [
     "ACTIVE_SET_FINGERPRINT_ROLE",
     "ACTIVE_SET_FINGERPRINT_SERVICE",
@@ -334,5 +352,6 @@ __all__ = [
     "VERSIONED_RESOURCE_STORE_ROLE",
     "VERSIONED_RESOURCE_STORE_SERVICE",
     "bind_atom_catalog",
+    "bind_environment_operations",
     "bind_resource_store",
 ]

@@ -28,15 +28,12 @@ from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
-    AtomCatalog,
     CatalogActiveSetInput,
     ResourceVersion,
     VersionedResourceStore,
 )
 from agentm.core.abi.errors import ExtensionLoadError
-from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
 from agentm.core.abi.messages import JsonValue, freeze_json
-from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.manifest import (
     AtomInstallPriority,
     ExtensionManifest,
@@ -44,37 +41,21 @@ from agentm.core.abi.manifest import (
     provided_capability_keys,
     requirement_key,
 )
-from agentm.core.abi.permission import PermissionPolicy
-from agentm.core.abi.provider import ProviderResolver
 from agentm.core.abi.provider import ProviderSessionIdentity
-from agentm.core.abi.resource import ResourceReader, ResourceStore, ResourceWriter
-from agentm.core.abi.tool_executor import ToolExecutor
-from agentm.core.abi.tool_orchestration import ToolOrchestrator
 from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_ROLE,
     ATOM_CATALOG_ROLE,
     ATOM_CATALOG_SERVICE,
-    BASH_OPERATIONS_ROLE,
-    EFFECT_SCOPE_ROLE,
-    ENVIRONMENT_OPERATIONS,
-    ENVIRONMENT_RESTORE_FAILURE_HANDLER,
     EXPERIMENT_SERVICE,
     LOOP_BUDGET_SERVICE,
-    PERMISSION_POLICY_ROLE,
-    PROVIDER_RESOLVER_SERVICE,
     RESOLVED_SESSION_SPEC_SERVICE,
-    RESOURCE_READER,
-    RESOURCE_WRITER,
     SCENARIO_LOADER_SERVICE,
-    TOOL_EXECUTOR,
-    TOOL_ORCHESTRATOR,
     TRAJECTORY_QUERY_STORE,
     TRAJECTORY_QUERY_STORE_SERVICE,
     TRAJECTORY_STORE_SERVICE,
     VERSIONED_RESOURCE_STORE_ROLE,
     VERSIONED_RESOURCE_STORE_SERVICE,
     bind_atom_catalog,
-    bind_resource_store,
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import (
@@ -440,7 +421,8 @@ def _compose_config_services(
 
     Single source for the experiment / loop-budget / scenario-loader /
     resolved-spec composition, so the root and child pipelines cannot diverge.
-    Capability boundaries are handled separately by ``_bind_boundaries``.
+    Capability boundaries are not config fields: a host binds them into
+    ``host_services`` before construction (see ``AgentSessionConfig``).
     """
 
     if config.experiment is not None:
@@ -465,72 +447,6 @@ def _compose_config_services(
             scope="session",
         )
     return resolved_spec
-
-
-def _bind_boundaries(
-    services: ServiceRegistry,
-    *,
-    resource_reader: ResourceReader | None = None,
-    resource_store: ResourceStore | None = None,
-    resource_writer: ResourceWriter | None = None,
-    tool_executor: ToolExecutor | None = None,
-    tool_orchestrator: ToolOrchestrator | None = None,
-    permission_policy: PermissionPolicy | None = None,
-    effect_scope: EffectScope | None = None,
-    environment_operations: EnvironmentOperations | None = None,
-    versioned_resource_store: VersionedResourceStore | None = None,
-    atom_catalog: AtomCatalog | None = None,
-    environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None,
-    provider_resolver: ProviderResolver | None = None,
-) -> None:
-    """Bind explicit capability boundaries into a session's service registry.
-
-    The single translation point from ``AgentSessionConfig``'s ergonomic typed
-    fields to service-role bindings. The registry is the one representation of
-    a session's boundaries: internal config objects no longer re-list them, and
-    the session constructor no longer copies them field by field.
-    """
-
-    if resource_reader is not None:
-        services.bind(RESOURCE_READER, resource_reader, replace=True)
-    if resource_store is not None:
-        bind_resource_store(services, resource_store, replace=True)
-    if resource_writer is not None:
-        services.bind(RESOURCE_WRITER, resource_writer, replace=True)
-    if tool_executor is not None:
-        services.bind(TOOL_EXECUTOR, tool_executor, replace=True)
-    if tool_orchestrator is not None:
-        services.bind(TOOL_ORCHESTRATOR, tool_orchestrator, replace=True)
-    if permission_policy is not None:
-        services.bind(PERMISSION_POLICY_ROLE, permission_policy, replace=True)
-    if effect_scope is not None:
-        services.bind(EFFECT_SCOPE_ROLE, effect_scope, replace=True)
-    if environment_operations is not None:
-        # Config-provided environment is tree-scoped so children inherit it,
-        # matching the pre-collapse register_operations(service_scope="tree").
-        services.bind(
-            ENVIRONMENT_OPERATIONS, environment_operations, replace=True, scope="tree"
-        )
-        services.bind(
-            BASH_OPERATIONS_ROLE,
-            environment_operations.bash,
-            replace=True,
-            scope="tree",
-        )
-    if versioned_resource_store is not None:
-        services.bind(
-            VERSIONED_RESOURCE_STORE_ROLE, versioned_resource_store, replace=True
-        )
-    if atom_catalog is not None:
-        bind_atom_catalog(services, atom_catalog, replace=True)
-    if environment_restore_failure_handler is not None:
-        services.bind(
-            ENVIRONMENT_RESTORE_FAILURE_HANDLER,
-            environment_restore_failure_handler,
-            replace=True,
-        )
-    if provider_resolver is not None:
-        services.register(PROVIDER_RESOLVER_SERVICE, provider_resolver, scope="tree")
 
 
 def _resolved_atom_config(
@@ -666,7 +582,7 @@ class SessionBuildConfig:
     cancel_signal: CancelSignal | None = None
 
     # Capability boundaries are pre-bound into ``services`` by the caller
-    # (via _bind_boundaries), not passed as fields here.
+    # (host_services / role bindings), not passed as fields here.
 
 
 async def _cleanup_failed_session(
@@ -820,21 +736,6 @@ async def create_from_config(
     if host_services is not None:
         services.update_from(host_services)
     resolved_spec = _compose_config_services(services, config)
-    _bind_boundaries(
-        services,
-        resource_reader=config.resource_reader,
-        resource_store=config.resource_store,
-        resource_writer=config.resource_writer,
-        tool_executor=config.tool_executor,
-        tool_orchestrator=config.tool_orchestrator,
-        permission_policy=config.permission_policy,
-        effect_scope=config.effect_scope,
-        environment_operations=config.environment_operations,
-        versioned_resource_store=config.versioned_resource_store,
-        atom_catalog=config.atom_catalog,
-        environment_restore_failure_handler=config.environment_restore_failure_handler,
-        provider_resolver=config.provider_resolver,
-    )
     trajectory_store = config.trajectory_store
     session = await create_session(
         SessionBuildConfig(
@@ -905,23 +806,9 @@ async def create_child_session(
     child_services.inherit_from(parent.services)
     _register_default_catalog_services(child_services)
     resolved_spec = _compose_config_services(child_services, config)
-    # Child inherits the parent's tree-scoped boundaries via inherit_from
-    # above; these bind only the child config's explicit overrides.
-    _bind_boundaries(
-        child_services,
-        resource_reader=config.resource_reader,
-        resource_store=config.resource_store,
-        resource_writer=config.resource_writer,
-        tool_executor=config.tool_executor,
-        tool_orchestrator=config.tool_orchestrator,
-        permission_policy=config.permission_policy,
-        effect_scope=config.effect_scope,
-        environment_operations=config.environment_operations,
-        versioned_resource_store=config.versioned_resource_store,
-        atom_catalog=config.atom_catalog,
-        environment_restore_failure_handler=config.environment_restore_failure_handler,
-        provider_resolver=config.provider_resolver,
-    )
+    # A child inherits the parent's tree-scoped boundaries via inherit_from
+    # above. Per-child boundary overrides are not a config surface: a host
+    # that needs different boundaries binds them into the parent's registry.
     provider_spec = (
         resolved_spec.provider if resolved_spec is not None else config.provider
     )

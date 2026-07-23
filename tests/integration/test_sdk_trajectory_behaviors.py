@@ -33,6 +33,12 @@ from agentm.core.abi.messages import (
     text_message,
 )
 from agentm.core.abi.provider import ProviderPromptCacheRequest
+from agentm.core.abi.roles import (
+    EFFECT_SCOPE_ROLE,
+    RESOURCE_WRITER,
+    bind_resource_store,
+)
+from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryDiagnostic,
@@ -59,6 +65,22 @@ from agentm.storage.resources import LocalResourceStore
 from agentm.storage.sql import create_sql_engine
 from agentm.storage.trajectory import JsonlTrajectoryStore, PostgresTrajectoryStore
 from tests.fixtures.custom_trigger import CustomTrigger
+
+
+def _resource_host_services(
+    resource_store: object,
+    resource_writer: object,
+    effect_scope: object | None = None,
+) -> ServiceRegistry:
+    """Bind resource/effect boundaries into a host registry for create/resume."""
+
+    services = ServiceRegistry()
+    bind_resource_store(services, resource_store)  # type: ignore[arg-type]
+    services.bind(RESOURCE_WRITER, resource_writer)  # type: ignore[arg-type]
+    if effect_scope is not None:
+        services.bind(EFFECT_SCOPE_ROLE, effect_scope)  # type: ignore[arg-type]
+    return services
+
 
 _CONTEXT_PROJECTION = "agentm.extensions.builtin.context_projection"
 _LLM_COMPACTION = "agentm.extensions.builtin.llm_compaction"
@@ -802,10 +824,12 @@ async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
             stream_fn=provider,
             model=_model(),
             trajectory_store=trajectory_store,
-            resource_store=resources,
-            resource_writer=resources,
-            effect_scope=LocalSnapshotEffectScope(snapshotter=snapshots),
-        )
+        ),
+        host_services=_resource_host_services(
+            resources,
+            resources,
+            LocalSnapshotEffectScope(snapshotter=snapshots),
+        ),
     )
     forked: AgentSession | None = None
     resumed: AgentSession | None = None
@@ -835,9 +859,11 @@ async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
                 ],
                 stream_fn=provider,
                 model=_model(),
-                resource_store=child_resources,
-                resource_writer=child_resources,
-                effect_scope=LocalSnapshotEffectScope(snapshotter=child_snapshots),
+            ),
+            host_services=_resource_host_services(
+                child_resources,
+                child_resources,
+                LocalSnapshotEffectScope(snapshotter=child_snapshots),
             ),
         )
         await resumed.run("write the branch file")
@@ -1506,9 +1532,8 @@ async def test_sdk_compaction_ignores_model_max_output_tokens(tmp_path: Path) ->
                 max_output_tokens=160,
             ),
             trajectory_store=_jsonl_store(tmp_path / "max-output-trajectory"),
-            resource_store=resources,
-            resource_writer=resources,
-        )
+        ),
+        host_services=_resource_host_services(resources, resources),
     )
     try:
         await session.run("question-one")

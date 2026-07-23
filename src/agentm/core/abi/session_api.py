@@ -19,24 +19,12 @@ import re
 from typing import Callable, Literal, Protocol, TypeAlias, runtime_checkable
 
 from agentm.core.abi.cancel import CancelReason, CancelSignal
-from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
-from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
 from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
-from agentm.core.abi.permission import PermissionPolicy
-from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
-from agentm.core.abi.tool_executor import ToolExecutor
-from agentm.core.abi.tool_orchestration import ToolOrchestrator
 from agentm.core.abi.provider import (
     ProviderConfig,
-    ProviderResolver,
     ProviderSessionIdentity,
-)
-from agentm.core.abi.resource import (
-    ResourceReader,
-    ResourceStore,
-    ResourceWriter,
 )
 from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.context import ContextPolicy
@@ -228,6 +216,13 @@ class AgentSessionConfig:
     Primary path: pass ``extensions`` directly. ``scenario`` is only a named
     indirection resolved through ``scenario_loader``. The core runtime does not
     own a built-in scenario registry; packaged helpers live outside core.
+
+    Capability boundaries (resource ports, tool execution, permission, effect
+    scope, catalogs, provider resolver) are not fields here. A host injects
+    them by binding roles into a ``ServiceRegistry`` and passing it as
+    ``host_services`` to ``create``/``resume`` (see ``agentm.core.abi.roles``
+    for the role descriptors and ``bind_*`` helpers). Child sessions inherit
+    their parent's tree-scoped boundaries.
     """
 
     cwd: str = ""
@@ -239,21 +234,9 @@ class AgentSessionConfig:
     extra_tools: list[Tool] = field(default_factory=list)
     atom_config_overrides: dict[str, dict[str, JsonValue]] = field(default_factory=dict)
     provider: ExtensionInput | None = None
-    provider_resolver: ProviderResolver | None = None
     stream_fn: StreamFn | None = None
     model: Model | None = None
     system: str | None = None
-    resource_reader: ResourceReader | None = None
-    resource_store: ResourceStore | None = None
-    resource_writer: ResourceWriter | None = None
-    tool_executor: ToolExecutor | None = None
-    tool_orchestrator: ToolOrchestrator | None = None
-    permission_policy: PermissionPolicy | None = None
-    effect_scope: EffectScope | None = None
-    environment_operations: EnvironmentOperations | None = None
-    environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
-    versioned_resource_store: VersionedResourceStore | None = None
-    atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
     trajectory_store: TrajectoryStore | None = None
     initial_turns: list[Turn] = field(default_factory=list)

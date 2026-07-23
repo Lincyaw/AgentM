@@ -39,6 +39,8 @@ from agentm.core.abi.roles import (
     RESOURCE_READER,
     RESOURCE_STORE,
     RESOURCE_WRITER,
+    bind_environment_operations,
+    bind_resource_store,
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import (
@@ -576,29 +578,30 @@ class Session(SessionRuntime):
 
             from agentm.core.runtime.session_factory import (
                 SessionBuildConfig,
-                _bind_boundaries,
                 create_session,
             )
 
             # Tool executor/orchestrator, permission policy, and the restore
             # handler are tree-scoped and already arrived via inherit_from
             # above; only the fork-transformed boundaries are re-bound here.
-            _bind_boundaries(
-                child_services,
-                resource_reader=child_resource_reader,
-                resource_store=child_resource_store,
-                resource_writer=child_resource_writer,
-                effect_scope=(
-                    environment_fork.effect_scope
-                    if environment_fork is not None
-                    else None
-                ),
-                environment_operations=(
-                    environment_fork.operations
-                    if environment_fork is not None
-                    else None
-                ),
-            )
+            if child_resource_reader is not None:
+                child_services.bind(
+                    RESOURCE_READER, child_resource_reader, replace=True
+                )
+            if child_resource_store is not None:
+                bind_resource_store(child_services, child_resource_store, replace=True)
+            if child_resource_writer is not None:
+                child_services.bind(
+                    RESOURCE_WRITER, child_resource_writer, replace=True
+                )
+            if environment_fork is not None:
+                child_services.bind(
+                    EFFECT_SCOPE_ROLE, environment_fork.effect_scope, replace=True
+                )
+                if environment_fork.operations is not None:
+                    bind_environment_operations(
+                        child_services, environment_fork.operations, replace=True
+                    )
 
             snapshot = source.composition_snapshot(include_provider_atoms=True)
             forked = await create_session(

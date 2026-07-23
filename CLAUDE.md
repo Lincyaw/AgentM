@@ -12,11 +12,15 @@ git config core.hooksPath .githooks  # enable tracked pre-commit hook once per c
 uv run ruff format src/ tests/     # auto-format
 uv run ruff check src/ tests/      # lint
 uv run mypy src/                   # type check
-uv run pytest --tb=short           # test
+uv run python -m pytest --tb=short # test
 agentm lint [paths...]             # project-specific AST linter (AM001-AM025)
 ```
 
-Run single test: `uv run pytest tests/unit/core/test_foo.py -k 'test_name'`
+Run tests as `uv run python -m pytest`, not bare `pytest` or `uv run pytest`: if a
+conda/global env is active, those resolve to a stray global pytest instead of the
+project `.venv`. The `python -m` form always uses the `.venv` interpreter.
+
+Run single test: `uv run python -m pytest tests/unit/core/test_foo.py -k 'test_name'`
 
 CI runs on push/PR to `main`: frozen sync → ruff check → mypy → pytest.
 
