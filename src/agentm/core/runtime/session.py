@@ -35,13 +35,10 @@ from agentm.core.abi.resource import (
 )
 from agentm.core.abi.roles import (
     EFFECT_SCOPE_ROLE,
-    PERMISSION_POLICY_ROLE,
     RESOLVED_SESSION_SPEC_SERVICE,
     RESOURCE_READER,
     RESOURCE_STORE,
     RESOURCE_WRITER,
-    TOOL_EXECUTOR,
-    TOOL_ORCHESTRATOR,
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import (
@@ -579,7 +576,28 @@ class Session(SessionRuntime):
 
             from agentm.core.runtime.session_factory import (
                 SessionBuildConfig,
+                _bind_boundaries,
                 create_session,
+            )
+
+            # Tool executor/orchestrator, permission policy, and the restore
+            # handler are tree-scoped and already arrived via inherit_from
+            # above; only the fork-transformed boundaries are re-bound here.
+            _bind_boundaries(
+                child_services,
+                resource_reader=child_resource_reader,
+                resource_store=child_resource_store,
+                resource_writer=child_resource_writer,
+                effect_scope=(
+                    environment_fork.effect_scope
+                    if environment_fork is not None
+                    else None
+                ),
+                environment_operations=(
+                    environment_fork.operations
+                    if environment_fork is not None
+                    else None
+                ),
             )
 
             snapshot = source.composition_snapshot(include_provider_atoms=True)
@@ -602,25 +620,6 @@ class Session(SessionRuntime):
                     trigger_renderers=snapshot.external_trigger_renderers,
                     codec=snapshot.codec,
                     provider_identity=provider_identity,
-                    resource_reader=child_resource_reader,
-                    resource_store=child_resource_store,
-                    resource_writer=child_resource_writer,
-                    tool_executor=source.services.get_role(TOOL_EXECUTOR),
-                    tool_orchestrator=source.services.get_role(TOOL_ORCHESTRATOR),
-                    permission_policy=source.services.get_role(PERMISSION_POLICY_ROLE),
-                    effect_scope=(
-                        environment_fork.effect_scope
-                        if environment_fork is not None
-                        else None
-                    ),
-                    environment_operations=(
-                        environment_fork.operations
-                        if environment_fork is not None
-                        else None
-                    ),
-                    environment_restore_failure_handler=(
-                        source._environment_restore_failure_handler()
-                    ),
                     services=child_services,
                     resolved_spec=resolved_spec,
                     max_turns=snapshot.max_turns,

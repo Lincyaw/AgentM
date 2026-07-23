@@ -35,7 +35,6 @@ from agentm.core.abi.codec import (
 )
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
-    VersionedResourceStore,
 )
 from agentm.core.abi.lifecycle import (
     EnvironmentRestoreFailureHandler,
@@ -49,17 +48,14 @@ from agentm.core.abi.messages import (
     freeze_json,
 )
 from agentm.core.abi.operations import BashOperations, EnvironmentOperations
-from agentm.core.abi.permission import PermissionAudience, PermissionPolicy
+from agentm.core.abi.permission import PermissionAudience
 from agentm.core.abi.provider import (
     ProviderConfig,
     ProviderResolver,
     ProviderSessionIdentity,
 )
-from agentm.core.abi.resource import ResourceReader, ResourceStore
 from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
 from agentm.core.abi.tool import Tool
-from agentm.core.abi.tool_executor import ToolExecutor
-from agentm.core.abi.tool_orchestration import ToolOrchestrator
 from agentm.core.abi.bus import EventBus, EventBusObserver, Handler
 from agentm.core.abi.context import (
     BindableContextPolicy,
@@ -88,15 +84,12 @@ from agentm.core.abi.roles import (
     PROVIDER_RESOLVER_SERVICE,
     PROVIDER_SESSION_IDENTITY,
     RESOLVED_SESSION_SPEC_SERVICE,
-    RESOURCE_READER,
     RESOURCE_WRITER,
     SESSION_TELEMETRY_ROLE,
     TOOL_ALLOWLIST_SERVICE,
     TOOL_EXECUTOR,
     TOOL_ORCHESTRATOR,
     TRAJECTORY_STORE_ROLE,
-    VERSIONED_RESOURCE_STORE_ROLE,
-    bind_resource_store,
 )
 from agentm.core.abi.session_api import (
     ExtensionSpec,
@@ -143,18 +136,15 @@ class SessionRuntimeConfig:
     tool_allowlist: Sequence[str] | None = None
     thinking: ThinkingLevel = "off"
     cancel_signal: CancelSignal | None = None
-    provider_resolver: ProviderResolver | None = None
-    tool_executor: ToolExecutor | None = None
-    tool_orchestrator: ToolOrchestrator | None = None
-    permission_policy: PermissionPolicy | None = None
-    resource_reader: ResourceReader | None = None
-    resource_store: ResourceStore | None = None
-    versioned_resource_store: VersionedResourceStore | None = None
-    environment_restore_failure_handler: EnvironmentRestoreFailureHandler | None = None
     provider_identity: ProviderSessionIdentity | None = None
     services: ServiceRegistry | None = None
     cwd: str = ""
     purpose: str = "root"
+
+    # Capability boundaries (resource ports, tool execution, permission,
+    # effect scope, catalogs, provider resolver) are NOT fields here: they are
+    # bound into ``services`` by the factory before construction. The registry
+    # is the single representation of a session's boundaries.
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,48 +280,8 @@ class SessionRuntime:
                 self._provider_identity,
                 replace=True,
             )
-        if runtime.provider_resolver is not None:
-            self.services.register(
-                PROVIDER_RESOLVER_SERVICE,
-                runtime.provider_resolver,
-                scope="tree",
-            )
-        if runtime.tool_executor is not None:
-            self.services.bind(TOOL_EXECUTOR, runtime.tool_executor, replace=True)
-        if runtime.tool_orchestrator is not None:
-            self.services.bind(
-                TOOL_ORCHESTRATOR,
-                runtime.tool_orchestrator,
-                replace=True,
-            )
-        elif self.services.get_role(TOOL_ORCHESTRATOR) is None:
+        if self.services.get_role(TOOL_ORCHESTRATOR) is None:
             self.services.bind(TOOL_ORCHESTRATOR, default_tool_orchestrator())
-        if runtime.permission_policy is not None:
-            self.services.bind(
-                PERMISSION_POLICY_ROLE,
-                runtime.permission_policy,
-                replace=True,
-            )
-        if runtime.resource_reader is not None:
-            self.services.bind(RESOURCE_READER, runtime.resource_reader, replace=True)
-        if runtime.resource_store is not None:
-            bind_resource_store(
-                self.services,
-                runtime.resource_store,
-                replace=True,
-            )
-        if runtime.versioned_resource_store is not None:
-            self.services.bind(
-                VERSIONED_RESOURCE_STORE_ROLE,
-                runtime.versioned_resource_store,
-                replace=True,
-            )
-        if runtime.environment_restore_failure_handler is not None:
-            self.services.bind(
-                ENVIRONMENT_RESTORE_FAILURE_HANDLER,
-                runtime.environment_restore_failure_handler,
-                replace=True,
-            )
         if runtime.tool_allowlist is not None:
             self.services.register(
                 TOOL_ALLOWLIST_SERVICE,
