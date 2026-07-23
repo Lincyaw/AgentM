@@ -27,14 +27,9 @@ from agentm.extensions import ExtensionManifest
 
 
 class StructuredOutputConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    result_schema: dict[str, object] = Field(default_factory=dict)
-
-    def __init__(self, **data: object) -> None:
-        if "schema" in data and "result_schema" not in data:
-            data["result_schema"] = data.pop("schema")
-        super().__init__(**data)
+    result_schema: dict[str, object] = Field(default_factory=dict, alias="schema")
 
     @model_validator(mode="after")
     def _require_schema(self) -> "StructuredOutputConfig":

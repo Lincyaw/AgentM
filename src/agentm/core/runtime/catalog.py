@@ -22,7 +22,7 @@ from agentm.core.abi.catalog import (
     ResourceVersion,
 )
 from agentm.core.abi.manifest import ExtensionManifest
-from agentm.core.abi.messages import JsonValue
+from agentm.core.abi.messages import JsonValue, thaw_json
 from agentm.core.abi.session_api import ExtensionSource
 
 
@@ -313,7 +313,11 @@ def _normalized_config(
         or not issubclass(schema, BaseModel)
     ):
         return config
-    return schema.model_validate(config).model_dump(mode="json")
+    # Extension configs arrive deep-frozen (nested mappingproxy/tuple);
+    # open object-typed fields keep those containers, and
+    # ``model_dump(mode="json")`` cannot serialize them. Thaw once here so
+    # no atom has to defend against frozen config internals itself.
+    return schema.model_validate(thaw_json(config)).model_dump(mode="json")
 
 
 def normalize_atom_config(
