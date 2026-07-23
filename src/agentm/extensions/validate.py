@@ -24,6 +24,10 @@ _FORBIDDEN_IMPORTS: dict[str, str] = {
     ),
     "agentm.cli": ("atoms must not depend on the CLI presenter"),
     "agentm.gateway": ("atoms must not depend on the gateway presenter"),
+    "agentm.presenter": (
+        "atoms must not depend on the presenter layer; shared view libraries "
+        "live outside it (e.g. agentm.trajectory_view)"
+    ),
     "agentm.extensions.builtin": (
         "atom-to-atom coupling is forbidden; communicate through AtomAPI "
         "services, events, or explicit extension dependencies"

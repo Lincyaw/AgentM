@@ -24,7 +24,7 @@ from policy_engine.source_parser import (
 from policy_engine.source_semantics import analyze_bash_segment
 from policy_engine.trace_indicators import load_policy_indicator_rows
 
-from agentm.presenter.trajectory import (
+from agentm.trajectory_view import (
     TraceQuery,
     TraceRow,
     TraceSnapshot,

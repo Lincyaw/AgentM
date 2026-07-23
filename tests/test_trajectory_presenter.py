@@ -7,7 +7,7 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.termination import ModelEndTurn, SignalAborted
 from agentm.core.abi.trajectory import Outcome, ToolRecord, Turn, TurnMeta
 from agentm.core.abi.trigger import ContinueTrigger, UserInput
-from agentm.presenter.trajectory import (
+from agentm.trajectory_view import (
     TraceQuery,
     build_trace_snapshot,
     default_trace_view_registry,

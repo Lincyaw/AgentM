@@ -1,6 +1,6 @@
 """Shared trajectory presenter app and extension points."""
 
-from agentm.presenter.trajectory.model import (
+from agentm.trajectory_view.model import (
     TraceMetrics,
     TraceQuery,
     TraceRecordStatus,
@@ -22,7 +22,7 @@ from agentm.presenter.trajectory.model import (
     parse_trace_query,
     trace_row_matches,
 )
-from agentm.presenter.trajectory.textual import (
+from agentm.trajectory_view.textual import (
     ResizableDataTable,
     TraceConsoleApp,
     TrajectoryDataSource,

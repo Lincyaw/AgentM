@@ -20,7 +20,7 @@ from textual.geometry import Size
 from textual.render import measure
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tab, Tabs
 
-from agentm.presenter.trajectory.model import (
+from agentm.trajectory_view.model import (
     TraceQuery,
     TraceRow,
     TraceSnapshot,

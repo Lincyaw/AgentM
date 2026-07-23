@@ -30,7 +30,7 @@ from agentm.core.abi.termination import SignalAborted
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.trigger import UserInput
 from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
-from agentm.presenter.trajectory.model import (
+from agentm.trajectory_view.model import (
     TraceRow,
     TraceSnapshot,
     TraceTurnSummary,
@@ -1077,7 +1077,7 @@ def view_cmd(
 
     if not legacy:
         try:
-            from agentm.presenter.trajectory import run_textual_viewer
+            from agentm.trajectory_view import run_textual_viewer
         except ImportError:
             stderr_console.print(
                 "[yellow]warning: Textual viewer unavailable; "

@@ -23,7 +23,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
-from agentm.presenter.trajectory.model import (
+from agentm.trajectory_view.model import (
     TraceRow,
     TraceSnapshot,
     TraceTurnSummary,

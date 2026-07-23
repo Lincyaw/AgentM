@@ -9,7 +9,7 @@ from typing import cast
 
 from sqlalchemy.engine import Connection, RowMapping
 
-from agentm.presenter.trajectory import TraceRow
+from agentm.trajectory_view import TraceRow
 
 from .ifg_regions import IfgRegionState, RegionReadQuery
 from .types import ToolArgs
