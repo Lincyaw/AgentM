@@ -544,6 +544,26 @@ def state(
         engine.dispose()
 
 
+@app.command()
+def closure(
+    session: str = typer.Option(..., "--session", "-s", help="Session ID"),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="Policy SQLite db path. Defaults to $AGENTM_HOME/policy_state/policy.db.",
+    ),
+) -> None:
+    """Compute loop-closure features (docs/policy-anomaly-detection.md)."""
+    from .loop_closure import extract_loop_closure
+
+    resolved_db_path = db_path or _db_path(session_id=session, cwd=None)
+    if not resolved_db_path.is_file():
+        console.print(f"[red]Policy database not found: {resolved_db_path}[/red]")
+        raise typer.Exit(1)
+    report = extract_loop_closure(resolved_db_path, session)
+    sys.stdout.write(json.dumps(report, indent=2, default=str) + "\n")
+
+
 def _session_where(
     session: str | None,
     *,

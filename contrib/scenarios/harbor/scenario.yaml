@@ -33,3 +33,7 @@ extensions:
         PYTHONPATH=/opt/agentm-toolbox python3 -m agentm_toolbox
       ifg_repository_remote_db_path: /logs/artifacts/agentm/policy/repository-index.sqlite
   - module: agentm.extensions.builtin.tool_purpose
+  # Runtime checklist critique (form one: structural triggers -> injected
+  # check questions). Disabled by default so baseline batches stay
+  # un-intervened; enable per run with AGENTM_CHECKLIST_WATCH_ENABLED=true.
+  - module: policy_engine.checklist_watch

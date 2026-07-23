@@ -30,15 +30,10 @@ rules:
     escalate_context: "ifg.intervention.summary()"
     reason: "The active intervention has exceeded its adaptive validation horizon."
 
-  - name: unchanged-anchor-reentry
-    on: tool_call_post
-    match: {tool: "bash|read|edit|write"}
-    when: "ifg.investigation.became_unchanged_reentry()"
-    effect: notify
-    mode: observe
-    escalate_context: "ifg.investigation.summary()"
-    reason: "Structural evidence: an unchanged repository anchor was re-entered."
-
+  # Removed: unchanged-anchor-reentry and repeated-region-reading fired on
+  # 7/7 failed and 4/4 passing sessions in the 2026-07-21 batch (zero
+  # discrimination; they track task complexity). See
+  # docs/policy-anomaly-detection.md.
   - name: investigation-anchor-churn
     on: tool_call_post
     match: {tool: read}
@@ -65,12 +60,3 @@ rules:
     mode: observe
     escalate_context: "ifg.investigation.summary()"
     reason: "Structural evidence: an investigation phase returned to an unchanged repository state."
-
-  - name: repeated-region-reading
-    on: tool_call_post
-    match: {tool: read}
-    when: "ifg.region_reads.became_redundant()"
-    effect: notify
-    mode: observe
-    escalate_context: "ifg.region_reads.latest_summary()"
-    reason: "The latest read added no active source-region coverage."
