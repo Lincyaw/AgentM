@@ -339,7 +339,7 @@ def _register_default_catalog_services(services: ServiceRegistry) -> None:
             VERSIONED_RESOURCE_STORE_SERVICE,
             InMemoryVersionedResourceStore(),
             VersionedResourceStore,
-            scope="host",
+            scope="tree",
         )
     if not services.has(ATOM_CATALOG_SERVICE):
         catalog = InMemoryAtomCatalog()
@@ -347,13 +347,13 @@ def _register_default_catalog_services(services: ServiceRegistry) -> None:
             ATOM_CATALOG_SERVICE,
             catalog,
             AtomCatalog,
-            scope="host",
+            scope="tree",
         )
         services.register(
             CATALOG_QUERY_SERVICE,
             catalog,
             AtomCatalogQuery,
-            scope="host",
+            scope="tree",
         )
 
 
@@ -366,7 +366,7 @@ def _register_default_query_store(
     services.register(
         TRAJECTORY_QUERY_STORE_SERVICE,
         TrajectoryStoreQueryAdapter(store),
-        scope="resource",
+        scope="tree",
     )
 
 
@@ -379,14 +379,14 @@ def _register_compaction_services(
             SESSION_COMPACTOR_SERVICE,
             config.session_compactor,
             SessionCompactor,
-            scope="host",
+            scope="tree",
         )
     if config.compaction_publisher is not None:
         services.register(
             COMPACTION_PUBLISHER_SERVICE,
             config.compaction_publisher,
             CompactionPublisher,
-            scope="host",
+            scope="tree",
         )
 
 
@@ -630,13 +630,13 @@ async def create_session(
         resolved_services.register(
             SCENARIO_LOADER_SERVICE,
             effective_loader,
-            scope="host",
+            scope="tree",
         )
     if provider_resolver is not None:
         resolved_services.register(
             PROVIDER_RESOLVER_SERVICE,
             provider_resolver,
-            scope="host",
+            scope="tree",
         )
     _register_default_catalog_services(resolved_services)
     _register_default_query_store(resolved_services, store)
@@ -698,7 +698,7 @@ async def create_session(
                 environment=environment_operations,
                 bash=environment_operations.bash,
                 replace=True,
-                service_scope="resource",
+                service_scope="tree",
             )
         if atom_catalog is not None:
             session.register_atom_catalog(atom_catalog, replace=True)
@@ -767,13 +767,13 @@ async def create_from_config(
         services.register(LOOP_BUDGET_SERVICE, config.loop_config, scope="session")
     _register_compaction_services(services, config)
     if config.scenario_loader is not None:
-        services.register(SCENARIO_LOADER_SERVICE, config.scenario_loader, scope="host")
+        services.register(SCENARIO_LOADER_SERVICE, config.scenario_loader, scope="tree")
     if config.environment_restore_failure_handler is not None:
         services.register(
             ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
             config.environment_restore_failure_handler,
             EnvironmentRestoreFailureHandler,
-            scope="host",
+            scope="tree",
         )
     resolved_spec = _resolve_session_spec(config)
     if resolved_spec is not None:
@@ -880,20 +880,20 @@ async def create_child_session(
         child_services.register(
             SCENARIO_LOADER_SERVICE,
             config.scenario_loader,
-            scope="host",
+            scope="tree",
         )
     if config.provider_resolver is not None:
         child_services.register(
             PROVIDER_RESOLVER_SERVICE,
             config.provider_resolver,
-            scope="host",
+            scope="tree",
         )
     if config.environment_restore_failure_handler is not None:
         child_services.register(
             ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
             config.environment_restore_failure_handler,
             EnvironmentRestoreFailureHandler,
-            scope="host",
+            scope="tree",
         )
     resolved_spec = _resolve_session_spec(config)
     if resolved_spec is not None:
@@ -1037,7 +1037,7 @@ async def create_child_session(
                 environment=config.environment_operations,
                 bash=config.environment_operations.bash,
                 replace=True,
-                service_scope="resource",
+                service_scope="tree",
             )
         if config.versioned_resource_store is not None:
             child.register_versioned_resource_store(

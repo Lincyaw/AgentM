@@ -25,7 +25,7 @@ _STORE_OWNER_SERVICE = "agentm.sdk.trajectory_store_owner"
 def _host_services_with_host_bash() -> ServiceRegistry:
     """Host defaults: shell execution pinned to the SDK host machine.
 
-    Registered at scope="host" so the whole session tree shares one instance
+    Registered at scope="tree" so the whole session tree shares one instance
     regardless of each session's own environment backend.
     """
     from agentm.environments.local import LocalBashOperations
@@ -35,7 +35,7 @@ def _host_services_with_host_bash() -> ServiceRegistry:
         HOST_BASH_OPERATIONS_SERVICE,
         LocalBashOperations(),
         BashOperations,
-        scope="host",
+        scope="tree",
     )
     return services
 
@@ -78,7 +78,7 @@ class AgentSession(Session):
             _STORE_OWNER_SERVICE,
             resolved,
             ResolvedTrajectoryStore,
-            scope="resource",
+            scope="tree",
         )
         try:
             session = await create_from_config(

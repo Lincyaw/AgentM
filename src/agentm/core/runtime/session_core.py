@@ -308,7 +308,7 @@ class _SessionLifecycle:
             self.services.register(
                 PROVIDER_RESOLVER_SERVICE,
                 runtime.provider_resolver,
-                scope="host",
+                scope="tree",
             )
         if runtime.tool_executor is not None:
             self.register_tool_executor(runtime.tool_executor, replace=True)
@@ -332,7 +332,7 @@ class _SessionLifecycle:
                 ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
                 runtime.environment_restore_failure_handler,
                 EnvironmentRestoreFailureHandler,
-                scope="host",
+                scope="tree",
             )
         if runtime.tool_allowlist is not None:
             self.services.register(
@@ -1075,7 +1075,7 @@ class _SessionResourceServices(_SessionProviders):
             service_name,
             writer,
             ResourceWriter,
-            scope="resource",
+            scope="tree",
         )
         self._emit_register_event(
             "resource_writer",
@@ -1102,7 +1102,7 @@ class _SessionResourceServices(_SessionProviders):
             service_name,
             reader,
             ResourceReader,
-            scope="resource",
+            scope="tree",
         )
         self._emit_register_event(
             "resource_reader",
@@ -1130,7 +1130,7 @@ class _SessionResourceServices(_SessionProviders):
             service_name,
             store,
             ResourceStore,
-            scope="resource",
+            scope="tree",
         )
         reader = self.services.get(RESOURCE_READER_SERVICE)
         if reader is None:
@@ -1172,7 +1172,7 @@ class _SessionRuntimeServices(_SessionResourceServices):
             service_name,
             executor,
             cast(type[ToolExecutor], ToolExecutor),
-            scope="host",
+            scope="tree",
         )
         self._emit_register_event(
             "tool_executor",
@@ -1199,7 +1199,7 @@ class _SessionRuntimeServices(_SessionResourceServices):
             service_name,
             orchestrator,
             cast(type[ToolOrchestrator], ToolOrchestrator),
-            scope="host",
+            scope="tree",
         )
         self._emit_register_event(
             "tool_orchestrator",
@@ -1229,7 +1229,7 @@ class _SessionRuntimeServices(_SessionResourceServices):
             service_name,
             policy,
             cast(type[PermissionPolicy], PermissionPolicy),
-            scope="host",
+            scope="tree",
         )
         self._emit_register_event(
             "permission_policy",
@@ -1256,7 +1256,7 @@ class _SessionRuntimeServices(_SessionResourceServices):
             service_name,
             store,
             cast(type[VersionedResourceStore], VersionedResourceStore),
-            scope="host",
+            scope="tree",
         )
         self._emit_register_event(
             "versioned_resource_store",
@@ -1310,14 +1310,14 @@ class _SessionRuntimeServices(_SessionResourceServices):
             service_name,
             catalog,
             cast(type[AtomCatalog], AtomCatalog),
-            scope="host",
+            scope="tree",
         )
         if isinstance(catalog, AtomCatalogQuery):
             self.services.register(
                 CATALOG_QUERY_SERVICE,
                 catalog,
                 AtomCatalogQuery,
-                scope="host",
+                scope="tree",
             )
         self._emit_register_event(
             "atom_catalog",

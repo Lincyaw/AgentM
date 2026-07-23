@@ -687,7 +687,7 @@ def install(api: AtomAPI, config: LlmCompactionConfig) -> None:
             SESSION_COMPACTOR_SERVICE,
             AgentSessionCompactor(store=store),
             SessionCompactor,
-            scope="host",
+            scope="tree",
         )
     if (
         store is not None
@@ -698,7 +698,7 @@ def install(api: AtomAPI, config: LlmCompactionConfig) -> None:
             COMPACTION_PUBLISHER_SERVICE,
             TrajectoryCompactionPublisher(store=store, resource_store=resource_store),
             CompactionPublisher,
-            scope="host",
+            scope="tree",
         )
 
 
