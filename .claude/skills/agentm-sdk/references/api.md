@@ -5,46 +5,29 @@ Read this when writing or editing atoms.
 
 ## Operations — the environment abstraction
 
-The `Operations` bundle is how atoms interact with the target environment
-(local host, sandbox, or any future backend). The `operations`
-atom selects the backend via config:
+Operations are how atoms act on the target environment (local host,
+sandbox, or any future backend). The `local_backend` atom binds the
+default local backend's services:
 
 ```yaml
-- module: agentm.extensions.builtin.operations
-  config:
-    backend: local
+- module: agentm.extensions.builtin.local_backend
 ```
 
-### When to use Operations
+Everything is consumed through the service registry with the role
+descriptors from `agentm.core.abi.roles`:
 
-**Use Operations** for LLM-triggered actions on the target environment:
-- Reading/writing user files -> `api.get_operations().file`
-- Running shell commands -> `api.get_operations().bash`
-
-**Don't use Operations** for agent infrastructure:
-- Reading skill files, prompt templates, config — host resources
-- Writing to `.agentm/` internal state (catalog, traces)
-
-### FileOperations
-
-```python
-file_ops = api.get_operations().file
-
-data = await file_ops.read_file(path)           # bytes
-stat = await file_ops.stat(path)                # FileStat(size, mtime_ns, is_file, is_dir)
-exists = await file_ops.access(path)            # bool
-is_file = await file_ops.is_file(path)          # bool
-is_dir = await file_ops.is_dir(path)            # bool
-entries = await file_ops.list_dir(path)         # list[str]
-await file_ops.write_file(path, data)           # write bytes
-await file_ops.makedirs(path, exist_ok=True)    # create directories
-```
+- Shell commands → `BASH_OPERATIONS_SERVICE` (`operations:bash`)
+- Host-pinned shell (never the sandbox) → `HOST_BASH_OPERATIONS`
+- Environment bundle (snapshot/close) → `ENVIRONMENT_OPERATIONS`
+- File reads → `RESOURCE_READER` role
+- Git-tracked file writes → `RESOURCE_WRITER` role
 
 ### BashOperations
 
 ```python
-bash_ops = api.get_operations().bash
+from agentm.core.abi import BASH_OPERATIONS_SERVICE, BashOperations
 
+bash_ops = api.services.require(BASH_OPERATIONS_SERVICE, BashOperations)
 result = await bash_ops.exec(
     cmd, cwd=api.ctx.cwd, timeout=30.0,
     env={"KEY": "val"},       # optional
@@ -57,29 +40,26 @@ result = await bash_ops.exec(
 ### Common mistakes
 
 ```python
-# WRONG — bypasses the Operations abstraction
-stat = os.stat(path)
+# WRONG — bypasses the environment abstraction
 with open(path, "rb") as f: data = f.read()
 subprocess.run(["grep", "-r", pattern, "."])
 
 # RIGHT
-stat = await file_ops.stat(path)
-data = await file_ops.read_file(path)
+writer = api.services.require_role(RESOURCE_WRITER)
+data = await writer.read(path)
 result = await bash_ops.exec(f"grep -r {shlex.quote(pattern)} .", cwd=api.ctx.cwd)
 ```
 
 ### Lazy-resolve pattern
 
-At install time, Operations may not be registered yet. Defer to first use:
+Declare hard dependencies in `MANIFEST.requires` (the solver orders
+installs so they exist), and resolve per call rather than caching the
+instance at install — the binding may be replaced over the session's
+lifetime:
 
 ```python
-def install(api: AtomAPI, config: Mapping[str, JsonValue]) -> None:
-    _cache: list[FileOperations] = []
-
-    def _get_file_ops() -> FileOperations:
-        if not _cache:
-            _cache.append(api.get_operations().file)
-        return _cache[0]
+def _bash_ops() -> BashOperations:
+    return api.services.require(BASH_OPERATIONS_SERVICE, BashOperations)
 ```
 
 ---
@@ -132,7 +112,9 @@ produces output most providers reject.
 For writes to user-visible files (code, memory, artifacts):
 
 ```python
-writer = api.get_resource_writer()
+from agentm.core.abi import RESOURCE_WRITER
+
+writer = api.services.require_role(RESOURCE_WRITER)
 
 await writer.write(path, content_bytes, rationale="why")
 await writer.replace(path, old_bytes, new_bytes, rationale="why")

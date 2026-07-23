@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast, get_args
+from typing import Final, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict
 
@@ -58,7 +58,9 @@ class CapabilityRef:
         return f"{self.kind}:{self.name}"
 
 
-_PARSEABLE_KINDS: frozenset[str] = frozenset(get_args(CapabilityKind)) - {"unknown"}
+_PARSEABLE_KINDS: Final[frozenset[str]] = frozenset(get_args(CapabilityKind)) - {
+    "unknown"
+}
 
 
 def parse_capability_ref(value: str) -> CapabilityRef:

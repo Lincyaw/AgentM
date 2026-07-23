@@ -362,14 +362,22 @@ def _check_private_in_all(tree: ast.Module, path: str) -> list[Issue]:
 
 
 def _check_atom_raw_io(tree: ast.Module, path: str, file_path: Path) -> list[Issue]:
-    """AM004: open()/subprocess in atom files."""
+    """AM004: open()/subprocess in atom files.
+
+    Atom code is builtin extensions plus contrib extension workspace members
+    (everything under ``contrib/extensions/`` is atom-reachable, mirroring the
+    load-time validator's package rule). Scenario packages stay out: they mix
+    atoms with host-level adapters, and the load-time validator covers their
+    mounted atom modules.
+    """
     parts = file_path.parts
-    is_atom = (
+    is_builtin_atom = (
         "extensions" in parts
         and "builtin" in parts
         and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name)
     )
-    if not is_atom:
+    is_contrib_atom = "contrib" in parts and "extensions" in parts
+    if not (is_builtin_atom or is_contrib_atom):
         return []
 
     issues: list[Issue] = []

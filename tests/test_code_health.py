@@ -29,6 +29,28 @@ def test_code_health_rejects_core_atom_policy(tmp_path: Path) -> None:
     assert "AM017" in rules
 
 
+def test_code_health_flags_subprocess_in_contrib_atom(tmp_path: Path) -> None:
+    rules = _issues_for(
+        tmp_path,
+        "import subprocess\n\ndef run() -> None:\n    subprocess.run(['ls'])\n",
+        relative="contrib/extensions/policy/src/policy_engine/tooling.py",
+    )
+    assert "AM004" in rules
+
+
+def test_code_health_allows_subprocess_in_host_code(tmp_path: Path) -> None:
+    for relative in (
+        "src/agentm/cli/_tools.py",
+        "contrib/scenarios/harbor/src/agentm_harbor/host_adapter.py",
+    ):
+        rules = _issues_for(
+            tmp_path,
+            "import subprocess\n\ndef run() -> None:\n    subprocess.run(['ls'])\n",
+            relative=relative,
+        )
+        assert "AM004" not in rules
+
+
 def test_code_health_rejects_scenario_module_preload(tmp_path: Path) -> None:
     rules = _issues_for(
         tmp_path,

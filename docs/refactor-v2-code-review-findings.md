@@ -129,8 +129,8 @@ Move parsing/execution behind a host or toolbox service exposed through `AtomAPI
 
 - [x] Policy atoms do not directly call subprocess or raw filesystem APIs for this path.
 - [x] The execution is routed through an auditable runtime service or Operations port.
-- [ ] AM004 detects equivalent violations in both built-in and contrib atoms.
-- [ ] A negative linter fixture demonstrates that ordinary non-atom host code remains allowed.
+- [x] AM004 detects equivalent violations in both built-in and contrib atoms.
+- [x] A negative linter fixture demonstrates that ordinary non-atom host code remains allowed.
 
 ### Decision notes
 
@@ -151,8 +151,14 @@ Resolved on 2026-07-22.
 - The `exec_sync` bridge handles both the event-loop thread (offloads to a
   helper thread, matching the previous blocking behavior) and worker threads
   (`asyncio.run` directly).
-- AM004 contrib-path detection and the negative linter fixture remain open
-  follow-ups; tracked here rather than blocking this repair.
+- 2026-07-23: AM004 now recognizes contrib extension workspace members
+  (everything under ``contrib/extensions/``) as atom code, mirroring the
+  load-time validator's package rule; scenario packages stay out because they
+  mix atoms with host adapters. Positive (contrib atom subprocess) and
+  negative (CLI/host-adapter subprocess) fixtures live in
+  ``tests/test_code_health.py``. The deliberate offline-CLI subprocess
+  fallback in ``source_parser._run_outline`` carries a precise
+  ``code-health: ignore[AM004]``.
 
 ## RV2-007: The presenter owns concrete compaction policy details
 
@@ -272,8 +278,9 @@ These are not promoted to behavioral findings yet, but they indicate growing con
 | --- | --- |
 | `_PolicyEngineRuntime` | 44 methods; threshold is 25 |
 | `PolicyPersistence` | 28 methods; threshold is 25 |
+| `SessionRuntime` | 50 methods; threshold is 25 — the honest count after the 2026-07-23 mixin collapse (the six mixins previously hid it); next split axis is extracting the provider subsystem as a collaborator object, not re-paging into mixins |
 | `contrib/extensions/policy/src/policy_engine/trace_view.py` | 2,629 lines; threshold is 1,500 |
-| `src/agentm/code_health.py` | 1,729 lines; threshold is 1,500 |
-| `src/agentm/core/runtime/reaction.py` | 1,577 lines; threshold is 1,500 |
+| `src/agentm/code_health.py` | 1,736 lines; threshold is 1,500 |
+| `src/agentm/core/runtime/reaction.py` | 1,581 lines; threshold is 1,500 |
 
 If one of these areas must change to resolve a finding, prefer extracting a cohesive responsibility rather than adding another conditional path to the existing large unit.

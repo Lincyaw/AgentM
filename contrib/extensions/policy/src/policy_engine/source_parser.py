@@ -854,14 +854,16 @@ def _run_outline(
     import subprocess  # noqa: PLC0415
 
     try:
-        completed = subprocess.run(
+        # Offline CLI fallback only; live sessions always run through the
+        # host bash service installed via set_host_exec.
+        completed = subprocess.run(  # code-health: ignore[AM004]
             list(argv),
             check=False,
             capture_output=True,
             text=True,
             timeout=timeout,
         )
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired as exc:  # code-health: ignore[AM004]
         raise TimeoutError(str(exc)) from exc
     return HostExecResult(
         stdout=completed.stdout,
