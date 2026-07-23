@@ -82,10 +82,24 @@ MANIFEST = ExtensionManifest(
     priority=AtomInstallPriority.POLICY,
 )
 
+# CALIBRATION DEBT (tracked in docs/policy-anomaly-detection.md, "Runtime
+# watcher heuristics"): the two constants below are judgment calls, not
+# calibrated values, and each has a known blind spot.
+#
+# _MUTATING_TOOLS binds the builtin file_tools names; mutations made via
+# bash write-redirects are invisible to the watcher (the write-leak gap
+# the coarse action model already monitors as Q1).
 _MUTATING_TOOLS = frozenset({"write", "edit"})
+# _GENERIC_SEGMENTS is a hand-picked stoplist for scope extraction; a
+# repository whose real package is literally named e.g. ``lib`` loses its
+# scope token. Replacement plan: derive genericness from cross-repo path
+# frequency once the calibration corpus is large enough.
 _GENERIC_SEGMENTS = frozenset(
     {"src", "lib", "test", "tests", "crates", "packages", "apps", "internal", "pkg"}
 )
+# Measured exclusions, not guesses: 126/127 removed the Prefect/Electric
+# F1 false fires (2026-07-22 calibration); pytest exit 4 is handled in
+# find_unresolved_reds (Paperless lesson, mirrors loop_closure).
 _ENV_PROBE_EXITS = frozenset({126, 127})
 
 

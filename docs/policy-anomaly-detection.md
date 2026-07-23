@@ -199,6 +199,29 @@ stage-1 cue (F4 was predicted, measured absent, because pre-existing package
 tests were executed and passed). Stage 1 cannot route it; only periodic or
 sampled critic review could.
 
+## Runtime watcher heuristics (checklist_watch): provenance and debts
+
+The live watcher (`policy_engine.checklist_watch`) evaluates its triggers
+with pure token algebra plus a small set of heuristics. None encode a
+runner or a task; each is listed here with its provenance and the data
+that retires or falsifies it. The inventory is the contract: a heuristic
+not on this list should not exist in the watcher.
+
+| Heuristic | Provenance | Replacement / falsifier |
+| --- | --- | --- |
+| `test` token marks a validation segment | purpose-lexicon stance above; monitored, not trusted | declared `purpose` field once batches carry it; falsified by pass-side fires on non-validation commands |
+| selector shape (bare positional, non-flag, non-option-value) | turborepo/electric replay | pass-side calibration: fires on passing sessions with legitimate positional args would demote it |
+| exit 126/127 = environment probe | measured: removed Prefect/Electric F1 false fires (2026-07-22) | stands unless a genuine failure ships with these codes |
+| pytest exit 4 = mistyped selector, not red | measured: Paperless batch (mirrors `loop_closure`) | same |
+| wrapper unwrap list (`uv run`, `python -m`, env assigns) | Harbor supersession miss; shared with `loop_closure` | grows only on a measured miss, in `loop_closure`, never forked |
+| `_GENERIC_SEGMENTS` path stoplist for scope extraction | hand-picked; **uncalibrated debt** | derive genericness from cross-repo path frequency over the calibration corpus |
+| `_MUTATING_TOOLS` = builtin `write`/`edit` | binds file_tools names; bash write-redirect mutations are invisible (the Q1 write-leak gap) | consume the Q1 leak rate; a high-leak session should widen or suspend the narrow-only trigger |
+
+Command-shape coverage is honest but narrow: the token rules are
+runner-free by construction, yet field-validated only on cargo and mix
+shapes so far; pytest/go/jest shapes ride the same rules unvalidated
+until a batch exercises them.
+
 ## Trigger points
 
 - **Pre-stop is the first-class trigger point.** The mechanism already
