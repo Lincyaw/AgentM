@@ -18,6 +18,12 @@ _FORBIDDEN_IMPORTS: dict[str, str] = {
     "agentm.core._internal": (
         "atoms must not depend on constitution-private internals"
     ),
+    "agentm.sdk": (
+        "atoms must not depend on the presenter layer; spawn sessions through "
+        "api.spawn_child_session and expose capabilities as services"
+    ),
+    "agentm.cli": ("atoms must not depend on the CLI presenter"),
+    "agentm.gateway": ("atoms must not depend on the gateway presenter"),
     "agentm.extensions.builtin": (
         "atom-to-atom coupling is forbidden; communicate through AtomAPI "
         "services, events, or explicit extension dependencies"

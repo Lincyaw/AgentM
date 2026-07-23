@@ -520,6 +520,9 @@ class SpawnedSession(Protocol):
     @property
     def session_id(self) -> str: ...
 
+    @property
+    def model(self) -> Model | None: ...
+
     async def prompt(
         self,
         text: str,

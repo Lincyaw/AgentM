@@ -108,10 +108,6 @@ from agentm.core.abi.trigger import (
 )
 from agentm.core.runtime.session import Session
 from agentm.sdk import AgentSession
-from agentm.presenter.compaction import (
-    AgentSessionCompactor,
-    TrajectoryCompactionPublisher,
-)
 from agentm.scenarios import (
     builtin_scenario_loader,
     load_scenario_manifest,
@@ -121,7 +117,6 @@ from agentm.scenarios import (
 __all__ = [
     "ActiveSetFingerprint",
     "AgentSession",
-    "AgentSessionCompactor",
     "AgentSessionConfig",
     "AtomActivation",
     "AtomCatalog",
@@ -192,7 +187,6 @@ __all__ = [
     "TrajectoryNodeSort",
     "TrajectoryQueryStore",
     "TrajectoryStore",
-    "TrajectoryCompactionPublisher",
     "Trigger",
     "TriggerMetadata",
     "TriggerPriority",

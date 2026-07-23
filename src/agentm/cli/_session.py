@@ -9,15 +9,11 @@ import sys
 
 import typer
 
-from agentm import CompactionRequest
+from agentm import CompactionRequest, CompactionResult
 from agentm.cli._display import EXIT_ERROR, EXIT_NOT_FOUND, is_tty, stderr_console
 from agentm.control import (
     InterruptDeliveryError,
     send_interrupt,
-)
-from agentm.extensions.builtin.llm_compaction import (
-    AgentSessionCompactor,
-    LlmCompactionConfig,
 )
 
 
@@ -102,6 +98,59 @@ def interrupt_cmd(
         )
 
 
+_COMPACTION_HOST_EXTENSIONS = [
+    ("agentm.extensions.builtin.local_backend", {}),
+    ("agentm.extensions.builtin.llm_compaction", {"keep_last_turns": 4}),
+]
+
+
+async def _run_compact(session_id: str) -> CompactionResult:
+    """Compact a stored session via a minimal compaction-host session.
+
+    The CLI composes a session containing the compaction atom and consumes
+    its SESSION_COMPACTOR service — the sanctioned external-callability
+    path; it never imports atom internals.
+    """
+    from agentm.config import DefaultSessionSpecResolver
+    from agentm.core.abi.roles import SESSION_COMPACTOR
+    from agentm.core.abi.session_api import AgentSessionConfig
+    from agentm.sdk import AgentSession
+    from agentm.storage.trajectory.resolve import resolve_trajectory_store_or_create
+
+    project_candidate = Path.cwd() / "agentm.toml"
+    resolver = DefaultSessionSpecResolver(
+        project_config=(str(project_candidate) if project_candidate.exists() else None),
+        user_config=None,
+    )
+    resolved = resolve_trajectory_store_or_create(str(Path.cwd()))
+    try:
+        config = AgentSessionConfig(
+            cwd=str(Path.cwd()),
+            extensions=list(_COMPACTION_HOST_EXTENSIONS),
+            spec_resolver=resolver,
+            trajectory_store=resolved.store,
+            purpose="compaction_host",
+        )
+        spec = resolver.resolve(config)
+        if spec.provider is None:
+            raise RuntimeError(
+                "no default model configured; set default_provider in config.toml"
+            )
+        session = await AgentSession.create(config)
+        try:
+            compactor = session.services.require_role(SESSION_COMPACTOR)
+            return await compactor.compact(
+                CompactionRequest(
+                    source_session_id=session_id,
+                    options={"keep_last_turns": 4},
+                )
+            )
+        finally:
+            await session.shutdown()
+    finally:
+        resolved.close()
+
+
 @session_app.command("compact")
 def compact_cmd(
     session_id: str = typer.Argument(..., metavar="SESSION_ID"),
@@ -109,22 +158,8 @@ def compact_cmd(
 ) -> None:
     """Generate an auditable summary from committed session history."""
     chosen_format = _select_format(fmt)
-    from agentm.storage.trajectory.resolve import resolve_trajectory_store_or_create
-
-    resolved = resolve_trajectory_store_or_create(str(Path.cwd()))
-    strategy = LlmCompactionConfig(
-        keep_last_turns=4,
-    )
-    compactor = AgentSessionCompactor(store=resolved.store)
     try:
-        result = asyncio.run(
-            compactor.compact(
-                CompactionRequest(
-                    source_session_id=session_id,
-                    options=strategy.model_dump(mode="json"),
-                )
-            )
-        )
+        result = asyncio.run(_run_compact(session_id))
     except (FileNotFoundError, KeyError) as exc:
         _emit_error(
             session_id=session_id,

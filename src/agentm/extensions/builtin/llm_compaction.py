@@ -10,7 +10,7 @@ history is recoverable through the ``[Turn N]`` references consumed by the
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 import hashlib
 import json
@@ -59,7 +59,12 @@ from agentm.core.abi.roles import (
     SESSION_COMPACTOR_SERVICE,
     TRAJECTORY_STORE_SERVICE,
 )
-from agentm.core.abi.session_api import AgentSessionConfig, AtomAPI, LoopConfig
+from agentm.core.abi.session_api import (
+    AgentSessionConfig,
+    AtomAPI,
+    LoopConfig,
+    SpawnedSession,
+)
 from agentm.core.abi.store import (
     SessionMeta,
     TrajectoryCompactionCommit,
@@ -685,7 +690,7 @@ def install(api: AtomAPI, config: LlmCompactionConfig) -> None:
     if store is not None and not api.services.has(SESSION_COMPACTOR_SERVICE):
         api.services.register(
             SESSION_COMPACTOR_SERVICE,
-            AgentSessionCompactor(store=store),
+            AgentSessionCompactor(store=store, spawn=api.spawn_child_session),
             SessionCompactor,
             scope="tree",
         )
@@ -707,13 +712,22 @@ def install(api: AtomAPI, config: LlmCompactionConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+SpawnSession = Callable[[AgentSessionConfig], Awaitable[SpawnedSession]]
+
+
 class AgentSessionCompactor:
-    """Generate a summary artifact via a one-turn child session."""
+    """Generate a summary artifact via a one-turn child session.
 
-    __slots__ = ("_store",)
+    ``spawn`` is the session-creation port (normally the owning session's
+    ``spawn_child_session``); the atom never imports a presenter to
+    cold-start sessions.
+    """
 
-    def __init__(self, *, store: TrajectoryStore) -> None:
+    __slots__ = ("_spawn", "_store")
+
+    def __init__(self, *, store: TrajectoryStore, spawn: SpawnSession) -> None:
         self._store = store
+        self._spawn = spawn
 
     async def compact(
         self,
@@ -751,27 +765,17 @@ class AgentSessionCompactor:
         )
         selected_turns = turns[start : target + 1]
 
-        root_session_id = meta.config.get("root_session_id")
-        if not isinstance(root_session_id, str) or not root_session_id:
-            root_session_id = request.source_session_id
-
-        from agentm.sdk import AgentSession
-
         child_config = AgentSessionConfig(
-            scenario="empty",
             extensions=[],
             system=strategy_config.summary_system_prompt,
             trajectory_store=store,
             purpose="context_compaction",
             loop_config=LoopConfig(max_turns=1, max_tool_calls=0),
-            session_id=None,
-            root_session_id=root_session_id,
-            parent_session_id=request.source_session_id,
             cancel_signal=signal,
             parent_cancellation="independent",
         )
 
-        child = await AgentSession.create(child_config)
+        child = await self._spawn(child_config)
         try:
             model = child.model
             if model is None:
