@@ -106,7 +106,11 @@ class LlmAnthropicConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="llm_anthropic",
     description="Register an Anthropic Messages API LLM stream provider.",
-    registers=("provider:anthropic",),
+    # No provider capability is declared: the registry name is config-driven
+    # (config['name'], defaulting to "anthropic") and only known at install,
+    # so it cannot be a statically declarable/verifiable capability. Providers
+    # are resolved through ProviderResolver, not the dependency solver.
+    registers=(),
     config_schema=LlmAnthropicConfig,
     sensitive_config_fields=("api_key", "default_headers"),
     requires=(),

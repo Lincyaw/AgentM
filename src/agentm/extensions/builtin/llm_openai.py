@@ -120,7 +120,11 @@ class LlmOpenaiConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="llm_openai",
     description="Register an OpenAI Chat Completions API LLM stream provider.",
-    registers=("provider:openai",),
+    # No provider capability is declared: the registry name is config-driven
+    # (config['name'], defaulting to "openai") and only known at install, so
+    # it cannot be a statically declarable/verifiable capability. Providers
+    # are resolved through ProviderResolver, not the dependency solver.
+    registers=(),
     config_schema=LlmOpenaiConfig,
     sensitive_config_fields=("api_key", "default_headers", "default_query"),
     requires=(),
