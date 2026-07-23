@@ -4,9 +4,11 @@ Status: design note, pending data validation
 
 Date: 2026-07-22
 
-This note consolidates the design discussion that followed
-`docs/policy-trajectory-failure-observability.md` and supersedes parts of it
-(see "Supersessions" at the end). It defines the positioning, the detection
+This note consolidates the design discussion that followed the earlier
+observability note (`policy-trajectory-failure-observability.md`, removed
+2026-07-23; see "Supersessions" at the end for what changed relative to it).
+The dimension model that decides what a critic checks lives in
+`docs/policy-feedback-dimensions.md`. This note defines the positioning, the detection
 model, the feature set, and the validation protocol to run once the trajectory
 databases for the labeled evaluation batches are available locally.
 
@@ -148,31 +150,54 @@ Known non-coverage, accepted deliberately:
 - **Mutually consistent wrong invariants** (Gitea). Inside stage 1 this stays
   undetectable; F4 is the cheap cue that routes such sessions to the critic.
 
-## Expected hits on the labeled batch
+## Measured hits on the labeled batch (first calibration round, 2026-07-22)
 
-Validation targets against `jobs/2026-07-21__22-27-02` (post-replay labels).
-The table records predictions to check once trajectory data is available;
-features failing these expectations are recalibrated or dropped.
+Measured with `policy_engine closure` over policy state rebuilt from the
+`harbor_gpt55` trajectory dump (`.agentm/seniorswe-trajectories/`,
+session-trial mapping in `session-trial-map.json`). Two deterministic
+refinements were required against the pre-registered predictions and are now
+part of the extractor:
 
-| Trial | Label | Expected stage-1 fires |
-| --- | --- | --- |
-| BetterAuth | pass | none (narrow tests alone must not fire) |
-| Immich | pass | none |
-| Prefect | pass | none: failures at turns 70/73/76 are superseded by exit-0 subset runs at 80-82 |
-| Teleport | pass | none |
-| Electric | fail | F3 (mostly session-modified tests) |
-| Firezone | fail | F1 (mix test failure never superseded), F2 partially |
-| Harbor | fail | F3 (session-created retention test as sole oracle) |
-| Paperless | fail | weak or none (accepted: task-contract layer) |
-| Plausible | fail | F1 (two unresolved targeted failures) |
-| Turborepo | fail | weak or none via F1-F8 (accepted: scope gap) |
-| Gitea | fail | F4 only (routes to critic; structure cannot decide) |
-| PostHog | invalid | environment-fault class, excluded from calibration |
+- exit codes 126/127 (shell "not found" environment probes) do not count as
+  failures; this removed all F1 false fires on Prefect and Electric;
+- path candidates are normalized (strip `file.exs:917` line selectors, drop
+  whitespace junk); this fixed the Electric F3 miss and Gitea noise.
 
-Aggregate acceptance for the trigger set: recall of at least 4 of 7 genuine
-failures with zero fires on the 4 passes, at a trigger rate whose critic cost
-is acceptable. Weak-signal features may fire on passes only if their role is
-critic routing and the measured budget allows it.
+| Trial | Label | F1 | F3 | F4 | Notes |
+| --- | --- | --- | --- | --- | --- |
+| BetterAuth | pass | FP | - | fires | F1 residual: one-shot xargs/prettier failures |
+| Immich | pass | FP | - | fires | F1 residual: one-shot jq parse probe |
+| Prefect | pass | - | - | - | supersession relation closed all failures, as designed |
+| Teleport | pass | - | - | - | clean |
+| Electric | fail | - | hit | fires | failing tests were superseded; the failure mode is self-authored oracles, and F3 catches it |
+| Firezone | fail | hit | hit | fires | unresolved `mix test` at turn 118 |
+| Harbor | fail | hit | hit | fires | session-created retention test as sole oracle |
+| Paperless | fail | hit | - | - | F1 only; modality gap stays with the task-contract layer |
+| Plausible | fail | hit | hit | fires | unresolved targeted failures |
+| Turborepo | fail | - | - | fires | F4 fires vacuously: no path-referencing validation at all (`cargo test -p` has no path operands) |
+| Gitea | fail | hit | - | - | prediction corrected: it DID run pre-existing package tests (which encoded the wrong invariant); the only cue is an early unresolved `go test` |
+| PostHog | invalid | fires | - | fires | excluded from calibration (verifier environment fault) |
+
+Measured discrimination (7 genuine fails vs 4 passes):
+
+- **F3 (self-authored oracle only): 4/7 fail recall, 0/4 pass fires.** The
+  strongest single trigger; fire at confirm strength.
+- **F1 (terminal unresolved): 5/7 fail recall, 2/4 pass fires.** The two pass
+  fires are one-shot inspection/formatting failures; per the two-stage
+  discipline they are left to critic suppression (and to the declared
+  `purpose` field in future batches) rather than further stage-1 tuning.
+- **F1 or F3: 6/7 fail recall** (Turborepo is the accepted scope-gap miss),
+  2/4 pass fires.
+- **F4 (zero independent oracle) is a weak routing cue, not a trigger.** It
+  also fires vacuously when no execution references paths at all, which
+  incidentally routes the Turborepo scope-gap case to the critic.
+- Purpose-dependent features (F5/F7) are null on this batch: the
+  `tool_purpose` atom entered the harbor scenario only after this batch ran.
+
+Gitea correction recorded: the indistinguishability case has no reliable
+stage-1 cue (F4 was predicted, measured absent, because pre-existing package
+tests were executed and passed). Stage 1 cannot route it; only periodic or
+sampled critic review could.
 
 ## Trigger points
 
@@ -219,7 +244,8 @@ when both sides of the join are in one place.
 
 ## Supersessions
 
-Relative to `docs/policy-trajectory-failure-observability.md`:
+Relative to the earlier observability note (removed 2026-07-23; recoverable
+from git history):
 
 - The recommendation to fix validation command classification by extending
   `bash_command_schema.yaml` is **dropped**. The coarse-grained action model

@@ -211,7 +211,6 @@ requirements:
       - path: src/agentm/execution/worker.py
       - path: src/agentm/extensions/builtin/file_tools.py
       - path: src/agentm/extensions/builtin/background_exec.py
-      - path: src/agentm/extensions/builtin/context_projection.py
       - path: src/agentm/extensions/builtin/llm_anthropic.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: src/agentm/extensions/builtin/llm_openai.py
@@ -299,7 +298,6 @@ requirements:
       - path: README.md
       - path: contrib/scenarios/harbor/README.md
       - path: docs/policy-guided-context-recovery.md
-      - path: docs/policy-trajectory-failure-observability.md
-      - path: docs/refactor-abstract-inventory.md
+      - path: docs/policy-feedback-dimensions.md
       - path: tools/otel/README.md
     depends_on: []
