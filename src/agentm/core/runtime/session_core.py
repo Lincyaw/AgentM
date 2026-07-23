@@ -359,7 +359,7 @@ class SessionRuntime:
         policy_ctx = PolicyContext(
             session_id=self.id,
             parent_session_id=self.ctx.parent_session_id,
-            services={n: self.services.get(n) for n in self.services.names()},
+            services=self.services,
             store=self.store,
             model=self._model,
             stream_fn=self._stream_fn,

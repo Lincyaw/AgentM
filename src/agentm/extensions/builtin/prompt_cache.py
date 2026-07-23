@@ -67,8 +67,10 @@ class PromptCacheContextPolicy(BindableContextPolicy):
     def bind(self, ctx: PolicyContext) -> None:
         self._session_id = ctx.session_id
         self._parent_session_id = ctx.parent_session_id
-        services = ctx.services or {}
-        candidate = services.get(TRAJECTORY_STORE_SERVICE)
+        services = ctx.services
+        candidate = (
+            services.get(TRAJECTORY_STORE_SERVICE) if services is not None else None
+        )
         if isinstance(candidate, TrajectoryStore):
             self._store = candidate
 

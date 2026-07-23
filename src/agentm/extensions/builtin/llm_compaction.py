@@ -266,13 +266,14 @@ class LlmCompactionPolicy(BindableContextPolicy):
     def bind(self, ctx: PolicyContext) -> None:
         self._session_id = ctx.session_id
         self._parent_session_id = ctx.parent_session_id
-        services = ctx.services or {}
-        resource_candidate = services.get(RESOURCE_STORE_SERVICE)
-        if isinstance(resource_candidate, ResourceStore):
-            self._resource_store = resource_candidate
-        trajectory_candidate = services.get(TRAJECTORY_STORE_SERVICE)
-        if isinstance(trajectory_candidate, TrajectoryStore):
-            self._trajectory_store = trajectory_candidate
+        services = ctx.services
+        if services is not None:
+            resource_candidate = services.get(RESOURCE_STORE_SERVICE)
+            if isinstance(resource_candidate, ResourceStore):
+                self._resource_store = resource_candidate
+            trajectory_candidate = services.get(TRAJECTORY_STORE_SERVICE)
+            if isinstance(trajectory_candidate, TrajectoryStore):
+                self._trajectory_store = trajectory_candidate
         self._renderers = dict(ctx.trigger_renderers or {})
 
     async def transform(

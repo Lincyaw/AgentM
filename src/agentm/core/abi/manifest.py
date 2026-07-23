@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict
 
@@ -58,6 +58,9 @@ class CapabilityRef:
         return f"{self.kind}:{self.name}"
 
 
+_PARSEABLE_KINDS: frozenset[str] = frozenset(get_args(CapabilityKind)) - {"unknown"}
+
+
 def parse_capability_ref(value: str) -> CapabilityRef:
     """Parse one explicit ``kind:name`` capability reference."""
 
@@ -68,25 +71,7 @@ def parse_capability_ref(value: str) -> CapabilityRef:
         )
     if not name:
         raise ValueError(f"capability reference has an empty name: {value!r}")
-    if kind in {
-        "atom",
-        "service",
-        "tool",
-        "event",
-        "provider",
-        "context_policy",
-        "trigger_renderer",
-        "trigger_codec",
-        "operations",
-        "resource",
-        "trajectory",
-        "catalog",
-        "effect",
-        "permission",
-        "executor",
-        "orchestrator",
-        "query",
-    }:
+    if kind in _PARSEABLE_KINDS:
         return CapabilityRef(kind=cast(CapabilityKind, kind), name=name)
     raise ValueError(f"unknown capability kind {kind!r} in {value!r}")
 

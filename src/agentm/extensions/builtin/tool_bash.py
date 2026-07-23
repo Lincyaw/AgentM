@@ -150,7 +150,7 @@ MANIFEST = ExtensionManifest(
 class _ToolBashRuntime:
     def __init__(self, session: AtomAPI, config: ToolBashConfig) -> None:
         self._session = session
-        self._bash_ops = _require_bash_ops(session)
+        _require_bash_ops(session)
         self._default_timeout = config.default_timeout
 
     def install(self) -> None:
@@ -163,7 +163,6 @@ class _ToolBashRuntime:
         self._session.register_tool(
             _BashTool(
                 session=self._session,
-                bash_ops=self._bash_ops,
                 default_timeout=self._default_timeout,
                 parameters=pydantic_to_tool_schema(_BashArgs),
                 tails=tails,
@@ -192,14 +191,12 @@ class _BashTool(EnvironmentExecutableTool):
         self,
         *,
         session: AtomAPI,
-        bash_ops: BashOperations,
         default_timeout: float,
         parameters: dict[str, object],
         tails: BashOutputTails | None = None,
     ) -> None:
         self.parameters = parameters
         self._session = session
-        self._bash_ops = bash_ops
         self._default_timeout = default_timeout
         self._tails = tails
 
@@ -211,7 +208,7 @@ class _BashTool(EnvironmentExecutableTool):
     ) -> ToolResult:
         return await self._execute_with(
             args,
-            bash_ops=self._bash_ops,
+            bash_ops=_require_bash_ops(self._session),
             cwd=self._session.ctx.cwd,
             signal=signal,
         )

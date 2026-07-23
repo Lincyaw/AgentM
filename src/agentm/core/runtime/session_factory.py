@@ -18,6 +18,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from agentm.core.abi.bus import EventBus
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.cancel import CompositeCancelSignal
@@ -38,6 +40,7 @@ from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.manifest import (
     AtomInstallPriority,
     ExtensionManifest,
+    parse_capability_ref,
     provided_capability_keys,
     requirement_key,
 )
@@ -279,6 +282,61 @@ def _extension_plan(
         provided.update(chosen.provides)
         del remaining[chosen.name]
     return ordered
+
+
+def _verify_registered_capabilities(
+    session: Session,
+    item: _ExtensionPlanItem,
+    *,
+    plan_required_keys: frozenset[str],
+) -> None:
+    """Check manifest ``registers`` declarations against reality after install.
+
+    Dependency solving trusts ``registers``, so a declared-but-missing
+    capability that some plan member required is a composition lie and fails
+    the install. A missing declaration nobody required only logs a warning —
+    provisions may legitimately depend on config (e.g. an enabled-tools
+    subset), and runtime consumers still fail loudly at their own lookup.
+    Kinds without an addressable registry (``event``, ``context_policy``)
+    are skipped; presence is what is verified, so a pre-existing binding the
+    atom deliberately preserved (host override) passes.
+    """
+
+    missing: list[str] = []
+    for declared in item.registers:
+        ref = parse_capability_ref(declared)
+        if ref.kind in {"service", "operations"}:
+            name = ref.name if ref.kind == "service" else f"operations:{ref.name}"
+            present = session.services.has(name)
+        elif ref.kind == "tool":
+            present = any(tool.name == ref.name for tool in session.tools)
+        elif ref.kind == "provider":
+            present = session.has_provider(ref.name)
+        elif ref.kind == "trigger_renderer":
+            present = ref.name in session.trigger_renderers
+        else:
+            continue
+        if not present:
+            missing.append(declared)
+    required_missing = [
+        declared
+        for declared in missing
+        if requirement_key(declared) in plan_required_keys
+    ]
+    if required_missing:
+        raise ExtensionLoadError(
+            item.module_path,
+            RuntimeError(
+                "manifest declares capabilities that other atoms require but "
+                f"install() did not provide: {', '.join(required_missing)}"
+            ),
+        )
+    for declared in missing:
+        logger.warning(
+            "atom {} declares {} in registers but did not provide it",
+            item.name,
+            declared,
+        )
 
 
 def _get_scenario_loader(services: ServiceRegistry | None) -> ScenarioLoader | None:
@@ -699,8 +757,18 @@ async def create_session(
             plan_specs,
             available_capabilities=_service_capabilities(resolved_services),
         )
+        plan_required_keys = frozenset(
+            requirement_key(requirement)
+            for planned in plan
+            for requirement in planned.requires
+        )
         for item in plan:
             await install_extension(session, item.spec)
+            _verify_registered_capabilities(
+                session,
+                item,
+                plan_required_keys=plan_required_keys,
+            )
         created_at = time.time()
         active_set = await _record_active_set(session, plan, created_at=created_at)
         await _ensure_store_session(
@@ -962,11 +1030,21 @@ async def create_child_session(
             plan_specs,
             available_capabilities=_service_capabilities(child_services),
         )
+        plan_required_keys = frozenset(
+            requirement_key(requirement)
+            for planned in plan
+            for requirement in planned.requires
+        )
         for item in plan:
             await install_extension(
                 child,
                 item.spec,
                 trigger="child_session_start",
+            )
+            _verify_registered_capabilities(
+                child,
+                item,
+                plan_required_keys=plan_required_keys,
             )
 
         for tool in config.extra_tools:

@@ -159,8 +159,9 @@ class EventBus:
 
         Frozen events remain immutable: ``reducer`` creates the next event from
         the current event and one handler result. Observation-only handlers may
-        return ``None``. Handler exceptions retain normal bus semantics; reducer
-        errors are contract violations and propagate to the caller.
+        return ``None``. Unlike ``emit``, a handler exception PROPAGATES to the
+        caller: a transform chain is decision-carrying, and a crashed link must
+        not silently degrade into an abstention. Reducer errors propagate too.
         """
 
         dispatch_id = uuid.uuid4().hex
@@ -173,43 +174,46 @@ class EventBus:
 
         snapshot = list(subs)
         results: list[Any] = []
-        for sub in snapshot:
-            handler_event = event
-            start_ns = time.perf_counter_ns()
-            self._observer_handler_start(
-                channel,
-                sub.handler,
-                handler_event,
-                dispatch_id,
-                sub.owner,
-            )
-            error: BaseException | None = None
-            try:
-                value = sub.handler(handler_event)
-                if inspect.isawaitable(value):
-                    value = await value
-            except Exception as exc:
-                error = exc
-                logger.exception(
-                    "event handler raised on channel {!r}; suppressing.",
+        try:
+            for sub in snapshot:
+                handler_event = event
+                start_ns = time.perf_counter_ns()
+                self._observer_handler_start(
                     channel,
+                    sub.handler,
+                    handler_event,
+                    dispatch_id,
+                    sub.owner,
                 )
-                value = None
-            duration_ns = time.perf_counter_ns() - start_ns
-            self._observer_handler_done(
-                channel,
-                sub.handler,
-                handler_event,
-                value,
-                error,
-                duration_ns,
-                dispatch_id,
-                sub.owner,
-            )
-            results.append(value)
-            if error is None and value is not None:
-                event = reducer(event, value)
-        self._observer_emit_end(channel, initial_event, results, dispatch_id)
+                error: BaseException | None = None
+                try:
+                    value = sub.handler(handler_event)
+                    if inspect.isawaitable(value):
+                        value = await value
+                except Exception as exc:
+                    error = exc
+                    logger.exception(
+                        "event handler raised on transform channel {!r}; propagating.",
+                        channel,
+                    )
+                    raise
+                finally:
+                    duration_ns = time.perf_counter_ns() - start_ns
+                    self._observer_handler_done(
+                        channel,
+                        sub.handler,
+                        handler_event,
+                        None if error is not None else value,
+                        error,
+                        duration_ns,
+                        dispatch_id,
+                        sub.owner,
+                    )
+                results.append(value)
+                if value is not None:
+                    event = reducer(event, value)
+        finally:
+            self._observer_emit_end(channel, initial_event, results, dispatch_id)
         return event, results
 
     def emit_sync(self, channel: str, event: Any) -> list[Any]:
