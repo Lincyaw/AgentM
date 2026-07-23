@@ -19,7 +19,7 @@ from collections.abc import Awaitable
 from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from pydantic import BaseModel as PydanticBaseModel
@@ -40,6 +40,9 @@ from agentm.extensions.validate import (  # code-health: ignore[AM010] -- consti
     validate_atom_package,
 )
 
+if TYPE_CHECKING:
+    from agentm.core.runtime.session_core import SessionRuntime
+
 
 _INSTALLING_EXTENSION: ContextVar[str | None] = ContextVar(
     "_installing_extension", default=None
@@ -52,7 +55,7 @@ def current_installing_extension() -> str:
 
 
 async def install_extension(
-    api: Any,
+    api: "SessionRuntime",
     extension: ExtensionSpec | str,
     config: dict[str, Any] | None = None,
     *,
@@ -78,7 +81,7 @@ async def install_extension(
         result = load_extension(spec, api)
         if inspect.isawaitable(result):
             await result
-        api._record_installed_extension(spec)
+        api.record_installed_extension(spec)
         logger.debug("installed atom: {}", module_path)
     except Exception as exc:
         error = str(exc)

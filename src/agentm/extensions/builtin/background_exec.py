@@ -27,6 +27,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
+    TOOL_EXECUTOR,
     AtomAPI,
     AtomInstallPriority,
     BackgroundCompletion,
@@ -538,8 +539,9 @@ class _BackgroundExecRuntime:
         )
 
     def install(self) -> None:
-        inner = self._api.get_tool_executor() or DirectToolExecutor()
-        self._api.register_tool_executor(
+        inner = self._api.services.get_role(TOOL_EXECUTOR) or DirectToolExecutor()
+        self._api.services.bind(
+            TOOL_EXECUTOR,
             _BackgroundExecutor(inner, self._manager),
             replace=True,
         )

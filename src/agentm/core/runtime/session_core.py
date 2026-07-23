@@ -1,25 +1,31 @@
 # code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
-"""Session core lifecycle, registration, and composition layers.
+"""Session runtime — lifecycle, registration, providers, and composition.
 
 Owns driver task, trajectory, trigger queue, bus, tools, services,
-context policies, and shutdown logic.  Also the fork/resume/spawn
-entry point.
+context policies, and shutdown logic.  ``Session`` (session.py) extends
+this with child, fork, and resume operations.
+
+Runtime boundaries (resource ports, tool execution, permission, effect
+scope, catalogs) are plain service-role bindings; there are no
+per-boundary register/get methods.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Iterator, cast
+from typing import Iterator
 
 from loguru import logger
 
 from agentm.core.abi.cancel import (
     CancelReason,
     CancelSignal,
+    CompositeCancelSignal,
     EventCancelSource,
 )
 from agentm.core.abi.codec import (
@@ -29,13 +35,9 @@ from agentm.core.abi.codec import (
 )
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
-    AtomCatalog,
-    AtomCatalogQuery,
     VersionedResourceStore,
 )
-from agentm.core.abi.compaction import ContextCompactionService
 from agentm.core.abi.lifecycle import (
-    EffectScope,
     EnvironmentRestoreFailureHandler,
     EnvironmentRestoreStatus,
 )
@@ -46,22 +48,15 @@ from agentm.core.abi.messages import (
     TextContent,
     freeze_json,
 )
-from agentm.core.abi.permission import PermissionPolicy
-from agentm.core.abi.permission import PermissionAudience
-from agentm.core.abi.operations import EnvironmentOperations
+from agentm.core.abi.operations import BashOperations, EnvironmentOperations
+from agentm.core.abi.permission import PermissionAudience, PermissionPolicy
 from agentm.core.abi.provider import (
     ProviderConfig,
     ProviderResolver,
     ProviderSessionIdentity,
 )
-from agentm.core.abi.resource import (
-    ResourceReader,
-    ResourceStore,
-    ResourceTxn,
-    ResourceWriter,
-)
+from agentm.core.abi.resource import ResourceReader, ResourceStore
 from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
-from agentm.core.abi.telemetry import SessionTelemetry
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.tool_executor import ToolExecutor
 from agentm.core.abi.tool_orchestration import ToolOrchestrator
@@ -80,30 +75,30 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.roles import (
-    ATOM_CATALOG_SERVICE,
-    ACTIVE_SET_FINGERPRINT_SERVICE,
-    CATALOG_QUERY_SERVICE,
-    BASH_OPERATIONS_SERVICE,
+    ACTIVE_SET_FINGERPRINT_ROLE,
+    BASH_OPERATIONS_ROLE,
+    CONTEXT_COMPACTION,
     CONTEXT_COMPACTION_SERVICE,
-    EFFECT_SCOPE_SERVICE,
-    ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
-    ENVIRONMENT_RESTORE_STATUS_SERVICE,
-    ENVIRONMENT_OPERATIONS_SERVICE,
-    PERMISSION_POLICY_SERVICE,
+    EFFECT_SCOPE_ROLE,
+    ENVIRONMENT_OPERATIONS,
+    ENVIRONMENT_RESTORE_FAILURE_HANDLER,
+    ENVIRONMENT_RESTORE_STATUS_ROLE,
+    EXPERIMENT_SERVICE,
+    PERMISSION_POLICY_ROLE,
     PROVIDER_RESOLVER_SERVICE,
-    PROVIDER_SESSION_IDENTITY_SERVICE,
+    PROVIDER_SESSION_IDENTITY,
     RESOLVED_SESSION_SPEC_SERVICE,
-    RESOURCE_READER_SERVICE,
-    RESOURCE_STORE_SERVICE,
-    RESOURCE_TXN_SERVICE,
-    RESOURCE_WRITER_SERVICE,
-    TOOL_EXECUTOR_SERVICE,
-    TOOL_ORCHESTRATOR_SERVICE,
-    TRAJECTORY_STORE_SERVICE,
-    VERSIONED_RESOURCE_STORE_SERVICE,
+    RESOURCE_READER,
+    RESOURCE_WRITER,
+    SESSION_TELEMETRY_ROLE,
+    TOOL_ALLOWLIST_SERVICE,
+    TOOL_EXECUTOR,
+    TOOL_ORCHESTRATOR,
+    TRAJECTORY_STORE_ROLE,
+    VERSIONED_RESOURCE_STORE_ROLE,
+    bind_resource_store,
 )
 from agentm.core.abi.session_api import (
-    AgentSessionConfig,
     ExtensionSpec,
     ResolvedSessionSpec,
     SessionContext,
@@ -124,9 +119,6 @@ from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
-
-if TYPE_CHECKING:
-    from agentm.core.runtime.session import Session
 
 
 @dataclass(slots=True)
@@ -165,24 +157,31 @@ class SessionRuntimeConfig:
     purpose: str = "root"
 
 
-class _SessionLifecycle:
-    """Session identity, driver lifecycle, triggers, and read-only state."""
+@dataclass(frozen=True, slots=True)
+class CompositionSnapshot:
+    """Typed view of a session's rebuildable composition.
 
-    register_tool_executor: Callable[..., None]
-    register_tool_orchestrator: Callable[..., None]
-    register_permission_policy: Callable[..., None]
-    register_resource_reader: Callable[..., None]
-    register_resource_store: Callable[..., None]
-    register_versioned_resource_store: Callable[..., None]
-    _activate_provider: Callable[..., None]
-    _freeze_provider_after_commits: Callable[..., None]
-    get_provider: Callable[..., ProviderConfig | None]
-    get_effect_scope: Callable[..., EffectScope | None]
-    get_resource_writer: Callable[..., ResourceWriter | None]
-    get_tool_executor: Callable[..., ToolExecutor | None]
-    get_tool_orchestrator: Callable[..., ToolOrchestrator]
-    get_permission_policy: Callable[..., PermissionPolicy | None]
-    _tool_allowlist: Callable[..., tuple[str, ...] | None]
+    The formal surface for spawn/fork/child construction — factories consume
+    this instead of reading session privates.
+    """
+
+    extensions: tuple[ExtensionSpec, ...]
+    external_tools: tuple[Tool, ...]
+    external_context_policies: tuple[ContextPolicy, ...]
+    external_trigger_renderers: dict[str, TriggerRenderer]
+    codec: CodecRegistry
+    stream_fn: StreamFn | None
+    model: Model | None
+    system: str | None
+    max_turns: int | None
+    max_tool_calls: int | None
+    tool_allowlist: tuple[str, ...] | None
+    thinking: ThinkingLevel
+    lineage_cancel: CancelSignal
+
+
+class SessionRuntime:
+    """Single-session runtime: identity, driver, registration, providers."""
 
     def __init__(self, config: SessionRuntimeConfig | None = None) -> None:
         runtime = SessionRuntimeConfig() if config is None else config
@@ -252,18 +251,11 @@ class _SessionLifecycle:
         else:
             self.codec = CodecRegistry()
         self.services = ServiceRegistry() if services is None else services
+        self.services.set_bind_observer(self._on_service_bind)
         if store is not None:
-            selected_store = self.services.get(
-                TRAJECTORY_STORE_SERVICE,
-                cast(type[TrajectoryStore], TrajectoryStore),
-            )
+            selected_store = self.services.get_role(TRAJECTORY_STORE_ROLE)
             if selected_store is None:
-                self.services.register(
-                    TRAJECTORY_STORE_SERVICE,
-                    store,
-                    cast(type[TrajectoryStore], TrajectoryStore),
-                    scope="tree",
-                )
+                self.services.bind(TRAJECTORY_STORE_ROLE, store)
             elif selected_store is not store:
                 raise ValueError(
                     "session services contain a different trajectory store"
@@ -286,23 +278,17 @@ class _SessionLifecycle:
         self._installed_extension_specs: list[ExtensionSpec] = []
         self._active_provider_name: str | None = None
         self._provider_owners: dict[str, str | None] = {}
-        inherited_provider_identity = self.services.get(
-            PROVIDER_SESSION_IDENTITY_SERVICE,
-            ProviderSessionIdentity,
-        )
+        inherited_provider_identity = self.services.get_role(PROVIDER_SESSION_IDENTITY)
         self._provider_identity: ProviderSessionIdentity | None = (
             runtime.provider_identity
             if runtime.provider_identity is not None
             else inherited_provider_identity
-            if isinstance(inherited_provider_identity, ProviderSessionIdentity)
-            else None
         )
         if self._provider_identity is not None:
-            self.services.register(
-                PROVIDER_SESSION_IDENTITY_SERVICE,
+            self.services.bind(
+                PROVIDER_SESSION_IDENTITY,
                 self._provider_identity,
-                ProviderSessionIdentity,
-                scope="session",
+                replace=True,
             )
         if runtime.provider_resolver is not None:
             self.services.register(
@@ -311,32 +297,44 @@ class _SessionLifecycle:
                 scope="tree",
             )
         if runtime.tool_executor is not None:
-            self.register_tool_executor(runtime.tool_executor, replace=True)
+            self.services.bind(TOOL_EXECUTOR, runtime.tool_executor, replace=True)
         if runtime.tool_orchestrator is not None:
-            self.register_tool_orchestrator(runtime.tool_orchestrator, replace=True)
-        elif not self.services.has(TOOL_ORCHESTRATOR_SERVICE):
-            self.register_tool_orchestrator(default_tool_orchestrator())
+            self.services.bind(
+                TOOL_ORCHESTRATOR,
+                runtime.tool_orchestrator,
+                replace=True,
+            )
+        elif self.services.get_role(TOOL_ORCHESTRATOR) is None:
+            self.services.bind(TOOL_ORCHESTRATOR, default_tool_orchestrator())
         if runtime.permission_policy is not None:
-            self.register_permission_policy(runtime.permission_policy, replace=True)
+            self.services.bind(
+                PERMISSION_POLICY_ROLE,
+                runtime.permission_policy,
+                replace=True,
+            )
         if runtime.resource_reader is not None:
-            self.register_resource_reader(runtime.resource_reader, replace=True)
+            self.services.bind(RESOURCE_READER, runtime.resource_reader, replace=True)
         if runtime.resource_store is not None:
-            self.register_resource_store(runtime.resource_store, replace=True)
+            bind_resource_store(
+                self.services,
+                runtime.resource_store,
+                replace=True,
+            )
         if runtime.versioned_resource_store is not None:
-            self.register_versioned_resource_store(
+            self.services.bind(
+                VERSIONED_RESOURCE_STORE_ROLE,
                 runtime.versioned_resource_store,
                 replace=True,
             )
         if runtime.environment_restore_failure_handler is not None:
-            self.services.register(
-                ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
+            self.services.bind(
+                ENVIRONMENT_RESTORE_FAILURE_HANDLER,
                 runtime.environment_restore_failure_handler,
-                EnvironmentRestoreFailureHandler,
-                scope="tree",
+                replace=True,
             )
         if runtime.tool_allowlist is not None:
             self.services.register(
-                "tool_allowlist",
+                TOOL_ALLOWLIST_SERVICE,
                 tuple(runtime.tool_allowlist),
                 scope="session",
             )
@@ -348,13 +346,6 @@ class _SessionLifecycle:
             )
 
     # --- Lifecycle ---
-
-    @classmethod
-    async def create(cls, config: AgentSessionConfig) -> "Session":
-        """Create a fully configured root session from an SDK config."""
-        from agentm.core.runtime.session_factory import create_from_config
-
-        return await create_from_config(config)
 
     def start(self) -> None:
         if self._driver_task is not None:
@@ -409,6 +400,7 @@ class _SessionLifecycle:
             assert self._stream_fn is not None
             assert self._model is not None
             provider = self.get_provider()
+            audience: PermissionAudience = "user" if self.ctx.depth == 0 else "subagent"
             await drive(
                 DriverConfig(
                     trajectory=self.trajectory,
@@ -421,10 +413,7 @@ class _SessionLifecycle:
                     session_id=self.id,
                     root_session_id=self.ctx.root_session_id,
                     parent_session_id=self.ctx.parent_session_id,
-                    permission_audience=cast(
-                        PermissionAudience,
-                        "user" if self.ctx.depth == 0 else "subagent",
-                    ),
+                    permission_audience=audience,
                     system=self.system,
                     context_policies=self.context_policies,
                     prompt_cache_adapter=(
@@ -434,12 +423,12 @@ class _SessionLifecycle:
                     interrupt=self._interrupt,
                     shutdown=self._shutdown,
                     cancel_signal=self._parent_cancel_signal,
-                    effect_scope=self.get_effect_scope(),
-                    resource_writer=self.get_resource_writer(),
+                    effect_scope=self.services.get_role(EFFECT_SCOPE_ROLE),
+                    resource_writer=self.services.get_role(RESOURCE_WRITER),
                     services=self.services,
-                    tool_executor=self.get_tool_executor(),
-                    tool_orchestrator=self.get_tool_orchestrator(),
-                    permission_policy=self.get_permission_policy(),
+                    tool_executor=self.services.get_role(TOOL_EXECUTOR),
+                    tool_orchestrator=self.services.require_role(TOOL_ORCHESTRATOR),
+                    permission_policy=self.services.get_role(PERMISSION_POLICY_ROLE),
                     max_turns=self._max_turns,
                     max_tool_calls=self._max_tool_calls,
                     tool_allowlist=self._tool_allowlist(),
@@ -488,19 +477,13 @@ class _SessionLifecycle:
             await self.bus.emit(SessionShutdownEvent.CHANNEL, SessionShutdownEvent())
         except BaseException as exc:
             cleanup_errors.append(exc)
-        environment = self.services.get(
-            ENVIRONMENT_OPERATIONS_SERVICE,
-            cast(type[EnvironmentOperations], EnvironmentOperations),
-        )
+        environment = self.services.get_role(ENVIRONMENT_OPERATIONS)
         if environment is not None:
             try:
                 await environment.close()
             except BaseException as exc:
                 cleanup_errors.append(exc)
-        telemetry = self.services.get(
-            "session_telemetry",
-            cast(type[SessionTelemetry], SessionTelemetry),
-        )
+        telemetry = self.services.get_role(SESSION_TELEMETRY_ROLE)
         if telemetry is not None:
             try:
                 await asyncio.to_thread(telemetry.shutdown)
@@ -584,13 +567,11 @@ class _SessionLifecycle:
 
         if self._closed:
             raise RuntimeError("cannot compact a closed session")
-        compaction = self.services.get(
-            CONTEXT_COMPACTION_SERVICE,
-            cast(type[ContextCompactionService], ContextCompactionService),
-        )
+        compaction = self.services.get_role(CONTEXT_COMPACTION)
         if compaction is None:
             raise RuntimeError(
-                "session has no context compaction service; install llm_compaction"
+                "no ContextCompactionService registered "
+                f"(service {CONTEXT_COMPACTION_SERVICE!r})"
             )
         if self._driver_task is None:
             self.start()
@@ -662,12 +643,6 @@ class _SessionLifecycle:
             "tool_names": [t.name for t in self.tools],
         }
 
-
-class _SessionRegistration(_SessionLifecycle):
-    """Extension-facing event, tool, context, and trigger registration."""
-
-    _emit_register_event: Callable[..., None]
-
     # --- Bus delegation ---
 
     def on(
@@ -681,6 +656,10 @@ class _SessionRegistration(_SessionLifecycle):
 
         owner = current_installing_extension() or None
         return self.bus.on(channel, handler, priority=priority, owner=owner)
+
+    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
+        """Register a bus observer for session-scoped instrumentation."""
+        return self.bus.add_observer(observer)
 
     # --- Registration ---
 
@@ -735,11 +714,72 @@ class _SessionRegistration(_SessionLifecycle):
             {"codec": codec},
         )
 
+    def register_operations(
+        self,
+        *,
+        replace: bool = False,
+        service_scope: ServiceScope = "session",
+        **kwargs: object,
+    ) -> None:
+        """Register named operation services."""
 
-class _SessionProviders(_SessionRegistration):
-    """Provider selection, activation, and durable identity binding."""
+        protocols: dict[str, type | None] = {
+            "bash": BashOperations,
+            "environment": EnvironmentOperations,
+        }
+        service_names = {
+            "bash": BASH_OPERATIONS_ROLE.key,
+            "environment": ENVIRONMENT_OPERATIONS.key,
+        }
+        for key, value in kwargs.items():
+            service_name = service_names.get(key, f"operations:{key}")
+            if self.services.has(service_name):
+                if not replace:
+                    raise ValueError(f"operation {key!r} already registered")
+                self.services.unregister(service_name)
+            self.services.register(
+                service_name,
+                value,
+                protocols.get(key),
+                scope=service_scope,
+            )
+            self._emit_register_event(
+                "operations",
+                key,
+                {"service_name": service_name, "service": value},
+            )
 
-    _active_set_fingerprint: Callable[..., ActiveSetFingerprint | None]
+    def _on_service_bind(
+        self,
+        key: str,
+        service: object,
+        scope: ServiceScope,
+    ) -> None:
+        self._emit_register_event(
+            "service",
+            key,
+            {"service": service, "scope": scope},
+        )
+
+    def _emit_register_event(
+        self,
+        kind: str,
+        name: str,
+        payload: dict[str, object],
+    ) -> None:
+        from agentm.core.runtime.extension import current_installing_extension
+
+        self.bus.emit_sync(
+            ApiRegisterEvent.CHANNEL,
+            ApiRegisterEvent(
+                kind=kind,
+                name=name,
+                extension=current_installing_extension(),
+                payload=payload,
+            ),
+        )
+
+    # --- Providers ---
 
     def register_provider(
         self,
@@ -926,12 +966,7 @@ class _SessionProviders(_SessionRegistration):
 
     def _set_provider_identity(self, identity: ProviderSessionIdentity) -> None:
         self._provider_identity = identity
-        self.services.register(
-            PROVIDER_SESSION_IDENTITY_SERVICE,
-            identity,
-            ProviderSessionIdentity,
-            scope="session",
-        )
+        self.services.bind(PROVIDER_SESSION_IDENTITY, identity, replace=True)
 
     def provider_session_identity(self) -> ProviderSessionIdentity | None:
         """Return the provider/model identity bound to this session, if known."""
@@ -968,24 +1003,13 @@ class _SessionProviders(_SessionRegistration):
     def _environment_restore_failure_handler(
         self,
     ) -> EnvironmentRestoreFailureHandler | None:
-        return self.services.get(
-            ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
-            cast(
-                type[EnvironmentRestoreFailureHandler],
-                EnvironmentRestoreFailureHandler,
-            ),
-        )
+        return self.services.get_role(ENVIRONMENT_RESTORE_FAILURE_HANDLER)
 
     def _record_environment_restore_status(
         self,
         status: EnvironmentRestoreStatus,
     ) -> None:
-        self.services.register(
-            ENVIRONMENT_RESTORE_STATUS_SERVICE,
-            status,
-            EnvironmentRestoreStatus,
-            scope="session",
-        )
+        self.services.bind(ENVIRONMENT_RESTORE_STATUS_ROLE, status, replace=True)
 
     def _resolve_provider_name(
         self,
@@ -1012,345 +1036,17 @@ class _SessionProviders(_SessionRegistration):
             "instead of relying on registration order"
         )
 
-
-class _SessionResourceServices(_SessionProviders):
-    """Resource, environment, and resolved-composition services."""
-
-    _emit_register_event: Callable[..., None]
+    # --- Resolved composition metadata ---
 
     def _resolved_session_spec(self) -> ResolvedSessionSpec | None:
         spec = self.services.get(RESOLVED_SESSION_SPEC_SERVICE)
         return spec if isinstance(spec, ResolvedSessionSpec) else None
 
     def _active_set_fingerprint(self) -> ActiveSetFingerprint | None:
-        fingerprint = self.services.get(ACTIVE_SET_FINGERPRINT_SERVICE)
-        return fingerprint if isinstance(fingerprint, ActiveSetFingerprint) else None
-
-    def register_operations(
-        self,
-        *,
-        replace: bool = False,
-        service_scope: ServiceScope = "session",
-        **kwargs: object,
-    ) -> None:
-        """Register named operation services."""
-        from agentm.core.abi.operations import BashOperations
-
-        service_names = {
-            "bash": BASH_OPERATIONS_SERVICE,
-            "environment": ENVIRONMENT_OPERATIONS_SERVICE,
-        }
-        protocols = {
-            "bash": BashOperations,
-            "environment": EnvironmentOperations,
-        }
-        for key, value in kwargs.items():
-            service_name = service_names.get(key, f"operations:{key}")
-            if self.services.has(service_name):
-                if not replace:
-                    raise ValueError(f"operation {key!r} already registered")
-                self.services.unregister(service_name)
-            self.services.register(
-                service_name,
-                value,
-                protocols.get(key),
-                scope=service_scope,
-            )
-            self._emit_register_event(
-                "operations",
-                key,
-                {"service_name": service_name, "service": value},
-            )
-
-    def register_resource_writer(
-        self,
-        writer: ResourceWriter,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = RESOURCE_WRITER_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("resource_writer already registered")
-        self.services.register(
-            service_name,
-            writer,
-            ResourceWriter,
-            scope="tree",
-        )
-        self._emit_register_event(
-            "resource_writer",
-            service_name,
-            {"service": writer},
-        )
-
-    def get_resource_writer(self) -> ResourceWriter | None:
-        return self.services.get(
-            RESOURCE_WRITER_SERVICE,
-            cast(type[ResourceWriter], ResourceWriter),
-        )
-
-    def register_resource_reader(
-        self,
-        reader: ResourceReader,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = RESOURCE_READER_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("resource_reader already registered")
-        self.services.register(
-            service_name,
-            reader,
-            ResourceReader,
-            scope="tree",
-        )
-        self._emit_register_event(
-            "resource_reader",
-            service_name,
-            {"service": reader},
-        )
-
-    def get_resource_reader(self) -> ResourceReader | None:
-        return self.services.get(
-            RESOURCE_READER_SERVICE,
-            cast(type[ResourceReader], ResourceReader),
-        )
-
-    def register_resource_store(
-        self,
-        store: ResourceStore,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = RESOURCE_STORE_SERVICE
-        previous = self.services.get(service_name)
-        if self.services.has(service_name) and not replace:
-            raise ValueError("resource_store already registered")
-        self.services.register(
-            service_name,
-            store,
-            ResourceStore,
-            scope="tree",
-        )
-        reader = self.services.get(RESOURCE_READER_SERVICE)
-        if reader is None:
-            self.register_resource_reader(store)
-        elif replace and reader is previous:
-            self.register_resource_reader(store, replace=True)
-        self._emit_register_event(
-            "resource_store",
-            service_name,
-            {"service": store},
-        )
-
-    def get_resource_store(self) -> ResourceStore | None:
-        return self.services.get(
-            RESOURCE_STORE_SERVICE,
-            cast(type[ResourceStore], ResourceStore),
-        )
-
-    def get_resource_txn(self) -> ResourceTxn | None:
-        return self.services.get(
-            RESOURCE_TXN_SERVICE,
-            cast(type[ResourceTxn], ResourceTxn),
-        )
-
-
-class _SessionRuntimeServices(_SessionResourceServices):
-    """Execution, permission, trajectory, effect, and catalog services."""
-
-    def register_tool_executor(
-        self,
-        executor: ToolExecutor,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = TOOL_EXECUTOR_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("tool_executor already registered")
-        self.services.register(
-            service_name,
-            executor,
-            cast(type[ToolExecutor], ToolExecutor),
-            scope="tree",
-        )
-        self._emit_register_event(
-            "tool_executor",
-            service_name,
-            {"service": executor},
-        )
-
-    def get_tool_executor(self) -> ToolExecutor | None:
-        return self.services.get(
-            TOOL_EXECUTOR_SERVICE,
-            cast(type[ToolExecutor], ToolExecutor),
-        )
-
-    def register_tool_orchestrator(
-        self,
-        orchestrator: ToolOrchestrator,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = TOOL_ORCHESTRATOR_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("tool_orchestrator already registered")
-        self.services.register(
-            service_name,
-            orchestrator,
-            cast(type[ToolOrchestrator], ToolOrchestrator),
-            scope="tree",
-        )
-        self._emit_register_event(
-            "tool_orchestrator",
-            service_name,
-            {"service": orchestrator},
-        )
-
-    def get_tool_orchestrator(self) -> ToolOrchestrator:
-        orchestrator = self.services.get(
-            TOOL_ORCHESTRATOR_SERVICE,
-            cast(type[ToolOrchestrator], ToolOrchestrator),
-        )
-        if orchestrator is None:
-            raise RuntimeError("session has no tool orchestrator")
-        return orchestrator
-
-    def register_permission_policy(
-        self,
-        policy: PermissionPolicy,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = PERMISSION_POLICY_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("permission_policy already registered")
-        self.services.register(
-            service_name,
-            policy,
-            cast(type[PermissionPolicy], PermissionPolicy),
-            scope="tree",
-        )
-        self._emit_register_event(
-            "permission_policy",
-            service_name,
-            {"service": policy},
-        )
-
-    def get_permission_policy(self) -> PermissionPolicy | None:
-        return self.services.get(
-            PERMISSION_POLICY_SERVICE,
-            cast(type[PermissionPolicy], PermissionPolicy),
-        )
-
-    def register_versioned_resource_store(
-        self,
-        store: VersionedResourceStore,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = VERSIONED_RESOURCE_STORE_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("versioned_resource_store already registered")
-        self.services.register(
-            service_name,
-            store,
-            cast(type[VersionedResourceStore], VersionedResourceStore),
-            scope="tree",
-        )
-        self._emit_register_event(
-            "versioned_resource_store",
-            service_name,
-            {"service": store},
-        )
-
-    def get_versioned_resource_store(self) -> VersionedResourceStore | None:
-        return self.services.get(
-            VERSIONED_RESOURCE_STORE_SERVICE,
-            cast(type[VersionedResourceStore], VersionedResourceStore),
-        )
-
-    def register_effect_scope(
-        self,
-        scope: EffectScope,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = EFFECT_SCOPE_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("effect_scope already registered")
-        self.services.register(
-            service_name,
-            scope,
-            cast(type[EffectScope], EffectScope),
-            scope="tree",
-        )
-        self._emit_register_event(
-            "effect_scope",
-            service_name,
-            {"service": scope},
-        )
-
-    def get_effect_scope(self) -> EffectScope | None:
-        return self.services.get(
-            EFFECT_SCOPE_SERVICE,
-            cast(type[EffectScope], EffectScope),
-        )
-
-    def register_atom_catalog(
-        self,
-        catalog: AtomCatalog,
-        *,
-        replace: bool = False,
-    ) -> None:
-        service_name = ATOM_CATALOG_SERVICE
-        if self.services.has(service_name) and not replace:
-            raise ValueError("atom_catalog already registered")
-        self.services.register(
-            service_name,
-            catalog,
-            cast(type[AtomCatalog], AtomCatalog),
-            scope="tree",
-        )
-        if isinstance(catalog, AtomCatalogQuery):
-            self.services.register(
-                CATALOG_QUERY_SERVICE,
-                catalog,
-                AtomCatalogQuery,
-                scope="tree",
-            )
-        self._emit_register_event(
-            "atom_catalog",
-            service_name,
-            {"service": catalog},
-        )
-
-    def get_atom_catalog(self) -> AtomCatalog | None:
-        return self.services.get(
-            ATOM_CATALOG_SERVICE,
-            cast(type[AtomCatalog], AtomCatalog),
-        )
-
-    def _emit_register_event(
-        self,
-        kind: str,
-        name: str,
-        payload: dict[str, object],
-    ) -> None:
-        from agentm.core.runtime.extension import current_installing_extension
-
-        self.bus.emit_sync(
-            ApiRegisterEvent.CHANNEL,
-            ApiRegisterEvent(
-                kind=kind,
-                name=name,
-                extension=current_installing_extension(),
-                payload=payload,
-            ),
-        )
+        return self.services.get_role(ACTIVE_SET_FINGERPRINT_ROLE)
 
     def _tool_allowlist(self) -> tuple[str, ...] | None:
-        raw = self.services.get("tool_allowlist")
+        raw = self.services.get(TOOL_ALLOWLIST_SERVICE)
         if raw is None:
             return None
         if isinstance(raw, str):
@@ -1367,13 +1063,7 @@ class _SessionRuntimeServices(_SessionResourceServices):
             f"{type(raw).__name__}"
         )
 
-    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
-        """Register a bus observer for session-scoped instrumentation."""
-        return self.bus.add_observer(observer)
-
-
-class _SessionComposition(_SessionRuntimeServices):
-    """Installed extension ownership and inherited composition metadata."""
+    # --- Composition ---
 
     async def install_extension(
         self,
@@ -1392,10 +1082,12 @@ class _SessionComposition(_SessionRuntimeServices):
             trigger=trigger,
         )
 
-    def _record_installed_extension(
+    def record_installed_extension(
         self,
         spec: ExtensionSpec,
     ) -> None:
+        """Record one installed extension for composition snapshots."""
+
         if not isinstance(spec, ExtensionSpec):
             raise TypeError("installed extension record requires ExtensionSpec")
         self.installed_extensions.append(spec.module_path)
@@ -1447,6 +1139,39 @@ class _SessionComposition(_SessionRuntimeServices):
             if spec.module_path not in excluded
         ]
 
+    def composition_snapshot(
+        self,
+        *,
+        include_provider_atoms: bool = True,
+    ) -> CompositionSnapshot:
+        """Snapshot the rebuildable composition for spawn/fork/child paths."""
+
+        return CompositionSnapshot(
+            extensions=tuple(
+                self._composition_extensions(
+                    include_provider_atoms=include_provider_atoms,
+                )
+            ),
+            external_tools=tuple(self._external_tools()),
+            external_context_policies=tuple(
+                copy.copy(policy) for policy in self._external_context_policies()
+            ),
+            external_trigger_renderers=self._external_trigger_renderers(),
+            codec=self._composition_codec(),
+            stream_fn=self._stream_fn,
+            model=self._model,
+            system=self.system,
+            max_turns=self._max_turns,
+            max_tool_calls=self._max_tool_calls,
+            tool_allowlist=self._tool_allowlist(),
+            thinking=self._thinking,
+            lineage_cancel=CompositeCancelSignal(
+                self._interrupt,
+                self._shutdown,
+                self._parent_cancel_signal,
+            ),
+        )
+
     @property
     def cwd(self) -> str:
         return self.ctx.cwd
@@ -1475,7 +1200,7 @@ class _SessionComposition(_SessionRuntimeServices):
 
     @property
     def experiment(self) -> dict[str, JsonValue] | None:
-        value = self.services.get("experiment")
+        value = self.services.get(EXPERIMENT_SERVICE)
         if value is None:
             return None
         if not isinstance(value, Mapping):
@@ -1486,4 +1211,4 @@ class _SessionComposition(_SessionRuntimeServices):
         return dict(frozen)
 
 
-__all__ = ["SessionRuntimeConfig"]
+__all__ = ["CompositionSnapshot", "SessionRuntime", "SessionRuntimeConfig"]

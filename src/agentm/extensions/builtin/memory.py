@@ -31,7 +31,7 @@ context trick — keep only relevance hints in prompt, let the agent decide
 what to expand.
 
 The atom is self-contained and §11-compliant: file reads go through
-``api.get_resource_writer()``.
+``api.services.get_role(RESOURCE_WRITER)``.
 Access bookkeeping is intentionally write-through to disk so it survives
 restarts and can be mined by future evolution/query atoms.
 """
@@ -50,6 +50,7 @@ import frontmatter  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
+    RESOURCE_WRITER,
     AtomAPI,
     AtomInstallPriority,
     BeforeRunEvent,
@@ -171,7 +172,7 @@ def install(api: AtomAPI, config: MemoryConfig) -> None:
     index_in_prompt = config.index_in_system_prompt
     max_index_lines = config.max_index_lines
 
-    writer = api.get_resource_writer()
+    writer = api.services.get_role(RESOURCE_WRITER)
     if writer is None:
         raise RuntimeError("memory requires a ResourceWriter service")
 

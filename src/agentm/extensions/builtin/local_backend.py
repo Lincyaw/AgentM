@@ -10,6 +10,9 @@ from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     BASH_OPERATIONS_SERVICE,
+    RESOURCE_READER,
+    RESOURCE_WRITER,
+    bind_resource_store,
     ENVIRONMENT_OPERATIONS_SERVICE,
     RESOURCE_READER_SERVICE,
     RESOURCE_STORE_SERVICE,
@@ -91,9 +94,9 @@ def install(api: AtomAPI, config: LocalBackendConfig) -> None:
         manifest_path=config.resource_manifest_path,
         discover_manifest=config.discover_resource_manifest,
     )
-    api.register_resource_reader(resources)
-    api.register_resource_store(resources)
-    api.register_resource_writer(resources)
+    api.services.bind(RESOURCE_READER, resources)
+    bind_resource_store(api.services, resources)
+    api.services.bind(RESOURCE_WRITER, resources)
 
 
 __all__ = ("LocalBackendConfig", "MANIFEST", "install")

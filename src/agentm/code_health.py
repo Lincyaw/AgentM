@@ -382,7 +382,10 @@ def _check_atom_raw_io(tree: ast.Module, path: str, file_path: Path) -> list[Iss
                         path=path,
                         line=node.lineno,
                         rule="AM004",
-                        message="raw open() in atom — use api.get_resource_writer() instead",
+                        message=(
+                            "raw open() in atom — use the resource_writer "
+                            "service: api.services.get_role(RESOURCE_WRITER)"
+                        ),
                         severity="warning",
                     )
                 )
@@ -393,7 +396,11 @@ def _check_atom_raw_io(tree: ast.Module, path: str, file_path: Path) -> list[Iss
                         path=path,
                         line=node.lineno,
                         rule="AM004",
-                        message="subprocess usage in atom — use api.get_operations().bash instead",
+                        message=(
+                            "subprocess usage in atom — use the operations:bash "
+                            "service: api.services.require(BASH_OPERATIONS_SERVICE, "
+                            "BashOperations)"
+                        ),
                         severity="warning",
                     )
                 )

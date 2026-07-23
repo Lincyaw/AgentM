@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import time
 import uuid
 from collections.abc import Sequence
@@ -34,7 +33,16 @@ from agentm.core.abi.resource import (
     ResourceTransactionRef,
     TransactionalResourceWriter,
 )
-from agentm.core.abi.roles import RESOLVED_SESSION_SPEC_SERVICE
+from agentm.core.abi.roles import (
+    EFFECT_SCOPE_ROLE,
+    PERMISSION_POLICY_ROLE,
+    RESOLVED_SESSION_SPEC_SERVICE,
+    RESOURCE_READER,
+    RESOURCE_STORE,
+    RESOURCE_WRITER,
+    TOOL_EXECUTOR,
+    TOOL_ORCHESTRATOR,
+)
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import (
     AgentSessionConfig,
@@ -58,8 +66,8 @@ from agentm.core.abi.trajectory import (
 )
 from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
 from agentm.core.runtime.session_core import (
+    SessionRuntime,
     SessionRuntimeConfig,
-    _SessionComposition,
 )
 from agentm.core.runtime.session_meta import (
     context_from_session_meta,
@@ -299,7 +307,7 @@ async def _resolve_fork_anchor(
     )
 
 
-class Session(_SessionComposition):
+class Session(SessionRuntime):
     """Top-level SDK session with child, fork, and resume operations."""
 
     async def spawn(
@@ -332,14 +340,17 @@ class Session(_SessionComposition):
 
         if parent_cancellation not in {"inherit", "independent"}:
             raise ValueError("parent_cancellation must be 'inherit' or 'independent'")
-        inherited_cancel = (
-            CompositeCancelSignal(
-                self._interrupt,
-                self._shutdown,
-                self._parent_cancel_signal,
+        direct_provider_override = stream_fn is not None or model is not None
+        if scenario is not None and direct_provider_override:
+            raise ValueError(
+                "spawn cannot combine a scenario change with direct stream/model "
+                "overrides; use spawn_child_session with an explicit provider"
             )
-            if parent_cancellation == "inherit"
-            else None
+        snapshot = self.composition_snapshot(
+            include_provider_atoms=not direct_provider_override,
+        )
+        inherited_cancel = (
+            snapshot.lineage_cancel if parent_cancellation == "inherit" else None
         )
         child_cancel_signal = (
             CompositeCancelSignal(inherited_cancel, cancel_signal)
@@ -349,25 +360,12 @@ class Session(_SessionComposition):
             else inherited_cancel
         )
 
-        direct_provider_override = stream_fn is not None or model is not None
-        if scenario is not None and direct_provider_override:
-            raise ValueError(
-                "spawn cannot combine a scenario change with direct stream/model "
-                "overrides; use spawn_child_session with an explicit provider"
-            )
-        extension_specs = (
-            None
-            if scenario is not None
-            else self._composition_extensions(
-                include_provider_atoms=not direct_provider_override,
-            )
-        )
+        extension_specs = None if scenario is not None else list(snapshot.extensions)
         from agentm.core.runtime.session_factory import (
             SessionBuildConfig,
             create_session,
         )
 
-        source_tool_allowlist = self._tool_allowlist()
         child = await create_session(
             SessionBuildConfig(
                 scenario=child_ctx.scenario,
@@ -376,25 +374,23 @@ class Session(_SessionComposition):
                 services=child_services,
                 store=self.store,
                 graph=self.graph,
-                stream_fn=self._stream_fn if stream_fn is None else stream_fn,
-                model=self._model if model is None else model,
+                stream_fn=snapshot.stream_fn if stream_fn is None else stream_fn,
+                model=snapshot.model if model is None else model,
                 tools=(
-                    list(tools) if tools is not None else list(self._external_tools())
+                    list(tools) if tools is not None else list(snapshot.external_tools)
                 ),
-                system=system if system is not None else self.system,
-                context_policies=[
-                    copy.copy(policy) for policy in self._external_context_policies()
-                ],
-                trigger_renderers=self._external_trigger_renderers(),
-                codec=self._composition_codec(),
-                max_turns=self._max_turns if max_turns is None else max_turns,
-                max_tool_calls=self._max_tool_calls,
+                system=system if system is not None else snapshot.system,
+                context_policies=list(snapshot.external_context_policies),
+                trigger_renderers=snapshot.external_trigger_renderers,
+                codec=snapshot.codec,
+                max_turns=snapshot.max_turns if max_turns is None else max_turns,
+                max_tool_calls=snapshot.max_tool_calls,
                 tool_allowlist=(
-                    list(source_tool_allowlist)
-                    if source_tool_allowlist is not None
+                    list(snapshot.tool_allowlist)
+                    if snapshot.tool_allowlist is not None
                     else None
                 ),
-                thinking=self._thinking,
+                thinking=snapshot.thinking,
                 cancel_signal=child_cancel_signal,
             ),
             session_type=type(self),
@@ -499,9 +495,9 @@ class Session(_SessionComposition):
             else None
         )
 
-        source_resource_writer = source.get_resource_writer()
+        source_resource_writer = source.services.get_role(RESOURCE_WRITER)
         if (
-            source.get_effect_scope() is not None
+            source.services.get_role(EFFECT_SCOPE_ROLE) is not None
             and source_resource_writer is not None
             and not isinstance(
                 source_resource_writer,
@@ -516,7 +512,7 @@ class Session(_SessionComposition):
         environment_fork: EnvironmentFork | None = None
         forked: Session | None = None
         try:
-            effect_scope = source.get_effect_scope()
+            effect_scope = source.services.get_role(EFFECT_SCOPE_ROLE)
             if effect_scope is not None:
                 candidate, caller_cancelled = await settle_known_outcome(
                     effect_scope.fork_at(
@@ -546,8 +542,8 @@ class Session(_SessionComposition):
                 )
 
             child_resource_writer = source_resource_writer
-            child_resource_reader = source.get_resource_reader()
-            child_resource_store = source.get_resource_store()
+            child_resource_reader = source.services.get_role(RESOURCE_READER)
+            child_resource_store = source.services.get_role(RESOURCE_STORE)
             if environment_fork is not None and source_resource_writer is not None:
                 forkable_writer = cast(
                     EnvironmentForkableResourceWriter,
@@ -586,15 +582,13 @@ class Session(_SessionComposition):
                 create_session,
             )
 
-            source_tool_allowlist = source._tool_allowlist()
+            snapshot = source.composition_snapshot(include_provider_atoms=True)
             forked = await create_session(
                 SessionBuildConfig(
-                    extensions=source._composition_extensions(
-                        include_provider_atoms=True
-                    ),
-                    stream_fn=source._stream_fn,
-                    model=source._model,
-                    system=source.system,
+                    extensions=list(snapshot.extensions),
+                    stream_fn=snapshot.stream_fn,
+                    model=snapshot.model,
+                    system=snapshot.system,
                     cwd=child_ctx.cwd,
                     purpose=purpose,
                     store=source.store,
@@ -603,20 +597,17 @@ class Session(_SessionComposition):
                     initial_turns=list(prefix.turns),
                     initial_head=initial_head,
                     fork_point=turn_ref,
-                    tools=list(source._external_tools()),
-                    context_policies=[
-                        copy.copy(policy)
-                        for policy in source._external_context_policies()
-                    ],
-                    trigger_renderers=source._external_trigger_renderers(),
-                    codec=source._composition_codec(),
+                    tools=list(snapshot.external_tools),
+                    context_policies=list(snapshot.external_context_policies),
+                    trigger_renderers=snapshot.external_trigger_renderers,
+                    codec=snapshot.codec,
                     provider_identity=provider_identity,
                     resource_reader=child_resource_reader,
                     resource_store=child_resource_store,
                     resource_writer=child_resource_writer,
-                    tool_executor=source.get_tool_executor(),
-                    tool_orchestrator=source.get_tool_orchestrator(),
-                    permission_policy=source.get_permission_policy(),
+                    tool_executor=source.services.get_role(TOOL_EXECUTOR),
+                    tool_orchestrator=source.services.get_role(TOOL_ORCHESTRATOR),
+                    permission_policy=source.services.get_role(PERMISSION_POLICY_ROLE),
                     effect_scope=(
                         environment_fork.effect_scope
                         if environment_fork is not None
@@ -632,14 +623,14 @@ class Session(_SessionComposition):
                     ),
                     services=child_services,
                     resolved_spec=resolved_spec,
-                    max_turns=source._max_turns,
-                    max_tool_calls=source._max_tool_calls,
+                    max_turns=snapshot.max_turns,
+                    max_tool_calls=snapshot.max_tool_calls,
                     tool_allowlist=(
-                        list(source_tool_allowlist)
-                        if source_tool_allowlist is not None
+                        list(snapshot.tool_allowlist)
+                        if snapshot.tool_allowlist is not None
                         else None
                     ),
-                    thinking=source._thinking,
+                    thinking=snapshot.thinking,
                 ),
                 session_type=cls,
             )
@@ -713,7 +704,7 @@ class Session(_SessionComposition):
                 resolved_spec=session._resolved_session_spec(),
                 active_set=session._active_set_fingerprint(),
             )
-            resource_writer = session.get_resource_writer()
+            resource_writer = session.services.get_role(RESOURCE_WRITER)
             if isinstance(resource_writer, TransactionalResourceWriter):
                 await await_known_outcome(
                     resource_writer.recover(
@@ -726,7 +717,7 @@ class Session(_SessionComposition):
                         )
                     )
                 )
-            effect_scope = session.get_effect_scope()
+            effect_scope = session.services.get_role(EFFECT_SCOPE_ROLE)
             if effect_scope is not None:
                 try:
                     await await_known_outcome(

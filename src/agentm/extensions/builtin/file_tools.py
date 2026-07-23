@@ -11,6 +11,8 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from agentm.core.abi import (
+    RESOURCE_TXN,
+    RESOURCE_WRITER,
     AtomAPI,
     AtomInstallPriority,
     FunctionTool,
@@ -235,7 +237,7 @@ class _FileToolsRuntime:
         self._allow_globs = _resolve_globs(config.allow_globs, session.ctx.cwd)
         self._deny_globs = _resolve_globs(config.deny_globs, session.ctx.cwd)
         self._max_size_bytes = config.max_size_bytes
-        writer = session.get_resource_writer()
+        writer = session.services.get_role(RESOURCE_WRITER)
         if writer is None:
             raise RuntimeError(
                 "file_tools requires a ResourceWriter; compose a resource atom "
@@ -258,7 +260,7 @@ class _FileToolsRuntime:
             self._register_edit()
 
     def _resource_txn(self) -> ResourceTxn | None:
-        return self._session.get_resource_txn()
+        return self._session.services.get_role(RESOURCE_TXN)
 
     async def _resource_view(
         self,

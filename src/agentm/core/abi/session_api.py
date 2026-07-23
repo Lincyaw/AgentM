@@ -20,7 +20,6 @@ from typing import Callable, Literal, Protocol, TypeAlias, runtime_checkable
 
 from agentm.core.abi.cancel import CancelReason, CancelSignal
 from agentm.core.abi.catalog import AtomCatalog, VersionedResourceStore
-from agentm.core.abi.compaction import CompactionPublisher, SessionCompactor
 from agentm.core.abi.lifecycle import EffectScope, EnvironmentRestoreFailureHandler
 from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
 from agentm.core.abi.permission import PermissionPolicy
@@ -37,7 +36,6 @@ from agentm.core.abi.provider import (
 from agentm.core.abi.resource import (
     ResourceReader,
     ResourceStore,
-    ResourceTxn,
     ResourceWriter,
 )
 from agentm.core.abi.bus import EventBus, Handler
@@ -258,8 +256,6 @@ class AgentSessionConfig:
     atom_catalog: AtomCatalog | None = None
     bus: EventBus | None = None
     trajectory_store: TrajectoryStore | None = None
-    session_compactor: SessionCompactor | None = None
-    compaction_publisher: CompactionPublisher | None = None
     initial_turns: list[Turn] = field(default_factory=list)
     tool_allowlist: list[str] | None = None
     purpose: str = "subagent"
@@ -399,128 +395,13 @@ class AtomAPI(Protocol):
         service_scope: ServiceScope = "session",
         **kwargs: object,
     ) -> None:
-        """Register named operation services, such as ``bash``."""
-        ...
+        """Register named operation services, such as ``bash``.
 
-    def register_resource_writer(
-        self,
-        writer: ResourceWriter,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the write-side resource boundary for mutating file tools."""
-        ...
-
-    def get_resource_writer(self) -> ResourceWriter | None:
-        """Return the resource boundary, when the host or an atom registered one."""
-        ...
-
-    def register_resource_reader(
-        self,
-        reader: ResourceReader,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the read-side ResourceRef dereference boundary."""
-        ...
-
-    def get_resource_reader(self) -> ResourceReader | None:
-        """Return the ResourceRef read boundary, when registered."""
-        ...
-
-    def register_resource_store(
-        self,
-        store: ResourceStore,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register durable logical ResourceRef read/write storage."""
-        ...
-
-    def get_resource_store(self) -> ResourceStore | None:
-        """Return durable logical ResourceRef storage, when registered."""
-        ...
-
-    def get_resource_txn(self) -> ResourceTxn | None:
-        """Return the active turn-scoped resource transaction, when present."""
-        ...
-
-    def register_tool_executor(
-        self,
-        executor: ToolExecutor,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the execution boundary for tool calls."""
-        ...
-
-    def get_tool_executor(self) -> ToolExecutor | None:
-        """Return the tool execution boundary, when registered."""
-        ...
-
-    def register_tool_orchestrator(
-        self,
-        orchestrator: ToolOrchestrator,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the batch scheduling boundary for tool calls."""
-        ...
-
-    def get_tool_orchestrator(self) -> ToolOrchestrator | None:
-        """Return the batch scheduling boundary, when registered."""
-        ...
-
-    def register_permission_policy(
-        self,
-        policy: PermissionPolicy,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the permission decision boundary for tool calls."""
-        ...
-
-    def get_permission_policy(self) -> PermissionPolicy | None:
-        """Return the permission policy, when registered."""
-        ...
-
-    def register_effect_scope(
-        self,
-        scope: EffectScope,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the lifecycle boundary for turn/fork/resume effects."""
-        ...
-
-    def get_effect_scope(self) -> EffectScope | None:
-        """Return the effect lifecycle boundary, when registered."""
-        ...
-
-    def register_versioned_resource_store(
-        self,
-        store: VersionedResourceStore,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the immutable SDK resource version store."""
-        ...
-
-    def get_versioned_resource_store(self) -> VersionedResourceStore | None:
-        """Return the versioned SDK resource store, when registered."""
-        ...
-
-    def register_atom_catalog(
-        self,
-        catalog: AtomCatalog,
-        *,
-        replace: bool = False,
-    ) -> None:
-        """Register the active-set catalog for resolved atoms."""
-        ...
-
-    def get_atom_catalog(self) -> AtomCatalog | None:
-        """Return the atom active-set catalog, when registered."""
+        Every other runtime boundary (resource reader/writer/store, tool
+        executor/orchestrator, permission policy, effect scope, catalogs) is
+        reached through ``services`` with the ``ServiceRole`` descriptors in
+        ``agentm.core.abi.roles`` — there are no per-boundary methods.
+        """
         ...
 
     def register_provider(
@@ -596,6 +477,7 @@ class AtomAPI(Protocol):
         tools: list[Tool] | None = None,
         system: str | None = None,
         model: Model | None = None,
+        stream_fn: StreamFn | None = None,
         scenario: str | None = None,
         cwd: str | None = None,
         max_turns: int | None = None,

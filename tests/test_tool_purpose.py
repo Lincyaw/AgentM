@@ -7,8 +7,10 @@ from collections.abc import Callable
 import pytest
 
 from agentm.core.abi import BeforeSendEvent, CancelSignal, FunctionTool, TextContent
-from agentm.core.abi import ToolExecutionCapabilities, ToolExecutionRequest
+from agentm.core.abi import TOOL_EXECUTOR, ToolExecutionCapabilities
+from agentm.core.abi import ToolExecutionRequest
 from agentm.core.abi import ToolExecutor, ToolResult
+from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.tool_executor import ToolExecutionRequirements
 from agentm.extensions.builtin.tool_purpose import ToolPurposeConfig, install
 
@@ -16,8 +18,9 @@ from agentm.extensions.builtin.tool_purpose import ToolPurposeConfig, install
 class _FakeAPI:
     def __init__(self, executor: ToolExecutor | None = None) -> None:
         self.handlers: dict[str, Callable[[BeforeSendEvent], object]] = {}
-        self._executor = executor
-        self.registered_executor: ToolExecutor | None = None
+        self.services = ServiceRegistry()
+        if executor is not None:
+            self.services.bind(TOOL_EXECUTOR, executor)
 
     def on(
         self,
@@ -29,14 +32,9 @@ class _FakeAPI:
         del priority
         self.handlers[channel] = handler
 
-    def get_tool_executor(self) -> ToolExecutor | None:
-        return self._executor
-
-    def register_tool_executor(
-        self, executor: ToolExecutor, *, replace: bool = False
-    ) -> None:
-        assert replace
-        self.registered_executor = executor
+    @property
+    def registered_executor(self) -> ToolExecutor | None:
+        return self.services.get_role(TOOL_EXECUTOR)
 
 
 class _RecordingExecutor:

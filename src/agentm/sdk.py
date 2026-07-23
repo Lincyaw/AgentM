@@ -6,8 +6,7 @@ import asyncio
 from dataclasses import replace
 from typing import cast
 
-from agentm.core.abi.operations import BashOperations
-from agentm.core.abi.roles import HOST_BASH_OPERATIONS_SERVICE
+from agentm.core.abi.roles import HOST_BASH_OPERATIONS
 from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.store import TrajectoryStore
@@ -22,21 +21,22 @@ from agentm.storage.trajectory.resolve import (
 _STORE_OWNER_SERVICE = "agentm.sdk.trajectory_store_owner"
 
 
-def _host_services_with_host_bash() -> ServiceRegistry:
-    """Host defaults: shell execution pinned to the SDK host machine.
+def _default_host_services(
+    host_services: ServiceRegistry | None = None,
+) -> ServiceRegistry:
+    """Host defaults plus caller-supplied overrides.
 
-    Registered at scope="tree" so the whole session tree shares one instance
-    regardless of each session's own environment backend.
+    Host bash is bound tree-wide so every session in the tree shares one
+    host-pinned shell executor regardless of its own environment backend.
+    Caller-supplied services win on conflict; the caller chose their scopes
+    deliberately, so nothing is filtered out.
     """
     from agentm.environments.local import LocalBashOperations
 
     services = ServiceRegistry()
-    services.register(
-        HOST_BASH_OPERATIONS_SERVICE,
-        LocalBashOperations(),
-        BashOperations,
-        scope="tree",
-    )
+    services.bind(HOST_BASH_OPERATIONS, LocalBashOperations())
+    if host_services is not None:
+        services.update_from(host_services)
     return services
 
 
@@ -61,20 +61,25 @@ class AgentSession(Session):
         self.register_cleanup(release_store)
 
     @classmethod
-    async def create(cls, config: AgentSessionConfig) -> "AgentSession":
-        host_services = _host_services_with_host_bash()
+    async def create(
+        cls,
+        config: AgentSessionConfig,
+        *,
+        host_services: ServiceRegistry | None = None,
+    ) -> "AgentSession":
+        merged = _default_host_services(host_services)
         if config.trajectory_store is not None:
             return cast(
                 AgentSession,
                 await create_from_config(
                     config,
                     session_type=cls,
-                    host_services=host_services,
+                    host_services=merged,
                 ),
             )
 
         resolved = resolve_trajectory_store_or_create(config.cwd or None)
-        host_services.register(
+        merged.register(
             _STORE_OWNER_SERVICE,
             resolved,
             ResolvedTrajectoryStore,
@@ -87,7 +92,7 @@ class AgentSession(Session):
                     trajectory_store=resolved.store,
                 ),
                 session_type=cls,
-                host_services=host_services,
+                host_services=merged,
             )
         except BaseException as creation_error:
             try:
@@ -110,16 +115,13 @@ class AgentSession(Session):
         *,
         host_services: ServiceRegistry | None = None,
     ) -> "AgentSession":
-        merged = _host_services_with_host_bash()
-        if host_services is not None:
-            merged.inherit_from(host_services)
         return cast(
             AgentSession,
             await super().resume(
                 session_id,
                 store,
                 config,
-                host_services=merged,
+                host_services=_default_host_services(host_services),
             ),
         )
 

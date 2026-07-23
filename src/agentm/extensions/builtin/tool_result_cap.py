@@ -10,6 +10,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
+    RESOURCE_WRITER,
     AtomAPI,
     AtomInstallPriority,
     BusPriority,
@@ -64,7 +65,7 @@ class _ToolResultCapRuntime:
         self._session = session
         self._max_tokens = config.max_tokens
         self._error_floor_tokens = config.error_floor_tokens
-        writer = session.get_resource_writer()
+        writer = session.services.get_role(RESOURCE_WRITER)
         if writer is None:
             raise RuntimeError("tool_result_cap requires a ResourceWriter service")
         self._writer: ResourceWriter = writer
