@@ -4,7 +4,7 @@ extensions:
   # to the orchestrator's local filesystem.
   - module: agentm.extensions.builtin.observability
 
-  - module: agentm.extensions.builtin.prompt_assembly
+  - module: agentm.extensions.builtin.system_prompt
     config:
       include_tool_index: true
       prompt: |

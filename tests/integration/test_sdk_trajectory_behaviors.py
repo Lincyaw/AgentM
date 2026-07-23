@@ -32,7 +32,6 @@ from agentm.core.abi.messages import (
     Usage,
     text_message,
 )
-from agentm.core.abi.provider import ProviderPromptCacheRequest
 from agentm.core.abi.roles import (
     EFFECT_SCOPE_ROLE,
     RESOURCE_WRITER,
@@ -49,14 +48,12 @@ from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.abi.tool_executor import ToolExecutionRequirements
 from agentm.core.abi.trajectory import (
-    PromptCacheState,
     TrajectoryForkPoint,
     TrajectoryHead,
     TurnCheckpoint,
 )
 from agentm.core.abi.trigger import UserInput
 from agentm.extensions.builtin.llm_openai import (
-    OpenAIPromptCacheAdapter,
     OpenAIStreamFn,
 )
 from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
@@ -82,18 +79,15 @@ def _resource_host_services(
     return services
 
 
-_CONTEXT_PROJECTION = "agentm.extensions.builtin.context_projection"
 _LLM_COMPACTION = "agentm.extensions.builtin.llm_compaction"
 _MESSAGE_PATTERNS = "agentm.extensions.builtin.message_patterns"
-_PROMPT_CACHE = "agentm.extensions.builtin.prompt_cache"
-_OBSERVABLE_CACHE_ADAPTER = "tests.fixtures.prompt_cache_adapter"
 _CUSTOM_TRIGGER = "tests.fixtures.custom_trigger"
 _FILE_TOOLS = "agentm.extensions.builtin.file_tools"
 _LOCAL_RESOURCES = "agentm.extensions.builtin.local_backend"
 _OPERATIONS = "agentm.extensions.builtin.local_backend"
 _BACKGROUND_EXEC = "agentm.extensions.builtin.background_exec"
 _MEMORY = "agentm.extensions.builtin.memory"
-_SYSTEM_PROMPT = "agentm.extensions.builtin.prompt_assembly"
+_SYSTEM_PROMPT = "agentm.extensions.builtin.system_prompt"
 _SUB_AGENT = "agentm.extensions.builtin.sub_agent"
 _WAIT_FOR_CANCEL = object()
 
@@ -370,11 +364,6 @@ async def test_selected_trajectory_backend_preserves_session_scope(
         store.query_nodes(TrajectoryNodeQuery(session_id="missing-session"))
     with pytest.raises(KeyError):
         store.get_head("missing-session")
-    with pytest.raises(KeyError):
-        store.save_prompt_cache_state(
-            "missing-session",
-            PromptCacheState(cache_key="missing-session-cache"),
-        )
     with pytest.raises(ValueError, match="unknown trajectory leaf node"):
         store.load_chain(
             first.session_id,
@@ -391,20 +380,6 @@ async def test_selected_trajectory_backend_preserves_session_scope(
     )
 
 
-def _trajectory_extensions(cache_key: str) -> list[tuple[str, dict[str, object]]]:
-    return [
-        (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
-        (
-            _PROMPT_CACHE,
-            {
-                "cache_key": cache_key,
-                "tag_last_messages": 2,
-            },
-        ),
-        (_OBSERVABLE_CACHE_ADAPTER, {}),
-    ]
-
-
 def _text(messages: Sequence[AgentMessage]) -> list[str]:
     return [
         block.text
@@ -412,17 +387,6 @@ def _text(messages: Sequence[AgentMessage]) -> list[str]:
         for block in message.content
         if isinstance(block, TextContent)
     ]
-
-
-def _cache_markers(messages: Sequence[AgentMessage]) -> set[str]:
-    return {
-        marker
-        for message in messages
-        if isinstance(
-            marker := message.meta.tags.get("provider_cache_marker"),
-            str,
-        )
-    }
 
 
 def _write_local_scenario(root: Path, name: str) -> Path:
@@ -571,71 +535,13 @@ async def test_sdk_all_packaged_scenarios_create(
 
 
 @pytest.mark.asyncio
-async def test_sdk_resume_replays_history_and_durable_cache_state(
-    trajectory_backend: _TrajectoryBackend,
-) -> None:
-    cache_key = "resume-prefix"
-    provider = _StubProvider("answer-one", "answer-two")
-    session = await AgentSession.create(
-        AgentSessionConfig(
-            extensions=_trajectory_extensions(cache_key),
-            stream_fn=provider,
-            model=_model(),
-            trajectory_store=trajectory_backend.connect(),
-        )
-    )
-    session_id = session.session_id
-    try:
-        await session.run("question-one")
-        await session.run("question-two")
-    finally:
-        await session.shutdown()
-
-    assert _cache_markers(provider.requests[1]) == {"resume-prefix:1"}
-
-    resumed_provider = _StubProvider("answer-three")
-    resumed = await AgentSession.resume(
-        session_id,
-        trajectory_backend.connect(),
-        config=AgentSessionConfig(
-            extensions=_trajectory_extensions(cache_key),
-            stream_fn=resumed_provider,
-            model=_model(),
-        ),
-    )
-    try:
-        transcript = await resumed.run("question-three")
-    finally:
-        await resumed.shutdown()
-
-    assert _text(resumed_provider.requests[0]) == [
-        "question-one",
-        "answer-one",
-        "question-two",
-        "answer-two",
-        "question-three",
-    ]
-    assert _cache_markers(resumed_provider.requests[0]) == {"resume-prefix:2"}
-    assert _text(transcript) == [
-        "question-one",
-        "answer-one",
-        "question-two",
-        "answer-two",
-        "question-three",
-        "answer-three",
-    ]
-
-
-@pytest.mark.asyncio
 async def test_sdk_persists_provider_failure_without_replaying_it(
     trajectory_backend: _TrajectoryBackend,
 ) -> None:
     provider = _StubProvider(RuntimeError("provider unavailable"))
     session = await AgentSession.create(
         AgentSessionConfig(
-            extensions=[
-                (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
-            ],
+            extensions=[],
             stream_fn=provider,
             model=_model(),
             trajectory_store=trajectory_backend.connect(),
@@ -660,9 +566,7 @@ async def test_sdk_persists_provider_failure_without_replaying_it(
         session_id,
         trajectory_backend.connect(),
         config=AgentSessionConfig(
-            extensions=[
-                (_CONTEXT_PROJECTION, {"mode": "exact_node_chain"}),
-            ],
+            extensions=[],
             stream_fn=resumed_provider,
             model=_model(),
         ),
@@ -682,7 +586,7 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
     provider = _StubProvider("answer-one", "parent-answer", "branch-answer")
     session = await AgentSession.create(
         AgentSessionConfig(
-            extensions=_trajectory_extensions("fork-prefix"),
+            extensions=[],
             stream_fn=provider,
             model=_model(),
             trajectory_store=trajectory_backend.connect(),
@@ -704,7 +608,6 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
         "answer-one",
         "branch-only-question",
     ]
-    assert _cache_markers(provider.requests[2]) == {"fork-prefix:2"}
     assert _text(transcript) == [
         "question-one",
         "answer-one",
@@ -720,7 +623,7 @@ async def test_sdk_node_fork_selectors_require_executable_turn_boundaries(
     provider = _StubProvider("answer-one", "answer-two", "branch-answer")
     session = await AgentSession.create(
         AgentSessionConfig(
-            extensions=_trajectory_extensions("node-fork"),
+            extensions=[],
             stream_fn=provider,
             model=_model(),
             trajectory_store=trajectory_backend.connect(),
@@ -1591,38 +1494,6 @@ class _OpenAIClientStub:
     def __init__(self, stream: object | None = None) -> None:
         self.completions = _OpenAICompletionsStub(stream)
         self.chat = type("_Chat", (), {"completions": self.completions})()
-
-
-@pytest.mark.asyncio
-async def test_openai_provider_materializes_prompt_cache_request_fields() -> None:
-    model = Model(
-        id="gpt-5-mini",
-        provider="openai",
-        context_window=128_000,
-        max_output_tokens=1_024,
-    )
-    adapter = OpenAIPromptCacheAdapter(retention="24h")
-    adapted = adapter.apply_prompt_cache(
-        ProviderPromptCacheRequest(
-            messages=[text_message("cached-prefix")],
-            model=model,
-            state=PromptCacheState(cache_key="stable-sdk-session"),
-        )
-    )
-    client = _OpenAIClientStub()
-    stream_fn = OpenAIStreamFn(client=client)
-
-    _ = [
-        event
-        async for event in stream_fn(
-            messages=list(adapted.messages),
-            model=model,
-            tools=[],
-        )
-    ]
-
-    assert client.completions.requests[0]["prompt_cache_key"] == ("stable-sdk-session")
-    assert client.completions.requests[0]["prompt_cache_retention"] == "24h"
 
 
 @pytest.mark.asyncio

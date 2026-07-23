@@ -20,7 +20,6 @@ from agentm.core.abi.messages import AgentMessage, MessageVisibility
 from agentm.core.abi.store import DiagnosticLevel, TrajectoryDiagnostic
 from agentm.core.abi.trajectory import (
     ContentReplacementState,
-    PromptCacheState,
     TrajectoryHead,
     TrajectoryHeadStatus,
     TrajectoryNode,
@@ -228,7 +227,6 @@ def serialize_node(node: TrajectoryNode) -> JsonObject:
         "is_sidechain": node.is_sidechain,
         "tool_call_ids": list(node.tool_call_ids),
         "tool_names": list(node.tool_names),
-        "cache_key": node.cache_key,
         "content_ref": node.content_ref,
         "visibility": node.visibility,
         "payload": json_safe(node.payload),
@@ -360,10 +358,6 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
         ),
         tool_call_ids=_string_tuple(data, "tool_call_ids"),
         tool_names=_string_tuple(data, "tool_names"),
-        cache_key=_optional_str(
-            data.get("cache_key"),
-            path="trajectory node.cache_key",
-        ),
         content_ref=_optional_str(
             data.get("content_ref"),
             path="trajectory node.content_ref",
@@ -544,66 +538,6 @@ def deserialize_content_state(data: Mapping[str, Any]) -> ContentReplacementStat
             data,
             "head_id",
             path="content replacement state",
-        ),
-        metadata=dict(metadata),
-    )
-
-
-def serialize_prompt_cache_state(state: PromptCacheState) -> JsonObject:
-    return {
-        "schema_version": STORAGE_RECORD_VERSION,
-        "cache_key": state.cache_key,
-        "leaf_node_id": state.leaf_node_id,
-        "content_replacement_state_key": state.content_replacement_state_key,
-        "branch_id": state.branch_id,
-        "head_id": state.head_id,
-        "provider": state.provider,
-        "metadata": json_safe(state.metadata),
-    }
-
-
-def deserialize_prompt_cache_state(data: Mapping[str, Any]) -> PromptCacheState:
-    _only_fields(
-        data,
-        {
-            "schema_version",
-            "cache_key",
-            "leaf_node_id",
-            "content_replacement_state_key",
-            "branch_id",
-            "head_id",
-            "provider",
-            "metadata",
-        },
-        "prompt cache state",
-    )
-    _validate_version(data, "prompt cache state")
-    metadata = json_restore(data.get("metadata", {}))
-    if not isinstance(metadata, Mapping):
-        raise ValueError("prompt cache metadata must be an object")
-    return PromptCacheState(
-        cache_key=_required_str(data, "cache_key", path="prompt cache state"),
-        leaf_node_id=_optional_str(
-            data.get("leaf_node_id"),
-            path="prompt cache state.leaf_node_id",
-        ),
-        content_replacement_state_key=_optional_str(
-            data.get("content_replacement_state_key"),
-            path="prompt cache state.content_replacement_state_key",
-        ),
-        branch_id=_required_str(
-            data,
-            "branch_id",
-            path="prompt cache state",
-        ),
-        head_id=_required_str(
-            data,
-            "head_id",
-            path="prompt cache state",
-        ),
-        provider=_optional_str(
-            data.get("provider"),
-            path="prompt cache state.provider",
         ),
         metadata=dict(metadata),
     )
@@ -835,7 +769,6 @@ __all__ = [
     "deserialize_diagnostic",
     "deserialize_head",
     "deserialize_node",
-    "deserialize_prompt_cache_state",
     "deserialize_resource_version",
     "json_restore",
     "json_safe",
@@ -846,6 +779,5 @@ __all__ = [
     "serialize_diagnostic",
     "serialize_head",
     "serialize_node",
-    "serialize_prompt_cache_state",
     "serialize_resource_version",
 ]

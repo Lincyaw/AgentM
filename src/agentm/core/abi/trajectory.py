@@ -73,7 +73,6 @@ TrajectoryIndexField = Literal[
     "role",
     "tool_call_id",
     "tool_name",
-    "cache_key",
     "content_ref",
     "visibility",
     "timestamp",
@@ -207,11 +206,6 @@ TRAJECTORY_NODE_INDEXES: tuple[TrajectoryIndexSpec, ...] = (
         purpose="tool-name trajectory filtering and usage diagnostics",
     ),
     TrajectoryIndexSpec(
-        name="trajectory_nodes_cache",
-        fields=("root_session_id", "cache_key", "session_id", "seq"),
-        purpose="prompt-cache/content-replacement prefix lookup",
-    ),
-    TrajectoryIndexSpec(
         name="trajectory_nodes_content_ref",
         fields=("content_ref", "session_id", "seq"),
         purpose="referenced summary and artifact lineage lookup",
@@ -311,40 +305,6 @@ class ContentReplacementState:
             self,
             "metadata",
             _freeze_metadata(self.metadata, "content replacement metadata"),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class PromptCacheState:
-    """Provider-facing prompt-cache identity attached to a chain prefix."""
-
-    cache_key: str
-    leaf_node_id: str | None = None
-    content_replacement_state_key: str | None = None
-    branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID
-    head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID
-    provider: str | None = None
-    metadata: Mapping[str, object] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        _require_string(self.cache_key, "prompt cache key")
-        _require_string(
-            self.leaf_node_id,
-            "prompt cache leaf_node_id",
-            optional=True,
-        )
-        _require_string(
-            self.content_replacement_state_key,
-            "prompt cache content_replacement_state_key",
-            optional=True,
-        )
-        _require_string(self.branch_id, "prompt cache branch_id")
-        _require_string(self.head_id, "prompt cache head_id")
-        _require_string(self.provider, "prompt cache provider", optional=True)
-        object.__setattr__(
-            self,
-            "metadata",
-            _freeze_metadata(self.metadata, "prompt cache metadata"),
         )
 
 
@@ -531,7 +491,6 @@ class TrajectoryNode:
     is_sidechain: bool = False
     tool_call_ids: tuple[str, ...] = ()
     tool_names: tuple[str, ...] = ()
-    cache_key: str | None = None
     content_ref: str | None = None
     visibility: MessageVisibility = "visible"
     message: AgentMessage | None = None
@@ -552,7 +511,6 @@ class TrajectoryNode:
             ("turn_id", self.turn_id),
             ("run_id", self.run_id),
             ("agent_id", self.agent_id),
-            ("cache_key", self.cache_key),
             ("content_ref", self.content_ref),
         ):
             _require_string(
@@ -912,7 +870,6 @@ __all__ = [
     "DEFAULT_TRAJECTORY_BRANCH_ID",
     "DEFAULT_TRAJECTORY_HEAD_ID",
     "Outcome",
-    "PromptCacheState",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
     "ToolRecord",

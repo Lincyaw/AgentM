@@ -85,7 +85,7 @@ MANIFEST = ExtensionManifest(
         "event:session_shutdown",
     ),
     config_schema=SubAgentConfig,
-    requires=("atom:prompt_assembly",),
+    requires=("atom:system_prompt",),
     priority=AtomInstallPriority.SERVICE,
 )
 

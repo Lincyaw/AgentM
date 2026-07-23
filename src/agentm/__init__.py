@@ -49,9 +49,6 @@ from agentm.core.abi.query import (
 )
 from agentm.core.abi.provider import (
     ProviderConfig,
-    ProviderPromptCacheAdapter,
-    ProviderPromptCacheRequest,
-    ProviderPromptCacheResult,
     ProviderRegistry,
     ProviderResolver,
     ProviderSessionIdentity,
@@ -155,9 +152,6 @@ __all__ = [
     "Model",
     "ObservabilityQueryStore",
     "ProviderConfig",
-    "ProviderPromptCacheAdapter",
-    "ProviderPromptCacheRequest",
-    "ProviderPromptCacheResult",
     "ProviderRequestFailed",
     "ProviderRegistry",
     "ProviderResolver",

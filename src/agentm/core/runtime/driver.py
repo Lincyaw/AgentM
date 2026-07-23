@@ -39,9 +39,6 @@ from agentm.core.abi.permission import (
     PermissionAudience,
     PermissionPolicy,
 )
-from agentm.core.abi.provider import (
-    ProviderPromptCacheAdapter,
-)
 from agentm.core.abi.resource import (
     ResourceMutation,
     ResourceTxn,
@@ -53,7 +50,6 @@ from agentm.core.abi.roles import (
     CONTEXT_COMPACTION_SERVICE,
     CONTEXT_PROJECTION_SERVICE,
     INTERRUPTION_MESSAGE_POLICY_SERVICE,
-    PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
     RESOURCE_TXN_SERVICE,
 )
 from agentm.core.abi.services import ServiceRegistry
@@ -511,7 +507,6 @@ class DriverConfig:
     permission_audience: PermissionAudience = "user"
     system: str | None = None
     context_policies: list[ContextPolicy] | None = None
-    prompt_cache_adapter: ProviderPromptCacheAdapter | None = None
     trigger_renderers: dict[str, TriggerRenderer] | None = None
     cancel_signal: CancelSignal | None = None
     effect_scope: EffectScope | None = None
@@ -572,12 +567,6 @@ async def drive(config: DriverConfig) -> None:
     )
     if context_projection is None and config.store is not None:
         context_projection = ExactNodeChainProjection()
-    prompt_cache_adapter = config.prompt_cache_adapter
-    if prompt_cache_adapter is None:
-        prompt_cache_adapter = config.services.get(
-            PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE,
-            cast(type[ProviderPromptCacheAdapter], ProviderPromptCacheAdapter),
-        )
     interruption_policy = config.services.get(
         INTERRUPTION_MESSAGE_POLICY_SERVICE,
         cast(type[InterruptionMessagePolicy], InterruptionMessagePolicy),
@@ -761,7 +750,6 @@ async def drive(config: DriverConfig) -> None:
                         system=prompt_run.system_prompt,
                     ),
                     context_projection=context_projection,
-                    prompt_cache_adapter=prompt_cache_adapter,
                     interruption_policy=interruption_policy,
                     checkpoint=checkpoint_writer,
                     tool_calls_remaining=(

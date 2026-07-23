@@ -19,7 +19,7 @@ from agentm.core.lib import expand_path, expand_path_from_cwd
 from agentm.extensions import ExtensionManifest
 
 
-class PromptAssemblyConfig(BaseModel):
+class SystemPromptConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt: str | None = None
@@ -30,13 +30,13 @@ class PromptAssemblyConfig(BaseModel):
 
 
 MANIFEST = ExtensionManifest(
-    name="prompt_assembly",
+    name="system_prompt",
     description=(
         "Assemble configured/project context, runtime facts, and the effective "
         "tool index into one provider-facing system prompt."
     ),
     registers=("event:before_run", "event:before_send"),
-    config_schema=PromptAssemblyConfig,
+    config_schema=SystemPromptConfig,
     requires=(),
     priority=AtomInstallPriority.CONTEXT,
 )
@@ -58,7 +58,7 @@ def _discover_context_files(cwd: str) -> str:
                 parts.append(candidate.read_text(encoding="utf-8").rstrip())
             except OSError as exc:
                 logger.warning(
-                    "prompt_assembly: could not read context file {}: {}",
+                    "system_prompt: could not read context file {}: {}",
                     candidate,
                     exc,
                 )
@@ -66,7 +66,7 @@ def _discover_context_files(cwd: str) -> str:
 
 
 def _resolve_prompt(
-    config: PromptAssemblyConfig,
+    config: SystemPromptConfig,
     *,
     cwd: str,
     scenario_dir: str | None,
@@ -106,11 +106,11 @@ def _join_prompt(*parts: str | None) -> str | None:
     return "\n\n".join(present) if present else None
 
 
-class _PromptAssemblyRuntime:
+class _SystemPromptRuntime:
     def __init__(
         self,
         api: AtomAPI,
-        config: PromptAssemblyConfig,
+        config: SystemPromptConfig,
         prompt: str,
     ) -> None:
         self._api = api
@@ -165,13 +165,13 @@ class _PromptAssemblyRuntime:
         return {"system": _join_prompt(event.system, block) or block}
 
 
-def install(api: AtomAPI, config: PromptAssemblyConfig) -> None:
+def install(api: AtomAPI, config: SystemPromptConfig) -> None:
     prompt = _resolve_prompt(
         config,
         cwd=api.ctx.cwd,
         scenario_dir=api.ctx.scenario_dir,
     )
-    _PromptAssemblyRuntime(api, config, prompt).install()
+    _SystemPromptRuntime(api, config, prompt).install()
 
 
-__all__ = ("MANIFEST", "PromptAssemblyConfig", "install")
+__all__ = ("MANIFEST", "SystemPromptConfig", "install")

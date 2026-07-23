@@ -24,7 +24,6 @@ from agentm.core.abi.store import (
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_HEAD_ID,
     ContentReplacementState,
-    PromptCacheState,
     TRAJECTORY_HEAD_INDEXES,
     TRAJECTORY_NODE_INDEXES,
     TrajectoryBranchId,
@@ -54,12 +53,10 @@ from agentm.storage.serialization import (
     deserialize_diagnostic,
     deserialize_head,
     deserialize_node,
-    deserialize_prompt_cache_state,
     serialize_content_state,
     serialize_diagnostic,
     serialize_head,
     serialize_node,
-    serialize_prompt_cache_state,
 )
 
 PostgresParams = Sequence[object] | Mapping[str, object]
@@ -215,7 +212,6 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                     visibility text NOT NULL,
                     tool_call_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
                     tool_names jsonb NOT NULL DEFAULT '[]'::jsonb,
-                    cache_key text,
                     content_ref text,
                     timestamp double precision NOT NULL DEFAULT 0,
                     node_json jsonb NOT NULL,
@@ -287,24 +283,11 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 )
                 """
             )
-            cur.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self._table("trajectory_prompt_cache_states")} (
-                    session_id text NOT NULL
-                        CONSTRAINT agentm_trajectory_prompt_cache_states_session_fk
-                        REFERENCES {self._table("trajectory_sessions")}(id),
-                    cache_key text NOT NULL,
-                    state_json jsonb NOT NULL,
-                    PRIMARY KEY (session_id, cache_key)
-                )
-                """
-            )
             for table in (
                 "trajectory_nodes",
                 "trajectory_heads",
                 "trajectory_diagnostics",
                 "trajectory_content_states",
-                "trajectory_prompt_cache_states",
             ):
                 self._ensure_session_foreign_key(cur, table)
             cur.execute(
@@ -966,49 +949,6 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             )
             return cloned
 
-    def save_prompt_cache_state(
-        self,
-        session_id: str,
-        state: PromptCacheState,
-    ) -> None:
-        with self._transaction() as cur:
-            self._require_session(cur, session_id, for_update=True)
-            cur.execute(
-                f"""
-                INSERT INTO {self._table("trajectory_prompt_cache_states")}
-                    (session_id, cache_key, state_json)
-                VALUES (%s, %s, %s::jsonb)
-                ON CONFLICT (session_id, cache_key)
-                DO UPDATE SET state_json = EXCLUDED.state_json
-                """,
-                (
-                    session_id,
-                    state.cache_key,
-                    _json_dumps(serialize_prompt_cache_state(state)),
-                ),
-            )
-
-    def load_prompt_cache_state(
-        self,
-        session_id: str,
-        cache_key: str,
-    ) -> PromptCacheState | None:
-        with self._transaction() as cur:
-            self._require_session(cur, session_id)
-            cur.execute(
-                f"""
-                SELECT state_json FROM {self._table("trajectory_prompt_cache_states")}
-                WHERE session_id = %s AND cache_key = %s
-                """,
-                (session_id, cache_key),
-            )
-            row = cur.fetchone()
-        return (
-            None
-            if row is None
-            else deserialize_prompt_cache_state(_json_mapping(row[0]))
-        )
-
     def _insert_node(self, cur: PostgresCursor, node: TrajectoryNode) -> None:
         data = serialize_node(node)
         cur.execute(
@@ -1017,14 +957,14 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 id, session_id, root_session_id, parent_session_id, seq,
                 parent_id, logical_parent_id, branch_id, head_id, agent_id,
                 is_sidechain, turn_id, turn_index, run_id, run_step, message_index,
-                kind, role, visibility, tool_call_ids, tool_names, cache_key,
+                kind, role, visibility, tool_call_ids, tool_names,
                 content_ref, timestamp, node_json
             )
             VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s::jsonb, %s::jsonb, %s,
+                %s, %s, %s, %s::jsonb, %s::jsonb,
                 %s, %s, %s::jsonb
             )
             """,
@@ -1050,7 +990,6 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 node.visibility,
                 _json_dumps(list(node.tool_call_ids)),
                 _json_dumps(list(node.tool_names)),
-                node.cache_key,
                 node.content_ref,
                 node.timestamp,
                 _json_dumps(data),
@@ -1298,7 +1237,6 @@ def _index_statements(schema: str) -> tuple[str, ...]:
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_prompt_run_idx ON {prefix} (session_id, run_id, run_step, message_index)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_tool_call_idx ON {prefix} USING gin (tool_call_ids)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_tool_name_idx ON {prefix} USING gin (tool_names)",
-        f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_cache_idx ON {prefix} (root_session_id, cache_key, session_id, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_content_ref_idx ON {prefix} (content_ref, session_id, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_visibility_idx ON {prefix} (session_id, kind, role, visibility, seq)",
         f"CREATE INDEX IF NOT EXISTS agentm_trajectory_nodes_session_timestamp_idx ON {prefix} (session_id, timestamp, seq)",
@@ -1346,7 +1284,6 @@ def _node_query_where(
     if query.tool_name is not None:
         clauses.append("tool_names ? %s")
         params.append(query.tool_name)
-    equal("cache_key", query.cache_key)
     equal("content_ref", query.content_ref)
     equal("visibility", query.visibility)
     if query.after_seq is not None:

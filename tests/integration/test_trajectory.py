@@ -366,7 +366,7 @@ async def test_before_send_system_prompt_does_not_accumulate_across_run() -> Non
         SessionBuildConfig(
             extensions=[
                 (
-                    "agentm.extensions.builtin.prompt_assembly",
+                    "agentm.extensions.builtin.system_prompt",
                     {
                         "discover_project_context": False,
                         "include_tool_index": True,

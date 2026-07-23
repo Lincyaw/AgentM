@@ -3,15 +3,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import math
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
-from .messages import AgentMessage
 from .stream import Model, StreamFn
-from .trajectory import PromptCacheState
 
 
 ProviderMetaScalar = str | int | float | bool | None
@@ -52,7 +50,6 @@ class ProviderConfig:
     stream_fn: StreamFn
     model: Model
     name: str
-    prompt_cache_adapter: ProviderPromptCacheAdapter | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.stream_fn, StreamFn):
@@ -60,14 +57,6 @@ class ProviderConfig:
         if not isinstance(self.model, Model):
             raise TypeError("provider model must be Model")
         _nonempty_string(self.name, "provider name")
-        if self.prompt_cache_adapter is not None and not isinstance(
-            self.prompt_cache_adapter,
-            ProviderPromptCacheAdapter,
-        ):
-            raise TypeError(
-                "provider prompt_cache_adapter must implement "
-                "ProviderPromptCacheAdapter"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,72 +107,6 @@ class ProviderSessionIdentity:
 ProviderRegistry = Mapping[str, ProviderConfig]
 
 
-@dataclass(frozen=True, slots=True)
-class ProviderPromptCacheRequest:
-    """Provider adapter input for prompt-cache materialization."""
-
-    messages: Sequence[AgentMessage]
-    model: Model
-    state: PromptCacheState
-    metadata: Mapping[str, str | int | float | bool | None] = field(
-        default_factory=dict
-    )
-
-    def __post_init__(self) -> None:
-        messages = tuple(self.messages)
-        if not all(isinstance(message, AgentMessage) for message in messages):
-            raise TypeError("provider cache request messages are invalid")
-        if not isinstance(self.model, Model):
-            raise TypeError("provider cache request model must be Model")
-        if not isinstance(self.state, PromptCacheState):
-            raise TypeError("provider cache request state must be PromptCacheState")
-        object.__setattr__(self, "messages", messages)
-        object.__setattr__(
-            self,
-            "metadata",
-            _freeze_metadata(self.metadata, "provider cache request metadata"),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderPromptCacheResult:
-    """Provider adapter output after applying cache hints."""
-
-    messages: Sequence[AgentMessage]
-    state: PromptCacheState
-    metadata: Mapping[str, str | int | float | bool | None] = field(
-        default_factory=dict
-    )
-
-    def __post_init__(self) -> None:
-        messages = tuple(self.messages)
-        if not all(isinstance(message, AgentMessage) for message in messages):
-            raise TypeError("provider cache result messages are invalid")
-        if not isinstance(self.state, PromptCacheState):
-            raise TypeError("provider cache result state must be PromptCacheState")
-        object.__setattr__(self, "messages", messages)
-        object.__setattr__(
-            self,
-            "metadata",
-            _freeze_metadata(self.metadata, "provider cache result metadata"),
-        )
-
-
-@runtime_checkable
-class ProviderPromptCacheAdapter(Protocol):
-    """Provider-specific bridge for prompt-cache state.
-
-    Context policy owns when cache boundaries exist. Provider adapters own how
-    that boundary is represented for one model API. Core never embeds
-    provider-specific cache-control syntax.
-    """
-
-    def apply_prompt_cache(
-        self,
-        request: ProviderPromptCacheRequest,
-    ) -> ProviderPromptCacheResult: ...
-
-
 @runtime_checkable
 class ProviderResolver(Protocol):
     """Tree-scoped host policy for selecting the active provider.
@@ -197,9 +120,6 @@ class ProviderResolver(Protocol):
 
 __all__ = [
     "ProviderConfig",
-    "ProviderPromptCacheAdapter",
-    "ProviderPromptCacheRequest",
-    "ProviderPromptCacheResult",
     "ProviderMeta",
     "ProviderMetaScalar",
     "ProviderRegistry",

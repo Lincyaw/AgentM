@@ -1,7 +1,6 @@
 # code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """LLM stream boundary.
 
-Implements the LLM stream port in ``docs/refactor-abstract-inventory.md``.
 The ``StreamFn`` Protocol is the single point that touches a real LLM API; the
 agent loop has zero hard-coded provider knowledge. Uses Python
 ``AsyncIterator`` semantics and a Python-native event taxonomy.

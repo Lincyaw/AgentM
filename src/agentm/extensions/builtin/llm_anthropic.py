@@ -2,7 +2,7 @@
 """Anthropic Messages API provider — native ``StreamFn`` implementation.
 
 This module plugs into the kernel via the ``StreamFn`` Protocol and extension
-composition contracts described in ``docs/refactor-abstract-inventory.md``.
+composition contracts.
 
 Boundaries:
 

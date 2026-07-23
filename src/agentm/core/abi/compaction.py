@@ -1,8 +1,11 @@
 """Context projection ABI.
 
-Trajectory is the durable source of truth. Projection decides which messages
-derived from committed turns are sent to the model under a context budget.
-Compaction is one projection strategy, not a replacement history model.
+Trajectory is the durable source of truth. A context projection replays the
+provider-visible messages from the committed node chain exactly, honoring
+compaction boundaries, content references, and visibility rules. It does not
+drop history to fit a budget. Compaction is a separate context policy that
+summarizes an old committed prefix into a durable checkpoint; the projection
+then substitutes that checkpoint in place of the covered prefix during replay.
 """
 
 # code-health: ignore-file[AM025] -- validates immutable ABI DTO boundaries

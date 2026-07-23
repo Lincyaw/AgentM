@@ -37,7 +37,7 @@ _BUILTIN_SCENARIOS: dict[str, ScenarioSpec] = {
                 "agentm.extensions.builtin.tool_error_messages",
                 "agentm.extensions.builtin.file_tools",
                 "agentm.extensions.builtin.tool_bash",
-                "agentm.extensions.builtin.prompt_assembly",
+                "agentm.extensions.builtin.system_prompt",
             )
         ),
     ),

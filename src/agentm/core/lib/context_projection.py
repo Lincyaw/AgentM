@@ -51,14 +51,11 @@ class ExactNodeChainProjection(ContextProjection):
         groups: list[tuple[int, list[AgentMessage]]] = []
         group_keys: list[tuple[str, str | None, int]] = []
         content_refs: list[str] = []
-        cache_keys: list[str] = []
         for node in projection_input.nodes:
             if node.is_sidechain and not self._include_sidechain:
                 continue
             if node.content_ref is not None:
                 content_refs.append(node.content_ref)
-            if node.cache_key is not None:
-                cache_keys.append(node.cache_key)
             message = _node_message(
                 node,
                 include_hidden=self._include_hidden,
@@ -89,7 +86,6 @@ class ExactNodeChainProjection(ContextProjection):
             kept=_turn_ranges(index for index in kept_indexes if index >= 0),
             dropped=_turn_ranges(index for index in dropped_indexes if index >= 0),
             content_refs=tuple(dict.fromkeys(content_refs)),
-            cache_keys=tuple(dict.fromkeys(cache_keys)),
             synthetic_message_count=sum(
                 1 for message in limited if message.meta.synthetic
             ),
@@ -122,12 +118,9 @@ def _node_message(
             return None
         if meta.visibility == "replay_only" and not include_replay_only:
             return None
-        if node.cache_key is not None or node.content_ref is not None:
+        if node.content_ref is not None:
             tags = dict(meta.tags)
-            if node.cache_key is not None:
-                tags.setdefault("cache_key", node.cache_key)
-            if node.content_ref is not None:
-                tags.setdefault("content_ref", node.content_ref)
+            tags.setdefault("content_ref", node.content_ref)
             message = replace(message, meta=replace(meta, tags=tags))
         return message
     if node.content_ref is None or not metadata_only_content_refs:

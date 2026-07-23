@@ -55,8 +55,6 @@ PROVIDER_RESOLVER_SERVICE: Final = "provider_resolver"
 PROVIDER_SESSION_IDENTITY_SERVICE: Final = "provider_session_identity"
 """Service key for the provider/model identity bound to a session history."""
 
-PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE: Final = "provider_prompt_cache_adapter"
-"""Service key for provider-specific prompt-cache materialization."""
 
 INTERRUPTION_MESSAGE_POLICY_SERVICE: Final = "interruption_message_policy"
 """Service key for provider-facing interrupted-turn message construction."""
@@ -321,7 +319,6 @@ __all__ = [
     "PERMISSION_POLICY_SERVICE",
     "PROVIDER_RESOLVER_ROLE",
     "PROVIDER_RESOLVER_SERVICE",
-    "PROVIDER_PROMPT_CACHE_ADAPTER_SERVICE",
     "PROVIDER_SESSION_IDENTITY",
     "PROVIDER_SESSION_IDENTITY_SERVICE",
     "RETRY_POLICY_SERVICE",

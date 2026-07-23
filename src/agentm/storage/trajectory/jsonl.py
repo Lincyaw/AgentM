@@ -26,7 +26,6 @@ from agentm.core.abi.store import (
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_HEAD_ID,
     ContentReplacementState,
-    PromptCacheState,
     TRAJECTORY_HEAD_INDEXES,
     TRAJECTORY_NODE_INDEXES,
     TrajectoryBranchId,
@@ -46,12 +45,10 @@ from agentm.storage.serialization import (
     deserialize_diagnostic,
     deserialize_head,
     deserialize_node,
-    deserialize_prompt_cache_state,
     serialize_content_state,
     serialize_diagnostic,
     serialize_head,
     serialize_node,
-    serialize_prompt_cache_state,
 )
 
 _VERSION = 2
@@ -398,35 +395,6 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
             )
             return cloned
 
-    def save_prompt_cache_state(
-        self,
-        session_id: str,
-        state_value: PromptCacheState,
-    ) -> None:
-        with self._guard():
-            state = self._load_session_unlocked(session_id)
-            state.save_prompt_cache_state(session_id, state_value)
-            self._normalize_tail_for_append_unlocked(session_id)
-            self._append_record_unlocked(
-                session_id,
-                {
-                    "version": _VERSION,
-                    "record_type": _PROMPT_CACHE_STATE,
-                    "state": serialize_prompt_cache_state(state_value),
-                },
-            )
-
-    def load_prompt_cache_state(
-        self,
-        session_id: str,
-        cache_key: str,
-    ) -> PromptCacheState | None:
-        with self._guard():
-            return self._load_session_unlocked(session_id).load_prompt_cache_state(
-                session_id,
-                cache_key,
-            )
-
     def file_path(self, session_id: str) -> Path:
         return self._path(session_id)
 
@@ -581,10 +549,8 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
                     deserialize_content_state(_required_mapping(record, "state")),
                 )
             elif record_type == _PROMPT_CACHE_STATE:
-                state.save_prompt_cache_state(
-                    meta.id,
-                    deserialize_prompt_cache_state(_required_mapping(record, "state")),
-                )
+                # Legacy prompt-cache records are no longer applied; skip them.
+                pass
             elif record_type == _DIAGNOSTIC:
                 state.append_diagnostic(
                     deserialize_diagnostic(_required_mapping(record, "diagnostic"))

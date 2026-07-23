@@ -349,7 +349,6 @@ class SessionRuntime:
         try:
             assert self._stream_fn is not None
             assert self._model is not None
-            provider = self.get_provider()
             audience: PermissionAudience = "user" if self.ctx.depth == 0 else "subagent"
             await drive(
                 DriverConfig(
@@ -366,9 +365,6 @@ class SessionRuntime:
                     permission_audience=audience,
                     system=self.system,
                     context_policies=self.context_policies,
-                    prompt_cache_adapter=(
-                        provider.prompt_cache_adapter if provider is not None else None
-                    ),
                     trigger_renderers=self.trigger_renderers,
                     interrupt=self._interrupt,
                     shutdown=self._shutdown,

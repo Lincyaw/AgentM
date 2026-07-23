@@ -40,10 +40,6 @@ from agentm.core.abi.permission import (
     PermissionRequest,
     permission_denial_result,
 )
-from agentm.core.abi.provider import (
-    ProviderPromptCacheAdapter,
-    ProviderPromptCacheRequest,
-)
 from agentm.core.abi.stream import (
     AssistantStreamEvent,
     MessageEnd,
@@ -106,7 +102,6 @@ from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
     Outcome,
-    PromptCacheState,
     ToolRecord,
     TrajectoryNode,
     Turn,
@@ -121,7 +116,6 @@ from agentm.core.abi.trigger import (
     TriggerMetadata,
     TriggerRenderer,
 )
-from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.runtime.execution import Execution
 
 if TYPE_CHECKING:
@@ -138,7 +132,6 @@ class ReactionRequest:
     trigger_metadata: TriggerMetadata
     config: DriverConfig
     context_projection: ContextProjection | None
-    prompt_cache_adapter: ProviderPromptCacheAdapter | None
     interruption_policy: InterruptionMessagePolicy | None
     tool_calls_remaining: int | None
     checkpoint: Callable[[TurnCheckpoint], Awaitable[None]] | None = None
@@ -720,58 +713,6 @@ async def _history_messages(
     )
 
 
-def _message_cache_key(messages: Sequence[AgentMessage]) -> str | None:
-    for message in reversed(messages):
-        cache_key = message.meta.tags.get("cache_key")
-        if isinstance(cache_key, str) and cache_key:
-            return cache_key
-    return None
-
-
-async def _apply_provider_prompt_cache(
-    *,
-    messages: Sequence[AgentMessage],
-    model: Model,
-    adapter: ProviderPromptCacheAdapter | None,
-    store: TrajectoryStore | None,
-    session_id: str,
-) -> list[AgentMessage]:
-    if adapter is None:
-        return list(messages)
-    cache_key = _message_cache_key(messages)
-    if cache_key is None:
-        return list(messages)
-
-    state = (
-        await asyncio.to_thread(store.load_prompt_cache_state, session_id, cache_key)
-        if store is not None
-        else None
-    )
-    if state is None:
-        state = PromptCacheState(cache_key=cache_key, provider=model.provider)
-    result = adapter.apply_prompt_cache(
-        ProviderPromptCacheRequest(
-            messages=messages,
-            model=model,
-            state=state,
-            metadata={"session_id": session_id},
-        )
-    )
-    if result.state.cache_key != cache_key:
-        raise ValueError(
-            "provider prompt-cache adapter cannot change the cache identity"
-        )
-    if store is not None:
-        await await_known_outcome(
-            asyncio.to_thread(
-                store.save_prompt_cache_state,
-                session_id,
-                result.state,
-            )
-        )
-    return list(result.messages)
-
-
 async def _projection_input(
     *,
     turns: Sequence[Turn],
@@ -861,7 +802,6 @@ async def react(
     system = config.system
     policies = config.context_policies or []
     context_projection = request.context_projection
-    prompt_cache_adapter = request.prompt_cache_adapter
     trigger_renderers = config.trigger_renderers
     interrupt = config.interrupt
     shutdown = config.shutdown
@@ -1001,13 +941,6 @@ async def react(
         resolved_system_prompt = effective_system
 
     messages = route_messages(messages, session_id=session_id)
-    messages = await _apply_provider_prompt_cache(
-        messages=messages,
-        model=effective_model,
-        adapter=prompt_cache_adapter,
-        store=trajectory_store,
-        session_id=session_id,
-    )
 
     # Runtime constraints remain authoritative even if a transform adds tools.
     if allowed_tool_names is not None:

@@ -12,7 +12,6 @@ from typing import Literal, Protocol, Sequence, runtime_checkable
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_HEAD_ID,
     ContentReplacementState,
-    PromptCacheState,
     TRAJECTORY_HEAD_INDEXES,
     TRAJECTORY_NODE_INDEXES,
     TrajectoryBranchId,
@@ -334,22 +333,6 @@ class TrajectoryStore(Protocol):
         """Clone state for fork/resume while preserving deterministic decisions."""
         ...
 
-    def save_prompt_cache_state(
-        self,
-        session_id: str,
-        state: PromptCacheState,
-    ) -> None:
-        """Persist provider prompt-cache identity for a chain prefix."""
-        ...
-
-    def load_prompt_cache_state(
-        self,
-        session_id: str,
-        cache_key: str,
-    ) -> PromptCacheState | None:
-        """Load provider prompt-cache identity for a chain prefix."""
-        ...
-
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryCommit:
@@ -478,7 +461,6 @@ class TrajectoryNodeQuery:
     message_index: int | None = None
     tool_call_id: str | None = None
     tool_name: str | None = None
-    cache_key: str | None = None
     content_ref: str | None = None
     visibility: str | None = None
     after_seq: int | None = None
@@ -504,7 +486,6 @@ class TrajectoryNodeQuery:
             ("run_id", self.run_id),
             ("tool_call_id", self.tool_call_id),
             ("tool_name", self.tool_name),
-            ("cache_key", self.cache_key),
             ("content_ref", self.content_ref),
         ):
             _validate_optional_query_string(value, label=label)

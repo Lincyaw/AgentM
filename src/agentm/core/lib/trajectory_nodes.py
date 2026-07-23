@@ -22,7 +22,6 @@ from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
     ContentReplacementState,
-    PromptCacheState,
     TRAJECTORY_HEAD_INDEXES,
     TRAJECTORY_NODE_INDEXES,
     TrajectoryBranchId,
@@ -100,7 +99,7 @@ def messages_to_nodes(
     nodes: list[TrajectoryNode] = []
     parent = context.parent_node_id
     for offset, message in enumerate(messages):
-        tool_call_ids, tool_names, cache_key, content_ref = _message_indexes(message)
+        tool_call_ids, tool_names, content_ref = _message_indexes(message)
         node = TrajectoryNode(
             id=f"{context.node_id_prefix}:{offset}",
             session_id=context.session_id,
@@ -122,7 +121,6 @@ def messages_to_nodes(
             is_sidechain=context.is_sidechain,
             tool_call_ids=tool_call_ids,
             tool_names=tool_names,
-            cache_key=cache_key,
             content_ref=content_ref,
             visibility=message.meta.visibility,
             message=message,
@@ -262,7 +260,7 @@ def _turn_messages(
 
 def _message_indexes(
     message: AgentMessage,
-) -> tuple[tuple[str, ...], tuple[str, ...], str | None, str | None]:
+) -> tuple[tuple[str, ...], tuple[str, ...], str | None]:
     tool_call_ids: list[str] = []
     tool_names: list[str] = []
     if isinstance(message, AssistantMessage):
@@ -274,12 +272,10 @@ def _message_indexes(
         tool_call_ids.extend(block.tool_call_id for block in message.content)
 
     tags = message.meta.tags
-    cache_key = tags.get("cache_key")
     content_ref = tags.get("content_ref")
     return (
         tuple(tool_call_ids),
         tuple(tool_names),
-        cache_key if isinstance(cache_key, str) else None,
         content_ref if isinstance(content_ref, str) else None,
     )
 
@@ -343,7 +339,6 @@ class TrajectoryIndexState:
         self._node_ids: set[str] = set()
         self._heads: dict[tuple[str, str], TrajectoryHead] = {}
         self._content_states: dict[tuple[str, str], ContentReplacementState] = {}
-        self._prompt_cache_states: dict[tuple[str, str], PromptCacheState] = {}
 
     @property
     def indexes(self) -> tuple[TrajectoryIndexSpec, ...]:
@@ -443,8 +438,6 @@ class TrajectoryIndexState:
             nodes = [node for node in nodes if query.tool_call_id in node.tool_call_ids]
         if query.tool_name is not None:
             nodes = [node for node in nodes if query.tool_name in node.tool_names]
-        if query.cache_key is not None:
-            nodes = [node for node in nodes if node.cache_key == query.cache_key]
         if query.content_ref is not None:
             nodes = [node for node in nodes if node.content_ref == query.content_ref]
         if query.visibility is not None:
@@ -635,24 +628,6 @@ class TrajectoryIndexState:
         )
         self.save_content_replacement_state(target_session_id, cloned)
         return cloned
-
-    @synchronized_trajectory_state
-    def save_prompt_cache_state(
-        self,
-        session_id: str,
-        state: PromptCacheState,
-    ) -> None:
-        self._require_index_session(session_id)
-        self._prompt_cache_states[(session_id, state.cache_key)] = state
-
-    @synchronized_trajectory_state
-    def load_prompt_cache_state(
-        self,
-        session_id: str,
-        cache_key: str,
-    ) -> PromptCacheState | None:
-        self._require_index_session(session_id)
-        return self._prompt_cache_states.get((session_id, cache_key))
 
     def _require_index_session(self, session_id: str) -> None:
         if session_id not in self._nodes:

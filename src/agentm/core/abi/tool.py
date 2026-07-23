@@ -1,8 +1,7 @@
 # code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Kernel tool contract.
 
-Implements the Tool Execution boundary in
-``docs/refactor-abstract-inventory.md``: the bare ``Tool`` Protocol the agent
+The Tool Execution boundary: the bare ``Tool`` Protocol the agent
 loop sees, plus the ``ToolResult`` / ``ToolOutcome`` data shapes.
 
 ``FunctionTool`` is a concrete adapter that wraps an async callable — it
