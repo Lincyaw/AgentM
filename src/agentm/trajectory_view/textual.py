@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar, cast
 
 from loguru import logger
@@ -34,6 +35,12 @@ from agentm.trajectory_view.model import (
     parse_trace_query,
 )
 from agentm.core.abi.query import TrajectoryQueryStore
+from agentm.control import (
+    CompactionDeliveryError,
+    InterruptDeliveryError,
+    send_compact,
+    send_interrupt,
+)
 
 _TableRows = tuple[tuple[str, tuple[str, ...], int], ...]
 
@@ -282,6 +289,12 @@ class TraceConsoleApp(App[None]):
         height: 3;
     }
 
+    #steer {
+        height: 3;
+        display: none;
+        border: solid $warning;
+    }
+
     #rows {
         height: 2fr;
     }
@@ -305,6 +318,8 @@ class TraceConsoleApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("/", "focus_query", "Search"),
+        Binding("i", "focus_steer", "Interrupt"),
+        Binding("c", "compact", "Compact"),
         Binding("escape", "clear_focus", "Blur"),
         Binding("tab", "next_view", "Next view"),
         Binding("shift+tab", "previous_view", "Previous view"),
@@ -330,10 +345,12 @@ class TraceConsoleApp(App[None]):
         *,
         follow: bool = False,
         registry: TraceViewRegistry | None = None,
+        inbox_root: Path | None = None,
     ) -> None:
         super().__init__()
         self._data_source = data_source
         self._follow = follow
+        self._inbox_root = inbox_root
         self._view_registry = registry or default_trace_view_registry()
         self._specs = self._view_registry.specs()
         self._active_view_id = self._specs[0].id if self._specs else "trajectory"
@@ -370,6 +387,13 @@ class TraceConsoleApp(App[None]):
                             "tool:bash, status:incomplete, cause:ModelEndTurn"
                         ),
                         id="query",
+                    )
+                    yield Input(
+                        placeholder=(
+                            "Interrupt & steer the live model — Enter to send, "
+                            "Esc to cancel"
+                        ),
+                        id="steer",
                     )
                     yield ResizableDataTable(id="rows")
                     yield Static("Detail", id="detail-title")
@@ -550,6 +574,13 @@ class TraceConsoleApp(App[None]):
         self.query_one("#rows", DataTable).focus()
         self._render_current_state()
 
+    @on(Input.Submitted, "#steer")
+    def _on_steer_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        self._hide_steer()
+        if text:
+            self.run_worker(self._deliver_interrupt(text), exclusive=False)
+
     @on(DataTable.RowHighlighted, "#rows")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = event.row_key.value
@@ -575,7 +606,56 @@ class TraceConsoleApp(App[None]):
     def action_focus_query(self) -> None:
         self.query_one("#query", Input).focus()
 
+    def action_focus_steer(self) -> None:
+        steer = self.query_one("#steer", Input)
+        steer.display = True
+        steer.focus()
+
+    def action_compact(self) -> None:
+        self.run_worker(self._deliver_compact(), exclusive=False)
+
+    def _hide_steer(self) -> None:
+        steer = self.query_one("#steer", Input)
+        steer.value = ""
+        steer.display = False
+        self.query_one("#rows", DataTable).focus()
+
+    async def _deliver_interrupt(self, text: str) -> None:
+        session_id = self._data_source.session_id
+        try:
+            await send_interrupt(session_id, text, inbox_root=self._inbox_root)
+        except FileNotFoundError:
+            self.notify(
+                f"No active session {_short_id(session_id)} — nothing to interrupt.",
+                severity="warning",
+            )
+        except (InterruptDeliveryError, ValueError, OSError) as exc:
+            self.notify(f"Interrupt failed: {exc}", severity="error")
+        else:
+            self.notify(
+                f"Interrupted current turn; queued {len(text)} chars to the model.",
+                severity="information",
+            )
+
+    async def _deliver_compact(self) -> None:
+        session_id = self._data_source.session_id
+        try:
+            await send_compact(session_id, inbox_root=self._inbox_root)
+        except FileNotFoundError:
+            self.notify(
+                f"No active session {_short_id(session_id)}.",
+                severity="warning",
+            )
+        except (CompactionDeliveryError, OSError) as exc:
+            self.notify(f"Compaction failed: {exc}", severity="error")
+        else:
+            self.notify("Compaction scheduled.", severity="information")
+
     def action_clear_focus(self) -> None:
+        steer = self.query_one("#steer", Input)
+        if self.focused is steer:
+            self._hide_steer()
+            return
         query = self.query_one("#query", Input)
         if self.focused is query:
             self.query_one("#rows", DataTable).focus()
@@ -766,6 +846,7 @@ def run_textual_viewer(
     *,
     follow: bool = False,
     registry: TraceViewRegistry | None = None,
+    inbox_root: Path | None = None,
 ) -> None:
     """Run the Textual trajectory console."""
 
@@ -773,6 +854,7 @@ def run_textual_viewer(
         TrajectoryDataSource(query=query, session_id=session_id),
         follow=follow,
         registry=registry,
+        inbox_root=inbox_root,
     )
     app.run()
 
