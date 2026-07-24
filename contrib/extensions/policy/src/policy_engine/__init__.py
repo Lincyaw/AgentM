@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AtomAPI,
@@ -46,16 +46,17 @@ from .deliver import build_injection, run_critic, self_check_message
 from .paths import default_policy_db_path, resolve_policy_path
 from .recording import ToolEventRecorder
 from .plane import DataPlane
-from .triggers import TriggerEngine, load_items, render_message
+from .triggers import TriggerEngine, load_items, load_signals, render_message
 
 
 class PolicyEngineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     checklist: str = "package:checklist.yaml"
+    signals: str = "package:signals.yaml"
     db_path: str | None = None
     max_injections: int = 3
-    min_narrow_runs: int = 2
+    signal_params: dict[str, float] = Field(default_factory=dict)
     # Delivery for critic-tier items at the stop decision:
     #   "off"        — structural tier only
     #   "self_check" — inject the checklist questions for the agent's own review
@@ -123,12 +124,18 @@ class _Runtime:
         items_path = resolve_policy_path(
             self.config.checklist, cwd=Path(self.api.ctx.cwd)
         )
+        signals_path = resolve_policy_path(
+            self.config.signals, cwd=Path(self.api.ctx.cwd)
+        )
         items = load_items(items_path) if items_path else {}
-        if not items:
-            logger.warning("policy_engine: no checklist items; interventions inert")
+        signals = load_signals(signals_path) if signals_path else {}
+        if not items or not signals:
+            logger.warning("policy_engine: missing checklist/signals; inert")
             return
         self.triggers = TriggerEngine(
-            items=items, min_narrow_runs=self.config.min_narrow_runs
+            items=items,
+            signals=signals,
+            param_overrides=dict(self.config.signal_params),
         )
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
         logger.info(

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -99,6 +100,16 @@ CREATE TABLE IF NOT EXISTS plane_superseded (
     red_run_id INTEGER NOT NULL,
     green_run_id INTEGER NOT NULL
 );
+-- action<->file edges: the correlation layer (IFG lineage). relation in
+-- ('read','search_hit','write','edit'); action_id = raw event row id.
+CREATE TABLE IF NOT EXISTS plane_action_files (
+    action_id INTEGER NOT NULL,
+    turn INTEGER NOT NULL,
+    relation TEXT NOT NULL,
+    path TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plane_action_files_path
+    ON plane_action_files(path, turn);
 """
 
 _VIEWS = """
@@ -138,6 +149,30 @@ CREATE TEMP VIEW IF NOT EXISTS v_independent_greens AS
 CREATE TEMP VIEW IF NOT EXISTS v_uncovered_scopes AS
     SELECT DISTINCT e.stem AS scope FROM plane_edits e
     WHERE e.stem NOT IN (SELECT scope FROM plane_run_scopes);
+
+-- edits whose file the agent had inspected earlier (read or search hit)
+CREATE TEMP VIEW IF NOT EXISTS v_informed_edits AS
+    SELECT DISTINCT e.id, e.turn, e.path FROM plane_edits e
+    WHERE EXISTS (
+        SELECT 1 FROM plane_action_files af
+        WHERE af.relation IN ('read', 'search_hit')
+          AND af.turn <= e.turn
+          AND (af.path = e.path OR e.path LIKE '%' || af.path
+               OR af.path LIKE '%' || e.path)
+    );
+
+-- edits to files never read or surfaced by any search first
+CREATE TEMP VIEW IF NOT EXISTS v_blind_edits AS
+    SELECT e.id, e.turn, e.path FROM plane_edits e
+    WHERE e.id NOT IN (SELECT id FROM v_informed_edits);
+
+-- per edit, turns until the next validation referencing its stem (NULL = never)
+CREATE TEMP VIEW IF NOT EXISTS v_edit_validation_gap AS
+    SELECT e.id, e.path, e.turn,
+           (SELECT MIN(v.turn) FROM v_validations v
+            JOIN plane_run_scopes rs ON rs.run_id = v.id
+            WHERE rs.scope = e.stem AND v.turn >= e.turn) - e.turn AS gap
+    FROM plane_edits e;
 """
 
 # Import-line shapes across the languages in the corpus (rust/go/ts/py/ex).
@@ -146,6 +181,8 @@ _IMPORT_LINE = re.compile(
     r"^\s*(?:import|use|from|require|alias|include)\b(.{1,120})",
     re.MULTILINE,
 )
+
+_SEARCH_HIT = re.compile(r"^([\w./-]+\.[A-Za-z]{1,6})[:-]\d")
 
 _FAIL_NAME = re.compile(
     r"(?:FAIL(?:ED)?:?\s+|test\s+)([A-Za-z_][\w:.\-/]{2,80})(?:\s+\.\.\.\s+FAILED)?"
@@ -220,11 +257,13 @@ class DataPlane:
                 cmd = args.get("cmd")
                 if isinstance(cmd, str) and cmd.strip():
                     bashes.append((row_id, turn, cmd, exit_code, result_text))
+                    self._observe_bash_edges(row_id, turn, cmd, result_text)
             elif tool in {"write", "edit"} and not result_error:
                 path = args.get("path") or args.get("file_path")
                 if isinstance(path, str) and path:
                     edits.append((row_id, turn, path))
                     self._observe_file(path, source="edit")
+                    self._edge(row_id, turn, tool, path)
                     content = args.get("content") or args.get("new_text") or ""
                     if isinstance(content, str) and content:
                         self._observe_imports(path, content, source="edit")
@@ -233,6 +272,7 @@ class DataPlane:
                 if isinstance(path, str) and path and result_text:
                     self._observe_file(path, source="read")
                     self._observe_imports(path, result_text, source="read")
+                    self._edge(row_id, turn, "read", path)
 
         for row_id, turn, path in edits:
             self.conn.execute(
@@ -363,6 +403,31 @@ class DataPlane:
                     )
                     break
 
+    def _edge(self, action_id: int, turn: int, relation: str, path: str) -> None:
+        self.conn.execute(
+            "INSERT INTO plane_action_files (action_id, turn, relation, path) "
+            "VALUES (?, ?, ?, ?)",
+            (action_id, turn, relation, path),
+        )
+
+    def _observe_bash_edges(
+        self, action_id: int, turn: int, cmd: str, result_text: str
+    ) -> None:
+        """Correlation edges from shell activity: file reads via read-shaped
+        heads, and search hits parsed from grep/rg-style `path:line` output."""
+
+        for segment in split_segments(cmd):
+            if segment.head in {"cat", "head", "tail", "less", "bat"}:
+                for token in segment.ordered[1:]:
+                    if "/" in token and not token.startswith("-"):
+                        self._edge(action_id, turn, "read", token)
+                        self._observe_file(token, source="read")
+            elif segment.head in {"rg", "grep", "ag"}:
+                for line in result_text.splitlines()[:80]:
+                    hit = _SEARCH_HIT.match(line)
+                    if hit:
+                        self._edge(action_id, turn, "search_hit", hit.group(1))
+
     def _observe_file(self, path: str, *, source: str) -> None:
         self.conn.execute(
             "INSERT OR IGNORE INTO plane_repo_files (path, is_test, source) "
@@ -380,12 +445,20 @@ class DataPlane:
 
     # -- unified query entry ---------------------------------------------------
 
-    def query(self, sql: str, params: tuple[object, ...] = ()) -> list[tuple]:
+    def query(
+        self,
+        sql: str,
+        params: tuple[object, ...] | Mapping[str, object] = (),
+    ) -> list[tuple]:
         """The single query entry. Fact tables and v_* views only."""
 
         return self.conn.execute(sql, params).fetchall()
 
-    def scalar(self, sql: str, params: tuple[object, ...] = ()) -> object:
+    def scalar(
+        self,
+        sql: str,
+        params: tuple[object, ...] | Mapping[str, object] = (),
+    ) -> object:
         row = self.conn.execute(sql, params).fetchone()
         return row[0] if row else None
 

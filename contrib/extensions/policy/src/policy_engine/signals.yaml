@@ -1,0 +1,135 @@
+# Signal definitions: each signal is a query over the data plane.
+#
+#   query      SQL over plane_* tables / v_* views; the signal is TRUE when
+#              the query returns at least one row. Named :params allowed.
+#   params     default parameter values (overridable via atom config
+#              signal_params).
+#   evidence   optional query + format used when the signal fires on the
+#              inject tier; rows are formatted with {0}, {1}, ...
+#   provenance one line on where the rule came from / how it was calibrated.
+#
+# Adding a signal means adding an entry here and calibrating it with
+# `python -m policy_engine replay` over the recorded corpus — no code.
+
+signals:
+  always:
+    query: "SELECT 1"
+    provenance: unconditional gate for critic items with no cheap precondition
+
+  narrow_only:
+    query: >-
+      SELECT rs.scope FROM plane_run_scopes rs
+      JOIN v_validations v ON v.id = rs.run_id
+      WHERE EXISTS (SELECT 1 FROM plane_run_selectors sel
+                    WHERE sel.run_id = rs.run_id)
+        AND rs.scope NOT IN (
+            SELECT rs2.scope FROM plane_run_scopes rs2
+            JOIN v_validations v2 ON v2.id = rs2.run_id
+            WHERE NOT EXISTS (SELECT 1 FROM plane_run_selectors s2
+                              WHERE s2.run_id = rs2.run_id))
+      GROUP BY rs.scope HAVING COUNT(DISTINCT rs.run_id) >= :min_narrow_runs
+    params: { min_narrow_runs: 2 }
+    evidence:
+      query: >-
+        SELECT v.raw FROM v_validations v
+        JOIN plane_run_scopes rs ON rs.run_id = v.id
+        WHERE EXISTS (SELECT 1 FROM plane_run_selectors sel
+                      WHERE sel.run_id = v.id)
+        GROUP BY v.id ORDER BY v.id DESC LIMIT 4
+      format: "narrowed run: `{0}`"
+    provenance: >-
+      turborepo rescues (3x reward 1.0); calibrated on the 28-session
+      corpus 2026-07-24, every emission evidence-correct.
+
+  self_authored_only:
+    query: >-
+      SELECT 1 WHERE EXISTS (SELECT 1 FROM plane_edits WHERE is_test = 1)
+        AND EXISTS (SELECT 1 FROM v_greens)
+        AND NOT EXISTS (SELECT 1 FROM v_independent_greens)
+    evidence:
+      query: >-
+        SELECT raw, exit_code FROM v_greens ORDER BY id DESC LIMIT 3
+      format: "green run (self-authored oracle): `{0}`"
+    provenance: >-
+      F3 lineage; stem-level independence definition removed the paperless
+      and electric false emissions in the 2026-07-24 audit.
+
+  under_validation:
+    query: >-
+      SELECT 1 WHERE (SELECT COUNT(*) FROM plane_edits) >= :min_mutations
+        AND (SELECT COUNT(*) FROM v_validations)
+            < (SELECT COUNT(*) FROM plane_edits) * :ratio
+    params: { min_mutations: 8, ratio: 0.25 }
+    evidence:
+      query: >-
+        SELECT (SELECT COUNT(*) FROM plane_edits),
+               (SELECT COUNT(*) FROM v_validations)
+      format: "{0} file modifications vs {1} validation runs"
+    provenance: >-
+      derived from the 2026-07-23 batch (posthog 31/2, firezone 56/4,
+      harbor 18/3); stop-checkpoint only — latched mid-run it fires on
+      normal edit bursts (17/28 sessions incl. passes).
+
+  unresolved_red:
+    query: "SELECT 1 FROM v_unresolved_reds"
+    evidence:
+      query: >-
+        SELECT raw, exit_code FROM v_unresolved_reds ORDER BY id DESC LIMIT 3
+      format: "failed run never superseded: `{0}` (exit {1})"
+    provenance: >-
+      fires on passing sessions too (2/4 in the corpus) — critic tier only.
+
+  red_any:
+    query: "SELECT 1 FROM v_reds"
+    provenance: crude relevance gate for dismissal/attribution questions
+
+  green_close:
+    query: >-
+      SELECT 1 WHERE (SELECT exit_code FROM v_validations
+                      ORDER BY id DESC LIMIT 1) = 0
+    provenance: session is closing on a green — prices the stop critic
+
+  repeat_fail2:
+    query: >-
+      SELECT head FROM v_reds GROUP BY head HAVING COUNT(*) >= :count
+    params: { count: 2 }
+    evidence:
+      query: >-
+        SELECT head, COUNT(*) FROM v_reds GROUP BY head
+        HAVING COUNT(*) >= 2 ORDER BY 2 DESC LIMIT 3
+      format: "repeated failure x{1}: {0}"
+    provenance: >-
+      normal debugging loops trip this (15/28 incl. passes) — critic tier;
+      needs a no-edits-in-between refinement before it can inject.
+
+  repeat_fail3:
+    query: >-
+      SELECT head FROM v_reds GROUP BY head HAVING COUNT(*) >= :count
+    params: { count: 3 }
+    provenance: stricter variant of repeat_fail2
+
+  test_code_alternate:
+    query: >-
+      SELECT 1 WHERE EXISTS (SELECT head FROM v_reds GROUP BY head
+                             HAVING COUNT(*) >= 2)
+        AND EXISTS (SELECT 1 FROM plane_edits WHERE is_test = 1)
+        AND EXISTS (SELECT 1 FROM plane_edits WHERE is_test = 0)
+    provenance: mined loop_dynamics item; relevance gate for the critic
+
+  no_measurement:
+    query: >-
+      SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM plane_run_tokens WHERE token IN
+        ('bench','benchmark','hyperfine','criterion','timeit','time',
+         'flamegraph','profile','perf'))
+    provenance: >-
+      lexical token set for perf-claim items; pair with arm perf_motivated
+      once the task classifier lands.
+
+  no_boundary_probe:
+    query: >-
+      SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM plane_run_tokens WHERE token IN
+        ('restart','rotate','reboot','kill','sighup','resume','reopen',
+         'relaunch'))
+    provenance: >-
+      lexical token set for persistence-symptom items; pair with arm
+      persistence_narrative once the task classifier lands.

@@ -17,13 +17,16 @@ import sys
 from pathlib import Path
 
 from .plane import DataPlane
-from .triggers import TriggerEngine, load_items
+from .triggers import TriggerEngine, load_items, load_signals
 
 
 def replay_session(db_path: Path, items_path: Path) -> list[str]:
     plane = DataPlane.snapshot(db_path)
     rows = plane.fetch_raw()
-    triggers = TriggerEngine(items=load_items(items_path))
+    triggers = TriggerEngine(
+        items=load_items(items_path),
+        signals=load_signals(items_path.parent / "signals.yaml"),
+    )
     emissions: list[str] = []
 
     def check(prefix_end: int, *, stopping: bool, turn: int) -> None:
