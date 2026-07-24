@@ -10,12 +10,12 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from agentm.core.abi import AtomAPI, text_message
+from agentm.core.abi import text_message
 from agentm.core.abi.events import Inject
 
 from .evidence import gather_evidence
+from .llm import call_llm
 from .pg_query import PgQuerySource
-from .tagger import _extract_result_text
 from .triggers import ChecklistItem
 
 _CRITIC_MANIFEST = Path(__file__).parent / "agents" / "critic.yaml"
@@ -31,8 +31,7 @@ def build_injection(message: str) -> Inject:
     return Inject(messages=(text_message(message, timestamp=time.time()),))
 
 
-async def verify_item(
-    api: AtomAPI,
+def verify_item(
     source: PgQuerySource,
     item: ChecklistItem,
     *,
@@ -40,6 +39,7 @@ async def verify_item(
 ) -> tuple[bool, str]:
     """Verify one checklist item against targeted evidence.
 
+    Uses direct LLM call, no child session.
     Returns (violated, reasoning).
     """
     system = _load_critic_system()
@@ -51,17 +51,11 @@ async def verify_item(
     if not evidence_prompt:
         return False, "no evidence turns found"
 
-    try:
-        child = await api.spawn(
-            purpose="policy-critic", system=system, tools=[], max_turns=1
-        )
-        result = await child.prompt(evidence_prompt, origin="policy_engine")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("deliver: critic failed for {}: {}", item.item_id, exc)
+    result = call_llm(system, evidence_prompt, max_tokens=300)
+    if result is None:
         return False, ""
 
-    text = _extract_result_text(result)
-    return _parse_critic_result(text)
+    return _parse_critic_result(result)
 
 
 def _parse_critic_result(text: str) -> tuple[bool, str]:

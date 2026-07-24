@@ -21,9 +21,8 @@ from pathlib import Path
 
 from loguru import logger
 
-from agentm.core.abi import AtomAPI
-
 from .compile import generate_tagger_prompt, load_vocabulary
+from .llm import call_llm
 from .pg_query import PgQuerySource
 
 _VOCABULARY_PATH = Path(__file__).parent / "vocabulary.yaml"
@@ -113,8 +112,7 @@ def _format_turn_content(
     return "\n".join(parts)
 
 
-async def annotate_turn(
-    api: AtomAPI,
+def annotate_turn(
     *,
     session_id: str,
     turn_index: int,
@@ -122,25 +120,15 @@ async def annotate_turn(
     tool_calls: Sequence[Mapping[str, object]],
     task_text: str = "",
 ) -> TurnAnnotation | None:
-    """Annotate one turn. Pass task_text on turn 0 for task-level predicates."""
+    """Annotate one turn. Uses direct LLM call, no child session."""
     system = _get_tagger_prompt()
     prompt = _format_turn_content(
         turn_index, assistant_text, tool_calls, task_text=task_text
     )
-    try:
-        child = await api.spawn(
-            purpose="policy-tagger", system=system, tools=[], max_turns=1
-        )
-        result = await child.prompt(prompt, origin="policy_engine")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("tagger: spawn/prompt failed: {}", exc)
+    result = call_llm(system, prompt, max_tokens=200)
+    if result is None:
         return None
-
-    return _parse_tagger_result(
-        _extract_result_text(result),
-        session_id=session_id,
-        turn_index=turn_index,
-    )
+    return _parse_tagger_result(result, session_id=session_id, turn_index=turn_index)
 
 
 def _parse_tagger_result(

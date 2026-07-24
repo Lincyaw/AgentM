@@ -23,4 +23,8 @@ extensions:
   # triggers + interventions stay disabled unless the run sets
   # AGENTM_CHECKLIST_WATCH_ENABLED=true (baseline batches stay clean).
   - module: policy_engine
+    config:
+      trajectory_dsn: "postgresql://agentm:agentm@localhost:55432/agentm_test"
+      critic: "off"
+      max_injections: 3
   - module: agentm.extensions.builtin.tool_purpose

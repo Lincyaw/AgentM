@@ -184,7 +184,7 @@ class _Runtime:
 
     async def _on_decide(self, event: DecideEvent) -> LoopAction | None:
         await self._flush_symbol_refreshes()
-        await self._run_tagger(event)
+        self._run_tagger(event)
 
         if self.triggers is None or self._pg is None:
             return None
@@ -207,18 +207,18 @@ class _Runtime:
             return build_injection(render_message(firing))
 
         if stopping and self.config.critic != "off":
-            return await self._run_critic(active)
+            return self._run_critic(active)
 
         return None
 
-    async def _run_critic(self, active_tags: frozenset[str]) -> LoopAction | None:
+    def _run_critic(self, active_tags: frozenset[str]) -> LoopAction | None:
         if self.triggers is None or self._pg is None:
             return None
         candidates = self.triggers.open_critic_items(self._pg, active_tags=active_tags)
         if not candidates:
             return None
         for item in candidates[:5]:
-            violated, reasoning = await verify_item(self.api, self._pg, item)
+            violated, reasoning = verify_item(self._pg, item)
             if violated:
                 self.injections += 1
                 message = (
@@ -234,7 +234,7 @@ class _Runtime:
                 return build_injection(message)
         return None
 
-    async def _run_tagger(self, event: DecideEvent) -> None:
+    def _run_tagger(self, event: DecideEvent) -> None:
         if self._pg is None:
             return
 
@@ -256,8 +256,7 @@ class _Runtime:
             self._task_classified = True
             task_text = self._first_user_message()
 
-        annotation = await annotate_turn(
-            self.api,
+        annotation = annotate_turn(
             session_id=self.session_id,
             turn_index=self.turn,
             assistant_text=assistant_text,
