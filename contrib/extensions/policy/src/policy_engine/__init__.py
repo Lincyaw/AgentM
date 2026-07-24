@@ -45,7 +45,7 @@ from agentm.extensions import ExtensionManifest
 from .deliver import build_injection, run_critic, self_check_message
 from .paths import default_policy_db_path, resolve_policy_path
 from .recording import ToolEventRecorder
-from .signals import MUTATING_TOOLS, TrajectoryState
+from .plane import DataPlane
 from .triggers import TriggerEngine, load_items, render_message
 
 
@@ -78,6 +78,18 @@ def _interventions_enabled() -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _message_text(message: object) -> str:
+    content = getattr(message, "content", None)  # code-health: ignore[AM021]
+    if not isinstance(content, (list, tuple)):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        text = getattr(block, "text", None)  # code-health: ignore[AM021]
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(parts)
+
+
 def _result_text(result: ToolResult | None) -> str:
     if result is None:
         return ""
@@ -94,7 +106,9 @@ class _Runtime:
     api: AtomAPI
     config: PolicyEngineConfig
     recorder: ToolEventRecorder
-    state: TrajectoryState = field(default_factory=TrajectoryState)
+    turn: int = 0
+    claims: list[tuple[int, bool, str]] = field(default_factory=list)
+    plane: DataPlane | None = None
     triggers: TriggerEngine | None = None
     injections: int = 0
     critic_done: bool = False
@@ -126,35 +140,25 @@ class _Runtime:
     # -- record + track ------------------------------------------------------
 
     def _on_turn_committed(self, event: TurnCommittedEvent) -> None:
-        self.state.turn += 1
+        self.turn += 1
 
     def _on_tool_result(self, event: ToolResultEvent) -> None:
-        is_error = event.result is not None and event.result.is_error
+        # Record only — every derived fact comes from the data plane, which
+        # rebuilds from these rows at each decision point. Failed bash runs
+        # are recorded like any other row: a nonzero exit is marked is_error
+        # by the runtime, and dropping those rows blinded the old watcher to
+        # every red run (found 2026-07-24).
         self.recorder.record(
-            turn=self.state.turn,
+            turn=self.turn,
             tool_name=event.tool_name,
             tool_call_id=event.tool_call_id or None,
             args=dict(event.args),
-            is_error=is_error,
+            is_error=event.result is not None and event.result.is_error,
             result_text=_result_text(event.result),
             exit_code=event.exit_code,
             duration_ms=event.duration_ms,
             cwd=self.api.ctx.cwd,
         )
-        # Failed bash runs are signal, not noise: a nonzero exit is marked
-        # is_error by the runtime, and dropping those rows blinded the old
-        # watcher to every red run (found 2026-07-24).
-        if event.tool_name == "bash":
-            raw = event.args.get("cmd")
-            if isinstance(raw, str) and raw.strip():
-                self.state.feed_bash(raw, event.exit_code)
-            return
-        if is_error:
-            return
-        if event.tool_name in MUTATING_TOOLS:
-            path = event.args.get("path") or event.args.get("file_path")
-            if isinstance(path, str) and path:
-                self.state.feed_mutation(path)
 
     # -- detect + intervene ----------------------------------------------------
 
@@ -163,7 +167,16 @@ class _Runtime:
             return None
         stopping = isinstance(event.observation.default_action, Stop)
 
-        firing = self.triggers.evaluate_inject(self.state, stopping=stopping)
+        claim = _message_text(event.observation.assistant_message)
+        if claim:
+            self.claims.append((self.turn, stopping, claim))
+
+        if self.plane is None:
+            self.plane = DataPlane.open(self.recorder.db_path)
+        self.plane.rebuild()
+        self.plane.ingest_claims(self.claims)
+
+        firing = self.triggers.evaluate_inject(self.plane, stopping=stopping)
         if firing is not None:
             self.injections += 1
             message = render_message(firing)
@@ -178,8 +191,8 @@ class _Runtime:
 
         if stopping and not self.critic_done and self.config.critic != "off":
             self.critic_done = True
-            items = self.triggers.open_critic_items(self.state)
-            evidence = self.triggers.critic_evidence(self.state)
+            items = self.triggers.open_critic_items(self.plane)
+            evidence = self.triggers.critic_evidence(self.plane)
             if not items and not evidence:
                 return None
             if self.config.critic == "self_check":
@@ -187,7 +200,7 @@ class _Runtime:
                 return build_injection(self_check_message(items, evidence))
             if self.config.critic == "subagent":
                 verdict = await run_critic(
-                    self.api, items=items, evidence=evidence, state=self.state
+                    self.api, items=items, evidence=evidence, plane=self.plane
                 )
                 if verdict is not None:
                     self.injections += 1

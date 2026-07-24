@@ -20,7 +20,7 @@ from loguru import logger
 from agentm.core.abi import AtomAPI, TextContent, UserMessage
 from agentm.core.abi.events import Inject
 
-from .signals import TrajectoryState
+from .plane import DataPlane
 from .triggers import ChecklistItem
 
 _CRITIC_SYSTEM = """You are a process reviewer for a software-engineering agent.
@@ -51,18 +51,21 @@ def build_injection(message: str) -> Inject:
     )
 
 
-def trajectory_digest(state: TrajectoryState) -> str:
+def trajectory_digest(plane: DataPlane) -> str:
     lines: list[str] = []
-    edited = state.mutated_paths[-20:]
+    total = plane.scalar("SELECT COUNT(*) FROM plane_edits")
+    edited = plane.query("SELECT path FROM plane_edits ORDER BY id DESC LIMIT 20")
     if edited:
-        lines.append(
-            f"files edited ({len(state.mutated_paths)} total, last {len(edited)}):"
-        )
-        lines.extend(f"  {path}" for path in edited)
+        lines.append(f"files edited ({total} total, last {len(edited)}):")
+        lines.extend(f"  {path}" for (path,) in reversed(edited))
     lines.append("commands executed (most recent):")
-    for record in state.execs[-_DIGEST_COMMANDS:]:
-        status = "ok" if record.exit_code == 0 else f"exit={record.exit_code}"
-        lines.append(f"  [{status}] {record.raw[:160]}")
+    rows = plane.query(
+        "SELECT raw, exit_code FROM plane_runs ORDER BY id DESC LIMIT ?",
+        (_DIGEST_COMMANDS,),
+    )
+    for raw, exit_code in reversed(rows):
+        status = "ok" if exit_code == 0 else f"exit={exit_code}"
+        lines.append(f"  [{status}] {str(raw)[:160]}")
     return "\n".join(lines)
 
 
@@ -90,7 +93,7 @@ async def run_critic(
     *,
     items: tuple[ChecklistItem, ...],
     evidence: tuple[str, ...],
-    state: TrajectoryState,
+    plane: DataPlane,
 ) -> str | None:
     """Form two: spawn a reviewer child; returns its verdict text or None."""
 
@@ -101,7 +104,7 @@ async def run_critic(
         prompt_lines.append("Structural observations:")
         prompt_lines.extend(f"- {fact}" for fact in evidence)
     prompt_lines.append("")
-    prompt_lines.append(trajectory_digest(state))
+    prompt_lines.append(trajectory_digest(plane))
     prompt = "\n".join(prompt_lines)
 
     try:
