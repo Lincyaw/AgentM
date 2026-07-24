@@ -64,21 +64,44 @@ def main() -> int:
     query = sub.add_parser("query", help="ad-hoc SQL over the fact schema")
     query.add_argument("db", type=Path)
     query.add_argument("sql")
+    ifg = sub.add_parser("ifg", help="backfill IFG tables for a session DB")
+    ifg.add_argument("db", type=Path)
+    ifg.add_argument("--session", default=None)
     args = parser.parse_args()
 
     items_path = Path(__file__).parent / "checklist.yaml"
 
+    if args.command == "ifg":
+        import sqlite3
+
+        from sqlalchemy import create_engine
+
+        from .ifg.service import backfill_ifg_from_policy_events
+
+        raw = sqlite3.connect(str(args.db))
+        session_ids = [
+            str(row[0])
+            for row in raw.execute("SELECT DISTINCT session_id FROM policy_tool_events")
+        ]
+        raw.close()
+        wanted = [str(args.session)] if args.session else session_ids
+        engine = create_engine(f"sqlite:///{args.db}")
+        with engine.begin() as conn:
+            for session_id in wanted:
+                result = backfill_ifg_from_policy_events(conn, session_id)
+                print(f"{session_id}: {result}")
+        return 0
+
     if args.command == "query":
-        plane = DataPlane.snapshot(args.db)
+        plane = DataPlane.snapshot(Path(args.db))
         plane.rebuild()
         for row in plane.query(args.sql):
             print("|".join(str(value) for value in row))
         plane.close()
         return 0
 
-    targets = (
-        sorted(args.target.glob("*.db")) if args.target.is_dir() else [args.target]
-    )
+    target = Path(args.target)
+    targets = sorted(target.glob("*.db")) if target.is_dir() else [target]
     for db_path in targets:
         probe = DataPlane.snapshot(db_path)
         row_count = len(probe.fetch_raw())
