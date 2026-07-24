@@ -36,7 +36,7 @@ from agentm.core.abi.events import (
 from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
-from .deliver import build_injection, run_critic
+from .deliver import build_injection, verify_item
 from .ifg.repository_index import RepositoryIndex, RepositoryRefreshPlan
 from .paths import resolve_policy_path
 from .pg_query import PgQuerySource
@@ -214,15 +214,24 @@ class _Runtime:
     async def _run_critic(self, active_tags: frozenset[str]) -> LoopAction | None:
         if self.triggers is None or self._pg is None:
             return None
-        items = self.triggers.open_critic_items(self._pg, active_tags=active_tags)
-        if not items:
+        candidates = self.triggers.open_critic_items(self._pg, active_tags=active_tags)
+        if not candidates:
             return None
-        questions = [item.check for item in items[:8]]
-        evidence = list(self.triggers.critic_evidence(self._pg))
-        verdict = await run_critic(self.api, questions=questions, evidence=evidence)
-        if verdict is not None:
-            self.injections += 1
-            return build_injection(verdict)
+        for item in candidates[:5]:
+            violated, reasoning = await verify_item(self.api, self._pg, item)
+            if violated:
+                self.injections += 1
+                message = (
+                    f"Process check ({item.dimension}):\n"
+                    f"{item.check}\n\n"
+                    f"Finding: {reasoning}"
+                )
+                logger.info(
+                    "policy_engine: critic confirmed {} ({})",
+                    item.item_id,
+                    reasoning[:80],
+                )
+                return build_injection(message)
         return None
 
     async def _run_tagger(self, event: DecideEvent) -> None:
