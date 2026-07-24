@@ -147,23 +147,30 @@ def cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _list_sessions(dsn: str, schema: str) -> list[str]:
+    """List session IDs from a trajectory schema."""
+    from agentm.storage.sql import create_sql_engine  # noqa: PLC0415
+
+    engine = create_sql_engine(dsn)
+    with engine.connect() as conn:
+        rows = conn.exec_driver_sql(
+            f"SELECT id FROM {schema}.agentm_trajectory_sessions "  # noqa: S608
+            "ORDER BY id"
+        )
+        session_ids = [str(row[0]) for row in rows]
+    engine.dispose()
+    return session_ids
+
+
 def cmd_tag(args: argparse.Namespace) -> int:
     """Batch-tag all sessions: run tagger LLM on each turn, write to PG."""
-    import psycopg  # noqa: PLC0415
-
     from .pg_query import PgQuerySource
     from .tagger import _get_tagger_prompt, _parse_tagger_result, write_annotation
 
     tagger_system = _get_tagger_prompt()
     print(f"Tagger prompt: {len(tagger_system)} chars")
 
-    with psycopg.connect(args.dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT id FROM {args.schema}.agentm_trajectory_sessions "  # noqa: S608
-                "ORDER BY id"
-            )
-            session_ids = [str(row[0]) for row in cur.fetchall()]
+    session_ids = _list_sessions(args.dsn, args.schema)
 
     print(f"Tagging {len(session_ids)} sessions")
 
@@ -259,15 +266,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     items = load_items(Path(args.checklist))
     signals = load_signals(Path(args.signals))
 
-    import psycopg  # noqa: PLC0415
-
-    with psycopg.connect(args.dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT id FROM {args.schema}.agentm_trajectory_sessions "  # noqa: S608
-                "ORDER BY id"
-            )
-            session_ids = [str(row[0]) for row in cur.fetchall()]
+    session_ids = _list_sessions(args.dsn, args.schema)
 
     print(f"Evaluating {len(session_ids)} sessions, {len(signals)} signals")
 

@@ -1,21 +1,18 @@
 """PG-backed QuerySource for signal evaluation.
 
-Wraps a psycopg connection scoped to one session. Signals reference
-``%(session_id)s`` in their SQL; the source binds it automatically.
-
-Also provides write access for tagger annotations and symbol sync,
-so all PG I/O shares one long-lived connection per session.
+Uses SQLAlchemy (consistent with the IFG subpackage and the SDK's
+storage layer). Session-scoped: signals reference ``%(session_id)s``
+which is auto-bound.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
 
 from loguru import logger
+from sqlalchemy.engine import Connection, Engine
 
-if TYPE_CHECKING:
-    import psycopg
+from agentm.storage.sql import create_sql_engine
 
 
 class PgQuerySource:
@@ -24,13 +21,13 @@ class PgQuerySource:
     def __init__(self, dsn: str, session_id: str) -> None:
         self._dsn = dsn
         self._session_id = session_id
-        self._conn: psycopg.Connection | None = None  # type: ignore[assignment]
+        self._engine: Engine | None = None
+        self._conn: Connection | None = None
 
-    def _connection(self) -> psycopg.Connection:  # type: ignore[name-defined]
+    def _connection(self) -> Connection:
         if self._conn is None:
-            import psycopg as _psycopg  # noqa: PLC0415
-
-            self._conn = _psycopg.connect(self._dsn)
+            self._engine = create_sql_engine(self._dsn)
+            self._conn = self._engine.connect()
         return self._conn
 
     def query(
@@ -42,9 +39,8 @@ class PgQuerySource:
         merged = dict(params) if isinstance(params, Mapping) else {}
         merged.setdefault("session_id", self._session_id)
         try:
-            with conn.cursor() as cur:
-                cur.execute(sql, merged)
-                return cur.fetchall()  # type: ignore[return-value]
+            result = conn.exec_driver_sql(sql, merged)
+            return [tuple(row) for row in result]
         except Exception as exc:  # noqa: BLE001
             logger.warning("pg_query: query failed: {}", exc)
             try:
@@ -58,10 +54,8 @@ class PgQuerySource:
         sql: str,
         params: tuple[object, ...] | Sequence[object] = (),
     ) -> None:
-        """Execute a write statement (INSERT/UPDATE/DELETE)."""
         conn = self._connection()
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
+        conn.exec_driver_sql(sql, tuple(params))
         conn.commit()
 
     def executemany(
@@ -70,8 +64,8 @@ class PgQuerySource:
         params_seq: Sequence[tuple[object, ...] | Sequence[object]],
     ) -> None:
         conn = self._connection()
-        with conn.cursor() as cur:
-            cur.executemany(sql, params_seq)
+        for params in params_seq:
+            conn.exec_driver_sql(sql, tuple(params))
         conn.commit()
 
     @property
@@ -83,5 +77,11 @@ class PgQuerySource:
             try:
                 self._conn.close()
             except Exception as close_exc:  # noqa: BLE001
-                logger.debug("pg_query: close failed: {}", close_exc)
+                logger.debug("pg_query: conn close failed: {}", close_exc)
             self._conn = None
+        if self._engine is not None:
+            try:
+                self._engine.dispose()
+            except Exception as eng_exc:  # noqa: BLE001
+                logger.debug("pg_query: engine dispose failed: {}", eng_exc)
+            self._engine = None
