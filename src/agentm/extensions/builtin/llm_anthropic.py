@@ -885,6 +885,30 @@ async def _translate_event(
 # --- Extension entrypoint --------------------------------------------------
 
 
+# Canonical Anthropic base URLs — anything else is treated as a custom endpoint
+# (mimo, MiniMax, Doubao and other Anthropic-compatible gateways). When ``name``
+# is omitted for such an endpoint the provider would otherwise silently register
+# under the default key ``"anthropic"`` and overwrite an earlier registration.
+_CANONICAL_ANTHROPIC_BASE_URLS: frozenset[str] = frozenset(
+    {
+        "https://api.anthropic.com",
+        "https://api.anthropic.com/",
+        "https://api.anthropic.com/v1",
+        "https://api.anthropic.com/v1/",
+    }
+)
+
+
+def _is_non_canonical_base_url(base_url: object) -> bool:
+    if base_url is None:
+        return False
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    return base_url.rstrip("/") not in {
+        url.rstrip("/") for url in _CANONICAL_ANTHROPIC_BASE_URLS
+    }
+
+
 class _AnthropicProviderRuntime:
     """Install-time provider registration runtime for Anthropic-compatible models."""
 
@@ -938,7 +962,21 @@ class _AnthropicProviderRuntime:
         )
 
     def _provider_name(self) -> str:
-        name = self._config.name or "anthropic"
+        raw_name = self._config.name
+        base_url = self._config.base_url
+        if raw_name is None:
+            if _is_non_canonical_base_url(base_url):
+                raise ValueError(
+                    "agentm.extensions.builtin.llm_anthropic.install: config.name "
+                    f"is required when base_url={base_url!r} is set to a "
+                    "non-canonical Anthropic-compatible endpoint. Multiple custom "
+                    "endpoints default to the bare 'anthropic' registry name and "
+                    "would silently overwrite each other. Pass an explicit "
+                    "config.name (e.g. 'mimo', 'minimax', 'doubao')."
+                )
+            name = "anthropic"
+        else:
+            name = raw_name
         if not isinstance(name, str) or not name:
             raise ValueError(
                 "agentm.extensions.builtin.llm_anthropic.install: "

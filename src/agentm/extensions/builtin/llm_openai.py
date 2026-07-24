@@ -735,12 +735,13 @@ class OpenAIStreamFn:
         signal: CancelSignal | None,
         thinking: Literal["off", "low", "medium", "high"],
     ) -> AsyncIterator[AssistantStreamEvent]:
-        # ``thinking`` is intentionally not forwarded: vanilla OpenAI Chat
-        # Completions has no thinking-budget knob. Reasoning that comes back
-        # as ``delta.reasoning_content`` (LiteLLM Kimi-K2, DeepSeek-R1, …) is
+        # OpenAI Chat Completions has no thinking-budget knob, but reasoning
+        # models accept ``reasoning_effort`` and its off/low/medium/high
+        # vocabulary maps 1:1 onto the ABI ``thinking`` level. An explicit
+        # ``config.reasoning_effort`` is a static override and wins; otherwise
+        # the per-turn ``thinking`` level drives it. Reasoning returned as
+        # ``delta.reasoning_content`` (LiteLLM Kimi-K2, DeepSeek-R1, …) is
         # surfaced regardless via ``ThinkingDelta`` events.
-        del thinking
-
         client = self._get_client()
         body: dict[str, Any] = {
             "model": model.id,
@@ -762,11 +763,14 @@ class OpenAIStreamFn:
             )
 
         extra: dict[str, Any] = thaw_json(self.extra_body) if self.extra_body else {}  # type: ignore[assignment]
-        if self.reasoning_effort is not None:
+        effort = self.reasoning_effort
+        if effort is None and thinking != "off":
+            effort = thinking
+        if effort is not None:
             if self.azure_endpoint is not None and tools:
                 self._emit_reasoning_skip_diagnostic()
             else:
-                extra.setdefault("reasoning_effort", self.reasoning_effort)
+                extra.setdefault("reasoning_effort", effort)
         response_format = extra.pop("response_format", None)
         if response_format is not None:
             body["response_format"] = response_format
