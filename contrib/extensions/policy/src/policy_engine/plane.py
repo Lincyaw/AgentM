@@ -113,6 +113,8 @@ CREATE INDEX IF NOT EXISTS idx_plane_action_files_path
 """
 
 _VIEWS = """
+-- Neutral shorthands only. The plane never encodes failure semantics:
+-- a view that names a fault pattern belongs in signals.yaml, not here.
 CREATE TEMP VIEW IF NOT EXISTS v_validations AS
     SELECT * FROM plane_runs WHERE is_validation = 1;
 
@@ -123,56 +125,6 @@ CREATE TEMP VIEW IF NOT EXISTS v_reds AS
 
 CREATE TEMP VIEW IF NOT EXISTS v_greens AS
     SELECT * FROM v_validations WHERE exit_code = 0;
-
-CREATE TEMP VIEW IF NOT EXISTS v_unresolved_reds AS
-    SELECT r.* FROM v_reds r
-    WHERE NOT EXISTS (
-        SELECT 1 FROM plane_superseded s WHERE s.red_run_id = r.id
-    );
-
--- greens that exercise something beyond the agent's own test files
-CREATE TEMP VIEW IF NOT EXISTS v_independent_greens AS
-    SELECT g.* FROM v_greens g
-    WHERE EXISTS (
-            SELECT 1 FROM plane_run_test_files tf
-            WHERE tf.run_id = g.id
-              AND tf.stem NOT IN (SELECT stem FROM plane_edits WHERE is_test = 1)
-        )
-       OR (
-            NOT EXISTS (SELECT 1 FROM plane_run_test_files tf
-                        WHERE tf.run_id = g.id)
-            AND NOT EXISTS (SELECT 1 FROM plane_run_selectors sel
-                            WHERE sel.run_id = g.id)
-        );
-
--- mutated scopes never referenced by any validation run
-CREATE TEMP VIEW IF NOT EXISTS v_uncovered_scopes AS
-    SELECT DISTINCT e.stem AS scope FROM plane_edits e
-    WHERE e.stem NOT IN (SELECT scope FROM plane_run_scopes);
-
--- edits whose file the agent had inspected earlier (read or search hit)
-CREATE TEMP VIEW IF NOT EXISTS v_informed_edits AS
-    SELECT DISTINCT e.id, e.turn, e.path FROM plane_edits e
-    WHERE EXISTS (
-        SELECT 1 FROM plane_action_files af
-        WHERE af.relation IN ('read', 'search_hit')
-          AND af.turn <= e.turn
-          AND (af.path = e.path OR e.path LIKE '%' || af.path
-               OR af.path LIKE '%' || e.path)
-    );
-
--- edits to files never read or surfaced by any search first
-CREATE TEMP VIEW IF NOT EXISTS v_blind_edits AS
-    SELECT e.id, e.turn, e.path FROM plane_edits e
-    WHERE e.id NOT IN (SELECT id FROM v_informed_edits);
-
--- per edit, turns until the next validation referencing its stem (NULL = never)
-CREATE TEMP VIEW IF NOT EXISTS v_edit_validation_gap AS
-    SELECT e.id, e.path, e.turn,
-           (SELECT MIN(v.turn) FROM v_validations v
-            JOIN plane_run_scopes rs ON rs.run_id = v.id
-            WHERE rs.scope = e.stem AND v.turn >= e.turn) - e.turn AS gap
-    FROM plane_edits e;
 """
 
 # Import-line shapes across the languages in the corpus (rust/go/ts/py/ex).

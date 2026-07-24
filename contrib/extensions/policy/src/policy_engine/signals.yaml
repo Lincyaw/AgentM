@@ -42,10 +42,22 @@ signals:
       corpus 2026-07-24, every emission evidence-correct.
 
   self_authored_only:
+    # an "independent green" exercises a test file the agent never edited,
+    # or runs selector-free at scope level; its absence is the pattern
     query: >-
       SELECT 1 WHERE EXISTS (SELECT 1 FROM plane_edits WHERE is_test = 1)
         AND EXISTS (SELECT 1 FROM v_greens)
-        AND NOT EXISTS (SELECT 1 FROM v_independent_greens)
+        AND NOT EXISTS (
+          SELECT 1 FROM v_greens g
+          WHERE EXISTS (
+                  SELECT 1 FROM plane_run_test_files tf
+                  WHERE tf.run_id = g.id
+                    AND tf.stem NOT IN (SELECT stem FROM plane_edits
+                                        WHERE is_test = 1))
+             OR (NOT EXISTS (SELECT 1 FROM plane_run_test_files tf
+                             WHERE tf.run_id = g.id)
+                 AND NOT EXISTS (SELECT 1 FROM plane_run_selectors sel
+                                 WHERE sel.run_id = g.id)))
     evidence:
       query: >-
         SELECT raw, exit_code FROM v_greens ORDER BY id DESC LIMIT 3
@@ -71,10 +83,16 @@ signals:
       normal edit bursts (17/28 sessions incl. passes).
 
   unresolved_red:
-    query: "SELECT 1 FROM v_unresolved_reds"
+    query: >-
+      SELECT 1 FROM v_reds r
+      WHERE NOT EXISTS (SELECT 1 FROM plane_superseded s
+                        WHERE s.red_run_id = r.id)
     evidence:
       query: >-
-        SELECT raw, exit_code FROM v_unresolved_reds ORDER BY id DESC LIMIT 3
+        SELECT raw, exit_code FROM v_reds r
+        WHERE NOT EXISTS (SELECT 1 FROM plane_superseded s
+                          WHERE s.red_run_id = r.id)
+        ORDER BY id DESC LIMIT 3
       format: "failed run never superseded: `{0}` (exit {1})"
     provenance: >-
       fires on passing sessions too (2/4 in the corpus) — critic tier only.
