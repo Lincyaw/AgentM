@@ -750,7 +750,10 @@ class SessionRuntime:
         key = f"provider:{name}"
         previous = self.services.get(key)
         if previous is not None and not replace:
-            raise ValueError(f"provider {name!r} already registered")
+            raise ValueError(
+                f"provider {name!r} is already registered in this session; give "
+                "each provider a unique name (config['name']) or pass replace=True"
+            )
         prospective = self._provider_configs()
         prospective[name] = config
         if self._provider_identity is None:

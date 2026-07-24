@@ -925,11 +925,6 @@ class _AnthropicProviderRuntime:
             provider=name,
             **self._model_kwargs(),
         )
-        if self._session.has_provider(name):
-            raise ValueError(
-                "agentm.extensions.builtin.llm_anthropic.install: provider "
-                f"{name!r} is already registered in this session."
-            )
         self._session.register_provider(
             name,
             ProviderConfig(stream_fn=stream_fn, model=model, name=name),

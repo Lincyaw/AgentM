@@ -1009,7 +1009,6 @@ class _OpenAIProviderRuntime:
         stream_fn = self._build_stream_fn(verify_ssl=verify_ssl)
         model = _build_model(model_id, **self._model_kwargs())
         name = self._provider_name()
-        self._ensure_provider_name_available(name)
         self._session.register_provider(
             name,
             ProviderConfig(
@@ -1094,14 +1093,6 @@ class _OpenAIProviderRuntime:
                 "agentm.extensions.builtin.llm_openai.install: config['name'] must be a non-empty string."
             )
         return name
-
-    def _ensure_provider_name_available(self, name: str) -> None:
-        if self._session.has_provider(name):
-            raise DuplicateProviderError(
-                f"agentm.extensions.builtin.llm_openai.install: provider name {name!r} is already "
-                "registered in this session. Choose a unique config['name'] for "
-                "each OpenAI-compatible endpoint."
-            )
 
 
 def install(session: Any, config: LlmOpenaiConfig) -> None:
