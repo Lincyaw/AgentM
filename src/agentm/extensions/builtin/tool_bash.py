@@ -34,6 +34,7 @@ from agentm.core.abi.services import ServiceNotFound, ServiceTypeMismatch
 from agentm.core.abi.tool_executor import EnvironmentExecutableTool
 from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
+from agentm_toolbox._shell_state import ShellStateStore
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
 
@@ -122,6 +123,9 @@ class ToolBashConfig(BaseModel):
     )
 
 
+_DEFAULT_SHELL: Final[str] = "default"
+
+
 class _BashArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -133,6 +137,15 @@ class _BashArgs(BaseModel):
         description=(
             "Max seconds the command may run before it is killed and the "
             "result is flagged TIMED OUT."
+        ),
+    )
+    shell: str = Field(
+        default=_DEFAULT_SHELL,
+        min_length=1,
+        description=(
+            "Named shell session. Each session maintains its own working "
+            "directory across commands (cd persists). Use different names "
+            "to work in multiple directories simultaneously."
         ),
     )
 
@@ -160,12 +173,14 @@ class _ToolBashRuntime:
             tails,
             scope="session",
         )
+        shells = ShellStateStore(default_cwd=self._session.ctx.cwd)
         self._session.register_tool(
             _BashTool(
                 session=self._session,
                 default_timeout=self._default_timeout,
                 parameters=pydantic_to_tool_schema(_BashArgs),
                 tails=tails,
+                shells=shells,
             )
         )
 
@@ -182,9 +197,11 @@ class _BashTool(EnvironmentExecutableTool):
         interrupt="cancel",
     )
     description = (
-        "Execute a shell command in the session cwd. The result reports the "
-        "exit code, wall time, stdout/stderr line counts, and the captured "
-        "stdout/stderr; a non-zero exit or timeout is flagged as an error."
+        "Execute a shell command. Each named shell session maintains its "
+        "own working directory across commands (cd persists). The result "
+        "reports exit code, wall time, stdout/stderr line counts, and the "
+        "captured stdout/stderr; a non-zero exit or timeout is flagged as "
+        "an error."
     )
 
     def __init__(
@@ -194,11 +211,13 @@ class _BashTool(EnvironmentExecutableTool):
         default_timeout: float,
         parameters: dict[str, object],
         tails: BashOutputTails | None = None,
+        shells: ShellStateStore | None = None,
     ) -> None:
         self.parameters = parameters
         self._session = session
         self._default_timeout = default_timeout
         self._tails = tails
+        self._shells = shells
 
     async def execute(
         self,
@@ -251,7 +270,15 @@ class _BashTool(EnvironmentExecutableTool):
         except ValidationError as exc:
             return _error(f"Invalid bash call: {exc}")
         cmd = parsed.cmd
+        shell_name = parsed.shell
         timeout = parsed.timeout if "timeout" in args else self._default_timeout
+
+        wrapped = False
+        if self._shells is not None:
+            cmd = self._shells.wrap_with_inline_cwd(cmd, shell_name)
+            cwd = self._shells.effective_cwd(shell_name)
+            wrapped = True
+
         on_data: Callable[[bytes], None] | None = None
         log_path: str | None = None
         if self._tails is not None:
@@ -278,9 +305,15 @@ class _BashTool(EnvironmentExecutableTool):
 
         stdout = result.stdout.decode("utf-8", errors="replace")
         stderr = result.stderr.decode("utf-8", errors="replace")
+
+        if wrapped and self._shells is not None:
+            stdout = self._shells.strip_inline_cwd(stdout, shell_name)
+
         is_error = result.exit_code != 0 or result.timed_out
 
         sections: list[str] = []
+        if shell_name != _DEFAULT_SHELL:
+            sections.append(f"Shell: {shell_name}")
         sections.append(f"Exit code: {result.exit_code}")
         sections.append(f"Wall time: {wall_time}s")
         if result.timed_out:
@@ -312,6 +345,7 @@ class _BashTool(EnvironmentExecutableTool):
                 "stdout_lines": stdout_lines,
                 "stderr_lines": stderr_lines,
                 "log_path": log_path,
+                "shell": shell_name,
             },
         )
 
