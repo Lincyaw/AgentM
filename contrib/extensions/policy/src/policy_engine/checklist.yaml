@@ -1,0 +1,104 @@
+# Checklist served by the policy_engine watcher.
+#
+# tier: structural — fires deterministically from trajectory signals and is
+#         injected directly; only signals with zero pass-disturbance on the
+#         calibration corpus (28 sessions, 2026-07-24 emission audit) qualify.
+#       critic — questions no token-shape rule can answer; delivered at the
+#         stop decision via self-check injection or a subagent review,
+#         depending on configuration.
+#
+# Wording is reviewed for injection: chain language, no ground truth, no
+# case surfaces. Distilled from the mining batch at
+# .agentm/mining/live-r1/checklist.yaml.
+
+items:
+  # ----- structural tier ----------------------------------------------------
+  - id: narrow_only_validation
+    dimension: evidence_adequacy
+    tier: structural
+    checkpoint: continuous
+    check: >
+      Every validation executed against the code you modified carries
+      narrowing filters, and the unfiltered form has never been run. A
+      filtered run only exercises the slice matching the filter; a
+      regression elsewhere in the same scope would pass unseen.
+    advice: >
+      Before treating validation as complete, run the unfiltered form once
+      and triage anything red.
+
+  - id: self_authored_oracle_only
+    dimension: evidence_adequacy
+    tier: structural
+    checkpoint: stop
+    check: >
+      Every passing validation in this session exercises test files you
+      wrote or edited yourself, so nothing independent of your own
+      assumptions has checked the change.
+    advice: >
+      Run the pre-existing test suite for the modules you touched at scope
+      level before concluding, and resolve anything that fails.
+
+  - id: under_validation_at_stop
+    dimension: evidence_adequacy
+    tier: structural
+    checkpoint: stop
+    check: >
+      The volume of modifications in this session far exceeds the number of
+      validation runs executed against them; most of the changed surface has
+      never been exercised by any check.
+    advice: >
+      Before concluding, run the test suites covering the modules you
+      changed and demonstrate each changed behavior at least once.
+
+  # ----- critic tier ----------------------------------------------------------
+  - id: unresolved_red_at_stop
+    dimension: belief_consistency
+    tier: critic
+    checkpoint: stop
+    check: >
+      You are about to finish while at least one validation you executed is
+      still red: its last run failed, and no later run of equal or broader
+      scope has succeeded.
+    advice: >
+      Fix and re-run it, or re-run a broader scope that covers it, or state
+      explicitly in your final summary why the failure does not block
+      completion.
+
+  - id: claimed_behaviors_demonstrated
+    dimension: requirement_coverage
+    tier: critic
+    checkpoint: stop
+    check: >
+      For each behavior or case the task description requires and your final
+      summary will claim, is there at least one executed run that actually
+      demonstrates it? List each required behavior next to the run that
+      exercised it; a behavior with no run is unverified.
+    advice: >
+      Add a concrete probe for every claimed behavior that lacks one before
+      concluding.
+
+  - id: task_quality_named_and_measured
+    dimension: evidence_adequacy
+    tier: critic
+    checkpoint: stop
+    check: >
+      Name the quality the task actually grades — a measurable quantity, a
+      structural property of output, or a specific behavioral contract —
+      and identify which executed run measured or demonstrated exactly that
+      quality. Passing adjacent tests does not measure the graded quality.
+    advice: >
+      If no run measured the graded quality, construct and execute one
+      before concluding.
+
+  - id: dismissed_failures_have_baselines
+    dimension: diagnosis_validity
+    tier: critic
+    checkpoint: stop
+    check: >
+      Every failure you classified as pre-existing, flaky, environmental, or
+      unrelated needs a verified control: a baseline run without your change
+      showing the same failure. An attribution without a baseline is a
+      guess.
+    advice: >
+      Run the baseline, or treat the failure as caused by your change and
+      resolve it.

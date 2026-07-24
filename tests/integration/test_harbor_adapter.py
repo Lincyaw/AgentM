@@ -327,7 +327,7 @@ def _model() -> Model:
     )
 
 
-def test_harbor_scenario_configures_policy_repository_scan() -> None:
+def test_harbor_scenario_includes_policy_engine() -> None:
     spec = _load_scenario(SCENARIO)
     policy = next(
         extension
@@ -335,20 +335,8 @@ def test_harbor_scenario_configures_policy_repository_scan() -> None:
         if extension.module_path == "policy_engine"
     )
 
-    assert dict(policy.config) == {
-        "policy_files": ("package:ifg_evidence.yaml",),
-        "db_session_scoped": True,
-        "ifg_realtime": True,
-        "ifg_defer_projection": True,
-        "ifg_repository_scan": True,
-        "ifg_repository_search_roots": ("/repo",),
-        "ifg_repository_worker_command": (
-            "PYTHONPATH=/opt/agentm-toolbox python3 -m agentm_toolbox"
-        ),
-        "ifg_repository_remote_db_path": (
-            "/logs/artifacts/agentm/policy/repository-index.sqlite"
-        ),
-    }
+    # Recording-only defaults: interventions are opt-in per run via env.
+    assert dict(policy.config) == {}
 
 
 @pytest.mark.asyncio
