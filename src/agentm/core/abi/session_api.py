@@ -496,6 +496,25 @@ class AtomAPI(Protocol):
     def experiment(self) -> dict[str, JsonValue] | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class SessionResult:
+    """What a session produced when its run ended.
+
+    ``reason`` is the terminating tool's ``ToolTerminate.reason`` (namespaced,
+    e.g. ``"structured_output:submitted"``) when the session ended by a terminal
+    tool, or ``None`` when it ended by the model finishing its turn / running out
+    of turns. ``text`` is the human- and machine-readable payload: the terminal
+    tool result's text (which by SDK convention is the serialized structured
+    result for tools like ``submit_result``), or the trailing assistant text
+    when no terminal tool fired. Callers that expect structured output decode
+    ``text`` against their own schema; ``reason is not None`` distinguishes a
+    real terminal submission from a session that merely stopped talking.
+    """
+
+    reason: str | None
+    text: str
+
+
 @runtime_checkable
 class SpawnedSession(Protocol):
     """Handle to a spawned child session."""
@@ -517,6 +536,15 @@ class SpawnedSession(Protocol):
 
     async def run(self, text: str) -> list[AgentMessage]:
         """Start, prompt, wait, return messages (blocking convenience)."""
+        ...
+
+    def final_result(self) -> SessionResult | None:
+        """The terminal outcome of the last run, or None if no turns committed.
+
+        Computed from the recorded termination cause of the final committed
+        turn, so callers never guess at terminal-tool names. Returns None only
+        when the session has not committed any turn yet.
+        """
         ...
 
     def push_trigger(
@@ -560,6 +588,7 @@ __all__ = [
     "ResolvedSessionSpec",
     "ScenarioLoader",
     "ScenarioSpec",
+    "SessionResult",
     "SESSION_CONFIG_PRECEDENCE",
     "SessionSpecResolver",
     "SessionContext",

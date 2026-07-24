@@ -16,8 +16,8 @@ internals, gateway state, or physical artifact layouts.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass
 import json
 from typing import Literal
 import uuid
@@ -26,9 +26,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
-    AgentMessage,
     AgentSessionConfig,
-    AssistantMessage,
     AtomAPI,
     AtomInstallPriority,
     EventCancelSource,
@@ -40,7 +38,6 @@ from agentm.core.abi import (
     SpawnedSession,
     SubagentResult,
     TextContent,
-    ToolCallBlock,
     ToolResult,
     UserInput,
 )
@@ -96,7 +93,6 @@ class _ChildTask(BackgroundTask):
     session: SpawnedSession
     detached: bool
     status: _Status = _RUNNING
-    final_messages: list[AgentMessage] = field(default_factory=list)
     summary: str | None = None
     error: str | None = None
     superseded_by: str | None = None
@@ -117,26 +113,6 @@ def _tool_result(
         is_error=is_error,
         extras=payload,
     )
-
-
-def _final_assistant_text(messages: Sequence[AgentMessage]) -> str | None:
-    for message in reversed(messages):
-        if not isinstance(message, AssistantMessage):
-            continue
-        for block in reversed(message.content):
-            if not isinstance(block, ToolCallBlock):
-                continue
-            if block.name != "return_response":
-                continue
-            text = block.arguments.get("text")
-            if isinstance(text, str) and text.strip():
-                return text
-        chunks = [
-            block.text for block in message.content if isinstance(block, TextContent)
-        ]
-        if chunks:
-            return "\n".join(chunks)
-    return None
 
 
 def _xml_attr(value: str) -> str:
@@ -386,20 +362,17 @@ class _ChildTaskManager:
         try:
             await state.session.run(prompt)
             await state.session.idle()
-            state.final_messages = state.session.get_messages()
             state.status = _ABORTED if state.abort_signal.is_set() else _COMPLETED
         except asyncio.CancelledError:
             state.abort_signal.set(
                 state.abort_signal.reason or "task_stop",
             )
             state.session.interrupt(state.abort_signal.reason or "task_stop")
-            state.final_messages = state.session.get_messages()
             state.status = _ABORTED
             state.error = "child task cancelled"
             await self._finish_child(state)
             raise
         except Exception as exc:  # noqa: BLE001
-            state.final_messages = state.session.get_messages()
             state.status = _ERROR
             state.error = str(exc) or type(exc).__name__
             logger.warning(
@@ -410,7 +383,8 @@ class _ChildTaskManager:
         await self._finish_child(state)
 
     async def _finish_child(self, state: _ChildTask) -> None:
-        state.summary = _final_assistant_text(state.final_messages)
+        result = state.session.final_result()
+        state.summary = result.text if result else ""
         try:
             await state.session.shutdown()
         except Exception as exc:  # noqa: BLE001

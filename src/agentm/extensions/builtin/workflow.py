@@ -25,9 +25,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
-    AgentMessage,
     AgentSessionConfig,
-    AssistantMessage,
     AtomAPI,
     AtomInstallPriority,
     Event,
@@ -35,10 +33,7 @@ from agentm.core.abi import (
     FunctionTool,
     JsonValue,
     LoopConfig,
-    TextContent,
-    ToolCallBlock,
     ToolResult,
-    ToolResultMessage,
     TurnCommittedEvent,
 )
 from agentm.core.lib import (
@@ -646,7 +641,8 @@ class _WorkflowRun:
                 )
                 try:
                     messages = await child.run(prompt)
-                    output = _final_session_output(messages)
+                    result = child.final_result()
+                    output = result.text if result else ""
                     return (
                         output
                         if output
@@ -694,35 +690,6 @@ def _is_error(result: AgentResult) -> bool:
 
 def _retry_prompt(original: str, exc: Exception, attempt: int) -> str:
     return f"{original}\n\n## Retry #{attempt}\nPrevious attempt failed: {str(exc)[:2000]}\n\nYou MUST call submit_result with a valid result."
-
-
-def _final_session_output(messages: list[AgentMessage]) -> str:
-    submit_names: set[str] = set()
-    call_names: dict[str, str] = {}
-    for msg in messages:
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, ToolCallBlock):
-                    call_names[block.id] = block.name
-                    if block.name.startswith("submit_"):
-                        submit_names.add(block.name)
-    if submit_names:
-        for msg in reversed(messages):
-            if not isinstance(msg, ToolResultMessage):
-                continue
-            for rb in reversed(msg.content):
-                if not rb.is_error and call_names.get(rb.tool_call_id) in submit_names:
-                    for inner in reversed(rb.content):
-                        if isinstance(inner, TextContent) and inner.text:
-                            return inner.text
-    for msg in reversed(messages):
-        if isinstance(msg, AssistantMessage) and not any(
-            isinstance(b, ToolCallBlock) for b in msg.content
-        ):
-            for block in reversed(msg.content):
-                if isinstance(block, TextContent) and block.text:
-                    return block.text
-    return ""
 
 
 # ===== Script validation + execution ========================================

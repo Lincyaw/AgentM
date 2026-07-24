@@ -95,6 +95,7 @@ from agentm.core.abi.session_api import (
     ExtensionSpec,
     ResolvedSessionSpec,
     SessionContext,
+    SessionResult,
 )
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.trajectory import (
@@ -108,6 +109,7 @@ from agentm.core.abi.trigger import (
     UserInput,
 )
 from agentm.core.lib.async_cancel import await_known_outcome
+from agentm.core.lib.session_result import compute_session_result
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 from agentm.core.runtime.trajectory import Trajectory
@@ -572,6 +574,9 @@ class SessionRuntime:
     def get_turns(self) -> list[Turn]:
         return list(self.trajectory.turns)
 
+    def final_result(self) -> SessionResult | None:
+        return compute_session_result(self.trajectory.turns)
+
     def status(self) -> dict[str, str | int | list[str]]:
         phase: str
         if self._closed:
@@ -715,15 +720,13 @@ class SessionRuntime:
     ) -> None:
         from agentm.core.runtime.extension import current_installing_extension
 
-        self.bus.emit_sync(
-            ApiRegisterEvent.CHANNEL,
-            ApiRegisterEvent(
-                kind=kind,
-                name=name,
-                extension=current_installing_extension(),
-                payload=payload,
-            ),
+        event = ApiRegisterEvent(
+            kind=kind,
+            name=name,
+            extension=current_installing_extension(),
+            payload=payload,
         )
+        self.bus.emit_sync(ApiRegisterEvent.CHANNEL, event)
 
     # --- Providers ---
 

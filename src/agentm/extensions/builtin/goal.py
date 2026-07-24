@@ -24,7 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from agentm.core.abi import (
     AgentMessage,
     AgentSessionConfig,
-    AssistantMessage,
     AtomAPI,
     AtomInstallPriority,
     BeforeSendEvent,
@@ -34,10 +33,10 @@ from agentm.core.abi import (
     JsonValue,
     LoopConfig,
     ModelEndTurn,
+    SessionResult,
     Stop,
     TextContent,
     Tool,
-    ToolCallBlock,
     ToolResult,
     ToolTerminate,
     ToolTerminated,
@@ -206,7 +205,7 @@ async def _prompt_child(
     extra_extensions: list[tuple[str, dict[str, JsonValue]]] | None = None,
     extra_tools: Sequence[Tool] | None = None,
     atom_config_overrides: dict[str, dict[str, JsonValue]] | None = None,
-) -> list[AgentMessage] | None:
+) -> SessionResult | None:
     config = AgentSessionConfig(
         cwd=api.ctx.cwd,
         scenario=scenario,
@@ -224,15 +223,16 @@ async def _prompt_child(
         logger.warning("goal: {} spawn failed: {}", purpose, exc)
         return None
     try:
-        return await child.run(prompt)
+        await child.run(prompt)
+        return child.final_result()
     except Exception as exc:  # noqa: BLE001
         logger.warning("goal: {} failed: {}", purpose, exc)
         return None
     finally:
         try:
             await child.shutdown()
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("goal: {} child shutdown failed: {}", purpose, exc)
 
 
 def _env_attach_overrides(api: AtomAPI) -> dict[str, dict[str, JsonValue]]:
@@ -258,7 +258,7 @@ async def _evaluate_checker(
         prompt = checker_prompt_override.format(condition=condition)
     else:
         prompt = _CHECKER_PROMPT_TEMPLATE.format(condition=condition)
-    messages = await _prompt_child(
+    result = await _prompt_child(
         api,
         scenario,
         max_turns,
@@ -268,55 +268,39 @@ async def _evaluate_checker(
         extra_tools=[_CHECKER_VERDICT_TOOL],
         atom_config_overrides=_env_attach_overrides(api),
     )
-    if messages is None:
+    if result is None:
         return None, "checker produced no response"
-    return _parse_verdict(messages)
+    return _parse_verdict(result)
 
 
-def _parse_verdict(messages: list[AgentMessage]) -> tuple[bool | None, str]:
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in msg.content:
-            if isinstance(block, ToolCallBlock) and block.name == "submit_verdict":
-                args = block.arguments
-                met = bool(args.get("met", False))
-                reason = str(args.get("reason", ""))
-                unexplained: list[str] = list(args.get("unexplained", []))  # type: ignore[arg-type]
-                if not met and unexplained:
-                    reason = f"{reason} (unexplained: {', '.join(unexplained)})"
-                return met, reason
-    return None, "checker did not call submit_verdict"
+def _parse_verdict(result: SessionResult) -> tuple[bool | None, str]:
+    if result.reason is None:
+        return None, "checker did not submit a verdict"
+    try:
+        data = json.loads(result.text)
+    except (json.JSONDecodeError, TypeError):
+        return None, "checker verdict was not valid JSON"
+    if not isinstance(data, dict):
+        return None, "checker verdict was not a JSON object"
+    met = bool(data.get("met", False))
+    reason = str(data.get("reason", ""))
+    unexplained = data.get("unexplained", [])
+    if not met and isinstance(unexplained, list) and unexplained:
+        joined = ", ".join(str(item) for item in unexplained)
+        reason = f"{reason} (unexplained: {joined})"
+    return met, reason
 
 
-def _parse_structured_payload(
-    messages: list[AgentMessage],
-) -> _ConditionPayload:
-    last_error: Exception | None = None
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in msg.content:
-            if isinstance(block, ToolCallBlock) and block.name == "submit_result":
-                result = block.arguments.get("result", block.arguments)
-                if isinstance(result, str):
-                    try:
-                        decoded = json.loads(result)
-                    except json.JSONDecodeError:
-                        decoded = None
-                    if isinstance(decoded, dict):
-                        result = decoded
-                if not isinstance(result, dict):
-                    last_error = ValueError(f"bad submit_result: {result!r}")
-                    continue
-                try:
-                    return _ConditionPayload.model_validate(result)
-                except ValidationError as exc:
-                    last_error = exc
-                    continue
-    if last_error is not None:
-        raise last_error
-    raise ValueError("no submit_result tool call found")
+def _parse_structured_payload(result: SessionResult) -> _ConditionPayload:
+    if result.reason is None:
+        raise ValueError("auto_init child did not submit a result")
+    try:
+        data = json.loads(result.text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"auto_init result was not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"auto_init result was not a JSON object: {data!r}")
+    return _ConditionPayload.model_validate(data)
 
 
 def _format_condition(payload: _ConditionPayload) -> str:
@@ -406,7 +390,7 @@ class _GoalRuntime:
             max_turns=self._auto_init_max_turns,
         )
         for attempt in range(self._auto_init_retries + 1):
-            messages = await _prompt_child(
+            result = await _prompt_child(
                 self._api,
                 self._auto_init_scenario,
                 self._auto_init_max_turns,
@@ -415,10 +399,10 @@ class _GoalRuntime:
                 extra_extensions=[_STRUCTURED_OUTPUT_EXT],
                 atom_config_overrides=_env_attach_overrides(self._api),
             )
-            if messages is None:
+            if result is None:
                 continue
             try:
-                payload = _parse_structured_payload(messages)
+                payload = _parse_structured_payload(result)
             except (TypeError, ValueError, ValidationError) as exc:
                 logger.warning(
                     "goal: auto_init attempt {} failed: {}", attempt + 1, exc
