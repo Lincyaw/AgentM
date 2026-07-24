@@ -64,6 +64,7 @@ def install(api: AtomAPI, config: LocalBackendConfig) -> None:
             bash=local_bash,
         )
         api.register_operations(environment=local_environment, bash=local_bash)
+        environment_kind = local_environment.ref.kind
     elif not isinstance(environment, EnvironmentOperations) or not isinstance(
         bash, BashOperations
     ):
@@ -72,6 +73,8 @@ def install(api: AtomAPI, config: LocalBackendConfig) -> None:
         raise ValueError(
             "local_backend requires environment and bash services from one backend"
         )
+    else:
+        environment_kind = environment.ref.kind
 
     reader = api.services.get(RESOURCE_READER_SERVICE)
     store = api.services.get(RESOURCE_STORE_SERVICE)
@@ -87,6 +90,22 @@ def install(api: AtomAPI, config: LocalBackendConfig) -> None:
         return
     if any(service is not None for service in existing_resources):
         raise TypeError("local_backend found an incomplete resource binding")
+
+    # About to bind the local, host-rooted resource store. bash runs inside the
+    # environment; file tools read/write through this store. If the environment
+    # is a sandbox/remote whose filesystem is not the host, a file written here
+    # is invisible to bash and vice versa -- an agent that writes a script then
+    # runs it silently sees nothing. Refuse the split-brain instead of letting
+    # it surface as a confusing runtime miss; a non-local environment must
+    # register its own matching resource backend.
+    if environment_kind not in {"local", "host"}:
+        raise ValueError(
+            f"local_backend: the environment is {environment_kind!r} but no "
+            "resource backend is registered, so file tools would fall back to a "
+            "host-local store the environment cannot see. Register a matching "
+            "resource_reader/resource_store/resource_writer from the same "
+            "backend as the environment."
+        )
 
     resources = LocalResourceStore(
         workspace_root=Path(api.ctx.cwd or "."),
