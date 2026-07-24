@@ -1,141 +1,208 @@
 # policy-engine
 
-An evidence-driven failure-detection and intervention loop for coding
-agents: mine failure patterns from recorded trajectories, compile them into
-queries over a data plane, and intervene in live sessions when they fire.
+Evidence-driven failure detection and intervention for coding agents.
+
+A coding agent's trajectory is a sequence of tool calls that read, write,
+and execute against a codebase. This package detects structural failure
+patterns as queries over the trajectory, recommends relevant checklist
+items, and intervenes when those items are confirmed.
 
 ```
-① raw data        trajectory records: tool events, results, messages
-② data plane      preprocess + correlate raw into ONE queryable fact schema
-③ mining          find failure patterns BY QUERYING THE PLANE  → checklist
-④ compile         each checklist item's `when` = a plane query (the DSL)
-⑤ intervene       gate fires → inject a check into the working agent,
-                  or spawn a reviewer subagent and inject its verdict
-⑥ calibrate       every trigger change is replayed over the recorded
-                  corpus; emissions are judged by their evidence
+① data plane      trajectory (PG) + repository symbol index → queryable facts
+② tagger          per-turn LLM annotation → phase + semantic predicates
+③ retrieval       predicate matching → candidate checklist items
+④ critic          LLM judgment → confirmed violations
+⑤ intervention    inject / critic / compact
+⑥ evolution       mine → compile → evaluate → select → diversify
 ```
-
-The ordering is load-bearing: **the plane is built before mining**, and the
-miner explores by querying it. Whatever the miner can see, the runtime can
-query — so mined patterns are compilable by construction. (When mining ran
-on raw trajectories instead, it produced trigger prose referencing facts no
-runtime could evaluate.)
-
-## Layering contract
-
-| Layer | Artifact | May contain | Must never contain |
-|---|---|---|---|
-| Raw | trajectory DB (psql), per-session SQLite (`policy_tool_events`) | append-only records | interpretation |
-| **Data plane** | `plane.py` → `plane_*` tables, `v_*` views | **neutral facts and relations**: runs, edits, action↔file edges, claims, supersession, temporal order | **failure semantics.** A view named after a fault pattern (e.g. "blind edits") is a checklist concept that leaked downward — it belongs in the signal layer |
-| Signals | `signals.yaml` | pattern definitions as SQL over the plane, with `:params`, evidence query + format, and calibration provenance | imperative code |
-| Checklist | `checklist.yaml` | mined items: check text, `when: {signal, checkpoint, arm}`, `deliver: inject/critic/offline` | trigger logic (only references to signals) |
-| Engine | `__init__.py`, `recording.py`, `plane.py`, `triggers.py`, `deliver.py` | mechanism: record → rebuild plane → evaluate gates → deliver | domain knowledge about specific failures |
-
-Knowledge grows as data (signals + checklist items); the engine stays
-fixed. The intended end state is that the miner itself emits new checklist
-items *with* their signal SQL, and they ship after replay calibration with
-no code change.
 
 ## Data plane
 
-Derived bottom-up from what the raw layer actually records — a fact enters
-the schema only if (a) it is derivable from raw data we have, and (b) some
-checklist item's `when`/`check` references it. Schema changes are discussed
-against that derivation before they are built.
+The data plane provides **neutral facts** over the trajectory. No pattern
+judgments — failure detection belongs in retrieval/signals, not here.
 
-| Table | Facts | Derived from |
-|---|---|---|
-| `plane_runs` (+`run_scopes`, `run_selectors`, `run_tokens`, `run_test_files`, `run_failures`) | executed commands: head, referenced scopes, narrowing selectors, failing test names | bash args + exit codes + result text |
-| `plane_edits` | file mutations, test-file flag | write/edit tool args |
-| `plane_action_files` | action↔file relations: `read` / `search_hit` / `write` / `edit` (correlation layer; IFG lineage) | read tool, bash read-shaped heads, grep/rg output the agent saw |
-| `plane_claims` | assistant statements per turn, final flag | decide events (live) / trajectory DB (batch) |
-| `plane_repo_files`, `plane_imports` | repository facts observed through the agent's own reads and writes | result text clips; an active repo-scan sensor can extend the same tables |
-| `plane_superseded` | relation: green run covers red run (same head, equal-or-wider scopes, not narrower) | derived join |
-| `v_validations` / `v_reds` / `v_greens` | neutral filters only | — |
+### Two inputs
 
-`DataPlane.query()` is the single query entry, shared by the live watcher,
-offline replay, the critic's evidence digest, and ad-hoc analysis:
+**1. Agent tool events (from SDK trajectory, PG).**
 
-```
-python -m policy_engine query <session.db> "SELECT ... FROM plane_runs ..."
-```
+Each tool event produces an **action → region** edge:
+- `read(path, offset, limit)` → read edge to (path, [offset, offset+limit])
+- `edit(path, old, new)` → edit edge to (path, file-level approximation)
+- `write(path, content)` → write edge to (path, whole file)
+- `bash(cmd)` → command text + exit code (no classification)
 
-Live mode rebuilds facts in the session DB at every decision point (a
-session is a few hundred rows; rebuild is idempotent). Snapshot mode
-attaches archives read-only, so calibration never mutates the corpus.
+Exposed as PG views in the `policy` schema:
+- `v_tool_calls` — all tool calls flattened
+- `v_regions` — action → region (path, start_line, end_line, relation)
+- `v_reads` / `v_edits` / `v_mutations` — convenience filters
+- `v_bash_runs` — bash commands with exit_code
+- `v_source_content` — source text the agent observed
 
-## Signals: the trigger DSL
+**2. Repository symbol index (optional, degradable).**
 
-A signal is one SQL query over the plane; it is true when any row returns.
+AST-parsed symbol definitions and references, built lazily by
+`RepositoryIndex` using `ast-grep` in the sandbox. When the agent
+first reads or edits a file, that file + its 1-hop import neighbors
+are parsed. The index expands as the agent's activity expands; edits
+trigger re-parsing of the affected file.
+
+Only the agent's activity subset is synced to PG — not the whole repo.
+Stored in `policy.file_symbols`, exposed via `policy.v_file_deps`
+(file → file dependencies via shared symbol names).
+
+When no index is available, `file_symbols` is empty, `v_file_deps`
+returns nothing, and signals that depend on symbol data silently
+degrade.
+
+### Failure detection = gap between the two
+
+The action graph says what the agent touched. The symbol index says
+what depends on what. A signal query joins the two to find gaps. The
+data plane never encodes these gaps itself — signals do.
+
+## Tagger
+
+The tagger is a **per-turn lightweight LLM call** that reads one step
+of the agent's work — its tool calls (with arguments and results),
+its reasoning text (if any), and the task description (on the first
+step) — and outputs structured annotations.
+
+### Output
+
+**Phase** (one per turn, mutually exclusive):
+exploring / diagnosing / implementing / validating / concluding.
+
+**Tags** (per turn, from the predicate vocabulary):
+Boolean facts observable from the step's content. Examples:
+`completion_claim`, `validation_failure`, `agent_has_edited`,
+`task_requires_reference_parity`. The full tag list is in
+`vocabulary.yaml` — the tagger prompt is generated from it.
+
+There is no separate task classifier. On the first turn, the tagger
+sees the task description and can set task-level tags (e.g.,
+`performance_or_quantitative_context`, `symptom_repetition_wording`).
+On later turns, it tags agent behavior.
+
+### Prompt generation
+
+The tagger prompt is **automatically generated** from `vocabulary.yaml`.
+When compile produces new predicates or prunes old ones, the prompt
+updates. No manual prompt maintenance — the vocabulary is the single
+source of truth for what tags exist.
+
+## Retrieval
+
+Two-stage cascade selecting which checklist items are relevant:
+
+### Stage 1: Predicate matching (cheap, high recall)
+
+Each checklist item declares a `trigger` expression — a boolean
+combination (AND / OR / NOT) of predicates from the vocabulary:
 
 ```yaml
-under_validation:
-  query: >-
-    SELECT 1 WHERE (SELECT COUNT(*) FROM plane_edits) >= :min_mutations
-      AND (SELECT COUNT(*) FROM v_validations)
-          < (SELECT COUNT(*) FROM plane_edits) * :ratio
-  params: { min_mutations: 8, ratio: 0.25 }
-  evidence:
-    query: "SELECT ..."
-    format: "{0} file modifications vs {1} validation runs"
-  provenance: derived from the 2026-07-23 batch (posthog 31/2, firezone 56/4)
+- id: belief_consistency_1
+  when:
+    trigger: validation_failure AND completion_claim
+    checkpoint: stop
 ```
 
-Rules:
+A predicate is true when the tagger has emitted that tag for any turn
+in the session. Matching is deterministic boolean logic over the
+tagger's cached output — no LLM call.
 
-- every signal carries `provenance`: where the rule came from and how it
-  was calibrated;
-- thresholds live in `params` (overridable via atom config
-  `signal_params`), never inlined;
-- a new signal ships only after `replay` over the corpus, judged by
-  per-emission evidence (see Calibration), not aggregate counts.
+### Stage 2: Critic (expensive, high precision)
 
-## Checklist items
+Candidate items from Stage 1 go to the critic (`agents/critic.yaml`):
+an LLM that reads the session evidence + the item's review question
+and judges whether the item is actually violated. Only confirmed
+violations produce interventions.
 
-```yaml
-- id: evidence_adequacy_3
-  deliver: inject            # inject | critic | offline
-  when: { signal: narrow_only, checkpoint: continuous, arm: always }
-  check: <the mined check question, quoted to the agent when it fires>
-  when_note: <the miner's original trigger prose, kept as provenance>
-```
+### Budget
 
-- `deliver: inject` — reserved for signals with audited zero-noise
-  emissions; fires once, quotes the agent's own commands as evidence.
-- `deliver: critic` — the item queues for the stop decision; all gated-open
-  items go to ONE delivery: either a self-check injection (the questions,
-  agent reviews itself) or a reviewer subagent whose confirmed verdict is
-  injected. Which form wins is an open experiment.
-- `deliver: offline` — label-pipeline checks, never evaluated at runtime.
-- `arm` names a task-side flag (perf_motivated, persistence_narrative, …)
-  from a one-shot LLM classification of the instruction; until the
-  classifier is wired, arming is permissive.
+`max_interventions` per session (default 3).
 
-Interventions never carry task answers: messages are process facts plus
-the check question. Budget: `max_injections` per session (default 3).
+## Intervention
 
-## Calibration workflow
+| delivery | behavior |
+|---|---|
+| `inject` | Append a message quoting the agent's own evidence. |
+| `critic` | Spawn a reviewer subagent; inject confirmed verdict. |
+| `compact` | Compress context: keep facts, discard subjective reasoning. Via SDK `ContextCompactionService`. |
+
+## Evolution
+
+The checklist, predicate vocabulary, and tagger co-evolve through an
+adaptive loop.
+
+### The loop
 
 ```
-python -m policy_engine replay <sessions-dir>
+① Mine       miner queries failing trajectories along D1–D7,
+             produces candidate items with when_notes
+
+② Compile    compiler agent decomposes each when_note into a trigger
+             expression over the predicate vocabulary; proposes new
+             predicates when needed
+
+③ Deploy     tagger prompt regenerated from vocabulary;
+             checklist updated with trigger expressions
+
+④ Evaluate   replay over the corpus; measure per-item fitness
+             (when it fires, does the critic confirm?)
+
+⑤ Select     prune low-fitness items and unreferenced predicates
+
+⑥ Diversify  ensure D1–D7 coverage; deduplicate overlapping items
 ```
 
-replays the recorded corpus through the exact live code path and prints
-every emission with the evidence behind it. Acceptance is reading those
-emissions: each firing must be correct *by its evidence*, not just
-directionally. This process has caught, among others: failed-run blindness
-(is_error filtering), `cat`/`gofmt`/`ls` counted as test runs, scope
-matching that only worked for cargo, selector extraction that missed every
-`go test -run`, and a config file defeating the self-authored-oracle rule.
-Aggregate trigger-rate tables are a smell; emission-level evidence is the
-standard.
+### CLI
 
-## Known gaps (in priority order)
+```bash
+python -m policy_engine compile              # ② when_notes → triggers + vocabulary
+python -m policy_engine tag <dsn>            # tag all sessions with tagger LLM
+python -m policy_engine replay <dsn> <sid>   # ④ replay one session
+python -m policy_engine evaluate <dsn>       # ④ evaluate across all sessions
+python -m policy_engine select               # ⑤ prune by fitness
+python -m policy_engine evolve <dsn>         # ②→④ in one command
+```
 
-1. Batch plane construction from the trajectory DB (psql) — messages/claims
-   axis for the ~12 items that reference the agent's own statements.
-2. Re-point the miner at the plane (its tools become plane queries), so
-   distilled items arrive with compilable `when` SQL.
-3. Task classifier → arm flags (currently permissive).
-4. Repository dependency sensor (downstream-consumer coverage items).
-5. Delivery experiment: self-check vs subagent critic on a near-miss task.
+### Predicate vocabulary lifecycle
+
+| event | action |
+|---|---|
+| New item needs a new concept | Compile proposes predicate, added to vocabulary |
+| Predicate unreferenced by any item | Pruned from vocabulary |
+| Vocabulary too large | Merge near-synonymous predicates |
+
+### Miner framework (D1–D7)
+
+The miner works along seven dimensions derived from the representation
+chain:
+
+```
+task → understanding → diagnosis → plan → change → evidence → belief → claim/stop
+```
+
+| Dimension | Comparand pair |
+|---|---|
+| D1 Interpretation fidelity | task ↔ understanding |
+| D2 Requirement coverage | understanding → plan/change |
+| D3 Implementation fidelity | claimed behavior ↔ actual code semantics |
+| D4 Diagnosis validity | claimed cause ↔ collected evidence |
+| D5 Evidence adequacy | change ↔ executed validation |
+| D6 Belief-evidence consistency | evidence ↔ belief/claim |
+| D7 Loop dynamics | the chain over time |
+
+The full dimension model is in `docs/policy-feedback-dimensions.md`.
+
+## Related work
+
+- **AdaMAST** (arXiv 2607.16387): adaptive failure taxonomies, fixed
+  axes + induced codes. Key finding: passive context injection
+  outperforms forced mechanical auditing.
+- **Act·onomy** (arXiv 2605.13625): behavioral taxonomy for agent
+  runtime. Orthogonal — classifies what the agent is doing, not
+  where the mismatch is.
+- **ActPlane** (arXiv 2606.25189v1): OS-level policy enforcement via
+  eBPF + IFC DSL. `after/since` gate model deferred in favor of
+  predicate matching for simplicity.

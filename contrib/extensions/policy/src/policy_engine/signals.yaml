@@ -1,153 +1,118 @@
-# Signal definitions: each signal is a query over the data plane.
+# Signal definitions: each signal is a SQL query over the PG data plane.
 #
-#   query      SQL over plane_* tables / v_* views; the signal is TRUE when
-#              the query returns at least one row. Named :params allowed.
-#   params     default parameter values (overridable via atom config
-#              signal_params).
-#   evidence   optional query + format used when the signal fires on the
-#              inject tier; rows are formatted with {0}, {1}, ...
-#   provenance one line on where the rule came from / how it was calibrated.
-#
-# Adding a signal means adding an entry here and calibrating it with
-# `python -m policy_engine replay` over the recorded corpus — no code.
+#   query      SQL over policy.* views/tables; TRUE when any row returns.
+#              Use %(session_id)s for session scoping (auto-bound).
+#              Use %(param_name)s for named params from the `params` block.
+#   evidence   optional query + format for inject-tier evidence messages.
+#   provenance where the rule came from / how it was calibrated.
 
 signals:
   always:
     query: "SELECT 1"
     provenance: unconditional gate for critic items with no cheap precondition
 
-  narrow_only:
-    query: >-
-      SELECT rs.scope FROM plane_run_scopes rs
-      JOIN v_validations v ON v.id = rs.run_id
-      WHERE EXISTS (SELECT 1 FROM plane_run_selectors sel
-                    WHERE sel.run_id = rs.run_id)
-        AND rs.scope NOT IN (
-            SELECT rs2.scope FROM plane_run_scopes rs2
-            JOIN v_validations v2 ON v2.id = rs2.run_id
-            WHERE NOT EXISTS (SELECT 1 FROM plane_run_selectors s2
-                              WHERE s2.run_id = rs2.run_id))
-      GROUP BY rs.scope HAVING COUNT(DISTINCT rs.run_id) >= :min_narrow_runs
-    params: { min_narrow_runs: 2 }
-    evidence:
-      query: >-
-        SELECT v.raw FROM v_validations v
-        JOIN plane_run_scopes rs ON rs.run_id = v.id
-        WHERE EXISTS (SELECT 1 FROM plane_run_selectors sel
-                      WHERE sel.run_id = v.id)
-        GROUP BY v.id ORDER BY v.id DESC LIMIT 4
-      format: "narrowed run: `{0}`"
-    provenance: >-
-      turborepo rescues (3x reward 1.0); calibrated on the 28-session
-      corpus 2026-07-24, every emission evidence-correct.
+  # -- Coverage (requires repository symbol index) ----------------------------
 
-  self_authored_only:
-    # an "independent green" exercises a test file the agent never edited,
-    # or runs selector-free at scope level; its absence is the pattern
+  dependency_blind_spot:
     query: >-
-      SELECT 1 WHERE EXISTS (SELECT 1 FROM plane_edits WHERE is_test = 1)
-        AND EXISTS (SELECT 1 FROM v_greens)
+      SELECT d.defining_path, d.referencing_path
+      FROM policy.v_file_deps d
+      JOIN policy.v_mutations m
+        ON m.session_id = d.session_id AND m.path = d.defining_path
+      WHERE d.session_id = %(session_id)s
         AND NOT EXISTS (
-          SELECT 1 FROM v_greens g
-          WHERE EXISTS (
-                  SELECT 1 FROM plane_run_test_files tf
-                  WHERE tf.run_id = g.id
-                    AND tf.stem NOT IN (SELECT stem FROM plane_edits
-                                        WHERE is_test = 1))
-             OR (NOT EXISTS (SELECT 1 FROM plane_run_test_files tf
-                             WHERE tf.run_id = g.id)
-                 AND NOT EXISTS (SELECT 1 FROM plane_run_selectors sel
-                                 WHERE sel.run_id = g.id)))
+          SELECT 1 FROM policy.v_regions r
+          WHERE r.session_id = d.session_id
+            AND r.path = d.referencing_path
+        )
+      LIMIT 1
     evidence:
       query: >-
-        SELECT raw, exit_code FROM v_greens ORDER BY id DESC LIMIT 3
-      format: "green run (self-authored oracle): `{0}`"
+        SELECT d.defining_path, d.referencing_path, d.symbol_name
+        FROM policy.v_file_deps d
+        JOIN policy.v_mutations m
+          ON m.session_id = d.session_id AND m.path = d.defining_path
+        WHERE d.session_id = %(session_id)s
+          AND NOT EXISTS (
+            SELECT 1 FROM policy.v_regions r
+            WHERE r.session_id = d.session_id
+              AND r.path = d.referencing_path
+          )
+        LIMIT 5
+      format: "edited {0}, downstream consumer {1} (via {2}) never read"
     provenance: >-
-      F3 lineage; stem-level independence definition removed the paperless
-      and electric false emissions in the 2026-07-24 audit.
+      failure pattern 1; degrades to silent when file_symbols is empty.
 
-  under_validation:
+  definition_not_traced:
     query: >-
-      SELECT 1 WHERE (SELECT COUNT(*) FROM plane_edits) >= :min_mutations
-        AND (SELECT COUNT(*) FROM v_validations)
-            < (SELECT COUNT(*) FROM plane_edits) * :ratio
-    params: { min_mutations: 8, ratio: 0.25 }
+      SELECT d.referencing_path, d.defining_path
+      FROM policy.v_file_deps d
+      JOIN policy.v_regions r
+        ON r.session_id = d.session_id AND r.path = d.referencing_path
+      WHERE d.session_id = %(session_id)s
+        AND NOT EXISTS (
+          SELECT 1 FROM policy.v_reads rd
+          WHERE rd.session_id = d.session_id
+            AND rd.path = d.defining_path
+        )
+      LIMIT 1
     evidence:
       query: >-
-        SELECT (SELECT COUNT(*) FROM plane_edits),
-               (SELECT COUNT(*) FROM v_validations)
-      format: "{0} file modifications vs {1} validation runs"
+        SELECT DISTINCT d.referencing_path, d.defining_path, d.symbol_name
+        FROM policy.v_file_deps d
+        JOIN policy.v_regions r
+          ON r.session_id = d.session_id AND r.path = d.referencing_path
+        WHERE d.session_id = %(session_id)s
+          AND NOT EXISTS (
+            SELECT 1 FROM policy.v_reads rd
+            WHERE rd.session_id = d.session_id
+              AND rd.path = d.defining_path
+          )
+        LIMIT 5
+      format: "{0} uses symbol {2} defined in {1}, but {1} was never read"
     provenance: >-
-      derived from the 2026-07-23 batch (posthog 31/2, firezone 56/4,
-      harbor 18/3); stop-checkpoint only — latched mid-run it fires on
-      normal edit bursts (17/28 sessions incl. passes).
+      failure pattern 5; degrades to silent when file_symbols is empty.
 
-  unresolved_red:
+  # -- Dynamics ---------------------------------------------------------------
+
+  non_convergent:
     query: >-
-      SELECT 1 FROM v_reds r
-      WHERE NOT EXISTS (SELECT 1 FROM plane_superseded s
-                        WHERE s.red_run_id = r.id)
+      WITH bounds AS (
+        SELECT MIN(turn_index) AS lo, MAX(turn_index) AS hi
+        FROM policy.v_regions WHERE session_id = %(session_id)s
+      ),
+      first_seen AS (
+        SELECT r.path,
+          CASE WHEN MIN(r.turn_index) >= b.lo + (b.hi - b.lo) * 0.5
+               THEN 1 ELSE 0 END AS is_late
+        FROM policy.v_regions r, bounds b
+        WHERE r.session_id = %(session_id)s
+        GROUP BY r.path, b.lo, b.hi
+      )
+      SELECT 1
+      WHERE (SELECT COUNT(*) FROM first_seen WHERE is_late = 1)
+            > (SELECT COUNT(*) FROM first_seen WHERE is_late = 0) * %(late_ratio)s
+        AND (SELECT COUNT(*) FROM first_seen) >= %(min_files)s
+    params: { late_ratio: 0.3, min_files: 8 }
     evidence:
       query: >-
-        SELECT raw, exit_code FROM v_reds r
-        WHERE NOT EXISTS (SELECT 1 FROM plane_superseded s
-                          WHERE s.red_run_id = r.id)
-        ORDER BY id DESC LIMIT 3
-      format: "failed run never superseded: `{0}` (exit {1})"
+        WITH bounds AS (
+          SELECT MIN(turn_index) AS lo, MAX(turn_index) AS hi
+          FROM policy.v_regions WHERE session_id = %(session_id)s
+        ),
+        first_seen AS (
+          SELECT r.path,
+            CASE WHEN MIN(r.turn_index) >= b.lo + (b.hi - b.lo) * 0.5
+                 THEN 1 ELSE 0 END AS is_late
+          FROM policy.v_regions r, bounds b
+          WHERE r.session_id = %(session_id)s
+          GROUP BY r.path, b.lo, b.hi
+        )
+        SELECT
+          (SELECT COUNT(*) FROM first_seen WHERE is_late = 0),
+          (SELECT COUNT(*) FROM first_seen WHERE is_late = 1)
+      format: "{0} files appeared in first half, {1} new files in second half"
     provenance: >-
-      fires on passing sessions too (2/4 in the corpus) — critic tier only.
-
-  red_any:
-    query: "SELECT 1 FROM v_reds"
-    provenance: crude relevance gate for dismissal/attribution questions
-
-  green_close:
-    query: >-
-      SELECT 1 WHERE (SELECT exit_code FROM v_validations
-                      ORDER BY id DESC LIMIT 1) = 0
-    provenance: session is closing on a green — prices the stop critic
-
-  repeat_fail2:
-    query: >-
-      SELECT head FROM v_reds GROUP BY head HAVING COUNT(*) >= :count
-    params: { count: 2 }
-    evidence:
-      query: >-
-        SELECT head, COUNT(*) FROM v_reds GROUP BY head
-        HAVING COUNT(*) >= 2 ORDER BY 2 DESC LIMIT 3
-      format: "repeated failure x{1}: {0}"
-    provenance: >-
-      normal debugging loops trip this (15/28 incl. passes) — critic tier;
-      needs a no-edits-in-between refinement before it can inject.
-
-  repeat_fail3:
-    query: >-
-      SELECT head FROM v_reds GROUP BY head HAVING COUNT(*) >= :count
-    params: { count: 3 }
-    provenance: stricter variant of repeat_fail2
-
-  test_code_alternate:
-    query: >-
-      SELECT 1 WHERE EXISTS (SELECT head FROM v_reds GROUP BY head
-                             HAVING COUNT(*) >= 2)
-        AND EXISTS (SELECT 1 FROM plane_edits WHERE is_test = 1)
-        AND EXISTS (SELECT 1 FROM plane_edits WHERE is_test = 0)
-    provenance: mined loop_dynamics item; relevance gate for the critic
-
-  no_measurement:
-    query: >-
-      SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM plane_run_tokens WHERE token IN
-        ('bench','benchmark','hyperfine','criterion','timeit','time',
-         'flamegraph','profile','perf'))
-    provenance: >-
-      lexical token set for perf-claim items; pair with arm perf_motivated
-      once the task classifier lands.
-
-  no_boundary_probe:
-    query: >-
-      SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM plane_run_tokens WHERE token IN
-        ('restart','rotate','reboot','kill','sighup','resume','reopen',
-         'relaunch'))
-    provenance: >-
-      lexical token set for persistence-symptom items; pair with arm
-      persistence_narrative once the task classifier lands.
+      convergence signal; agent's file frontier should narrow over time.
+      Fires when >30% of touched files first appear in the second half.
+      Validated on harbor_live corpus: 4/20 fail, 1/9 pass sessions.

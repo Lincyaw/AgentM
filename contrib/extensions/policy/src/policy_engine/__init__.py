@@ -1,26 +1,20 @@
 # code-health: ignore-file[AM025] -- event payloads are untyped at the boundary
-"""``policy_engine`` — record, detect, intervene.
+"""``policy_engine`` — detect structural failure patterns, intervene.
 
-The whole package is three moves over one stream of raw data:
+Live flow:
 
-1. **Record**: every tool result is appended to a per-session SQLite file
-   (``recording``). That corpus is also the calibration bench — every
-   trigger added here must first prove its rates on it (``__main__ replay``).
-2. **Detect**: ``signals`` maintains O(1) trajectory counters; ``triggers``
-   binds checklist items to them. Structural items fire deterministically;
-   critic items are questions saved for the stop decision.
-3. **Intervene** (``deliver``): a firing either injects a message into the
-   working agent's own loop, or spawns a reviewer subagent whose confirmed
-   verdict is injected.
-
-Interventions are off by default so baseline batches stay clean; enable per
-run via ``AGENTM_CHECKLIST_WATCH_ENABLED=true`` (name kept for continuity
-with existing run scripts). Recording is always on.
+1. **ToolResultEvent** — queue repository-index refresh for read/write/edit;
+   accumulate tool call info for the current turn.
+2. **TurnCommittedEvent** — advance turn counter, reset per-turn state.
+3. **DecideEvent** (async) — process pending symbol refreshes, run tagger,
+   evaluate signals + trigger predicates, intervene if a checklist item fires.
 """
 
 from __future__ import annotations
 
 import os
+import posixpath
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,8 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentm.core.abi import (
     AtomAPI,
     AtomInstallPriority,
-    TextContent,
-    ToolResult,
+    BashOperations,
 )
 from agentm.core.abi.events import (
     DecideEvent,
@@ -40,12 +33,19 @@ from agentm.core.abi.events import (
     ToolResultEvent,
     TurnCommittedEvent,
 )
+from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
-from .deliver import build_injection, run_critic, self_check_message
-from .paths import default_policy_db_path, resolve_policy_path
-from .recording import ToolEventRecorder
-from .plane import DataPlane
+from .deliver import build_injection, run_critic
+from .ifg.repository_index import RepositoryIndex, RepositoryRefreshPlan
+from .paths import resolve_policy_path
+from .pg_query import PgQuerySource
+from .symbol_sync import extract_symbols_for_paths, write_symbols
+from .tagger import (
+    _content_text,
+    annotate_turn,
+    write_annotation,
+)
 from .triggers import TriggerEngine, load_items, load_signals, render_message
 
 
@@ -54,19 +54,15 @@ class PolicyEngineConfig(BaseModel):
 
     checklist: str = "package:checklist.yaml"
     signals: str = "package:signals.yaml"
-    db_path: str | None = None
+    trajectory_dsn: str = ""
     max_injections: int = 3
     signal_params: dict[str, float] = Field(default_factory=dict)
-    # Delivery for critic-tier items at the stop decision:
-    #   "off"        — structural tier only
-    #   "self_check" — inject the checklist questions for the agent's own review
-    #   "subagent"   — spawn a reviewer child and inject its confirmed verdict
     critic: str = "off"
 
 
 MANIFEST = ExtensionManifest(
     name="policy_engine",
-    description="Records tool events, evaluates checklist triggers, intervenes.",
+    description="Detects structural failure patterns in trajectories, intervenes.",
     registers=(),
     config_schema=PolicyEngineConfig,
     priority=AtomInstallPriority.POLICY,
@@ -74,52 +70,56 @@ MANIFEST = ExtensionManifest(
 
 
 def _interventions_enabled() -> bool:
-    # Read directly: the runtime has no generic env-config layer.
     value = os.environ.get("AGENTM_CHECKLIST_WATCH_ENABLED", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _message_text(message: object) -> str:
-    content = getattr(message, "content", None)  # code-health: ignore[AM021]
-    if not isinstance(content, (list, tuple)):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        text = getattr(block, "text", None)  # code-health: ignore[AM021]
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts)
+def _file_path_from_args(args: Mapping[str, object]) -> str | None:
+    path = args.get("path") or args.get("file_path")
+    return path if isinstance(path, str) and path.strip() else None
 
 
-def _result_text(result: ToolResult | None) -> str:
-    if result is None:
-        return ""
-    parts: list[str] = []
-    for block in result.content:
-        text = getattr(block, "text", None)  # code-health: ignore[AM021]
-        if isinstance(text, str):
-            parts.append(text)
-    return "\n".join(parts)
+@dataclass(slots=True)
+class _ToolCallRecord:
+    name: str
+    arguments: Mapping[str, object]
+    result_text: str
+    is_error: bool
 
 
 @dataclass(slots=True)
 class _Runtime:
     api: AtomAPI
     config: PolicyEngineConfig
-    recorder: ToolEventRecorder
+    session_id: str
     turn: int = 0
-    claims: list[tuple[int, bool, str]] = field(default_factory=list)
-    plane: DataPlane | None = None
     triggers: TriggerEngine | None = None
     injections: int = 0
-    critic_done: bool = False
+    repo_index: RepositoryIndex | None = None
+    _pending_refreshes: list[RepositoryRefreshPlan] = field(default_factory=list)
+    _synced_paths: set[str] = field(default_factory=set)
+    _pg: PgQuerySource | None = None
+    _current_turn_calls: list[_ToolCallRecord] = field(default_factory=list)
+    _task_classified: bool = False
+    _active_tags: set[str] = field(default_factory=set)
 
     def install(self) -> None:
         self.api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
         self.api.on(TurnCommittedEvent.CHANNEL, self._on_turn_committed)
 
+        bash = self.api.services.get(BASH_OPERATIONS_SERVICE)
+        if isinstance(bash, BashOperations):  # code-health: ignore[AM025]
+            self.repo_index = RepositoryIndex(root=self.api.ctx.cwd, bash=bash)
+            logger.info(
+                "policy_engine: repository index enabled (root={})",
+                self.api.ctx.cwd,
+            )
+
         if not _interventions_enabled():
-            logger.info("policy_engine: recording only (interventions disabled)")
+            logger.info("policy_engine: symbol sync only (interventions disabled)")
+            return
+        if not self.config.trajectory_dsn:
+            logger.warning("policy_engine: no trajectory_dsn; interventions disabled")
             return
         items_path = resolve_policy_path(
             self.config.checklist, cwd=Path(self.api.ctx.cwd)
@@ -137,6 +137,7 @@ class _Runtime:
             signals=signals,
             param_overrides=dict(self.config.signal_params),
         )
+        self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
         logger.info(
             "policy_engine: interventions active ({} items, critic={})",
@@ -144,97 +145,173 @@ class _Runtime:
             self.config.critic,
         )
 
-    # -- record + track ------------------------------------------------------
+    # -- observe ---------------------------------------------------------------
+
+    def _on_tool_result(self, event: ToolResultEvent) -> None:
+        args = dict(event.args)
+        self._current_turn_calls.append(
+            _ToolCallRecord(
+                name=event.tool_name,
+                arguments=args,
+                result_text=_content_text(event.result, 1500),
+                is_error=event.result is not None and event.result.is_error,
+            )
+        )
+
+        if event.tool_name not in {"read", "write", "edit"}:
+            return
+        path = _file_path_from_args(args)
+        if path is None or self.repo_index is None:
+            return
+        cwd = self.api.ctx.cwd
+        normalized = (
+            posixpath.normpath(path)
+            if posixpath.isabs(path)
+            else posixpath.normpath(posixpath.join(cwd, path))
+        )
+        is_mutation = event.tool_name in {"write", "edit"}
+        if normalized in self._synced_paths and not is_mutation:
+            return
+        self._pending_refreshes.append(
+            RepositoryRefreshPlan(paths=(normalized,), reason=f"tool:{event.tool_name}")
+        )
 
     def _on_turn_committed(self, event: TurnCommittedEvent) -> None:
         self.turn += 1
-
-    def _on_tool_result(self, event: ToolResultEvent) -> None:
-        # Record only — every derived fact comes from the data plane, which
-        # rebuilds from these rows at each decision point. Failed bash runs
-        # are recorded like any other row: a nonzero exit is marked is_error
-        # by the runtime, and dropping those rows blinded the old watcher to
-        # every red run (found 2026-07-24).
-        self.recorder.record(
-            turn=self.turn,
-            tool_name=event.tool_name,
-            tool_call_id=event.tool_call_id or None,
-            args=dict(event.args),
-            is_error=event.result is not None and event.result.is_error,
-            result_text=_result_text(event.result),
-            exit_code=event.exit_code,
-            duration_ms=event.duration_ms,
-            cwd=self.api.ctx.cwd,
-        )
+        self._current_turn_calls = []
 
     # -- detect + intervene ----------------------------------------------------
 
     async def _on_decide(self, event: DecideEvent) -> LoopAction | None:
-        if self.triggers is None or self.injections >= self.config.max_injections:
+        await self._flush_symbol_refreshes()
+        await self._run_tagger(event)
+
+        if self.triggers is None or self._pg is None:
+            return None
+        if self.injections >= self.config.max_injections:
             return None
         stopping = isinstance(event.observation.default_action, Stop)
+        active = frozenset(self._active_tags)
 
-        claim = _message_text(event.observation.assistant_message)
-        if claim:
-            self.claims.append((self.turn, stopping, claim))
-
-        if self.plane is None:
-            self.plane = DataPlane.open(self.recorder.db_path)
-        self.plane.rebuild()
-        self.plane.ingest_claims(self.claims)
-
-        firing = self.triggers.evaluate_inject(self.plane, stopping=stopping)
+        firing = self.triggers.evaluate_inject(
+            self._pg, stopping=stopping, active_tags=active
+        )
         if firing is not None:
             self.injections += 1
-            message = render_message(firing)
             logger.info(
-                "policy_engine: injecting {} ({} chars, {}/{})",
+                "policy_engine: injecting {} ({}/{})",
                 firing.item.item_id,
-                len(message),
                 self.injections,
                 self.config.max_injections,
             )
-            return build_injection(message)
+            return build_injection(render_message(firing))
 
-        if stopping and not self.critic_done and self.config.critic != "off":
-            self.critic_done = True
-            items = self.triggers.open_critic_items(self.plane)
-            evidence = self.triggers.critic_evidence(self.plane)
-            if not items and not evidence:
-                return None
-            if self.config.critic == "self_check":
-                self.injections += 1
-                return build_injection(self_check_message(items, evidence))
-            if self.config.critic == "subagent":
-                verdict = await run_critic(
-                    self.api, items=items, evidence=evidence, plane=self.plane
-                )
-                if verdict is not None:
-                    self.injections += 1
-                    return build_injection(verdict)
+        if stopping and self.config.critic != "off":
+            return await self._run_critic(active)
+
         return None
+
+    async def _run_critic(self, active_tags: frozenset[str]) -> LoopAction | None:
+        if self.triggers is None or self._pg is None:
+            return None
+        items = self.triggers.open_critic_items(self._pg, active_tags=active_tags)
+        if not items:
+            return None
+        questions = [item.check for item in items[:8]]
+        evidence = list(self.triggers.critic_evidence(self._pg))
+        verdict = await run_critic(self.api, questions=questions, evidence=evidence)
+        if verdict is not None:
+            self.injections += 1
+            return build_injection(verdict)
+        return None
+
+    async def _run_tagger(self, event: DecideEvent) -> None:
+        if self._pg is None:
+            return
+
+        assistant_text = _content_text(event.observation.assistant_message, 3000)
+        tool_calls = [
+            {
+                "name": tc.name,
+                "arguments": dict(tc.arguments),
+                "result_text": tc.result_text,
+                "is_error": tc.is_error,
+            }
+            for tc in self._current_turn_calls
+        ]
+        if not assistant_text and not tool_calls:
+            return
+
+        task_text = ""
+        if not self._task_classified:
+            self._task_classified = True
+            task_text = self._first_user_message()
+
+        annotation = await annotate_turn(
+            self.api,
+            session_id=self.session_id,
+            turn_index=self.turn,
+            assistant_text=assistant_text,
+            tool_calls=tool_calls,
+            task_text=task_text,
+        )
+        if annotation is not None:
+            write_annotation(self._pg, annotation)
+            self._active_tags.update(annotation.tags)
+            logger.debug(
+                "policy_engine: turn {} → phase={} tags={}",
+                self.turn,
+                annotation.phase,
+                annotation.tags,
+            )
+
+    def _first_user_message(self) -> str:
+        messages = self.api.get_messages()
+        for msg in messages:
+            role = getattr(msg, "role", None)  # code-health: ignore[AM021]
+            if role == "user":
+                return _content_text(msg, 3000)
+        return ""
+
+    async def _flush_symbol_refreshes(self) -> None:
+        if not self._pending_refreshes or self.repo_index is None:
+            return
+        plans = list(self._pending_refreshes)
+        self._pending_refreshes.clear()
+        for plan in plans:
+            try:
+                await self.repo_index.refresh(plan)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("policy_engine: repo index refresh failed: {}", exc)
+                continue
+            if self._pg is None:
+                continue
+            rows = extract_symbols_for_paths(
+                self.repo_index,
+                session_id=self.session_id,
+                paths=list(plan.paths),
+            )
+            if rows:
+                written = write_symbols(
+                    self._pg,
+                    rows,
+                    session_id=self.session_id,
+                    paths=list(plan.paths),
+                )
+                logger.debug(
+                    "policy_engine: synced {} symbols for {}",
+                    written,
+                    plan.paths,
+                )
+            self._synced_paths.update(plan.paths)
 
 
 def install(api: AtomAPI, config: PolicyEngineConfig) -> None:
-    base = (
-        Path(config.db_path).expanduser()
-        if config.db_path
-        else default_policy_db_path()
-    )
-    session_id = api.ctx.session_id
-    safe = "".join(
-        ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in session_id
-    )[:128]
-    recorder = ToolEventRecorder(
-        db_path=base.parent / "sessions" / f"{safe or 'session'}.db",
-        session_id=session_id,
-    )
-    _Runtime(api=api, config=config, recorder=recorder).install()
+    _Runtime(api=api, config=config, session_id=api.ctx.session_id).install()
 
 
 __all__ = [
     "MANIFEST",
     "PolicyEngineConfig",
-    "TextContent",
     "install",
 ]

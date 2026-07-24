@@ -1,38 +1,42 @@
 # code-health: ignore-file[AM025] -- checklist YAML is untyped at the boundary
-"""Trigger layer: every checklist item carries a declared gate.
+"""Trigger layer: checklist items with gates.
 
-An item's ``when`` block is the DSL: it names a signal (a named query
-against the data plane), the checkpoint it is evaluated at, and the
-task-side arm flag. The gate decides WHEN an item becomes relevant; the
-``deliver`` field decides what happens then:
+Each item's ``when`` block declares:
+- ``signal``: a named SQL query over the data plane (structural signals)
+- ``trigger``: a predicate expression over tagger annotations
+- ``checkpoint``: when to evaluate (continuous / stop)
 
-- ``inject``  — the audited structural signals; fire once, render a message
-  quoting the agent's own commands, inject immediately.
-- ``critic``  — collected while gated-open at the stop decision and handed
-  to the delivery layer (self-check injection or subagent review), which
-  judges WHETHER the item is actually violated.
-- ``offline`` — label-pipeline checks; never evaluated at runtime.
-
-The gate vocabulary is deliberately small: signals are audited queries
-over the plane schema; the DSL only composes them. Rates for every gate
-come from ``python -m policy_engine replay`` over the recorded corpus.
+An item fires when BOTH signal and trigger are satisfied (or when either
+is ``always``). Signal queries the structural data plane; trigger queries
+the semantic annotations from the tagger.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import yaml
 from loguru import logger
 
-from .plane import DataPlane
+
+@runtime_checkable
+class QuerySource(Protocol):
+    """Anything that can execute SQL and return rows."""
+
+    def query(
+        self,
+        sql: str,
+        params: tuple[object, ...] | Mapping[str, object] = (),
+    ) -> list[tuple]: ...
 
 
 @dataclass(slots=True, frozen=True)
 class SignalDef:
-    """One signal = one query over the data plane (defined in signals.yaml)."""
+    """One signal = one SQL query over the data plane."""
 
     name: str
     query: str
@@ -67,9 +71,9 @@ def load_signals(path: Path) -> dict[str, SignalDef]:
 
 @dataclass(slots=True, frozen=True)
 class Gate:
-    signal: str  # named plane query from the signal registry
+    signal: str  # named SQL query from signal registry
+    trigger: str  # predicate expression over tagger annotations
     checkpoint: str  # "continuous" | "stop"
-    arm: str  # task flag name; "always" until the task classifier lands
 
 
 @dataclass(slots=True, frozen=True)
@@ -86,7 +90,6 @@ class ChecklistItem:
 class Firing:
     item: ChecklistItem
     facts: tuple[str, ...]
-    suggestion: str
 
 
 def load_items(path: Path) -> dict[str, ChecklistItem]:
@@ -109,8 +112,8 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
             deliver=str(entry.get("deliver", "critic")),
             gate=Gate(
                 signal=str(when.get("signal", "always")),
+                trigger=str(when.get("trigger", "always")),
                 checkpoint=str(when.get("checkpoint", "stop")),
-                arm=str(when.get("arm", "always")),
             ),
         )
         if item.item_id:
@@ -129,51 +132,101 @@ def render_message(firing: Firing) -> str:
         lines.append("")
         lines.append("Observed in this session:")
         lines.extend(f"- {fact}" for fact in firing.facts)
-    if firing.suggestion:
-        lines.append("")
-        lines.append(firing.suggestion)
     if firing.item.advice:
         lines.append(firing.item.advice)
     return "\n".join(lines)
 
 
+# -- Predicate expression evaluation ------------------------------------------
+
+_TOKEN_RE = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*|AND|OR|NOT|\(|\)")
+
+
+def evaluate_trigger(expr: str, active_tags: frozenset[str]) -> bool:
+    """Evaluate a boolean predicate expression against active tags.
+
+    Supports: predicate names, AND, OR, NOT, parentheses.
+    ``always`` is unconditionally true.
+    """
+    if expr == "always" or not expr.strip():
+        return True
+    tokens = _TOKEN_RE.findall(expr)
+    if not tokens:
+        return True
+    pos = 0
+
+    def _peek() -> str:
+        return tokens[pos] if pos < len(tokens) else ""
+
+    def _advance() -> str:
+        nonlocal pos
+        tok = tokens[pos]
+        pos += 1
+        return tok
+
+    def _parse_or() -> bool:
+        result = _parse_and()
+        while _peek() == "OR":
+            _advance()
+            result = _parse_and() or result
+        return result
+
+    def _parse_and() -> bool:
+        result = _parse_not()
+        while _peek() == "AND":
+            _advance()
+            result = _parse_not() and result
+        return result
+
+    def _parse_not() -> bool:
+        if _peek() == "NOT":
+            _advance()
+            return not _parse_atom()
+        return _parse_atom()
+
+    def _parse_atom() -> bool:
+        tok = _peek()
+        if tok == "(":
+            _advance()
+            result = _parse_or()
+            if _peek() == ")":
+                _advance()
+            return result
+        if tok:
+            _advance()
+            return tok in active_tags
+        return False
+
+    return _parse_or()
+
+
+# -- Trigger engine ------------------------------------------------------------
+
+
 @dataclass(slots=True)
 class TriggerEngine:
-    """Generic gate evaluator: items and signals are data, this is mechanism.
-
-    A signal is true when its query (with merged params) returns any row.
-    Inject items latch after one firing and render evidence rows through
-    the signal's format string.
-    """
+    """Evaluates items against structural signals + tagger predicates."""
 
     items: dict[str, ChecklistItem]
     signals: dict[str, SignalDef]
     param_overrides: dict[str, float] = field(default_factory=dict)
-    # None = task not classified yet: every item is armed (permissive).
-    arm_flags: frozenset[str] | None = None
     _fired: set[str] = field(default_factory=set)
 
-    def _armed(self, item: ChecklistItem) -> bool:
-        if item.gate.arm == "always" or self.arm_flags is None:
+    def signal_true(self, source: QuerySource, name: str) -> bool:
+        if name == "always":
             return True
-        return item.gate.arm in self.arm_flags
-
-    def signal_true(self, plane: DataPlane, name: str) -> bool:
         signal = self.signals.get(name)
         if signal is None:
             logger.warning("policy triggers: unknown signal {}", name)
             return False
         params = {**signal.params, **self.param_overrides}
-        bound = {
-            key: value for key, value in params.items() if f":{key}" in signal.query
-        }
-        return bool(plane.query(signal.query, bound))
+        return bool(source.query(signal.query, params))
 
-    def evidence(self, plane: DataPlane, name: str) -> tuple[str, ...]:
+    def evidence(self, source: QuerySource, name: str) -> tuple[str, ...]:
         signal = self.signals.get(name)
         if signal is None or not signal.evidence_query:
             return ()
-        rows = plane.query(signal.evidence_query)
+        rows = source.query(signal.evidence_query)
         facts = []
         for row in rows:
             try:
@@ -184,39 +237,62 @@ class TriggerEngine:
                 )
         return tuple(facts)
 
-    # -- inject tier -----------------------------------------------------------
+    def _gate_open(
+        self,
+        item: ChecklistItem,
+        source: QuerySource,
+        *,
+        stopping: bool,
+        active_tags: frozenset[str],
+    ) -> bool:
+        if item.gate.checkpoint == "stop" and not stopping:
+            return False
+        if not self.signal_true(source, item.gate.signal):
+            return False
+        if not evaluate_trigger(item.gate.trigger, active_tags):
+            return False
+        return True
 
-    def evaluate_inject(self, plane: DataPlane, *, stopping: bool) -> Firing | None:
+    def evaluate_inject(
+        self,
+        source: QuerySource,
+        *,
+        stopping: bool,
+        active_tags: frozenset[str] = frozenset(),
+    ) -> Firing | None:
         for item in self.items.values():
             if item.deliver != "inject" or item.item_id in self._fired:
                 continue
-            if not self._armed(item):
-                continue
-            if item.gate.checkpoint == "stop" and not stopping:
-                continue
-            if not self.signal_true(plane, item.gate.signal):
+            if not self._gate_open(
+                item, source, stopping=stopping, active_tags=active_tags
+            ):
                 continue
             self._fired.add(item.item_id)
             return Firing(
                 item=item,
-                facts=self.evidence(plane, item.gate.signal),
-                suggestion="",
+                facts=self.evidence(source, item.gate.signal),
             )
         return None
 
-    # -- critic tier -------------------------------------------------------------
-
-    def open_critic_items(self, plane: DataPlane) -> tuple[ChecklistItem, ...]:
+    def open_critic_items(
+        self,
+        source: QuerySource,
+        *,
+        active_tags: frozenset[str] = frozenset(),
+    ) -> tuple[ChecklistItem, ...]:
         return tuple(
             item
             for item in self.items.values()
             if item.deliver == "critic"
-            and self._armed(item)
-            and self.signal_true(plane, item.gate.signal)
+            and self._gate_open(item, source, stopping=True, active_tags=active_tags)
         )
 
-    def critic_evidence(self, plane: DataPlane) -> tuple[str, ...]:
+    def critic_evidence(self, source: QuerySource) -> tuple[str, ...]:
         facts: list[str] = []
-        for name in ("unresolved_red", "repeat_fail2"):
-            facts.extend(self.evidence(plane, name)[:3])
+        for name in (
+            "dependency_blind_spot",
+            "definition_not_traced",
+            "non_convergent",
+        ):
+            facts.extend(self.evidence(source, name)[:3])
         return tuple(facts)
