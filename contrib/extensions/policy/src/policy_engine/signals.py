@@ -40,6 +40,27 @@ from .commands import (
 # monitors as Q1); tracked in docs/policy-anomaly-detection.md.
 MUTATING_TOOLS = frozenset({"write", "edit"})
 
+# Measurement- and lifecycle-probe shaped tokens for the hybrid gates
+# (perf task with no measurement run; persistence symptom with no
+# boundary probe). Provenance: mined checklist `when` clauses; rates
+# validated on the 28-session corpus 2026-07-24.
+_MEASUREMENT_TOKENS = frozenset(
+    {
+        "bench",
+        "benchmark",
+        "hyperfine",
+        "criterion",
+        "timeit",
+        "time",
+        "flamegraph",
+        "profile",
+        "perf",
+    }
+)
+_BOUNDARY_TOKENS = frozenset(
+    {"restart", "rotate", "reboot", "kill", "sighup", "resume", "reopen", "relaunch"}
+)
+
 
 def _is_test_path(path: str) -> bool:
     """Stem-pattern match, not substring: `test/vitest.config.mjs` is a
@@ -201,6 +222,43 @@ class TrajectoryState:
             validation_count=len(validations),
             validations=tuple(segment for _r, segment in validations[-4:]),
         )
+
+    def features(self) -> dict[str, bool | int]:
+        """Cheap feature snapshot for declarative gates (no evidence)."""
+
+        validations = self.validation_segments()
+        reds = [
+            (record, segment)
+            for record, segment in validations
+            if record.exit_code not in (None, 0)
+            and record.exit_code not in ENV_PROBE_EXITS
+        ]
+        all_tokens = {
+            token.lower()
+            for record in self.execs
+            for segment in record.segments
+            for token in segment.norm
+        }
+        repeated = self.repeated_failures()
+        return {
+            "mutations": len(self.mutated_paths),
+            "test_edits": len(self.edited_test_stems),
+            "validation_runs": len(validations),
+            "red_any": bool(reds),
+            "green_close": bool(validations) and validations[-1][0].exit_code == 0,
+            "unresolved_red": bool(self.unresolved_reds()),
+            "repeat_fail2": any(count >= 2 for _k, count in repeated),
+            "repeat_fail3": any(count >= 3 for _k, count in repeated),
+            "test_code_alternate": any(count >= 2 for _k, count in repeated)
+            and bool(self.edited_test_stems)
+            and len(self.mutated_paths) > len(self.edited_test_stems),
+            "narrow_only": bool(self.narrow_only_groups(min_runs=2)),
+            "self_authored_only": self.self_authored_only() is not None,
+            "under_validation": self.under_validation() is not None,
+            "no_measurement": not (all_tokens & _MEASUREMENT_TOKENS),
+            "no_boundary_probe": not (all_tokens & _BOUNDARY_TOKENS),
+            "always": True,
+        }
 
     def unresolved_reds(self) -> list[ExecRecord]:
         """Failed validation runs never superseded by an equal-or-broader

@@ -1,104 +1,812 @@
-# Checklist served by the policy_engine watcher.
+# Complete checklist served by the policy_engine watcher — every item mined
+# from the trajectory batches carries a declared gate (the `when` block):
+#   signal      a trajectory feature from signals.py (audited code)
+#   checkpoint  continuous | stop
+#   arm         task-side flag; `always` until the task classifier lands
+# and a delivery route:
+#   inject      audited structural signals -> immediate templated injection
+#   critic      handed to the stop-time critic (self-check or subagent)
+#   offline     label-pipeline checks, never evaluated at runtime
 #
-# tier: structural — fires deterministically from trajectory signals and is
-#         injected directly; only signals with zero pass-disturbance on the
-#         calibration corpus (28 sessions, 2026-07-24 emission audit) qualify.
-#       critic — questions no token-shape rule can answer; delivered at the
-#         stop decision via self-check injection or a subagent review,
-#         depending on configuration.
-#
-# Wording is reviewed for injection: chain language, no ground truth, no
-# case surfaces. Distilled from the mining batch at
-# .agentm/mining/live-r1/checklist.yaml.
+# Source: .agentm/mining/live-r1/checklist.yaml (2026-07-23 mining batch).
+# `when_note` preserves each item's original mined trigger prose.
+# Gate rates are measured with `python -m policy_engine replay`.
 
 items:
-  # ----- structural tier ----------------------------------------------------
-  - id: narrow_only_validation
-    dimension: evidence_adequacy
-    tier: structural
+- id: belief_consistency_1
+  dimension: belief_consistency
+  deliver: critic
+  when:
+    signal: unresolved_red
+    checkpoint: stop
+    arm: always
+  check: At stop, is every executed check whose last run failed either (a) superseded
+    by a later passing run of the same or a more complete check, or (b) explicitly
+    disclosed in the stop message with the completion claim scoped around it? Does
+    the summary's verification list show green results only for narrower or filtered
+    runs while the most complete available check was last observed red and never
+    re-run?
+  advice: ''
+  when_note: Any validation command in the trajectory exits non-zero, and the agent
+    later stops with a completion, done, or merge-readiness claim.
+- id: belief_consistency_2
+  dimension: belief_consistency
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: always
+  check: Does the final summary's enumeration of what changed match the full set
+    of modifications actually present in the workspace or submitted diff, including
+    anomalies the agent itself observed earlier? Was the pre-stop review scoped
+    (e.g., path-filtered) so that known tree-wide modifications were never re-surfaced
+    before a clean, surgical, or merge-ready claim?
+  advice: ''
+  when_note: An early observation such as a workspace status or diff shows modifications
+    not caused by the agent, and the final summary enumerates a narrow changed-file
+    set or claims the change is clean or merge-ready.
+- id: belief_consistency_3
+  dimension: belief_consistency
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: enumerated_requirements
+  check: For each behavior, branch, or input case-class the final summary claims
+    as working, is there at least one executed validation run that actually exercises
+    it? Does any executed check actively assert that a claimed path did not fire,
+    or does all behavioral evidence trace to the agent's own self-authored anticipated-case
+    tests with no probing of variants the changed mechanism plausibly treats differently?
+  advice: ''
+  when_note: The stop-time claim asserts a fix or feature is complete, or enumerates
+    implemented behaviors, and the change introduces multiple code paths or input
+    case-classes.
+- id: belief_consistency_4
+  dimension: belief_consistency
+  deliver: critic
+  when:
+    signal: red_any
+    checkpoint: stop
+    arm: parity_reference
+  check: When a validation failure during the trajectory contradicts an expected
+    value the agent itself authored earlier in the same session, is the contradiction
+    resolved against an external reference (task statement, reference implementation,
+    pre-existing suite, or a format/well-formedness standard) before the implementation
+    is edited — or does the agent rewrite the implementation until it matches its
+    own guess? At stop, does the 'verified' or 'fixed' claim rest entirely on tests
+    whose oracle values were written in the same session, with no independent check
+    distinguishing the chosen behavior from the alternative?
+  advice: ''
+  when_note: A mid-trajectory test failure shows actual output differing from an
+    expected value on a task requiring match to an external reference behavior,
+    or the stop message claims verification while its validation list contains only
+    tests the agent authored or edited this session.
+- id: belief_consistency_5
+  dimension: belief_consistency
+  deliver: critic
+  when:
+    signal: red_any
+    checkpoint: stop
+    arm: always
+  check: When the agent reclassifies observed failures as unrelated, pre-existing,
+    flaky, or environmental, is that attribution backed by a baseline observation
+    (revert/stash plus rerun of the same failing set) covering all dismissed failures
+    rather than a single one? Is each exculpatory qualifier in the final summary
+    ('passes in isolation', 'unrelated', 'the changed tests pass') traceable to
+    an observation matching its full stated scope and uncontradicted by any later
+    observation?
+  advice: ''
+  when_note: Agent text or the final summary downgrades or dismisses red results
+    — including as a footnote alongside a completion claim — rather than fixing
+    or gating on them.
+- id: belief_consistency_6
+  dimension: belief_consistency
+  deliver: critic
+  when:
+    signal: no_measurement
+    checkpoint: stop
+    arm: perf_motivated
+  check: When the final claim asserts a performance effect or efficiency capability
+    ('avoids work', 'faster', 'reduces allocation/churn'), does the trajectory contain
+    any measurement that could support it — a benchmark, profile, or timing comparison
+    — or is the claimed effect presented as verified outcome while nothing executed
+    could have confirmed it?
+  advice: ''
+  when_note: The task is an optimization or performance task, or the final summary
+    contains quantitative or effect language about the change's impact, and the
+    agent reports the work as done.
+- id: diagnosis_validity_1
+  dimension: diagnosis_validity
+  deliver: critic
+  when:
+    signal: self_authored_only
+    checkpoint: stop
+    arm: severity_qualifiers
+  check: Do the scenarios the agent actually exercised include the task's stated
+    severity condition (persistence, non-recovery, survival across restarts/processes/streams),
+    or does every executed test terminate through the easy, recoverable path? Is
+    completion claimed while the headline manifestation of the reported symptom
+    was never reproduced?
+  advice: ''
+  when_note: The task describes the symptom with severity qualifiers (stuck, loops,
+    never recovers, persists) and the agent's validation consists of self-authored
+    scenario tests rather than a pre-existing suite.
+- id: diagnosis_validity_2
+  dimension: diagnosis_validity
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: perf_motivated
+  check: Does the stated mechanism rely on a universal or existential claim about
+    runtime behavior ('this work is never needed', 'no consumer asks for this',
+    'nothing depends on this path') that a cheap check would settle — call-site
+    grep, consumer frequency count, trace — with no such check present in the trajectory?
+    Does the change delete or relocate work at the hotspot's location instead of
+    addressing a measured cost mechanism?
+  advice: ''
+  when_note: Profile- or hotspot-driven optimization/refactor tasks where the diagnosis
+    reframes structure (eager to lazy, precompute to recompute, keep to delete).
+- id: diagnosis_validity_3
+  dimension: diagnosis_validity
+  deliver: critic
+  when:
+    signal: red_any
+    checkpoint: stop
+    arm: always
+  check: Is the adopted diagnosis consistent with everything the agent already collected?
+    If any artifact the agent itself read — existing tests documenting a convention,
+    reference code showing state scope, keying, boundedness, or lifecycle, or its
+    own earlier observations — supports a rival account of the cause, does the trajectory
+    contain explicit engagement (a stated reason or a discriminating observation)
+    excluding that rival before the change is made?
+  advice: ''
+  when_note: Agent has committed to a mechanism-level cause (visible in edit rationales
+    or planning text) and earlier turns quote or summarize repo or reference artifacts
+    bearing on that cause.
+- id: diagnosis_validity_4
+  dimension: diagnosis_validity
+  deliver: critic
+  when:
+    signal: self_authored_only
+    checkpoint: stop
+    arm: always
+  check: Is the diagnosis confirmed only by tests the agent wrote whose expected
+    values are derived from the diagnosis itself — asserting the structure its own
+    fix produces, or asserting the absence of a behavior that the reference or existing
+    suite asserts the presence of? Is any expectation traceable to an external oracle
+    (pre-existing test, specification, reference behavior) rather than to the agent's
+    hypothesis?
+  advice: ''
+  when_note: Agent authors new regression tests for its own change and no pre-existing
+    test pins the disputed behavior.
+- id: diagnosis_validity_5
+  dimension: diagnosis_validity
+  deliver: critic
+  when:
+    signal: repeat_fail2
+    checkpoint: stop
+    arm: always
+  check: When a test suite fails after the agent's edits, is a 'pre-existing / flaky
+    / unrelated' attribution made only after a verified control — a baseline run
+    of the same suite on the unpatched tree, or identical failure sets across repeated
+    runs? If a revert/restore A/B was used, did the agent re-verify workspace state
+    (status/diff) after each step, particularly when a tool result reports the apply
+    or restore failed? Is the completion claim made while the suite's last observed
+    state is red and merely disclaimed in the summary?
+  advice: ''
+  when_note: Any test-suite failure first observed after the agent's first edit,
+    in a trajectory that continues toward a completion claim.
+- id: diagnosis_validity_6
+  dimension: diagnosis_validity
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: parity_reference
+  check: When the task is to match a reference implementation's behavior on a code
+    path, does the change contain a counterpart for every named sub-mechanism of
+    the diagnosed fix that the agent quoted from the reference — including state
+    that outlives a single request/process (with its keying and boundedness), retry
+    limits, and terminal error surfacing? Does the exit claim assert parity while
+    the diff omits quoted components or leaves a diagnosed loop unbounded?
+  advice: ''
+  when_note: Task text requires matching or parity with a named reference implementation,
+    and the trajectory contains quoted reference code plus a final diff.
+- id: evidence_adequacy_1
+  dimension: evidence_adequacy
+  deliver: critic
+  when:
+    signal: unresolved_red
+    checkpoint: stop
+    arm: always
+  check: After the broadest executed run over the changed surface fails, does the
+    agent stop on narrowed green runs plus a narrative claim that the failures are
+    environmental or pre-existing — without (a) an executed discriminating check
+    that actually ran to completion and supports the attribution (per-failure triage,
+    or the same broad suite on the unmodified tree), and (b) any subsequent green
+    broad run? If yes, a red signal was converted into an effective green without
+    evidence.
+  advice: ''
+  when_note: The trajectory contains a nonzero-exit broad/unfiltered validation
+    over a changed module, followed later by a completion or merge claim.
+- id: evidence_adequacy_2
+  dimension: evidence_adequacy
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: always
+  check: Before the stop claim, did the agent review the full surface of the change
+    it is about to submit via an unfiltered worktree status/diff — or was the final
+    review path-filtered to the files it edited, while the worktree contained other
+    pre-existing or incidental modifications that flow into the submission unexamined?
+  advice: ''
+  when_note: The trajectory ends in a submitted patch and any earlier worktree-status
+    output showed modifications beyond the agent's own edits.
+- id: narrow_only_validation
+  dimension: evidence_adequacy
+  deliver: inject
+  when:
+    signal: narrow_only
     checkpoint: continuous
-    check: >
-      Every validation executed against the code you modified carries
-      narrowing filters, and the unfiltered form has never been run. A
-      filtered run only exercises the slice matching the filter; a
-      regression elsewhere in the same scope would pass unseen.
-    advice: >
-      Before treating validation as complete, run the unfiltered form once
-      and triage anything red.
-
-  - id: self_authored_oracle_only
-    dimension: evidence_adequacy
-    tier: structural
+    arm: always
+  check: Does the union of executed validation scopes cover the whole changed module/package
+    plus the known downstream consumers of each changed symbol and the real end-to-end
+    path through it? Flag when every green run carries a narrowing selector (line
+    selector, name filter, single package) such that part of the changed surface,
+    its callers, or the production call path is never exercised, yet the agent asserts
+    merge-readiness.
+  advice: Before treating validation as complete, run the unfiltered form once and
+    triage anything red.
+  when_note: All executed test commands carry narrowing selectors, or the change
+    touches code whose consumers (per the agent's own call-chain exploration) live
+    outside the edited scope.
+- id: self_authored_oracle_only
+  dimension: evidence_adequacy
+  deliver: inject
+  when:
+    signal: self_authored_only
     checkpoint: stop
-    check: >
-      Every passing validation in this session exercises test files you
-      wrote or edited yourself, so nothing independent of your own
-      assumptions has checked the change.
-    advice: >
-      Run the pre-existing test suite for the modules you touched at scope
-      level before concluding, and resolve anything that fails.
-
-  - id: under_validation_at_stop
-    dimension: evidence_adequacy
-    tier: structural
+    arm: always
+  check: Is every green validation that exercises the changed behavior either (a)
+    authored or edited by the agent in this session — so its assertions restate
+    the agent's own chosen semantics — or (b) a pre-existing check that was already
+    observed green before the first change? If so, no executed check can falsify
+    the agent's reading of the requirement, and the done-claim rests on circular
+    or pressure-free evidence. This is fatal when the task points at an external
+    reference or graded contract, where the correctness standard lives outside the
+    agent's head.
+  advice: Run the pre-existing test suite for the modules you touched at scope level
+    before concluding, and resolve anything that fails.
+  when_note: Agent claims completion after running tests, and the trajectory contains
+    test-file edits in-session or a gating test command that was also run before
+    the first mutation.
+- id: evidence_adequacy_5
+  dimension: evidence_adequacy
+  deliver: critic
+  when:
+    signal: green_close
     checkpoint: stop
-    check: >
-      The volume of modifications in this session far exceeds the number of
-      validation runs executed against them; most of the changed surface has
-      never been exercised by any check.
-    advice: >
-      Before concluding, run the test suites covering the modules you
-      changed and demonstrate each changed behavior at least once.
-
-  # ----- critic tier ----------------------------------------------------------
-  - id: unresolved_red_at_stop
-    dimension: belief_consistency
-    tier: critic
+    arm: measurable_quality
+  check: 'Name the quality the task or requirement actually grades — a measurable
+    quantity (e.g., latency), a structural property of rendered output, or a specific
+    behavioral branch. Does at least one executed validation measure or trigger
+    that quality directly? Flag when the final claim asserts the quality while every
+    executed check sits on a proxy dimension: compile/format gates, unit tests that
+    never drive the graded branch''s trigger condition, or code-reading arguments
+    in place of measurement.'
+  advice: ''
+  when_note: The task text names a measurable quality or a specific behavioral contract,
+    and the agent's final claim asserts that quality — cheap enough to evaluate
+    always.
+- id: evidence_adequacy_6
+  dimension: evidence_adequacy
+  deliver: critic
+  when:
+    signal: no_boundary_probe
     checkpoint: stop
-    check: >
-      You are about to finish while at least one validation you executed is
-      still red: its last run failed, and no later run of equal or broader
-      scope has succeeded.
-    advice: >
-      Fix and re-run it, or re-run a broader scope that covers it, or state
-      explicitly in your final summary why the failure does not block
-      completion.
-
-  - id: claimed_behaviors_demonstrated
-    dimension: requirement_coverage
-    tier: critic
+    arm: failure_story
+  check: When the task narrates a concrete failure story — persistent misbehavior,
+    recurrence across a restart or rotation boundary — does at least one executed
+    scenario instantiate that story under its discriminating conditions (the failure
+    repeated until the required bound is reached, state carried across the boundary)?
+    Flag when the only executed scenario is a one-shot, weakened version that both
+    the required behavior and the incorrect behavior would pass.
+  advice: ''
+  when_note: The task describes a production failure narrative or reproduction with
+    persistence/boundary elements, and validation relies on scripted or simulated
+    scenarios.
+- id: implementation_fidelity_1
+  dimension: implementation_fidelity
+  deliver: critic
+  when:
+    signal: green_close
     checkpoint: stop
-    check: >
-      For each behavior or case the task description requires and your final
-      summary will claim, is there at least one executed run that actually
-      demonstrates it? List each required behavior next to the run that
-      exercised it; a behavior with no run is unverified.
-    advice: >
-      Add a concrete probe for every claimed behavior that lacks one before
-      concluding.
-
-  - id: task_quality_named_and_measured
-    dimension: evidence_adequacy
-    tier: critic
+    arm: always
+  check: For each branch or guard the change adds to deliver a claimed effect —
+    a protective branch that must fire, or a fast path that reuses a stored result
+    instead of recomputing — does the guard's actual truth set match the scenario
+    set the claim quantifies over? (a) Can the guard of each claimed-effect branch
+    ever be true, given every writer of the fields it reads and the invariants those
+    writers establish (ordering, reset-then-set pairs)? (b) Does the guard fail
+    in every scenario class where the claim requires the fallback or recomputation
+    (modified, deleted, recreated, repeated-trigger inputs), or does mere presence
+    in the stored/reused structure short-circuit it? Do the agent's own tests exercise
+    any class where a mismatch in (a) or (b) would be observable?
+  advice: ''
+  when_note: The diff introduces a new conditional branch or guard that decides
+    whether a claimed protective effect fires, or whether a previously computed/stored
+    result may be reused under an equivalence claim, and the agent's summary asserts
+    the effect or the equivalence.
+- id: implementation_fidelity_2
+  dimension: implementation_fidelity
+  deliver: critic
+  when:
+    signal: green_close
     checkpoint: stop
-    check: >
-      Name the quality the task actually grades — a measurable quantity, a
-      structural property of output, or a specific behavioral contract —
-      and identify which executed run measured or demonstrated exactly that
-      quality. Passing adjacent tests does not measure the graded quality.
-    advice: >
-      If no run measured the graded quality, construct and execute one
-      before concluding.
-
-  - id: dismissed_failures_have_baselines
-    dimension: diagnosis_validity
-    tier: critic
+    arm: always
+  check: 'For every new state field the change introduces, is its full lifecycle
+    defined and consistent with the claim: which paths write it, which paths clear
+    or update it, do existing reset/teardown/success functions handle it, and does
+    its storage scope (per-event, per-consumer, per-entity) match the span the requirement
+    or a ported reference claims (tracked/preserved/sent across the session, across
+    consumers, or across consumer restarts)? Would the claimed effect still occur
+    on a second trigger of the initiating event, after a reset, after the consumer
+    is destroyed and re-created, or for a sibling consumer of the same entity —
+    and conversely, can the field outlive the validity the claim or reference implies,
+    so the effect fires on later events it should not classify? When a reference
+    implementation is in scope, does the new field live where the reference keeps
+    the equivalent state (e.g., a shared keyed store consulted per request) or somewhere
+    narrower?'
+  advice: ''
+  when_note: The diff adds new fields or keys to a persistent state structure to
+    support a fix, and the task, a ported reference, or the agent's own claim asserts
+    the new state is tracked, preserved, or produced across subsequent events, consumers,
+    or restarts — or bounds the state's lifetime (keyed, evictable, cleared-on-success)
+    in a way the implementation must honor.
+- id: implementation_fidelity_3
+  dimension: implementation_fidelity
+  deliver: critic
+  when:
+    signal: repeat_fail2
     checkpoint: stop
-    check: >
-      Every failure you classified as pre-existing, flaky, environmental, or
-      unrelated needs a verified control: a baseline run without your change
-      showing the same failure. An attribution without a baseline is a
-      guess.
-    advice: >
-      Run the baseline, or treat the failure as caused by your change and
-      resolve it.
+    arm: always
+  check: When the agent attributes post-change test failures to a pre-existing or
+    unrelated baseline, did the experiment behind that attribution actually reconstruct
+    the pre-change state — every file in the change reverted, no other edits left
+    applied, the full failing suite run and its output actually inspected, and the
+    failure set shown to be stable and identical — or is the attribution stronger
+    than what the performed experiment can support?
+  advice: ''
+  when_note: After its own edits, the agent observes a failing suite and asserts
+    in messages or the final summary that the failures pre-date the change or are
+    unrelated to it.
+- id: implementation_fidelity_4
+  dimension: implementation_fidelity
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: parity_reference
+  check: 'When the change ports a retry/recovery behavior that a reference implementation
+    (or the requirement) bounds with a termination condition, does the new code
+    contain a reachable exit equivalent to that bound — an attempt counter, a max-attempt
+    guard, or a terminal error branch — plus any on-exhaustion state cleanup the
+    reference performs? Concretely: is there any input sequence of persistent failures
+    under which the loop exits with the required error effect, or does every path
+    loop forever?'
+  advice: ''
+  when_note: The task requires matching a reference implementation's failure/recovery
+    semantics, or the diff introduces a branch that re-attempts an operation in
+    response to an adverse result.
+- id: implementation_fidelity_5
+  dimension: implementation_fidelity
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: measurable_quality
+  check: When the requirement pins a specific ordering or nesting between two elements
+    the change composes, does the code's reachable output in the task's named scenario
+    exhibit the required direction — or can the new construction emit only one direction,
+    and is that direction the inverse? And do the expected outputs in the agent's
+    own added tests assert the required direction, or does the trajectory show production
+    code being rewritten to satisfy a self-authored fixture whose direction was
+    never validated against the reported complaint?
+  advice: ''
+  when_note: The task or bug report describes the defect as a wrong ordering/nesting/precedence
+    of two composed elements of the output, the change restructures how they are
+    composed, and the agent adds its own expected-output fixtures.
+- id: implementation_fidelity_6
+  dimension: implementation_fidelity
+  deliver: critic
+  when:
+    signal: no_measurement
+    checkpoint: stop
+    arm: perf_motivated
+  check: When the task's motivation is performance and the final claim asserts a
+    performance effect (work avoided, allocations trimmed, faster setup), does the
+    trajectory contain any measurement that could support the claim — a benchmark,
+    timing, or before/after profile — and does that measurement exercise the code
+    path and hotspot the claim names?
+  advice: ''
+  when_note: The task prompt is performance-motivated (profile, timing complaint,
+    'avoid redundant work') and the agent's summary or edit rationales assert a
+    performance effect.
+- id: interpretation_fidelity_1
+  dimension: interpretation_fidelity
+  deliver: critic
+  when:
+    signal: self_authored_only
+    checkpoint: stop
+    arm: always
+  check: 'Does any validation oracle independent of the agent''s own reading gate
+    the completion claim — a fully green pre-existing suite, a reference-behavior
+    comparison, external observation — or is every cited passing check one of: (a)
+    a test the agent authored in-session that encodes the same interpretation as
+    the change (asserting the agent''s own output verbatim, exercising only the
+    single-occurrence happy path, or asserting the absence of a recovery mechanism
+    the task''s wording implies), or (b) a hand-picked subset of pre-existing tests
+    cited while the suite as a whole is not green and the failing test''s subject
+    matches the change?'
+  advice: ''
+  when_note: The agent's verification or final summary cites tests as completion
+    evidence, and the trajectory shows either test files authored or modified in-session
+    after the implementation, or selective citation of passing pre-existing tests
+    alongside unresolved failures in the same suite.
+- id: interpretation_fidelity_2
+  dimension: interpretation_fidelity
+  deliver: critic
+  when:
+    signal: repeat_fail2
+    checkpoint: stop
+    arm: always
+  check: When pre-existing tests fail on the path the change touches, did the agent
+    establish whether the failures pre-date the change via a baseline run that actually
+    completed, and root-cause them — or dismiss them as flaky/unrelated/environmental
+    while citing self-selected passing tests and declaring the requirement's preserved-behavior
+    constraint intact?
+  advice: ''
+  when_note: Trajectory shows failures of pre-existing (not agent-authored) tests
+    after edits, plus dismissal language ('flaky', 'unrelated', 'environmental',
+    'passes in isolation'), or an attempted baseline comparison.
+- id: interpretation_fidelity_3
+  dimension: interpretation_fidelity
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: parity_reference
+  check: When the task requires the change to match a reference implementation's
+    behavior on a path, is every observable behavior of the reference path — parameters
+    emitted, state scope and lifetime, repetition/iteration bounds, and terminal/error
+    behavior — either present in the change or explicitly excluded with a recorded
+    reason? Or did the agent port only the first minimal contrast it found and silently
+    drop the rest of the reference machinery it had read?
+  advice: ''
+  when_note: Task text contains cross-implementation parity language ('match what
+    X does', 'port', 'bring to parity with') and the trajectory shows the agent
+    reading reference source.
+- id: interpretation_fidelity_4
+  dimension: interpretation_fidelity
+  deliver: critic
+  when:
+    signal: no_boundary_probe
+    checkpoint: stop
+    arm: persistence_narrative
+  check: When the task's symptom language implies information must persist across
+    a lifecycle boundary (restart, reset, rotation, repeated occurrence), is the
+    state carrying that information placed at a scope that survives the boundary
+    — or in per-instance/per-request state that is torn down at exactly that boundary,
+    so the recovery behavior can never activate in the steady-state scenario the
+    task describes?
+  advice: ''
+  when_note: Task symptom text contains repetition or cross-instance persistence
+    wording ('again', 'over and over', 'never recover', 'restarting clears it for
+    a while', 'keeps making requests').
+- id: interpretation_fidelity_5
+  dimension: interpretation_fidelity
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: always
+  check: Where the task names a symptom but does not pin the required structure,
+    direction, or causal mechanism, what evidence discriminates the agent's chosen
+    reading from the plausible alternative(s) — and was any of it gathered before
+    commitment? Specifically flag when the agent's 'fixed' expected output inverts
+    the structure of the 'broken' output it reproduced, or when the chosen reading
+    matches what the code already does in the simple case, with no external evidence
+    (reference behavior, upstream history, rendering, measurement) justifying the
+    choice.
+  advice: ''
+  when_note: Task describes a symptom or goal without an acceptance criterion that
+    fixes structure, direction, or mechanism (overlap/containment rendering bugs,
+    vague performance symptoms, 'X instead of Y' descriptions where Y is unnamed).
+- id: label_validity_1
+  dimension: label_validity
+  deliver: offline
+  when:
+    signal: always
+    checkpoint: stop
+    arm: always
+  check: Did the validation gate actually execute behavioral checks against the
+    changed state? Zero executed checks, an empty per-check map, or failure entries
+    that are collection/import errors rather than assertion outcomes mean no measurement
+    occurred — and an all-pass value over an empty check set is vacuous, not a pass.
+  advice: ''
+  when_note: The label derives from an automated validation gate and per-check results
+    are present in the trial record.
+- id: label_validity_2
+  dimension: label_validity
+  deliver: offline
+  when:
+    signal: always
+    checkpoint: stop
+    arm: always
+  check: 'Is a failure label a faithful, deterministic measurement of the agent''s
+    change? Confirm the gate''s failing checks reproduce agent-observable reality:
+    same command and exit status the agent itself ran, assertion messages matching
+    actual properties of the change, failures concerning behaviors the change touches.
+    Invalidate or downweight when the trajectory shows non-determinism or environment
+    linkage: disjoint failing sets across identical reruns, checks passing in isolation
+    but failing in the full run, the same failure reproducing after the agent''s
+    edits are reverted, or failing assertions located in files the agent never edited.'
+  advice: ''
+  when_note: The recorded label is a failure from an automated validation gate and
+    the trajectory contains the agent's own validation runs.
+- id: label_validity_3
+  dimension: label_validity
+  deliver: offline
+  when:
+    signal: always
+    checkpoint: stop
+    arm: always
+  check: Is the change artifact that label components were computed over attributable
+    to the agent alone? If the captured change contains entries that predate the
+    agent's first action or files the agent never touched, any score derived from
+    that artifact (classifications, size metrics, judges reading the captured change)
+    is measuring contaminated input.
+  advice: ''
+  when_note: Any label component is computed from a captured change artifact (extracted
+    diff/patch) rather than from executed behavior; or the captured change lists
+    files absent from the trajectory.
+- id: label_validity_4
+  dimension: label_validity
+  deliver: offline
+  when:
+    signal: always
+    checkpoint: stop
+    arm: always
+  check: 'Is the recorded label an actual measurement, or an absent value the pipeline
+    silently persisted? If the label is null/empty and the trial record carries
+    an exception raised while producing or persisting the label, treat the label
+    as an instrument artifact: invalidate it, quarantine the trial from any consumer
+    that would read null as failure (or as zero), and reconstruct the residual outcome
+    only from scoring channels that demonstrably executed.'
+  advice: ''
+  when_note: The recorded label is null/missing/empty, or the trial record's exception
+    field is non-empty. Computable from the record header alone; evaluate on every
+    scored trial.
+- id: label_validity_5
+  dimension: label_validity
+  deliver: offline
+  when:
+    signal: always
+    checkpoint: stop
+    arm: always
+  check: 'Which scoring channels fed the recorded label, and did each of them actually
+    execute a judgment? Treat any channel whose status is skipped/failed, or whose
+    output is a constant fallback (the same default rationale repeated across all
+    entries), as absence of judgment: the label is valid only if every channel the
+    reward composition draws on executed, and every degraded channel is provably
+    excluded from the label rather than silently aggregated into it or cited as
+    a score.'
+  advice: ''
+  when_note: The trial record contains outputs from more than one scoring channel
+    (a correctness gate plus auxiliary judges/classifiers), or any channel status
+    field is not 'ok'.
+- id: loop_dynamics_1
+  dimension: loop_dynamics
+  deliver: critic
+  when:
+    signal: repeat_fail2
+    checkpoint: stop
+    arm: always
+  check: After the agent has attributed a failing validation to a cause its change
+    cannot affect, does it re-run the same command (or re-analyze the same output
+    with a different tool) and re-derive the identical conclusion, instead of proceeding
+    on the attribution it already established?
+  advice: ''
+  when_note: A validation command has failed with an unchanged failure signature
+    at least twice, and the agent's own text already states a causal attribution
+    that places the failure outside the scope of its change.
+- id: loop_dynamics_2
+  dimension: loop_dynamics
+  deliver: critic
+  when:
+    signal: unresolved_red
+    checkpoint: stop
+    arm: always
+  check: Does the agent stop while a validation that exercises its change is still
+    failing, dismissing the failure with an attribution that moves the cause outside
+    its change but that its own evidence does not establish — no discriminating
+    baseline (the same failing validation re-run with the change reverted), or a
+    baseline run that itself failed or was never examined yet is cited as exonerating
+    — and does it substitute a narrowed set of passing checks for the full gate
+    it had been using?
+  advice: ''
+  when_note: A validation command that exercises the changed code fails after the
+    change; the same named failures recur across >=2 runs (including an isolation
+    or serial variant); and that validation's last full-scope result before the
+    stop is still red.
+- id: loop_dynamics_3
+  dimension: loop_dynamics
+  deliver: critic
+  when:
+    signal: self_authored_only
+    checkpoint: stop
+    arm: always
+  check: 'Is the loop''s convergence evidence entirely self-referential: every red-to-green
+    transition after the first change is against assertions the agent authored this
+    session, the expected behavior is never re-derived from the task text or an
+    external reference (a spec, or a baseline of pre-change behavior), the probe
+    set stops growing after the first green, and the stop decision rests on those
+    self-authored greens alone?'
+  advice: ''
+  when_note: The repository's pre-existing validation passes before the first change
+    (or otherwise cannot discriminate the reported bug), so the agent's own assertions
+    become the only progress signal.
+- id: loop_dynamics_4
+  dimension: loop_dynamics
+  deliver: critic
+  when:
+    signal: no_boundary_probe
+    checkpoint: stop
+    arm: severity_qualifiers
+  check: 'The task text names a concrete failure regime (a repeated, persistent,
+    or boundary condition under which the system fails): does at least one validation
+    drive the system into that regime before the agent declares the requirement
+    met, or do all of its checks exercise only the single-occurrence happy path?'
+  advice: ''
+  when_note: The task statement explicitly describes a failure symptom or regime
+    (e.g., 'over and over', 'never recovers', a stated bound or limit) and the agent's
+    validation is uniformly green.
+- id: loop_dynamics_5
+  dimension: loop_dynamics
+  deliver: critic
+  when:
+    signal: repeat_fail2
+    checkpoint: stop
+    arm: always
+  check: When a validation fails nondeterministically, does the agent respond with
+    pure re-scheduling — re-running it as full suite, single test, serial, or after
+    a delay, with no intervening change and no read of the failing assertion sites
+    — treating the fluctuating failure set as the finding instead of localizing
+    why the assertions that recur in every run fail?
+  advice: ''
+  when_note: A validation command fails and re-running it without changes yields
+    a varying set of failing tests, while at least one test name or assertion recurs
+    in every run.
+- id: loop_dynamics_6
+  dimension: loop_dynamics
+  deliver: critic
+  when:
+    signal: repeat_fail3
+    checkpoint: stop
+    arm: always
+  check: When the same agent action produces the same structural failure more than
+    once on the same artifact, does the agent update the procedure for that action,
+    or does it repeat the identical mechanism and spend turns repairing the damage
+    each time?
+  advice: ''
+  when_note: The trajectory contains two or more failures of the same class caused
+    by the agent's own repeated use of one action mechanism on one artifact (e.g.,
+    successive edits to a single file breaking its structure the same way, each
+    followed by a repair).
+- id: loop_dynamics_7
+  dimension: loop_dynamics
+  deliver: critic
+  when:
+    signal: test_code_alternate
+    checkpoint: stop
+    arm: always
+  check: While chasing one failing check, do the agent's edits alternate between
+    the check itself and the code under test — including mid-loop changes to the
+    check's own expectations — so that neither side is held fixed long enough to
+    isolate which is wrong, and does the loop end without any run of validation
+    the agent did not author against the accumulated production changes?
+  advice: ''
+  when_note: The same targeted validation command is re-run and keeps failing across
+    many turns while edits touch both that validation and the code it tests.
+- id: requirement_coverage_1
+  dimension: requirement_coverage
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: always
+  check: Does the final diff cover every site the requirement implicates that the
+    agent's own reads or searches surfaced — repeated call sites of the pattern
+    being changed, and both ends of a producer/consumer contract the change alters
+    — or did it change only the site tied to the agent's initial hypothesis?
+  advice: ''
+  when_note: The change targets a recurring code pattern or a layered producer/consumer
+    contract, and the trajectory shows the agent reading multiple matching sites
+    while the diff touches a strict subset of them.
+- id: requirement_coverage_2
+  dimension: requirement_coverage
+  deliver: critic
+  when:
+    signal: no_measurement
+    checkpoint: stop
+    arm: perf_motivated
+  check: For a requirement to reduce a named cost, is there evidence — measurement
+    or a code-level mechanism argument — that the change eliminates the cost the
+    requirement names, rather than merely editing the named area with a locally
+    plausible alternative that leaves (or increases) the wasteful work?
+  advice: ''
+  when_note: The task asks to reduce time or resource use at a named hotspot or
+    for a named scenario, and the agent's diff touches the named area without any
+    before/after measurement.
+- id: requirement_coverage_3
+  dimension: requirement_coverage
+  deliver: critic
+  when:
+    signal: green_close
+    checkpoint: stop
+    arm: enumerated_requirements
+  check: For each requirement clause the agent itself enumerated (from the task
+    text, a reference behavior it must match, or its own summary), does the final
+    diff contain a reachable implementation of that clause — not merely the clause's
+    vocabulary in code, but a path whose enabling state can actually be produced
+    — and does at least one of the agent's validations exercise that path?
+  advice: ''
+  when_note: The task defines required behavior by enumeration (a reference implementation
+    to match, listed scenarios, or a symptom with named cases) and the agent's exploration
+    or final summary lists multiple behavior clauses.
+- id: requirement_coverage_4
+  dimension: requirement_coverage
+  deliver: critic
+  when:
+    signal: self_authored_only
+    checkpoint: stop
+    arm: always
+  check: Is the agent's coverage claim backed only by self-authored tests that mirror
+    its own change — with no independent anchor (pre-existing test, reference behavior,
+    task-given example) for the chosen interpretation, and no audit of requirement
+    instances the change did not touch — and did the agent stop as soon as those
+    tests went green?
+  advice: ''
+  when_note: The agent declares completion citing its own passing tests, and the
+    requirement is either ambiguous (admits multiple plausible semantics) or spans
+    multiple instances/categories implied by the task text.
+- id: requirement_coverage_5
+  dimension: requirement_coverage
+  deliver: critic
+  when:
+    signal: no_boundary_probe
+    checkpoint: stop
+    arm: persistence_narrative
+  check: When the task's symptom or requirement involves recurrence across restarts,
+    fresh instances, or sharing beyond one object's lifetime, does the change keep
+    the relevant state at a scope that outlives a single instance, and is there
+    a validation that starts a fresh instance against the pre-existing condition?
+  advice: ''
+  when_note: The task text mentions restart, recurrence after restart, fresh-start
+    behavior, or cross-instance/cross-request sharing of the fixed behavior.
+- id: under_validation_at_stop
+  dimension: evidence_adequacy
+  deliver: inject
+  when:
+    signal: under_validation
+    checkpoint: stop
+    arm: always
+  check: The volume of modifications in this session far exceeds the number of validation
+    runs executed against them; most of the changed surface has never been exercised
+    by any check.
+  advice: Before concluding, run the test suites covering the modules you changed
+    and demonstrate each changed behavior at least once.
+  when_note: Derived signal, calibrated on the 2026-07-23 batch (posthog 31/2, firezone
+    56/4, harbor 18/3).

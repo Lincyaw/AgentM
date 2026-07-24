@@ -46,7 +46,7 @@ from .deliver import build_injection, run_critic, self_check_message
 from .paths import default_policy_db_path, resolve_policy_path
 from .recording import ToolEventRecorder
 from .signals import MUTATING_TOOLS, TrajectoryState
-from .triggers import StructuralTriggers, load_items, render_message
+from .triggers import TriggerEngine, load_items, render_message
 
 
 class PolicyEngineConfig(BaseModel):
@@ -95,7 +95,7 @@ class _Runtime:
     config: PolicyEngineConfig
     recorder: ToolEventRecorder
     state: TrajectoryState = field(default_factory=TrajectoryState)
-    triggers: StructuralTriggers | None = None
+    triggers: TriggerEngine | None = None
     injections: int = 0
     critic_done: bool = False
 
@@ -113,7 +113,7 @@ class _Runtime:
         if not items:
             logger.warning("policy_engine: no checklist items; interventions inert")
             return
-        self.triggers = StructuralTriggers(
+        self.triggers = TriggerEngine(
             items=items, min_narrow_runs=self.config.min_narrow_runs
         )
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
@@ -163,7 +163,7 @@ class _Runtime:
             return None
         stopping = isinstance(event.observation.default_action, Stop)
 
-        firing = self.triggers.evaluate(self.state, stopping=stopping)
+        firing = self.triggers.evaluate_inject(self.state, stopping=stopping)
         if firing is not None:
             self.injections += 1
             message = render_message(firing)
@@ -178,8 +178,10 @@ class _Runtime:
 
         if stopping and not self.critic_done and self.config.critic != "off":
             self.critic_done = True
-            items = self.triggers.critic_items()
+            items = self.triggers.open_critic_items(self.state)
             evidence = self.triggers.critic_evidence(self.state)
+            if not items and not evidence:
+                return None
             if self.config.critic == "self_check":
                 self.injections += 1
                 return build_injection(self_check_message(items, evidence))

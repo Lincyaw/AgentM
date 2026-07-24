@@ -1,22 +1,27 @@
 # code-health: ignore-file[AM025] -- checklist YAML is untyped at the boundary
-"""Trigger layer: checklist items bound to trajectory signals.
+"""Trigger layer: every checklist item carries a declared gate.
 
-Two tiers, decided by the 2026-07-24 emission audit:
+An item's ``when`` block is the DSL: it names a trajectory feature (from
+``TrajectoryState.features()``), the checkpoint it is evaluated at, and the
+task-side arm flag. The gate decides WHEN an item becomes relevant; the
+``deliver`` field decides what happens then:
 
-- ``structural`` items fire deterministically from ``TrajectoryState``
-  signals and inject a templated message quoting the agent's own commands.
-  Only signals with zero pass-disturbance across the calibration corpus
-  may live in this tier.
-- ``critic`` items are questions no token-shape rule can answer; when a
-  session reaches the stop decision they are handed to the delivery layer
-  (self-check injection or subagent review) together with the noisy
-  structural evidence (unresolved reds, repeated failures).
+- ``inject``  — the audited structural signals; fire once, render a message
+  quoting the agent's own commands, inject immediately.
+- ``critic``  — collected while gated-open at the stop decision and handed
+  to the delivery layer (self-check injection or subagent review), which
+  judges WHETHER the item is actually violated.
+- ``offline`` — label-pipeline checks; never evaluated at runtime.
+
+The gate vocabulary is deliberately small: features are audited code in
+``signals.py``; the DSL only composes them. Rates for every gate come from
+``python -m policy_engine replay`` over the recorded corpus.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -26,13 +31,20 @@ from .signals import TrajectoryState
 
 
 @dataclass(slots=True, frozen=True)
+class Gate:
+    signal: str  # feature name in TrajectoryState.features()
+    checkpoint: str  # "continuous" | "stop"
+    arm: str  # task flag name; "always" until the task classifier lands
+
+
+@dataclass(slots=True, frozen=True)
 class ChecklistItem:
     item_id: str
     dimension: str
     check: str
     advice: str
-    tier: str  # "structural" | "critic"
-    checkpoint: str  # "continuous" | "stop"
+    deliver: str  # "inject" | "critic" | "offline"
+    gate: Gate
 
 
 @dataclass(slots=True, frozen=True)
@@ -52,13 +64,19 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
     for entry in (raw or {}).get("items", []):
         if not isinstance(entry, Mapping):
             continue
+        when = entry.get("when")
+        when = when if isinstance(when, Mapping) else {}
         item = ChecklistItem(
             item_id=str(entry.get("id", "")),
             dimension=str(entry.get("dimension", "")),
             check=" ".join(str(entry.get("check", "")).split()),
             advice=" ".join(str(entry.get("advice", "")).split()),
-            tier=str(entry.get("tier", "critic")),
-            checkpoint=str(entry.get("checkpoint", "stop")),
+            deliver=str(entry.get("deliver", "critic")),
+            gate=Gate(
+                signal=str(when.get("signal", "always")),
+                checkpoint=str(when.get("checkpoint", "stop")),
+                arm=str(when.get("arm", "always")),
+            ),
         )
         if item.item_id:
             items[item.item_id] = item
@@ -85,87 +103,111 @@ def render_message(firing: Firing) -> str:
 
 
 @dataclass(slots=True)
-class StructuralTriggers:
-    """Evaluates the structural tier; each item latches after one firing."""
+class TriggerEngine:
+    """Evaluates every item's gate; inject items latch after one firing."""
 
     items: dict[str, ChecklistItem]
     min_narrow_runs: int = 2
-    _fired: set[str] | None = None
+    # None = task not classified yet: every item is armed (permissive).
+    # Once the task classifier provides flags, arm conditions restrict.
+    arm_flags: frozenset[str] | None = None
+    _fired: set[str] = field(default_factory=set)
 
-    def _latched(self, item_id: str) -> bool:
-        if self._fired is None:
-            self._fired = set()
-        return item_id in self._fired
+    def _armed(self, item: ChecklistItem) -> bool:
+        if item.gate.arm == "always" or self.arm_flags is None:
+            return True
+        return item.gate.arm in self.arm_flags
 
-    def _latch(self, item_id: str) -> None:
-        if self._fired is None:
-            self._fired = set()
-        self._fired.add(item_id)
+    # -- inject tier -----------------------------------------------------------
 
-    def evaluate(self, state: TrajectoryState, *, stopping: bool) -> Firing | None:
-        firing = self._narrow_only(state)
-        if firing is None and stopping:
-            firing = self._self_authored_only(state) or self._under_validation(state)
-        if firing is not None:
-            self._latch(firing.item.item_id)
-        return firing
+    def evaluate_inject(
+        self, state: TrajectoryState, *, stopping: bool
+    ) -> Firing | None:
+        features = state.features()
+        for item in self.items.values():
+            if item.deliver != "inject" or item.item_id in self._fired:
+                continue
+            if not self._armed(item):
+                continue
+            if item.gate.checkpoint == "stop" and not stopping:
+                continue
+            firing = self._evidence_firing(item, state, features)
+            if firing is not None:
+                self._fired.add(item.item_id)
+                return firing
+        return None
 
-    def _narrow_only(self, state: TrajectoryState) -> Firing | None:
-        item = self.items.get("narrow_only_validation")
-        if item is None or item.tier != "structural" or self._latched(item.item_id):
-            return None
-        groups = state.narrow_only_groups(min_runs=self.min_narrow_runs)
-        if not groups:
-            return None
-        facts: list[str] = []
-        for group in groups[:3]:
-            for run in group.runs[-2:]:
-                facts.append(
-                    f"`{_clip(run.segment.raw)}` "
-                    f"(narrowing tokens: {', '.join(run.selectors[:4])})"
-                )
-        shortest = min(
-            (run for group in groups for run in group.runs),
-            key=lambda run: len(run.segment.ordered),
+    def _evidence_firing(
+        self,
+        item: ChecklistItem,
+        state: TrajectoryState,
+        features: Mapping[str, bool | int],
+    ) -> Firing | None:
+        """Inject items render evidence via their signal's evaluator."""
+
+        signal = item.gate.signal
+        if signal == "narrow_only":
+            groups = state.narrow_only_groups(min_runs=self.min_narrow_runs)
+            if not groups:
+                return None
+            facts = [
+                f"`{_clip(run.segment.raw)}` "
+                f"(narrowing tokens: {', '.join(run.selectors[:4])})"
+                for group in groups[:3]
+                for run in group.runs[-2:]
+            ]
+            shortest = min(
+                (run for group in groups for run in group.runs),
+                key=lambda run: len(run.segment.ordered),
+            )
+            suggestion = (
+                f"For example, re-run `{_clip(shortest.segment.raw)}` without "
+                f"{', '.join(shortest.selectors[:3])}."
+            )
+            return Firing(item=item, facts=tuple(facts), suggestion=suggestion)
+        if signal == "self_authored_only":
+            authored = state.self_authored_only()
+            if authored is None:
+                return None
+            facts = [
+                f"test files you edited: {', '.join(authored.edited_test_stems[:4])}",
+                *(
+                    f"green run: `{_clip(segment.raw)}`"
+                    for segment in authored.green_runs[-2:]
+                ),
+            ]
+            return Firing(item=item, facts=tuple(facts), suggestion="")
+        if signal == "under_validation":
+            sparse = state.under_validation()
+            if sparse is None:
+                return None
+            facts = [
+                f"{sparse.mutation_count} file modifications vs "
+                f"{sparse.validation_count} validation runs",
+                *(
+                    f"validation run: `{_clip(segment.raw)}`"
+                    for segment in sparse.validations[-2:]
+                ),
+            ]
+            return Firing(item=item, facts=tuple(facts), suggestion="")
+        # Generic feature gate without a dedicated evidence renderer.
+        if features.get(signal):
+            return Firing(item=item, facts=(), suggestion="")
+        return None
+
+    # -- critic tier -------------------------------------------------------------
+
+    def open_critic_items(self, state: TrajectoryState) -> tuple[ChecklistItem, ...]:
+        """Critic items whose gate is open at the stop decision."""
+
+        features = state.features()
+        return tuple(
+            item
+            for item in self.items.values()
+            if item.deliver == "critic"
+            and self._armed(item)
+            and bool(features.get(item.gate.signal))
         )
-        suggestion = (
-            f"For example, re-run `{_clip(shortest.segment.raw)}` without "
-            f"{', '.join(shortest.selectors[:3])}."
-        )
-        return Firing(item=item, facts=tuple(facts), suggestion=suggestion)
-
-    def _self_authored_only(self, state: TrajectoryState) -> Firing | None:
-        item = self.items.get("self_authored_oracle_only")
-        if item is None or item.tier != "structural" or self._latched(item.item_id):
-            return None
-        evidence = state.self_authored_only()
-        if evidence is None:
-            return None
-        facts = [
-            f"test files you edited: {', '.join(evidence.edited_test_stems[:4])}",
-            *(
-                f"green run: `{_clip(segment.raw)}`"
-                for segment in evidence.green_runs[-2:]
-            ),
-        ]
-        return Firing(item=item, facts=tuple(facts), suggestion="")
-
-    def _under_validation(self, state: TrajectoryState) -> Firing | None:
-        item = self.items.get("under_validation_at_stop")
-        if item is None or item.tier != "structural" or self._latched(item.item_id):
-            return None
-        evidence = state.under_validation()
-        if evidence is None:
-            return None
-        facts = [
-            f"{evidence.mutation_count} file modifications vs "
-            f"{evidence.validation_count} validation runs",
-            *(
-                f"validation run: `{_clip(segment.raw)}`"
-                for segment in evidence.validations[-2:]
-            ),
-        ]
-        return Firing(item=item, facts=tuple(facts), suggestion="")
 
     def critic_evidence(self, state: TrajectoryState) -> tuple[str, ...]:
         """Noisy-signal digest handed to the critic at stop time."""
@@ -179,6 +221,3 @@ class StructuralTriggers:
         for key, count in state.repeated_failures()[:3]:
             facts.append(f"repeated failure x{count}: {key}")
         return tuple(facts)
-
-    def critic_items(self) -> tuple[ChecklistItem, ...]:
-        return tuple(item for item in self.items.values() if item.tier == "critic")

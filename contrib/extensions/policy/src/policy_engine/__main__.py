@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from .signals import MUTATING_TOOLS, TrajectoryState
-from .triggers import StructuralTriggers, load_items
+from .triggers import TriggerEngine, load_items
 
 
 def _load_rows(db_path: Path) -> list[tuple[str, str, int | None, int]]:
@@ -39,11 +39,11 @@ def _load_rows(db_path: Path) -> list[tuple[str, str, int | None, int]]:
 def replay_session(db_path: Path, items_path: Path) -> list[str]:
     rows = _load_rows(db_path)
     state = TrajectoryState()
-    triggers = StructuralTriggers(items=load_items(items_path))
+    triggers = TriggerEngine(items=load_items(items_path))
     emissions: list[str] = []
 
     def check(*, stopping: bool) -> None:
-        firing = triggers.evaluate(state, stopping=stopping)
+        firing = triggers.evaluate_inject(state, stopping=stopping)
         if firing is not None:
             facts = "\n".join(f"      {fact}" for fact in firing.facts)
             emissions.append(
@@ -68,6 +68,10 @@ def replay_session(db_path: Path, items_path: Path) -> list[str]:
                 state.feed_mutation(path)
 
     check(stopping=True)  # the stop decision
+    open_items = triggers.open_critic_items(state)
+    if open_items:
+        ids = ", ".join(item.item_id for item in open_items)
+        emissions.append(f"  [critic-gate-open x{len(open_items)}] {ids}")
     for fact in triggers.critic_evidence(state):
         emissions.append(f"  [critic-evidence] {fact}")
     return emissions
