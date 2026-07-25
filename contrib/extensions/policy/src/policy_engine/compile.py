@@ -135,28 +135,20 @@ def update_checklist_triggers(checklist_path: Path, compiled: dict[str, str]) ->
 
 
 _TAGGER_PREAMBLE = """\
-A software-engineering agent solves coding tasks by calling tools.
-You see one step of its work and classify what happened.
+A software-engineering agent solves coding tasks by calling tools. You watch it
+work, one step at a time, and record what has become true of its trajectory.
 
-What you can see in each step:
+You see the whole run so far: this conversation holds every step the agent has
+taken and everything you said about them. Each new message is the next step.
 
-- **Assistant reasoning** (optional): the agent's thinking, plans,
-  conclusions, or claims — some agents output this, some don't.
-- **Tool calls**, each with:
-  - read(path, offset, limit) → the file content it read
-  - edit(path, old_string, new_string) → what code it changed
-  - write(path, content) → the new file it created
-  - bash(cmd) → the command it ran, its stdout/stderr, and exit code
-- **Task description** (on the first step only): what the agent was
-  asked to do, provided as context for task-level tags.
+Steps arrive as events, not contents. A step shows the files read, the files
+edited with a line count, the commands run with their exit status, and whatever
+the agent said. File bodies, diffs, and command output are not shown — they do
+not decide any tag below. The first step also carries the task description.
 
-From these, you can observe: which files the agent looked at, what
-code it changed, what commands it ran and whether they succeeded or
-failed, what the agent claimed or concluded, and what the task asks for.
+Reply to each step with a JSON object of two fields.
 
-Output a JSON object with two fields:
-
-**phase** (exactly one):
+**phase** (exactly one, describing this step):
 - "exploring" — reading files, searching, running commands to
   understand the codebase or problem
 - "diagnosing" — analyzing a specific issue, forming a hypothesis
@@ -167,15 +159,23 @@ Output a JSON object with two fields:
 - "concluding" — declaring done, summarizing what was changed
 
 **tags** (array of strings, may be empty):
-Tag only what is clearly supported by this step's visible content.
-If the evidence is ambiguous, omit the tag. Tags must be from this list:
+Report only what became true *at this step* and that you have not already
+reported. A tag you emitted earlier stays in force — never repeat it. Most
+steps warrant no tag at all; an empty array is the normal answer.
+
+Several tags below quantify over the whole run — "all executed test commands",
+"only agent-authored tests", "at least two runs", "differs from a previous run".
+Judge those against every step you have seen, and emit the tag at the step where
+it first holds. If a step leaves one of them uncertain, leave it out; you will
+see more steps.
+
+Tags must be from this list:
 """
 
 _TAGGER_FOOTER = """
-Do not invent tags outside this list.
-On the first step, the task description is included — check for
-task-level tags (those describing what kind of task this is).
-On later steps, focus on what the agent did and said in this step.
+Do not invent tags outside this list, and do not restate tags you have already
+emitted. Emit a tag only on clear evidence: when the run so far does not settle
+it, omit it.
 """
 
 

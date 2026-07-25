@@ -10,12 +10,12 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from agentm.core.abi import text_message
+from agentm.core.abi import MessageEnd, Model, StreamFn, text_message
 from agentm.core.abi.events import Inject
 
 from .evidence import gather_evidence
-from .llm import call_llm
 from .pg_query import PgQuerySource
+from .tagger import _content_text
 from .triggers import ChecklistItem
 
 _CRITIC_MANIFEST = Path(__file__).parent / "agents" / "critic.yaml"
@@ -31,17 +31,19 @@ def build_injection(message: str) -> Inject:
     return Inject(messages=(text_message(message, timestamp=time.time()),))
 
 
-def verify_item(
+async def verify_item(
     source: PgQuerySource,
     item: ChecklistItem,
     *,
+    stream_fn: StreamFn,
+    model: Model,
     schema: str = "harbor_live",
-    model_name: str | None = None,
 ) -> tuple[bool, str]:
     """Verify one checklist item against targeted evidence.
 
-    Uses direct LLM call, no child session.
-    Returns (violated, reasoning).
+    Runs through the session's registered provider, so it shares the host's
+    retry policy and token accounting rather than opening a second path to the
+    model. Returns (violated, reasoning).
     """
     system = _load_critic_system()
     if not system:
@@ -52,11 +54,19 @@ def verify_item(
     if not evidence_prompt:
         return False, "no evidence turns found"
 
-    result = call_llm(system, evidence_prompt, max_tokens=300, model_name=model_name)
-    if result is None:
-        return False, ""
-
-    return _parse_critic_result(result)
+    try:
+        stream = stream_fn(
+            messages=[text_message(evidence_prompt, timestamp=time.time())],
+            model=model,
+            tools=[],
+            system=system,
+        )
+        async for event in stream:
+            if isinstance(event, MessageEnd):  # code-health: ignore[AM025]
+                return _parse_critic_result(_content_text(event.message, 2000))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("deliver: critic call failed: {}", exc)
+    return False, ""
 
 
 def _parse_critic_result(text: str) -> tuple[bool, str]:

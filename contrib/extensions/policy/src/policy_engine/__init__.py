@@ -57,8 +57,8 @@ from .paths import resolve_policy_path
 from .pg_query import PgQuerySource
 from .symbol_sync import extract_symbols_for_paths, write_symbols
 from .tagger import (
+    TaggerConversation,
     _content_text,
-    annotate_turn,
     write_annotation,
 )
 from .triggers import TriggerEngine, load_items, render_check, render_rejection
@@ -134,6 +134,7 @@ class _Runtime:
     _rejections: int = 0
     _submitted: bool = False
     _submit_nudged: bool = False
+    _tagger: TaggerConversation | None = None
 
     def install(self) -> None:
         self.api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
@@ -160,6 +161,18 @@ class _Runtime:
         if not items:
             logger.warning("policy_engine: missing checklist; inert")
             return
+        provider = self.api.get_provider(self.config.llm_model or None)
+        if provider is None:
+            logger.warning(
+                "policy_engine: provider {!r} not registered; interventions disabled",
+                self.config.llm_model,
+            )
+            return
+        self._tagger = TaggerConversation(
+            session_id=self.session_id,
+            stream_fn=provider.stream_fn,
+            model=provider.model,
+        )
         self.triggers = TriggerEngine(items=items)
         self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
@@ -265,7 +278,7 @@ class _Runtime:
 
     async def _on_decide(self, event: DecideEvent) -> LoopAction | None:
         await self._flush_symbol_refreshes()
-        self._run_tagger(event)
+        await self._run_tagger(event)
 
         if self.triggers is None:
             return None
@@ -305,8 +318,8 @@ class _Runtime:
         )
         return build_injection(render_check(item))
 
-    def _run_tagger(self, event: DecideEvent) -> None:
-        if self._pg is None:
+    async def _run_tagger(self, event: DecideEvent) -> None:
+        if self._pg is None or self._tagger is None:
             return
 
         assistant_text = _content_text(event.observation.assistant_message, 3000)
@@ -327,13 +340,11 @@ class _Runtime:
             self._task_classified = True
             task_text = self._first_user_message()
 
-        annotation = annotate_turn(
-            session_id=self.session_id,
+        annotation = await self._tagger.annotate(
             turn_index=self.turn,
             assistant_text=assistant_text,
             tool_calls=tool_calls,
             task_text=task_text,
-            model_name=self.config.llm_model,
         )
         if annotation is not None:
             write_annotation(self._pg, annotation)
