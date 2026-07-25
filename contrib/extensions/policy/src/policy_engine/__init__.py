@@ -40,7 +40,6 @@ from agentm.core.abi import (
     BashOperations,
     FunctionTool,
     JsonValue,
-    ProviderConfig,
     TextContent,
     ToolResult,
     ToolTerminate,
@@ -152,11 +151,11 @@ class _Runtime:
     _stop_checks: int = 0
     _submitted: bool = False
     _tagger: TaggerConversation | None = None
+    _provider_missing_logged: bool = False
     # Every turn, rendered once. The tagger reads from _tagged onward; the
     # reviewer reads the whole thing at submit.
     _turns: list[str] = field(default_factory=list)
     _tagged: int = 0
-    _provider: ProviderConfig | None = None
     _reviewer: AcceptanceReviewer | None = None
     _concerns: list[str] = field(default_factory=list)
     _review_rounds: int = 0
@@ -190,19 +189,6 @@ class _Runtime:
         if not items:
             logger.warning("policy_engine: missing checklist; inert")
             return
-        provider = self.api.get_provider(self.config.provider or None)
-        if provider is None:
-            logger.warning(
-                "policy_engine: provider {!r} not registered; interventions disabled",
-                self.config.provider or "<active>",
-            )
-            return
-        self._provider = provider
-        self._tagger = TaggerConversation(
-            session_id=self.session_id,
-            stream_fn=provider.stream_fn,
-            model=provider.model,
-        )
         self.triggers = TriggerEngine(items=items)
         self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
@@ -224,9 +210,8 @@ class _Runtime:
             )
         )
         logger.info(
-            "policy_engine: interventions active ({} items, provider={}, critic={})",
+            "policy_engine: interventions active ({} items, critic={})",
             len(items),
-            provider.name,
             self.config.critic,
         )
 
@@ -269,7 +254,7 @@ class _Runtime:
 
     async def _review(self, args: dict[str, JsonValue]) -> AcceptanceVerdict | None:
         """The acceptance verdict when it rejects, else None."""
-        if self.config.critic != "on" or self._provider is None:
+        if self.config.critic != "on":
             return None
         if self._review_rounds >= self.config.max_review_rounds:
             return None
@@ -392,6 +377,32 @@ class _Runtime:
         )
         return build_injection(render_check(item))
 
+    def _resolve_tagger(self) -> TaggerConversation | None:
+        """The tagger, once a provider exists to run it on.
+
+        Resolved on first use rather than at install: atoms install by priority
+        band and POLICY (300) comes before PROVIDER (400), so at install time
+        the registry is still empty and the atom would disable itself.
+        """
+        if self._tagger is not None:
+            return self._tagger
+        provider = self.api.get_provider(self.config.provider or None)
+        if provider is None:
+            if not self._provider_missing_logged:
+                self._provider_missing_logged = True
+                logger.warning(
+                    "policy_engine: provider {!r} not registered; tagging off",
+                    self.config.provider or "<active>",
+                )
+            return None
+        logger.info("policy_engine: tagging on provider {}", provider.name)
+        self._tagger = TaggerConversation(
+            session_id=self.session_id,
+            stream_fn=provider.stream_fn,
+            model=provider.model,
+        )
+        return self._tagger
+
     def _record_turn(self, event: DecideEvent) -> None:
         """Buffer this turn for the tagger, and keep it for the reviewer."""
         assistant_text = _content_text(event.observation.assistant_message, 3000)
@@ -421,13 +432,14 @@ class _Runtime:
         tag set — a check decided on stale tags is a check decided on the wrong
         session.
         """
-        if self._pg is None or self._tagger is None:
+        tagger = self._resolve_tagger()
+        if self._pg is None or tagger is None:
             return
         batch = self._turns[self._tagged :]
         if not batch:
             return
         self._tagged = len(self._turns)
-        annotation = await self._tagger.annotate(batch, turn_index=self.turn)
+        annotation = await tagger.annotate(batch, turn_index=self.turn)
         if annotation is None:
             return
         write_annotation(self._pg, annotation)
