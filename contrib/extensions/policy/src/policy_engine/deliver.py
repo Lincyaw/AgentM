@@ -15,6 +15,7 @@ from agentm.core.abi import MessageEnd, Model, StreamFn, text_message
 from agentm.core.abi.events import Inject
 
 from .evidence import gather_evidence
+from .jsonio import json_object
 from .pg_query import PgQuerySource
 from .tagger import _content_text
 from .triggers import ChecklistItem
@@ -73,9 +74,7 @@ async def verify_item(
 def _parse_critic_result(text: str) -> tuple[bool, str]:
     if not text:
         return False, ""
-    clean = text.strip()
-    if clean.startswith("```"):
-        clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    clean = json_object(text)
     try:
         parsed = json.loads(clean)
         violated = bool(parsed.get("violated", False))

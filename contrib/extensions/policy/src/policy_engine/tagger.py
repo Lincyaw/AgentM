@@ -45,6 +45,7 @@ from agentm.core.abi import (
 )
 
 from .compile import generate_tagger_prompt, load_vocabulary
+from .jsonio import json_object
 from .pg_query import PgQuerySource
 
 _VOCABULARY_PATH = Path(__file__).parent / "vocabulary.yaml"
@@ -235,9 +236,7 @@ def _parse_tagger_result(
 ) -> TurnAnnotation | None:
     if not text:
         return None
-    clean = text.strip()
-    if clean.startswith("```"):
-        clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    clean = json_object(text)
     try:
         parsed = json.loads(clean)
     except json.JSONDecodeError:

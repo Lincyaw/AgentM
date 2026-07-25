@@ -21,6 +21,8 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
+from .jsonio import json_object
+
 
 @dataclass(frozen=True, slots=True)
 class PredicateDef:
@@ -78,9 +80,7 @@ def build_compiler_prompt(when_note: str, vocabulary: dict[str, PredicateDef]) -
 
 
 def parse_compiler_result(raw_text: str) -> CompiledItem | None:
-    text = raw_text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    text = json_object(raw_text)
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
