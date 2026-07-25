@@ -31,6 +31,7 @@ from loguru import logger
 
 from agentm.core.abi import ProviderConfig
 
+from .manifest import load_manifest
 from .pg_query import PgQuerySource
 from .triggers import ChecklistItem, TriggerEngine, load_items
 
@@ -338,6 +339,7 @@ async def _tag_sessions(
         )
 
         tagged = 0
+        seen: set[str] = set()
         batch: list[str] = []
         for turn_index, turn_json in turns:
             assistant_text, tool_calls, task_text = _turn_for_tagger(turn_json)
@@ -357,16 +359,18 @@ async def _tag_sessions(
             batch = []
             if annotation is not None:
                 write_annotation(source, annotation)
+                seen.update(annotation.tags)
                 tagged += 1
         if batch:
             annotation = await conversation.annotate(batch, turn_index=turns[-1][0])
             if annotation is not None:
                 write_annotation(source, annotation)
+                seen.update(annotation.tags)
                 tagged += 1
 
         print(
             f"  {sid}: {tagged} batch(es) over {len(turns)} turns, "
-            f"{len(conversation.seen_tags)} distinct tags"
+            f"{len(seen)} distinct tags"
         )
         source.close()
 
@@ -565,9 +569,7 @@ def _call_llm(
         if system_override:
             system = system_override
         elif manifest:
-            manifest_path = Path(__file__).parent / "agents" / f"{manifest}.yaml"
-            raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-            system = str(raw.get("system", ""))
+            system = load_manifest(manifest).system
         else:
             system = ""
 

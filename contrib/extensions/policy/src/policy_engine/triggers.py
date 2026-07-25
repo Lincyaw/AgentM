@@ -12,12 +12,16 @@ in the session. Matching is deterministic boolean logic — no LLM call.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 from loguru import logger
+
+from agentm.core.abi import text_message
+from agentm.core.abi.events import Inject
 
 
 @dataclass(slots=True, frozen=True)
@@ -94,22 +98,27 @@ show me the old result actually fails — run the check that indicts it. If you
 cannot make it fail, keep it."""
 
 
-def render_check(item: ChecklistItem) -> str:
-    """Mid-work check, injected while the agent is still working."""
-    lines = [_CHECK_HEAD, "", item.check]
+def build_injection(message: str) -> Inject:
+    """Wrap a rendered check as the loop action that delivers it."""
+    return Inject(messages=(text_message(message, timestamp=time.time()),))
+
+
+def _render(item: ChecklistItem, head: str, tail: str) -> str:
+    lines = [head, "", item.check]
     if item.advice:
         lines.append(item.advice)
-    lines += ["", _CHECK_TAIL]
+    lines += ["", tail]
     return "\n".join(lines)
+
+
+def render_check(item: ChecklistItem) -> str:
+    """Mid-work check, injected while the agent is still working."""
+    return _render(item, _CHECK_HEAD, _CHECK_TAIL)
 
 
 def render_stop_check(item: ChecklistItem) -> str:
     """Check raised at the moment the agent wraps up in prose."""
-    lines = [_STOP_HEAD, "", item.check]
-    if item.advice:
-        lines.append(item.advice)
-    lines += ["", _STOP_TAIL]
-    return "\n".join(lines)
+    return _render(item, _STOP_HEAD, _STOP_TAIL)
 
 
 # -- Predicate expression evaluation ------------------------------------------
@@ -188,16 +197,6 @@ class TriggerEngine:
             self._fired.add(item.item_id)
             return item
         return None
-
-    def would_trigger(
-        self, *, stopping: bool, active_tags: frozenset[str] = frozenset()
-    ) -> bool:
-        """Whether any item matches, without consuming it.
-
-        Used when an inject is suppressed: the items must stay unfired so they
-        can still land once the agent has done real work.
-        """
-        return any(self._matching(stopping=stopping, active_tags=active_tags))
 
     def _matching(
         self, *, stopping: bool, active_tags: frozenset[str]

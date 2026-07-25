@@ -188,7 +188,6 @@ class TaggerConversation:
     model: Model
     system: str = field(default_factory=_get_tagger_prompt)
     messages: list[AgentMessage] = field(default_factory=list)
-    seen_tags: set[str] = field(default_factory=set)
 
     async def annotate(
         self, rendered_turns: Sequence[str], *, turn_index: int
@@ -212,8 +211,6 @@ class TaggerConversation:
             session_id=self.session_id,
             turn_index=turn_index,
         )
-        if annotation is not None:
-            self.seen_tags.update(annotation.tags)
         return annotation
 
     async def _complete(self) -> AssistantMessage | None:

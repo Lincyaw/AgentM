@@ -15,12 +15,9 @@ session it is reviewing is a loop waiting to happen.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
 
-import yaml
 from loguru import logger
 
 from agentm.core.abi import (
@@ -29,19 +26,14 @@ from agentm.core.abi import (
     FunctionTool,
     JsonValue,
     TextContent,
+    Tool,
     ToolResult,
     ToolTerminate,
 )
 
-_MANIFEST = Path(__file__).parent / "agents" / "acceptance.yaml"
+from .manifest import load_manifest
 
 _OUTPUT_LIMIT = 4000
-
-
-@lru_cache(maxsize=1)
-def _system_prompt() -> str:
-    raw = yaml.safe_load(_MANIFEST.read_text(encoding="utf-8"))
-    return str(raw.get("system", ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +160,17 @@ class AcceptanceReviewer:
     api: AtomAPI
     bash: BashOperations
     cwd: str
-    max_turns: int = 12
+
+    def _tools(self, names: Sequence[str], sink: _VerdictSink) -> list[Tool]:
+        """Build the tools the manifest asked for, and only those."""
+        builders: dict[str, Callable[[], Tool]] = {
+            "bash": lambda: _bash_tool(self.bash, self.cwd),
+            "submit_verdict": lambda: _verdict_tool(sink),
+        }
+        unknown = [n for n in names if n not in builders]
+        if unknown:
+            raise ValueError(f"acceptance manifest names unknown tools: {unknown}")
+        return [builders[n]() for n in names]
 
     async def review(self, prompt: str) -> AcceptanceVerdict:
         """Accepts on any failure of its own.
@@ -176,18 +178,14 @@ class AcceptanceReviewer:
         A reviewer that breaks must not be able to hold a session open, so
         every path that is not an explicit rejection returns acceptance.
         """
-        system = _system_prompt()
-        if not system:
-            logger.warning("acceptance: manifest missing system prompt")
-            return AcceptanceVerdict(accepted=True)
-
         sink = _VerdictSink()
         try:
+            manifest = load_manifest("acceptance")
             child = await self.api.spawn(
                 purpose="acceptance",
-                tools=[_bash_tool(self.bash, self.cwd), _verdict_tool(sink)],
-                system=system,
-                max_turns=self.max_turns,
+                tools=self._tools(manifest.tools, sink),
+                system=manifest.system,
+                max_turns=manifest.max_turns,
             )
             await child.run(prompt)
         except Exception as exc:  # noqa: BLE001

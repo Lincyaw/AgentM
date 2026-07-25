@@ -24,6 +24,7 @@ gate the agent has no way to pass.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import posixpath
 from collections.abc import Mapping
@@ -56,7 +57,6 @@ from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
 from .acceptance import AcceptanceReviewer, AcceptanceVerdict, build_prompt
-from .deliver import build_injection
 from .ifg.repository_index import RepositoryIndex, RepositoryRefreshPlan
 from .paths import resolve_policy_path
 from .pg_query import PgQuerySource
@@ -67,7 +67,13 @@ from .tagger import (
     render_turn,
     write_annotation,
 )
-from .triggers import TriggerEngine, load_items, render_check, render_stop_check
+from .triggers import (
+    TriggerEngine,
+    build_injection,
+    load_items,
+    render_check,
+    render_stop_check,
+)
 
 
 class PolicyEngineConfig(BaseModel):
@@ -142,15 +148,16 @@ class _Runtime:
     _synced_paths: set[str] = field(default_factory=set)
     _pg: PgQuerySource | None = None
     _current_turn_calls: list[_ToolCallRecord] = field(default_factory=list)
-    _task_classified: bool = False
     _active_tags: set[str] = field(default_factory=set)
     _stop_checks: int = 0
     _submitted: bool = False
     _tagger: TaggerConversation | None = None
-    _pending_turns: list[str] = field(default_factory=list)
+    # Every turn, rendered once. The tagger reads from _tagged onward; the
+    # reviewer reads the whole thing at submit.
+    _turns: list[str] = field(default_factory=list)
+    _tagged: int = 0
     _provider: ProviderConfig | None = None
     _reviewer: AcceptanceReviewer | None = None
-    _events: list[str] = field(default_factory=list)
     _concerns: list[str] = field(default_factory=list)
     _review_rounds: int = 0
 
@@ -272,7 +279,7 @@ class _Runtime:
         prompt = build_prompt(
             task=self._first_user_message(),
             summary=summary if isinstance(summary, str) else "",
-            events=self._events,
+            events=self._turns,
             concerns=self._concerns,
         )
         verdict = await self._reviewer.review(prompt)
@@ -326,17 +333,24 @@ class _Runtime:
     # -- detect + intervene ----------------------------------------------------
 
     async def _on_decide(self, event: DecideEvent) -> LoopAction | None:
-        await self._flush_symbol_refreshes()
+        # Nothing on this path reads the symbol index — triggers read the tag
+        # set — so indexing runs alongside the tagger rather than in front of
+        # it. Serialised, its ast-grep and PG time was pure added latency on
+        # every turn.
+        indexing = asyncio.create_task(self._flush_symbol_refreshes())
         self._record_turn(event)
 
         if self.triggers is None:
+            await indexing
             return None
         stopping = isinstance(event.observation.default_action, Stop)
 
         # Wrapping up is a decision point, so the buffer is flushed there
         # regardless of how few turns it holds.
-        if stopping or len(self._pending_turns) >= self.config.tagger_interval:
+        pending = len(self._turns) - self._tagged
+        if stopping or pending >= self.config.tagger_interval:
             await self._flush_tagger()
+        await indexing
 
         # Wrapping up in prose is how this agent finishes; that moment is the
         # stop checkpoint. Hand it one check and name the way out. The old
@@ -393,16 +407,12 @@ class _Runtime:
         if not assistant_text and not tool_calls:
             return
 
-        task_text = ""
-        if not self._task_classified:
-            self._task_classified = True
-            task_text = self._first_user_message()
-
-        rendered = render_turn(
-            self.turn, assistant_text, tool_calls, task_text=task_text
+        # The task text rides along with the first turn, so it stays in the
+        # tagger's cached prefix for the rest of the session.
+        task_text = self._first_user_message() if not self._turns else ""
+        self._turns.append(
+            render_turn(self.turn, assistant_text, tool_calls, task_text=task_text)
         )
-        self._events.append(rendered)
-        self._pending_turns.append(rendered)
 
     async def _flush_tagger(self) -> None:
         """Tag the buffered turns as one batch.
@@ -411,10 +421,12 @@ class _Runtime:
         tag set — a check decided on stale tags is a check decided on the wrong
         session.
         """
-        if self._pg is None or self._tagger is None or not self._pending_turns:
+        if self._pg is None or self._tagger is None:
             return
-        batch = list(self._pending_turns)
-        self._pending_turns.clear()
+        batch = self._turns[self._tagged :]
+        if not batch:
+            return
+        self._tagged = len(self._turns)
         annotation = await self._tagger.annotate(batch, turn_index=self.turn)
         if annotation is None:
             return
@@ -438,36 +450,39 @@ class _Runtime:
         return ""
 
     async def _flush_symbol_refreshes(self) -> None:
+        """Re-index the paths touched since the last flush.
+
+        Deduped first: a turn that edits one file three times used to spawn
+        three ast-grep runs over the same file, since each tool call queued its
+        own plan and the already-synced check ran only after the flush.
+        """
         if not self._pending_refreshes or self.repo_index is None:
             return
-        plans = list(self._pending_refreshes)
+        by_reason: dict[str, set[str]] = {}
+        for plan in self._pending_refreshes:
+            by_reason.setdefault(plan.reason, set()).update(plan.paths)
         self._pending_refreshes.clear()
-        for plan in plans:
+
+        for reason, path_set in by_reason.items():
+            paths = sorted(path_set)
             try:
-                await self.repo_index.refresh(plan)
+                await self.repo_index.refresh(
+                    RepositoryRefreshPlan(paths=tuple(paths), reason=reason)
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("policy_engine: repo index refresh failed: {}", exc)
                 continue
+            self._synced_paths.update(paths)
             if self._pg is None:
                 continue
             rows = extract_symbols_for_paths(
-                self.repo_index,
-                session_id=self.session_id,
-                paths=list(plan.paths),
+                self.repo_index, session_id=self.session_id, paths=paths
             )
             if rows:
                 written = write_symbols(
-                    self._pg,
-                    rows,
-                    session_id=self.session_id,
-                    paths=list(plan.paths),
+                    self._pg, rows, session_id=self.session_id, paths=paths
                 )
-                logger.debug(
-                    "policy_engine: synced {} symbols for {}",
-                    written,
-                    plan.paths,
-                )
-            self._synced_paths.update(plan.paths)
+                logger.debug("policy_engine: synced {} symbols for {}", written, paths)
 
 
 def install(api: AtomAPI, config: PolicyEngineConfig) -> None:

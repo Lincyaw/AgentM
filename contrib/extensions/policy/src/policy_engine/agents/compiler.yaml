@@ -40,23 +40,4 @@ system: |
     predicate that just rephrases the when_note.
   - reasoning: one sentence explaining the decomposition.
 
-result_schema:
-  type: object
-  properties:
-    trigger_expr:
-      type: string
-    new_predicates:
-      type: array
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-          definition:
-            type: string
-        required: [name, definition]
-    reasoning:
-      type: string
-  required: [trigger_expr, new_predicates, reasoning]
-
 max_turns: 1
