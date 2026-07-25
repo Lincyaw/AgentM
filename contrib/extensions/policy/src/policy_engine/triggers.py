@@ -64,44 +64,63 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
     return items
 
 
-_ACT_SINGLE = (
-    "If this already holds, keep going and do not reply to this note. "
-    "If it does not, fix it now — make the edit or run the check. "
-    "Do not answer with an audit."
-)
+# Response contract. The message must license an edit, not an answer: a bare
+# question gets graded ("evidence_adequacy — Partial") and the work never
+# reopens. Every inject therefore ends in a first-person commitment whose only
+# two forms are a change or a reasoned refusal, and the dimension name is
+# withheld so the agent judges the work rather than the label.
+_CONTRACT = """\
+Work this in order, over what you have actually done so far:
 
-_ACT_BATCH = (
-    "For each point: if it already holds, move on. If it does not, do the work "
-    "that makes it hold. Do not reply with a point-by-point audit — a written "
-    "verdict on these questions is not the deliverable, the corrected work is."
-)
+1. Observe: name the concrete thing that is wrong, weak, or missing, with a
+   verbatim fact from your own trace — a command you ran and its output, a
+   line you read, a result you got. If nothing is wrong, say exactly what you
+   checked.
+2. Decide: commit to exactly one of
+   - `change: <one focused change>`
+   - `no change needed, because <reason resting on the fact you just cited>`
 
-_STOP_PREFIX = (
-    "You are about to finish, so this is your last chance to act on the "
-    "following. Anything you find here is still fixable — reopen the work "
-    "rather than restating or qualifying your summary."
-)
+If you commit to a change, make it now. A verdict on its own is not a response
+to this note. A well-supported `no change needed` is a valid outcome — never
+manufacture work to satisfy the check."""
+
+_ADVISORY = "Process check (advisory — this does not block you)."
+
+# The exam register comes from the agent believing the work is already
+# delivered. Naming the answer as provisional is what reopens it.
+_GATE = """\
+Process check before you finish.
+
+Your answer is PROVISIONAL. It has not been submitted or scored, and the work
+is still open. Do not treat this as a post-hoc audit, and do not report a
+status such as pass, partial, complete, or accept-with-caveat — those are not
+available here."""
+
+# A committed answer is cheap to defend in prose and expensive to refute with a
+# check. Requiring the refutation is what converts a verdict into a tool call.
+_REPLACEMENT = """\
+If the change would replace a result you already produced, that result may be
+replaced only by demonstrating its own failure, never by demonstrating that an
+alternative looks better. Construct and run the check that would indict it —
+recompute it from its own stated inputs, re-read the value at its cited source,
+or re-check a constraint the task states — and show that check running. If you
+cannot construct a failing check, keep the result, however compelling the
+alternative reading looks."""
 
 
-def render_message(items: list[ChecklistItem], *, stopping: bool = False) -> str:
-    """Render one or more checklist items into a single inject message."""
-    lines: list[str] = []
+def render_message(item: ChecklistItem, *, stopping: bool = False) -> str:
+    """Render one checklist item into an inject message.
+
+    One item per inject, deliberately. Surfacing several at once lets the agent
+    absorb the relevant one among plausible neighbours and move on — the same
+    dilution that makes a full-taxonomy dump weaker than a ranked single call.
+    """
+    lines = [_GATE if stopping else _ADVISORY, "", item.check]
+    if item.advice:
+        lines.append(item.advice)
+    lines += ["", _CONTRACT]
     if stopping:
-        lines.append(_STOP_PREFIX + "\n")
-
-    if len(items) == 1:
-        item = items[0]
-        lines.append(f"Process check ({item.dimension}):")
-        lines.append(item.check)
-        if item.advice:
-            lines.append(item.advice)
-        lines.append("\n" + _ACT_SINGLE)
-        return "\n".join(lines)
-
-    lines.append("Process check from the validation monitor.")
-    lines.append(_ACT_BATCH)
-    for i, item in enumerate(items, 1):
-        lines.append(f"\n{i}. ({item.dimension}) {item.check}")
+        lines += ["", _REPLACEMENT]
     return "\n".join(lines)
 
 
@@ -173,21 +192,14 @@ class TriggerEngine:
     items: dict[str, ChecklistItem]
     _fired: set[str] = field(default_factory=set)
 
-    def collect_triggered(
-        self,
-        *,
-        stopping: bool,
-        active_tags: frozenset[str] = frozenset(),
-        max_items: int = 3,
-    ) -> list[ChecklistItem]:
-        """Collect all triggered items up to max_items, marking them fired."""
-        triggered: list[ChecklistItem] = []
+    def next_triggered(
+        self, *, stopping: bool, active_tags: frozenset[str] = frozenset()
+    ) -> ChecklistItem | None:
+        """The single highest-priority matching item, marked fired."""
         for item in self._matching(stopping=stopping, active_tags=active_tags):
             self._fired.add(item.item_id)
-            triggered.append(item)
-            if len(triggered) >= max_items:
-                break
-        return triggered
+            return item
+        return None
 
     def would_trigger(
         self, *, stopping: bool, active_tags: frozenset[str] = frozenset()

@@ -124,7 +124,7 @@ def cmd_compile(
 class _Emission:
     turn_index: int
     stopping: bool
-    item_ids: list[str]
+    item_id: str
 
 
 @dataclass(slots=True)
@@ -161,7 +161,7 @@ def _simulate(
 ) -> tuple[list[_Emission], list[_Suppression]]:
     """Replay the live gating logic over a recorded session.
 
-    Mirrors ``_Runtime._suppressed`` / ``TriggerEngine.collect_triggered`` so a
+    Mirrors ``_Runtime._suppressed`` / ``TriggerEngine.next_triggered`` so a
     gate setting can be backtested against real trajectories before shipping.
     """
     engine = TriggerEngine(items=items)
@@ -187,17 +187,15 @@ def _simulate(
             reason = f"only {work_now - work_at_inject} work turn(s) since last inject"
 
         if not reason:
-            triggered = engine.collect_triggered(
-                stopping=stopping, active_tags=frozenset(active), max_items=3
+            item = engine.next_triggered(
+                stopping=stopping, active_tags=frozenset(active)
             )
-            if triggered:
+            if item is not None:
                 injections += 1
                 if stopping:
                     stop_injections += 1
                 work_at_inject = work_now
-                emissions.append(
-                    _Emission(turn_index, stopping, [i.item_id for i in triggered])
-                )
+                emissions.append(_Emission(turn_index, stopping, item.item_id))
         elif engine.would_trigger(stopping=stopping, active_tags=frozenset(active)):
             suppressions.append(_Suppression(turn_index, reason))
 
@@ -241,7 +239,7 @@ def cmd_replay(
     print(f"\n=== Injections ({len(emissions)}) ===")
     for e in emissions:
         kind = "stop" if e.stopping else "continuous"
-        print(f"  t{e.turn_index:<4} [{kind:10s}] {', '.join(e.item_ids)}")
+        print(f"  t{e.turn_index:<4} [{kind:10s}] {e.item_id}")
 
     print(f"\n=== Suppressed ({len(suppressions)}) ===")
     for s in suppressions:
@@ -401,8 +399,7 @@ def cmd_evaluate(
             total_injects += 1
             if e.stopping:
                 stop_injects += 1
-            for item_id in e.item_ids:
-                fires[item_id] = fires.get(item_id, 0) + 1
+            fires[e.item_id] = fires.get(e.item_id, 0) + 1
         for s in suppressions:
             total_suppressed += 1
             suppressed_by[s.reason.split(" since")[0]] = (

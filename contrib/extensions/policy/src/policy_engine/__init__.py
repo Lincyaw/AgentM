@@ -196,10 +196,10 @@ class _Runtime:
         if self._suppressed(stopping):
             return None
 
-        triggered = self.triggers.collect_triggered(
-            stopping=stopping, active_tags=frozenset(self._active_tags), max_items=3
+        item = self.triggers.next_triggered(
+            stopping=stopping, active_tags=frozenset(self._active_tags)
         )
-        if not triggered:
+        if item is None:
             return None
 
         self.injections += 1
@@ -208,12 +208,12 @@ class _Runtime:
         self._work_turns_at_inject = self._work_turns_now()
         logger.info(
             "policy_engine: injecting {} ({}/{}, checkpoint={})",
-            [item.item_id for item in triggered],
+            item.item_id,
             self.injections,
             self.config.max_injections,
             "stop" if stopping else "continuous",
         )
-        return build_injection(render_message(triggered, stopping=stopping))
+        return build_injection(render_message(item, stopping=stopping))
 
     def _work_turns_now(self) -> int:
         """Tool-using turns so far, counting the turn being decided."""
