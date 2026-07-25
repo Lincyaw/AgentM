@@ -25,7 +25,6 @@ extensions:
   - module: policy_engine
     config:
       trajectory_dsn: "postgresql://agentm:agentm@localhost:55432/agentm_test"
-      llm_model: "azure-gpt"
-      critic: "subagent"
+      critic: "off"
       max_injections: 5
   - module: agentm.extensions.builtin.tool_purpose

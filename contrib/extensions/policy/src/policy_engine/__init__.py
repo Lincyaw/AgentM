@@ -69,7 +69,11 @@ class PolicyEngineConfig(BaseModel):
 
     checklist: str = "package:checklist.yaml"
     trajectory_dsn: str = ""
-    llm_model: str = "azure-gpt"
+    # Provider registry name for the tagger and critic. Empty means the
+    # session's own active provider — a registry name, not a config.toml
+    # profile key, so a wrong value disables interventions rather than
+    # silently falling back.
+    provider: str = ""
     critic: str = "off"
     # Mid-work checks, injected as user messages while the agent is working.
     max_injections: int = 5
@@ -161,11 +165,11 @@ class _Runtime:
         if not items:
             logger.warning("policy_engine: missing checklist; inert")
             return
-        provider = self.api.get_provider(self.config.llm_model or None)
+        provider = self.api.get_provider(self.config.provider or None)
         if provider is None:
             logger.warning(
                 "policy_engine: provider {!r} not registered; interventions disabled",
-                self.config.llm_model,
+                self.config.provider or "<active>",
             )
             return
         self._tagger = TaggerConversation(
@@ -194,8 +198,9 @@ class _Runtime:
             )
         )
         logger.info(
-            "policy_engine: interventions active ({} items, critic={})",
+            "policy_engine: interventions active ({} items, provider={}, critic={})",
             len(items),
+            provider.name,
             self.config.critic,
         )
 

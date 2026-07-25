@@ -65,26 +65,32 @@ class _SlowComputeTool:
                 await asyncio.wait_for(signal.wait(), timeout=duration)
             except TimeoutError:
                 return ToolResult(
-                    content=[TextContent(
-                        type="text",
-                        text=f"computation completed after {duration}s",
-                    )],
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=f"computation completed after {duration}s",
+                        )
+                    ],
                 )
             reason = cancel_reason(signal) or "unknown"
             return ToolResult(
-                content=[TextContent(
-                    type="text",
-                    text=f"computation cancelled (reason: {reason})",
-                )],
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"computation cancelled (reason: {reason})",
+                    )
+                ],
                 is_error=True,
             )
 
         await asyncio.sleep(duration)
         return ToolResult(
-            content=[TextContent(
-                type="text",
-                text=f"computation completed after {duration}s",
-            )],
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"computation completed after {duration}s",
+                )
+            ],
         )
 
 
