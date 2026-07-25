@@ -29,6 +29,8 @@ import typer
 import yaml
 from loguru import logger
 
+from agentm.core.abi import ProviderConfig
+
 from .pg_query import PgQuerySource
 from .triggers import ChecklistItem, TriggerEngine, load_items
 
@@ -263,20 +265,53 @@ def cmd_tag(
     model: str | None = MODEL_OPT,
     force: bool = typer.Option(False, "--force", help="re-tag already tagged sessions"),
 ) -> None:
-    """Batch-tag all sessions: run tagger LLM on each turn, write to PG."""
-    from .tagger import _get_tagger_prompt, _parse_tagger_result, write_annotation
+    """Replay recorded sessions through the tagger and write annotations.
 
-    tagger_system = _get_tagger_prompt()
-    print(f"Tagger prompt: {len(tagger_system)} chars")
+    Exercises the same ``TaggerConversation`` the atom runs live, against
+    trajectories already in the store, so a vocabulary or prompt change can be
+    judged on real runs without spending a sandbox.
+    """
+    import asyncio  # noqa: PLC0415
+
+    asyncio.run(_tag_sessions(dsn, schema, model, force))
+
+
+async def _build_provider(model: str | None) -> ProviderConfig:
+    """A session carrying nothing but the provider, for offline tagging.
+
+    Goes through the same resolver the CLI uses, so the provider comes from
+    AGENTM_HOME/config.toml exactly as it would in a live run — no second copy
+    of credential lookup lives here.
+    """
+    from agentm import AgentSession, AgentSessionConfig  # noqa: PLC0415
+    from agentm.config import DefaultSessionSpecResolver  # noqa: PLC0415
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            purpose="tagger",
+            spec_resolver=DefaultSessionSpecResolver(),
+        )
+    )
+    provider = session.get_provider(model or None)
+    if provider is None:
+        raise RuntimeError(
+            f"provider {model or '<active>'} is not registered; "
+            "set default_model in AGENTM_HOME/config.toml or pass --model"
+        )
+    return provider
+
+
+async def _tag_sessions(dsn: str, schema: str, model: str | None, force: bool) -> None:
+    from .tagger import TaggerConversation, write_annotation  # noqa: PLC0415
+
+    provider = await _build_provider(model)
+    print(f"Provider: {provider.name} ({provider.model.id})")
 
     session_ids = _list_sessions(dsn, schema)
-
     print(f"Tagging {len(session_ids)} sessions")
 
     for sid in session_ids:
         source = PgQuerySource(dsn, sid)
-
-        # Check if already tagged
         existing = source.query(
             "SELECT COUNT(*) FROM policy.turn_annotations "
             "WHERE session_id = %(session_id)s"
@@ -286,51 +321,58 @@ def cmd_tag(
             source.close()
             continue
 
-        # Load turns from trajectory
         turns = source.query(
             f"SELECT turn_index, turn_json "  # noqa: S608
             f"FROM {schema}.agentm_trajectory_turns "
             "WHERE session_id = %(session_id)s ORDER BY turn_index"
         )
+        conversation = TaggerConversation(
+            session_id=sid, stream_fn=provider.stream_fn, model=provider.model
+        )
 
         tagged = 0
         for turn_index, turn_json in turns:
-            turn_content = _format_turn_for_tagger(turn_json)
-            result = _call_llm(
-                turn_content,
-                manifest=None,
-                model=model,
-                system_override=tagger_system,
-            )
-            if result is None:
+            assistant_text, tool_calls, task_text = _turn_for_tagger(turn_json)
+            if not assistant_text and not tool_calls:
                 continue
-            annotation = _parse_tagger_result(
-                result, session_id=sid, turn_index=turn_index
+            annotation = await conversation.annotate(
+                turn_index=turn_index,
+                assistant_text=assistant_text,
+                tool_calls=tool_calls,
+                task_text=task_text if turn_index == 0 else "",
             )
             if annotation is not None:
                 write_annotation(source, annotation)
                 tagged += 1
 
-        print(f"  {sid}: tagged {tagged}/{len(turns)} turns")
+        print(
+            f"  {sid}: tagged {tagged}/{len(turns)} turns, "
+            f"{len(conversation.seen_tags)} distinct tags"
+        )
         source.close()
 
 
-def _format_turn_for_tagger(turn_json: object) -> str:
-    """Format one trajectory turn for the tagger (offline batch mode)."""
-    import json as _json  # noqa: PLC0415
+def _turn_for_tagger(
+    turn_json: object,
+) -> tuple[str, list[dict[str, object]], str]:
+    """Recover (assistant_text, tool_calls, task_text) from a stored turn.
 
+    Mirrors what the live atom collects from ToolResultEvent, so an offline
+    replay renders identically to a live run.
+    """
     if not isinstance(turn_json, dict):
-        return ""
-    parts: list[str] = []
+        return "", [], ""
 
+    assistant_parts: list[str] = []
     response = turn_json.get("response", {})
     if isinstance(response, dict):
         for block in response.get("content", []):
             if isinstance(block, dict) and block.get("type") == "text":
                 text = block.get("text", "")
                 if text:
-                    parts.append(f"Assistant reasoning:\n{text[:2000]}")
+                    assistant_parts.append(str(text))
 
+    tool_calls: list[dict[str, object]] = []
     for tr in turn_json.get("tool_results", []):
         if not isinstance(tr, dict):
             continue
@@ -338,21 +380,28 @@ def _format_turn_for_tagger(turn_json: object) -> str:
         result = tr.get("result", {})
         if not isinstance(call, dict) or not isinstance(result, dict):
             continue
-        name = call.get("name", "?")
-        args = call.get("arguments", {})
         result_text = ""
         for block in result.get("content", []):
             if isinstance(block, dict) and block.get("type") == "text":
-                result_text += block.get("text", "")[:600]
-        is_error = result.get("is_error", False)
-        parts.append(f"\nTool call: {name}")
-        parts.append(f"  Args: {_json.dumps(args, default=str)[:400]}")
-        if result_text:
-            parts.append(
-                f"  Result ({'ERROR' if is_error else 'ok'}): {result_text[:600]}"
-            )
+                result_text += str(block.get("text", ""))
+        arguments = call.get("arguments")
+        tool_calls.append(
+            {
+                "name": str(call.get("name", "?")),
+                "arguments": arguments if isinstance(arguments, dict) else {},
+                "result_text": result_text[:2000],
+                "is_error": bool(result.get("is_error", False)),
+            }
+        )
 
-    return "\n".join(parts)
+    task_text = ""
+    trigger = turn_json.get("trigger_metadata")
+    if isinstance(trigger, dict):
+        meta = trigger.get("meta")
+        if isinstance(meta, dict):
+            task_text = str(meta.get("text", ""))
+
+    return "\n".join(assistant_parts), tool_calls, task_text
 
 
 @app.command("evaluate")
