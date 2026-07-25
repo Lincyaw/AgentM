@@ -60,7 +60,7 @@ def call_llm(
     *,
     model_name: str | None = None,
     max_tokens: int = 300,
-    temperature: float = 0,
+    temperature: float | None = None,
 ) -> str | None:
     """Make a direct LLM call. Returns response text or None on failure."""
     model_config = _load_model_config(model_name)
@@ -74,15 +74,17 @@ def call_llm(
         from openai import OpenAI  # noqa: PLC0415
 
         client = OpenAI(api_key=api_key, base_url=base_url or None)
-        resp = client.chat.completions.create(
-            model=model_id,
-            messages=[
+        kwargs: dict[str, object] = {
+            "model": model_id,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+            "max_tokens": max_tokens,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        resp = client.chat.completions.create(**kwargs)
         content = resp.choices[0].message.content
         return content.strip() if content else None
     except Exception as exc:  # noqa: BLE001
