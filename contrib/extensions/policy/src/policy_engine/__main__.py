@@ -11,8 +11,9 @@ Commands map to steps of the evolution loop:
     evolve      run the full loop: compile → evaluate → select
 
 ``replay``/``evaluate`` mirror the runtime's suppression gates, so a change to
-``min_work_turns`` / ``max_stop_injections`` can be backtested against recorded
-trajectories before it ships.
+``max_injections`` can be backtested against recorded trajectories before it
+ships. Stop-checkpoint checks now run through the ``submit`` tool and cannot be
+replayed from trajectories recorded before that tool existed.
 
 Step ① (mine) lives in the pattern_miner scenario.
 Step ⑥ (diversify) is part of the miner's distill step.
@@ -42,15 +43,14 @@ _PKG = Path(__file__).parent
 DEFAULT_CHECKLIST = str(_PKG / "checklist.yaml")
 DEFAULT_VOCAB = str(_PKG / "vocabulary.yaml")
 
-# Suppression gates. Defaults must mirror PolicyEngineConfig so a replay
-# reproduces what the live atom would have done.
+# Defaults must mirror PolicyEngineConfig so a replay reproduces what the live
+# atom would have done.
 CHECKLIST_OPT = typer.Option(DEFAULT_CHECKLIST, "--checklist")
 VOCAB_OPT = typer.Option(DEFAULT_VOCAB, "--vocab")
 SCHEMA_OPT = typer.Option("harbor_live", "--schema")
 MODEL_OPT = typer.Option(None, "--model", help="model profile from config.toml")
 MAX_INJECTIONS_OPT = typer.Option(5, "--max-injections")
-MAX_STOP_OPT = typer.Option(2, "--max-stop-injections")
-MIN_WORK_OPT = typer.Option(1, "--min-work-turns")
+MAX_REJECTIONS_OPT = typer.Option(3, "--max-rejections")
 
 
 @app.command("compile")
@@ -156,52 +156,49 @@ def _simulate(
     items: dict[str, ChecklistItem],
     *,
     max_injections: int,
-    max_stop_injections: int,
-    min_work_turns: int,
+    max_rejections: int,
 ) -> tuple[list[_Emission], list[_Suppression]]:
-    """Replay the live gating logic over a recorded session.
+    """Replay the mid-work injection path over a recorded session.
 
-    Mirrors ``_Runtime._suppressed`` / ``TriggerEngine.next_triggered`` so a
-    gate setting can be backtested against real trajectories before shipping.
+    Faithful for continuous checks: those still fire from ``_on_decide`` on the
+    same condition, so replaying recorded tags reproduces them exactly.
+
+    Not faithful for stop-checkpoint checks. Those are now raised by the
+    ``submit`` tool, and no recorded trajectory contains a submit call — the
+    agent had no such tool. What is reported instead is which stop-checkpoint
+    items were *matching* the first time the agent ended a turn without tool
+    calls: an upper bound on what a first submit would have been rejected on,
+    not a prediction of how the session would then have gone.
     """
     engine = TriggerEngine(items=items)
     emissions: list[_Emission] = []
-    suppressions: list[_Suppression] = []
+    pending: list[_Suppression] = []
     active: set[str] = set()
     injections = 0
-    stop_injections = 0
-    work_turns = 0
-    work_at_inject = 0
+    first_stop_seen = False
 
     for turn_index, has_tools, tags in turns:
         active.update(tags)
-        work_now = work_turns + (1 if has_tools else 0)
-        stopping = not has_tools
+        frozen = frozenset(active)
 
-        reason = ""
+        if not has_tools:
+            if not first_stop_seen:
+                first_stop_seen = True
+                for _ in range(max_rejections):
+                    item = engine.next_triggered(stopping=True, active_tags=frozen)
+                    if item is None:
+                        break
+                    pending.append(_Suppression(turn_index, item.item_id))
+            continue
+
         if injections >= max_injections:
-            reason = "budget spent"
-        elif stopping and stop_injections >= max_stop_injections:
-            reason = "stop-inject budget spent"
-        elif injections and work_now - work_at_inject < min_work_turns:
-            reason = f"only {work_now - work_at_inject} work turn(s) since last inject"
+            continue
+        item = engine.next_triggered(stopping=False, active_tags=frozen)
+        if item is not None:
+            injections += 1
+            emissions.append(_Emission(turn_index, False, item.item_id))
 
-        if not reason:
-            item = engine.next_triggered(
-                stopping=stopping, active_tags=frozenset(active)
-            )
-            if item is not None:
-                injections += 1
-                if stopping:
-                    stop_injections += 1
-                work_at_inject = work_now
-                emissions.append(_Emission(turn_index, stopping, item.item_id))
-        elif engine.would_trigger(stopping=stopping, active_tags=frozenset(active)):
-            suppressions.append(_Suppression(turn_index, reason))
-
-        work_turns = work_now
-
-    return emissions, suppressions
+    return emissions, pending
 
 
 @app.command("replay")
@@ -211,8 +208,7 @@ def cmd_replay(
     schema: str = SCHEMA_OPT,
     checklist: str = CHECKLIST_OPT,
     max_injections: int = MAX_INJECTIONS_OPT,
-    max_stop_injections: int = MAX_STOP_OPT,
-    min_work_turns: int = MIN_WORK_OPT,
+    max_rejections: int = MAX_REJECTIONS_OPT,
 ) -> None:
     """Replay one session through the live gating logic."""
     items = load_items(Path(checklist))
@@ -228,8 +224,7 @@ def cmd_replay(
         turns,
         items,
         max_injections=max_injections,
-        max_stop_injections=max_stop_injections,
-        min_work_turns=min_work_turns,
+        max_rejections=max_rejections,
     )
 
     tags = sorted({t for _, _, ts in turns for t in ts})
@@ -241,7 +236,7 @@ def cmd_replay(
         kind = "stop" if e.stopping else "continuous"
         print(f"  t{e.turn_index:<4} [{kind:10s}] {e.item_id}")
 
-    print(f"\n=== Suppressed ({len(suppressions)}) ===")
+    print(f"\n=== Would be raised at first submit ({len(suppressions)}) ===")
     for s in suppressions:
         print(f"  t{s.turn_index:<4} {s.reason}")
 
@@ -366,8 +361,7 @@ def cmd_evaluate(
     schema: str = SCHEMA_OPT,
     checklist: str = CHECKLIST_OPT,
     max_injections: int = MAX_INJECTIONS_OPT,
-    max_stop_injections: int = MAX_STOP_OPT,
-    min_work_turns: int = MIN_WORK_OPT,
+    max_rejections: int = MAX_REJECTIONS_OPT,
 ) -> None:
     """Replay all sessions, report per-item fire rates and gate stats."""
     items = load_items(Path(checklist))
@@ -375,10 +369,9 @@ def cmd_evaluate(
     print(f"Evaluating {len(session_ids)} sessions against {len(items)} items")
 
     fires: dict[str, int] = {item_id: 0 for item_id in items}
+    at_submit: dict[str, int] = {}
     total_injects = 0
-    stop_injects = 0
-    total_suppressed = 0
-    suppressed_by: dict[str, int] = {}
+    total_at_submit = 0
     scored = 0
 
     for sid in session_ids:
@@ -388,34 +381,32 @@ def cmd_evaluate(
         if not turns:
             continue
         scored += 1
-        emissions, suppressions = _simulate(
+        emissions, pending = _simulate(
             turns,
             items,
             max_injections=max_injections,
-            max_stop_injections=max_stop_injections,
-            min_work_turns=min_work_turns,
+            max_rejections=max_rejections,
         )
         for e in emissions:
             total_injects += 1
-            if e.stopping:
-                stop_injects += 1
             fires[e.item_id] = fires.get(e.item_id, 0) + 1
-        for s in suppressions:
-            total_suppressed += 1
-            suppressed_by[s.reason.split(" since")[0]] = (
-                suppressed_by.get(s.reason.split(" since")[0], 0) + 1
-            )
+        for s in pending:
+            total_at_submit += 1
+            at_submit[s.reason] = at_submit.get(s.reason, 0) + 1
 
-    print(f"\n=== Injections over {scored} sessions ===")
-    print(f"  total       {total_injects}")
-    print(f"  stop        {stop_injects}")
-    print(f"  continuous  {total_injects - stop_injects}")
-    print(f"  suppressed  {total_suppressed}")
-    for reason, count in sorted(suppressed_by.items(), key=lambda x: -x[1]):
-        print(f"    {reason}: {count}")
+    print(f"\n=== Over {scored} sessions ===")
+    print(f"  mid-work injections      {total_injects}")
+    print(f"  raised at first submit   {total_at_submit}")
 
-    print("\n=== Item fire rates ===")
+    print("\n=== Mid-work item fire rates ===")
     for item_id, count in sorted(fires.items(), key=lambda x: -x[1]):
+        if not count:
+            continue
+        pct = 100.0 * count / max(scored, 1)
+        print(f"  {item_id:40s} {count:3d}/{scored} ({pct:.0f}%)")
+
+    print("\n=== Items raised at first submit ===")
+    for item_id, count in sorted(at_submit.items(), key=lambda x: -x[1]):
         pct = 100.0 * count / max(scored, 1)
         print(f"  {item_id:40s} {count:3d}/{scored} ({pct:.0f}%)")
 
@@ -460,8 +451,7 @@ def cmd_evolve(
     vocab_path_arg: str = VOCAB_OPT,
     model: str | None = MODEL_OPT,
     max_injections: int = MAX_INJECTIONS_OPT,
-    max_stop_injections: int = MAX_STOP_OPT,
-    min_work_turns: int = MIN_WORK_OPT,
+    max_rejections: int = MAX_REJECTIONS_OPT,
 ) -> None:
     """Run the full evolution loop: compile → evaluate → (select is manual)."""
     print("=== Step 1: Compile ===")
@@ -478,8 +468,7 @@ def cmd_evolve(
         schema=schema,
         checklist=checklist,
         max_injections=max_injections,
-        max_stop_injections=max_stop_injections,
-        min_work_turns=min_work_turns,
+        max_rejections=max_rejections,
     )
 
     print(

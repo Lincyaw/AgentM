@@ -6,8 +6,18 @@ Live flow:
 1. **ToolResultEvent** — queue repository-index refresh for read/write/edit;
    accumulate tool call info for the current turn.
 2. **TurnCommittedEvent** — advance turn counter, reset per-turn state.
-3. **DecideEvent** (async) — process pending symbol refreshes, run tagger,
-   evaluate signals + trigger predicates, intervene if a checklist item fires.
+3. **DecideEvent** (async) — process pending symbol refreshes, run the tagger,
+   evaluate trigger predicates, inject a mid-work check if one fires.
+4. **submit tool** — the agent declares it is finished. Pending stop-checkpoint
+   checks are raised as the tool's own result and the loop continues; when
+   none remain the tool terminates the session.
+
+Finishing is the agent's call, made through ``submit``. The loop used to infer
+it from a turn that carried no tool call, which cannot tell "the work is done"
+apart from "I just answered your note" — so every reply to a stop-checkpoint
+check looked like a fresh attempt to finish and drew another one, until the
+injection budget ran out. Raising those checks through ``submit`` removes the
+ambiguity, and a tool result asks for work where a user message asks for prose.
 """
 
 from __future__ import annotations
@@ -25,6 +35,11 @@ from agentm.core.abi import (
     AtomAPI,
     AtomInstallPriority,
     BashOperations,
+    FunctionTool,
+    JsonValue,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
 )
 from agentm.core.abi.events import (
     DecideEvent,
@@ -46,7 +61,7 @@ from .tagger import (
     annotate_turn,
     write_annotation,
 )
-from .triggers import TriggerEngine, load_items, render_message
+from .triggers import TriggerEngine, load_items, render_check, render_rejection
 
 
 class PolicyEngineConfig(BaseModel):
@@ -55,24 +70,31 @@ class PolicyEngineConfig(BaseModel):
     checklist: str = "package:checklist.yaml"
     trajectory_dsn: str = ""
     llm_model: str = "azure-gpt"
-    max_injections: int = 5
     critic: str = "off"
-    # An inject only lands if the agent has actually worked since the last one.
-    # Measured over a 30-session run: injects with zero tool-using turns since
-    # the previous inject drew a tool response 11% of the time; with one or
-    # more, 75-100%. Zero-work injects are the agent answering the previous
-    # note in prose, and re-injecting there only deepens the exam loop.
-    min_work_turns: int = 1
-    # Stop-checkpoint injects decay hard: 1st 64%, 2nd 71%, 3rd 38%, 4th+ 0%.
-    max_stop_injections: int = 2
+    # Mid-work checks, injected as user messages while the agent is working.
+    max_injections: int = 5
+    # Stop-checkpoint checks, raised as submit's own result. The cap exists so a
+    # session can always finish; past it submit accepts unconditionally.
+    max_rejections: int = 3
+    # Ends the session when the agent stops without ever calling submit. Off
+    # keeps the pre-submit behaviour, where ending a turn ends the session.
+    require_submit: bool = True
 
 
 MANIFEST = ExtensionManifest(
     name="policy_engine",
     description="Detects structural failure patterns in trajectories, intervenes.",
-    registers=(),
+    registers=("tool:submit",),
     config_schema=PolicyEngineConfig,
     priority=AtomInstallPriority.POLICY,
+)
+
+_SUBMIT_DESCRIPTION = (
+    "Declare the task finished and end the session. Call this once the code "
+    "changes are complete and verified — ending your turn without calling it "
+    "does not submit. A process check may come back instead of acceptance; "
+    "address it and call submit again, or call submit again explaining why it "
+    "does not apply to this task."
 )
 
 
@@ -109,9 +131,9 @@ class _Runtime:
     _current_turn_calls: list[_ToolCallRecord] = field(default_factory=list)
     _task_classified: bool = False
     _active_tags: set[str] = field(default_factory=set)
-    _stop_injections: int = 0
-    _work_turns: int = 0
-    _work_turns_at_inject: int = 0
+    _rejections: int = 0
+    _submitted: bool = False
+    _submit_nudged: bool = False
 
     def install(self) -> None:
         self.api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
@@ -141,10 +163,67 @@ class _Runtime:
         self.triggers = TriggerEngine(items=items)
         self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
+        self.api.register_tool(
+            FunctionTool(
+                name="submit",
+                description=_SUBMIT_DESCRIPTION,
+                parameters={  # code-health: ignore[AM011]
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": ("What was changed and what verified it."),
+                        }
+                    },
+                    "required": ["summary"],
+                },
+                fn=self._submit,
+            )
+        )
         logger.info(
             "policy_engine: interventions active ({} items, critic={})",
             len(items),
             self.config.critic,
+        )
+
+    # -- submit ----------------------------------------------------------------
+
+    async def _submit(self, args: dict[str, JsonValue]) -> ToolResult | ToolTerminate:
+        """The agent declares the task finished.
+
+        Pending stop-checkpoint checks come back as this tool's own result, one
+        at a time, so the agent's next move is a tool call rather than prose.
+        Past ``max_rejections`` the submission is accepted regardless — the
+        session must always be able to end.
+        """
+        self._submitted = True
+        item = None
+        if self.triggers is not None and self._rejections < self.config.max_rejections:
+            item = self.triggers.next_triggered(
+                stopping=True, active_tags=frozenset(self._active_tags)
+            )
+        if item is None:
+            logger.info(
+                "policy_engine: submit accepted after {} rejection(s)",
+                self._rejections,
+            )
+            return ToolTerminate(
+                result=ToolResult(
+                    content=[TextContent(type="text", text="Submitted.")]
+                ),
+                reason="policy:submitted",
+            )
+
+        self._rejections += 1
+        logger.info(
+            "policy_engine: submit rejected on {} ({}/{})",
+            item.item_id,
+            self._rejections,
+            self.config.max_rejections,
+        )
+        return ToolResult(
+            content=[TextContent(type="text", text=render_rejection(item))],
+            is_error=True,
         )
 
     # -- observe ---------------------------------------------------------------
@@ -180,8 +259,6 @@ class _Runtime:
 
     def _on_turn_committed(self, event: TurnCommittedEvent) -> None:
         self.turn += 1
-        if self._current_turn_calls:
-            self._work_turns += 1
         self._current_turn_calls = []
 
     # -- detect + intervene ----------------------------------------------------
@@ -193,49 +270,40 @@ class _Runtime:
         if self.triggers is None:
             return None
         stopping = isinstance(event.observation.default_action, Stop)
-        if self._suppressed(stopping):
+
+        # Ending a turn is not a submission. Point the agent at the tool once,
+        # then let it go — nagging a stopping agent is what produced the loop
+        # this design replaces. Stop-checkpoint checks belong to submit.
+        if stopping:
+            if (
+                self.config.require_submit
+                and not self._submitted
+                and not self._submit_nudged
+            ):
+                self._submit_nudged = True
+                return build_injection(
+                    "You have not submitted. When the work is complete and "
+                    "verified, call the `submit` tool — ending your turn does "
+                    "not finish the task."
+                )
             return None
 
+        if self.injections >= self.config.max_injections:
+            return None
         item = self.triggers.next_triggered(
-            stopping=stopping, active_tags=frozenset(self._active_tags)
+            stopping=False, active_tags=frozenset(self._active_tags)
         )
         if item is None:
             return None
 
         self.injections += 1
-        if stopping:
-            self._stop_injections += 1
-        self._work_turns_at_inject = self._work_turns_now()
         logger.info(
-            "policy_engine: injecting {} ({}/{}, checkpoint={})",
+            "policy_engine: injecting {} ({}/{})",
             item.item_id,
             self.injections,
             self.config.max_injections,
-            "stop" if stopping else "continuous",
         )
-        return build_injection(render_message(item, stopping=stopping))
-
-    def _work_turns_now(self) -> int:
-        """Tool-using turns so far, counting the turn being decided."""
-        return self._work_turns + (1 if self._current_turn_calls else 0)
-
-    def _suppressed(self, stopping: bool) -> bool:
-        """Reasons to stay quiet even though an item may match."""
-        if self.injections >= self.config.max_injections:
-            return True
-        if stopping and self._stop_injections >= self.config.max_stop_injections:
-            logger.debug("policy_engine: stop-inject budget spent, staying quiet")
-            return True
-        if self.injections == 0:
-            return False
-        worked = self._work_turns_now() - self._work_turns_at_inject
-        if worked < self.config.min_work_turns:
-            logger.debug(
-                "policy_engine: only {} work turn(s) since last inject, staying quiet",
-                worked,
-            )
-            return True
-        return False
+        return build_injection(render_check(item))
 
     def _run_tagger(self, event: DecideEvent) -> None:
         if self._pg is None:

@@ -64,63 +64,49 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
     return items
 
 
-# Response contract. The message must license an edit, not an answer: a bare
-# question gets graded ("evidence_adequacy — Partial") and the work never
-# reopens. Every inject therefore ends in a first-person commitment whose only
-# two forms are a change or a reasoned refusal, and the dimension name is
-# withheld so the agent judges the work rather than the label.
-_CONTRACT = """\
-Work this in order, over what you have actually done so far:
+# One item per message, deliberately. Surfacing several at once lets the agent
+# absorb the relevant one among plausible neighbours and move on.
 
-1. Observe: name the concrete thing that is wrong, weak, or missing, with a
-   verbatim fact from your own trace — a command you ran and its output, a
-   line you read, a result you got. If nothing is wrong, say exactly what you
-   checked.
-2. Decide: commit to exactly one of
-   - `change: <one focused change>`
-   - `no change needed, because <reason resting on the fact you just cited>`
+# Mid-work check, delivered as a user message while the agent is still working.
+# It must not read as a request for a verdict — a bare question gets answered in
+# prose and the work never changes — so it ends by naming the two moves that
+# count, and both of them are actions.
+_CHECK_TAIL = """\
+If this holds, keep going. If it does not, fix it now — make the edit or run
+the check. When the work is complete and verified, call the `submit` tool.
+Do not reply to this note with an audit."""
 
-If you commit to a change, make it now. A verdict on its own is not a response
-to this note. A well-supported `no change needed` is a valid outcome — never
-manufacture work to satisfy the check."""
+# Submit rejection, delivered as the submit tool's own result. The agent is
+# mid-tool-call here, so the register is already "do something"; what it needs
+# is the way back out.
+_REJECTION_HEAD = "Not submitted. One process check is outstanding."
 
-_ADVISORY = "Process check (advisory — this does not block you)."
+_REJECTION_TAIL = """\
+Do one of these, then call `submit` again:
+- fix what the check names, and verify the fix;
+- or, if the check does not apply to this task, call `submit` again and say why
+  in the summary.
 
-# The exam register comes from the agent believing the work is already
-# delivered. Naming the answer as provisional is what reopens it.
-_GATE = """\
-Process check before you finish.
-
-Your answer is PROVISIONAL. It has not been submitted or scored, and the work
-is still open. Do not treat this as a post-hoc audit, and do not report a
-status such as pass, partial, complete, or accept-with-caveat — those are not
-available here."""
-
-# A committed answer is cheap to defend in prose and expensive to refute with a
-# check. Requiring the refutation is what converts a verdict into a tool call.
-_REPLACEMENT = """\
-If the change would replace a result you already produced, that result may be
-replaced only by demonstrating its own failure, never by demonstrating that an
-alternative looks better. Construct and run the check that would indict it —
-recompute it from its own stated inputs, re-read the value at its cited source,
-or re-check a constraint the task states — and show that check running. If you
-cannot construct a failing check, keep the result, however compelling the
-alternative reading looks."""
+If the change would replace a result you already produced, replace it only by
+demonstrating its own failure — run the check that indicts it and show that
+check running. If you cannot construct a failing check, keep the result."""
 
 
-def render_message(item: ChecklistItem, *, stopping: bool = False) -> str:
-    """Render one checklist item into an inject message.
-
-    One item per inject, deliberately. Surfacing several at once lets the agent
-    absorb the relevant one among plausible neighbours and move on — the same
-    dilution that makes a full-taxonomy dump weaker than a ranked single call.
-    """
-    lines = [_GATE if stopping else _ADVISORY, "", item.check]
+def render_check(item: ChecklistItem) -> str:
+    """Mid-work check, injected as a user message."""
+    lines = [item.check]
     if item.advice:
         lines.append(item.advice)
-    lines += ["", _CONTRACT]
-    if stopping:
-        lines += ["", _REPLACEMENT]
+    lines += ["", _CHECK_TAIL]
+    return "\n".join(lines)
+
+
+def render_rejection(item: ChecklistItem) -> str:
+    """Stop-checkpoint check, returned as the submit tool's result."""
+    lines = [_REJECTION_HEAD, "", item.check]
+    if item.advice:
+        lines.append(item.advice)
+    lines += ["", _REJECTION_TAIL]
     return "\n".join(lines)
 
 
