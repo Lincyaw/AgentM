@@ -52,7 +52,7 @@ VOCAB_OPT = typer.Option(DEFAULT_VOCAB, "--vocab")
 SCHEMA_OPT = typer.Option("harbor_live", "--schema")
 MODEL_OPT = typer.Option(None, "--model", help="model profile from config.toml")
 MAX_INJECTIONS_OPT = typer.Option(5, "--max-injections")
-MAX_REJECTIONS_OPT = typer.Option(3, "--max-rejections")
+MAX_STOP_CHECKS_OPT = typer.Option(3, "--max-stop-checks")
 
 
 @app.command("compile")
@@ -158,7 +158,7 @@ def _simulate(
     items: dict[str, ChecklistItem],
     *,
     max_injections: int,
-    max_rejections: int,
+    max_stop_checks: int,
 ) -> tuple[list[_Emission], list[_Suppression]]:
     """Replay the mid-work injection path over a recorded session.
 
@@ -186,7 +186,7 @@ def _simulate(
         if not has_tools:
             if not first_stop_seen:
                 first_stop_seen = True
-                for _ in range(max_rejections):
+                for _ in range(max_stop_checks):
                     item = engine.next_triggered(stopping=True, active_tags=frozen)
                     if item is None:
                         break
@@ -210,7 +210,7 @@ def cmd_replay(
     schema: str = SCHEMA_OPT,
     checklist: str = CHECKLIST_OPT,
     max_injections: int = MAX_INJECTIONS_OPT,
-    max_rejections: int = MAX_REJECTIONS_OPT,
+    max_stop_checks: int = MAX_STOP_CHECKS_OPT,
 ) -> None:
     """Replay one session through the live gating logic."""
     items = load_items(Path(checklist))
@@ -226,7 +226,7 @@ def cmd_replay(
         turns,
         items,
         max_injections=max_injections,
-        max_rejections=max_rejections,
+        max_stop_checks=max_stop_checks,
     )
 
     tags = sorted({t for _, _, ts in turns for t in ts})
@@ -410,7 +410,7 @@ def cmd_evaluate(
     schema: str = SCHEMA_OPT,
     checklist: str = CHECKLIST_OPT,
     max_injections: int = MAX_INJECTIONS_OPT,
-    max_rejections: int = MAX_REJECTIONS_OPT,
+    max_stop_checks: int = MAX_STOP_CHECKS_OPT,
 ) -> None:
     """Replay all sessions, report per-item fire rates and gate stats."""
     items = load_items(Path(checklist))
@@ -434,7 +434,7 @@ def cmd_evaluate(
             turns,
             items,
             max_injections=max_injections,
-            max_rejections=max_rejections,
+            max_stop_checks=max_stop_checks,
         )
         for e in emissions:
             total_injects += 1
@@ -500,7 +500,7 @@ def cmd_evolve(
     vocab_path_arg: str = VOCAB_OPT,
     model: str | None = MODEL_OPT,
     max_injections: int = MAX_INJECTIONS_OPT,
-    max_rejections: int = MAX_REJECTIONS_OPT,
+    max_stop_checks: int = MAX_STOP_CHECKS_OPT,
 ) -> None:
     """Run the full evolution loop: compile → evaluate → (select is manual)."""
     print("=== Step 1: Compile ===")
@@ -517,7 +517,7 @@ def cmd_evolve(
         schema=schema,
         checklist=checklist,
         max_injections=max_injections,
-        max_rejections=max_rejections,
+        max_stop_checks=max_stop_checks,
     )
 
     print(

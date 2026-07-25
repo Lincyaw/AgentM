@@ -8,16 +8,18 @@ Live flow:
 2. **TurnCommittedEvent** — advance turn counter, reset per-turn state.
 3. **DecideEvent** (async) — process pending symbol refreshes, run the tagger,
    evaluate trigger predicates, inject a mid-work check if one fires.
-4. **submit tool** — the agent declares it is finished. Pending stop-checkpoint
-   checks are raised as the tool's own result and the loop continues; when
-   none remain the tool terminates the session.
+   When the agent wraps up instead, raise one stop-checkpoint check.
+4. **submit tool** — the agent's way out of a check, and the only thing that
+   ends the session cleanly.
 
-Finishing is the agent's call, made through ``submit``. The loop used to infer
-it from a turn that carried no tool call, which cannot tell "the work is done"
-apart from "I just answered your note" — so every reply to a stop-checkpoint
-check looked like a fresh attempt to finish and drew another one, until the
-injection budget ran out. Raising those checks through ``submit`` removes the
-ambiguity, and a tool result asks for work where a user message asks for prose.
+The agent finishes the way it always did, in prose. That moment is the stop
+checkpoint, and the check lands there. What the old design lacked was an exit:
+a reply to a check looked exactly like a fresh attempt to finish, so it drew
+the next check, and the next, until the budget ran out — the agent could not
+end the session, only outlast the engine. ``submit`` is that exit, named in
+every check, so one tool call always finishes. It never refuses; whether a
+check was really met is a question for the trajectory afterwards, not for a
+gate the agent has no way to pass.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ from .tagger import (
     _content_text,
     write_annotation,
 )
-from .triggers import TriggerEngine, load_items, render_check, render_rejection
+from .triggers import TriggerEngine, load_items, render_check, render_stop_check
 
 
 class PolicyEngineConfig(BaseModel):
@@ -75,14 +77,10 @@ class PolicyEngineConfig(BaseModel):
     # silently falling back.
     provider: str = ""
     critic: str = "off"
-    # Mid-work checks, injected as user messages while the agent is working.
+    # Mid-work checks, injected while the agent is working.
     max_injections: int = 5
-    # Stop-checkpoint checks, raised as submit's own result. The cap exists so a
-    # session can always finish; past it submit accepts unconditionally.
-    max_rejections: int = 3
-    # Ends the session when the agent stops without ever calling submit. Off
-    # keeps the pre-submit behaviour, where ending a turn ends the session.
-    require_submit: bool = True
+    # Checks raised when the agent wraps up. Past the cap it is left to finish.
+    max_stop_checks: int = 3
 
 
 MANIFEST = ExtensionManifest(
@@ -94,11 +92,9 @@ MANIFEST = ExtensionManifest(
 )
 
 _SUBMIT_DESCRIPTION = (
-    "Declare the task finished and end the session. Call this once the code "
-    "changes are complete and verified — ending your turn without calling it "
-    "does not submit. A process check may come back instead of acceptance; "
-    "address it and call submit again, or call submit again explaining why it "
-    "does not apply to this task."
+    "Confirm the task is finished and end the session. Use this to close out a "
+    "process check once you have addressed it or established that it does not "
+    "apply to this task."
 )
 
 
@@ -135,9 +131,8 @@ class _Runtime:
     _current_turn_calls: list[_ToolCallRecord] = field(default_factory=list)
     _task_classified: bool = False
     _active_tags: set[str] = field(default_factory=set)
-    _rejections: int = 0
+    _stop_checks: int = 0
     _submitted: bool = False
-    _submit_nudged: bool = False
     _tagger: TaggerConversation | None = None
 
     def install(self) -> None:
@@ -206,42 +201,21 @@ class _Runtime:
 
     # -- submit ----------------------------------------------------------------
 
-    async def _submit(self, args: dict[str, JsonValue]) -> ToolResult | ToolTerminate:
-        """The agent declares the task finished.
+    async def _submit(self, args: dict[str, JsonValue]) -> ToolTerminate:
+        """The way out of a process check, once the agent judges it answered.
 
-        Pending stop-checkpoint checks come back as this tool's own result, one
-        at a time, so the agent's next move is a tool call rather than prose.
-        Past ``max_rejections`` the submission is accepted regardless — the
-        session must always be able to end.
+        It never refuses. A check that keeps coming back is the loop this design
+        replaces: the agent needs one action that reliably finishes, or it
+        cannot finish at all. Whether the check was actually met is a question
+        for the trajectory afterwards, not for a gate the agent cannot pass.
         """
         self._submitted = True
-        item = None
-        if self.triggers is not None and self._rejections < self.config.max_rejections:
-            item = self.triggers.next_triggered(
-                stopping=True, active_tags=frozenset(self._active_tags)
-            )
-        if item is None:
-            logger.info(
-                "policy_engine: submit accepted after {} rejection(s)",
-                self._rejections,
-            )
-            return ToolTerminate(
-                result=ToolResult(
-                    content=[TextContent(type="text", text="Submitted.")]
-                ),
-                reason="policy:submitted",
-            )
-
-        self._rejections += 1
         logger.info(
-            "policy_engine: submit rejected on {} ({}/{})",
-            item.item_id,
-            self._rejections,
-            self.config.max_rejections,
+            "policy_engine: submitted after {} stop check(s)", self._stop_checks
         )
-        return ToolResult(
-            content=[TextContent(type="text", text=render_rejection(item))],
-            is_error=True,
+        return ToolTerminate(
+            result=ToolResult(content=[TextContent(type="text", text="Submitted.")]),
+            reason="policy:submitted",
         )
 
     # -- observe ---------------------------------------------------------------
@@ -289,22 +263,26 @@ class _Runtime:
             return None
         stopping = isinstance(event.observation.default_action, Stop)
 
-        # Ending a turn is not a submission. Point the agent at the tool once,
-        # then let it go — nagging a stopping agent is what produced the loop
-        # this design replaces. Stop-checkpoint checks belong to submit.
+        # Wrapping up in prose is how this agent finishes; that moment is the
+        # stop checkpoint. Hand it one check and name the way out. The old
+        # design had no exit — every reply drew another check until the budget
+        # ran out — so the check now carries `submit` with it.
         if stopping:
-            if (
-                self.config.require_submit
-                and not self._submitted
-                and not self._submit_nudged
-            ):
-                self._submit_nudged = True
-                return build_injection(
-                    "You have not submitted. When the work is complete and "
-                    "verified, call the `submit` tool — ending your turn does "
-                    "not finish the task."
-                )
-            return None
+            if self._submitted or self._stop_checks >= self.config.max_stop_checks:
+                return None
+            item = self.triggers.next_triggered(
+                stopping=True, active_tags=frozenset(self._active_tags)
+            )
+            if item is None:
+                return None
+            self._stop_checks += 1
+            logger.info(
+                "policy_engine: stop check {} ({}/{})",
+                item.item_id,
+                self._stop_checks,
+                self.config.max_stop_checks,
+            )
+            return build_injection(render_stop_check(item))
 
         if self.injections >= self.config.max_injections:
             return None

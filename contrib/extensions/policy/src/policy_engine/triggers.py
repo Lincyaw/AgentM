@@ -76,24 +76,30 @@ If this holds, keep going. If it does not, fix it now — make the edit or run
 the check. When the work is complete and verified, call the `submit` tool.
 Do not reply to this note with an audit."""
 
-# Submit rejection, delivered as the submit tool's own result. The agent is
-# mid-tool-call here, so the register is already "do something"; what it needs
-# is the way back out.
-_REJECTION_HEAD = "Not submitted. One process check is outstanding."
+# Raised when the agent wraps up. The work is not released yet, so the check is
+# still actionable — and the way out is one tool call, stated here. Without a
+# stated exit the agent answers in prose, wraps up again, and draws the next
+# check; that loop is what this message exists to avoid.
+_STOP_HEAD = """\
+Before this is final — one process check.
 
-_REJECTION_TAIL = """\
-Do one of these, then call `submit` again:
-- fix what the check names, and verify the fix;
-- or, if the check does not apply to this task, call `submit` again and say why
-  in the summary.
+Your work has not been released or scored yet, so anything below is still
+fixable. Do not report a status such as pass, partial, or complete; those are
+not what this asks for."""
 
-If the change would replace a result you already produced, replace it only by
+_STOP_TAIL = """\
+If it does not hold, fix it now and verify the fix. If it already holds, or it
+does not apply to this task, call `submit` to finish and say why in the summary.
+Either way, close this out with `submit` — a written verdict on its own leaves
+the task unfinished.
+
+If the fix would replace a result you already produced, replace it only by
 demonstrating its own failure — run the check that indicts it and show that
 check running. If you cannot construct a failing check, keep the result."""
 
 
 def render_check(item: ChecklistItem) -> str:
-    """Mid-work check, injected as a user message."""
+    """Mid-work check, injected while the agent is still working."""
     lines = [item.check]
     if item.advice:
         lines.append(item.advice)
@@ -101,12 +107,12 @@ def render_check(item: ChecklistItem) -> str:
     return "\n".join(lines)
 
 
-def render_rejection(item: ChecklistItem) -> str:
-    """Stop-checkpoint check, returned as the submit tool's result."""
-    lines = [_REJECTION_HEAD, "", item.check]
+def render_stop_check(item: ChecklistItem) -> str:
+    """Check raised at the moment the agent wraps up in prose."""
+    lines = [_STOP_HEAD, "", item.check]
     if item.advice:
         lines.append(item.advice)
-    lines += ["", _REJECTION_TAIL]
+    lines += ["", _STOP_TAIL]
     return "\n".join(lines)
 
 
