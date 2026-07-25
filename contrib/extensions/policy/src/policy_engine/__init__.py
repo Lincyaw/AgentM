@@ -55,7 +55,12 @@ from agentm.core.abi.events import (
 from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
-from .acceptance import AcceptanceReviewer, AcceptanceVerdict, build_prompt
+from .acceptance import (
+    PURPOSE as ACCEPTANCE_PURPOSE,
+    AcceptanceReviewer,
+    AcceptanceVerdict,
+    build_prompt,
+)
 from .ifg.repository_index import RepositoryIndex, RepositoryRefreshPlan
 from .paths import resolve_policy_path
 from .pg_query import PgQuerySource
@@ -161,6 +166,12 @@ class _Runtime:
     _review_rounds: int = 0
 
     def install(self) -> None:
+        # A reviewer must not install the policy that spawned it: it would
+        # register its own submit, tag its own turns, and spawn a reviewer of
+        # its own.
+        if self.api.ctx.purpose == ACCEPTANCE_PURPOSE:
+            logger.debug("policy_engine: inert inside an acceptance review")
+            return
         self.api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
         self.api.on(TurnCommittedEvent.CHANNEL, self._on_turn_committed)
         self.api.on(RunEndEvent.CHANNEL, self._on_run_end)
@@ -168,9 +179,6 @@ class _Runtime:
         bash = self.api.services.get(BASH_OPERATIONS_SERVICE)
         if isinstance(bash, BashOperations):  # code-health: ignore[AM025]
             self.repo_index = RepositoryIndex(root=self.api.ctx.cwd, bash=bash)
-            self._reviewer = AcceptanceReviewer(
-                api=self.api, bash=bash, cwd=self.api.ctx.cwd
-            )
             logger.info(
                 "policy_engine: repository index enabled (root={})",
                 self.api.ctx.cwd,
@@ -189,6 +197,7 @@ class _Runtime:
         if not items:
             logger.warning("policy_engine: missing checklist; inert")
             return
+        self._reviewer = AcceptanceReviewer(api=self.api)
         self.triggers = TriggerEngine(items=items)
         self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
         self.api.on(DecideEvent.CHANNEL, self._on_decide)

@@ -15,25 +15,27 @@ session it is reviewing is a loop waiting to happen.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from loguru import logger
 
 from agentm.core.abi import (
     AtomAPI,
-    BashOperations,
     FunctionTool,
     JsonValue,
     TextContent,
-    Tool,
     ToolResult,
     ToolTerminate,
 )
 
 from .manifest import load_manifest
 
-_OUTPUT_LIMIT = 4000
+#: Purpose marker on the reviewer's session. The policy atom checks it so a
+#: reviewer does not install the policy that spawned it — that child would
+#: register its own submit, run its own tagger, and review its own reviewer.
+PURPOSE = "acceptance"
+_PURPOSE = PURPOSE
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,44 +81,6 @@ def build_prompt(
     return "\n\n".join(parts)
 
 
-def _bash_tool(bash: BashOperations, cwd: str) -> FunctionTool:
-    async def run(args: dict[str, JsonValue]) -> ToolResult:
-        cmd = args.get("cmd")
-        if not isinstance(cmd, str) or not cmd.strip():
-            return ToolResult(
-                content=[TextContent(type="text", text="cmd is required")],
-                is_error=True,
-            )
-        try:
-            result = await bash.exec(cmd, cwd=cwd, timeout=180.0)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("acceptance: bash failed: {}", exc)
-            return ToolResult(
-                content=[TextContent(type="text", text=f"command failed: {exc}")],
-                is_error=True,
-            )
-        out = (result.stdout + result.stderr).decode("utf-8", "replace")
-        text = f"exit {result.exit_code}\n{out[:_OUTPUT_LIMIT]}"
-        return ToolResult(
-            content=[TextContent(type="text", text=text)],
-            is_error=result.exit_code != 0,
-        )
-
-    return FunctionTool(
-        name="bash",
-        description=(
-            "Run a shell command in the agent's workspace. Use it to read files, "
-            "render a scenario, or run a test suite."
-        ),
-        parameters={  # code-health: ignore[AM011]
-            "type": "object",
-            "properties": {"cmd": {"type": "string"}},
-            "required": ["cmd"],
-        },
-        fn=run,
-    )
-
-
 def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
     async def submit_verdict(args: dict[str, JsonValue]) -> ToolTerminate:
         accepted = bool(args.get("accepted", True))
@@ -158,19 +122,6 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
 @dataclass(slots=True)
 class AcceptanceReviewer:
     api: AtomAPI
-    bash: BashOperations
-    cwd: str
-
-    def _tools(self, names: Sequence[str], sink: _VerdictSink) -> list[Tool]:
-        """Build the tools the manifest asked for, and only those."""
-        builders: dict[str, Callable[[], Tool]] = {
-            "bash": lambda: _bash_tool(self.bash, self.cwd),
-            "submit_verdict": lambda: _verdict_tool(sink),
-        }
-        unknown = [n for n in names if n not in builders]
-        if unknown:
-            raise ValueError(f"acceptance manifest names unknown tools: {unknown}")
-        return [builders[n]() for n in names]
 
     async def review(self, prompt: str) -> AcceptanceVerdict:
         """Accepts on any failure of its own.
@@ -181,9 +132,13 @@ class AcceptanceReviewer:
         sink = _VerdictSink()
         try:
             manifest = load_manifest("acceptance")
+            # Only the verdict tool is added. A child inherits the scenario's
+            # extensions, so it already has the workspace tools routed to the
+            # same sandbox — passing our own `bash` collided with tool_bash and
+            # failed the whole spawn.
             child = await self.api.spawn(
-                purpose="acceptance",
-                tools=self._tools(manifest.tools, sink),
+                purpose=_PURPOSE,
+                tools=[_verdict_tool(sink)],
                 system=manifest.system,
                 max_turns=manifest.max_turns,
             )

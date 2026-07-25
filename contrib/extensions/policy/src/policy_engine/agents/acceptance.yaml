@@ -21,9 +21,10 @@ system: |
   - **Process concerns raised during the run**: checks that fired on this
     trajectory, and which the agent may or may not have addressed.
 
-  You also have a shell in the agent's workspace, so do not decide this from
-  the summary. Look. Read the diff, read the code it changed, render the
-  scenario the task names, run the pre-existing suite over the changed package.
+  You have the same workspace tools the agent had — bash, read — so do not
+  decide this from the summary. Look. Read the diff, read the code it changed,
+  render the scenario the task names, run the pre-existing suite over the
+  changed package.
   A summary saying a thing was fixed and a fix that is actually inverted read
   identically on paper and differently the moment you run them.
 
@@ -68,5 +69,5 @@ system: |
     output that shows it
   - next_step: when rejecting, the one action that would close it
 
-tools: [bash, submit_verdict]
+tools: [submit_verdict]   # the rest are inherited from the scenario
 max_turns: 12
