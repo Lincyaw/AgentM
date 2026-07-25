@@ -12,7 +12,7 @@ in the session. Matching is deterministic boolean logic — no LLM call.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -64,20 +64,42 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
     return items
 
 
-def render_message(items: list[ChecklistItem]) -> str:
-    """Render a batch of checklist items into one inject message."""
+_ACT_SINGLE = (
+    "If this already holds, keep going and do not reply to this note. "
+    "If it does not, fix it now — make the edit or run the check. "
+    "Do not answer with an audit."
+)
+
+_ACT_BATCH = (
+    "For each point: if it already holds, move on. If it does not, do the work "
+    "that makes it hold. Do not reply with a point-by-point audit — a written "
+    "verdict on these questions is not the deliverable, the corrected work is."
+)
+
+_STOP_PREFIX = (
+    "You are about to finish, so this is your last chance to act on the "
+    "following. Anything you find here is still fixable — reopen the work "
+    "rather than restating or qualifying your summary."
+)
+
+
+def render_message(items: list[ChecklistItem], *, stopping: bool = False) -> str:
+    """Render one or more checklist items into a single inject message."""
+    lines: list[str] = []
+    if stopping:
+        lines.append(_STOP_PREFIX + "\n")
+
     if len(items) == 1:
         item = items[0]
-        lines = [f"Process check ({item.dimension}):"]
+        lines.append(f"Process check ({item.dimension}):")
         lines.append(item.check)
         if item.advice:
             lines.append(item.advice)
+        lines.append("\n" + _ACT_SINGLE)
         return "\n".join(lines)
 
-    lines = [
-        "Process check from the validation monitor — "
-        "audit your process against each point below:"
-    ]
+    lines.append("Process check from the validation monitor.")
+    lines.append(_ACT_BATCH)
     for i, item in enumerate(items, 1):
         lines.append(f"\n{i}. ({item.dimension}) {item.check}")
     return "\n".join(lines)
@@ -158,8 +180,28 @@ class TriggerEngine:
         active_tags: frozenset[str] = frozenset(),
         max_items: int = 3,
     ) -> list[ChecklistItem]:
-        """Collect all triggered items up to max_items. Batch mode."""
+        """Collect all triggered items up to max_items, marking them fired."""
         triggered: list[ChecklistItem] = []
+        for item in self._matching(stopping=stopping, active_tags=active_tags):
+            self._fired.add(item.item_id)
+            triggered.append(item)
+            if len(triggered) >= max_items:
+                break
+        return triggered
+
+    def would_trigger(
+        self, *, stopping: bool, active_tags: frozenset[str] = frozenset()
+    ) -> bool:
+        """Whether any item matches, without consuming it.
+
+        Used when an inject is suppressed: the items must stay unfired so they
+        can still land once the agent has done real work.
+        """
+        return any(self._matching(stopping=stopping, active_tags=active_tags))
+
+    def _matching(
+        self, *, stopping: bool, active_tags: frozenset[str]
+    ) -> Iterator[ChecklistItem]:
         for item in self.items.values():
             if item.deliver != "inject" or item.item_id in self._fired:
                 continue
@@ -167,8 +209,4 @@ class TriggerEngine:
                 continue
             if not evaluate_trigger(item.gate.trigger, active_tags):
                 continue
-            self._fired.add(item.item_id)
-            triggered.append(item)
-            if len(triggered) >= max_items:
-                break
-        return triggered
+            yield item

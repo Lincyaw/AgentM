@@ -5,10 +5,14 @@ Commands map to steps of the evolution loop:
 
     compile     ② when_notes → trigger expressions + vocabulary
     deploy      ③ regenerate tagger prompt from vocabulary (automatic)
-    replay      ④ replay one session: tagger + signals → emissions
-    evaluate    ④ evaluate across all sessions → per-item fitness
+    replay      ④ replay one session through the live gating logic
+    evaluate    ④ replay all sessions → per-item fire rates + gate stats
     select      ⑤ prune low-fitness items + unused predicates
     evolve      run the full loop: compile → evaluate → select
+
+``replay``/``evaluate`` mirror the runtime's suppression gates, so a change to
+``min_work_turns`` / ``max_stop_injections`` can be backtested against recorded
+trajectories before it ships.
 
 Step ① (mine) lives in the pattern_miner scenario.
 Step ⑥ (diversify) is part of the miner's distill step.
@@ -16,16 +20,46 @@ Step ⑥ (diversify) is part of the miner's distill step.
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
+from dataclasses import dataclass
 from pathlib import Path
 
+import typer
 import yaml
 from loguru import logger
 
+from .pg_query import PgQuerySource
+from .triggers import ChecklistItem, TriggerEngine, load_items
 
-def cmd_compile(args: argparse.Namespace) -> int:
+app = typer.Typer(
+    name="policy_engine",
+    add_completion=False,
+    no_args_is_help=True,
+    help="Policy engine evolution loop.",
+)
+
+_PKG = Path(__file__).parent
+DEFAULT_CHECKLIST = str(_PKG / "checklist.yaml")
+DEFAULT_VOCAB = str(_PKG / "vocabulary.yaml")
+
+# Suppression gates. Defaults must mirror PolicyEngineConfig so a replay
+# reproduces what the live atom would have done.
+CHECKLIST_OPT = typer.Option(DEFAULT_CHECKLIST, "--checklist")
+VOCAB_OPT = typer.Option(DEFAULT_VOCAB, "--vocab")
+SCHEMA_OPT = typer.Option("harbor_live", "--schema")
+MODEL_OPT = typer.Option(None, "--model", help="model profile from config.toml")
+MAX_INJECTIONS_OPT = typer.Option(5, "--max-injections")
+MAX_STOP_OPT = typer.Option(2, "--max-stop-injections")
+MIN_WORK_OPT = typer.Option(1, "--min-work-turns")
+
+
+@app.command("compile")
+def cmd_compile(
+    checklist: str = CHECKLIST_OPT,
+    vocab_path_arg: str = VOCAB_OPT,
+    model: str | None = MODEL_OPT,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
     """Compile when_notes into trigger expressions."""
     from .compile import (
         build_compiler_prompt,
@@ -36,8 +70,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
         update_checklist_triggers,
     )
 
-    checklist_path = Path(args.checklist)
-    vocab_path = Path(args.vocab)
+    checklist_path = Path(checklist)
+    vocab_path = Path(vocab_path_arg)
     raw = yaml.safe_load(checklist_path.read_text(encoding="utf-8"))
     items = [i for i in raw.get("items", []) if i.get("deliver") != "offline"]
     vocab = load_vocabulary(vocab_path)
@@ -56,11 +90,11 @@ def cmd_compile(args: argparse.Namespace) -> int:
         prompt = build_compiler_prompt(when_note, vocab)
         print(f"  {item_id}: ", end="", flush=True)
 
-        if args.dry_run:
+        if dry_run:
             print("(dry run)")
             continue
 
-        result = _call_llm(prompt, manifest="compiler", model=args.model)
+        result = _call_llm(prompt, manifest="compiler", model=model)
         if result is None:
             print("FAILED")
             continue
@@ -79,72 +113,139 @@ def cmd_compile(args: argparse.Namespace) -> int:
         )
         print(f"{parsed.trigger_expr}{new_str}")
 
-    if not args.dry_run and compiled:
+    if not dry_run and compiled:
         save_vocabulary(vocab, vocab_path)
         update_checklist_triggers(checklist_path, compiled)
         print(f"\nVocabulary: {len(vocab)} predicates → {vocab_path}")
         print(f"Checklist: {len(compiled)} triggers updated → {checklist_path}")
 
-    return 0
+
+@dataclass(slots=True)
+class _Emission:
+    turn_index: int
+    stopping: bool
+    item_ids: list[str]
 
 
-def cmd_replay(args: argparse.Namespace) -> int:
-    """Replay one session: evaluate signals + predicate triggers."""
-    from .pg_query import PgQuerySource
-    from .triggers import TriggerEngine, load_items, load_signals
+@dataclass(slots=True)
+class _Suppression:
+    turn_index: int
+    reason: str
 
-    items = load_items(Path(args.checklist))
-    signals = load_signals(Path(args.signals))
-    engine = TriggerEngine(items=items, signals=signals)
-    source = PgQuerySource(args.dsn, args.session_id)
 
-    # Load active tags for this session
-    tag_rows = source.query(
-        "SELECT DISTINCT unnest(tags) FROM policy.turn_annotations "
-        "WHERE session_id = %(session_id)s"
+def _load_turns(
+    source: PgQuerySource, schema: str
+) -> list[tuple[int, bool, frozenset[str]]]:
+    """Return (turn_index, has_tool_calls, tags) per turn, in order."""
+    rows = source.query(
+        "SELECT t.turn_index, "
+        "  EXISTS (SELECT 1 FROM jsonb_array_elements("
+        "    coalesce(t.turn_json->'response'->'content', '[]'::jsonb)) c "
+        "    WHERE c->>'type' = 'tool_call') AS has_tools, "
+        "  coalesce(a.tags, ARRAY[]::text[]) AS tags "
+        f"FROM {schema}.agentm_trajectory_turns t "  # noqa: S608
+        "LEFT JOIN policy.turn_annotations a "
+        "  ON a.session_id = t.session_id AND a.turn_index = t.turn_index "
+        "WHERE t.session_id = %(session_id)s ORDER BY t.turn_index"
     )
-    active_tags = frozenset(row[0] for row in tag_rows if row[0])
+    return [(int(r[0]), bool(r[1]), frozenset(r[2] or ())) for r in rows]
 
-    print(f"Session: {args.session_id}")
-    print(f"Active tags: {sorted(active_tags)}")
 
-    print("\n=== Signals ===")
-    for name in signals:
-        result = engine.signal_true(source, name)
-        evidence = engine.evidence(source, name) if result else ()
-        print(f"  {name}: {result}")
-        for fact in evidence[:3]:
-            print(f"    {fact}")
+def _simulate(
+    turns: list[tuple[int, bool, frozenset[str]]],
+    items: dict[str, ChecklistItem],
+    *,
+    max_injections: int,
+    max_stop_injections: int,
+    min_work_turns: int,
+) -> tuple[list[_Emission], list[_Suppression]]:
+    """Replay the live gating logic over a recorded session.
 
-    print("\n=== Inject emissions ===")
-    count = 0
-    for stopping in (False, True):
-        firing = engine.evaluate_inject(
-            source, stopping=stopping, active_tags=active_tags
-        )
-        while firing is not None:
-            count += 1
-            print(
-                f"  [{firing.item.item_id}] "
-                f"signal={firing.item.gate.signal} "
-                f"trigger={firing.item.gate.trigger} "
-                f"stopping={stopping}"
+    Mirrors ``_Runtime._suppressed`` / ``TriggerEngine.collect_triggered`` so a
+    gate setting can be backtested against real trajectories before shipping.
+    """
+    engine = TriggerEngine(items=items)
+    emissions: list[_Emission] = []
+    suppressions: list[_Suppression] = []
+    active: set[str] = set()
+    injections = 0
+    stop_injections = 0
+    work_turns = 0
+    work_at_inject = 0
+
+    for turn_index, has_tools, tags in turns:
+        active.update(tags)
+        work_now = work_turns + (1 if has_tools else 0)
+        stopping = not has_tools
+
+        reason = ""
+        if injections >= max_injections:
+            reason = "budget spent"
+        elif stopping and stop_injections >= max_stop_injections:
+            reason = "stop-inject budget spent"
+        elif injections and work_now - work_at_inject < min_work_turns:
+            reason = f"only {work_now - work_at_inject} work turn(s) since last inject"
+
+        if not reason:
+            triggered = engine.collect_triggered(
+                stopping=stopping, active_tags=frozenset(active), max_items=3
             )
-            for fact in firing.facts[:2]:
-                print(f"    {fact}")
-            firing = engine.evaluate_inject(
-                source, stopping=stopping, active_tags=active_tags
-            )
-    print(f"  total: {count}")
+            if triggered:
+                injections += 1
+                if stopping:
+                    stop_injections += 1
+                work_at_inject = work_now
+                emissions.append(
+                    _Emission(turn_index, stopping, [i.item_id for i in triggered])
+                )
+        elif engine.would_trigger(stopping=stopping, active_tags=frozenset(active)):
+            suppressions.append(_Suppression(turn_index, reason))
 
-    print("\n=== Critic items ===")
-    critic = engine.open_critic_items(source, active_tags=active_tags)
-    print(f"  total: {len(critic)}")
-    for item in critic[:10]:
-        print(f"  [{item.item_id}] trigger={item.gate.trigger}")
+        work_turns = work_now
 
+    return emissions, suppressions
+
+
+@app.command("replay")
+def cmd_replay(
+    dsn: str,
+    session_id: str,
+    schema: str = SCHEMA_OPT,
+    checklist: str = CHECKLIST_OPT,
+    max_injections: int = MAX_INJECTIONS_OPT,
+    max_stop_injections: int = MAX_STOP_OPT,
+    min_work_turns: int = MIN_WORK_OPT,
+) -> None:
+    """Replay one session through the live gating logic."""
+    items = load_items(Path(checklist))
+    source = PgQuerySource(dsn, session_id)
+    turns = _load_turns(source, schema)
     source.close()
-    return 0
+
+    if not turns:
+        print(f"No turns for session {session_id} in schema {schema}")
+        raise typer.Exit(code=1)
+
+    emissions, suppressions = _simulate(
+        turns,
+        items,
+        max_injections=max_injections,
+        max_stop_injections=max_stop_injections,
+        min_work_turns=min_work_turns,
+    )
+
+    tags = sorted({t for _, _, ts in turns for t in ts})
+    print(f"Session: {session_id}  ({len(turns)} turns)")
+    print(f"Active tags: {tags}")
+
+    print(f"\n=== Injections ({len(emissions)}) ===")
+    for e in emissions:
+        kind = "stop" if e.stopping else "continuous"
+        print(f"  t{e.turn_index:<4} [{kind:10s}] {', '.join(e.item_ids)}")
+
+    print(f"\n=== Suppressed ({len(suppressions)}) ===")
+    for s in suppressions:
+        print(f"  t{s.turn_index:<4} {s.reason}")
 
 
 def _list_sessions(dsn: str, schema: str) -> list[str]:
@@ -162,27 +263,32 @@ def _list_sessions(dsn: str, schema: str) -> list[str]:
     return session_ids
 
 
-def cmd_tag(args: argparse.Namespace) -> int:
+@app.command("tag")
+def cmd_tag(
+    dsn: str,
+    schema: str = SCHEMA_OPT,
+    model: str | None = MODEL_OPT,
+    force: bool = typer.Option(False, "--force", help="re-tag already tagged sessions"),
+) -> None:
     """Batch-tag all sessions: run tagger LLM on each turn, write to PG."""
-    from .pg_query import PgQuerySource
     from .tagger import _get_tagger_prompt, _parse_tagger_result, write_annotation
 
     tagger_system = _get_tagger_prompt()
     print(f"Tagger prompt: {len(tagger_system)} chars")
 
-    session_ids = _list_sessions(args.dsn, args.schema)
+    session_ids = _list_sessions(dsn, schema)
 
     print(f"Tagging {len(session_ids)} sessions")
 
     for sid in session_ids:
-        source = PgQuerySource(args.dsn, sid)
+        source = PgQuerySource(dsn, sid)
 
         # Check if already tagged
         existing = source.query(
             "SELECT COUNT(*) FROM policy.turn_annotations "
             "WHERE session_id = %(session_id)s"
         )
-        if existing and existing[0][0] > 0 and not args.force:
+        if existing and existing[0][0] > 0 and not force:
             print(f"  {sid}: already tagged ({existing[0][0]} turns), skip")
             source.close()
             continue
@@ -190,7 +296,7 @@ def cmd_tag(args: argparse.Namespace) -> int:
         # Load turns from trajectory
         turns = source.query(
             f"SELECT turn_index, turn_json "  # noqa: S608
-            f"FROM {args.schema}.agentm_trajectory_turns "
+            f"FROM {schema}.agentm_trajectory_turns "
             "WHERE session_id = %(session_id)s ORDER BY turn_index"
         )
 
@@ -200,7 +306,7 @@ def cmd_tag(args: argparse.Namespace) -> int:
             result = _call_llm(
                 turn_content,
                 manifest=None,
-                model=args.model,
+                model=model,
                 system_override=tagger_system,
             )
             if result is None:
@@ -214,8 +320,6 @@ def cmd_tag(args: argparse.Namespace) -> int:
 
         print(f"  {sid}: tagged {tagged}/{len(turns)} turns")
         source.close()
-
-    return 0
 
 
 def _format_turn_for_tagger(turn_json: object) -> str:
@@ -258,51 +362,90 @@ def _format_turn_for_tagger(turn_json: object) -> str:
     return "\n".join(parts)
 
 
-def cmd_evaluate(args: argparse.Namespace) -> int:
-    """Evaluate signals across all sessions, report per-signal fire rates."""
-    from .pg_query import PgQuerySource
-    from .triggers import TriggerEngine, load_items, load_signals
+@app.command("evaluate")
+def cmd_evaluate(
+    dsn: str,
+    schema: str = SCHEMA_OPT,
+    checklist: str = CHECKLIST_OPT,
+    max_injections: int = MAX_INJECTIONS_OPT,
+    max_stop_injections: int = MAX_STOP_OPT,
+    min_work_turns: int = MIN_WORK_OPT,
+) -> None:
+    """Replay all sessions, report per-item fire rates and gate stats."""
+    items = load_items(Path(checklist))
+    session_ids = _list_sessions(dsn, schema)
+    print(f"Evaluating {len(session_ids)} sessions against {len(items)} items")
 
-    items = load_items(Path(args.checklist))
-    signals = load_signals(Path(args.signals))
+    fires: dict[str, int] = {item_id: 0 for item_id in items}
+    total_injects = 0
+    stop_injects = 0
+    total_suppressed = 0
+    suppressed_by: dict[str, int] = {}
+    scored = 0
 
-    session_ids = _list_sessions(args.dsn, args.schema)
-
-    print(f"Evaluating {len(session_ids)} sessions, {len(signals)} signals")
-
-    signal_fires: dict[str, int] = {name: 0 for name in signals}
     for sid in session_ids:
-        source = PgQuerySource(args.dsn, sid)
-        engine = TriggerEngine(items=items, signals=signals)
-        for name in signals:
-            if engine.signal_true(source, name):
-                signal_fires[name] += 1
+        source = PgQuerySource(dsn, sid)
+        turns = _load_turns(source, schema)
         source.close()
+        if not turns:
+            continue
+        scored += 1
+        emissions, suppressions = _simulate(
+            turns,
+            items,
+            max_injections=max_injections,
+            max_stop_injections=max_stop_injections,
+            min_work_turns=min_work_turns,
+        )
+        for e in emissions:
+            total_injects += 1
+            if e.stopping:
+                stop_injects += 1
+            for item_id in e.item_ids:
+                fires[item_id] = fires.get(item_id, 0) + 1
+        for s in suppressions:
+            total_suppressed += 1
+            suppressed_by[s.reason.split(" since")[0]] = (
+                suppressed_by.get(s.reason.split(" since")[0], 0) + 1
+            )
 
-    print("\n=== Signal fire rates ===")
-    for name, count in sorted(signal_fires.items(), key=lambda x: -x[1]):
-        pct = 100.0 * count / max(len(session_ids), 1)
-        print(f"  {name:30s} {count:3d}/{len(session_ids)} ({pct:.0f}%)")
+    print(f"\n=== Injections over {scored} sessions ===")
+    print(f"  total       {total_injects}")
+    print(f"  stop        {stop_injects}")
+    print(f"  continuous  {total_injects - stop_injects}")
+    print(f"  suppressed  {total_suppressed}")
+    for reason, count in sorted(suppressed_by.items(), key=lambda x: -x[1]):
+        print(f"    {reason}: {count}")
 
-    return 0
+    print("\n=== Item fire rates ===")
+    for item_id, count in sorted(fires.items(), key=lambda x: -x[1]):
+        pct = 100.0 * count / max(scored, 1)
+        print(f"  {item_id:40s} {count:3d}/{scored} ({pct:.0f}%)")
 
 
-def cmd_select(args: argparse.Namespace) -> int:
+@app.command("select")
+def cmd_select(
+    checklist: str = CHECKLIST_OPT,
+    vocab_path_arg: str = VOCAB_OPT,
+    fitness_file: str | None = typer.Option(
+        None, "--fitness", help="JSON file: {item_id: score}"
+    ),
+    threshold: float = typer.Option(0.1, "--threshold"),
+) -> None:
     """Prune low-fitness items and unused predicates."""
     from .compile import load_vocabulary, prune_items, prune_vocabulary, save_vocabulary
 
-    checklist_path = Path(args.checklist)
-    vocab_path = Path(args.vocab)
+    checklist_path = Path(checklist)
+    vocab_path = Path(vocab_path_arg)
 
     # For now, fitness is manual: read from a JSON file
-    fitness_path = Path(args.fitness) if args.fitness else None
-    if fitness_path and fitness_path.is_file():
-        fitness = json.loads(fitness_path.read_text())
-    else:
+    fitness_path = Path(fitness_file) if fitness_file else None
+    if fitness_path is None or not fitness_path.is_file():
         print("No fitness data; use --fitness <path.json> with {item_id: score}")
-        return 1
+        raise typer.Exit(code=1)
+    fitness = json.loads(fitness_path.read_text())
 
-    pruned = prune_items(checklist_path, fitness, threshold=args.threshold)
+    pruned = prune_items(checklist_path, fitness, threshold=threshold)
     print(f"Pruned {len(pruned)} items: {pruned}")
 
     vocab = load_vocabulary(vocab_path)
@@ -311,29 +454,43 @@ def cmd_select(args: argparse.Namespace) -> int:
     save_vocabulary(vocab, vocab_path)
     print(f"Vocabulary: {before} → {len(vocab)} predicates")
 
-    return 0
 
-
-def cmd_evolve(args: argparse.Namespace) -> int:
+@app.command("evolve")
+def cmd_evolve(
+    dsn: str,
+    schema: str = SCHEMA_OPT,
+    checklist: str = CHECKLIST_OPT,
+    vocab_path_arg: str = VOCAB_OPT,
+    model: str | None = MODEL_OPT,
+    max_injections: int = MAX_INJECTIONS_OPT,
+    max_stop_injections: int = MAX_STOP_OPT,
+    min_work_turns: int = MIN_WORK_OPT,
+) -> None:
     """Run the full evolution loop: compile → evaluate → (select is manual)."""
     print("=== Step 1: Compile ===")
-    args.dry_run = False
-    ret = cmd_compile(args)
-    if ret != 0:
-        return ret
+    cmd_compile(
+        checklist=checklist,
+        vocab_path_arg=vocab_path_arg,
+        model=model,
+        dry_run=False,
+    )
 
     print("\n=== Step 2: Evaluate ===")
-    ret = cmd_evaluate(args)
-    if ret != 0:
-        return ret
+    cmd_evaluate(
+        dsn=dsn,
+        schema=schema,
+        checklist=checklist,
+        max_injections=max_injections,
+        max_stop_injections=max_stop_injections,
+        min_work_turns=min_work_turns,
+    )
 
     print(
         "\n=== Step 3: Select ===\n"
         "Run manually after reviewing evaluate output:\n"
-        f"  python -m policy_engine select {args.checklist} {args.vocab} "
-        "--fitness <fitness.json>"
+        f"  python -m policy_engine select --checklist {checklist} "
+        f"--vocab {vocab_path_arg} --fitness <fitness.json>"
     )
-    return 0
 
 
 # -- LLM calling (offline, not through SDK spawn) -----------------------------
@@ -380,75 +537,5 @@ def _call_llm(
         return None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        prog="policy_engine",
-        description="Policy engine evolution loop CLI",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    pkg = Path(__file__).parent
-    default_checklist = str(pkg / "checklist.yaml")
-    default_signals = str(pkg / "signals.yaml")
-    default_vocab = str(pkg / "vocabulary.yaml")
-
-    # compile
-    p = sub.add_parser("compile", help="compile when_notes → trigger expressions")
-    p.add_argument("--checklist", default=default_checklist)
-    p.add_argument("--vocab", default=default_vocab)
-    p.add_argument("--model", default=None, help="model profile from config.toml")
-    p.add_argument("--dry-run", action="store_true")
-
-    # tag
-    p = sub.add_parser("tag", help="batch-tag all sessions with tagger LLM")
-    p.add_argument("dsn")
-    p.add_argument("--schema", default="harbor_live")
-    p.add_argument("--model", default=None)
-    p.add_argument(
-        "--force", action="store_true", help="re-tag already tagged sessions"
-    )
-
-    # replay
-    p = sub.add_parser("replay", help="replay one session")
-    p.add_argument("dsn")
-    p.add_argument("session_id")
-    p.add_argument("--checklist", default=default_checklist)
-    p.add_argument("--signals", default=default_signals)
-
-    # evaluate
-    p = sub.add_parser("evaluate", help="evaluate signals across all sessions")
-    p.add_argument("dsn")
-    p.add_argument("--schema", default="harbor_live")
-    p.add_argument("--checklist", default=default_checklist)
-    p.add_argument("--signals", default=default_signals)
-
-    # select
-    p = sub.add_parser("select", help="prune low-fitness items")
-    p.add_argument("--checklist", default=default_checklist)
-    p.add_argument("--vocab", default=default_vocab)
-    p.add_argument("--fitness", help="JSON file: {item_id: score}")
-    p.add_argument("--threshold", type=float, default=0.1)
-
-    # evolve
-    p = sub.add_parser("evolve", help="full loop: compile → tag → evaluate")
-    p.add_argument("dsn")
-    p.add_argument("--schema", default="harbor_live")
-    p.add_argument("--checklist", default=default_checklist)
-    p.add_argument("--signals", default=default_signals)
-    p.add_argument("--vocab", default=default_vocab)
-    p.add_argument("--model", default=None)
-
-    args = parser.parse_args()
-    handlers = {
-        "compile": cmd_compile,
-        "tag": cmd_tag,
-        "replay": cmd_replay,
-        "evaluate": cmd_evaluate,
-        "select": cmd_select,
-        "evolve": cmd_evolve,
-    }
-    return handlers[args.command](args)
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    app()

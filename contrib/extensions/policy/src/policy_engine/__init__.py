@@ -57,6 +57,14 @@ class PolicyEngineConfig(BaseModel):
     llm_model: str = "azure-gpt"
     max_injections: int = 5
     critic: str = "off"
+    # An inject only lands if the agent has actually worked since the last one.
+    # Measured over a 30-session run: injects with zero tool-using turns since
+    # the previous inject drew a tool response 11% of the time; with one or
+    # more, 75-100%. Zero-work injects are the agent answering the previous
+    # note in prose, and re-injecting there only deepens the exam loop.
+    min_work_turns: int = 1
+    # Stop-checkpoint injects decay hard: 1st 64%, 2nd 71%, 3rd 38%, 4th+ 0%.
+    max_stop_injections: int = 2
 
 
 MANIFEST = ExtensionManifest(
@@ -101,6 +109,9 @@ class _Runtime:
     _current_turn_calls: list[_ToolCallRecord] = field(default_factory=list)
     _task_classified: bool = False
     _active_tags: set[str] = field(default_factory=set)
+    _stop_injections: int = 0
+    _work_turns: int = 0
+    _work_turns_at_inject: int = 0
 
     def install(self) -> None:
         self.api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
@@ -169,6 +180,8 @@ class _Runtime:
 
     def _on_turn_committed(self, event: TurnCommittedEvent) -> None:
         self.turn += 1
+        if self._current_turn_calls:
+            self._work_turns += 1
         self._current_turn_calls = []
 
     # -- detect + intervene ----------------------------------------------------
@@ -179,26 +192,50 @@ class _Runtime:
 
         if self.triggers is None:
             return None
-        if self.injections >= self.config.max_injections:
-            return None
         stopping = isinstance(event.observation.default_action, Stop)
-        active = frozenset(self._active_tags)
+        if self._suppressed(stopping):
+            return None
 
         triggered = self.triggers.collect_triggered(
-            stopping=stopping, active_tags=active, max_items=3
+            stopping=stopping, active_tags=frozenset(self._active_tags), max_items=3
         )
-        if triggered:
-            self.injections += 1
-            ids = [item.item_id for item in triggered]
-            logger.info(
-                "policy_engine: injecting {} ({}/{})",
-                ids,
-                self.injections,
-                self.config.max_injections,
-            )
-            return build_injection(render_message(triggered))
+        if not triggered:
+            return None
 
-        return None
+        self.injections += 1
+        if stopping:
+            self._stop_injections += 1
+        self._work_turns_at_inject = self._work_turns_now()
+        logger.info(
+            "policy_engine: injecting {} ({}/{}, checkpoint={})",
+            [item.item_id for item in triggered],
+            self.injections,
+            self.config.max_injections,
+            "stop" if stopping else "continuous",
+        )
+        return build_injection(render_message(triggered, stopping=stopping))
+
+    def _work_turns_now(self) -> int:
+        """Tool-using turns so far, counting the turn being decided."""
+        return self._work_turns + (1 if self._current_turn_calls else 0)
+
+    def _suppressed(self, stopping: bool) -> bool:
+        """Reasons to stay quiet even though an item may match."""
+        if self.injections >= self.config.max_injections:
+            return True
+        if stopping and self._stop_injections >= self.config.max_stop_injections:
+            logger.debug("policy_engine: stop-inject budget spent, staying quiet")
+            return True
+        if self.injections == 0:
+            return False
+        worked = self._work_turns_now() - self._work_turns_at_inject
+        if worked < self.config.min_work_turns:
+            logger.debug(
+                "policy_engine: only {} work turn(s) since last inject, staying quiet",
+                worked,
+            )
+            return True
+        return False
 
     def _run_tagger(self, event: DecideEvent) -> None:
         if self._pg is None:

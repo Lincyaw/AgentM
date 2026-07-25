@@ -117,9 +117,22 @@ an LLM that reads the session evidence + the item's review question
 and judges whether the item is actually violated. Only confirmed
 violations produce interventions.
 
-### Budget
+### Suppression gates
 
-`max_interventions` per session (default 3).
+A matching item is not enough. Three gates decide whether the inject
+actually lands, all calibrated on a 30-session GPT run (104 injects,
+measuring whether the agent used any tool in the turn after the inject):
+
+| gate | default | why |
+|---|---|---|
+| `max_injections` | 5 | Total per session. |
+| `min_work_turns` | 1 | Tool-using turns required since the last inject. With zero, injects drew a tool response 11% of the time; with one or more, 75–100%. Zero-work means the agent is answering the previous note in prose — re-injecting there only deepens the loop. |
+| `max_stop_injections` | 2 | Stop-checkpoint injects decay hard: 1st 64%, 2nd 71%, 3rd 38%, 4th+ 0%. |
+
+Suppression does not consume the item — it stays unfired and can land
+once the agent has done real work. Continuous-checkpoint injects are the
+productive ones (≈92% draw a tool response vs ≈63% at stop), so the
+budget should not be spent at stop.
 
 ## Intervention
 
@@ -128,6 +141,16 @@ violations produce interventions.
 | `inject` | Append a message quoting the agent's own evidence. |
 | `critic` | Spawn a reviewer subagent; inject confirmed verdict. |
 | `compact` | Compress context: keep facts, discard subjective reasoning. Via SDK `ContextCompactionService`. |
+
+### Inject wording
+
+The message must ask for a correction, not a verdict. An earlier
+phrasing ("audit your process against each point below") was answered
+literally: agents replied with a point-by-point `Pass / Partial` writeup
+and never reopened the work — in one session the agent graded itself
+`Partial` on evidence adequacy and then stopped. Every inject now ends
+with an explicit instruction to act rather than reply, and stop-checkpoint
+injects are prefixed with a note that the work is still reopenable.
 
 ## Evolution
 
@@ -160,7 +183,7 @@ adaptive loop.
 ```bash
 python -m policy_engine compile              # ② when_notes → triggers + vocabulary
 python -m policy_engine tag <dsn>            # tag all sessions with tagger LLM
-python -m policy_engine replay <dsn> <sid>   # ④ replay one session
+python -m policy_engine replay <dsn> <sid>   # ④ replay one session through the gates
 python -m policy_engine evaluate <dsn>       # ④ evaluate across all sessions
 python -m policy_engine select               # ⑤ prune by fitness
 python -m policy_engine evolve <dsn>         # ②→④ in one command
