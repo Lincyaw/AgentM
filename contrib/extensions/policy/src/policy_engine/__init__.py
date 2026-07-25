@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     AtomAPI,
@@ -36,7 +36,7 @@ from agentm.core.abi.events import (
 from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
-from .deliver import build_injection, verify_item
+from .deliver import build_injection
 from .ifg.repository_index import RepositoryIndex, RepositoryRefreshPlan
 from .paths import resolve_policy_path
 from .pg_query import PgQuerySource
@@ -46,18 +46,16 @@ from .tagger import (
     annotate_turn,
     write_annotation,
 )
-from .triggers import TriggerEngine, load_items, load_signals, render_message
+from .triggers import TriggerEngine, load_items, render_message
 
 
 class PolicyEngineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     checklist: str = "package:checklist.yaml"
-    signals: str = "package:signals.yaml"
     trajectory_dsn: str = ""
     llm_model: str = "azure-gpt"
-    max_injections: int = 3
-    signal_params: dict[str, float] = Field(default_factory=dict)
+    max_injections: int = 5
     critic: str = "off"
 
 
@@ -125,19 +123,11 @@ class _Runtime:
         items_path = resolve_policy_path(
             self.config.checklist, cwd=Path(self.api.ctx.cwd)
         )
-        signals_path = resolve_policy_path(
-            self.config.signals, cwd=Path(self.api.ctx.cwd)
-        )
         items = load_items(items_path) if items_path else {}
-        signals = load_signals(signals_path) if signals_path else {}
-        if not items or not signals:
-            logger.warning("policy_engine: missing checklist/signals; inert")
+        if not items:
+            logger.warning("policy_engine: missing checklist; inert")
             return
-        self.triggers = TriggerEngine(
-            items=items,
-            signals=signals,
-            param_overrides=dict(self.config.signal_params),
-        )
+        self.triggers = TriggerEngine(items=items)
         self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
         logger.info(
@@ -187,16 +177,14 @@ class _Runtime:
         await self._flush_symbol_refreshes()
         self._run_tagger(event)
 
-        if self.triggers is None or self._pg is None:
+        if self.triggers is None:
             return None
         if self.injections >= self.config.max_injections:
             return None
         stopping = isinstance(event.observation.default_action, Stop)
         active = frozenset(self._active_tags)
 
-        firing = self.triggers.evaluate_inject(
-            self._pg, stopping=stopping, active_tags=active
-        )
+        firing = self.triggers.evaluate_inject(stopping=stopping, active_tags=active)
         if firing is not None:
             self.injections += 1
             logger.info(
@@ -207,34 +195,6 @@ class _Runtime:
             )
             return build_injection(render_message(firing))
 
-        if stopping and self.config.critic != "off":
-            return self._run_critic(active)
-
-        return None
-
-    def _run_critic(self, active_tags: frozenset[str]) -> LoopAction | None:
-        if self.triggers is None or self._pg is None:
-            return None
-        candidates = self.triggers.open_critic_items(self._pg, active_tags=active_tags)
-        if not candidates:
-            return None
-        for item in candidates[:5]:
-            violated, reasoning = verify_item(
-                self._pg, item, model_name=self.config.llm_model
-            )
-            if violated:
-                self.injections += 1
-                message = (
-                    f"Process check ({item.dimension}):\n"
-                    f"{item.check}\n\n"
-                    f"Finding: {reasoning}"
-                )
-                logger.info(
-                    "policy_engine: critic confirmed {} ({})",
-                    item.item_id,
-                    reasoning[:80],
-                )
-                return build_injection(message)
         return None
 
     def _run_tagger(self, event: DecideEvent) -> None:

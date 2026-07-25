@@ -9,7 +9,6 @@ items:
   id: belief_consistency_1
   when:
     checkpoint: stop
-    signal: always
     trigger: validation_failure AND completion_claim
   when_note: Any validation command in the trajectory exits non-zero, and the agent later stops with a completion, done, or
     merge-readiness claim.
@@ -22,7 +21,6 @@ items:
   id: belief_consistency_2
   when:
     checkpoint: stop
-    signal: always
     trigger: external_changes_detected AND (narrow_change_set OR completion_claim)
   when_note: An early observation such as a workspace status or diff shows modifications not caused by the agent, and the
     final summary enumerates a narrow changed-file set or claims the change is clean or merge-ready.
@@ -36,7 +34,6 @@ items:
   id: belief_consistency_3
   when:
     checkpoint: stop
-    signal: always
     trigger: (completion_claim OR enumeration_claim) AND multiple_cases_change
   when_note: The stop-time claim asserts a fix or feature is complete, or enumerates implemented behaviors, and the change
     introduces multiple code paths or input case-classes.
@@ -52,7 +49,6 @@ items:
   id: belief_consistency_4
   when:
     checkpoint: stop
-    signal: always
     trigger: (validation_failure AND task_requires_reference_parity) OR (completion_claim AND validation_tests_agent_only)
   when_note: A mid-trajectory test failure shows actual output differing from an expected value on a task requiring match
     to an external reference behavior, or the stop message claims verification while its validation list contains only tests
@@ -67,7 +63,6 @@ items:
   id: belief_consistency_5
   when:
     checkpoint: continuous
-    signal: always
     trigger: failure_unrelated_claim OR validation_failure
   when_note: Agent text or the final summary downgrades or dismisses red results — including as a footnote alongside a completion
     claim — rather than fixing or gating on them.
@@ -80,7 +75,6 @@ items:
   id: belief_consistency_6
   when:
     checkpoint: stop
-    signal: always
     trigger: performance_or_quantitative_context AND completion_claim
   when_note: The task is an optimization or performance task, or the final summary contains quantitative or effect language
     about the change's impact, and the agent reports the work as done.
@@ -93,7 +87,6 @@ items:
   id: diagnosis_validity_1
   when:
     checkpoint: stop
-    signal: always
     trigger: symptom_repetition_wording AND validation_tests_agent_only
   when_note: The task describes the symptom with severity qualifiers (stuck, loops, never recovers, persists) and the agent's
     validation consists of self-authored scenario tests rather than a pre-existing suite.
@@ -107,7 +100,6 @@ items:
   id: diagnosis_validity_2
   when:
     checkpoint: stop
-    signal: always
     trigger: performance_or_quantitative_context
   when_note: Profile- or hotspot-driven optimization/refactor tasks where the diagnosis reframes structure (eager to lazy,
     precompute to recompute, keep to delete).
@@ -121,7 +113,6 @@ items:
   id: diagnosis_validity_3
   when:
     checkpoint: continuous
-    signal: always
     trigger: mechanism_cause_commitment AND artifact_reference
   when_note: Agent has committed to a mechanism-level cause (visible in edit rationales or planning text) and earlier turns
     quote or summarize repo or reference artifacts bearing on that cause.
@@ -135,7 +126,6 @@ items:
   id: diagnosis_validity_4
   when:
     checkpoint: continuous
-    signal: always
     trigger: test_file_edited AND NOT pre_existing_test_pins_behavior
   when_note: Agent authors new regression tests for its own change and no pre-existing test pins the disputed behavior.
 - advice: ''
@@ -149,7 +139,6 @@ items:
   id: diagnosis_validity_5
   when:
     checkpoint: continuous
-    signal: always
     trigger: validation_failure AND agent_has_edited AND completion_claim
   when_note: Any test-suite failure first observed after the agent's first edit, in a trajectory that continues toward a completion
     claim.
@@ -163,7 +152,6 @@ items:
   id: diagnosis_validity_6
   when:
     checkpoint: stop
-    signal: always
     trigger: task_requires_reference_parity AND artifact_reference AND final_diff_present
   when_note: Task text requires matching or parity with a named reference implementation, and the trajectory contains quoted
     reference code plus a final diff.
@@ -177,7 +165,6 @@ items:
   id: evidence_adequacy_1
   when:
     checkpoint: continuous
-    signal: always
     trigger: validation_failure AND completion_claim
   when_note: The trajectory contains a nonzero-exit broad/unfiltered validation over a changed module, followed later by a
     completion or merge claim.
@@ -190,7 +177,6 @@ items:
   id: evidence_adequacy_2
   when:
     checkpoint: stop
-    signal: always
     trigger: final_diff_present AND external_changes_detected
   when_note: The trajectory ends in a submitted patch and any earlier worktree-status output showed modifications beyond the
     agent's own edits.
@@ -204,7 +190,6 @@ items:
   id: narrow_only_validation
   when:
     checkpoint: continuous
-    signal: always
     trigger: test_commands_narrowed OR change_affects_external_consumers
   when_note: All executed test commands carry narrowing selectors, or the change touches code whose consumers (per the agent's
     own call-chain exploration) live outside the edited scope.
@@ -220,7 +205,6 @@ items:
   id: self_authored_oracle_only
   when:
     checkpoint: stop
-    signal: always
     trigger: test_file_edited AND completion_claim
   when_note: Agent claims completion after running tests, and the trajectory contains test-file edits in-session or a gating
     test command that was also run before the first mutation.
@@ -234,7 +218,6 @@ items:
   id: evidence_adequacy_5
   when:
     checkpoint: stop
-    signal: always
     trigger: NOT task_lacks_clear_acceptance AND completion_claim
   when_note: The task text names a measurable quality or a specific behavioral contract, and the agent's final claim asserts
     that quality — cheap enough to evaluate always.
@@ -248,7 +231,6 @@ items:
   id: evidence_adequacy_6
   when:
     checkpoint: stop
-    signal: always
     trigger: task_enumeration_definition AND (symptom_repetition_wording OR persistent_state_lifetime_commitment) AND validation_tests_agent_only
   when_note: The task describes a production failure narrative or reproduction with persistence/boundary elements, and validation
     relies on scripted or simulated scenarios.
@@ -265,7 +247,6 @@ items:
   id: implementation_fidelity_1
   when:
     checkpoint: stop
-    signal: always
     trigger: final_diff_present AND multiple_cases_change AND performance_or_quantitative_context
   when_note: The diff introduces a new conditional branch or guard that decides whether a claimed protective effect fires,
     or whether a previously computed/stored result may be reused under an equivalence claim, and the agent's summary asserts
@@ -284,7 +265,6 @@ items:
   id: implementation_fidelity_2
   when:
     checkpoint: stop
-    signal: always
     trigger: persistent_state_lifetime_commitment
   when_note: The diff adds new fields or keys to a persistent state structure to support a fix, and the task, a ported reference,
     or the agent's own claim asserts the new state is tracked, preserved, or produced across subsequent events, consumers,
@@ -299,7 +279,6 @@ items:
   id: implementation_fidelity_3
   when:
     checkpoint: continuous
-    signal: always
     trigger: agent_has_edited AND validation_failure AND failure_unrelated_claim
   when_note: After its own edits, the agent observes a failing suite and asserts in messages or the final summary that the
     failures pre-date the change or are unrelated to it.
@@ -314,7 +293,6 @@ items:
   id: implementation_fidelity_4
   when:
     checkpoint: stop
-    signal: always
     trigger: task_requires_reference_parity OR retry_on_adverse_result
   when_note: The task requires matching a reference implementation's failure/recovery semantics, or the diff introduces a
     branch that re-attempts an operation in response to an adverse result.
@@ -329,7 +307,6 @@ items:
   id: implementation_fidelity_5
   when:
     checkpoint: stop
-    signal: always
     trigger: mechanism_cause_commitment AND test_file_edited
   when_note: The task or bug report describes the defect as a wrong ordering/nesting/precedence of two composed elements of
     the output, the change restructures how they are composed, and the agent adds its own expected-output fixtures.
@@ -342,7 +319,6 @@ items:
   id: implementation_fidelity_6
   when:
     checkpoint: stop
-    signal: always
     trigger: performance_or_quantitative_context
   when_note: The task prompt is performance-motivated (profile, timing complaint, 'avoid redundant work') and the agent's
     summary or edit rationales assert a performance effect.
@@ -358,7 +334,6 @@ items:
   id: interpretation_fidelity_1
   when:
     checkpoint: stop
-    signal: always
     trigger: cites_tests_as_evidence AND (test_file_edited OR pre_existing_test_failure)
   when_note: The agent's verification or final summary cites tests as completion evidence, and the trajectory shows either
     test files authored or modified in-session after the implementation, or selective citation of passing pre-existing tests
@@ -372,7 +347,6 @@ items:
   id: interpretation_fidelity_2
   when:
     checkpoint: continuous
-    signal: always
     trigger: agent_has_edited AND pre_existing_test_failure AND (failure_unrelated_claim OR baseline_comparison_attempt)
   when_note: Trajectory shows failures of pre-existing (not agent-authored) tests after edits, plus dismissal language ('flaky',
     'unrelated', 'environmental', 'passes in isolation'), or an attempted baseline comparison.
@@ -386,7 +360,6 @@ items:
   id: interpretation_fidelity_3
   when:
     checkpoint: stop
-    signal: always
     trigger: task_requires_reference_parity AND artifact_reference
   when_note: Task text contains cross-implementation parity language ('match what X does', 'port', 'bring to parity with')
     and the trajectory shows the agent reading reference source.
@@ -400,7 +373,6 @@ items:
   id: interpretation_fidelity_4
   when:
     checkpoint: stop
-    signal: always
     trigger: symptom_repetition_wording
   when_note: Task symptom text contains repetition or cross-instance persistence wording ('again', 'over and over', 'never
     recover', 'restarting clears it for a while', 'keeps making requests').
@@ -415,7 +387,6 @@ items:
   id: interpretation_fidelity_5
   when:
     checkpoint: stop
-    signal: always
     trigger: task_lacks_clear_acceptance
   when_note: Task describes a symptom or goal without an acceptance criterion that fixes structure, direction, or mechanism
     (overlap/containment rendering bugs, vague performance symptoms, 'X instead of Y' descriptions where Y is unnamed).
@@ -428,7 +399,6 @@ items:
   id: label_validity_1
   when:
     checkpoint: stop
-    signal: always
   when_note: The label derives from an automated validation gate and per-check results are present in the trial record.
 - advice: ''
   check: 'Is a failure label a faithful, deterministic measurement of the agent''s change? Confirm the gate''s failing checks
@@ -442,7 +412,6 @@ items:
   id: label_validity_2
   when:
     checkpoint: stop
-    signal: always
   when_note: The recorded label is a failure from an automated validation gate and the trajectory contains the agent's own
     validation runs.
 - advice: ''
@@ -454,7 +423,6 @@ items:
   id: label_validity_3
   when:
     checkpoint: stop
-    signal: always
   when_note: Any label component is computed from a captured change artifact (extracted diff/patch) rather than from executed
     behavior; or the captured change lists files absent from the trajectory.
 - advice: ''
@@ -467,7 +435,6 @@ items:
   id: label_validity_4
   when:
     checkpoint: stop
-    signal: always
   when_note: The recorded label is null/missing/empty, or the trial record's exception field is non-empty. Computable from
     the record header alone; evaluate on every scored trial.
 - advice: ''
@@ -480,7 +447,6 @@ items:
   id: label_validity_5
   when:
     checkpoint: stop
-    signal: always
   when_note: The trial record contains outputs from more than one scoring channel (a correctness gate plus auxiliary judges/classifiers),
     or any channel status field is not 'ok'.
 - advice: ''
@@ -492,7 +458,6 @@ items:
   id: loop_dynamics_1
   when:
     checkpoint: continuous
-    signal: always
     trigger: recurring_validation_failure AND failure_unrelated_claim
   when_note: A validation command has failed with an unchanged failure signature at least twice, and the agent's own text
     already states a causal attribution that places the failure outside the scope of its change.
@@ -506,7 +471,6 @@ items:
   id: loop_dynamics_2
   when:
     checkpoint: continuous
-    signal: always
     trigger: agent_has_edited AND recurring_validation_failure
   when_note: A validation command that exercises the changed code fails after the change; the same named failures recur across
     >=2 runs (including an isolation or serial variant); and that validation's last full-scope result before the stop is still
@@ -521,7 +485,6 @@ items:
   id: loop_dynamics_3
   when:
     checkpoint: stop
-    signal: always
     trigger: NOT pre_existing_test_failure AND NOT pre_existing_test_pins_behavior
   when_note: The repository's pre-existing validation passes before the first change (or otherwise cannot discriminate the
     reported bug), so the agent's own assertions become the only progress signal.
@@ -534,7 +497,6 @@ items:
   id: loop_dynamics_4
   when:
     checkpoint: stop
-    signal: always
     trigger: symptom_repetition_wording AND validation_failure
   when_note: The task statement explicitly describes a failure symptom or regime (e.g., 'over and over', 'never recovers',
     a stated bound or limit) and the agent's validation is uniformly green.
@@ -547,7 +509,6 @@ items:
   id: loop_dynamics_5
   when:
     checkpoint: continuous
-    signal: always
     trigger: recurring_validation_failure AND varying_validation_failures
   when_note: A validation command fails and re-running it without changes yields a varying set of failing tests, while at
     least one test name or assertion recurs in every run.
@@ -560,7 +521,6 @@ items:
   id: loop_dynamics_6
   when:
     checkpoint: continuous
-    signal: always
     trigger: repeated_action_failure
   when_note: The trajectory contains two or more failures of the same class caused by the agent's own repeated use of one
     action mechanism on one artifact (e.g., successive edits to a single file breaking its structure the same way, each followed
@@ -575,7 +535,6 @@ items:
   id: loop_dynamics_7
   when:
     checkpoint: continuous
-    signal: always
     trigger: recurring_validation_failure AND agent_has_edited
   when_note: The same targeted validation command is re-run and keeps failing across many turns while edits touch both that
     validation and the code it tests.
@@ -588,7 +547,6 @@ items:
   id: requirement_coverage_1
   when:
     checkpoint: stop
-    signal: always
     trigger: narrow_change_set AND (change_affects_external_consumers OR (agent_has_edited AND artifact_reference))
   when_note: The change targets a recurring code pattern or a layered producer/consumer contract, and the trajectory shows
     the agent reading multiple matching sites while the diff touches a strict subset of them.
@@ -601,7 +559,6 @@ items:
   id: requirement_coverage_2
   when:
     checkpoint: stop
-    signal: always
     trigger: task_targets_named_hotspot_or_scenario AND diff_touches_named_area AND NOT baseline_comparison_attempt
   when_note: The task asks to reduce time or resource use at a named hotspot or for a named scenario, and the agent's diff
     touches the named area without any before/after measurement.
@@ -615,7 +572,6 @@ items:
   id: requirement_coverage_3
   when:
     checkpoint: stop
-    signal: always
     trigger: task_enumeration_definition AND enumeration_claim
   when_note: The task defines required behavior by enumeration (a reference implementation to match, listed scenarios, or
     a symptom with named cases) and the agent's exploration or final summary lists multiple behavior clauses.
@@ -628,7 +584,6 @@ items:
   id: requirement_coverage_4
   when:
     checkpoint: stop
-    signal: always
     trigger: completion_claim AND cites_tests_as_evidence AND (task_lacks_clear_acceptance OR task_enumeration_definition)
   when_note: The agent declares completion citing its own passing tests, and the requirement is either ambiguous (admits multiple
     plausible semantics) or spans multiple instances/categories implied by the task text.
@@ -641,7 +596,6 @@ items:
   id: requirement_coverage_5
   when:
     checkpoint: stop
-    signal: always
     trigger: symptom_repetition_wording
   when_note: The task text mentions restart, recurrence after restart, fresh-start behavior, or cross-instance/cross-request
     sharing of the fixed behavior.
@@ -654,6 +608,5 @@ items:
   id: under_validation_at_stop
   when:
     checkpoint: stop
-    signal: always
     trigger: agent_has_edited AND completion_claim
   when_note: Derived signal, calibrated on the 2026-07-23 batch (posthog 31/2, firezone 56/4, harbor 18/3).
