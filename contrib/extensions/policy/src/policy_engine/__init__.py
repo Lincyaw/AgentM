@@ -54,12 +54,8 @@ from agentm.core.abi.events import (
 from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
-from .deliver import (
-    AcceptanceVerdict,
-    build_acceptance_prompt,
-    build_injection,
-    review_submission,
-)
+from .acceptance import AcceptanceReviewer, AcceptanceVerdict, build_prompt
+from .deliver import build_injection
 from .ifg.repository_index import RepositoryIndex, RepositoryRefreshPlan
 from .paths import resolve_policy_path
 from .pg_query import PgQuerySource
@@ -147,6 +143,7 @@ class _Runtime:
     _submitted: bool = False
     _tagger: TaggerConversation | None = None
     _provider: ProviderConfig | None = None
+    _reviewer: AcceptanceReviewer | None = None
     _events: list[str] = field(default_factory=list)
     _concerns: list[str] = field(default_factory=list)
     _review_rounds: int = 0
@@ -158,6 +155,9 @@ class _Runtime:
         bash = self.api.services.get(BASH_OPERATIONS_SERVICE)
         if isinstance(bash, BashOperations):  # code-health: ignore[AM025]
             self.repo_index = RepositoryIndex(root=self.api.ctx.cwd, bash=bash)
+            self._reviewer = AcceptanceReviewer(
+                api=self.api, bash=bash, cwd=self.api.ctx.cwd
+            )
             logger.info(
                 "policy_engine: repository index enabled (root={})",
                 self.api.ctx.cwd,
@@ -258,18 +258,16 @@ class _Runtime:
             return None
         if self._review_rounds >= self.config.max_review_rounds:
             return None
+        if self._reviewer is None:
+            return None
         summary = args.get("summary")
-        prompt = build_acceptance_prompt(
+        prompt = build_prompt(
             task=self._first_user_message(),
             summary=summary if isinstance(summary, str) else "",
             events=self._events,
             concerns=self._concerns,
         )
-        verdict = await review_submission(
-            prompt,
-            stream_fn=self._provider.stream_fn,
-            model=self._provider.model,
-        )
+        verdict = await self._reviewer.review(prompt)
         return None if verdict.accepted else verdict
 
     # -- observe ---------------------------------------------------------------

@@ -21,8 +21,16 @@ system: |
   - **Process concerns raised during the run**: checks that fired on this
     trajectory, and which the agent may or may not have addressed.
 
-  Judge one question: does the work, as evidenced by the run, do what the task
-  asked?
+  You also have a shell in the agent's workspace, so do not decide this from
+  the summary. Look. Read the diff, read the code it changed, render the
+  scenario the task names, run the pre-existing suite over the changed package.
+  A summary saying a thing was fixed and a fix that is actually inverted read
+  identically on paper and differently the moment you run them.
+
+  Start with `git diff` to see the change, then check the specific thing the
+  task asked for. Keep it to a handful of commands.
+
+  Judge one question: does the work do what the task asked?
 
   What makes a submission fail acceptance:
   - The task names a direction, ordering, or scenario, and nothing in the run
@@ -54,21 +62,11 @@ system: |
   Prefer acceptance when the evidence is thin either way: a wrong rejection
   costs the agent a round it needed for real work.
 
-  Output JSON only:
+  When you have looked enough, call `submit_verdict` exactly once:
   - accepted: true when the work does what the task asked
-  - finding: when rejecting, the specific gap; empty when accepting
-  - next_step: when rejecting, the one action that would close it; empty
-    when accepting
+  - finding: when rejecting, the specific gap — name the file, command, or
+    output that shows it
+  - next_step: when rejecting, the one action that would close it
 
-result_schema:
-  type: object
-  properties:
-    accepted:
-      type: boolean
-    finding:
-      type: string
-    next_step:
-      type: string
-  required: [accepted]
-
-max_turns: 1
+tools: [bash, submit_verdict]
+max_turns: 12
