@@ -55,6 +55,7 @@ class PolicyEngineConfig(BaseModel):
     checklist: str = "package:checklist.yaml"
     signals: str = "package:signals.yaml"
     trajectory_dsn: str = ""
+    llm_model: str = "azure-gpt"
     max_injections: int = 3
     signal_params: dict[str, float] = Field(default_factory=dict)
     critic: str = "off"
@@ -218,7 +219,9 @@ class _Runtime:
         if not candidates:
             return None
         for item in candidates[:5]:
-            violated, reasoning = verify_item(self._pg, item)
+            violated, reasoning = verify_item(
+                self._pg, item, model_name=self.config.llm_model
+            )
             if violated:
                 self.injections += 1
                 message = (
@@ -262,6 +265,7 @@ class _Runtime:
             assistant_text=assistant_text,
             tool_calls=tool_calls,
             task_text=task_text,
+            model_name=self.config.llm_model,
         )
         if annotation is not None:
             write_annotation(self._pg, annotation)

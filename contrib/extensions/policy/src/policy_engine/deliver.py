@@ -36,6 +36,7 @@ def verify_item(
     item: ChecklistItem,
     *,
     schema: str = "harbor_live",
+    model_name: str | None = None,
 ) -> tuple[bool, str]:
     """Verify one checklist item against targeted evidence.
 
@@ -51,7 +52,7 @@ def verify_item(
     if not evidence_prompt:
         return False, "no evidence turns found"
 
-    result = call_llm(system, evidence_prompt, max_tokens=300)
+    result = call_llm(system, evidence_prompt, max_tokens=300, model_name=model_name)
     if result is None:
         return False, ""
 

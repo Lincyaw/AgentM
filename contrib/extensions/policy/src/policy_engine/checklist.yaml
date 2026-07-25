@@ -4,7 +4,7 @@ items:
     a more complete check, or (b) explicitly disclosed in the stop message with the completion claim scoped around it? Does
     the summary's verification list show green results only for narrower or filtered runs while the most complete available
     check was last observed red and never re-run?
-  deliver: critic
+  deliver: inject
   dimension: belief_consistency
   id: belief_consistency_1
   when:
@@ -17,7 +17,7 @@ items:
   check: Does the final summary's enumeration of what changed match the full set of modifications actually present in the
     workspace or submitted diff, including anomalies the agent itself observed earlier? Was the pre-stop review scoped (e.g.,
     path-filtered) so that known tree-wide modifications were never re-surfaced before a clean, surgical, or merge-ready claim?
-  deliver: critic
+  deliver: inject
   dimension: belief_consistency
   id: belief_consistency_2
   when:
@@ -31,7 +31,7 @@ items:
     validation run that actually exercises it? Does any executed check actively assert that a claimed path did not fire, or
     does all behavioral evidence trace to the agent's own self-authored anticipated-case tests with no probing of variants
     the changed mechanism plausibly treats differently?
-  deliver: critic
+  deliver: inject
   dimension: belief_consistency
   id: belief_consistency_3
   when:
@@ -47,7 +47,7 @@ items:
     the implementation until it matches its own guess? At stop, does the 'verified' or 'fixed' claim rest entirely on tests
     whose oracle values were written in the same session, with no independent check distinguishing the chosen behavior from
     the alternative?
-  deliver: critic
+  deliver: inject
   dimension: belief_consistency
   id: belief_consistency_4
   when:
@@ -62,20 +62,20 @@ items:
     backed by a baseline observation (revert/stash plus rerun of the same failing set) covering all dismissed failures rather
     than a single one? Is each exculpatory qualifier in the final summary ('passes in isolation', 'unrelated', 'the changed
     tests pass') traceable to an observation matching its full stated scope and uncontradicted by any later observation?
-  deliver: critic
+  deliver: inject
   dimension: belief_consistency
   id: belief_consistency_5
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
-    trigger: always
+    trigger: failure_unrelated_claim OR validation_failure
   when_note: Agent text or the final summary downgrades or dismisses red results — including as a footnote alongside a completion
     claim — rather than fixing or gating on them.
 - advice: ''
   check: When the final claim asserts a performance effect or efficiency capability ('avoids work', 'faster', 'reduces allocation/churn'),
     does the trajectory contain any measurement that could support it — a benchmark, profile, or timing comparison — or is
     the claimed effect presented as verified outcome while nothing executed could have confirmed it?
-  deliver: critic
+  deliver: inject
   dimension: belief_consistency
   id: belief_consistency_6
   when:
@@ -88,7 +88,7 @@ items:
   check: Do the scenarios the agent actually exercised include the task's stated severity condition (persistence, non-recovery,
     survival across restarts/processes/streams), or does every executed test terminate through the easy, recoverable path?
     Is completion claimed while the headline manifestation of the reported symptom was never reproduced?
-  deliver: critic
+  deliver: inject
   dimension: diagnosis_validity
   id: diagnosis_validity_1
   when:
@@ -102,7 +102,7 @@ items:
     'no consumer asks for this', 'nothing depends on this path') that a cheap check would settle — call-site grep, consumer
     frequency count, trace — with no such check present in the trajectory? Does the change delete or relocate work at the
     hotspot's location instead of addressing a measured cost mechanism?
-  deliver: critic
+  deliver: inject
   dimension: diagnosis_validity
   id: diagnosis_validity_2
   when:
@@ -116,11 +116,11 @@ items:
     read — existing tests documenting a convention, reference code showing state scope, keying, boundedness, or lifecycle,
     or its own earlier observations — supports a rival account of the cause, does the trajectory contain explicit engagement
     (a stated reason or a discriminating observation) excluding that rival before the change is made?
-  deliver: critic
+  deliver: inject
   dimension: diagnosis_validity
   id: diagnosis_validity_3
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: mechanism_cause_commitment AND artifact_reference
   when_note: Agent has committed to a mechanism-level cause (visible in edit rationales or planning text) and earlier turns
@@ -130,11 +130,11 @@ items:
     — asserting the structure its own fix produces, or asserting the absence of a behavior that the reference or existing
     suite asserts the presence of? Is any expectation traceable to an external oracle (pre-existing test, specification, reference
     behavior) rather than to the agent's hypothesis?
-  deliver: critic
+  deliver: inject
   dimension: diagnosis_validity
   id: diagnosis_validity_4
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: test_file_edited AND NOT pre_existing_test_pins_behavior
   when_note: Agent authors new regression tests for its own change and no pre-existing test pins the disputed behavior.
@@ -144,11 +144,11 @@ items:
     runs? If a revert/restore A/B was used, did the agent re-verify workspace state (status/diff) after each step, particularly
     when a tool result reports the apply or restore failed? Is the completion claim made while the suite's last observed state
     is red and merely disclaimed in the summary?
-  deliver: critic
+  deliver: inject
   dimension: diagnosis_validity
   id: diagnosis_validity_5
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: validation_failure AND agent_has_edited AND completion_claim
   when_note: Any test-suite failure first observed after the agent's first edit, in a trajectory that continues toward a completion
@@ -158,7 +158,7 @@ items:
     for every named sub-mechanism of the diagnosed fix that the agent quoted from the reference — including state that outlives
     a single request/process (with its keying and boundedness), retry limits, and terminal error surfacing? Does the exit
     claim assert parity while the diff omits quoted components or leaves a diagnosed loop unbounded?
-  deliver: critic
+  deliver: inject
   dimension: diagnosis_validity
   id: diagnosis_validity_6
   when:
@@ -172,11 +172,11 @@ items:
     narrative claim that the failures are environmental or pre-existing — without (a) an executed discriminating check that
     actually ran to completion and supports the attribution (per-failure triage, or the same broad suite on the unmodified
     tree), and (b) any subsequent green broad run? If yes, a red signal was converted into an effective green without evidence.
-  deliver: critic
+  deliver: inject
   dimension: evidence_adequacy
   id: evidence_adequacy_1
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: validation_failure AND completion_claim
   when_note: The trajectory contains a nonzero-exit broad/unfiltered validation over a changed module, followed later by a
@@ -185,7 +185,7 @@ items:
   check: Before the stop claim, did the agent review the full surface of the change it is about to submit via an unfiltered
     worktree status/diff — or was the final review path-filtered to the files it edited, while the worktree contained other
     pre-existing or incidental modifications that flow into the submission unexamined?
-  deliver: critic
+  deliver: inject
   dimension: evidence_adequacy
   id: evidence_adequacy_2
   when:
@@ -229,7 +229,7 @@ items:
     of rendered output, or a specific behavioral branch. Does at least one executed validation measure or trigger that quality
     directly? Flag when the final claim asserts the quality while every executed check sits on a proxy dimension: compile/format
     gates, unit tests that never drive the graded branch''s trigger condition, or code-reading arguments in place of measurement.'
-  deliver: critic
+  deliver: inject
   dimension: evidence_adequacy
   id: evidence_adequacy_5
   when:
@@ -243,7 +243,7 @@ items:
     boundary — does at least one executed scenario instantiate that story under its discriminating conditions (the failure
     repeated until the required bound is reached, state carried across the boundary)? Flag when the only executed scenario
     is a one-shot, weakened version that both the required behavior and the incorrect behavior would pass.
-  deliver: critic
+  deliver: inject
   dimension: evidence_adequacy
   id: evidence_adequacy_6
   when:
@@ -260,7 +260,7 @@ items:
     scenario class where the claim requires the fallback or recomputation (modified, deleted, recreated, repeated-trigger
     inputs), or does mere presence in the stored/reused structure short-circuit it? Do the agent's own tests exercise any
     class where a mismatch in (a) or (b) would be observable?
-  deliver: critic
+  deliver: inject
   dimension: implementation_fidelity
   id: implementation_fidelity_1
   when:
@@ -279,7 +279,7 @@ items:
     same entity — and conversely, can the field outlive the validity the claim or reference implies, so the effect fires on
     later events it should not classify? When a reference implementation is in scope, does the new field live where the reference
     keeps the equivalent state (e.g., a shared keyed store consulted per request) or somewhere narrower?'
-  deliver: critic
+  deliver: inject
   dimension: implementation_fidelity
   id: implementation_fidelity_2
   when:
@@ -294,11 +294,11 @@ items:
     that attribution actually reconstruct the pre-change state — every file in the change reverted, no other edits left applied,
     the full failing suite run and its output actually inspected, and the failure set shown to be stable and identical — or
     is the attribution stronger than what the performed experiment can support?
-  deliver: critic
+  deliver: inject
   dimension: implementation_fidelity
   id: implementation_fidelity_3
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: agent_has_edited AND validation_failure AND failure_unrelated_claim
   when_note: After its own edits, the agent observes a failing suite and asserts in messages or the final summary that the
@@ -309,7 +309,7 @@ items:
     guard, or a terminal error branch — plus any on-exhaustion state cleanup the reference performs? Concretely: is there
     any input sequence of persistent failures under which the loop exits with the required error effect, or does every path
     loop forever?'
-  deliver: critic
+  deliver: inject
   dimension: implementation_fidelity
   id: implementation_fidelity_4
   when:
@@ -324,7 +324,7 @@ items:
     direction, and is that direction the inverse? And do the expected outputs in the agent's own added tests assert the required
     direction, or does the trajectory show production code being rewritten to satisfy a self-authored fixture whose direction
     was never validated against the reported complaint?
-  deliver: critic
+  deliver: inject
   dimension: implementation_fidelity
   id: implementation_fidelity_5
   when:
@@ -337,7 +337,7 @@ items:
   check: When the task's motivation is performance and the final claim asserts a performance effect (work avoided, allocations
     trimmed, faster setup), does the trajectory contain any measurement that could support the claim — a benchmark, timing,
     or before/after profile — and does that measurement exercise the code path and hotspot the claim names?
-  deliver: critic
+  deliver: inject
   dimension: implementation_fidelity
   id: implementation_fidelity_6
   when:
@@ -353,7 +353,7 @@ items:
     exercising only the single-occurrence happy path, or asserting the absence of a recovery mechanism the task''s wording
     implies), or (b) a hand-picked subset of pre-existing tests cited while the suite as a whole is not green and the failing
     test''s subject matches the change?'
-  deliver: critic
+  deliver: inject
   dimension: interpretation_fidelity
   id: interpretation_fidelity_1
   when:
@@ -367,11 +367,11 @@ items:
   check: When pre-existing tests fail on the path the change touches, did the agent establish whether the failures pre-date
     the change via a baseline run that actually completed, and root-cause them — or dismiss them as flaky/unrelated/environmental
     while citing self-selected passing tests and declaring the requirement's preserved-behavior constraint intact?
-  deliver: critic
+  deliver: inject
   dimension: interpretation_fidelity
   id: interpretation_fidelity_2
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: agent_has_edited AND pre_existing_test_failure AND (failure_unrelated_claim OR baseline_comparison_attempt)
   when_note: Trajectory shows failures of pre-existing (not agent-authored) tests after edits, plus dismissal language ('flaky',
@@ -381,7 +381,7 @@ items:
     of the reference path — parameters emitted, state scope and lifetime, repetition/iteration bounds, and terminal/error
     behavior — either present in the change or explicitly excluded with a recorded reason? Or did the agent port only the
     first minimal contrast it found and silently drop the rest of the reference machinery it had read?
-  deliver: critic
+  deliver: inject
   dimension: interpretation_fidelity
   id: interpretation_fidelity_3
   when:
@@ -395,7 +395,7 @@ items:
     repeated occurrence), is the state carrying that information placed at a scope that survives the boundary — or in per-instance/per-request
     state that is torn down at exactly that boundary, so the recovery behavior can never activate in the steady-state scenario
     the task describes?
-  deliver: critic
+  deliver: inject
   dimension: interpretation_fidelity
   id: interpretation_fidelity_4
   when:
@@ -410,7 +410,7 @@ items:
     Specifically flag when the agent's 'fixed' expected output inverts the structure of the 'broken' output it reproduced,
     or when the chosen reading matches what the code already does in the simple case, with no external evidence (reference
     behavior, upstream history, rendering, measurement) justifying the choice.
-  deliver: critic
+  deliver: inject
   dimension: interpretation_fidelity
   id: interpretation_fidelity_5
   when:
@@ -487,11 +487,11 @@ items:
   check: After the agent has attributed a failing validation to a cause its change cannot affect, does it re-run the same
     command (or re-analyze the same output with a different tool) and re-derive the identical conclusion, instead of proceeding
     on the attribution it already established?
-  deliver: critic
+  deliver: inject
   dimension: loop_dynamics
   id: loop_dynamics_1
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: recurring_validation_failure AND failure_unrelated_claim
   when_note: A validation command has failed with an unchanged failure signature at least twice, and the agent's own text
@@ -501,11 +501,11 @@ items:
     attribution that moves the cause outside its change but that its own evidence does not establish — no discriminating baseline
     (the same failing validation re-run with the change reverted), or a baseline run that itself failed or was never examined
     yet is cited as exonerating — and does it substitute a narrowed set of passing checks for the full gate it had been using?
-  deliver: critic
+  deliver: inject
   dimension: loop_dynamics
   id: loop_dynamics_2
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: agent_has_edited AND recurring_validation_failure
   when_note: A validation command that exercises the changed code fails after the change; the same named failures recur across
@@ -516,7 +516,7 @@ items:
     is against assertions the agent authored this session, the expected behavior is never re-derived from the task text or
     an external reference (a spec, or a baseline of pre-change behavior), the probe set stops growing after the first green,
     and the stop decision rests on those self-authored greens alone?'
-  deliver: critic
+  deliver: inject
   dimension: loop_dynamics
   id: loop_dynamics_3
   when:
@@ -529,7 +529,7 @@ items:
   check: 'The task text names a concrete failure regime (a repeated, persistent, or boundary condition under which the system
     fails): does at least one validation drive the system into that regime before the agent declares the requirement met,
     or do all of its checks exercise only the single-occurrence happy path?'
-  deliver: critic
+  deliver: inject
   dimension: loop_dynamics
   id: loop_dynamics_4
   when:
@@ -542,11 +542,11 @@ items:
   check: When a validation fails nondeterministically, does the agent respond with pure re-scheduling — re-running it as full
     suite, single test, serial, or after a delay, with no intervening change and no read of the failing assertion sites —
     treating the fluctuating failure set as the finding instead of localizing why the assertions that recur in every run fail?
-  deliver: critic
+  deliver: inject
   dimension: loop_dynamics
   id: loop_dynamics_5
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: recurring_validation_failure AND varying_validation_failures
   when_note: A validation command fails and re-running it without changes yields a varying set of failing tests, while at
@@ -555,11 +555,11 @@ items:
   check: When the same agent action produces the same structural failure more than once on the same artifact, does the agent
     update the procedure for that action, or does it repeat the identical mechanism and spend turns repairing the damage each
     time?
-  deliver: critic
+  deliver: inject
   dimension: loop_dynamics
   id: loop_dynamics_6
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: repeated_action_failure
   when_note: The trajectory contains two or more failures of the same class caused by the agent's own repeated use of one
@@ -570,11 +570,11 @@ items:
     — including mid-loop changes to the check's own expectations — so that neither side is held fixed long enough to isolate
     which is wrong, and does the loop end without any run of validation the agent did not author against the accumulated production
     changes?
-  deliver: critic
+  deliver: inject
   dimension: loop_dynamics
   id: loop_dynamics_7
   when:
-    checkpoint: stop
+    checkpoint: continuous
     signal: always
     trigger: recurring_validation_failure AND agent_has_edited
   when_note: The same targeted validation command is re-run and keeps failing across many turns while edits touch both that
@@ -583,7 +583,7 @@ items:
   check: Does the final diff cover every site the requirement implicates that the agent's own reads or searches surfaced —
     repeated call sites of the pattern being changed, and both ends of a producer/consumer contract the change alters — or
     did it change only the site tied to the agent's initial hypothesis?
-  deliver: critic
+  deliver: inject
   dimension: requirement_coverage
   id: requirement_coverage_1
   when:
@@ -596,7 +596,7 @@ items:
   check: For a requirement to reduce a named cost, is there evidence — measurement or a code-level mechanism argument — that
     the change eliminates the cost the requirement names, rather than merely editing the named area with a locally plausible
     alternative that leaves (or increases) the wasteful work?
-  deliver: critic
+  deliver: inject
   dimension: requirement_coverage
   id: requirement_coverage_2
   when:
@@ -610,7 +610,7 @@ items:
     or its own summary), does the final diff contain a reachable implementation of that clause — not merely the clause's vocabulary
     in code, but a path whose enabling state can actually be produced — and does at least one of the agent's validations exercise
     that path?
-  deliver: critic
+  deliver: inject
   dimension: requirement_coverage
   id: requirement_coverage_3
   when:
@@ -623,7 +623,7 @@ items:
   check: Is the agent's coverage claim backed only by self-authored tests that mirror its own change — with no independent
     anchor (pre-existing test, reference behavior, task-given example) for the chosen interpretation, and no audit of requirement
     instances the change did not touch — and did the agent stop as soon as those tests went green?
-  deliver: critic
+  deliver: inject
   dimension: requirement_coverage
   id: requirement_coverage_4
   when:
@@ -636,7 +636,7 @@ items:
   check: When the task's symptom or requirement involves recurrence across restarts, fresh instances, or sharing beyond one
     object's lifetime, does the change keep the relevant state at a scope that outlives a single instance, and is there a
     validation that starts a fresh instance against the pre-existing condition?
-  deliver: critic
+  deliver: inject
   dimension: requirement_coverage
   id: requirement_coverage_5
   when:
@@ -655,5 +655,5 @@ items:
   when:
     checkpoint: stop
     signal: always
-    trigger: always
+    trigger: agent_has_edited AND completion_claim
   when_note: Derived signal, calibrated on the 2026-07-23 batch (posthog 31/2, firezone 56/4, harbor 18/3).

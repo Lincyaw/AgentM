@@ -119,13 +119,14 @@ def annotate_turn(
     assistant_text: str,
     tool_calls: Sequence[Mapping[str, object]],
     task_text: str = "",
+    model_name: str | None = None,
 ) -> TurnAnnotation | None:
     """Annotate one turn. Uses direct LLM call, no child session."""
     system = _get_tagger_prompt()
     prompt = _format_turn_content(
         turn_index, assistant_text, tool_calls, task_text=task_text
     )
-    result = call_llm(system, prompt, max_tokens=200)
+    result = call_llm(system, prompt, max_tokens=200, model_name=model_name)
     if result is None:
         return None
     return _parse_tagger_result(result, session_id=session_id, turn_index=turn_index)
