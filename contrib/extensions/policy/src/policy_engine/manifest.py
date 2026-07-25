@@ -38,7 +38,7 @@ def load_manifest(name: str) -> AgentManifest:
     if not path.is_file():
         raise FileNotFoundError(f"agent manifest not found: {path}")
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, Mapping):
+    if not isinstance(raw, Mapping):  # code-health: ignore[AM025] -- YAML boundary
         raise ValueError(f"agent manifest is not a mapping: {path}")
     system = str(raw.get("system", "")).strip()
     if not system:
