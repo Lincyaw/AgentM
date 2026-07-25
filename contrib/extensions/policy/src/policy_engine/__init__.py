@@ -39,6 +39,7 @@ from agentm.core.abi import (
     BashOperations,
     FunctionTool,
     JsonValue,
+    ProviderConfig,
     TextContent,
     ToolResult,
     ToolTerminate,
@@ -53,7 +54,12 @@ from agentm.core.abi.events import (
 from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
-from .deliver import build_injection
+from .deliver import (
+    AcceptanceVerdict,
+    build_acceptance_prompt,
+    build_injection,
+    review_submission,
+)
 from .ifg.repository_index import RepositoryIndex, RepositoryRefreshPlan
 from .paths import resolve_policy_path
 from .pg_query import PgQuerySource
@@ -61,6 +67,7 @@ from .symbol_sync import extract_symbols_for_paths, write_symbols
 from .tagger import (
     TaggerConversation,
     _content_text,
+    render_turn,
     write_annotation,
 )
 from .triggers import TriggerEngine, load_items, render_check, render_stop_check
@@ -76,11 +83,16 @@ class PolicyEngineConfig(BaseModel):
     # profile key, so a wrong value disables interventions rather than
     # silently falling back.
     provider: str = ""
+    # Acceptance review at submit time: "off", or "on" to read the run against
+    # the task before the session is allowed to end.
     critic: str = "off"
     # Mid-work checks, injected while the agent is working.
     max_injections: int = 5
     # Checks raised when the agent wraps up. Past the cap it is left to finish.
     max_stop_checks: int = 3
+    # How many times acceptance may send the agent back. The session must
+    # always be able to end, and a reviewer that never yields is a stuck loop.
+    max_review_rounds: int = 2
 
 
 MANIFEST = ExtensionManifest(
@@ -134,6 +146,10 @@ class _Runtime:
     _stop_checks: int = 0
     _submitted: bool = False
     _tagger: TaggerConversation | None = None
+    _provider: ProviderConfig | None = None
+    _events: list[str] = field(default_factory=list)
+    _concerns: list[str] = field(default_factory=list)
+    _review_rounds: int = 0
 
     def install(self) -> None:
         self.api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
@@ -167,6 +183,7 @@ class _Runtime:
                 self.config.provider or "<active>",
             )
             return
+        self._provider = provider
         self._tagger = TaggerConversation(
             session_id=self.session_id,
             stream_fn=provider.stream_fn,
@@ -201,22 +218,59 @@ class _Runtime:
 
     # -- submit ----------------------------------------------------------------
 
-    async def _submit(self, args: dict[str, JsonValue]) -> ToolTerminate:
-        """The way out of a process check, once the agent judges it answered.
+    async def _submit(self, args: dict[str, JsonValue]) -> ToolResult | ToolTerminate:
+        """The agent's way out, and the moment acceptance runs.
 
-        It never refuses. A check that keeps coming back is the loop this design
-        replaces: the agent needs one action that reliably finishes, or it
-        cannot finish at all. Whether the check was actually met is a question
-        for the trajectory afterwards, not for a gate the agent cannot pass.
+        With the critic off this never refuses: a check the agent can only
+        answer in words is not a gate, and the earlier refusing version was
+        answered with wording rather than work. With it on, the refusal is
+        backed by a reading of the run against the task, so "it does not apply"
+        is something that can be checked rather than merely asserted.
         """
+        verdict = await self._review(args)
+        if verdict is not None:
+            self._review_rounds += 1
+            logger.info(
+                "policy_engine: submission sent back ({}/{}): {}",
+                self._review_rounds,
+                self.config.max_review_rounds,
+                verdict.finding[:120],
+            )
+            return ToolResult(
+                content=[TextContent(type="text", text=verdict.as_message())],
+                is_error=True,
+            )
+
         self._submitted = True
         logger.info(
-            "policy_engine: submitted after {} stop check(s)", self._stop_checks
+            "policy_engine: submitted after {} stop check(s), {} review round(s)",
+            self._stop_checks,
+            self._review_rounds,
         )
         return ToolTerminate(
             result=ToolResult(content=[TextContent(type="text", text="Submitted.")]),
             reason="policy:submitted",
         )
+
+    async def _review(self, args: dict[str, JsonValue]) -> AcceptanceVerdict | None:
+        """The acceptance verdict when it rejects, else None."""
+        if self.config.critic != "on" or self._provider is None:
+            return None
+        if self._review_rounds >= self.config.max_review_rounds:
+            return None
+        summary = args.get("summary")
+        prompt = build_acceptance_prompt(
+            task=self._first_user_message(),
+            summary=summary if isinstance(summary, str) else "",
+            events=self._events,
+            concerns=self._concerns,
+        )
+        verdict = await review_submission(
+            prompt,
+            stream_fn=self._provider.stream_fn,
+            model=self._provider.model,
+        )
+        return None if verdict.accepted else verdict
 
     # -- observe ---------------------------------------------------------------
 
@@ -276,6 +330,7 @@ class _Runtime:
             if item is None:
                 return None
             self._stop_checks += 1
+            self._concerns.append(item.check)
             logger.info(
                 "policy_engine: stop check {} ({}/{})",
                 item.item_id,
@@ -293,6 +348,7 @@ class _Runtime:
             return None
 
         self.injections += 1
+        self._concerns.append(item.check)
         logger.info(
             "policy_engine: injecting {} ({}/{})",
             item.item_id,
@@ -323,6 +379,7 @@ class _Runtime:
             self._task_classified = True
             task_text = self._first_user_message()
 
+        self._events.append(render_turn(self.turn, assistant_text, tool_calls))
         annotation = await self._tagger.annotate(
             turn_index=self.turn,
             assistant_text=assistant_text,

@@ -64,43 +64,39 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
     return items
 
 
-# One item per message, deliberately. Surfacing several at once lets the agent
+# These arrive as user messages, so they should sound like the person who asked
+# for the work — someone raising one doubt, not a form to fill in. Headed,
+# bulleted audit blocks got answered in kind: a written verdict per point, and
+# no change to the work. One doubt, plainly put, is harder to answer in prose
+# than a rubric is.
+#
+# One item per message, deliberately: surfacing several at once lets the agent
 # absorb the relevant one among plausible neighbours and move on.
 
-# Mid-work check, delivered as a user message while the agent is still working.
-# It must not read as a request for a verdict — a bare question gets answered in
-# prose and the work never changes — so it ends by naming the two moves that
-# count, and both of them are actions.
-_CHECK_TAIL = """\
-If this holds, keep going. If it does not, fix it now — make the edit or run
-the check. When the work is complete and verified, call the `submit` tool.
-Do not reply to this note with an audit."""
+_CHECK_HEAD = "One thing while you're in this —"
 
-# Raised when the agent wraps up. The work is not released yet, so the check is
-# still actionable — and the way out is one tool call, stated here. Without a
-# stated exit the agent answers in prose, wraps up again, and draws the next
-# check; that loop is what this message exists to avoid.
-_STOP_HEAD = """\
-Before this is final — one process check.
+_CHECK_TAIL = "If you've already got that covered, carry on. If not, sort it out now."
 
-Your work has not been released or scored yet, so anything below is still
-fixable. Do not report a status such as pass, partial, or complete; those are
-not what this asks for."""
+_STOP_HEAD = "Hold on, before you call this done — I want to be sure about one thing."
 
+# The exit has to be named. Without one, a reply to a check is indistinguishable
+# from a fresh attempt to finish, so it draws the next check, and the next,
+# until the budget runs out: the agent cannot end the session, only outlast the
+# engine.
 _STOP_TAIL = """\
-If it does not hold, fix it now and verify the fix. If it already holds, or it
-does not apply to this task, call `submit` to finish and say why in the summary.
-Either way, close this out with `submit` — a written verdict on its own leaves
-the task unfinished.
+Nothing has been merged or scored yet, so if something is off it is still
+fixable. Take a look and fix it if it needs fixing. If you have already covered
+it, or it does not apply here, call `submit` and tell me why — either way close
+it out with `submit`, since a written answer on its own leaves the task open.
 
-If the fix would replace a result you already produced, replace it only by
-demonstrating its own failure — run the check that indicts it and show that
-check running. If you cannot construct a failing check, keep the result."""
+One thing though: if fixing it means replacing something you already produced,
+show me the old result actually fails — run the check that indicts it. If you
+cannot make it fail, keep it."""
 
 
 def render_check(item: ChecklistItem) -> str:
     """Mid-work check, injected while the agent is still working."""
-    lines = [item.check]
+    lines = [_CHECK_HEAD, "", item.check]
     if item.advice:
         lines.append(item.advice)
     lines += ["", _CHECK_TAIL]
