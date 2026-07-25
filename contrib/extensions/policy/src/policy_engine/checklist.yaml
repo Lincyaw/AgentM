@@ -63,7 +63,7 @@ items:
   id: belief_consistency_5
   when:
     checkpoint: continuous
-    trigger: failure_unrelated_claim OR validation_failure
+    trigger: failure_unrelated_claim
   when_note: Agent text or the final summary downgrades or dismisses red results — including as a footnote alongside a completion
     claim — rather than fixing or gating on them.
 - advice: ''
@@ -126,7 +126,7 @@ items:
   id: diagnosis_validity_4
   when:
     checkpoint: continuous
-    trigger: test_file_edited AND NOT pre_existing_test_pins_behavior
+    trigger: test_file_edited AND completion_claim AND NOT pre_existing_test_pins_behavior
   when_note: Agent authors new regression tests for its own change and no pre-existing test pins the disputed behavior.
 - advice: ''
   check: When a test suite fails after the agent's edits, is a 'pre-existing / flaky / unrelated' attribution made only after
@@ -190,7 +190,7 @@ items:
   id: narrow_only_validation
   when:
     checkpoint: continuous
-    trigger: test_commands_narrowed OR change_affects_external_consumers
+    trigger: test_commands_narrowed AND agent_has_edited
   when_note: All executed test commands carry narrowing selectors, or the change touches code whose consumers (per the agent's
     own call-chain exploration) live outside the edited scope.
 - advice: Run the pre-existing test suite for the modules you touched at scope level before concluding, and resolve anything
@@ -390,65 +390,6 @@ items:
     trigger: task_lacks_clear_acceptance
   when_note: Task describes a symptom or goal without an acceptance criterion that fixes structure, direction, or mechanism
     (overlap/containment rendering bugs, vague performance symptoms, 'X instead of Y' descriptions where Y is unnamed).
-- advice: ''
-  check: Did the validation gate actually execute behavioral checks against the changed state? Zero executed checks, an empty
-    per-check map, or failure entries that are collection/import errors rather than assertion outcomes mean no measurement
-    occurred — and an all-pass value over an empty check set is vacuous, not a pass.
-  deliver: offline
-  dimension: label_validity
-  id: label_validity_1
-  when:
-    checkpoint: stop
-  when_note: The label derives from an automated validation gate and per-check results are present in the trial record.
-- advice: ''
-  check: 'Is a failure label a faithful, deterministic measurement of the agent''s change? Confirm the gate''s failing checks
-    reproduce agent-observable reality: same command and exit status the agent itself ran, assertion messages matching actual
-    properties of the change, failures concerning behaviors the change touches. Invalidate or downweight when the trajectory
-    shows non-determinism or environment linkage: disjoint failing sets across identical reruns, checks passing in isolation
-    but failing in the full run, the same failure reproducing after the agent''s edits are reverted, or failing assertions
-    located in files the agent never edited.'
-  deliver: offline
-  dimension: label_validity
-  id: label_validity_2
-  when:
-    checkpoint: stop
-  when_note: The recorded label is a failure from an automated validation gate and the trajectory contains the agent's own
-    validation runs.
-- advice: ''
-  check: Is the change artifact that label components were computed over attributable to the agent alone? If the captured
-    change contains entries that predate the agent's first action or files the agent never touched, any score derived from
-    that artifact (classifications, size metrics, judges reading the captured change) is measuring contaminated input.
-  deliver: offline
-  dimension: label_validity
-  id: label_validity_3
-  when:
-    checkpoint: stop
-  when_note: Any label component is computed from a captured change artifact (extracted diff/patch) rather than from executed
-    behavior; or the captured change lists files absent from the trajectory.
-- advice: ''
-  check: 'Is the recorded label an actual measurement, or an absent value the pipeline silently persisted? If the label is
-    null/empty and the trial record carries an exception raised while producing or persisting the label, treat the label as
-    an instrument artifact: invalidate it, quarantine the trial from any consumer that would read null as failure (or as zero),
-    and reconstruct the residual outcome only from scoring channels that demonstrably executed.'
-  deliver: offline
-  dimension: label_validity
-  id: label_validity_4
-  when:
-    checkpoint: stop
-  when_note: The recorded label is null/missing/empty, or the trial record's exception field is non-empty. Computable from
-    the record header alone; evaluate on every scored trial.
-- advice: ''
-  check: 'Which scoring channels fed the recorded label, and did each of them actually execute a judgment? Treat any channel
-    whose status is skipped/failed, or whose output is a constant fallback (the same default rationale repeated across all
-    entries), as absence of judgment: the label is valid only if every channel the reward composition draws on executed, and
-    every degraded channel is provably excluded from the label rather than silently aggregated into it or cited as a score.'
-  deliver: offline
-  dimension: label_validity
-  id: label_validity_5
-  when:
-    checkpoint: stop
-  when_note: The trial record contains outputs from more than one scoring channel (a correctness gate plus auxiliary judges/classifiers),
-    or any channel status field is not 'ok'.
 - advice: ''
   check: After the agent has attributed a failing validation to a cause its change cannot affect, does it re-run the same
     command (or re-analyze the same output with a different tool) and re-derive the identical conclusion, instead of proceeding

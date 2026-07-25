@@ -22,8 +22,8 @@ from loguru import logger
 
 @dataclass(slots=True, frozen=True)
 class Gate:
-    trigger: str  # predicate expression over tagger annotations
-    checkpoint: str  # "continuous" | "stop"
+    trigger: str
+    checkpoint: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -32,14 +32,8 @@ class ChecklistItem:
     dimension: str
     check: str
     advice: str
-    deliver: str  # "inject" | "offline"
+    deliver: str
     gate: Gate
-
-
-@dataclass(slots=True, frozen=True)
-class Firing:
-    item: ChecklistItem
-    facts: tuple[str, ...]
 
 
 def load_items(path: Path) -> dict[str, ChecklistItem]:
@@ -70,15 +64,22 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
     return items
 
 
-def render_message(firing: Firing) -> str:
-    lines = [f"Process check ({firing.item.dimension}):"]
-    lines.append(firing.item.check)
-    if firing.facts:
-        lines.append("")
-        lines.append("Observed in this session:")
-        lines.extend(f"- {fact}" for fact in firing.facts)
-    if firing.item.advice:
-        lines.append(firing.item.advice)
+def render_message(items: list[ChecklistItem]) -> str:
+    """Render a batch of checklist items into one inject message."""
+    if len(items) == 1:
+        item = items[0]
+        lines = [f"Process check ({item.dimension}):"]
+        lines.append(item.check)
+        if item.advice:
+            lines.append(item.advice)
+        return "\n".join(lines)
+
+    lines = [
+        "Process check from the validation monitor — "
+        "audit your process against each point below:"
+    ]
+    for i, item in enumerate(items, 1):
+        lines.append(f"\n{i}. ({item.dimension}) {item.check}")
     return "\n".join(lines)
 
 
@@ -88,7 +89,6 @@ _TOKEN_RE = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*|AND|OR|NOT|\(|\)")
 
 
 def evaluate_trigger(expr: str, active_tags: frozenset[str]) -> bool:
-    """Evaluate a boolean predicate expression against active tags."""
     if expr == "always" or not expr.strip():
         return True
     tokens = _TOKEN_RE.findall(expr)
@@ -151,12 +151,15 @@ class TriggerEngine:
     items: dict[str, ChecklistItem]
     _fired: set[str] = field(default_factory=set)
 
-    def evaluate_inject(
+    def collect_triggered(
         self,
         *,
         stopping: bool,
         active_tags: frozenset[str] = frozenset(),
-    ) -> Firing | None:
+        max_items: int = 3,
+    ) -> list[ChecklistItem]:
+        """Collect all triggered items up to max_items. Batch mode."""
+        triggered: list[ChecklistItem] = []
         for item in self.items.values():
             if item.deliver != "inject" or item.item_id in self._fired:
                 continue
@@ -165,9 +168,7 @@ class TriggerEngine:
             if not evaluate_trigger(item.gate.trigger, active_tags):
                 continue
             self._fired.add(item.item_id)
-            matched = sorted(tag for tag in active_tags if tag in item.gate.trigger)
-            return Firing(
-                item=item,
-                facts=tuple(f"tag: {t}" for t in matched[:3]),
-            )
-        return None
+            triggered.append(item)
+            if len(triggered) >= max_items:
+                break
+        return triggered

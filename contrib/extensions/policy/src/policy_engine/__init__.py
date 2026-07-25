@@ -184,16 +184,19 @@ class _Runtime:
         stopping = isinstance(event.observation.default_action, Stop)
         active = frozenset(self._active_tags)
 
-        firing = self.triggers.evaluate_inject(stopping=stopping, active_tags=active)
-        if firing is not None:
+        triggered = self.triggers.collect_triggered(
+            stopping=stopping, active_tags=active, max_items=3
+        )
+        if triggered:
             self.injections += 1
+            ids = [item.item_id for item in triggered]
             logger.info(
                 "policy_engine: injecting {} ({}/{})",
-                firing.item.item_id,
+                ids,
                 self.injections,
                 self.config.max_injections,
             )
-            return build_injection(render_message(firing))
+            return build_injection(render_message(triggered))
 
         return None
 
