@@ -26,7 +26,6 @@ instead of re-opening a second path to the model.
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -38,14 +37,18 @@ from loguru import logger
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
+    FunctionTool,
+    JsonValue,
     MessageEnd,
     Model,
     StreamFn,
+    ToolCallBlock,
+    ToolResult,
     text_message,
+    tool_result,
 )
 
 from .compile import generate_tagger_prompt, load_vocabulary
-from .jsonio import json_object
 from .pg_query import PgQuerySource
 
 _VOCABULARY_PATH = Path(__file__).parent / "vocabulary.yaml"
@@ -53,6 +56,8 @@ _VOCABULARY_PATH = Path(__file__).parent / "vocabulary.yaml"
 _VALID_PHASES = frozenset(
     {"exploring", "diagnosing", "implementing", "validating", "concluding"}
 )
+
+_RECORD_TOOL = "record"
 
 # Bodies are dropped, but a command line is itself the evidence for several
 # predicates ("does every test command carry a narrowing selector"), so it is
@@ -92,6 +97,11 @@ def _tagger_system_prompt(vocab_path: str, mtime: float) -> str:
     return generate_tagger_prompt(vocab)
 
 
+def _vocab_names() -> tuple[str, ...]:
+    """The tag names the schema will accept — the vocabulary, verbatim."""
+    return tuple(sorted(load_vocabulary(_VOCABULARY_PATH)))
+
+
 def _get_tagger_prompt() -> str:
     if not _VOCABULARY_PATH.is_file():
         return _fallback_tagger_prompt()
@@ -106,6 +116,38 @@ def _fallback_tagger_prompt() -> str:
         "Output JSON with:\n"
         '- "phase": one of exploring/diagnosing/implementing/validating/concluding\n'
         '- "tags": empty array (no vocabulary loaded yet)\n'
+    )
+
+
+def _record_tool(vocab_names: Sequence[str]) -> FunctionTool:
+    """The tagger answers by calling this, not by writing JSON.
+
+    Free text cost 19% of annotations on one run: a model with something to say
+    puts it before the object, and a strict parse then drops the whole reply —
+    disproportionately on the steps worth reading, which are the ones it had
+    something to say about. A tool call carries parsed arguments, so there is
+    no prose to get past. It is never executed; only the requested arguments
+    are read.
+    """
+
+    async def record(args: dict[str, JsonValue]) -> ToolResult:
+        raise NotImplementedError("the tagger reads arguments, never executes")
+
+    return FunctionTool(
+        name=_RECORD_TOOL,
+        description="Record what this batch of steps shows.",
+        parameters={  # code-health: ignore[AM011]
+            "type": "object",
+            "properties": {
+                "phase": {"type": "string", "enum": sorted(_VALID_PHASES)},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(vocab_names)},
+                },
+            },
+            "required": ["phase", "tags"],
+        },
+        fn=record,
     )
 
 
@@ -188,6 +230,7 @@ class TaggerConversation:
     model: Model
     system: str = field(default_factory=_get_tagger_prompt)
     messages: list[AgentMessage] = field(default_factory=list)
+    tool: FunctionTool = field(default_factory=lambda: _record_tool(_vocab_names()))
 
     async def annotate(
         self, rendered_turns: Sequence[str], *, turn_index: int
@@ -200,25 +243,29 @@ class TaggerConversation:
         )
 
         reply = await self._complete()
-        if reply is None:
+        call = _record_call(reply) if reply is not None else None
+        if reply is None or call is None:
             # Drop the unanswered batch so the history stays a clean alternation.
             self.messages.pop()
+            if reply is not None:
+                logger.warning("tagger: reply did not call {}", _RECORD_TOOL)
             return None
 
+        # Keep the call and a result for it: an assistant tool call left
+        # unanswered is not a shape every provider will accept on the next
+        # request, and the whole point of this conversation is that it grows.
         self.messages.append(reply)
-        annotation = _parse_tagger_result(
-            _content_text(reply, 2000),
-            session_id=self.session_id,
-            turn_index=turn_index,
+        self.messages.append(tool_result(call.id, "recorded", timestamp=time.time()))
+        return _annotation_from(
+            call.arguments, session_id=self.session_id, turn_index=turn_index
         )
-        return annotation
 
     async def _complete(self) -> AssistantMessage | None:
         try:
             stream = self.stream_fn(
                 messages=list(self.messages),
                 model=self.model,
-                tools=[],
+                tools=[self.tool],
                 system=self.system,
             )
             async for event in stream:
@@ -231,26 +278,30 @@ class TaggerConversation:
         return None
 
 
-def _parse_tagger_result(
-    text: str, *, session_id: str, turn_index: int
-) -> TurnAnnotation | None:
-    if not text:
-        return None
-    clean = json_object(text)
-    try:
-        parsed = json.loads(clean)
-    except json.JSONDecodeError:
-        logger.warning("tagger: invalid JSON response")
-        return None
-    if not isinstance(parsed, Mapping):
-        return None
-    phase = parsed.get("phase", "exploring")
+def _record_call(message: AssistantMessage) -> ToolCallBlock | None:
+    for block in message.content:
+        if isinstance(block, ToolCallBlock) and block.name == _RECORD_TOOL:
+            return block
+    return None
+
+
+def _annotation_from(
+    arguments: Mapping[str, object], *, session_id: str, turn_index: int
+) -> TurnAnnotation:
+    phase = arguments.get("phase")
     if phase not in _VALID_PHASES:
         phase = "exploring"
-    raw_tags = parsed.get("tags", [])
-    tags = tuple(tag for tag in raw_tags if isinstance(tag, str))
+    raw_tags = arguments.get("tags")
+    tags = (
+        tuple(t for t in raw_tags if isinstance(t, str))
+        if isinstance(raw_tags, (list, tuple))
+        else ()
+    )
     return TurnAnnotation(
-        session_id=session_id, turn_index=turn_index, phase=phase, tags=tags
+        session_id=session_id,
+        turn_index=turn_index,
+        phase=str(phase),
+        tags=tags,
     )
 
 

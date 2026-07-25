@@ -147,7 +147,7 @@ edited with a line count, the commands run with their exit status, and whatever
 the agent said. File bodies, diffs, and command output are not shown — they do
 not decide any tag below. The first message also carries the task description.
 
-Reply to each message with a JSON object of two fields.
+Answer each message by calling the `record` tool, with two arguments.
 
 **phase** (exactly one, for where the agent stands at the end of these steps):
 - "exploring" — reading files, searching, running commands to
@@ -159,7 +159,7 @@ Reply to each message with a JSON object of two fields.
   to verify its changes work
 - "concluding" — declaring done, summarizing what was changed
 
-**tags** (array of strings, may be empty):
+**tags** (may be empty):
 Report only what became true *in these steps* and that you have not already
 reported. A tag you emitted earlier stays in force — never repeat it. Many
 messages warrant no tag at all; an empty array is a normal answer.
@@ -170,13 +170,12 @@ Judge those against every step you have seen, and emit the tag as soon as it
 first holds. If the run so far leaves one of them uncertain, leave it out; you
 will see more steps.
 
-Tags must be from this list:
+The tag names, with what each means:
 """
 
 _TAGGER_FOOTER = """
-Do not invent tags outside this list, and do not restate tags you have already
-emitted. Emit a tag only on clear evidence: when the run so far does not settle
-it, omit it.
+Do not restate tags you have already emitted. Emit a tag only on clear
+evidence: when the run so far does not settle it, omit it.
 """
 
 
