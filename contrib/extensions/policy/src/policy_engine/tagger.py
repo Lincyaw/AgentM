@@ -171,9 +171,16 @@ def render_turn(
 
 @dataclass(slots=True)
 class TaggerConversation:
-    """A model conversation that grows by one exchange per agent turn.
+    """A model conversation that grows by one exchange per batch of turns.
 
     Only the tail moves, so the cached prefix keeps growing with the session.
+
+    Batching costs nothing that is used. The tags feed a session-cumulative
+    set, and a trigger reads the set, never which turn a tag arrived on — so
+    per-turn resolution buys resolution nobody reads, at one model call per
+    turn. Several turns per call is the same signal an order of magnitude
+    cheaper. The recorded turn_index is the last turn in the batch, making an
+    annotation a statement of what holds *as of* that turn.
     """
 
     session_id: str
@@ -184,22 +191,18 @@ class TaggerConversation:
     seen_tags: set[str] = field(default_factory=set)
 
     async def annotate(
-        self,
-        *,
-        turn_index: int,
-        assistant_text: str,
-        tool_calls: Sequence[Mapping[str, object]],
-        task_text: str = "",
+        self, rendered_turns: Sequence[str], *, turn_index: int
     ) -> TurnAnnotation | None:
-        """Append one turn, ask what became true, keep the reply in history."""
-        rendered = render_turn(
-            turn_index, assistant_text, tool_calls, task_text=task_text
+        """Append a batch of turns, ask what became true, keep the reply."""
+        if not rendered_turns:
+            return None
+        self.messages.append(
+            text_message("\n\n".join(rendered_turns), timestamp=time.time())
         )
-        self.messages.append(text_message(rendered, timestamp=time.time()))
 
         reply = await self._complete()
         if reply is None:
-            # Drop the unanswered turn so the history stays a clean alternation.
+            # Drop the unanswered batch so the history stays a clean alternation.
             self.messages.pop()
             return None
 

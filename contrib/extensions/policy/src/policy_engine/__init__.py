@@ -47,6 +47,7 @@ from agentm.core.abi import (
 from agentm.core.abi.events import (
     DecideEvent,
     LoopAction,
+    RunEndEvent,
     Stop,
     ToolResultEvent,
     TurnCommittedEvent,
@@ -82,6 +83,10 @@ class PolicyEngineConfig(BaseModel):
     # Acceptance review at submit time: "off", or "on" to read the run against
     # the task before the session is allowed to end.
     critic: str = "off"
+    # Turns per tagger call. The tags feed a cumulative set that triggers read
+    # as a whole, so per-turn resolution buys nothing and costs one model call
+    # per turn. The buffer is flushed early whenever a decision needs the tags.
+    tagger_interval: int = 5
     # Mid-work checks, injected while the agent is working.
     max_injections: int = 5
     # Checks raised when the agent wraps up. Past the cap it is left to finish.
@@ -142,6 +147,7 @@ class _Runtime:
     _stop_checks: int = 0
     _submitted: bool = False
     _tagger: TaggerConversation | None = None
+    _pending_turns: list[str] = field(default_factory=list)
     _provider: ProviderConfig | None = None
     _reviewer: AcceptanceReviewer | None = None
     _events: list[str] = field(default_factory=list)
@@ -151,6 +157,7 @@ class _Runtime:
     def install(self) -> None:
         self.api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
         self.api.on(TurnCommittedEvent.CHANNEL, self._on_turn_committed)
+        self.api.on(RunEndEvent.CHANNEL, self._on_run_end)
 
         bash = self.api.services.get(BASH_OPERATIONS_SERVICE)
         if isinstance(bash, BashOperations):  # code-health: ignore[AM025]
@@ -227,6 +234,7 @@ class _Runtime:
         backed by a reading of the run against the task, so "it does not apply"
         is something that can be checked rather than merely asserted.
         """
+        await self._flush_tagger()
         verdict = await self._review(args)
         if verdict is not None:
             self._review_rounds += 1
@@ -305,15 +313,30 @@ class _Runtime:
         self.turn += 1
         self._current_turn_calls = []
 
+    async def _on_run_end(self, event: RunEndEvent) -> None:
+        """Tag whatever is still buffered when the run stops.
+
+        Batching means turns can be in hand but unread when the session ends —
+        including the last stretch before submit, which is where a session
+        tends to be most worth reading. Nothing acts on these tags, but they
+        are what the offline analysis and the next checklist revision see.
+        """
+        await self._flush_tagger()
+
     # -- detect + intervene ----------------------------------------------------
 
     async def _on_decide(self, event: DecideEvent) -> LoopAction | None:
         await self._flush_symbol_refreshes()
-        await self._run_tagger(event)
+        self._record_turn(event)
 
         if self.triggers is None:
             return None
         stopping = isinstance(event.observation.default_action, Stop)
+
+        # Wrapping up is a decision point, so the buffer is flushed there
+        # regardless of how few turns it holds.
+        if stopping or len(self._pending_turns) >= self.config.tagger_interval:
+            await self._flush_tagger()
 
         # Wrapping up in prose is how this agent finishes; that moment is the
         # stop checkpoint. Hand it one check and name the way out. The old
@@ -355,10 +378,8 @@ class _Runtime:
         )
         return build_injection(render_check(item))
 
-    async def _run_tagger(self, event: DecideEvent) -> None:
-        if self._pg is None or self._tagger is None:
-            return
-
+    def _record_turn(self, event: DecideEvent) -> None:
+        """Buffer this turn for the tagger, and keep it for the reviewer."""
         assistant_text = _content_text(event.observation.assistant_message, 3000)
         tool_calls = [
             {
@@ -377,22 +398,36 @@ class _Runtime:
             self._task_classified = True
             task_text = self._first_user_message()
 
-        self._events.append(render_turn(self.turn, assistant_text, tool_calls))
-        annotation = await self._tagger.annotate(
-            turn_index=self.turn,
-            assistant_text=assistant_text,
-            tool_calls=tool_calls,
-            task_text=task_text,
+        rendered = render_turn(
+            self.turn, assistant_text, tool_calls, task_text=task_text
         )
-        if annotation is not None:
-            write_annotation(self._pg, annotation)
-            self._active_tags.update(annotation.tags)
-            logger.debug(
-                "policy_engine: turn {} → phase={} tags={}",
-                self.turn,
-                annotation.phase,
-                annotation.tags,
-            )
+        self._events.append(rendered)
+        self._pending_turns.append(rendered)
+
+    async def _flush_tagger(self) -> None:
+        """Tag the buffered turns as one batch.
+
+        Called on the interval, and unconditionally before anything reads the
+        tag set — a check decided on stale tags is a check decided on the wrong
+        session.
+        """
+        if self._pg is None or self._tagger is None or not self._pending_turns:
+            return
+        batch = list(self._pending_turns)
+        self._pending_turns.clear()
+        annotation = await self._tagger.annotate(batch, turn_index=self.turn)
+        if annotation is None:
+            return
+        write_annotation(self._pg, annotation)
+        new_tags = set(annotation.tags) - self._active_tags
+        self._active_tags.update(annotation.tags)
+        logger.debug(
+            "policy_engine: turns ..{} ({} batched) → phase={} new tags={}",
+            self.turn,
+            len(batch),
+            annotation.phase,
+            sorted(new_tags),
+        )
 
     def _first_user_message(self) -> str:
         messages = self.api.get_messages()

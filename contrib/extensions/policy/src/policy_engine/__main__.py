@@ -264,6 +264,7 @@ def cmd_tag(
     schema: str = SCHEMA_OPT,
     model: str | None = MODEL_OPT,
     force: bool = typer.Option(False, "--force", help="re-tag already tagged sessions"),
+    interval: int = typer.Option(5, "--interval", help="turns per tagger call"),
 ) -> None:
     """Replay recorded sessions through the tagger and write annotations.
 
@@ -273,7 +274,7 @@ def cmd_tag(
     """
     import asyncio  # noqa: PLC0415
 
-    asyncio.run(_tag_sessions(dsn, schema, model, force))
+    asyncio.run(_tag_sessions(dsn, schema, model, force, interval))
 
 
 async def _build_provider(model: str | None) -> ProviderConfig:
@@ -301,8 +302,14 @@ async def _build_provider(model: str | None) -> ProviderConfig:
     return provider
 
 
-async def _tag_sessions(dsn: str, schema: str, model: str | None, force: bool) -> None:
-    from .tagger import TaggerConversation, write_annotation  # noqa: PLC0415
+async def _tag_sessions(
+    dsn: str, schema: str, model: str | None, force: bool, interval: int
+) -> None:
+    from .tagger import (  # noqa: PLC0415
+        TaggerConversation,
+        render_turn,
+        write_annotation,
+    )
 
     provider = await _build_provider(model)
     print(f"Provider: {provider.name} ({provider.model.id})")
@@ -331,22 +338,34 @@ async def _tag_sessions(dsn: str, schema: str, model: str | None, force: bool) -
         )
 
         tagged = 0
+        batch: list[str] = []
         for turn_index, turn_json in turns:
             assistant_text, tool_calls, task_text = _turn_for_tagger(turn_json)
             if not assistant_text and not tool_calls:
                 continue
-            annotation = await conversation.annotate(
-                turn_index=turn_index,
-                assistant_text=assistant_text,
-                tool_calls=tool_calls,
-                task_text=task_text if turn_index == 0 else "",
+            batch.append(
+                render_turn(
+                    turn_index,
+                    assistant_text,
+                    tool_calls,
+                    task_text=task_text if turn_index == 0 else "",
+                )
             )
+            if len(batch) < interval:
+                continue
+            annotation = await conversation.annotate(batch, turn_index=turn_index)
+            batch = []
+            if annotation is not None:
+                write_annotation(source, annotation)
+                tagged += 1
+        if batch:
+            annotation = await conversation.annotate(batch, turn_index=turns[-1][0])
             if annotation is not None:
                 write_annotation(source, annotation)
                 tagged += 1
 
         print(
-            f"  {sid}: tagged {tagged}/{len(turns)} turns, "
+            f"  {sid}: {tagged} batch(es) over {len(turns)} turns, "
             f"{len(conversation.seen_tags)} distinct tags"
         )
         source.close()

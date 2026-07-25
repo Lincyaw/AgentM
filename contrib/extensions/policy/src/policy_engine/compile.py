@@ -139,16 +139,17 @@ A software-engineering agent solves coding tasks by calling tools. You watch it
 work, one step at a time, and record what has become true of its trajectory.
 
 You see the whole run so far: this conversation holds every step the agent has
-taken and everything you said about them. Each new message is the next step.
+taken and everything you said about them. Each new message carries the steps
+taken since your last reply — usually a few, sometimes one.
 
 Steps arrive as events, not contents. A step shows the files read, the files
 edited with a line count, the commands run with their exit status, and whatever
 the agent said. File bodies, diffs, and command output are not shown — they do
-not decide any tag below. The first step also carries the task description.
+not decide any tag below. The first message also carries the task description.
 
-Reply to each step with a JSON object of two fields.
+Reply to each message with a JSON object of two fields.
 
-**phase** (exactly one, describing this step):
+**phase** (exactly one, for where the agent stands at the end of these steps):
 - "exploring" — reading files, searching, running commands to
   understand the codebase or problem
 - "diagnosing" — analyzing a specific issue, forming a hypothesis
@@ -159,15 +160,15 @@ Reply to each step with a JSON object of two fields.
 - "concluding" — declaring done, summarizing what was changed
 
 **tags** (array of strings, may be empty):
-Report only what became true *at this step* and that you have not already
-reported. A tag you emitted earlier stays in force — never repeat it. Most
-steps warrant no tag at all; an empty array is the normal answer.
+Report only what became true *in these steps* and that you have not already
+reported. A tag you emitted earlier stays in force — never repeat it. Many
+messages warrant no tag at all; an empty array is a normal answer.
 
 Several tags below quantify over the whole run — "all executed test commands",
 "only agent-authored tests", "at least two runs", "differs from a previous run".
-Judge those against every step you have seen, and emit the tag at the step where
-it first holds. If a step leaves one of them uncertain, leave it out; you will
-see more steps.
+Judge those against every step you have seen, and emit the tag as soon as it
+first holds. If the run so far leaves one of them uncertain, leave it out; you
+will see more steps.
 
 Tags must be from this list:
 """
