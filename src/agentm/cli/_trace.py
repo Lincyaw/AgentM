@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -145,6 +146,26 @@ class _WatchEvent(TypedDict):
 @dataclass(frozen=True, slots=True)
 class _TraceContext:
     query: TrajectoryQueryStore
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreOverride:
+    """A store named on the command line rather than resolved from config."""
+
+    dsn: str | None = None
+    schema: str | None = None
+
+    def env(self) -> dict[str, str] | None:
+        """The override as the environment the resolver already understands."""
+        if self.dsn is None and self.schema is None:
+            return None
+        env = dict(os.environ)
+        if self.dsn is not None:
+            env["AGENTM_TRAJECTORY_DSN"] = self.dsn
+            env.pop("AGENTM_TRAJECTORY_DIR", None)
+        if self.schema is not None:
+            env["AGENTM_TRAJECTORY_SCHEMA"] = self.schema
+        return env
 
 
 def _load_trace_snapshot(
@@ -362,8 +383,17 @@ def _trace_default(
     session: str | None = typer.Option(None, "--session", "-s"),
     fmt: str | None = typer.Option(None, "--output", "-o", help="json for ndjson dump"),
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream new content"),
+    dsn: str | None = typer.Option(
+        None,
+        "--dsn",
+        help="Postgres trajectory store to read instead of the configured one",
+    ),
+    schema: str | None = typer.Option(
+        None, "--schema", help="Schema within --dsn (or the configured DSN)"
+    ),
 ) -> None:
     """Open the interactive viewer for the latest session when no subcommand is given."""
+    ctx.obj = _StoreOverride(dsn=dsn, schema=schema)
     if ctx.invoked_subcommand is not None:
         return
     if follow and not sys.stdout.isatty():
@@ -386,10 +416,11 @@ def _get_query_store(ctx: typer.Context) -> TrajectoryQueryStore:
     state = ctx.obj
     if isinstance(state, _TraceContext):
         return state.query
-    if state is not None:
+    override = state if isinstance(state, _StoreOverride) else _StoreOverride()
+    if state is not None and not isinstance(state, _StoreOverride):
         raise TypeError("agentm trace received an unexpected command context")
 
-    resolved = resolve_trajectory_store()
+    resolved = resolve_trajectory_store(env=override.env())
     if resolved is not None:
         query = TrajectoryStoreQueryAdapter(resolved.store)
         ctx.obj = _TraceContext(query=query)

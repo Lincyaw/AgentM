@@ -27,7 +27,10 @@ _AGENTS_DIR = Path(__file__).parent / "agents"
 class AgentManifest:
     name: str
     system: str
-    max_turns: int
+    #: ``None`` leaves the child unbounded. A reviewer that runs out of turns
+    #: mid-investigation returns no verdict at all, which fails open — the
+    #: worst of both, paying for the work and discarding the answer.
+    max_turns: int | None
     tools: tuple[str, ...]
 
 
@@ -44,10 +47,11 @@ def load_manifest(name: str) -> AgentManifest:
     if not system:
         raise ValueError(f"agent manifest has no system prompt: {path}")
     tools = raw.get("tools") or ()
+    raw_turns = raw.get("max_turns")
     return AgentManifest(
         name=name,
         system=system,
-        max_turns=int(raw.get("max_turns", 1)),
+        max_turns=None if raw_turns is None else int(raw_turns),
         tools=tuple(str(t) for t in tools),
     )
 
