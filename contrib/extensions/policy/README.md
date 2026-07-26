@@ -8,12 +8,12 @@ patterns as queries over the trajectory, recommends relevant checklist
 items, and intervenes when those items are confirmed.
 
 ```
-① data plane      trajectory (PG) + repository symbol index → queryable facts
-② tagger          per-turn LLM annotation → phase + semantic predicates
-③ retrieval       predicate matching → candidate checklist items
-④ critic          LLM judgment → confirmed violations
-⑤ intervention    inject / critic / compact
-⑥ evolution       mine → compile → evaluate → select → diversify
+① data plane   trajectory (PG) + repository symbol index → queryable facts
+② tagger       side-car conversation → phase + semantic predicates
+③ retrieval    predicate matching → candidate checklist items
+④ delivery     one check, as a user message, while the work is still open
+⑤ acceptance   a reviewer with a shell, at submit — optional
+⑥ evolution    mine → compile → evaluate → select → diversify
 ```
 
 ## Data plane
@@ -62,33 +62,61 @@ data plane never encodes these gaps itself — signals do.
 
 ## Tagger
 
-The tagger is a **per-turn lightweight LLM call** that reads one step
-of the agent's work — its tool calls (with arguments and results),
-its reasoning text (if any), and the task description (on the first
-step) — and outputs structured annotations.
+A side-car conversation that grows by one exchange per batch of turns, running
+alongside the agent on the session's own provider.
+
+It was originally one stateless call per turn, seeing a single step. That made
+half the vocabulary unanswerable — predicates quantified over the session
+("*all* executed test commands narrow scope", "*only* agent-authored tests",
+"the same failure in *at least two* runs") cannot be decided from one step — so
+it stayed silent on the discriminating ones and re-emitted the obvious ones
+every turn. On one recorded session: 5 distinct tags, of which 3 checklist
+items lit and 0 continuous ones.
+
+### Shape
+
+The system prompt and every prior batch stay byte-identical at the head, which
+is what prompt caching rewards; only the tail moves. Each reply reports what
+became true *since the last one*, so a tag is stated once and stays in force.
+
+Steps arrive as **events, not contents**: files read, files edited with a line
+count, commands with their exit status, whatever the agent said. File bodies,
+diffs and stdout are what made the input large and decide no predicate. A turn
+costs tens of tokens, so the whole history is cheaper than the old per-turn
+call was.
+
+Turns are batched (`tagger_interval`, default 5). Per-turn resolution buys
+nothing: tags feed a session-cumulative set and triggers read the set as a
+whole, never which turn a tag arrived on. The buffer is flushed early wherever
+a decision needs the tags — when the agent wraps up, before an acceptance
+review, and at run end.
+
+Same session, three versions:
+
+| | model calls | parse failures | distinct tags | items lit (stop/continuous) |
+|---|---|---|---|---|
+| per-turn, stateless | 48 | ~13 | 5 | 3 / 0 |
+| per-turn, side-car | 48 | 0 | 18 | 10 / 6 |
+| batched by 5 | **10** | **0** | **15** | **9 / 7** |
 
 ### Output
 
-**Phase** (one per turn, mutually exclusive):
-exploring / diagnosing / implementing / validating / concluding.
+It answers by calling a `record` tool carrying **phase** (exploring /
+diagnosing / implementing / validating / concluding) and **tags**. Arguments
+arrive parsed, so there is no prose to get past — asking for JSON in free text
+lost 19% of annotations on one run, and lost them disproportionately on the
+turns where the agent had written the most, which are the turns worth reading.
+The tags enum is generated from `vocabulary.yaml`, so a tag outside the
+vocabulary is unrepresentable rather than merely discouraged.
 
-**Tags** (per turn, from the predicate vocabulary):
-Boolean facts observable from the step's content. Examples:
-`completion_claim`, `validation_failure`, `agent_has_edited`,
-`task_requires_reference_parity`. The full tag list is in
-`vocabulary.yaml` — the tagger prompt is generated from it.
-
-There is no separate task classifier. On the first turn, the tagger
-sees the task description and can set task-level tags (e.g.,
-`performance_or_quantitative_context`, `symptom_repetition_wording`).
-On later turns, it tags agent behavior.
+Annotations land in `policy.turn_annotations`, keyed by session and the last
+turn in the batch.
 
 ### Prompt generation
 
-The tagger prompt is **automatically generated** from `vocabulary.yaml`.
-When compile produces new predicates or prunes old ones, the prompt
-updates. No manual prompt maintenance — the vocabulary is the single
-source of truth for what tags exist.
+The tagger prompt is generated from `vocabulary.yaml`. When compile adds or
+prunes predicates the prompt follows, and the schema with it. No manual prompt
+maintenance — the vocabulary is the single source of truth for what tags exist.
 
 ## Retrieval
 
@@ -110,47 +138,166 @@ A predicate is true when the tagger has emitted that tag for any turn
 in the session. Matching is deterministic boolean logic over the
 tagger's cached output — no LLM call.
 
-### Stage 2: Critic (expensive, high precision)
+### Stage 2: Acceptance review (at submit, optional)
 
-Candidate items from Stage 1 go to the critic (`agents/critic.yaml`):
-an LLM that reads the session evidence + the item's review question
-and judges whether the item is actually violated. Only confirmed
-violations produce interventions.
+Matching is recall. Precision is a reviewer that looks at the work — a child
+session with the scenario's own tools, so it can read the diff, build a case
+and run it in the same sandbox. It judges one question: does this do what the
+task asked?
 
-### Suppression gates
+It is given a **method**, not a rubric, because a rubric only says what a bad
+submission looks like. Verifying a fix is a differential over the symptom the
+task states: list every claim the task makes, name what output carries each and
+what separates symptom-present from symptom-gone, reproduce the symptom on the
+pre-change code, run the same probe now, and compare against the side the task
+asked for. `agents/acceptance.yaml` holds the prompt.
 
-A matching item is not enough. Three gates decide whether the inject
-actually lands, all calibrated on a 30-session GPT run (104 injects,
-measuring whether the agent used any tool in the turn after the inject):
+`submit_verdict` requires an `evidence` field on acceptance as well as
+rejection. Three reviews in a row accepted an inverted fix: one wrote a probe
+and never ran it, one ran a probe that printed only startup noise and then read
+a cached test result. Each believed it had checked. Quoting the output is what
+separates looking from intending to look.
 
-| gate | default | why |
+The reviewer never blocks the session. Any failure of its own — no verdict, a
+broken spawn, an exception — accepts, and `max_review_rounds` bounds how many
+times it can send the agent back. Off by default (`critic: "off"`).
+
+## Delivery
+
+| where | how it arrives | budget |
 |---|---|---|
-| `max_injections` | 5 | Total per session. |
-| `min_work_turns` | 1 | Tool-using turns required since the last inject. With zero, injects drew a tool response 11% of the time; with one or more, 75–100%. Zero-work means the agent is answering the previous note in prose — re-injecting there only deepens the loop. |
-| `max_stop_injections` | 2 | Stop-checkpoint injects decay hard: 1st 64%, 2nd 71%, 3rd 38%, 4th+ 0%. |
+| Mid-work | user message, while the agent is still working | `max_injections` |
+| Wrapping up | user message at the stop checkpoint, naming `submit` as the way out | `max_stop_checks` |
+| At submit | the acceptance reviewer's verdict, as the tool's result | `max_review_rounds` |
 
-Suppression does not consume the item — it stays unfired and can land
-once the agent has done real work. Continuous-checkpoint injects are the
-productive ones (≈92% draw a tool response vs ≈63% at stop), so the
-budget should not be spent at stop.
+### Wording
 
-## Intervention
+Checks arrive as user messages, so they read like the person who asked for the
+work — one doubt, plainly put. Headed, bulleted audit blocks got answered in
+kind: a written `Pass / Partial` verdict per point and no change to the work.
+One item per message, since surfacing several lets the agent absorb the
+relevant one among plausible neighbours and move on.
 
-| delivery | behavior |
-|---|---|
-| `inject` | Append a message quoting the agent's own evidence. |
-| `critic` | Spawn a reviewer subagent; inject confirmed verdict. |
-| `compact` | Compress context: keep facts, discard subjective reasoning. Via SDK `ContextCompactionService`. |
+Finishing is the agent's own act, through `submit`. The loop used to infer it
+from a turn carrying no tool call, which cannot tell "the work is done" from "I
+just answered your note" — so every reply drew another check until the budget
+ran out, and the agent could not end the session, only outlast the engine.
+Every check now names `submit` as the exit, and submit never refuses.
 
-### Inject wording
+## Running it
 
-The message must ask for a correction, not a verdict. An earlier
-phrasing ("audit your process against each point below") was answered
-literally: agents replied with a point-by-point `Pass / Partial` writeup
-and never reopened the work — in one session the agent graded itself
-`Partial` on evidence adequacy and then stopped. Every inject now ends
-with an explicit instruction to act rather than reply, and stop-checkpoint
-injects are prefixed with a note that the work is still reopenable.
+Everything below runs the harbor scenario against Senior SWE-Bench. The atom is
+inert unless `AGENTM_CHECKLIST_WATCH_ENABLED=true`, so baseline batches stay
+clean without editing the scenario.
+
+### One batch
+
+```bash
+K=$(python3 -c "import tomllib;print(tomllib.load(open('.agentm/harbor-gpt55/config.toml','rb'))['models']['litellm-dsv4pro']['api_key'])")
+
+AGENTM_CHECKLIST_WATCH_ENABLED=true \
+AGENTM_TRAJECTORY_SCHEMA=<fresh-schema> \
+ARK_BASE_URL=http://101.126.39.61:8088/v1 ARK_API_KEY=$K \
+SSB_JUDGE_MODEL=openai/DeepSeek-V4-pro \
+uv run .agentm/harbor-gpt55/run_better_auth_eval.py azure-gpt <task...> --n-concurrent 10
+```
+
+Always give a **fresh schema**. One 5-day schema accumulated runs from several
+code revisions, and every statistic taken over it mixed them silently.
+
+`critic: "on"` in `contrib/scenarios/harbor/scenario.yaml` enables the
+acceptance review; `"off"` leaves checks as reminders only.
+
+### The judge
+
+Three model slots, all separately overridable, and `ALL_JUDGE_MODEL` does *not*
+cover the other two:
+
+| Slot | Variable | What it does |
+|---|---|---|
+| Judge | `SSB_OVERRIDE_ALL_JUDGE_MODEL` | rubric + taste + validation review |
+| Classifier | `SSB_OVERRIDE_CLASSIFIER_MODEL` | behavioural vs cosmetic patch files |
+| Validation agent | `SSB_OVERRIDE_VA_MODEL` | generates tests from user stories |
+
+The validation agent is the one that matters: it gates `correctness`, and when
+it dies the verifier writes an empty reward file and the trial fails with
+`RewardFileEmptyError` — no score at all, which is not the same as zero.
+
+`reward` is **not** just the functional tests. It requires the tests to pass
+*and* every validation story to pass, so a task can show `verifier: 2/2` with
+`correctness: 0.0`.
+
+The Volcengine endpoint carries a weekly quota that, once spent, kills all
+three slots at once. `http://101.126.39.61:8088/v1` (DeepSeek-V4-pro) is
+reachable from inside the sandbox and is not on that quota.
+
+### Re-running only the judge
+
+The verifier derives everything from the workspace, so a no-op agent over a
+restored workspace re-scores without spending agent tokens:
+
+```bash
+uv run --extra harbor python -m harbor.cli.main run -p <task-dir> \
+  -a nop --env agentm_harbor:ArlEnvironment \
+  --ek fork_from=<arl_session_id> --ek fork_step=<arl_step> \
+  --ve SSB_OVERRIDE_ALL_JUDGE_MODEL=... --ve OPENAI_API_KEY=... [...]
+```
+
+`arl_session_id` and `arl_step` come from `agent_result.metadata` in the
+trial's `result.json`. Verified faithful: `taste_patch_bloat` reproduced to
+three decimals, meaning the restored patch is byte-identical.
+
+`-a oracle` applies the task's own reference solution instead — the right way
+to sanity-check that the verifier itself works, since the oracle should score
+1.0.
+
+### Re-running only the acceptance review
+
+Two forks stacked: ARL restores the workspace, harbor restores the
+conversation. The agent reissues submit and acceptance spawns for real — no
+special harness, and the atom rebuilds its state from the trajectory.
+
+```bash
+AGENTM_FORK_FROM_SESSION=<agentm_session_id>   # from result.json metadata
+AGENTM_FORK_TURN=<the turn before submit>
+AGENTM_FORK_PROMPT="Call submit to finish."
+# plus --ek fork_from/fork_step as above, and the same values via --ae
+```
+
+Look for `policy_engine: restored N turn(s), M concern(s), K tag(s)` — if the
+counts are zero the fork carried nothing and the reviewer will read an empty
+run. Cost is roughly 7 minutes against 15 for a full run, which is what makes
+iterating on the acceptance prompt practical.
+
+### Reading a run
+
+```bash
+D=postgresql://agentm:agentm@localhost:55432/agentm_test
+uv run agentm trace --dsn $D --schema <schema> sessions
+uv run agentm trace --dsn $D --schema <schema> tools -s <session-id>
+uv run agentm trace --dsn $D --schema <schema> view  -s <session-id>
+```
+
+The acceptance reviewer is a child session with `purpose='acceptance'`; reading
+its tool calls is how you tell whether it actually looked at anything.
+
+Results live in `jobs/<timestamp>/<trial>/`: `result.json` for rewards and ARL
+metadata, `verifier/agent_filtered.patch` for what was graded,
+`verifier/reward_details.json` for per-test outcomes,
+`verifier/run_judge_*.stderr` for a skipped or crashed judge.
+
+### Things that have bitten
+
+- **Disk.** A batch pulls images and leaves containers behind (`--no-delete`).
+  Docker reached 1.5 TB with ~550 GB reclaimable; `docker container prune -f`
+  is the cheap fix. When the root filesystem fills, harbor keeps writing trial
+  results but tooling that needs `/tmp` stops working, and a `result.json` can
+  land empty.
+- **Concurrency.** Trials of the same task image share a warm pool. Different
+  images are safe to run alongside each other; the same image is not.
+- **Whiteouts.** `agent.patch` includes OverlayFS `.wh.*` entries. Read
+  `agent_filtered.patch` for the real change set.
+
 
 ## Evolution
 
