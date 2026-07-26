@@ -200,6 +200,7 @@ class _Runtime:
         self._reviewer = AcceptanceReviewer(api=self.api)
         self.triggers = TriggerEngine(items=items)
         self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
+        self._restore()
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
         self.api.register_tool(
             FunctionTool(
@@ -385,6 +386,54 @@ class _Runtime:
             self.config.max_injections,
         )
         return build_injection(render_check(item))
+
+    def _restore(self) -> None:
+        """Rebuild what a fork does not carry, from the trajectory that does.
+
+        Atom state is memory, so a session forked mid-run starts with an empty
+        event log, no record of which checks already fired, and no tags — and
+        the acceptance reviewer would then read an empty run. All three are
+        already durable: turns in the trajectory, fired checks in each turn's
+        injected messages, tags in policy.turn_annotations under the session
+        this one was forked from.
+        """
+        for turn in self.api.get_turns():
+            calls = [
+                {
+                    "name": record.call.name,
+                    "arguments": dict(record.call.arguments),
+                    "result_text": _content_text(record.result, 1500),
+                    "is_error": record.result.is_error,
+                }
+                for record in turn.tool_results
+            ]
+            self._turns.append(
+                render_turn(turn.index, _content_text(turn.response, 3000), calls)
+            )
+            self._concerns.extend(
+                _content_text(message, 4000) for message in turn.outcome.injected
+            )
+        self._tagged = len(self._turns)
+        self.turn = len(self._turns)
+        self._restore_tags()
+        if self._turns:
+            logger.info(
+                "policy_engine: restored {} turn(s), {} concern(s), {} tag(s)",
+                len(self._turns),
+                len(self._concerns),
+                len(self._active_tags),
+            )
+
+    def _restore_tags(self) -> None:
+        """Tags carry by root session: a fork is the same run under a new id."""
+        if self._pg is None:
+            return
+        rows = self._pg.query(
+            "SELECT DISTINCT unnest(tags) FROM policy.turn_annotations "
+            "WHERE session_id = ANY(%(ids)s)",
+            {"ids": [self.session_id, self.api.ctx.root_session_id]},
+        )
+        self._active_tags.update(str(row[0]) for row in rows if row[0])
 
     def _resolve_tagger(self) -> TaggerConversation | None:
         """The tagger, once a provider exists to run it on.
