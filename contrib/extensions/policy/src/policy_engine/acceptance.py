@@ -41,8 +41,19 @@ _PURPOSE = PURPOSE
 @dataclass(frozen=True, slots=True)
 class AcceptanceVerdict:
     accepted: bool
+    #: What the reviewer actually saw. Required in both directions — three
+    #: reviews in a row accepted a fix whose nesting was inverted, and the
+    #: transcripts show why: one wrote a probe program and never ran it, one
+    #: ran a probe that printed only startup noise and then read a cached test
+    #: result. Each believed it had checked. Having to quote the output is the
+    #: cheapest thing that distinguishes looking from intending to look.
+    evidence: str = ""
     finding: str = ""
     next_step: str = ""
+
+    @property
+    def has_evidence(self) -> bool:
+        return bool(self.evidence.strip())
 
     def as_message(self) -> str:
         """What the agent is told when the submission does not hold up."""
@@ -86,6 +97,7 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
         accepted = bool(args.get("accepted", True))
         sink.verdict = AcceptanceVerdict(
             accepted=accepted,
+            evidence=str(args.get("evidence", "")),
             finding=str(args.get("finding", "")),
             next_step=str(args.get("next_step", "")),
         )
@@ -104,6 +116,13 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
                     "type": "boolean",
                     "description": "True when the work does what the task asked.",
                 },
+                "evidence": {
+                    "type": "string",
+                    "description": (
+                        "The output you actually saw, quoted — the command and "
+                        "what it printed. Required whichever way you decide."
+                    ),
+                },
                 "finding": {
                     "type": "string",
                     "description": "When rejecting, the specific gap.",
@@ -113,7 +132,7 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
                     "description": "When rejecting, the one action that closes it.",
                 },
             },
-            "required": ["accepted"],
+            "required": ["accepted", "evidence"],
         },
         fn=submit_verdict,
     )
