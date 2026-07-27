@@ -16,23 +16,23 @@ internals, gateway state, or physical artifact layouts.
 from __future__ import annotations
 
 import asyncio
+import json
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-import json
 from typing import Literal
-import uuid
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
+    LOOP_BUDGET_SERVICE,
     AgentSessionConfig,
     AtomAPI,
     AtomInstallPriority,
     EventCancelSource,
     FunctionTool,
     JsonValue,
-    LOOP_BUDGET_SERVICE,
     LoopConfig,
     SessionShutdownEvent,
     SpawnedSession,
@@ -61,6 +61,14 @@ class SubAgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     max_workers: int = Field(default=4, ge=1)
+    default_scenario: str = Field(
+        default="",
+        description=(
+            "Scenario a child gets when the caller names none. Empty keeps the "
+            "old behaviour, where the child inherits this session's own "
+            "composition."
+        ),
+    )
     shutdown_grace_seconds: float = Field(
         default=_DEFAULT_SHUTDOWN_GRACE_SECONDS,
         gt=0,
@@ -231,10 +239,12 @@ class _ChildTaskManager:
         api: AtomAPI,
         max_workers: int,
         shutdown_grace_seconds: float,
+        default_scenario: str = "",
     ) -> None:
         self._api = api
         self._max_workers = max_workers
         self._shutdown_grace_seconds = shutdown_grace_seconds
+        self._default_scenario = default_scenario
         self._registry: BackgroundTaskRegistry[_ChildTask] = BackgroundTaskRegistry(
             max_workers=max_workers
         )
@@ -282,9 +292,14 @@ class _ChildTaskManager:
             )
 
         cancel_source = EventCancelSource()
+        # A host that has said what a child should be gets to say it once, here,
+        # rather than through every prompt that dispatches one. Left to the
+        # caller the name has to be guessed, and a guess comes back as an
+        # infrastructure error the model cannot act on.
+        scenario = request.scenario or self._default_scenario or None
         child_config = AgentSessionConfig(
             cwd=self._api.ctx.cwd,
-            scenario=request.scenario,
+            scenario=scenario,
             loop_config=self._parent_loop_config(),
             purpose=request.purpose,
             cancel_signal=cancel_source,
@@ -512,6 +527,7 @@ class _SubAgentRuntime:
             api=api,
             max_workers=config.max_workers,
             shutdown_grace_seconds=config.shutdown_grace_seconds,
+            default_scenario=config.default_scenario,
         )
 
     def install(self) -> None:
