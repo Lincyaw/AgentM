@@ -16,6 +16,18 @@ extensions:
       tool_result_max_tokens: 200
       total_max_tokens: 1000
   - module: agentm.extensions.builtin.skill_loader
+  # Not a tool for running agents. An agent given one of those writes a brief
+  # for a subordinate: it appends instructions, grants permissions the reviewer
+  # does not have, and states what the correct output would be -- which the
+  # reviewer then verifies the change against, closing the loop it was spawned
+  # to open. A form has no place to put any of that.
+  #
+  # The review runs in this same sandbox, because the point is a reader that can
+  # run the thing it doubts, not a second opinion about the diff.
+  - module: agentm_harbor.review_request
+    config:
+      scenario: "arl:harbor-critic"
+
   - module: agentm.extensions.builtin.tool_policy
     config:
       protect_file_mutations: true
@@ -26,5 +38,6 @@ extensions:
     config:
       trajectory_dsn: "postgresql://agentm:agentm@localhost:55432/agentm_test"
       critic: "on"
+      critic_provider: "azure-gpt"
       max_injections: 5
   - module: agentm.extensions.builtin.tool_purpose

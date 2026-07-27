@@ -1,3 +1,5 @@
+# code-health: ignore-file[AM025] -- the vocabulary is read from YAML, which
+# has no type until something checks it; these three are that check.
 """Compile step: decompose checklist when_notes into trigger expressions.
 
 Part of the evolution loop:
@@ -13,29 +15,17 @@ When predicates change, the tagger prompt is regenerated automatically.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from loguru import logger
-
-from .jsonio import json_object
 
 
 @dataclass(frozen=True, slots=True)
 class PredicateDef:
     name: str
     definition: str
-
-
-@dataclass(frozen=True, slots=True)
-class CompiledItem:
-    item_id: str
-    trigger_expr: str
-    new_predicates: tuple[PredicateDef, ...]
-    reasoning: str
 
 
 # -- Vocabulary I/O ------------------------------------------------------------
@@ -66,43 +56,6 @@ def save_vocabulary(vocab: dict[str, PredicateDef], path: Path) -> None:
 
 
 # -- Compiler prompt -----------------------------------------------------------
-
-
-def build_compiler_prompt(when_note: str, vocabulary: dict[str, PredicateDef]) -> str:
-    vocab_lines = [f"- {n}: {p.definition}" for n, p in sorted(vocabulary.items())]
-    vocab_text = (
-        "\n".join(vocab_lines) if vocab_lines else "(empty — propose what you need)"
-    )
-    return (
-        f"## When_note to decompose\n\n{when_note}\n\n"
-        f"## Current predicate vocabulary\n\n{vocab_text}\n"
-    )
-
-
-def parse_compiler_result(raw_text: str) -> CompiledItem | None:
-    text = json_object(raw_text)
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        logger.warning("compile: invalid JSON from compiler")
-        return None
-    if not isinstance(parsed, Mapping):
-        return None
-
-    trigger_expr = str(parsed.get("trigger_expr", "always"))
-    reasoning = str(parsed.get("reasoning", ""))
-    new_preds = []
-    for p in parsed.get("new_predicates", []):
-        if isinstance(p, Mapping) and p.get("name") and p.get("definition"):
-            new_preds.append(
-                PredicateDef(name=str(p["name"]), definition=str(p["definition"]))
-            )
-    return CompiledItem(
-        item_id="",
-        trigger_expr=trigger_expr,
-        new_predicates=tuple(new_preds),
-        reasoning=reasoning,
-    )
 
 
 def merge_vocabulary(

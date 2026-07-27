@@ -34,15 +34,22 @@ class AgentManifest:
     tools: tuple[str, ...]
 
 
-@lru_cache(maxsize=8)
-def load_manifest(name: str) -> AgentManifest:
-    """Read ``agents/<name>.yaml``. Raises if it is missing or has no prompt."""
-    path = _AGENTS_DIR / f"{name}.yaml"
+@lru_cache(maxsize=16)
+def load_manifest(name: str, agents_dir: str = "") -> AgentManifest:
+    """Read ``<agents_dir>/<name>.yaml``. Raises if missing or with no prompt.
+
+    ``agents_dir`` empty means this package's own ``agents/``. The loop's stages
+    keep their manifests beside themselves and pass their directory in, so there
+    is one loader rather than one per directory -- which is what stops a
+    manifest field being read in one place and ignored in the other.
+    """
+    directory = Path(agents_dir) if agents_dir else _AGENTS_DIR
+    path = directory / f"{name}.yaml"
     if not path.is_file():
         raise FileNotFoundError(f"agent manifest not found: {path}")
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, Mapping):  # code-health: ignore[AM025] -- YAML boundary
-        raise ValueError(f"agent manifest is not a mapping: {path}")
+        raise TypeError(f"agent manifest is not a mapping: {path}")
     system = str(raw.get("system", "")).strip()
     if not system:
         raise ValueError(f"agent manifest has no system prompt: {path}")

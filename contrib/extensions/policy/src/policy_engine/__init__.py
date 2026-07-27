@@ -55,8 +55,11 @@ from agentm.core.abi.events import (
 from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 
+from . import facts
 from .acceptance import (
     PURPOSE as ACCEPTANCE_PURPOSE,
+)
+from .acceptance import (
     AcceptanceReviewer,
     AcceptanceVerdict,
     build_prompt,
@@ -76,6 +79,7 @@ from .triggers import (
     build_injection,
     load_items,
     render_check,
+    render_finish_reminder,
     render_stop_check,
 )
 
@@ -84,12 +88,27 @@ class PolicyEngineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     checklist: str = "package:checklist.yaml"
+    # Where the run's turns are written. Empty falls back to the same env var
+    # the trajectory store itself reads, for the same reason the schema below
+    # does: the two halves of one connection must not be resolved differently,
+    # or a run whose store is pointed elsewhere leaves this atom querying a
+    # database it never wrote to -- where every precondition reads "unmet" and
+    # every gated item goes quiet, with one warning as the only evidence.
     trajectory_dsn: str = ""
-    # Provider registry name for the tagger and critic. Empty means the
-    # session's own active provider — a registry name, not a config.toml
-    # profile key, so a wrong value disables interventions rather than
-    # silently falling back.
+    # Schema the run's turns are written to. Facts are queried per-schema, so a
+    # precondition cannot be evaluated without it. Empty falls back to the same
+    # env var the trajectory store itself reads, which is what keeps the two
+    # pointing at one place.
+    trajectory_schema: str = ""
+    # Provider registry name for the tagger. Empty means the session's own
+    # active provider — a registry name, not a config.toml profile key, so a
+    # wrong value disables interventions rather than silently falling back.
     provider: str = ""
+    # Provider for the acceptance reviewer, which is the most reasoning-heavy
+    # thing here and does not want the tagger's cheap model. Empty inherits
+    # `provider`, and that default once put the reviewer on the config's
+    # default_model while the agent it reviewed ran on a far stronger one.
+    critic_provider: str = ""
     # Acceptance review at submit time: "off", or "on" to read the run against
     # the task before the session is allowed to end.
     critic: str = "off"
@@ -164,6 +183,11 @@ class _Runtime:
     _reviewer: AcceptanceReviewer | None = None
     _concerns: list[str] = field(default_factory=list)
     _review_rounds: int = 0
+    # Preconditions answered so far this turn. A fact is derived from committed
+    # turns, so within one decide the answer cannot change -- and one decide asks
+    # twice, once on the stop path and once on the continuous one, for every item
+    # whose tags match. Cleared on commit, because between turns it very much can.
+    _fact_cache: dict[str, bool] = field(default_factory=dict)
 
     def install(self) -> None:
         # A reviewer must not install the policy that spawned it: it would
@@ -187,7 +211,8 @@ class _Runtime:
         if not _interventions_enabled():
             logger.info("policy_engine: symbol sync only (interventions disabled)")
             return
-        if not self.config.trajectory_dsn:
+        dsn = self.config.trajectory_dsn or os.environ.get("AGENTM_TRAJECTORY_DSN", "")
+        if not dsn:
             logger.warning("policy_engine: no trajectory_dsn; interventions disabled")
             return
         items_path = resolve_policy_path(
@@ -197,9 +222,12 @@ class _Runtime:
         if not items:
             logger.warning("policy_engine: missing checklist; inert")
             return
-        self._reviewer = AcceptanceReviewer(api=self.api)
+        self._reviewer = AcceptanceReviewer(
+            api=self.api,
+            provider=self.config.critic_provider or self.config.provider,
+        )
         self.triggers = TriggerEngine(items=items)
-        self._pg = PgQuerySource(self.config.trajectory_dsn, self.session_id)
+        self._pg = PgQuerySource(dsn, self.session_id)
         self._restore()
         self.api.on(DecideEvent.CHANNEL, self._on_decide)
         self.api.register_tool(
@@ -314,6 +342,7 @@ class _Runtime:
     def _on_turn_committed(self, event: TurnCommittedEvent) -> None:
         self.turn += 1
         self._current_turn_calls = []
+        self._fact_cache.clear()
 
     async def _on_run_end(self, event: RunEndEvent) -> None:
         """Tag whatever is still buffered when the run stops.
@@ -355,10 +384,24 @@ class _Runtime:
             if self._submitted or self._stop_checks >= self.config.max_stop_checks:
                 return None
             item = self.triggers.next_triggered(
-                stopping=True, active_tags=frozenset(self._active_tags)
+                stopping=True,
+                active_tags=frozenset(self._active_tags),
+                fact_check=self._fact_check,
             )
             if item is None:
-                return None
+                # With acceptance on, finishing still has to go through review,
+                # and the agent only learns `submit` exists from this message.
+                # Leaving it to a checklist match meant the reviewer ran or not
+                # by coincidence: three recorded sessions, one review.
+                if self.config.critic != "on":
+                    return None
+                self._stop_checks += 1
+                logger.info(
+                    "policy_engine: finish reminder ({}/{}), no item matched",
+                    self._stop_checks,
+                    self.config.max_stop_checks,
+                )
+                return build_injection(render_finish_reminder())
             self._stop_checks += 1
             self._concerns.append(item.check)
             logger.info(
@@ -372,7 +415,9 @@ class _Runtime:
         if self.injections >= self.config.max_injections:
             return None
         item = self.triggers.next_triggered(
-            stopping=False, active_tags=frozenset(self._active_tags)
+            stopping=False,
+            active_tags=frozenset(self._active_tags),
+            fact_check=self._fact_check,
         )
         if item is None:
             return None
@@ -386,6 +431,37 @@ class _Runtime:
             self.config.max_injections,
         )
         return build_injection(render_check(item))
+
+    def _fact_check(self, sql: str) -> bool:
+        """Whether a precondition holds for this session, right now.
+
+        False on any failure. A precondition that cannot be evaluated has not
+        been shown to hold, and firing a check on an unanswered question is the
+        thing preconditions exist to stop.
+        """
+        cached = self._fact_cache.get(sql)
+        if cached is not None:
+            return cached
+        if self._pg is None:
+            return False
+        schema = self.config.trajectory_schema or os.environ.get(
+            "AGENTM_TRAJECTORY_SCHEMA", ""
+        )
+        if not schema:
+            logger.warning("policy_engine: no trajectory schema; preconditions unmet")
+            return False
+        try:
+            rows = self._pg.query(
+                facts.expand(sql, schema), {"session_id": self.session_id}
+            )
+        except Exception as exc:  # noqa: BLE001 - a bad precondition is not fatal
+            logger.warning("policy_engine: precondition failed: {}", exc)
+            return False
+        held = bool(rows)
+        # Only a real answer is cached. A failure is not knowledge, and the next
+        # turn should ask again rather than inherit a false negative.
+        self._fact_cache[sql] = held
+        return held
 
     def _restore(self) -> None:
         """Rebuild what a fork does not carry, from the trajectory that does.

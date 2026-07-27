@@ -42,6 +42,11 @@ from loguru import logger
 from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
 
 SCENARIO = "arl:harbor"
+
+#: The composition a dispatched child gets. Named here rather than left to the
+#: caller: the model has to guess it otherwise, and a wrong guess comes back as
+#: an infrastructure error it cannot act on.
+CRITIC_SCENARIO = "arl:harbor-critic"
 _TOOLBOX_SETUP_TIMEOUT = 300
 
 
@@ -122,9 +127,20 @@ def _load_scenario(scenario: str) -> ScenarioSpec:
 
 
 def _scenario_loader(path: Path) -> ScenarioLoader:
+    """Resolve a scenario name to the manifest that declares it.
+
+    One name per file, so a second composition needs a second file and a way to
+    reach it. Without this the loader answered every request with the run's own
+    manifest, which meant a child session could only ever be another copy of the
+    agent under test -- and a copy of the agent is the one reviewer whose
+    blind spots are guaranteed to match.
+    """
+
+    manifests = {CRITIC_SCENARIO: path.parent / "critic.yaml"}
+
     def load(scenario: str) -> ScenarioSpec:
         return load_scenario_manifest(
-            path,
+            manifests.get(scenario, path),
             requested_name=scenario,
         )
 
@@ -327,7 +343,6 @@ class ExternalAgentMAgent(BaseAgent):
             trajectory_store=trajectory.store,
         )
         _sync_execution_metadata(context, environment)
-        fork_source: AgentSession | None = None
         try:
             if resume_session_id is not None:
                 session = await AgentSession.resume(
@@ -346,43 +361,46 @@ class ExternalAgentMAgent(BaseAgent):
                 root_session_id = source_meta.config.get("root_session_id")
                 if not isinstance(root_session_id, str) or not root_session_id:
                     raise ValueError("fork source metadata has no valid root_session_id")
-                fork_source = await AgentSession.create(
+                # Built in one step, from a prefix that already ends at
+                # ``fork_turn`` -- ``load_prefix`` is inclusive of it.
+                #
+                # The two-step version, which loaded the prefix under the source's
+                # own id and then forked off it, produced the same turns but left
+                # the run marked as somebody's child. Nothing distinguishes that
+                # from a dispatched subagent: both carry a parent and a depth, so
+                # every atom that asks "am I a subagent" answers yes. ``sub_agent``
+                # asks exactly that, to stop children spawning children, and so a
+                # resumed run silently had no ``dispatch_agent`` -- measured: the
+                # agent went looking for it as a shell command.
+                #
+                # A resumed attempt is a continuation, not a subordinate. Where it
+                # came from is recorded in the trial metadata below, which is where
+                # the readers of that fact already look.
+                session = await AgentSession.create(
                     replace(
                         session_config,
-                        purpose="harbor-fork-source",
-                        session_id=source_session_id,
+                        purpose="harbor-fork",
                         root_session_id=root_session_id,
                         parent_session_id=None,
                         initial_turns=source_turns,
                     ),
                     host_services=host_services,
                 )
-                session = await AgentSession.fork(
-                    fork_source,
-                    at=fork_turn,
-                    purpose="harbor-fork",
-                )
             else:
                 session = await AgentSession.create(session_config, host_services=host_services)
         except BaseException as creation_error:
-            cleanup_errors: list[BaseException] = []
-            if fork_source is not None:
-                try:
-                    await fork_source.shutdown()
-                except BaseException as source_shutdown_error:
-                    cleanup_errors.append(source_shutdown_error)
             try:
                 trajectory.close()
             except Exception as close_error:
-                cleanup_errors.append(close_error)
-            if cleanup_errors:
                 raise BaseExceptionGroup(
                     "AgentM session creation and cleanup failed",
-                    (creation_error, *cleanup_errors),
+                    (creation_error, close_error),
                 ) from creation_error
             raise
 
-        fork_parent_session_id = session.ctx.parent_session_id
+        # The origin is reported from the request, not from the session's own
+        # parent pointer, which a resumed run deliberately no longer sets.
+        fork_parent_session_id = fork_request[0] if fork_request is not None else None
         selected_fork_turn = fork_request[1] if fork_request is not None else None
         _sync_execution_metadata(
             context,
@@ -439,11 +457,6 @@ class ExternalAgentMAgent(BaseAgent):
                 await session.shutdown()
             except BaseException as shutdown_error:
                 errors.append(shutdown_error)
-            if fork_source is not None:
-                try:
-                    await fork_source.shutdown()
-                except BaseException as source_shutdown_error:
-                    errors.append(source_shutdown_error)
             try:
                 trajectory.close()
             except Exception as close_error:

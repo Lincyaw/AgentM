@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,11 +23,31 @@ from loguru import logger
 from agentm.core.abi import text_message
 from agentm.core.abi.events import Inject
 
+#: Answers whether an item's precondition holds for the live session. The
+#: engine stays free of a database that way: it asks, the atom knows how.
+FactCheck = Callable[[str], bool]
+
 
 @dataclass(slots=True, frozen=True)
 class Gate:
+    """When an item may fire.
+
+    Two halves answering different questions, and both must hold. ``trigger``
+    asks whether the concern *resembles* this session, from the tagger's
+    predicates. ``precondition`` asks whether the situation the concern
+    presupposes has actually arrived, from the session's recorded actions.
+
+    The second half exists because of a measurement: one item was seen firing
+    eleven times, and six of those sessions had run no test at all, while the
+    item's own words describe green narrowed test runs. It was aimed at the right
+    concern and arrived before there was anything to be concerned about.
+
+    An empty ``precondition`` means unconditional, which is the honest default.
+    """
+
     trigger: str
     checkpoint: str
+    precondition: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,6 +81,7 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
             gate=Gate(
                 trigger=str(when.get("trigger", "always")),
                 checkpoint=str(when.get("checkpoint", "stop")),
+                precondition=" ".join(str(when.get("precondition", "")).split()),
             ),
         )
         if item.item_id:
@@ -119,6 +140,22 @@ def render_check(item: ChecklistItem) -> str:
 def render_stop_check(item: ChecklistItem) -> str:
     """Check raised at the moment the agent wraps up in prose."""
     return _render(item, _STOP_HEAD, _STOP_TAIL)
+
+
+def render_finish_reminder() -> str:
+    """Sent when the agent wraps up and no item matched, with review on.
+
+    Carries no concern of its own: the reviewer supplies that. It exists because
+    ``submit`` is how finishing happens and the agent has to be told it is there.
+    Leaving that to a checklist match made review a coincidence.
+    """
+    return (
+        "Looks like you are wrapping up. Nothing is merged or scored yet, so "
+        "have a last look at whether the work does what was asked, and fix "
+        "anything that needs it.\n\n"
+        "When you are satisfied, call `submit` with a short summary of what you "
+        "changed. A written summary on its own leaves the task open."
+    )
 
 
 # -- Predicate expression evaluation ------------------------------------------
@@ -190,16 +227,32 @@ class TriggerEngine:
     _fired: set[str] = field(default_factory=set)
 
     def next_triggered(
-        self, *, stopping: bool, active_tags: frozenset[str] = frozenset()
+        self,
+        *,
+        stopping: bool,
+        active_tags: frozenset[str] = frozenset(),
+        fact_check: FactCheck | None = None,
     ) -> ChecklistItem | None:
-        """The single highest-priority matching item, marked fired."""
-        for item in self._matching(stopping=stopping, active_tags=active_tags):
+        """The single highest-priority matching item, marked fired.
+
+        ``fact_check`` evaluates an item's precondition against the live session.
+        Omitting it treats every precondition as unmet, so an item gated on facts
+        stays silent rather than firing blind: a caller that cannot answer the
+        question has not answered it yes.
+        """
+        for item in self._matching(
+            stopping=stopping, active_tags=active_tags, fact_check=fact_check
+        ):
             self._fired.add(item.item_id)
             return item
         return None
 
     def _matching(
-        self, *, stopping: bool, active_tags: frozenset[str]
+        self,
+        *,
+        stopping: bool,
+        active_tags: frozenset[str],
+        fact_check: FactCheck | None = None,
     ) -> Iterator[ChecklistItem]:
         for item in self.items.values():
             if item.deliver != "inject" or item.item_id in self._fired:
@@ -207,5 +260,9 @@ class TriggerEngine:
             if item.gate.checkpoint == "stop" and not stopping:
                 continue
             if not evaluate_trigger(item.gate.trigger, active_tags):
+                continue
+            if item.gate.precondition and (
+                fact_check is None or not fact_check(item.gate.precondition)
+            ):
                 continue
             yield item

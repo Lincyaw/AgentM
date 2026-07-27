@@ -15,6 +15,19 @@ dependencies = [
   "ast-grep-cli>=0.44.1",
 ]
 
+[project.optional-dependencies]
+# An extra rather than a dependency: `agentm` depends on this package, so a hard
+# edge back would close a cycle. Same shape as agentm-harbor's `external`, and
+# it exists so the import is declared somewhere rather than resolving only
+# because the workspace happens to install both.
+external = ["agentm"]
+# The data plane queries trajectories directly, and the loop's discovery reads
+# them out of the same database. Mirrors agentm's own `storage-postgres`.
+postgres = ["psycopg[binary]>=3.2.0"]
+
+[tool.uv.sources]
+agentm = { workspace = true }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

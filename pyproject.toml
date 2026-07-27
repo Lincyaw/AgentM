@@ -49,7 +49,7 @@ packaged-minimal = [
 ]
 harbor = [
     "agentm-harbor",
-    "arl-env>=0.24.0",
+    "arl-env>=0.26.1",
     "dockerfile-parse",
 ]
 
@@ -71,6 +71,11 @@ requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
+# Local checkout while the replay support this depends on is unreleased: an
+# attempt can be resumed from the middle of a recorded run only if the
+# environment can rebuild the workspace at that point. Point this back at the
+# published version once it ships.
+arl-env = { path = "../agent-env/sdk/python/arl", editable = true }
 agentm-harbor = { workspace = true }
 policy-engine = { workspace = true, editable = true }
 

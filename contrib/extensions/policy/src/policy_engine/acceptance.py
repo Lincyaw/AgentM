@@ -64,8 +64,10 @@ class AcceptanceVerdict:
             parts += ["", f"Next: {self.next_step}"]
         parts += [
             "",
-            "Do that, then call `submit` again. If you think this is already "
-            "covered, call `submit` and tell me where.",
+            (
+                "Do that, then call `submit` again. If you think this is "
+                "already covered, call `submit` and tell me where."
+            ),
         ]
         return "\n".join(parts)
 
@@ -119,8 +121,12 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
                 "evidence": {
                     "type": "string",
                     "description": (
-                        "The output you actually saw, quoted — the command and "
-                        "what it printed. Required whichever way you decide."
+                        "The rule you derived from the task, then one line per "
+                        "input you tried: the input, what the pre-change code "
+                        "printed, what the current code printed, and which side "
+                        "of the discriminator that puts it on. Required "
+                        "whichever way you decide. One line means one input, "
+                        "which does not support acceptance."
                     ),
                 },
                 "finding": {
@@ -141,6 +147,12 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
 @dataclass(slots=True)
 class AcceptanceReviewer:
     api: AtomAPI
+    #: Provider registry name to run the reviewer on. Empty inherits whatever
+    #: the child would get by default, which is the session's active provider
+    #: — not necessarily the one the reviewed agent ran on. Resolved per review
+    #: rather than at construction: the atom installs in the POLICY band,
+    #: before providers register.
+    provider: str = ""
 
     async def review(self, prompt: str) -> AcceptanceVerdict:
         """Accepts on any failure of its own.
@@ -155,11 +167,27 @@ class AcceptanceReviewer:
             # extensions, so it already has the workspace tools routed to the
             # same sandbox — passing our own `bash` collided with tool_bash and
             # failed the whole spawn.
+            model = None
+            stream_fn = None
+            if self.provider:
+                resolved = self.api.get_provider(self.provider)
+                if resolved is None:
+                    logger.warning(
+                        "acceptance: provider {!r} not registered; "
+                        "reviewing on the session default",
+                        self.provider,
+                    )
+                else:
+                    logger.info("acceptance: reviewing on provider {}", resolved.name)
+                    model = resolved.model
+                    stream_fn = resolved.stream_fn
             child = await self.api.spawn(
                 purpose=_PURPOSE,
                 tools=[_verdict_tool(sink)],
                 system=manifest.system,
                 max_turns=manifest.max_turns,
+                model=model,
+                stream_fn=stream_fn,
             )
             await child.run(prompt)
         except Exception as exc:  # noqa: BLE001

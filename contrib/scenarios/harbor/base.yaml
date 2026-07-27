@@ -4,6 +4,22 @@ extensions:
   # to the orchestrator's local filesystem.
   - module: agentm.extensions.builtin.observability
 
+  # A benchmark run is hours of work behind every call, so a provider that is
+  # briefly out of capacity must not end it. Without this the first 429 raises
+  # and the whole trial is scored as an infrastructure loss -- which is both a
+  # wasted run and, worse, indistinguishable in the numbers from a trial where
+  # the agent genuinely produced nothing.
+  #
+  # The delays are longer than a chat client would want because the thing being
+  # protected is long: waiting five minutes across seven attempts is cheap
+  # against discarding a run that has already spent an hour.
+  - module: agentm.extensions.builtin.retry_policy
+    config:
+      max_retries: 7
+      base_delay: 5.0
+      factor: 2.0
+      jitter: 2.0
+
   - module: agentm.extensions.builtin.system_prompt
     config:
       include_tool_index: true

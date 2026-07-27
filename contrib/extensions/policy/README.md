@@ -7,14 +7,92 @@ and execute against a codebase. This package detects structural failure
 patterns as queries over the trajectory, recommends relevant checklist
 items, and intervenes when those items are confirmed.
 
+## The design
+
+This is the intended shape. It is the reference we align on; where the code
+currently departs from it, that is a defect to close, and the open ones are
+listed under [Known departures](#known-departures).
+
+**Within a session** — two observers feed one gate, the gate delivers at most
+one check, and finishing goes through review:
+
+```mermaid
+flowchart LR
+  AG([Agent loop])
+  DP[1 Data plane]
+  TG[2 Tagger]
+  RT{3 Retrieval}
+  DV[4 Delivery]
+  AC[5 Acceptance]
+  END([Ends])
+
+  AG -->|tool events| DP
+  AG -->|turn events| TG
+  DP -->|facts| RT
+  TG -->|tags| RT
+  RT -->|both hold| DV
+  DV -->|one check| AG
+  AG -->|submit| AC
+  AC -->|send back| AG
+  AC -->|holds up| END
+
+  style DP fill:#e8f0fe,stroke:#4285f4
+  style TG fill:#e8f0fe,stroke:#4285f4
+  style RT fill:#fef7e0,stroke:#f9ab00
+  style DV fill:#e6f4ea,stroke:#34a853
+  style AC fill:#e6f4ea,stroke:#34a853
 ```
-① data plane   trajectory (PG) + repository symbol index → queryable facts
-② tagger       side-car conversation → phase + semantic predicates
-③ retrieval    predicate matching → candidate checklist items
-④ delivery     one check, as a user message, while the work is still open
-⑤ acceptance   a reviewer with a shell, at submit — optional
-⑥ evolution    mine → compile → evaluate → select → diversify
+
+| | Stage | What it is |
+|---|---|---|
+| 1 | Data plane | Tool events and the repository symbol index, as queryable facts. Neutral: no judgments. |
+| 2 | Tagger | A side-car conversation, batched, emitting cumulative semantic tags. |
+| 3 | Retrieval | An item fires only when its tag trigger **and** its fact precondition both hold. |
+| 4 | Delivery | One check, as one user message, while the work is still open. |
+| 5 | Acceptance | A reviewer with a shell at submit, running a differential over the task's claims. |
+
+**Between sessions** — what fired and what came of it is the training signal:
+
+```mermaid
+flowchart LR
+  TRAJ[(trajectories and outcomes)]
+  OBS[(firing observations)]
+  MINE[mine] --> COMP[compile] --> DEPL[deploy] --> EVAL[evaluate] --> SEL[select]
+  SEL --> MINE
+  TRAJ --> MINE
+  OBS --> EVAL
+  SEL -.->|revised| CK[checklist and vocabulary]
+
+  style EVAL fill:#fef7e0,stroke:#f9ab00
+  style OBS fill:#fce8e6,stroke:#ea4335
 ```
+
+`trajectories and outcomes` come from ①; `firing observations` come from ④ and
+⑤ — did the agent act on the check, did the reviewer find the concern real.
+That is the edge which makes the checklist self-revising, and it is the one
+currently missing.
+
+Two properties are what make this a loop rather than a pile of parts:
+
+**Detection is grounded in facts, not only in opinion.** A tag says a concern
+*resembles* this session; a precondition query over the data plane says the
+situation the concern presupposes has actually arrived. A check about narrowed
+green test runs must not fire in a session that has not run a test yet.
+
+**Fitness is computed, not supplied.** Every firing produces an observation —
+did the agent act on it, did the reviewer find the concern real — and those
+observations are what prune the checklist. A loop whose selection step needs a
+human verdict is not a loop.
+
+### Known departures
+
+| # | Departure | Where |
+|---|---|---|
+| 1 | The data plane has no runtime consumer. Facts and symbols are written every turn and never read back; retrieval is tags only. | `__init__.py::_on_decide` |
+| 2 | Triggers have no precondition, so an item fires as soon as its tags appear. Measured: 6 of 11 firings of the validation-scope item landed in sessions that had run no test at all. | `triggers.py::_matching` |
+| 3 | `submit` is registered by this atom, so session termination depends on an optional extension being installed and enabled. | `__init__.py::install` |
+| 4 | Acceptance is reachable only after a stop check fires; no checklist match means no review. | `__init__.py::_on_decide` |
+| 5 | `evaluate` reports fire rates, not fitness, and `select` reads a hand-written JSON. | `__main__.py::cmd_select` |
 
 ## Data plane
 

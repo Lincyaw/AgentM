@@ -26,12 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import typer
-import yaml
-from loguru import logger
 
 from agentm.core.abi import ProviderConfig
 
-from .manifest import load_manifest
 from .pg_query import PgQuerySource
 from .triggers import ChecklistItem, TriggerEngine, load_items
 
@@ -41,6 +38,13 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Policy engine evolution loop.",
 )
+
+# The learning loop, as addressable stages: collect, diagnose, abstract,
+# compile, replay, select. Registered as a sub-app so each stage is runnable on
+# its own for debugging and `loop run` chains the identical functions.
+from .loop.cli import app as _loop_app
+
+app.add_typer(_loop_app, name="loop")
 
 _PKG = Path(__file__).parent
 DEFAULT_CHECKLIST = str(_PKG / "checklist.yaml")
@@ -54,73 +58,6 @@ SCHEMA_OPT = typer.Option("harbor_live", "--schema")
 MODEL_OPT = typer.Option(None, "--model", help="model profile from config.toml")
 MAX_INJECTIONS_OPT = typer.Option(5, "--max-injections")
 MAX_STOP_CHECKS_OPT = typer.Option(3, "--max-stop-checks")
-
-
-@app.command("compile")
-def cmd_compile(
-    checklist: str = CHECKLIST_OPT,
-    vocab_path_arg: str = VOCAB_OPT,
-    model: str | None = MODEL_OPT,
-    dry_run: bool = typer.Option(False, "--dry-run"),
-) -> None:
-    """Compile when_notes into trigger expressions."""
-    from .compile import (
-        build_compiler_prompt,
-        load_vocabulary,
-        merge_vocabulary,
-        parse_compiler_result,
-        save_vocabulary,
-        update_checklist_triggers,
-    )
-
-    checklist_path = Path(checklist)
-    vocab_path = Path(vocab_path_arg)
-    raw = yaml.safe_load(checklist_path.read_text(encoding="utf-8"))
-    items = [i for i in raw.get("items", []) if i.get("deliver") != "offline"]
-    vocab = load_vocabulary(vocab_path)
-
-    print(f"Compiling {len(items)} items, {len(vocab)} existing predicates")
-
-    compiled: dict[str, str] = {}
-
-    for item in items:
-        item_id = item.get("id", "")
-        when_note = item.get("when_note", "")
-        if not when_note:
-            print(f"  {item_id}: no when_note, skipping")
-            continue
-
-        prompt = build_compiler_prompt(when_note, vocab)
-        print(f"  {item_id}: ", end="", flush=True)
-
-        if dry_run:
-            print("(dry run)")
-            continue
-
-        result = _call_llm(prompt, manifest="compiler", model=model)
-        if result is None:
-            print("FAILED")
-            continue
-
-        parsed = parse_compiler_result(result)
-        if parsed is None:
-            print("PARSE ERROR")
-            continue
-
-        compiled[item_id] = parsed.trigger_expr
-        vocab = merge_vocabulary(vocab, parsed.new_predicates)
-        new_str = (
-            f" +{len(parsed.new_predicates)} predicates"
-            if parsed.new_predicates
-            else ""
-        )
-        print(f"{parsed.trigger_expr}{new_str}")
-
-    if not dry_run and compiled:
-        save_vocabulary(vocab, vocab_path)
-        update_checklist_triggers(checklist_path, compiled)
-        print(f"\nVocabulary: {len(vocab)} predicates → {vocab_path}")
-        print(f"Checklist: {len(compiled)} triggers updated → {checklist_path}")
 
 
 @dataclass(slots=True)
@@ -146,7 +83,7 @@ def _load_turns(
         "    coalesce(t.turn_json->'response'->'content', '[]'::jsonb)) c "
         "    WHERE c->>'type' = 'tool_call') AS has_tools, "
         "  coalesce(a.tags, ARRAY[]::text[]) AS tags "
-        f"FROM {schema}.agentm_trajectory_turns t "  # noqa: S608
+        f"FROM {schema}.agentm_trajectory_turns t "
         "LEFT JOIN policy.turn_annotations a "
         "  ON a.session_id = t.session_id AND a.turn_index = t.turn_index "
         "WHERE t.session_id = %(session_id)s ORDER BY t.turn_index"
@@ -246,13 +183,12 @@ def cmd_replay(
 
 def _list_sessions(dsn: str, schema: str) -> list[str]:
     """List session IDs from a trajectory schema."""
-    from agentm.storage.sql import create_sql_engine  # noqa: PLC0415
+    from agentm.storage.sql import create_sql_engine
 
     engine = create_sql_engine(dsn)
     with engine.connect() as conn:
         rows = conn.exec_driver_sql(
-            f"SELECT id FROM {schema}.agentm_trajectory_sessions "  # noqa: S608
-            "ORDER BY id"
+            f"SELECT id FROM {schema}.agentm_trajectory_sessions ORDER BY id"
         )
         session_ids = [str(row[0]) for row in rows]
     engine.dispose()
@@ -273,7 +209,7 @@ def cmd_tag(
     trajectories already in the store, so a vocabulary or prompt change can be
     judged on real runs without spending a sandbox.
     """
-    import asyncio  # noqa: PLC0415
+    import asyncio
 
     asyncio.run(_tag_sessions(dsn, schema, model, force, interval))
 
@@ -285,8 +221,8 @@ async def _build_provider(model: str | None) -> ProviderConfig:
     AGENTM_HOME/config.toml exactly as it would in a live run — no second copy
     of credential lookup lives here.
     """
-    from agentm import AgentSession, AgentSessionConfig  # noqa: PLC0415
-    from agentm.config import DefaultSessionSpecResolver  # noqa: PLC0415
+    from agentm import AgentSession, AgentSessionConfig
+    from agentm.config import DefaultSessionSpecResolver
 
     session = await AgentSession.create(
         AgentSessionConfig(
@@ -306,7 +242,7 @@ async def _build_provider(model: str | None) -> ProviderConfig:
 async def _tag_sessions(
     dsn: str, schema: str, model: str | None, force: bool, interval: int
 ) -> None:
-    from .tagger import (  # noqa: PLC0415
+    from .tagger import (
         TaggerConversation,
         render_turn,
         write_annotation,
@@ -330,7 +266,7 @@ async def _tag_sessions(
             continue
 
         turns = source.query(
-            f"SELECT turn_index, turn_json "  # noqa: S608
+            f"SELECT turn_index, turn_json "
             f"FROM {schema}.agentm_trajectory_turns "
             "WHERE session_id = %(session_id)s ORDER BY turn_index"
         )
@@ -513,84 +449,6 @@ def cmd_select(
     vocab = prune_vocabulary(vocab, checklist_path)
     save_vocabulary(vocab, vocab_path)
     print(f"Vocabulary: {before} → {len(vocab)} predicates")
-
-
-@app.command("evolve")
-def cmd_evolve(
-    dsn: str,
-    schema: str = SCHEMA_OPT,
-    checklist: str = CHECKLIST_OPT,
-    vocab_path_arg: str = VOCAB_OPT,
-    model: str | None = MODEL_OPT,
-    max_injections: int = MAX_INJECTIONS_OPT,
-    max_stop_checks: int = MAX_STOP_CHECKS_OPT,
-) -> None:
-    """Run the full evolution loop: compile → evaluate → (select is manual)."""
-    print("=== Step 1: Compile ===")
-    cmd_compile(
-        checklist=checklist,
-        vocab_path_arg=vocab_path_arg,
-        model=model,
-        dry_run=False,
-    )
-
-    print("\n=== Step 2: Evaluate ===")
-    cmd_evaluate(
-        dsn=dsn,
-        schema=schema,
-        checklist=checklist,
-        max_injections=max_injections,
-        max_stop_checks=max_stop_checks,
-    )
-
-    print(
-        "\n=== Step 3: Select ===\n"
-        "Run manually after reviewing evaluate output:\n"
-        f"  python -m policy_engine select --checklist {checklist} "
-        f"--vocab {vocab_path_arg} --fitness <fitness.json>"
-    )
-
-
-# -- LLM calling (offline, not through SDK spawn) -----------------------------
-
-
-def _call_llm(
-    prompt: str,
-    *,
-    manifest: str | None,
-    model: str | None,
-    system_override: str | None = None,
-) -> str | None:
-    try:
-        import tomllib  # noqa: PLC0415
-
-        from openai import OpenAI  # noqa: PLC0415
-
-        if system_override:
-            system = system_override
-        elif manifest:
-            system = load_manifest(manifest).system
-        else:
-            system = ""
-
-        config = tomllib.loads(Path.home().joinpath(".agentm/config.toml").read_text())
-        model_name = model or "litellm-dsv4flash"
-        mc = config["models"][model_name]
-        client = OpenAI(api_key=mc["api_key"], base_url=mc["base_url"])
-
-        resp = client.chat.completions.create(
-            model=mc["model"],
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=500,
-            temperature=0,
-        )
-        return resp.choices[0].message.content
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("LLM call failed: {}", exc)
-        return None
 
 
 if __name__ == "__main__":
