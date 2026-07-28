@@ -151,6 +151,7 @@ requirements:
       - path: src/agentm/config/__init__.py
       - path: src/agentm/config/resolver.py
       - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/_codec_v2.py
       - path: src/agentm/core/abi/_resource_codec.py
       - path: src/agentm/core/abi/bus.py
       - path: src/agentm/core/abi/cancel.py
@@ -193,6 +194,7 @@ requirements:
       - path: src/agentm/core/runtime/catalog.py
       - path: src/agentm/core/runtime/driver.py
       - path: src/agentm/core/runtime/reaction.py
+      - path: src/agentm/core/runtime/reaction_types.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/runtime/session_core.py

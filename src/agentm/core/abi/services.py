@@ -193,6 +193,20 @@ class ServiceRegistry:
         entry = self._services.get(name)
         return None if entry is None else entry.scope
 
+    def copy(self) -> ServiceRegistry:
+        """Snapshot registrations and observer for composition transactions."""
+
+        copied = ServiceRegistry()
+        copied._services = dict(self._services)
+        copied._bind_observer = self._bind_observer
+        return copied
+
+    def replace_from(self, other: ServiceRegistry) -> None:
+        """Restore registrations and observer from ``other``."""
+
+        self._services = dict(other._services)
+        self._bind_observer = other._bind_observer
+
     def update_from(self, other: ServiceRegistry) -> None:
         """Merge another registry into this one (other wins on conflict)."""
         self._services.update(other._services)

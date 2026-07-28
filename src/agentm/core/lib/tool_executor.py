@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.messages import thaw_json
+from agentm.core.abi.messages import JsonValue, thaw_json
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
 from agentm.core.abi.tool_executor import (
     ToolExecutionCapabilities,
@@ -29,7 +29,8 @@ async def _execute_direct(
     # Requests deep-freeze their args for audit immutability; tools are
     # promised plain JSON containers, so thaw at the delivery boundary —
     # a defensive deep copy that keeps the frozen original on the request.
-    thawed_args = cast("dict[str, object]", thaw_json(dict(args)))
+    frozen_args = cast("JsonValue", args)
+    thawed_args = cast("dict[str, object]", thaw_json(frozen_args))
     task = asyncio.create_task(
         tool.execute(thawed_args, signal=signal),
         name=f"agentm-tool-{tool.name}",

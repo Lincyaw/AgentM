@@ -7,9 +7,8 @@ import asyncio
 import hashlib
 import json
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from agentm.core.abi.bus import EventBus
 from agentm.core.abi.cancel import (
@@ -105,7 +104,6 @@ from agentm.core.abi.trajectory import (
     ToolRecord,
     TrajectoryNode,
     Turn,
-    TurnCheckpoint,
     TurnMeta,
 )
 from agentm.core.abi.trigger import (
@@ -113,35 +111,16 @@ from agentm.core.abi.trigger import (
     ContinueTrigger,
     SubagentResult,
     Trigger,
-    TriggerMetadata,
     TriggerRenderer,
 )
 from agentm.core.runtime.execution import Execution
-
-if TYPE_CHECKING:
-    from agentm.core.runtime.driver import DriverConfig
+from agentm.core.runtime.reaction_types import (
+    ReactionDependencies,
+    ReactionRequest,
+    ReactionResult,
+)
 
 _INTERRUPTED_TOOL_TEXT = "Tool execution interrupted"
-
-
-@dataclass(frozen=True, slots=True)
-class ReactionRequest:
-    execution: Execution
-    trigger: Trigger
-    trigger_metadata: TriggerMetadata
-    config: DriverConfig
-    context_projection: ContextProjection | None
-    interruption_policy: InterruptionMessagePolicy | None
-    tool_calls_remaining: int | None
-    checkpoint: Callable[[TurnCheckpoint], Awaitable[None]] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ReactionResult:
-    outcome: Outcome
-    meta: TurnMeta
-    tool_calls_used: int
-    continuation_system_prompt: str | None
 
 
 def _signal_aborted(signal: CancelSignal | None) -> SignalAborted:
@@ -555,7 +534,7 @@ async def _orchestration_failure_outcome(
         )
     exc = result.error
     reason = str(exc) if exc is not None else result.status
-    err_returns = await bus.emit(
+    err_returns = await bus.emit_decision(
         ToolErrorEvent.CHANNEL,
         ToolErrorEvent(
             kind="execution_failed",
@@ -595,7 +574,7 @@ async def _finalize_tool_outcome(
         args=event_args,
         duration_ms=duration_ms,
     )
-    returns = await bus.emit(
+    returns = await bus.emit_decision(
         ToolResultEvent.CHANNEL,
         ToolResultEvent(
             tool_call_id=call.id,
@@ -678,7 +657,7 @@ async def _record_turn_payload(
 async def _history_messages(
     *,
     turns: Sequence[Turn],
-    policies: list[ContextPolicy],
+    policies: Sequence[ContextPolicy],
     trigger_renderers: dict[str, TriggerRenderer] | None,
     projection: ContextProjection | None,
     budget: ContextBudget,
@@ -789,34 +768,34 @@ async def react(
 ) -> ReactionResult:
     """ReAct loop within one turn.  Returns when a Stop action fires."""
 
-    config = request.config
+    dependencies = request.dependencies
     execution = request.execution
-    trajectory = config.trajectory
+    trajectory = dependencies.trajectory
     trigger = request.trigger
     trigger_metadata = request.trigger_metadata
-    bus = config.bus
-    stream_fn = config.stream_fn
-    model = config.model
-    tools = config.tools
-    system = config.system
-    policies = config.context_policies or []
+    bus = dependencies.bus
+    stream_fn = dependencies.stream_fn
+    model = dependencies.model
+    tools = dependencies.tools
+    system = dependencies.system
+    policies = dependencies.context_policies
     context_projection = request.context_projection
-    trigger_renderers = config.trigger_renderers
-    interrupt = config.interrupt
-    shutdown = config.shutdown
-    parent_cancel_signal = config.cancel_signal
-    thinking = config.thinking
-    tool_executor = config.tool_executor
-    tool_orchestrator = config.tool_orchestrator
-    permission_policy = config.permission_policy
-    trajectory_store = config.store
-    session_id = config.session_id
-    root_session_id = config.root_session_id
-    parent_session_id = config.parent_session_id
-    permission_audience = config.permission_audience
+    trigger_renderers = dependencies.trigger_renderers
+    interrupt = dependencies.interrupt
+    shutdown = dependencies.shutdown
+    parent_cancel_signal = dependencies.cancel_signal
+    thinking = dependencies.thinking
+    tool_executor = dependencies.tool_executor
+    tool_orchestrator = dependencies.tool_orchestrator
+    permission_policy = dependencies.permission_policy
+    trajectory_store = dependencies.store
+    session_id = dependencies.session_id
+    root_session_id = dependencies.root_session_id
+    parent_session_id = dependencies.parent_session_id
+    permission_audience = dependencies.permission_audience
     interruption_policy = request.interruption_policy
     tool_calls_remaining = request.tool_calls_remaining
-    tool_allowlist = config.tool_allowlist
+    tool_allowlist = dependencies.tool_allowlist
 
     total_input = 0
     total_output = 0
@@ -1212,7 +1191,7 @@ async def react(
                     checkpoint_meta,
                 )
 
-            tc_returns = await bus.emit(
+            tc_returns = await bus.emit_decision(
                 ToolCallEvent.CHANNEL,
                 ToolCallEvent(
                     tool_call_id=tc.id,
@@ -1449,7 +1428,7 @@ async def react(
     if terminal_from_trigger is not None and isinstance(default, Step):
         default = Stop(cause=terminal_from_trigger)
 
-    decide_returns = await bus.emit(
+    decide_returns = await bus.emit_decision(
         DecideEvent.CHANNEL,
         DecideEvent(
             observation=TurnObservation(
@@ -1506,6 +1485,7 @@ async def react(
 
 
 __all__ = [
+    "ReactionDependencies",
     "ReactionRequest",
     "ReactionResult",
     "react",

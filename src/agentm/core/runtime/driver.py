@@ -110,9 +110,12 @@ from agentm.core.lib.context_projection import ExactNodeChainProjection
 from agentm.core.lib.redact import redact_text_secrets
 from agentm.core.lib.trajectory_nodes import turn_to_nodes
 from agentm.core.runtime.reaction import (
-    ReactionRequest,
     react,
     record_interruption_message,
+)
+from agentm.core.runtime.reaction_types import (
+    ReactionDependencies,
+    ReactionRequest,
 )
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import (
@@ -742,12 +745,28 @@ async def drive(config: DriverConfig) -> None:
                     execution=execution,
                     trigger=trigger,
                     trigger_metadata=envelope.metadata,
-                    config=replace(
-                        config,
-                        context_policies=policies,
+                    dependencies=ReactionDependencies(
+                        trajectory=config.trajectory,
+                        bus=config.bus,
+                        stream_fn=config.stream_fn,
+                        model=config.model,
+                        tools=tuple(config.tools),
+                        system=prompt_run.system_prompt,
+                        context_policies=tuple(policies),
+                        trigger_renderers=config.trigger_renderers,
                         interrupt=_interrupt,
                         shutdown=_shutdown,
-                        system=prompt_run.system_prompt,
+                        cancel_signal=config.cancel_signal,
+                        thinking=config.thinking,
+                        tool_executor=config.tool_executor,
+                        tool_orchestrator=config.tool_orchestrator,
+                        permission_policy=config.permission_policy,
+                        store=config.store,
+                        session_id=config.session_id,
+                        root_session_id=config.root_session_id,
+                        parent_session_id=config.parent_session_id,
+                        permission_audience=config.permission_audience,
+                        tool_allowlist=config.tool_allowlist,
                     ),
                     context_projection=context_projection,
                     interruption_policy=interruption_policy,

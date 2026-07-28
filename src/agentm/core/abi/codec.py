@@ -30,6 +30,10 @@ from dataclasses import asdict
 from types import MappingProxyType
 from typing import Any, Final, Protocol, cast, runtime_checkable
 
+from agentm.core.abi._codec_v2 import (
+    migrate_v2_checkpoint,
+    migrate_v2_turn,
+)
 from agentm.core.abi._resource_codec import (
     deserialize_resource_mutations,
     serialize_resource_mutations,
@@ -87,7 +91,10 @@ from agentm.core.lib.json_value import (
     json_safe as _json_safe,
 )
 
-TRAJECTORY_CODEC_VERSION = 3
+TURN_CODEC_VERSION = 3
+TURN_CHECKPOINT_CODEC_VERSION = 3
+SESSION_META_CODEC_VERSION = 3
+_LEGACY_TRAJECTORY_CODEC_VERSION = 2
 
 
 @runtime_checkable
@@ -801,6 +808,12 @@ class CodecRegistry:
         copied._cause_types = dict(self._cause_types)
         return copied
 
+    def replace_from(self, other: "CodecRegistry") -> None:
+        """Restore registrations from ``other`` without replacing this object."""
+
+        self._trigger_codecs = dict(other._trigger_codecs)
+        self._cause_types = dict(other._cause_types)
+
     def copy_without_trigger_sources(
         self,
         sources: set[str],
@@ -1031,7 +1044,7 @@ class CodecRegistry:
     ) -> dict[str, Any]:
         """Convert an incomplete turn checkpoint to a JSON-safe dict."""
         return {
-            "schema_version": TRAJECTORY_CODEC_VERSION,
+            "schema_version": TURN_CHECKPOINT_CODEC_VERSION,
             "index": checkpoint.index,
             "id": checkpoint.id,
             "run_id": checkpoint.run_id,
@@ -1060,6 +1073,17 @@ class CodecRegistry:
     ) -> TurnCheckpoint:
         """Reconstruct an incomplete turn checkpoint from a dict."""
         data = _object(data, "turn checkpoint")
+        version = _integer(
+            data.get("schema_version"),
+            "turn checkpoint.schema_version",
+        )
+        if version == _LEGACY_TRAJECTORY_CODEC_VERSION:
+            data = migrate_v2_checkpoint(
+                data,
+                target_version=TURN_CHECKPOINT_CODEC_VERSION,
+            )
+        elif version != TURN_CHECKPOINT_CODEC_VERSION:
+            raise ValueError(f"unsupported turn checkpoint schema version: {version}")
         _only_fields(
             data,
             {
@@ -1078,12 +1102,6 @@ class CodecRegistry:
             },
             "turn checkpoint",
         )
-        version = _integer(
-            data.get("schema_version"),
-            "turn checkpoint.schema_version",
-        )
-        if version != TRAJECTORY_CODEC_VERSION:
-            raise ValueError(f"unsupported turn checkpoint schema version: {version}")
         raw_response = data.get("response")
         response = (
             None
@@ -1146,7 +1164,7 @@ class CodecRegistry:
     def serialize_turn(self, turn: Turn) -> dict[str, Any]:
         """Convert a Turn to a JSON-safe dict for storage."""
         return {
-            "schema_version": TRAJECTORY_CODEC_VERSION,
+            "schema_version": TURN_CODEC_VERSION,
             "index": turn.index,
             "id": turn.id,
             "run_id": turn.run_id,
@@ -1167,6 +1185,11 @@ class CodecRegistry:
     def deserialize_turn(self, data: dict[str, Any]) -> Turn:
         """Reconstruct a Turn from a dict."""
         data = _object(data, "turn")
+        version = _integer(data.get("schema_version"), "turn.schema_version")
+        if version == _LEGACY_TRAJECTORY_CODEC_VERSION:
+            data = migrate_v2_turn(data, target_version=TURN_CODEC_VERSION)
+        elif version != TURN_CODEC_VERSION:
+            raise ValueError(f"unsupported turn schema version: {version}")
         _only_fields(
             data,
             {
@@ -1185,9 +1208,6 @@ class CodecRegistry:
             },
             "turn",
         )
-        version = _integer(data.get("schema_version"), "turn.schema_version")
-        if version != TRAJECTORY_CODEC_VERSION:
-            raise ValueError(f"unsupported turn schema version: {version}")
         raw_response = data.get("response")
         response = (
             None
@@ -1287,7 +1307,7 @@ class CodecRegistry:
     @staticmethod
     def serialize_session_meta(meta: Any) -> dict[str, Any]:
         return {
-            "schema_version": TRAJECTORY_CODEC_VERSION,
+            "schema_version": SESSION_META_CODEC_VERSION,
             "id": meta.id,
             "parent_id": meta.parent_id,
             "fork_point": meta.fork_point,
@@ -1320,7 +1340,10 @@ class CodecRegistry:
             data.get("schema_version"),
             "session metadata.schema_version",
         )
-        if version != TRAJECTORY_CODEC_VERSION:
+        if version not in {
+            SESSION_META_CODEC_VERSION,
+            _LEGACY_TRAJECTORY_CODEC_VERSION,
+        }:
             raise ValueError(f"unsupported session metadata schema version: {version}")
         fork_point = data.get("fork_point")
         if fork_point is not None and (

@@ -23,6 +23,10 @@ Handler = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
 EventReducer = Callable[[Any, Any], Any]
 
 
+def _keep_event(event: Any, _: Any) -> Any:
+    return event
+
+
 @dataclass(frozen=True, slots=True)
 class Event:
     """Base for frozen events that handlers cannot mutate."""
@@ -147,6 +151,17 @@ class EventBus:
         self._observer_emit_end(channel, event, results, dispatch_id)
         return results
 
+    async def emit_decision(self, channel: str, event: Any) -> list[Any]:
+        """Dispatch a return-value-carrying event and propagate handler errors.
+
+        Every handler receives the original immutable event. Use this for
+        gates, rewrites, replacements, and decisions where treating a crashed
+        handler as ``None`` would silently change policy into abstention.
+        """
+
+        _, results = await self.emit_reduced(channel, event, _keep_event)
+        return results
+
     async def emit_reduced(
         self,
         channel: str,
@@ -183,6 +198,7 @@ class EventBus:
                     dispatch_id,
                     sub.owner,
                 )
+                value: Any = None
                 error: BaseException | None = None
                 try:
                     value = sub.handler(handler_event)
@@ -194,6 +210,9 @@ class EventBus:
                         "event handler raised on transform channel {!r}; propagating.",
                         channel,
                     )
+                    raise
+                except BaseException as exc:
+                    error = exc
                     raise
                 finally:
                     duration_ns = time.perf_counter_ns() - start_ns
@@ -268,6 +287,30 @@ class EventBus:
     def freeze_clear(self) -> None:
         """Block clear() from wiping handlers.  Called after atom install."""
         self._frozen_clear = True
+
+    def copy(self) -> EventBus:
+        """Snapshot subscriptions and observers for composition transactions."""
+
+        copied = EventBus()
+        copied._handlers = {
+            channel: list(subscriptions)
+            for channel, subscriptions in self._handlers.items()
+        }
+        copied._observers = list(self._observers)
+        copied._next_seq = self._next_seq
+        copied._frozen_clear = self._frozen_clear
+        return copied
+
+    def replace_from(self, other: EventBus) -> None:
+        """Restore subscriptions and observers from ``other``."""
+
+        self._handlers = {
+            channel: list(subscriptions)
+            for channel, subscriptions in other._handlers.items()
+        }
+        self._observers = list(other._observers)
+        self._next_seq = other._next_seq
+        self._frozen_clear = other._frozen_clear
 
     def clear(self) -> None:
         """Clear all handlers.  Blocked after freeze_clear()."""

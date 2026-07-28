@@ -1,8 +1,5 @@
 # code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
-"""Extension loader — import an atom module and call its install().
-
-Atoms receive the Session object directly.
-"""
+"""Extension loader — validate an atom and install it through AtomAPI."""
 
 # code-health: ignore-file[AM022] -- validates dynamically imported Python plugin contracts
 
@@ -15,7 +12,8 @@ import inspect
 import sys
 import threading
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
@@ -25,14 +23,26 @@ from loguru import logger
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ValidationError as PydanticValidationError
 
+from agentm.core.abi.bus import (
+    EventBus,
+    EventBusObserver,
+    EventReducer,
+    Handler,
+)
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.events import ExtensionInstallEvent
 from agentm.core.abi.manifest import ExtensionManifest
-from agentm.core.abi.messages import thaw_json
+from agentm.core.abi.messages import JsonValue, thaw_json
 from agentm.core.abi.session_api import (
+    AgentSessionConfig,
+    AtomAPI,
+    ChildCancellationMode,
     ExtensionSource,
     ExtensionSpec,
+    SessionContext,
+    SpawnedSession,
 )
+from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
     ValidationIssue,
     extension_helper_imports,
@@ -41,7 +51,21 @@ from agentm.extensions.validate import (  # code-health: ignore[AM010] -- consti
 )
 
 if TYPE_CHECKING:
-    from agentm.core.runtime.session_core import SessionRuntime
+    from agentm.core.abi.cancel import CancelReason, CancelSignal
+    from agentm.core.abi.codec import TriggerCodec
+    from agentm.core.abi.context import ContextPolicy
+    from agentm.core.abi.messages import AgentMessage
+    from agentm.core.abi.provider import ProviderConfig
+    from agentm.core.abi.store import TrajectoryStore
+    from agentm.core.abi.stream import Model, StreamFn
+    from agentm.core.abi.tool import Tool
+    from agentm.core.abi.trajectory import Turn
+    from agentm.core.abi.trigger import (
+        Trigger,
+        TriggerPriority,
+        TriggerRenderer,
+    )
+    from agentm.core.runtime.session import Session
 
 
 _INSTALLING_EXTENSION: ContextVar[str | None] = ContextVar(
@@ -54,8 +78,254 @@ def current_installing_extension() -> str:
     return _INSTALLING_EXTENSION.get() or ""
 
 
+class _AtomEventBusFacade(EventBus):
+    """Atom-visible bus surface without lifecycle-control capabilities."""
+
+    __slots__ = ("__active", "__session")
+
+    def __init__(
+        self,
+        session: "Session",
+        active: Callable[[], bool],
+    ) -> None:
+        super().__init__()
+        self.__session = session
+        self.__active = active
+
+    def _require_active(self, action: str) -> None:
+        if not self.__active():
+            raise RuntimeError(
+                f"atom cannot {action} during installation; "
+                "defer work to SessionReadyEvent"
+            )
+
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = 500,
+        owner: str | None = None,
+    ) -> Callable[[], None]:
+        del owner
+        return self.__session.on(channel, handler, priority=priority)
+
+    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
+        return self.__session.add_observer(observer)
+
+    async def emit(self, channel: str, event: Any) -> list[Any]:
+        self._require_active("emit events")
+        return await self.__session.bus.emit(channel, event)
+
+    async def emit_decision(self, channel: str, event: Any) -> list[Any]:
+        self._require_active("emit decision events")
+        return await self.__session.bus.emit_decision(channel, event)
+
+    async def emit_reduced(
+        self,
+        channel: str,
+        event: Any,
+        reducer: EventReducer,
+    ) -> tuple[Any, list[Any]]:
+        self._require_active("emit transform events")
+        return await self.__session.bus.emit_reduced(channel, event, reducer)
+
+    def emit_sync(self, channel: str, event: Any) -> list[Any]:
+        self._require_active("emit events")
+        return self.__session.bus.emit_sync(channel, event)
+
+    def freeze_clear(self) -> None:
+        raise PermissionError("atoms cannot freeze the session event bus")
+
+    def clear(self) -> None:
+        raise PermissionError("atoms cannot clear the session event bus")
+
+
+class _AtomAPIFacade:
+    """Concrete capability object exposing exactly the declared AtomAPI."""
+
+    __slots__ = ("__active", "__bus", "__session")
+
+    def __init__(self, session: "Session") -> None:
+        self.__active = False
+        self.__session = session
+        self.__bus = _AtomEventBusFacade(session, self._is_active)
+
+    def _is_active(self) -> bool:
+        return self.__active
+
+    def activate(self) -> None:
+        self.__active = True
+
+    def _require_active(self, action: str) -> None:
+        if not self.__active:
+            raise RuntimeError(
+                f"atom cannot {action} during installation; "
+                "defer work to SessionReadyEvent"
+            )
+
+    @property
+    def ctx(self) -> SessionContext:
+        return self.__session.ctx
+
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = 500,
+    ) -> Callable[[], None]:
+        return self.__session.on(channel, handler, priority=priority)
+
+    @property
+    def bus(self) -> EventBus:
+        return self.__bus
+
+    def register_tool(self, tool: "Tool") -> None:
+        self.__session.register_tool(tool)
+
+    def register_context_policy(
+        self,
+        policy: "ContextPolicy",
+        *,
+        priority: int = 500,
+    ) -> None:
+        self.__session.register_context_policy(policy, priority=priority)
+
+    def register_trigger_renderer(
+        self,
+        source: str,
+        renderer: "TriggerRenderer",
+    ) -> None:
+        self.__session.register_trigger_renderer(source, renderer)
+
+    def register_trigger_codec(self, source: str, codec: "TriggerCodec") -> None:
+        self.__session.register_trigger_codec(source, codec)
+
+    def register_operations(
+        self,
+        *,
+        replace: bool = False,
+        service_scope: ServiceScope = "session",
+        **kwargs: object,
+    ) -> None:
+        self.__session.register_operations(
+            replace=replace,
+            service_scope=service_scope,
+            **kwargs,
+        )
+
+    def register_provider(
+        self,
+        name: str,
+        config: "ProviderConfig",
+        *,
+        replace: bool = False,
+    ) -> None:
+        self.__session.register_provider(name, config, replace=replace)
+
+    def has_provider(self, name: str) -> bool:
+        return self.__session.has_provider(name)
+
+    def get_provider(self, name: str | None = None) -> "ProviderConfig | None":
+        return self.__session.get_provider(name)
+
+    def push_trigger(
+        self,
+        trigger: "Trigger",
+        *,
+        priority: "TriggerPriority" = "next",
+        target_session_id: str | None = None,
+        target_agent_id: str | None = None,
+        origin: str | None = None,
+        mode: str = "prompt",
+        is_meta: bool = False,
+        skip_commands: bool = False,
+        meta: dict[str, JsonValue] | None = None,
+    ) -> object:
+        self._require_active("push triggers")
+        return self.__session.push_trigger(
+            trigger,
+            priority=priority,
+            target_session_id=target_session_id,
+            target_agent_id=target_agent_id,
+            origin=origin,
+            mode=mode,
+            is_meta=is_meta,
+            skip_commands=skip_commands,
+            meta=meta,
+        )
+
+    def interrupt(self, reason: "CancelReason | str" = "user_cancel") -> None:
+        self._require_active("interrupt the session")
+        self.__session.interrupt(reason)
+
+    def track_background(self) -> AbstractContextManager[None]:
+        self._require_active("start background work")
+        return self.__session.track_background()
+
+    def get_messages(self) -> list["AgentMessage"]:
+        return self.__session.get_messages()
+
+    def get_turns(self) -> Sequence["Turn"]:
+        return self.__session.get_turns()
+
+    @property
+    def store(self) -> "TrajectoryStore | None":
+        return self.__session.store
+
+    @property
+    def services(self) -> ServiceRegistry:
+        return self.__session.services
+
+    async def spawn(
+        self,
+        *,
+        purpose: str = "subagent",
+        tools: list["Tool"] | None = None,
+        system: str | None = None,
+        model: "Model | None" = None,
+        stream_fn: "StreamFn | None" = None,
+        scenario: str | None = None,
+        cwd: str | None = None,
+        max_turns: int | None = None,
+        extra_services: ServiceRegistry | None = None,
+        cancel_signal: "CancelSignal | None" = None,
+        parent_cancellation: ChildCancellationMode = "inherit",
+    ) -> SpawnedSession:
+        self._require_active("spawn child sessions")
+        return await self.__session.spawn(
+            purpose=purpose,
+            tools=tools,
+            system=system,
+            model=model,
+            stream_fn=stream_fn,
+            scenario=scenario,
+            cwd=cwd,
+            max_turns=max_turns,
+            extra_services=extra_services,
+            cancel_signal=cancel_signal,
+            parent_cancellation=parent_cancellation,
+        )
+
+    async def spawn_child_session(
+        self,
+        config: AgentSessionConfig,
+    ) -> SpawnedSession:
+        self._require_active("spawn child sessions")
+        return await self.__session.spawn_child_session(config)
+
+    @property
+    def model(self) -> "Model | None":
+        return self.__session.model
+
+    @property
+    def experiment(self) -> dict[str, JsonValue] | None:
+        return self.__session.experiment
+
+
 async def install_extension(
-    api: SessionRuntime,
+    api: "Session",
     extension: ExtensionSpec | str,
     config: dict[str, Any] | None = None,
     *,
@@ -77,14 +347,24 @@ async def install_extension(
         ),
     )
     error: str | None = None
+    snapshot = api._capture_extension_install_state()
+    atom_api = _AtomAPIFacade(api)
     try:
-        result = load_extension(spec, api)
+        result = load_extension(spec, atom_api)
         if inspect.isawaitable(result):
             await result
         api.record_installed_extension(spec)
+        atom_api.activate()
         logger.debug("installed atom: {}", module_path)
-    except Exception as exc:
-        error = str(exc)
+    except BaseException as exc:
+        error = str(exc) or type(exc).__name__
+        try:
+            api._restore_extension_install_state(snapshot)
+        except BaseException as rollback_error:
+            raise BaseExceptionGroup(
+                f"atom installation and rollback failed: {module_path}",
+                (exc, rollback_error),
+            ) from exc
         logger.exception("failed to install atom: {}", module_path)
         raise
     finally:
@@ -93,7 +373,7 @@ async def install_extension(
             ExtensionInstallEvent(
                 name=name,
                 module_path=module_path,
-                phase="error" if error else "end",
+                phase="error" if error is not None else "end",
                 duration_ns=time.perf_counter_ns() - started_ns,
                 trigger=trigger,
                 error=error,
@@ -103,7 +383,7 @@ async def install_extension(
 
 def load_extension(
     extension: ExtensionSpec | str,
-    api: Any,
+    api: AtomAPI,
     config: dict[str, Any] | None = None,
     *,
     validate: bool = True,

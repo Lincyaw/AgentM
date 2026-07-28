@@ -18,6 +18,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, cast
 
 from loguru import logger
 
@@ -114,6 +115,9 @@ from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
 
+if TYPE_CHECKING:
+    from agentm.core.runtime.session import Session
+
 
 @dataclass(slots=True)
 class SessionRuntimeConfig:
@@ -169,6 +173,30 @@ class CompositionSnapshot:
     tool_allowlist: tuple[str, ...] | None
     thinking: ThinkingLevel
     lineage_cancel: CancelSignal
+
+
+@dataclass(frozen=True, slots=True)
+class _ExtensionInstallSnapshot:
+    """Mutable session composition captured before one atom installation."""
+
+    bus: EventBus
+    services: ServiceRegistry
+    codec: CodecRegistry
+    tools: tuple[Tool, ...]
+    tool_owners: dict[int, str | None]
+    context_policies: tuple[ContextPolicy, ...]
+    context_policy_owners: dict[int, str | None]
+    context_policy_priorities: dict[int, int]
+    trigger_renderers: dict[str, TriggerRenderer]
+    trigger_renderer_owners: dict[str, str | None]
+    trigger_codec_owners: dict[str, str | None]
+    stream_fn: StreamFn | None
+    model: Model | None
+    active_provider_name: str | None
+    provider_identity: ProviderSessionIdentity | None
+    provider_owners: dict[str, str | None]
+    installed_extensions: tuple[str, ...]
+    installed_extension_specs: tuple[ExtensionSpec, ...]
 
 
 class SessionRuntime:
@@ -307,18 +335,8 @@ class SessionRuntime:
         if self._model is None:
             raise RuntimeError(f"session {self.id}: cannot start without model")
 
-        policy_ctx = PolicyContext(
-            session_id=self.id,
-            parent_session_id=self.ctx.parent_session_id,
-            services=self.services,
-            store=self.store,
-            model=self._model,
-            stream_fn=self._stream_fn,
-            trigger_renderers=dict(self.trigger_renderers),
-        )
         for policy in self.context_policies:
-            if isinstance(policy, BindableContextPolicy):
-                policy.bind(policy_ctx)
+            self._bind_context_policy(policy)
 
         self.bus.on(
             TurnCommittedEvent.CHANNEL,
@@ -342,6 +360,21 @@ class SessionRuntime:
                 model=self._model,
             ),
         )
+
+    def _policy_context(self) -> PolicyContext:
+        return PolicyContext(
+            session_id=self.id,
+            parent_session_id=self.ctx.parent_session_id,
+            services=self.services,
+            store=self.store,
+            model=self._model,
+            stream_fn=self._stream_fn,
+            trigger_renderers=dict(self.trigger_renderers),
+        )
+
+    def _bind_context_policy(self, policy: ContextPolicy) -> None:
+        if isinstance(policy, BindableContextPolicy):
+            policy.bind(self._policy_context())
 
     def _freeze_provider_on_turn_commit(self, _: TurnCommittedEvent) -> None:
         self._freeze_provider_after_commits()
@@ -628,12 +661,22 @@ class SessionRuntime:
     ) -> None:
         from agentm.core.runtime.extension import current_installing_extension
 
+        if any(existing is policy for existing in self.context_policies):
+            raise ValueError("context policy instance is already registered")
         self.context_policies.append(policy)
         self._context_policy_priorities[id(policy)] = priority
         self._context_policy_owners[id(policy)] = current_installing_extension() or None
         self.context_policies.sort(
             key=lambda item: self._context_policy_priorities[id(item)]
         )
+        if self._driver_task is not None:
+            try:
+                self._bind_context_policy(policy)
+            except BaseException:
+                self.context_policies.remove(policy)
+                self._context_policy_priorities.pop(id(policy), None)
+                self._context_policy_owners.pop(id(policy), None)
+                raise
         self._emit_register_event(
             "context_policy",
             type(policy).__name__,
@@ -1026,12 +1069,62 @@ class SessionRuntime:
         """Install an extension through the standard lifecycle path."""
         from agentm.core.runtime.extension import install_extension
 
+        if self._driver_task is not None:
+            raise RuntimeError(
+                "extensions cannot be installed after session start; "
+                "compose atoms before start"
+            )
         await install_extension(
-            self,
+            cast("Session", self),
             extension,
             None if isinstance(extension, ExtensionSpec) else config or {},
             trigger=trigger,
         )
+
+    def _capture_extension_install_state(self) -> _ExtensionInstallSnapshot:
+        return _ExtensionInstallSnapshot(
+            bus=self.bus.copy(),
+            services=self.services.copy(),
+            codec=self.codec.copy(),
+            tools=tuple(self.tools),
+            tool_owners=dict(self._tool_owners),
+            context_policies=tuple(self.context_policies),
+            context_policy_owners=dict(self._context_policy_owners),
+            context_policy_priorities=dict(self._context_policy_priorities),
+            trigger_renderers=dict(self.trigger_renderers),
+            trigger_renderer_owners=dict(self._trigger_renderer_owners),
+            trigger_codec_owners=dict(self._trigger_codec_owners),
+            stream_fn=self._stream_fn,
+            model=self._model,
+            active_provider_name=self._active_provider_name,
+            provider_identity=self._provider_identity,
+            provider_owners=dict(self._provider_owners),
+            installed_extensions=tuple(self.installed_extensions),
+            installed_extension_specs=tuple(self._installed_extension_specs),
+        )
+
+    def _restore_extension_install_state(
+        self,
+        snapshot: _ExtensionInstallSnapshot,
+    ) -> None:
+        self.bus.replace_from(snapshot.bus)
+        self.services.replace_from(snapshot.services)
+        self.codec.replace_from(snapshot.codec)
+        self.tools = list(snapshot.tools)
+        self._tool_owners = dict(snapshot.tool_owners)
+        self.context_policies = list(snapshot.context_policies)
+        self._context_policy_owners = dict(snapshot.context_policy_owners)
+        self._context_policy_priorities = dict(snapshot.context_policy_priorities)
+        self.trigger_renderers = dict(snapshot.trigger_renderers)
+        self._trigger_renderer_owners = dict(snapshot.trigger_renderer_owners)
+        self._trigger_codec_owners = dict(snapshot.trigger_codec_owners)
+        self._stream_fn = snapshot.stream_fn
+        self._model = snapshot.model
+        self._active_provider_name = snapshot.active_provider_name
+        self._provider_identity = snapshot.provider_identity
+        self._provider_owners = dict(snapshot.provider_owners)
+        self.installed_extensions = list(snapshot.installed_extensions)
+        self._installed_extension_specs = list(snapshot.installed_extension_specs)
 
     def record_installed_extension(
         self,

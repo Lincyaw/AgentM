@@ -398,7 +398,7 @@ class _SkillLoaderRuntime:
         observer = _ResourceResponseObserver()
         unsubscribe = self._api.bus.add_observer(observer)
         try:
-            responses = await self._api.bus.emit(
+            responses = await self._api.bus.emit_decision(
                 ResourcesDiscoverEvent.CHANNEL,
                 ResourcesDiscoverEvent(cwd=self._api.ctx.cwd, reason="startup"),
             )
