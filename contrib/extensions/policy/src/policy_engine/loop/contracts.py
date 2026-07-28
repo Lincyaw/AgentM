@@ -1,14 +1,21 @@
-# code-health: ignore-file[AM025] -- JSON arriving from disk and from model
-# tool calls is untyped by construction; every isinstance here is at that
-# boundary, converting it into the typed records below exactly once.
 """The protocol between loop stages.
 
 Each stage reads one artifact and writes the next, so these records are the
 whole interface: a stage can be re-run against a hand-edited file, and a stage
-can be replaced without touching its neighbours. They are also the agents'
-output schemas -- ``Diagnosis`` and ``Candidate`` are what the diagnoser and
-abstractor return by tool call, so the model has no way to finish except by
-filling one in.
+can be replaced without touching its neighbours.
+
+Every shape is written once, as a pydantic model, and serves three readers
+from that one definition: the artifact on disk (``to_json``/``from_json``),
+the agent's tool schema (the ``*Payload`` classes — ``FunctionTool`` converts
+a model class to JSON Schema, and the runner validates the call against it, so
+a malformed payload is a retry rather than an empty string downstream), and
+the typed record the next stage receives. The previous arrangement wrote each
+shape three times by hand, and the three had already begun to disagree.
+
+A ``*Payload`` class holds exactly the fields the model fills in; the record
+that extends it adds what the loop assigns — ids, provenance, turn indices.
+Parsing is validating: an artifact missing a required field fails loudly at
+load rather than defaulting to ``""`` and failing quietly three stages later.
 
 Everything is plain JSON on disk. ``AGENTM_HOME/policy-loop/<run-id>/`` holds
 one file per stage.
@@ -18,65 +25,54 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, Self, cast, get_args
+
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import JsonValue as PydanticJsonValue
 
 from agentm.core.abi import JsonValue
 
-# -- json helpers -------------------------------------------------------------
+# -- json helpers --------------------------------------------------------------
+# For benchmark adapters reading foreign, untyped JSON (result files, judge
+# output) that has no model. Loop artifacts do not need these.
 
 
 def json_str(raw: Mapping[str, JsonValue], key: str, default: str = "") -> str:
-    """One string out of untyped JSON, or ``default``.
-
-    Public because benchmark adapters read the same untyped JSON at the same
-    boundary, and a second copy of this is where the ``bool`` subtlety below
-    gets fixed in one place only.
-    """
+    """One string out of untyped JSON, or ``default``."""
     value = raw.get(key, default)
-    return value if isinstance(value, str) else default
+    return value if isinstance(value, str) else default  # code-health: ignore[AM025]
 
 
 def json_int(raw: Mapping[str, JsonValue], key: str, default: int = 0) -> int:
     """One int out of untyped JSON. ``bool`` is an ``int`` in Python and is not
     one here: ``True`` arriving where a turn index belongs is bad data."""
     value = raw.get(key, default)
-    return value if isinstance(value, int) and not isinstance(value, bool) else default
+    if isinstance(value, bool):  # code-health: ignore[AM025]
+        return default
+    return value if isinstance(value, int) else default  # code-health: ignore[AM025]
 
 
-_str = json_str
-_int = json_int
+# -- the record base -----------------------------------------------------------
 
 
-def _bool(raw: Mapping[str, JsonValue], key: str, default: bool = False) -> bool:
-    value = raw.get(key, default)
-    return value if isinstance(value, bool) else default
+class Record(BaseModel):
+    """One shape, three readers: artifact row, tool schema, typed value."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return cast("dict[str, JsonValue]", self.model_dump(mode="json", by_alias=True))
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, JsonValue]) -> Self:
+        return cls.model_validate(raw)
 
 
-def _objects(raw: Mapping[str, JsonValue], key: str) -> list[Mapping[str, JsonValue]]:
-    value = raw.get(key)
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, Mapping)]
+# -- shared --------------------------------------------------------------------
 
 
-def _mapping(raw: Mapping[str, JsonValue], key: str) -> Mapping[str, JsonValue]:
-    value = raw.get(key)
-    return value if isinstance(value, Mapping) else {}
-
-
-def _strings(raw: Mapping[str, JsonValue], key: str) -> tuple[str, ...]:
-    value = raw.get(key)
-    if not isinstance(value, list):
-        return ()
-    return tuple(item for item in value if isinstance(item, str))
-
-
-# -- shared -------------------------------------------------------------------
-
-
-@dataclass(slots=True, frozen=True)
-class Metrics:
+class Metrics(Record):
     """What a benchmark scored, by its own names.
 
     Not three fixed fields: benchmarks disagree about what they measure, and
@@ -91,22 +87,8 @@ class Metrics:
     worth keeping.
     """
 
-    values: Mapping[str, float | None] = field(default_factory=dict)
+    values: dict[str, float | None] = Field(default_factory=dict)
     primary: str = ""
-
-    def to_json(self) -> dict[str, JsonValue]:
-        return {"values": dict(self.values), "primary": self.primary}
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> Metrics:
-        values = _mapping(raw, "values")
-        parsed: dict[str, float | None] = {}
-        for key, value in values.items():
-            if value is None or isinstance(value, bool):
-                parsed[key] = None
-            elif isinstance(value, (int, float)):
-                parsed[key] = float(value)
-        return Metrics(values=parsed, primary=_str(raw, "primary"))
 
     def get(self, name: str) -> float | None:
         return self.values.get(name)
@@ -149,23 +131,14 @@ class Metrics:
         )
 
 
-@dataclass(slots=True, frozen=True)
-class Evidence:
+class Evidence(Record):
     """A quote with where it came from, so a claim can be re-checked."""
 
     source: str = ""
     quote: str = ""
 
-    def to_json(self) -> dict[str, JsonValue]:
-        return {"source": self.source, "quote": self.quote}
 
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> Evidence:
-        return Evidence(source=_str(raw, "source"), quote=_str(raw, "quote"))
-
-
-@dataclass(slots=True, frozen=True)
-class EvidenceRef:
+class EvidenceRef(Record):
     """Somewhere a diagnoser should look, named by the benchmark that knows.
 
     Rendered into the prompt verbatim, so the loop never learns that a verifier
@@ -178,45 +151,23 @@ class EvidenceRef:
     locator: str = ""
     note: str = ""
 
-    def to_json(self) -> dict[str, JsonValue]:
-        return {"label": self.label, "locator": self.locator, "note": self.note}
 
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> EvidenceRef:
-        return EvidenceRef(
-            label=_str(raw, "label"),
-            locator=_str(raw, "locator"),
-            note=_str(raw, "note"),
-        )
-
-
-@dataclass(slots=True, frozen=True)
-class Assertion:
+class Assertion(Record):
     """One graded check that failed. ``kind`` separates the functional suite
     from the validation stories because they fail for different reasons and are
     reported in different files."""
 
     kind: str = "test"
-    assertion_id: str = ""
+    assertion_id: str = Field(
+        default="", validation_alias="id", serialization_alias="id"
+    )
     message: str = ""
 
-    def to_json(self) -> dict[str, JsonValue]:
-        return {"kind": self.kind, "id": self.assertion_id, "message": self.message}
 
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> Assertion:
-        return Assertion(
-            kind=_str(raw, "kind", "test"),
-            assertion_id=_str(raw, "id"),
-            message=_str(raw, "message"),
-        )
+# -- stage 1: discovery --------------------------------------------------------
 
 
-# -- stage 1: discovery -------------------------------------------------------
-
-
-@dataclass(slots=True, frozen=True)
-class FailureCase:
+class FailureCase(Record):
     """One graded attempt that did not pass.
 
     Self-describing on purpose. Whatever a diagnoser needs to read is listed in
@@ -228,6 +179,9 @@ class FailureCase:
 
     case_id: str
     task_name: str
+    #: Which model made this attempt. Empty when the source cannot say, which
+    #: costs only the model-scope notes -- they group on it.
+    model_name: str = ""
     #: The task as the agent received it.
     instruction: str = ""
     failing_assertions: tuple[Assertion, ...] = ()
@@ -237,43 +191,13 @@ class FailureCase:
     #: whether an assertion id is fine-grained enough needs benchmark knowledge.
     #: Empty when there is only one attempt.
     cohort_note: str = ""
-    metrics: Metrics = field(default_factory=Metrics)
+    metrics: Metrics = Field(default_factory=Metrics)
     sibling_metrics: tuple[Metrics, ...] = ()
     #: Everything the replay backend needs and nobody else interprets: a
     #: workspace checkpoint, a conversation turn, a container digest -- whatever
-    #: this benchmark's re-run takes.
-    backend_ref: Mapping[str, JsonValue] = field(default_factory=dict)
-
-    def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "case_id": self.case_id,
-            "task_name": self.task_name,
-            "instruction": self.instruction,
-            "failing_assertions": tuple(a.to_json() for a in self.failing_assertions),
-            "evidence": tuple(e.to_json() for e in self.evidence),
-            "cohort_note": self.cohort_note,
-            "metrics": self.metrics.to_json(),
-            "sibling_metrics": tuple(m.to_json() for m in self.sibling_metrics),
-            "backend_ref": dict(self.backend_ref),
-        }
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> FailureCase:
-        return FailureCase(
-            case_id=_str(raw, "case_id"),
-            task_name=_str(raw, "task_name"),
-            instruction=_str(raw, "instruction"),
-            failing_assertions=tuple(
-                Assertion.from_json(a) for a in _objects(raw, "failing_assertions")
-            ),
-            evidence=tuple(EvidenceRef.from_json(e) for e in _objects(raw, "evidence")),
-            cohort_note=_str(raw, "cohort_note"),
-            metrics=Metrics.from_json(_mapping(raw, "metrics")),
-            sibling_metrics=tuple(
-                Metrics.from_json(m) for m in _objects(raw, "sibling_metrics")
-            ),
-            backend_ref=_mapping(raw, "backend_ref"),
-        )
+    #: this benchmark's re-run takes. Typed with pydantic's own JsonValue: the
+    #: ABI's recursive alias sends schema generation into infinite recursion.
+    backend_ref: dict[str, PydanticJsonValue] = Field(default_factory=dict)
 
     @property
     def replayable(self) -> bool:
@@ -281,13 +205,13 @@ class FailureCase:
         return bool(self.backend_ref)
 
 
-# -- stage 2: diagnose --------------------------------------------------------
+# -- stage 2: diagnose ---------------------------------------------------------
 
 #: Why the attempt is wrong. The last two exist so the loop can retire a case
 #: instead of grinding on it: one dev-set task is graded against a
 #: reference-internal parameter name the task never states, and another's graded
 #: suite fails nondeterministically in code no patch touches.
-CAUSE_CLASSES: tuple[str, ...] = (
+CauseClass = Literal[
     "misread_intent",
     "omitted",
     "wrong_implementation",
@@ -295,105 +219,83 @@ CAUSE_CLASSES: tuple[str, ...] = (
     "environment_self_break",
     "grading_artifact",
     "harness_nondeterminism",
-)
+]
+CAUSE_CLASSES: tuple[str, ...] = get_args(CauseClass)
 
 
-@dataclass(slots=True, frozen=True)
-class Diagnosis:
-    """The diagnoser's answer: what grading wanted, what was built instead, and
-    where the two parted."""
+class DiagnosisPayload(Record):
+    """What the diagnoser fills in. Doubles as the ``submit_diagnosis`` tool
+    schema, so a field description here is what the model reads."""
+
+    required_behaviour: str = Field(
+        description="What grading demands, quoted from the failing assertions."
+    )
+    reference_idea: str = Field(
+        description="The reference solution's central idea, one sentence."
+    )
+    agent_idea: str = Field(
+        description="What the agent built instead, in the same terms."
+    )
+    divergence_turn: int = Field(
+        default=-1,
+        description="Turn index where the approach stopped being open. -1 if "
+        "you cannot locate it.",
+    )
+    divergence_quote: str = Field(
+        default="", description="What was said or done at that turn."
+    )
+    cause_class: CauseClass
+    mechanism: str = Field(
+        description="Why it is wrong, concretely: what breaks, under what "
+        "condition. Not 'it did not test enough'."
+    )
+    decision: str = Field(
+        description="What was being chosen at the divergence turn, in the "
+        "agent's own terms."
+    )
+    unasked_question: str = Field(
+        description="The step not taken: a question the agent could have asked "
+        "itself at that moment, answerable only by running something. Must be "
+        "askable without knowing the answer -- if it names the defect, it is "
+        "hindsight, not a question."
+    )
+    discriminating_answer: str = Field(
+        description="What asking it would have produced, and what the agent "
+        "believed instead. If the answer would look the same whether or not "
+        "the agent was right, this is not the missing step; find the question "
+        "whose answer differs."
+    )
+    lesson: str = Field(
+        description="What someone starting a different task in this same "
+        "repository should know because of this. May name this repository's "
+        "conventions and traps; may not name this task's defect. Empty if this "
+        "case teaches nothing."
+    )
+    reachable: bool = Field(
+        description="Could anything said to the agent before it submitted have "
+        "changed this outcome?"
+    )
+    reachable_rationale: str = Field(
+        default="",
+        description="When not reachable, why not. A justified no is worth more "
+        "than an invented yes.",
+    )
+    evidence: tuple[Evidence, ...] = Field(
+        description="Every claim with a quote and where it came from."
+    )
+
+
+class Diagnosis(DiagnosisPayload):
+    """The diagnoser's answer, plus what the loop assigns: identity and the
+    case it came from."""
 
     diagnosis_id: str
     case_id: str
     task_name: str = ""
-    required_behaviour: str = ""
-    reference_idea: str = ""
-    agent_idea: str = ""
-    divergence_turn: int = -1
-    divergence_quote: str = ""
-    cause_class: str = ""
-    mechanism: str = ""
-    #: What was being chosen at ``divergence_turn``, in the agent's own terms.
-    decision: str = ""
-    #: The step not taken: a question the agent could have put to itself at that
-    #: moment, and would have had to run something to answer.
-    #:
-    #: Phrased without hindsight, on purpose. "Did I miss the working-tree
-    #: overlay" is the answer wearing a question mark -- it is only available to
-    #: someone who already knows. "What happens to a path that is modified but
-    #: still in the index" is available before the fact, and is what makes the
-    #: lesson transfer to a task where the overlay is not the issue.
-    unasked_question: str = ""
-    #: What asking it would have produced, and what the agent believed instead.
-    #:
-    #: Load-bearing: it is what separates a question with an answer from a
-    #: question that would have come out the same either way. Every case in the
-    #: first batch had the agent consult something real and stop -- an in-repo
-    #: test, a status code, a flag -- where what it consulted looked identical
-    #: whether it was right or wrong. A question with no discriminating answer is
-    #: not the missing step, however sensible it sounds.
-    discriminating_answer: str = ""
-    #: What carries to the next task in this same repository.
-    #:
-    #: Separate from ``mechanism`` because they are answers to different
-    #: questions and the useful one is easy to skip. The mechanism is what went
-    #: wrong here, in full detail, and it is what makes the diagnosis auditable.
-    #: The lesson is the part that is still true when the file, the function and
-    #: the requirement have all changed, and it is the only part with any value
-    #: downstream.
-    #:
-    #: The scope is one repository, not all software. A repository has a
-    #: prevailing way of doing things, and knowing it is genuinely useful to
-    #: whoever works here next -- which is why a lesson may name a convention, a
-    #: layer, a habit of this codebase. What it may not do is name this task's
-    #: defect, because that is the answer rather than a lesson.
-    lesson: str = ""
-    reachable: bool = True
-    reachable_rationale: str = ""
-    evidence: tuple[Evidence, ...] = ()
-
-    def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "diagnosis_id": self.diagnosis_id,
-            "case_id": self.case_id,
-            "task_name": self.task_name,
-            "required_behaviour": self.required_behaviour,
-            "reference_idea": self.reference_idea,
-            "agent_idea": self.agent_idea,
-            "divergence_turn": self.divergence_turn,
-            "divergence_quote": self.divergence_quote,
-            "cause_class": self.cause_class,
-            "mechanism": self.mechanism,
-            "decision": self.decision,
-            "unasked_question": self.unasked_question,
-            "discriminating_answer": self.discriminating_answer,
-            "lesson": self.lesson,
-            "reachable": self.reachable,
-            "reachable_rationale": self.reachable_rationale,
-            "evidence": tuple(e.to_json() for e in self.evidence),
-        }
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> Diagnosis:
-        return Diagnosis(
-            diagnosis_id=_str(raw, "diagnosis_id"),
-            case_id=_str(raw, "case_id"),
-            task_name=_str(raw, "task_name"),
-            required_behaviour=_str(raw, "required_behaviour"),
-            reference_idea=_str(raw, "reference_idea"),
-            agent_idea=_str(raw, "agent_idea"),
-            divergence_turn=_int(raw, "divergence_turn", -1),
-            divergence_quote=_str(raw, "divergence_quote"),
-            cause_class=_str(raw, "cause_class"),
-            mechanism=_str(raw, "mechanism"),
-            decision=_str(raw, "decision"),
-            unasked_question=_str(raw, "unasked_question"),
-            discriminating_answer=_str(raw, "discriminating_answer"),
-            lesson=_str(raw, "lesson"),
-            reachable=_bool(raw, "reachable", True),
-            reachable_rationale=_str(raw, "reachable_rationale"),
-            evidence=tuple(Evidence.from_json(e) for e in _objects(raw, "evidence")),
-        )
+    #: Carried from the case so notes can group by it without re-reading the
+    #: batch. Empty when the source cannot say, which costs only model-scope
+    #: notes -- they group on it.
+    model_name: str = ""
 
     @property
     def worth_abstracting(self) -> bool:
@@ -404,27 +306,51 @@ class Diagnosis:
         }
 
 
-# -- stage 3: abstract --------------------------------------------------------
+# -- stage 3: abstract ---------------------------------------------------------
 
 
-@dataclass(slots=True, frozen=True)
-class Candidate:
-    """A general check proposed from one diagnosis.
+class CandidatePayload(Record):
+    """What the abstractor fills in. Doubles as the ``submit_candidate`` tool
+    schema.
 
     ``observation`` is the load-bearing field. A check that can be satisfied by
     reasoning gets satisfied by reasoning: an offline A/B had the reviewing
-    model produce a structured, confident endorsement of the very diagnosis that
-    was wrong. A candidate that names nothing to run is rejected here, before it
+    model produce a structured, confident endorsement of the very diagnosis
+    that was wrong. A candidate that names nothing to run is rejected before it
     costs a replay.
     """
 
+    check: str = Field(
+        description="The message the agent will receive. One doubt, plainly "
+        "put. No file, function or value from this task."
+    )
+    observation: str = Field(
+        description="What running this check actually produces: a number, an "
+        "output, an exit status. Empty means the check is reflective, and the "
+        "candidate will be discarded."
+    )
+    when_note: str = Field(
+        description="In plain language, what must be true of the session for "
+        "this to be worth sending."
+    )
+    precondition_note: str = Field(
+        default="",
+        description="In plain language, what must be observably true of the "
+        "session's recorded actions. Empty means unconditional.",
+    )
+    checkpoint: Literal["continuous", "stop"] = Field(
+        description="continuous: mid-work. stop: when the agent wraps up."
+    )
+    dimension: str = Field(
+        default="",
+        description="Which representation-chain dimension this guards, D1 to D7.",
+    )
+
+
+class Candidate(CandidatePayload):
+    """A general check proposed from one diagnosis, plus its provenance."""
+
     candidate_id: str
-    check: str = ""
-    when_note: str = ""
-    precondition_note: str = ""
-    observation: str = ""
-    checkpoint: str = "stop"
-    dimension: str = ""
     from_task: str = ""
     from_session: str = ""
     from_diagnosis: str = ""
@@ -432,37 +358,6 @@ class Candidate:
     #: fixed. Carried because it is where the check has to arrive to be worth
     #: anything -- delivered at the end it lands after the work it would undo.
     from_turn: int = -1
-
-    def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "candidate_id": self.candidate_id,
-            "check": self.check,
-            "when_note": self.when_note,
-            "precondition_note": self.precondition_note,
-            "observation": self.observation,
-            "checkpoint": self.checkpoint,
-            "dimension": self.dimension,
-            "from_task": self.from_task,
-            "from_session": self.from_session,
-            "from_diagnosis": self.from_diagnosis,
-            "from_turn": self.from_turn,
-        }
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> Candidate:
-        return Candidate(
-            candidate_id=_str(raw, "candidate_id"),
-            check=_str(raw, "check"),
-            when_note=_str(raw, "when_note"),
-            precondition_note=_str(raw, "precondition_note"),
-            observation=_str(raw, "observation"),
-            checkpoint=_str(raw, "checkpoint", "stop"),
-            dimension=_str(raw, "dimension"),
-            from_task=_str(raw, "from_task"),
-            from_session=_str(raw, "from_session"),
-            from_diagnosis=_str(raw, "from_diagnosis"),
-            from_turn=_int(raw, "from_turn", -1),
-        )
 
     def rejection(self) -> str:
         """Why this candidate must not proceed, or empty when it may."""
@@ -473,26 +368,36 @@ class Candidate:
         return ""
 
 
-# -- stage 4: compile ---------------------------------------------------------
+# -- stage 4: compile ----------------------------------------------------------
 
 
-@dataclass(slots=True, frozen=True)
-class PredicateProposal:
-    name: str = ""
-    description: str = ""
-
-    def to_json(self) -> dict[str, JsonValue]:
-        return {"name": self.name, "description": self.description}
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> PredicateProposal:
-        return PredicateProposal(
-            name=_str(raw, "name"), description=_str(raw, "description")
-        )
+class PredicateProposal(Record):
+    name: str = Field(default="", description="Predicate name, snake_case.")
+    description: str = Field(
+        default="",
+        description="What must be observable in the session's events for this "
+        "predicate to hold.",
+    )
 
 
-@dataclass(slots=True, frozen=True)
-class CompiledCandidate:
+class GatePayload(Record):
+    """What the compiler fills in. Doubles as the ``submit_gate`` tool schema."""
+
+    trigger: str = Field(
+        description="Boolean expression over vocabulary predicates, or `always`."
+    )
+    precondition: str = Field(
+        description="SQL returning rows when the presupposed situation has "
+        "arrived. Empty when the check needs no prior state."
+    )
+    new_predicates: tuple[PredicateProposal, ...] = Field(
+        default=(),
+        description="Only what the vocabulary lacks. Each must be decidable "
+        "from the session's events alone.",
+    )
+
+
+class CompiledCandidate(GatePayload):
     """A candidate with a firing condition it can actually be gated on.
 
     ``trigger`` is a boolean expression over tagger predicates -- what the
@@ -504,33 +409,9 @@ class CompiledCandidate:
 
     candidate: Candidate
     item_id: str = ""
-    trigger: str = "always"
-    precondition: str = ""
-    new_predicates: tuple[PredicateProposal, ...] = ()
-
-    def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "candidate": self.candidate.to_json(),
-            "item_id": self.item_id,
-            "trigger": self.trigger,
-            "precondition": self.precondition,
-            "new_predicates": tuple(p.to_json() for p in self.new_predicates),
-        }
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> CompiledCandidate:
-        return CompiledCandidate(
-            candidate=Candidate.from_json(_mapping(raw, "candidate")),
-            item_id=_str(raw, "item_id"),
-            trigger=_str(raw, "trigger", "always"),
-            precondition=_str(raw, "precondition"),
-            new_predicates=tuple(
-                PredicateProposal.from_json(p) for p in _objects(raw, "new_predicates")
-            ),
-        )
 
 
-# -- stage 5: replay ----------------------------------------------------------
+# -- stage 5: replay -----------------------------------------------------------
 
 #: ``candidate`` injects the check; ``placebo`` injects a contentless nudge at
 #: the same fork point. The placebo is not optional -- without it an improvement
@@ -548,8 +429,7 @@ ARMS: tuple[str, ...] = ("placebo", "candidate")
 OUTCOMES: tuple[str, ...] = ("improved", "unchanged", "regressed", "lost")
 
 
-@dataclass(slots=True, frozen=True)
-class ReplayMeasurement:
+class ReplayMeasurement(Record):
     """One counterfactual: the same attempt, from the same fork point, with and
     without the candidate."""
 
@@ -563,8 +443,8 @@ class ReplayMeasurement:
     #: difference decides what the row means.
     requested_turn: int = -1
     resumed_turn: int = -1
-    metrics_before: Metrics = field(default_factory=Metrics)
-    metrics_after: Metrics = field(default_factory=Metrics)
+    metrics_before: Metrics = Field(default_factory=Metrics)
+    metrics_after: Metrics = Field(default_factory=Metrics)
     job_dir: str = ""
     #: What the review said, when the run had one. Kept beside the numbers so
     #: alignment can be judged without going back to a session store.
@@ -575,44 +455,26 @@ class ReplayMeasurement:
         return self.metrics_after.minus(self.metrics_before)
 
     def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "candidate_id": self.candidate_id,
-            "case_id": self.case_id,
-            "arm": self.arm,
-            "outcome": self.outcome,
-            "lost_reason": self.lost_reason,
-            "requested_turn": self.requested_turn,
-            "resumed_turn": self.resumed_turn,
-            "metrics_before": self.metrics_before.to_json(),
-            "metrics_after": self.metrics_after.to_json(),
-            "delta": self.delta.to_json(),
-            "job_dir": self.job_dir,
-            "review_report": self.review_report,
-        }
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> ReplayMeasurement:
-        return ReplayMeasurement(
-            candidate_id=_str(raw, "candidate_id"),
-            case_id=_str(raw, "case_id"),
-            arm=_str(raw, "arm"),
-            outcome=_str(raw, "outcome", "lost"),
-            lost_reason=_str(raw, "lost_reason"),
-            requested_turn=_int(raw, "requested_turn", -1),
-            resumed_turn=_int(raw, "resumed_turn", -1),
-            metrics_before=Metrics.from_json(_mapping(raw, "metrics_before")),
-            metrics_after=Metrics.from_json(_mapping(raw, "metrics_after")),
-            job_dir=_str(raw, "job_dir"),
-            review_report=_str(raw, "review_report"),
-        )
+        """The row plus its derived delta, so an artifact reads without a
+        calculator."""
+        encoded = super().to_json()
+        encoded["delta"] = self.delta.to_json()
+        return encoded
 
 
-# -- repository notes ---------------------------------------------------------
+# -- repository notes ----------------------------------------------------------
 
 
-@dataclass(slots=True, frozen=True)
-class RepositoryNote:
-    """One thing a reviewer of this repository has to be told.
+#: What a note is about, and therefore where it transfers. A repository note
+#: holds for one codebase and is mined from its own failures. A model note
+#: holds for one model wherever it works, and is mined only across
+#: repositories -- anything supported by a single repository's failures is a
+#: repository note wearing the wrong label.
+NOTE_SCOPES: tuple[str, ...] = ("repository", "model")
+
+
+class Note(Record):
+    """One thing a reviewer has to be told before it starts.
 
     Distinct from a ``Candidate``, and the difference is who reads it. A
     candidate is sent to the agent doing the work, at the moment it is working:
@@ -633,7 +495,10 @@ class RepositoryNote:
     """
 
     note_id: str
-    repository: str = ""
+    #: "repository" or "model" -- see NOTE_SCOPES.
+    scope: str = "repository"
+    #: The repository or the model this holds for.
+    subject: str = ""
     #: The conditions to put a change into: what to run it against, and under
     #: what circumstances. Empty is rejected.
     situation: str = ""
@@ -641,83 +506,93 @@ class RepositoryNote:
     without_it: str = ""
     from_cases: tuple[str, ...] = ()
 
+    #: Repositories the evidence came from. A model note needs more than one;
+    #: with one it cannot be told apart from a fact about that codebase.
+    from_repositories: tuple[str, ...] = ()
+
     def rejection(self) -> str:
         if not self.situation.strip():
             return "no situation: a note nobody can put a change into is prose"
-        if not self.repository.strip():
-            return "no repository: a note that is true everywhere belongs in the prompt"
+        if not self.subject.strip():
+            return "no subject: a note that is true everywhere belongs in the prompt"
+        if self.scope not in NOTE_SCOPES:
+            return f"unknown scope {self.scope!r}"
+        if self.scope == "model" and len(set(self.from_repositories)) < 2:
+            return (
+                "a model note drawn from one repository is a repository note: "
+                "what separates the model from the codebase is surviving both"
+            )
         return ""
 
-    def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "note_id": self.note_id,
-            "repository": self.repository,
-            "situation": self.situation,
-            "without_it": self.without_it,
-            "from_cases": self.from_cases,
-        }
 
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> RepositoryNote:
-        return RepositoryNote(
-            note_id=_str(raw, "note_id"),
-            repository=_str(raw, "repository"),
-            situation=_str(raw, "situation"),
-            without_it=_str(raw, "without_it"),
-            from_cases=_strings(raw, "from_cases"),
-        )
+class NoteEntry(Record):
+    """One note as the noter submits it; the loop adds identity and provenance."""
 
+    situation: str = Field(
+        description="What to put the change into, reachable from a checkout: "
+        "something to run, a service to start, a second process to introduce."
+    )
+    without_it: str = Field(
+        description="What a reviewer who did not know this would conclude, and "
+        "why that is wrong."
+    )
+
+
+class NotesPayload(Record):
+    """The ``submit_notes`` tool schema: the merged set, not additions to it."""
+
+    notes: tuple[NoteEntry, ...] = Field(
+        description="The merged set. Empty is a valid answer."
+    )
+    dropped: str = Field(
+        default="",
+        description="Any note you removed from the existing set, and why the "
+        "evidence no longer supports it.",
+    )
+
+
+# -- alignment -----------------------------------------------------------------
 
 #: How close a review came to what grading actually punished. The point of
 #: measuring this rather than the score is density: a score moves on whether the
 #: agent then fixed the thing correctly, which is a second question and a rarer
 #: event, while this answers the first one on every run.
-ALIGNMENTS: tuple[str, ...] = ("same", "adjacent", "elsewhere", "none")
+AlignmentVerdict = Literal["same", "adjacent", "elsewhere", "none"]
+ALIGNMENTS: tuple[str, ...] = get_args(AlignmentVerdict)
 
 
-@dataclass(slots=True, frozen=True)
-class Alignment:
-    """Whether a review found the thing grading punished.
+class AlignmentPayload(Record):
+    """What the aligner fills in. Doubles as the ``submit_alignment`` tool
+    schema."""
 
-    ``same``: the review's case and a graded failure are the same defect.
-    ``adjacent``: same code, different defect -- real, and not what failed.
-    ``elsewhere``: real and unrelated. ``none``: the review found nothing.
-    """
+    verdict: AlignmentVerdict = Field(
+        description="same: fixing the review's finding makes the assertion "
+        "pass. adjacent: same code, different defect. elsewhere: real but "
+        "unrelated. none: no case reported."
+    )
+    finding: str = Field(
+        default="", description="The review's strongest finding, in one line."
+    )
+    graded_failure: str = Field(
+        default="", description="The assertion you compared it against."
+    )
+    reason: str = Field(
+        description="Why that verdict. For 'same', the line from the finding "
+        "to the assertion no longer failing."
+    )
+
+
+class Alignment(AlignmentPayload):
+    """Whether a review found the thing grading punished, tied to its case."""
 
     case_id: str
     candidate_id: str = ""
-    verdict: str = "none"
-    finding: str = ""
-    graded_failure: str = ""
-    reason: str = ""
-
-    def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "case_id": self.case_id,
-            "candidate_id": self.candidate_id,
-            "verdict": self.verdict,
-            "finding": self.finding,
-            "graded_failure": self.graded_failure,
-            "reason": self.reason,
-        }
-
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> Alignment:
-        return Alignment(
-            case_id=_str(raw, "case_id"),
-            candidate_id=_str(raw, "candidate_id"),
-            verdict=_str(raw, "verdict", "none"),
-            finding=_str(raw, "finding"),
-            graded_failure=_str(raw, "graded_failure"),
-            reason=_str(raw, "reason"),
-        )
 
 
-# -- stage 6: select ----------------------------------------------------------
+# -- stage 6: select -----------------------------------------------------------
 
 
-@dataclass(slots=True, frozen=True)
-class Verdict:
+class Verdict(Record):
     candidate_id: str
     accepted: bool = False
     reason: str = ""
@@ -737,36 +612,15 @@ class Verdict:
         """
         return bool(self.improved_cases or self.regressed_cases)
 
-    def to_json(self) -> dict[str, JsonValue]:
-        return {
-            "candidate_id": self.candidate_id,
-            "accepted": self.accepted,
-            "reason": self.reason,
-            "improved_cases": self.improved_cases,
-            "regressed_cases": self.regressed_cases,
-            "lost_cases": self.lost_cases,
-        }
 
-    @staticmethod
-    def from_json(raw: Mapping[str, JsonValue]) -> Verdict:
-        return Verdict(
-            candidate_id=_str(raw, "candidate_id"),
-            accepted=_bool(raw, "accepted"),
-            reason=_str(raw, "reason"),
-            improved_cases=_strings(raw, "improved_cases"),
-            regressed_cases=_strings(raw, "regressed_cases"),
-            lost_cases=_strings(raw, "lost_cases"),
-        )
+# -- artifact io ---------------------------------------------------------------
 
 
-# -- artifact io --------------------------------------------------------------
-
-
-def write_artifact(path: Path, records: Sequence[object]) -> None:
+def write_artifact(path: Path, records: Sequence[Record]) -> None:
     """One stage's output. Sorted keys and a trailing newline so two runs of the
     same stage diff cleanly -- the standalone-equals-chained check depends on
     byte equality."""
-    payload = [_encode(record) for record in records]
+    payload = [record.to_json() for record in records]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
@@ -776,34 +630,38 @@ def write_artifact(path: Path, records: Sequence[object]) -> None:
 
 def read_artifact(path: Path) -> list[Mapping[str, JsonValue]]:
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
+    if not isinstance(raw, list):  # code-health: ignore[AM025]
         raise TypeError(f"{path}: expected a JSON list of records")
-    return [item for item in raw if isinstance(item, Mapping)]
-
-
-def _encode(record: object) -> JsonValue:
-    to_json = getattr(record, "to_json", None)  # code-health: ignore[AM021]
-    if to_json is None:
-        raise TypeError(f"{type(record).__name__} has no to_json")
-    encoded = to_json()
-    if not isinstance(encoded, Mapping):
-        raise TypeError(f"{type(record).__name__}.to_json did not return a mapping")
-    return dict(encoded)
+    return [
+        item
+        for item in raw
+        if isinstance(item, Mapping)  # code-health: ignore[AM025]
+    ]
 
 
 __all__ = [
+    "ALIGNMENTS",
     "ARMS",
     "CAUSE_CLASSES",
     "OUTCOMES",
+    "Alignment",
+    "AlignmentPayload",
     "Assertion",
     "Candidate",
+    "CandidatePayload",
     "CompiledCandidate",
     "Diagnosis",
+    "DiagnosisPayload",
     "Evidence",
     "EvidenceRef",
     "FailureCase",
+    "GatePayload",
     "Metrics",
+    "Note",
+    "NoteEntry",
+    "NotesPayload",
     "PredicateProposal",
+    "Record",
     "ReplayMeasurement",
     "Verdict",
     "json_int",

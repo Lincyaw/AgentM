@@ -33,8 +33,8 @@ from .contracts import (
     CompiledCandidate,
     Diagnosis,
     FailureCase,
+    Note,
     ReplayMeasurement,
-    RepositoryNote,
     Verdict,
     read_artifact,
     write_artifact,
@@ -110,7 +110,7 @@ class LoopConfig:
     #: Notes the repositories already hold. The stage returns the merged set,
     #: so passing the previous pass's file is how a note survives more than
     #: one pass instead of being rediscovered or lost.
-    held_notes: Sequence[RepositoryNote] = ()
+    held_notes: Sequence[Note] = ()
 
 
 async def run(config: LoopConfig) -> list[Verdict]:
@@ -248,8 +248,8 @@ def load_measurements(path: Path) -> list[ReplayMeasurement]:
     return [ReplayMeasurement.from_json(raw) for raw in read_artifact(path)]
 
 
-def load_notes(path: Path) -> list[RepositoryNote]:
-    return [RepositoryNote.from_json(raw) for raw in read_artifact(path)]
+def load_notes(path: Path) -> list[Note]:
+    return [Note.from_json(raw) for raw in read_artifact(path)]
 
 
 def summarise(verdicts: Sequence[Verdict]) -> str:

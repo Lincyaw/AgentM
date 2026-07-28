@@ -81,6 +81,29 @@ _LOST_SIGNATURES: tuple[tuple[str, str], ...] = (
 # -- read side ----------------------------------------------------------------
 
 
+def _batch_model(batch_dir: Path) -> str:
+    """Which model made this batch's attempts, from the job's own config.
+
+    Read once per batch rather than carried in a flag, so a case can never
+    claim a model the run did not use. Absent, the model-scope notes simply
+    have nothing to group on -- everything else is unaffected.
+    """
+    config = batch_dir / "config.json"
+    try:
+        raw = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.info("senior-swe: no model name in {}: {}", config, exc)
+        return ""
+    agents = raw.get("agents")
+    if not isinstance(agents, list) or not agents:  # code-health: ignore[AM025]
+        return ""
+    first = agents[0]
+    name = (
+        first.get("model_name") if isinstance(first, dict) else None
+    )  # code-health: ignore[AM025]
+    return name if isinstance(name, str) else ""  # code-health: ignore[AM025]
+
+
 @dataclass(slots=True)
 class SeniorSweSource:
     """Discovery over a Harbor jobs directory."""
@@ -104,6 +127,7 @@ class SeniorSweSource:
         # meaning the same thing after the shell moves into a container, where
         # nothing shares this process's working directory.
         batch_dir = Path(batch).resolve()
+        model_name = _batch_model(batch_dir)
         trials = sorted(p for p in batch_dir.iterdir() if (p / "result.json").is_file())
         if not trials:
             logger.warning("senior-swe: no trials with result.json under {}", batch_dir)
@@ -123,7 +147,9 @@ class SeniorSweSource:
                 # No metric at all means the attempt was lost to the harness and
                 # has nothing to diagnose; a full pass has nothing to learn.
                 continue
-            case = self._build(trial, record, cohort.get(record.task_name, []))
+            case = self._build(
+                trial, record, cohort.get(record.task_name, []), model_name
+            )
             if case is not None:
                 cases.append(case)
 
@@ -315,6 +341,7 @@ class SeniorSweSource:
         trial: Path,
         record: _Trial,
         cohort: Sequence[tuple[Path, _Trial]],
+        model_name: str = "",
     ) -> FailureCase | None:
         short = record.task_name.split("/")[-1]
         task_dir = self.bench_root / short
@@ -377,6 +404,7 @@ class SeniorSweSource:
         return FailureCase(
             case_id=f"{short}:{record.session_id or trial.name}",
             task_name=short,
+            model_name=model_name,
             instruction=_instruction(task_dir),
             failing_assertions=record.failing,
             evidence=tuple(evidence),

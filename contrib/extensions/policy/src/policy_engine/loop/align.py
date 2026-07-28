@@ -20,44 +20,15 @@ the reviewer, and it should only ever be read as measuring the reviewer.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
-from loguru import logger
-
-from agentm.core.abi import JsonValue
-
-from .contracts import ALIGNMENTS, Alignment, Assertion, FailureCase
+from .contracts import ALIGNMENTS, Alignment, AlignmentPayload, Assertion, FailureCase
 from .runner import AgentRun, ResultTool, fan_out, load_stage_manifest
 
 RESULT_TOOL = ResultTool(
     name="submit_alignment",
     description="Record whether the review found what grading punished. Call once.",
-    parameters={  # code-health: ignore[AM011]
-        "type": "object",
-        "properties": {
-            "verdict": {
-                "type": "string",
-                "enum": ALIGNMENTS,
-                "description": "same: fixing the review's finding makes the "
-                "assertion pass. adjacent: same code, different defect. "
-                "elsewhere: real but unrelated. none: no case reported.",
-            },
-            "finding": {
-                "type": "string",
-                "description": "The review's strongest finding, in one line.",
-            },
-            "graded_failure": {
-                "type": "string",
-                "description": "The assertion you compared it against.",
-            },
-            "reason": {
-                "type": "string",
-                "description": "Why that verdict. For 'same', the line from "
-                "the finding to the assertion no longer failing.",
-            },
-        },
-        "required": ("verdict", "reason"),
-    },
+    payload=AlignmentPayload,
 )
 
 
@@ -100,18 +71,10 @@ async def align_one(
     payload = await run.run(build_prompt(case.failing_assertions, report))
     if payload is None:
         return None
-
-    verdict = _text(payload, "verdict")
-    if verdict not in ALIGNMENTS:
-        logger.warning("align: {} returned verdict {!r}", case.case_id, verdict)
-        verdict = "none"
-    return Alignment(
-        case_id=case.case_id,
-        candidate_id=candidate_id,
-        verdict=verdict,
-        finding=_text(payload, "finding"),
-        graded_failure=_text(payload, "graded_failure"),
-        reason=_text(payload, "reason"),
+    # The runner already validated the payload against AlignmentPayload, so
+    # enrichment is all that is left.
+    return Alignment.from_json(
+        {**payload, "case_id": case.case_id, "candidate_id": candidate_id}
     )
 
 
@@ -145,11 +108,6 @@ def tally(alignments: Sequence[Alignment]) -> dict[str, int]:
     for item in alignments:
         counts[item.verdict] = counts.get(item.verdict, 0) + 1
     return counts
-
-
-def _text(raw: Mapping[str, JsonValue], key: str) -> str:
-    value = raw.get(key)
-    return value.strip() if isinstance(value, str) else ""
 
 
 __all__ = ["RESULT_TOOL", "align", "align_one", "build_prompt", "tally"]

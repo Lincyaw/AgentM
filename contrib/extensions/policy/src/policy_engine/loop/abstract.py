@@ -29,49 +29,13 @@ from loguru import logger
 
 from agentm.core.abi import JsonValue
 
-from .contracts import Candidate, Diagnosis, Evidence
+from .contracts import Candidate, CandidatePayload, Diagnosis, Evidence
 from .runner import AgentRun, ResultTool, fan_out, load_stage_manifest
 
 RESULT_TOOL = ResultTool(
     name="submit_candidate",
     description="Record the check this diagnosis implies. Call once.",
-    parameters={  # code-health: ignore[AM011]
-        "type": "object",
-        "properties": {
-            "check": {
-                "type": "string",
-                "description": "The message the agent will receive. One doubt, "
-                "plainly put. No file, function or value from this task.",
-            },
-            "observation": {
-                "type": "string",
-                "description": "What running this check actually produces: a "
-                "number, an output, an exit status. Empty means the check is "
-                "reflective, and the candidate will be discarded.",
-            },
-            "when_note": {
-                "type": "string",
-                "description": "In plain language, what must be true of the "
-                "session for this to be worth sending.",
-            },
-            "precondition_note": {
-                "type": "string",
-                "description": "In plain language, what must be observably true "
-                "of the session's recorded actions. Empty means unconditional.",
-            },
-            "checkpoint": {
-                "type": "string",
-                "enum": ("continuous", "stop"),
-                "description": "continuous: mid-work. stop: when the agent wraps up.",
-            },
-            "dimension": {
-                "type": "string",
-                "description": "Which representation-chain dimension this "
-                "guards, D1 to D7.",
-            },
-        },
-        "required": ("check", "observation", "when_note", "checkpoint"),
-    },
+    payload=CandidatePayload,
 )
 
 #: Evidence whose source looks like the reference solution. Dropped before the

@@ -229,6 +229,13 @@ def cmd_notes(
     diagnoses: str = typer.Option(..., "--diagnoses"),
     out: str = _OUT,
     existing: str = typer.Option("", "--existing", help="notes to merge into"),
+    scope: str = typer.Option(
+        "repository",
+        "--scope",
+        help="repository: one codebase's own failures. model: one model's "
+        "failures across codebases, which is what separates the model from "
+        "any of them -- a group drawn from a single repository is dropped.",
+    ),
     apply_to: str = typer.Option(
         "",
         "--apply-to",
@@ -250,6 +257,7 @@ def cmd_notes(
         notes(
             loaded,
             held,
+            scope=scope,
             provider=provider,
             user_config=user_config,
             concurrency=concurrency,
@@ -257,7 +265,7 @@ def cmd_notes(
     )
     write_artifact(Path(out), produced)
     for item in produced:
-        typer.echo(f"  [{item.repository}] {item.situation[:88]}")
+        typer.echo(f"  [{item.scope}:{item.subject}] {item.situation[:88]}")
     typer.echo(f"{len(produced)} note(s) -> {out}")
     if apply_to:
         written = apply_notes(produced, Path(apply_to))

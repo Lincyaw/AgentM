@@ -22,42 +22,13 @@ from policy_engine.shared import facts
 from policy_engine.shared.pg_query import PgQuerySource
 from policy_engine.shared.vocabulary import PredicateDef, load_vocabulary
 
-from .contracts import Candidate, CompiledCandidate
+from .contracts import Candidate, CompiledCandidate, GatePayload
 from .runner import AgentRun, ResultTool, fan_out, load_stage_manifest
 
 RESULT_TOOL = ResultTool(
     name="submit_gate",
     description="Record the firing condition for this item. Call once.",
-    parameters={  # code-health: ignore[AM011]
-        "type": "object",
-        "properties": {
-            "trigger": {
-                "type": "string",
-                "description": "Boolean expression over vocabulary predicates, "
-                "or `always`.",
-            },
-            "precondition": {
-                "type": "string",
-                "description": "SQL returning rows when the presupposed "
-                "situation has arrived. Empty when the check needs no prior "
-                "state.",
-            },
-            "new_predicates": {
-                "type": "array",
-                "description": "Only what the vocabulary lacks. Each must be "
-                "decidable from the session's events alone.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "description": {"type": "string"},
-                    },
-                    "required": ("name", "description"),
-                },
-            },
-        },
-        "required": ("trigger", "precondition"),
-    },
+    payload=GatePayload,
 )
 
 
