@@ -10,13 +10,13 @@ the assertion text the graders produced.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from loguru import logger
 
 from agentm.core.abi import JsonValue
 
-from .contracts import CAUSE_CLASSES, Diagnosis, FailureCase
+from .contracts import Diagnosis, DiagnosisPayload, FailureCase
 from .protocols import CaseSource
 from .runner import AgentRun, ResultTool, fan_out, load_stage_manifest
 
@@ -24,103 +24,7 @@ RESULT_TOOL = ResultTool(
     name="submit_diagnosis",
     description="Record why this attempt diverged. Call once, when you can "
     "state the mechanism concretely.",
-    parameters={  # code-health: ignore[AM011]
-        "type": "object",
-        "properties": {
-            "required_behaviour": {
-                "type": "string",
-                "description": "What grading demands, quoted from the failing "
-                "assertions.",
-            },
-            "reference_idea": {
-                "type": "string",
-                "description": "The reference solution's central idea, one sentence.",
-            },
-            "agent_idea": {
-                "type": "string",
-                "description": "What the agent built instead, in the same terms.",
-            },
-            "divergence_turn": {
-                "type": "integer",
-                "description": "Turn index where the approach stopped being "
-                "open. -1 if you cannot locate it.",
-            },
-            "divergence_quote": {
-                "type": "string",
-                "description": "What was said or done at that turn.",
-            },
-            "cause_class": {
-                "type": "string",
-                "enum": CAUSE_CLASSES,
-            },
-            "mechanism": {
-                "type": "string",
-                "description": "Why it is wrong, concretely: what breaks, under "
-                "what condition. Not 'it did not test enough'.",
-            },
-            "decision": {
-                "type": "string",
-                "description": "What was being chosen at the divergence turn, "
-                "in the agent's own terms.",
-            },
-            "unasked_question": {
-                "type": "string",
-                "description": "The step not taken: a question the agent could "
-                "have asked itself at that moment, answerable only by running "
-                "something. Must be askable without knowing the answer -- if it "
-                "names the defect, it is hindsight, not a question.",
-            },
-            "discriminating_answer": {
-                "type": "string",
-                "description": "What asking it would have produced, and what the "
-                "agent believed instead. If the answer would look the same "
-                "whether or not the agent was right, this is not the missing "
-                "step; find the question whose answer differs.",
-            },
-            "lesson": {
-                "type": "string",
-                "description": "What someone starting a different task in this "
-                "same repository should know because of this. May name this "
-                "repository's conventions and traps; may not name this task's "
-                "defect. Empty if this case teaches nothing.",
-            },
-            "reachable": {
-                "type": "boolean",
-                "description": "Could anything said to the agent before it "
-                "submitted have changed this outcome?",
-            },
-            "reachable_rationale": {
-                "type": "string",
-                "description": "When not reachable, why not. A justified no is "
-                "worth more than an invented yes.",
-            },
-            "evidence": {
-                "type": "array",
-                "description": "Every claim with a quote and where it came from.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source": {"type": "string"},
-                        "quote": {"type": "string"},
-                    },
-                    "required": ("source", "quote"),
-                },
-            },
-        },
-        "required": (
-            "required_behaviour",
-            "reference_idea",
-            "agent_idea",
-            "cause_class",
-            "mechanism",
-            "decision",
-            "unasked_question",
-            "discriminating_answer",
-            "lesson",
-            "reachable",
-            "evidence",
-        ),
-    },
+    payload=DiagnosisPayload,
 )
 
 
@@ -225,6 +129,7 @@ async def diagnose(
     user_config: str = "",
     concurrency: int = 4,
     source: CaseSource | None = None,
+    on_result: Callable[[list[Diagnosis]], None] | None = None,
 ) -> list[Diagnosis]:
     """Cases are independent, so they run together. Concurrency is bounded
     because each one holds a session, a model connection and, when the fork
@@ -240,7 +145,12 @@ async def diagnose(
         )
 
     return await fan_out(
-        cases, one, concurrency=concurrency, label="diagnose", noun="diagnosis(es)"
+        cases,
+        one,
+        concurrency=concurrency,
+        label="diagnose",
+        noun="diagnosis(es)",
+        on_result=on_result,
     )
 
 

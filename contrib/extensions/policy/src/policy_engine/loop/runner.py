@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
+from pydantic import ValidationError
 
 from agentm import AgentSession
 from agentm.config import DefaultSessionSpecResolver
@@ -45,6 +46,8 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.roles import bind_environment_operations
 from policy_engine.shared.manifest import AgentManifest, load_manifest
+
+from .contracts import Record
 
 #: Enough to read, search and run, and nothing that rewrites history behind the
 #: agent's back. Mirrors the harbor scenario's base set, which is the one known
@@ -77,12 +80,14 @@ def load_stage_manifest(name: str) -> AgentManifest:
 
 @dataclass(frozen=True, slots=True)
 class ResultTool:
-    """The one tool an agent finishes with. ``parameters`` is a JSON Schema and
-    is the stage's output contract."""
+    """The one tool an agent finishes with. ``payload`` is the stage's output
+    contract: a pydantic model whose schema the tool presents and whose
+    validation the call must pass, so a missing field is a retry rather than an
+    empty string downstream."""
 
     name: str
     description: str
-    parameters: Mapping[str, JsonValue]
+    payload: type[Record]
 
 
 @dataclass(slots=True)
@@ -91,8 +96,27 @@ class _Sink:
 
 
 def _terminal_tool(spec: ResultTool, sink: _Sink) -> FunctionTool:
-    async def submit(args: dict[str, JsonValue]) -> ToolTerminate:
-        sink.payload = dict(args)
+    async def submit(args: dict[str, JsonValue]) -> ToolResult | ToolTerminate:
+        try:
+            validated = spec.payload.model_validate(args)
+        except ValidationError as exc:
+            # The error text goes back to the model, which gets another go —
+            # the session only ends when this tool accepts.
+            problems = "; ".join(
+                f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
+                for err in exc.errors()
+            )
+            return ToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"Not recorded — fix these fields and call "
+                        f"{spec.name} again: {problems}",
+                    )
+                ],
+                is_error=True,
+            )
+        sink.payload = validated.to_json()
         return ToolTerminate(
             result=ToolResult(content=[TextContent(type="text", text="Recorded.")]),
             reason=f"policy-loop:{spec.name}",
@@ -101,7 +125,7 @@ def _terminal_tool(spec: ResultTool, sink: _Sink) -> FunctionTool:
     return FunctionTool(
         name=spec.name,
         description=spec.description,
-        parameters=dict(spec.parameters),  # code-health: ignore[AM011]
+        parameters=spec.payload,
         fn=submit,
     )
 
@@ -198,6 +222,7 @@ async def fan_out[T, R](
     concurrency: int,
     label: str,
     noun: str,
+    on_result: Callable[[list[R]], None] | None = None,
 ) -> list[R]:
     """Run ``work`` over ``items`` at a bounded width, dropping the failures.
 
@@ -209,17 +234,35 @@ async def fan_out[T, R](
 
     ``None`` from ``work`` means that item produced nothing, and it costs that
     item only: one case failing to diagnose must not cost the batch.
+
+    ``on_result`` is handed everything finished so far, each time one finishes.
+    Without it a stage holds its whole batch in memory until the last item
+    returns, and a stop anywhere loses all of it -- twenty-one diagnoses at
+    roughly an hour of model time, in the case that prompted this. ``replay``
+    already wrote after every arm for exactly this reason; putting it here
+    rather than in one stage means diagnose, abstract, notes, compile and align
+    stop being the exception.
     """
     limit = asyncio.Semaphore(max(1, concurrency))
+    done: list[R] = []
 
     async def one(item: T) -> R | None:
         async with limit:
-            return await work(item)
+            result = await work(item)
+        if result is not None:
+            done.append(result)
+            if on_result is not None:
+                # A checkpoint that can end the batch defeats its own purpose,
+                # so a failing sink costs the checkpoint and nothing else.
+                try:
+                    on_result(list(done))
+                except Exception as exc:  # noqa: BLE001 - the work still stands
+                    logger.warning("{}: could not checkpoint: {}", label, exc)
+        return result
 
-    results = await asyncio.gather(*(one(item) for item in items))
-    found = [r for r in results if r is not None]
-    logger.info("{}: {} {} from {} case(s)", label, len(found), noun, len(items))
-    return found
+    await asyncio.gather(*(one(item) for item in items))
+    logger.info("{}: {} {} from {} case(s)", label, len(done), noun, len(items))
+    return done
 
 
 __all__ = [

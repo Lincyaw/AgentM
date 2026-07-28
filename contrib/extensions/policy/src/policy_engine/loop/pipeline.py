@@ -125,14 +125,19 @@ async def run(config: LoopConfig) -> list[Verdict]:
     if not cases:
         return []
 
+    # Checkpointed after every case. This stage is the longest in the pass --
+    # an hour of model time over twenty-one cases -- and until now none of it
+    # reached disk until all of it did, so a stop anywhere lost the lot.
+    diagnose_out = config.paths.artifact("diagnose")
     diagnoses = await diagnose(
         cases,
         provider=config.provider,
         user_config=config.user_config,
         concurrency=config.concurrency,
         source=config.source,
+        on_result=lambda done: write_artifact(diagnose_out, done),
     )
-    write_artifact(config.paths.artifact("diagnose"), diagnoses)
+    write_artifact(diagnose_out, diagnoses)
 
     # Before abstraction, and before any replay, because a note is meant to be
     # in place when the run it should change happens. The two stages read the
