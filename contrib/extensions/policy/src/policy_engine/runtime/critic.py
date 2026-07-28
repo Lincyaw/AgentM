@@ -793,6 +793,12 @@ class PlanCritic:
         verdict = await self.critic.review(
             build_plan_prompt(task=self.task_for(), plan=plan)
         )
+        if not verdict.criterion_settled:
+            # Checked before `accepted`, and this is the entry where it matters
+            # most: a plan built on a standard nobody could settle is a plan
+            # whose every later step inherits the ambiguity.
+            logger.info("plan critic: criterion undecided, sending the plan back")
+            return PlanReview(approved=False, feedback=verdict.as_ambiguity_message())
         if verdict.accepted:
             logger.info("plan critic: direction holds up")
             return PlanReview(approved=True)
