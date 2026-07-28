@@ -40,6 +40,7 @@ from .contracts import (
     write_artifact,
 )
 from .diagnose import diagnose
+from .install import install
 from .notes import apply_notes, notes
 from .protocols import CaseSource, ReplayBackend
 from .replay import replay
@@ -61,6 +62,7 @@ ARTIFACTS: Mapping[str, str] = {
     "replay": "measurements.json",
     "align": "alignments.json",
     "select": "selection.json",
+    "install": "installed-checklist.yaml",
 }
 
 #: The predicate vocabulary a compile stage gates against, when none is named.
@@ -102,6 +104,9 @@ class LoopConfig:
     #: with what this pass learned. Without it notes are still produced and
     #: written to the run directory, they just do not reach anybody.
     task_root: Path | None = None
+    #: Where accepted candidates are written. Defaults to a file inside the
+    #: run directory, so a pass never edits a live checklist unless told to.
+    checklist_out: Path | None = None
     #: Notes the repositories already hold. The stage returns the merged set,
     #: so passing the previous pass's file is how a note survives more than
     #: one pass instead of being rediscovered or lost.
@@ -200,6 +205,14 @@ async def run(config: LoopConfig) -> list[Verdict]:
 
     verdicts = select(measurements)
     write_artifact(config.paths.artifact("select"), verdicts)
+
+    # The stage that makes the pass mean something outside this directory.
+    # Written to the run's own file by default rather than over the live
+    # checklist: a pass proposes, and loading the proposal is a separate act.
+    report = install(
+        verdicts, compiled, config.checklist_out or config.paths.artifact("install")
+    )
+    logger.info("loop: {}", report.summary())
     return verdicts
 
 
@@ -216,6 +229,10 @@ def load_diagnoses(path: Path) -> list[Diagnosis]:
 
 def load_candidates(path: Path) -> list[Candidate]:
     return [Candidate.from_json(raw) for raw in read_artifact(path)]
+
+
+def load_verdicts(path: Path) -> list[Verdict]:
+    return [Verdict.from_json(raw) for raw in read_artifact(path)]
 
 
 def load_compiled(path: Path) -> list[CompiledCandidate]:

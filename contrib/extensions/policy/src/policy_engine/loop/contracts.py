@@ -725,6 +725,18 @@ class Verdict:
     regressed_cases: tuple[str, ...] = ()
     lost_cases: tuple[str, ...] = ()
 
+    @property
+    def measured(self) -> bool:
+        """Whether any arm produced evidence, either way.
+
+        ``accepted`` is one bit and it collapses two very different failures:
+        measured and not useful, versus never measured because the replay was
+        lost. Only the first is grounds for removing an installed item -- the
+        second is an experiment that did not finish, and four of the first six
+        replays run by hand were exactly that.
+        """
+        return bool(self.improved_cases or self.regressed_cases)
+
     def to_json(self) -> dict[str, JsonValue]:
         return {
             "candidate_id": self.candidate_id,

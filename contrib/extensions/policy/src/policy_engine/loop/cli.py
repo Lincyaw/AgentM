@@ -28,6 +28,7 @@ from .collect import collect
 from .compile_gate import check_precondition, compile_candidates
 from .contracts import CompiledCandidate, write_artifact
 from .diagnose import diagnose
+from .install import install
 from .notes import apply_notes, notes
 from .pipeline import (
     DEFAULT_VOCABULARY,
@@ -39,6 +40,7 @@ from .pipeline import (
     load_diagnoses,
     load_measurements,
     load_notes,
+    load_verdicts,
     run,
     summarise,
 )
@@ -430,6 +432,36 @@ def cmd_select(
     verdicts = select(load_measurements(Path(measurements)))
     write_artifact(Path(out), verdicts)
     typer.echo(summarise(verdicts))
+
+
+@app.command("install")
+def cmd_install(
+    selection: str = typer.Option(..., "--selection"),
+    compiled: str = typer.Option(..., "--compiled"),
+    out: str = typer.Option(..., "--out", help="checklist YAML to merge into"),
+) -> None:
+    """Accepted candidates into a checklist the runtime can load.
+
+    Merged: accepted items replace their earlier version, ones measured and
+    rejected are removed, and ones whose replays were all lost are left alone --
+    an experiment that did not finish is not a finding.
+
+    Point --out at a file you intend to load. It is not defaulted to the live
+    checklist on purpose: closing the loop and switching it on are two
+    decisions.
+    """
+    report = install(
+        load_verdicts(Path(selection)),
+        load_compiled(Path(compiled)),
+        Path(out),
+    )
+    for item_id in report.installed:
+        typer.echo(f"  + {item_id}")
+    for item_id in report.removed:
+        typer.echo(f"  - {item_id}")
+    for item_id in report.undecided:
+        typer.echo(f"  ? {item_id} (unmeasured, left as-is)")
+    typer.echo(report.summary())
 
 
 @app.command("run")
