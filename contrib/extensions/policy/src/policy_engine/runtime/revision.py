@@ -13,8 +13,13 @@ it already built: extending a design is cheap and reversible, reworking one
 means the first shape was wrong, and that is when a second opinion is worth
 paying for.
 
-Detected without a model call, from the tool stream alone: an edit whose
-``old_string`` overlaps text this same run added earlier, to the same file.
+Detected without a model call, from the tool stream alone, at whatever
+granularity the call itself supports:
+
+- an edit that says what it replaced, when that text overlaps what this run
+  wrote to the same file earlier
+- a write, or an edit that names only line numbers, to a file this run has
+  already written to -- the coordinates have moved but the filename has not
 
 Measured on three recorded attempts at one task, two of which failed:
 
@@ -22,7 +27,7 @@ Measured on three recorded attempts at one task, two of which failed:
     every edit                        23-25    yes, among 23 others
     first edit per file                 5      no
     revision of own work (this)      7-12      yes
-      + 5-turn cooldown                4-5     yes
+      + 5-turn cooldown                5-8     yes
 
 The cooldown collapses bursts -- turns 51, 52, 54, 57, 59 are one sitting with
 the same code -- and is what makes the count affordable when each firing costs
@@ -124,22 +129,31 @@ class RevisionDetector:
             if call.name == "write":
                 # A write replaces the entire file, so if this run put anything
                 # in that file already, the write has certainly replaced it.
-                # This is the one case that needs no text matching, and it is
-                # the strongest form of the signal -- the tool's own
-                # description reserves it for complete rewrites.
                 if known:
                     revised = True
                 added = _significant_lines(str(call.arguments.get("content", "")))
             else:
-                # ``edit`` has two modes. Only the string-replacement one says
-                # what it replaced; the line-range mode names coordinates, and
-                # they have shifted with every edit since, so there is nothing
-                # here to match against. Its text is still recorded, so it
-                # counts as earlier work for whatever replaces it later -- a
-                # line-range edit can be revised, it just cannot be the turn
-                # that shows the revision. About one edit in thirteen.
                 replaced = _significant_lines(str(call.arguments.get("old_string", "")))
-                if replaced and any(replaced & earlier for earlier in known):
+                if replaced:
+                    revised = revised or any(replaced & e for e in known)
+                elif known:
+                    # ``edit``'s other mode names line numbers rather than the
+                    # text it replaces, and those coordinates have shifted with
+                    # every edit since -- there is nothing to match against
+                    # without tracking offsets through the whole run.
+                    #
+                    # So it falls back to the granularity that is known for
+                    # certain: which file was touched. Same rule as ``write``,
+                    # and weaker than text matching, since the edit may well be
+                    # extending a part of the file the run never wrote.
+                    #
+                    # Measured over three recorded attempts, the fallback added
+                    # three firings in one and none in the other two. What it
+                    # does cost is ordering: in that session the first three
+                    # firings moved from turns 30/68/97 to 30/38/44, so a
+                    # confirmed rework lost its slot to two guesses. Earlier is
+                    # the better place to spend a review, and one edit in
+                    # thirteen being invisible is the worse failure.
                     revised = True
                 added = _significant_lines(str(call.arguments.get("new_string", "")))
 
