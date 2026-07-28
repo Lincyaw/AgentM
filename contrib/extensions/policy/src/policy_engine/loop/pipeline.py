@@ -25,6 +25,7 @@ from pathlib import Path
 from loguru import logger
 
 from .abstract import abstract
+from .align import align, tally
 from .collect import collect
 from .compile_gate import compile_candidates
 from .contracts import (
@@ -39,6 +40,7 @@ from .contracts import (
     write_artifact,
 )
 from .diagnose import diagnose
+from .notes import apply_notes, notes
 from .protocols import CaseSource, ReplayBackend
 from .replay import replay
 from .select import select
@@ -53,9 +55,11 @@ _PACKAGE_ROOT = Path(__file__).parent.parent / "runtime"
 ARTIFACTS: Mapping[str, str] = {
     "collect": "cases.json",
     "diagnose": "diagnoses.json",
+    "notes": "notes.json",
     "abstract": "candidates.json",
     "compile": "compiled.json",
     "replay": "measurements.json",
+    "align": "alignments.json",
     "select": "selection.json",
 }
 
@@ -92,6 +96,16 @@ class LoopConfig:
     user_config: str = ""
     concurrency: int = 4
     only: str = ""
+    #: Where the bench keeps its tasks. Given it, the notes stage writes each
+    #: repository's notes beside its tasks, which is where a review of one
+    #: reads them -- so the replays later in this same pass are already run
+    #: with what this pass learned. Without it notes are still produced and
+    #: written to the run directory, they just do not reach anybody.
+    task_root: Path | None = None
+    #: Notes the repositories already hold. The stage returns the merged set,
+    #: so passing the previous pass's file is how a note survives more than
+    #: one pass instead of being rediscovered or lost.
+    held_notes: Sequence[RepositoryNote] = ()
 
 
 async def run(config: LoopConfig) -> list[Verdict]:
@@ -114,6 +128,21 @@ async def run(config: LoopConfig) -> list[Verdict]:
         source=config.source,
     )
     write_artifact(config.paths.artifact("diagnose"), diagnoses)
+
+    # Before abstraction, and before any replay, because a note is meant to be
+    # in place when the run it should change happens. The two stages read the
+    # same diagnoses and neither feeds the other: a candidate goes to the agent
+    # doing the work, a note to whoever reviews it.
+    produced_notes = await notes(
+        diagnoses,
+        config.held_notes,
+        provider=config.provider,
+        user_config=config.user_config,
+        concurrency=config.concurrency,
+    )
+    write_artifact(config.paths.artifact("notes"), produced_notes)
+    if config.task_root is not None:
+        apply_notes(produced_notes, config.task_root)
 
     candidates = await abstract(
         diagnoses,
@@ -146,6 +175,27 @@ async def run(config: LoopConfig) -> list[Verdict]:
         compiled,
         cases,
         out_path=config.paths.artifact("replay"),
+    )
+
+    # Alignment measures the reviewer, not the change, so it cannot decide
+    # which candidate to keep. It is here because it is the only reading of a
+    # pass that has a value when every score came back unchanged.
+    by_case = {case.case_id: case for case in cases}
+    pairs = [
+        (by_case[m.case_id], m.review_report, m.candidate_id)
+        for m in measurements
+        if m.case_id in by_case
+    ]
+    alignments = await align(
+        pairs,
+        provider=config.provider,
+        user_config=config.user_config,
+        concurrency=config.concurrency,
+    )
+    write_artifact(config.paths.artifact("align"), alignments)
+    logger.info(
+        "loop: alignment {}",
+        " ".join(f"{name}={count}" for name, count in tally(alignments).items()),
     )
 
     verdicts = select(measurements)

@@ -451,8 +451,18 @@ def cmd_run(
     judge_profile: str = _JUDGE_PROFILE,
     concurrency: int = _CONCURRENCY,
     only: str = _ONLY,
+    held_notes: str = typer.Option(
+        "",
+        "--held-notes",
+        help="the previous pass's notes.json, to merge into rather than restate",
+    ),
+    apply_notes_to_bench: bool = typer.Option(
+        True,
+        "--apply-notes/--no-apply-notes",
+        help="write each repository's notes beside its tasks, where a review reads them",
+    ),
 ) -> None:
-    """All six stages in order, writing every intermediate.
+    """Every stage in order, writing every intermediate.
 
     Worth starting inside the batch window: replay does not need it, but
     diagnose can fork the attempt's own machine while it lives, and only
@@ -494,6 +504,8 @@ def cmd_run(
                 user_config=user_config,
                 concurrency=concurrency,
                 only=only,
+                task_root=Path(bench_root) if apply_notes_to_bench else None,
+                held_notes=load_notes(Path(held_notes)) if held_notes else (),
             )
         )
     )
