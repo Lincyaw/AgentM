@@ -145,6 +145,12 @@ class ReplayOutcome:
     lost_reason: str = field(default="", kw_only=True)
     artifact_dir: str = field(default="", kw_only=True)
     resumed_at: int = field(default=-1, kw_only=True)
+    #: What an independent reviewer said during the run, when the scenario ran
+    #: one. Carried with the measurement because the two are only meaningful
+    #: together: whether a review found what grading punished is a question
+    #: about this attempt, and asking it later means finding a session again
+    #: from a job directory nobody kept.
+    review_report: str = field(default="", kw_only=True)
 
 
 __all__ = [

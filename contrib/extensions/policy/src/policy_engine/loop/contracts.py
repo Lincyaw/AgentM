@@ -566,6 +566,9 @@ class ReplayMeasurement:
     metrics_before: Metrics = field(default_factory=Metrics)
     metrics_after: Metrics = field(default_factory=Metrics)
     job_dir: str = ""
+    #: What the review said, when the run had one. Kept beside the numbers so
+    #: alignment can be judged without going back to a session store.
+    review_report: str = ""
 
     @property
     def delta(self) -> Metrics:
@@ -584,6 +587,7 @@ class ReplayMeasurement:
             "metrics_after": self.metrics_after.to_json(),
             "delta": self.delta.to_json(),
             "job_dir": self.job_dir,
+            "review_report": self.review_report,
         }
 
     @staticmethod
@@ -599,6 +603,113 @@ class ReplayMeasurement:
             metrics_before=Metrics.from_json(_mapping(raw, "metrics_before")),
             metrics_after=Metrics.from_json(_mapping(raw, "metrics_after")),
             job_dir=_str(raw, "job_dir"),
+            review_report=_str(raw, "review_report"),
+        )
+
+
+# -- repository notes ---------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class RepositoryNote:
+    """One thing a reviewer of this repository has to be told.
+
+    Distinct from a ``Candidate``, and the difference is who reads it. A
+    candidate is sent to the agent doing the work, at the moment it is working:
+    "before you go further, check this". A note is given to whoever reviews that
+    work, and it holds for the repository rather than for a moment: "here, a
+    change of this kind meets these conditions, and this is where a plausible
+    shortcut gives a wrong answer".
+
+    The distinction earned its place. Twenty-one candidates moved no score. One
+    note -- that the graded tests run against a real database, so a mocked store
+    proves nothing about a fix concerned with locking -- changed how the reviewer
+    worked on the first attempt: it stood up a real Postgres instead of modelling
+    the interleaving it needed.
+
+    ``situation`` is the load-bearing field, and it is why this is not a lesson.
+    A note nobody can put a change into is prose. This one names conditions a
+    reviewer can go and create.
+    """
+
+    note_id: str
+    repository: str = ""
+    #: The conditions to put a change into: what to run it against, and under
+    #: what circumstances. Empty is rejected.
+    situation: str = ""
+    #: What a reviewer would otherwise conclude, and why it would be wrong.
+    without_it: str = ""
+    from_cases: tuple[str, ...] = ()
+
+    def rejection(self) -> str:
+        if not self.situation.strip():
+            return "no situation: a note nobody can put a change into is prose"
+        if not self.repository.strip():
+            return "no repository: a note that is true everywhere belongs in the prompt"
+        return ""
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "note_id": self.note_id,
+            "repository": self.repository,
+            "situation": self.situation,
+            "without_it": self.without_it,
+            "from_cases": self.from_cases,
+        }
+
+    @staticmethod
+    def from_json(raw: Mapping[str, JsonValue]) -> RepositoryNote:
+        return RepositoryNote(
+            note_id=_str(raw, "note_id"),
+            repository=_str(raw, "repository"),
+            situation=_str(raw, "situation"),
+            without_it=_str(raw, "without_it"),
+            from_cases=_strings(raw, "from_cases"),
+        )
+
+
+#: How close a review came to what grading actually punished. The point of
+#: measuring this rather than the score is density: a score moves on whether the
+#: agent then fixed the thing correctly, which is a second question and a rarer
+#: event, while this answers the first one on every run.
+ALIGNMENTS: tuple[str, ...] = ("same", "adjacent", "elsewhere", "none")
+
+
+@dataclass(slots=True, frozen=True)
+class Alignment:
+    """Whether a review found the thing grading punished.
+
+    ``same``: the review's case and a graded failure are the same defect.
+    ``adjacent``: same code, different defect -- real, and not what failed.
+    ``elsewhere``: real and unrelated. ``none``: the review found nothing.
+    """
+
+    case_id: str
+    candidate_id: str = ""
+    verdict: str = "none"
+    finding: str = ""
+    graded_failure: str = ""
+    reason: str = ""
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "case_id": self.case_id,
+            "candidate_id": self.candidate_id,
+            "verdict": self.verdict,
+            "finding": self.finding,
+            "graded_failure": self.graded_failure,
+            "reason": self.reason,
+        }
+
+    @staticmethod
+    def from_json(raw: Mapping[str, JsonValue]) -> Alignment:
+        return Alignment(
+            case_id=_str(raw, "case_id"),
+            candidate_id=_str(raw, "candidate_id"),
+            verdict=_str(raw, "verdict", "none"),
+            finding=_str(raw, "finding"),
+            graded_failure=_str(raw, "graded_failure"),
+            reason=_str(raw, "reason"),
         )
 
 

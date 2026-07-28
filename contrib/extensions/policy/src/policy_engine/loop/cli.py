@@ -22,11 +22,13 @@ import typer
 from policy_engine.shared.pg_query import PgQuerySource
 
 from .abstract import abstract
+from .align import align, tally
 from .benches import senior_swe
 from .collect import collect
 from .compile_gate import check_precondition, compile_candidates
 from .contracts import CompiledCandidate, write_artifact
 from .diagnose import diagnose
+from .notes import apply_notes, notes
 from .pipeline import (
     DEFAULT_VOCABULARY,
     LoopConfig,
@@ -36,6 +38,7 @@ from .pipeline import (
     load_compiled,
     load_diagnoses,
     load_measurements,
+    load_notes,
     run,
     summarise,
 )
@@ -217,6 +220,84 @@ def cmd_abstract(
     for item in found:
         typer.echo(f"  {item.candidate_id}  [{item.checkpoint}] {item.check[:90]}")
     typer.echo(f"{len(found)} candidate(s) -> {out}")
+
+
+@app.command("notes")
+def cmd_notes(
+    diagnoses: str = typer.Option(..., "--diagnoses"),
+    out: str = _OUT,
+    existing: str = typer.Option("", "--existing", help="notes to merge into"),
+    apply_to: str = typer.Option(
+        "",
+        "--apply-to",
+        help="bench task root; writes review-notes.md beside each task",
+    ),
+    provider: str = _PROVIDER,
+    user_config: str = _USER_CONFIG,
+    concurrency: int = _CONCURRENCY,
+) -> None:
+    """Diagnoses become notes for whoever reviews this repository next.
+
+    A different artefact from a candidate, for a different reader: a candidate
+    goes to the agent doing the work, a note to the one reviewing it, and a note
+    holds for the repository rather than for a moment.
+    """
+    loaded = load_diagnoses(Path(diagnoses))
+    held = load_notes(Path(existing)) if existing else []
+    produced = asyncio.run(
+        notes(
+            loaded,
+            held,
+            provider=provider,
+            user_config=user_config,
+            concurrency=concurrency,
+        )
+    )
+    write_artifact(Path(out), produced)
+    for item in produced:
+        typer.echo(f"  [{item.repository}] {item.situation[:88]}")
+    typer.echo(f"{len(produced)} note(s) -> {out}")
+    if apply_to:
+        written = apply_notes(produced, Path(apply_to))
+        for path in written:
+            typer.echo(f"  applied -> {path}")
+
+
+@app.command("align")
+def cmd_align(
+    measurements: str = typer.Option(..., "--measurements"),
+    cases: str = typer.Option(..., "--cases"),
+    out: str = _OUT,
+    provider: str = _PROVIDER,
+    user_config: str = _USER_CONFIG,
+    concurrency: int = _CONCURRENCY,
+) -> None:
+    """Did each run's review find what grading punished?
+
+    The signal the score cannot give. A score moves only when the review found
+    the right defect and the agent then fixed it; this asks the first half on
+    its own, and it has an answer every time.
+    """
+    by_case = {case.case_id: case for case in load_cases(Path(cases))}
+    pairs = []
+    for measurement in load_measurements(Path(measurements)):
+        case = by_case.get(measurement.case_id)
+        if case is None:
+            typer.echo(f"  no case for {measurement.case_id}; skipping")
+            continue
+        pairs.append((case, measurement.review_report, measurement.candidate_id))
+
+    verdicts = asyncio.run(
+        align(
+            pairs, provider=provider, user_config=user_config, concurrency=concurrency
+        )
+    )
+    write_artifact(Path(out), verdicts)
+    for item in verdicts:
+        typer.echo(f"  {item.verdict:<10} {item.case_id[:44]}  {item.finding[:60]}")
+    counts = tally(verdicts)
+    typer.echo(" ".join(f"{name}={count}" for name, count in counts.items()))
+    typer.echo(f"{len(verdicts)} alignment(s) -> {out}")
 
 
 @app.command("compile")

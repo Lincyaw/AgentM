@@ -719,7 +719,39 @@ class HarborReplay:
             lost_reason=lost,
             artifact_dir=str(job_dir),
             resumed_at=resume_at,
+            review_report=self._review_report(job_dir),
         )
+
+    def _review_report(self, job_dir: Path) -> str:
+        """What the review said, if the scenario ran one.
+
+        The run writes its session id into the trial metadata, and a review is
+        a child of that session -- so the report is its last message. Read here
+        rather than left for later because a job directory is not kept and a
+        session id outside one is unusable.
+        """
+        if not self.trajectory_dsn or not self.trajectory_schema:
+            return ""
+        results = sorted(job_dir.glob("*/result.json"))
+        if not results:
+            return ""
+        try:
+            raw = json.loads(results[0].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        meta = raw.get("metadata") if isinstance(raw, Mapping) else None
+        session = meta.get("agentm_session_id") if isinstance(meta, Mapping) else None
+        if not isinstance(session, str) or not session:
+            return ""
+        try:
+            return _last_review_message(
+                self.trajectory_dsn, self.trajectory_schema, session
+            )
+        except Exception as exc:  # noqa: BLE001 -- a missing report is not a lost run
+            logger.warning(
+                "senior-swe: could not read the review for {}: {}", session, exc
+            )
+            return ""
 
     def _job_config(
         self,
@@ -909,3 +941,38 @@ __all__ = [
     "default_agentm_home",
     "judge_credentials",
 ]
+
+
+def _last_review_message(dsn: str, schema: str, parent_session: str) -> str:
+    """The final thing a review said, out of the trajectory store.
+
+    A review is a child session of the run, and what it produced is the last
+    text its model emitted -- there is no separate result record, because the
+    tool that started it returns that text to its caller and nothing persists
+    it under a name.
+    """
+    import psycopg  # local: only this path needs the database
+
+    query = (
+        f'SELECT t.turn_json FROM "{schema}".agentm_trajectory_turns t '
+        f'JOIN "{schema}".agentm_trajectory_sessions s ON s.id = t.session_id '
+        "WHERE s.parent_id = %s AND s.purpose = 'review' "
+        "ORDER BY t.turn_index DESC LIMIT 12"
+    )
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(query, (parent_session,))
+        rows = cur.fetchall()
+
+    for (payload,) in rows:
+        turn = json.loads(payload) if isinstance(payload, str) else payload
+        if not isinstance(turn, Mapping):
+            continue
+        response = turn.get("response")
+        blocks = response.get("content") if isinstance(response, Mapping) else None
+        for block in blocks if isinstance(blocks, list) else []:
+            if not isinstance(block, Mapping) or block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str) and len(text) > 300:
+                return text
+    return ""

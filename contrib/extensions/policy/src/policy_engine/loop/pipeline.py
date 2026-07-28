@@ -33,6 +33,7 @@ from .contracts import (
     Diagnosis,
     FailureCase,
     ReplayMeasurement,
+    RepositoryNote,
     Verdict,
     read_artifact,
     write_artifact,
@@ -173,6 +174,10 @@ def load_compiled(path: Path) -> list[CompiledCandidate]:
 
 def load_measurements(path: Path) -> list[ReplayMeasurement]:
     return [ReplayMeasurement.from_json(raw) for raw in read_artifact(path)]
+
+
+def load_notes(path: Path) -> list[RepositoryNote]:
+    return [RepositoryNote.from_json(raw) for raw in read_artifact(path)]
 
 
 def summarise(verdicts: Sequence[Verdict]) -> str:
