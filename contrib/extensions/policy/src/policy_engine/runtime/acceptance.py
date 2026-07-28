@@ -36,6 +36,16 @@ from policy_engine.shared.manifest import load_manifest
 PURPOSE = "acceptance"
 _PURPOSE = PURPOSE
 
+#: Room a mid-task finding may take in the agent's context. Enough for the
+#: reviewer's own summary of what it ran, not for the output of running it.
+_EVIDENCE_LIMIT = 1200
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n[…truncated]"
+
 
 @dataclass(frozen=True, slots=True)
 class AcceptanceVerdict:
@@ -83,7 +93,12 @@ class AcceptanceVerdict:
         if self.finding:
             parts += ["", self.finding]
         if self.evidence.strip():
-            parts += ["", self.evidence.strip()]
+            # Capped, unlike at submit, where the verdict ends the turn either
+            # way. This one lands mid-task in a context the agent still has to
+            # work in, and the reviewer is asked for one line per input it
+            # tried -- an unbounded paste of probe output would cost more room
+            # than the finding is worth.
+            parts += ["", _clip(self.evidence.strip(), _EVIDENCE_LIMIT)]
         if self.next_step:
             parts += ["", f"Next: {self.next_step}"]
         parts += [

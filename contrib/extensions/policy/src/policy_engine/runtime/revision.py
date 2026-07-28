@@ -119,14 +119,30 @@ class RevisionDetector:
             path = str(call.arguments.get("path", ""))
             if not path or _is_test_path(path):
                 continue
+            known = self._added.get(path, ())
 
-            replaced = _significant_lines(str(call.arguments.get("old_string", "")))
-            if replaced and any(
-                replaced & earlier for earlier in self._added.get(path, ())
-            ):
-                revised = True
+            if call.name == "write":
+                # A write replaces the entire file, so if this run put anything
+                # in that file already, the write has certainly replaced it.
+                # This is the one case that needs no text matching, and it is
+                # the strongest form of the signal -- the tool's own
+                # description reserves it for complete rewrites.
+                if known:
+                    revised = True
+                added = _significant_lines(str(call.arguments.get("content", "")))
+            else:
+                # ``edit`` has two modes. Only the string-replacement one says
+                # what it replaced; the line-range mode names coordinates, and
+                # they have shifted with every edit since, so there is nothing
+                # here to match against. Its text is still recorded, so it
+                # counts as earlier work for whatever replaces it later -- a
+                # line-range edit can be revised, it just cannot be the turn
+                # that shows the revision. About one edit in thirteen.
+                replaced = _significant_lines(str(call.arguments.get("old_string", "")))
+                if replaced and any(replaced & earlier for earlier in known):
+                    revised = True
+                added = _significant_lines(str(call.arguments.get("new_string", "")))
 
-            added = _significant_lines(str(call.arguments.get("new_string", "")))
             if added:
                 self._added.setdefault(path, []).append(added)
 
