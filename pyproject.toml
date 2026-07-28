@@ -80,6 +80,9 @@ agentm-harbor = { workspace = true }
 policy-engine = { workspace = true, editable = true }
 
 [tool.uv.workspace]
+# Explicitly list nested projects under contrib/. Other contrib/scenarios/*
+# entries are pure manifests with no pyproject.toml and must NOT be picked
+# up as workspace members.
 members = [
     "contrib/extensions/policy",
     "contrib/scenarios/harbor",
@@ -95,7 +98,7 @@ addopts = ""
 norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "runs", "jobs"]
 
 [tool.ruff.lint]
-# Default rule set (E/F) plus high-signal correctness guards:
+# The E/F core plus high-signal correctness guards:
 #   S110 — try/except/pass
 #   S112 — try/except/continue
 #   B007 — unused loop control variables
@@ -106,6 +109,7 @@ norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules"
 # expected/benign, warning+ for error-hiding) — see the silent-exception
 # discipline applied across src/agentm. Suppress with an explicit
 # ``# noqa: S110`` + reason only when logging is truly impossible.
+#
 # Stated as an explicit ``select`` rather than ``extend-select``: the baseline
 # ruff calls "default" is not stable across releases, and 0.16 widened it. The
 # list below is the rule set this project actually enforces, so a ruff upgrade
