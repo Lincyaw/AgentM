@@ -81,6 +81,7 @@ from policy_engine.runtime.triggers import (
     REWORKED,
     STOPPING,
     Budget,
+    ChecklistItem,
     Moment,
     TriggerEngine,
     build_injection,
@@ -282,13 +283,18 @@ class _Runtime:
             provider=self.config.critic_provider or self.config.provider,
             scenario=self.config.critic_scenario,
         )
-        self.actions = {
-            "inject": InjectAction(),
-            "review": ReviewAction(
+        # The registry is the switch. `critic: "off"` has to mean no reviewer
+        # runs, and folding the old `revision_review` flag into an item left
+        # nothing holding that door: the item fired and spawned a blocking
+        # reviewer whatever the config said. Withholding the action is the
+        # whole of the fix, and it needs no second knob to express.
+        self.actions = {"inject": InjectAction()}
+        if self.config.critic == "on":
+            self.actions["review"] = ReviewAction(
                 reviewer=self._reviewer,
                 prompt_for=self._revision_prompt,
-            ),
-        }
+            )
+        items = self._installable(items)
         self.triggers = TriggerEngine(
             items=items, budget=Budget(total=self.config.max_interventions)
         )
@@ -476,6 +482,25 @@ class _Runtime:
             self.triggers.budget.total,
         )
         return await action.deliver(item, moment)
+
+    def _installable(self, items: dict[str, ChecklistItem]) -> dict[str, ChecklistItem]:
+        """Drop items whose action is not installed, once and loudly.
+
+        Dropped here rather than skipped at fire time so the budget is never
+        charged for an item that cannot be delivered, and so a checklist naming
+        an action this host does not have says so at install instead of on
+        whichever turn it first matches.
+        """
+        keep = {k: v for k, v in items.items() if v.deliver in self.actions}
+        for item_id, item in items.items():
+            if item_id not in keep:
+                logger.warning(
+                    "policy_engine: {} wants action {!r}, not installed here; "
+                    "item disabled",
+                    item_id,
+                    item.deliver,
+                )
+        return keep
 
     def _revision_prompt(self, moment: Moment) -> str:
         """What a review-delivering item sends the critic mid-task."""
