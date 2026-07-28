@@ -56,13 +56,15 @@ from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
 from policy_engine.runtime.actions import Action, InjectAction, ReviewAction
 from policy_engine.runtime.critic import (
-    PURPOSE as ACCEPTANCE_PURPOSE,
-)
-from policy_engine.runtime.critic import (
+    PLAN_APPROVER_SERVICE,
     Critic,
     CriticVerdict,
+    PlanCritic,
     build_prompt,
     build_revision_prompt,
+)
+from policy_engine.runtime.critic import (
+    PURPOSE as ACCEPTANCE_PURPOSE,
 )
 from policy_engine.runtime.ifg.repository_index import (
     RepositoryIndex,
@@ -295,6 +297,16 @@ class _Runtime:
                 prompt_for=self._revision_prompt,
             )
         items = self._installable(items)
+        if self.config.critic == "on":
+            # plan_mode looks its approver up by name and accepts anything with
+            # a `review`; registering over its AutoApprover is how the critic
+            # reaches the one checkpoint that precedes the code. Tree-scoped so
+            # a child inherits it, matching how plan_mode scopes its own.
+            self.api.services.register(
+                PLAN_APPROVER_SERVICE,
+                PlanCritic(critic=self._reviewer, task_for=self._first_user_message),
+                scope="tree",
+            )
         self.triggers = TriggerEngine(
             items=items, budget=Budget(total=self.config.max_interventions)
         )

@@ -1,11 +1,15 @@
 # code-health: ignore-file[AM025] -- tool args and model JSON are untyped
-"""One critic, three moments it can be called.
+"""One critic, four moments it can be called.
 
 The critic's identity is the ``critic`` manifest beside this file: a second
 reader that tries to break what it is handed and endorses only what survives.
-This module is everything around that identity — the three entries, what each
+This module is everything around that identity — the four entries, what each
 hands over, and how each answer comes back:
 
+* **plan** (``PlanCritic``, standing in as ``plan_mode``'s approver) — no code
+  exists yet; the verdict decides whether the agent may start writing. The only
+  entry with no diff in reach, which is why it is the only one that can be
+  asked about direction rather than damage.
 * **submit** (``Critic.review`` with ``build_prompt``) — the agent has declared
   the task finished; the verdict decides whether the session may end.
 * **rework** (``Critic.review`` with ``build_revision_prompt``) — the agent
@@ -33,7 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -186,6 +190,61 @@ def build_prompt(
         "not."
     )
     return "\n\n".join(parts)
+
+
+def build_plan_prompt(*, task: str, plan: str) -> str:
+    """The plan checkpoint, and the only one where no code exists yet.
+
+    That absence is the point. Every other entry hands the reviewer a change,
+    and a reviewer holding a change reaches for the cheapest reference within
+    arm's length: the code before it. Measured on this bench, both reviewers of
+    one task opened with ``git diff`` and built a pre-change copy to compare
+    against, which answers "did this break anything" and cannot answer "was
+    this the right direction" -- and on a task whose whole point is to change
+    existing behaviour, the two questions have opposite answers. One review
+    derived a rule exactly inverted from the graded one, verified the change
+    against it thoroughly, and endorsed it.
+
+    With no diff to anchor on, the only available reference is the task, which
+    is where the direction actually lives. So this entry asks about the
+    direction and nothing else -- not whether the steps are complete, not
+    whether the approach is efficient. A plan can be vague and still point the
+    right way; a precise plan pointed the wrong way is the failure this
+    checkpoint exists to catch.
+    """
+    return "\n\n".join(
+        [
+            (
+                "A software-engineering agent has written a plan and cannot "
+                "change any file until it is approved. No code exists yet, so "
+                "there is nothing to test and nothing to compare against.\n\n"
+                "Judge one thing: whether the behaviour this plan aims at is "
+                "the behaviour the task asks for. Not whether the steps are "
+                "complete, not whether the approach is elegant."
+            ),
+            f"## Task\n{task.strip()}",
+            f"## The plan\n{plan.strip()}",
+            (
+                "The plan asserts, somewhere, what correct output looks like. "
+                "Find that assertion and ask what establishes it.\n\n"
+                "The repository's own tests are not automatically the answer. "
+                "Where a task asks to change existing behaviour, the tests "
+                "that pin that behaviour are the thing being changed, and "
+                "reading them as the specification points exactly backwards. "
+                "Check what they actually cover: a task describing a case they "
+                "never exercise is a task they cannot speak to.\n\n"
+                "You may read and run anything that does not change a file."
+            ),
+            (
+                "Call `submit_verdict` exactly once. `accepted: false` when the "
+                "plan aims at the wrong behaviour, or when what it treats as "
+                "correct rests on nothing -- say which, in `finding`, and in "
+                "`next_step` the one thing that would settle it. `accepted: "
+                "true` when the direction holds up; put in `evidence` what you "
+                "checked it against."
+            ),
+        ]
+    )
 
 
 def build_revision_prompt(*, task: str, events: Sequence[str]) -> str:
@@ -584,12 +643,68 @@ def install(api: AtomAPI, config: ReviewRequestConfig) -> None:
     _ReviewRuntime(api, config).install()
 
 
+#: The service name ``plan_mode`` looks its approver up under. A string rather
+#: than an import: atom-to-atom coupling is forbidden, and the name is that
+#: atom's published surface.
+PLAN_APPROVER_SERVICE = "plan_mode.approver"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanReview:
+    """What ``plan_mode`` reads back. Structurally its ``PlanVerdict``.
+
+    Not that class, because importing it would couple two atoms. The protocol
+    it satisfies is ``runtime_checkable`` and the value is only read for these
+    two fields, which is what makes the decoupling hold rather than merely
+    typecheck.
+    """
+
+    approved: bool
+    feedback: str = ""
+
+
+@dataclass(slots=True)
+class PlanCritic:
+    """The critic, standing in as ``plan_mode``'s approver.
+
+    The one checkpoint that can reach the direction, because it runs before
+    there is a diff to mistake for a specification. A rejection costs the agent
+    a plan revision and no code, which is the cheapest correction available
+    anywhere in a run.
+
+    Fails open, like every other entry: a plan held hostage by a broken
+    reviewer is worse than an unreviewed plan.
+    """
+
+    critic: Critic
+    task_for: Callable[[], str]
+
+    async def review(self, plan: str) -> PlanReview:
+        verdict = await self.critic.review(
+            build_plan_prompt(task=self.task_for(), plan=plan)
+        )
+        if verdict.accepted:
+            logger.info("plan critic: direction holds up")
+            return PlanReview(approved=True)
+        logger.info("plan critic: sent back -- {}", verdict.finding[:160])
+        parts = [verdict.finding or "The plan aims at the wrong behaviour."]
+        if verdict.evidence.strip():
+            parts.append(_clip(verdict.evidence.strip(), _EVIDENCE_LIMIT))
+        if verdict.next_step:
+            parts.append(f"Next: {verdict.next_step}")
+        return PlanReview(approved=False, feedback="\n\n".join(parts))
+
+
 __all__ = [
     "MANIFEST",
+    "PLAN_APPROVER_SERVICE",
     "PURPOSE",
     "Critic",
     "CriticVerdict",
+    "PlanCritic",
+    "PlanReview",
     "ReviewRequestConfig",
+    "build_plan_prompt",
     "build_prompt",
     "build_revision_prompt",
     "install",

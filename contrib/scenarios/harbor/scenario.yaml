@@ -41,6 +41,13 @@ extensions:
   # Records every tool event to the per-session policy DB; checklist
   # triggers + interventions stay disabled unless the run sets
   # AGENTM_CHECKLIST_WATCH_ENABLED=true (baseline batches stay clean).
+  # Before policy_engine, which registers its critic over this atom's
+  # AutoApprover -- the one checkpoint that runs before any code exists, and
+  # so the only one that can be asked about direction rather than damage.
+  - module: agentm.extensions.builtin.plan_mode
+    config:
+      start_in_plan: true
+
   - module: policy_engine
     config:
       trajectory_dsn: "postgresql://agentm:agentm@localhost:55432/agentm_test"
