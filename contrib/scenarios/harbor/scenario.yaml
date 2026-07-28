@@ -27,6 +27,11 @@ extensions:
   - module: agentm_harbor.review_request
     config:
       scenario: "arl:harbor-critic"
+      # Local knowledge reaches the reviewer per repository, from a
+      # review-notes.md beside the task, named through this variable. What is
+      # true of a database is noise to a syntax highlighter, and one blob for
+      # both would be too vague to act on either way.
+      notes_env: "AGENTM_REVIEW_NOTES"
 
   - module: agentm.extensions.builtin.tool_policy
     config:

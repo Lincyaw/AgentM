@@ -1,3 +1,5 @@
+# code-health: ignore-file[AM025] -- a fact's metadata is free-form by
+# contract; the isinstance checks here are where it acquires a shape.
 """Sync repository index symbols to the PG data plane.
 
 Uses PgQuerySource for writes (shared connection), not standalone psycopg.
@@ -10,12 +12,12 @@ from dataclasses import dataclass
 
 from loguru import logger
 
-from .ifg.repository_index import RepositoryIndex
-from .ifg.source_parser import (
+from policy_engine.runtime.ifg.repository_index import RepositoryIndex
+from policy_engine.runtime.ifg.source_parser import (
     SymbolExtractionInput,
     SymbolFact,
 )
-from .pg_query import PgQuerySource
+from policy_engine.shared.pg_query import PgQuerySource
 
 _EXTRACTOR_VERSION = "policy-symbol-sync-v1"
 

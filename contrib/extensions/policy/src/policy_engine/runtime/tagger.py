@@ -47,9 +47,8 @@ from agentm.core.abi import (
     text_message,
     tool_result,
 )
-
-from .compile import generate_tagger_prompt, load_vocabulary
-from .pg_query import PgQuerySource
+from policy_engine.runtime.compile import generate_tagger_prompt, load_vocabulary
+from policy_engine.shared.pg_query import PgQuerySource
 
 _VOCABULARY_PATH = Path(__file__).parent / "vocabulary.yaml"
 

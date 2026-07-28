@@ -28,9 +28,8 @@ from pathlib import Path
 import typer
 
 from agentm.core.abi import ProviderConfig
-
-from .pg_query import PgQuerySource
-from .triggers import ChecklistItem, TriggerEngine, load_items
+from policy_engine.runtime.triggers import ChecklistItem, TriggerEngine, load_items
+from policy_engine.shared.pg_query import PgQuerySource
 
 app = typer.Typer(
     name="policy_engine",
@@ -46,7 +45,7 @@ from .loop.cli import app as _loop_app
 
 app.add_typer(_loop_app, name="loop")
 
-_PKG = Path(__file__).parent
+_PKG = Path(__file__).parent / "runtime"
 DEFAULT_CHECKLIST = str(_PKG / "checklist.yaml")
 DEFAULT_VOCAB = str(_PKG / "vocabulary.yaml")
 
@@ -242,7 +241,7 @@ async def _build_provider(model: str | None) -> ProviderConfig:
 async def _tag_sessions(
     dsn: str, schema: str, model: str | None, force: bool, interval: int
 ) -> None:
-    from .tagger import (
+    from policy_engine.runtime.tagger import (
         TaggerConversation,
         render_turn,
         write_annotation,
@@ -429,7 +428,12 @@ def cmd_select(
     threshold: float = typer.Option(0.1, "--threshold"),
 ) -> None:
     """Prune low-fitness items and unused predicates."""
-    from .compile import load_vocabulary, prune_items, prune_vocabulary, save_vocabulary
+    from policy_engine.runtime.compile import (
+        load_vocabulary,
+        prune_items,
+        prune_vocabulary,
+        save_vocabulary,
+    )
 
     checklist_path = Path(checklist)
     vocab_path = Path(vocab_path_arg)

@@ -201,10 +201,15 @@ async def replay(
 
     cwd = await _initial_cwd(env)
     shells = ShellStateStore(default_cwd=cwd)
-    # ``require_read=False`` because replay skips the agent's reads: they moved
-    # nothing, so re-running them would only cost time. What they earn in a live
-    # session is permission to edit, and here the recording is that permission --
-    # the edit is known to have happened.
+    # Stateless on purpose, and ``require_read=False`` for the same reason:
+    # replay skips the agent's reads, so the toolbox can never learn that a file
+    # changed under it. In a live session a read after a command that rewrote a
+    # file is what refreshes that knowledge; here there is no read, and the
+    # toolbox would go on believing the file is whatever the last edit left --
+    # then reject the next edit as "modified since you last read it". Measured:
+    # one 124-turn rebuild died that way at turn 103, and the workspace was
+    # fine. Nothing here needs the state anyway; the bytes are fetched and
+    # written by this module, not by the toolbox.
     files = FileToolbox(cwd=cwd, require_read=False)
     applied = 0
     for position, action in enumerate(actions):
@@ -323,7 +328,6 @@ async def _edit(env: BaseEnvironment, action: Action, files: FileToolbox) -> Non
             f"this workspace -- {result.text}"
         )
     await _upload(env, path, staged)
-    files.accept_content(path, staged)
 
 
 async def _write(env: BaseEnvironment, action: Action, files: FileToolbox) -> None:
@@ -338,7 +342,6 @@ async def _write(env: BaseEnvironment, action: Action, files: FileToolbox) -> No
             f"this workspace -- {result.text}"
         )
     await _upload(env, path, staged)
-    files.accept_content(path, staged)
 
 
 async def _download(env: BaseEnvironment, path: str) -> bytes | None:

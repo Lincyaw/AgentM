@@ -19,7 +19,8 @@ from pathlib import Path
 
 import typer
 
-from ..pg_query import PgQuerySource
+from policy_engine.shared.pg_query import PgQuerySource
+
 from .abstract import abstract
 from .benches import senior_swe
 from .collect import collect

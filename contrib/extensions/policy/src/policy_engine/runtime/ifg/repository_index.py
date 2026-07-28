@@ -22,7 +22,6 @@ from .source_parser import (
 )
 from .source_semantics import analyze_bash_segment
 
-
 REPOSITORY_INDEX_SERVICE = "policy:repository_index"
 _WRITE_ACTIONS = frozenset({"write", "edit", "create", "delete"})
 _GIT_READ_SUBCOMMANDS = frozenset(
@@ -154,7 +153,7 @@ class RepositoryIndex:
                 cwd=cwd,
                 timeout=min(self._refresh_timeout, 10.0),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- logged; a repository without git is not an error
             logger.debug("repository git-root discovery failed in {}: {}", cwd, exc)
             return None
         if result.timed_out or result.exit_code != 0:
@@ -173,7 +172,7 @@ class RepositoryIndex:
                 cwd=search_root,
                 timeout=min(self._refresh_timeout, 10.0),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- logged; a search that cannot run yields no results
             logger.debug("repository search failed under {}: {}", search_root, exc)
             return None
         if result.timed_out or result.exit_code != 0:
@@ -273,7 +272,7 @@ class RepositoryIndex:
         )
         try:
             result = await self._bash.exec(command, cwd=self._root, timeout=timeout)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- returned to the caller as the failure text
             return None, f"outline execution failed: {type(exc).__name__}: {exc}"
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         if result.timed_out:
@@ -328,7 +327,7 @@ class RepositoryIndex:
         )
         try:
             result = await self._bash.exec(command, cwd=self._root, timeout=timeout)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- returned to the caller as the failure text
             return None, f"remote index execution failed: {type(exc).__name__}: {exc}"
         stdout = result.stdout.decode("utf-8", errors="replace").strip()
         payload: object = None

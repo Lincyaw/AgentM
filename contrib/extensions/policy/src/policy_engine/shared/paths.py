@@ -104,7 +104,7 @@ def _database_has_session(path: Path, session_id: str) -> bool:
                 if table not in tables:
                     continue
                 row = connection.execute(
-                    f"SELECT 1 FROM {table} WHERE session_id = ? LIMIT 1",  # noqa: S608
+                    f"SELECT 1 FROM {table} WHERE session_id = ? LIMIT 1",
                     (session_id,),
                 ).fetchone()
                 if row is not None:

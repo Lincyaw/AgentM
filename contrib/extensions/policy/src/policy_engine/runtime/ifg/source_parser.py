@@ -9,9 +9,9 @@ maps outline entries into IFG facts.
 
 from __future__ import annotations
 
+import json
 import posixpath
 import shlex
-import json
 import shutil
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -35,7 +35,7 @@ _active_host_exec: HostExec | None = None
 
 
 def set_host_exec(host_exec: HostExec) -> None:
-    global _active_host_exec  # noqa: PLW0603
+    global _active_host_exec
     _active_host_exec = host_exec
 
 
@@ -851,7 +851,7 @@ def _run_outline(
 ) -> HostExecResult:
     if _active_host_exec is not None:
         return _active_host_exec(argv, timeout)
-    import subprocess  # noqa: PLC0415
+    import subprocess
 
     try:
         # Offline CLI fallback only; live sessions always run through the

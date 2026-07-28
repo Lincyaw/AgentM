@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-_AGENTS_DIR = Path(__file__).parent / "agents"
+_AGENTS_DIR = Path(__file__).parent.parent / "runtime" / "agents"
 
 
 @dataclass(frozen=True, slots=True)

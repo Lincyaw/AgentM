@@ -19,7 +19,6 @@ import yaml
 
 from .source_parser import BashRedirect, BashSegment
 
-
 BASH_SEMANTICS_EXTRACTOR_VERSION = "bash-semantics-v4"
 EXTRACTOR_VERSION = BASH_SEMANTICS_EXTRACTOR_VERSION
 
@@ -210,12 +209,10 @@ def _is_stdin_filter(
         return False
     if _has_file_operand(segment.argv, schema=schema):
         return False
-    if any(
+    return not any(
         redirect.kind == "file" and redirect.operator in _READ_REDIRECTS
         for redirect in segment.redirects
-    ):
-        return False
-    return True
+    )
 
 
 def _has_file_operand(

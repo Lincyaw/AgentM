@@ -123,7 +123,7 @@ def delete_ifg_derived_session(
     deleted += cursor.rowcount
     for table in IFG_DERIVED_TABLES:
         cursor = conn.exec_driver_sql(
-            f"DELETE FROM {table} WHERE session_id = ? AND extractor_version = ?",  # noqa: S608
+            f"DELETE FROM {table} WHERE session_id = ? AND extractor_version = ?",
             (session_id, extractor_version),
         )
         deleted += cursor.rowcount
@@ -878,7 +878,7 @@ def read_file_edges(
         FROM ifg_action_file_edges
         WHERE session_id = ? AND extractor_version = ?{anchor_clause}
         ORDER BY turn, event_id, path
-        """,  # noqa: S608
+        """,
         (session_id, extractor_version),
     ).mappings()
     return tuple(

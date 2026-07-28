@@ -14,7 +14,6 @@ from .source_parser import (
     extract_symbols_from_repository_files,
     extract_symbols_from_source_units,
 )
-
 from .types import (
     IfgActionFileEdgeRow,
     IfgActionRow,
@@ -262,7 +261,7 @@ def build_ifg_symbols(
     action_symbol_edges: list[IfgActionSymbolEdgeRow] = []
     file_symbol_edges: list[IfgFileSymbolEdgeRow] = []
     fact_groups: list[tuple[IfgSymbolRow, list[SymbolFact]]] = []
-    for _stable_key, facts in _group_symbol_facts(symbol_facts).items():
+    for facts in _group_symbol_facts(symbol_facts).values():
         symbol = _symbol_from_facts(facts, extractor_version=extractor_version)
         symbols.append(symbol)
         fact_groups.append((symbol, facts))

@@ -10,17 +10,6 @@ from dataclasses import dataclass, replace
 
 from sqlalchemy.engine import RowMapping
 
-from .repository_index import RepositoryIndex
-from .regions import parse_source_region
-from .source_parser import (
-    BashSegment,
-    parse_bash_segments,
-)
-from .source_semantics import (
-    BashPathReference,
-    analyze_bash_segment,
-)
-
 from .normalize import tool_event_from_policy_row
 from .project import (
     build_ifg_graph,
@@ -38,7 +27,17 @@ from .project import (
     unique_symbol_symbol_edges,
     unique_symbols,
 )
+from .regions import parse_source_region
+from .repository_index import RepositoryIndex
 from .schema import IFG_EXTRACTOR_VERSION
+from .source_parser import (
+    BashSegment,
+    parse_bash_segments,
+)
+from .source_semantics import (
+    BashPathReference,
+    analyze_bash_segment,
+)
 from .types import (
     IfgActionFileEdgeRow,
     IfgActionRow,
@@ -154,7 +153,7 @@ def extract_ifg_from_tool_events(
     for event in events:
         try:
             extracted = _extract_event(event, extractor_version=extractor_version)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- recorded as an error row for this event
             errors.append(_error_row(event, exc))
             continue
         actions.extend(extracted.actions)

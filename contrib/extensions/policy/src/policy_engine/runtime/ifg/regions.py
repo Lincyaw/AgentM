@@ -11,9 +11,8 @@ import posixpath
 import re
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-
 from collections.abc import Mapping as _ToolArgsMapping
+from dataclasses import dataclass
 
 ToolArgs = _ToolArgsMapping[str, object]
 

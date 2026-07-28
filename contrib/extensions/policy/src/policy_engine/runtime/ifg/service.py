@@ -6,10 +6,9 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Sequence
 
-from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from sqlalchemy.engine import Connection
 
-from .repository_index import RepositoryIndex
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 
 from .extract import extract_ifg_from_tool_events
 from .normalize import (
@@ -29,8 +28,8 @@ from .project import (
     unique_nodes,
     unique_path_candidates,
     unique_source_units,
-    unique_symbol_symbol_edges,
     unique_symbol_mentions,
+    unique_symbol_symbol_edges,
     unique_symbols,
 )
 from .repository import (
@@ -39,6 +38,7 @@ from .repository import (
     write_atomic_rows,
     write_session_summary,
 )
+from .repository_index import RepositoryIndex
 from .schema import IFG_EXTRACTOR_VERSION, delete_ifg_session, ensure_ifg_schema
 from .types import IfgBackfillResult, IfgExtractionRows, IfgToolEvent
 

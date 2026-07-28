@@ -44,7 +44,7 @@ from .select import select
 
 #: This package's own directory. Split from parent access so the symlink
 #: resolution is one explicit step.
-_PACKAGE_ROOT = Path(__file__).parent.parent
+_PACKAGE_ROOT = Path(__file__).parent.parent / "runtime"
 
 #: One file per stage. Names what ``run`` writes where; the subcommands take an
 #: explicit ``--out``, so running them by hand reproduces a chained run only if

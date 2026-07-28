@@ -34,8 +34,8 @@ from .types import (
 )
 
 __all__ = [
-    "IFG_TABLES",
     "IFG_EXTRACTOR_VERSION",
+    "IFG_TABLES",
     "IfgActionFileEdgeRow",
     "IfgActionRow",
     "IfgActionSymbolEdgeRow",

@@ -28,8 +28,7 @@ from agentm.core.abi import (
     ToolResult,
     ToolTerminate,
 )
-
-from .manifest import load_manifest
+from policy_engine.shared.manifest import load_manifest
 
 #: Purpose marker on the reviewer's session. The policy atom checks it so a
 #: reviewer does not install the policy that spawned it — that child would

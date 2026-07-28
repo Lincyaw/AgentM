@@ -1,3 +1,5 @@
+# code-health: ignore-file[AM025] -- query parameters arrive from callers as
+# whatever they had; this is the one place that is decided.
 """PG-backed QuerySource for signal evaluation.
 
 Uses SQLAlchemy (consistent with the IFG subpackage and the SDK's

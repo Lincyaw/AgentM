@@ -6,9 +6,10 @@ from __future__ import annotations
 import base64
 from collections.abc import Iterable, Mapping, Sequence
 
+from sqlalchemy.engine import Connection, RowMapping
+
 from agentm.core.abi.messages import ImageContent, TextContent, ToolResultBlock
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
-from sqlalchemy.engine import Connection, RowMapping
 
 from .types import IfgToolEvent
 from .utils import _first_str, _loads, _mapping_str, _row_value

@@ -737,6 +737,9 @@ class HarborReplay:
             "AGENTM_FORK_TURN": str(resume_at),
             "AGENTM_FORK_PROMPT": injected,
         }
+        notes = self._review_notes(case)
+        if notes:
+            agent_env["AGENTM_REVIEW_NOTES"] = str(notes)
 
         verifier_env: dict[str, JsonValue] = {
             "SSB_OVERRIDE_ALL_JUDGE_MODEL": self.judge_model,
@@ -779,6 +782,19 @@ class HarborReplay:
             "verifier": {"env": verifier_env},
             "tasks": ({"path": str(ref.get("task_dir", ""))},),
         }
+
+    def _review_notes(self, case: FailureCase) -> Path | None:
+        """Where this repository's own notes for a reviewer live, if anywhere.
+
+        Beside the task, named for it, because a note about how a database
+        takes locks is noise to a syntax highlighter and neither belongs in a
+        prompt that has to serve both.
+        """
+        task_dir = case.backend_ref.get("task_dir")
+        if not isinstance(task_dir, str) or not task_dir:
+            return None
+        path = Path(task_dir) / "review-notes.md"
+        return path if path.is_file() else None
 
     def _origin(self, case: FailureCase, resume_at: int) -> dict[str, JsonValue]:
         """Where the re-run's workspace comes from, or empty if nowhere.

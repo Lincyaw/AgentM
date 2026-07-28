@@ -24,7 +24,9 @@ looks like. That is the reviewer's to establish.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from agentm.core.abi import (
     AgentSessionConfig,
@@ -45,6 +47,23 @@ class ReviewRequestConfig(BaseModel):
     #: Composition the review runs under. It is a different agent from the one
     #: submitting: read-only, and told to establish the requirement itself.
     scenario: str = ""
+
+    #: Environment variable naming a file of notes for the repository this run
+    #: is against. Read at dispatch rather than at install so one scenario can
+    #: serve many repositories: the notes that matter to a database are noise
+    #: to a syntax highlighter, and a single blob for both says nothing precise
+    #: about either.
+    notes_env: str = "AGENTM_REVIEW_NOTES"
+
+    #: What a reviewer has to know about this repository and could not have
+    #: reasoned its way to. The reviewer's prompt names no repository on
+    #: purpose, so it reproduces a problem the way a stranger would -- and a
+    #: stranger models whatever is expensive to stand up. One built a mocked
+    #: interleaving to reproduce a race, confirmed the fix against it, and
+    #: never saw that the same fix deadlocks against the real database,
+    #: because the model it had built contained no locks. Local knowledge is
+    #: what closes that, and this is where local knowledge arrives.
+    notes: str = ""
 
 
 MANIFEST = ExtensionManifest(
@@ -90,13 +109,14 @@ class _SubmitForReview(BaseModel):
     )
 
 
-def _prompt(request: _SubmitForReview) -> str:
+def _prompt(request: _SubmitForReview, notes: str = "") -> str:
     sections = [
         ("Task", request.task),
         ("How the author read it", request.reading),
         ("What they chose to do, and why", request.decision),
         ("What they rejected, and why", request.rejected),
         ("Paths changed", request.paths),
+        ("Known about this repository", notes),
     ]
     return "\n\n".join(f"## {head}\n\n{body}" for head, body in sections if body.strip())
 
@@ -105,6 +125,8 @@ class _ReviewRuntime:
     def __init__(self, api: AtomAPI, config: ReviewRequestConfig) -> None:
         self._api = api
         self._scenario = config.scenario
+        self._notes = config.notes
+        self._notes_env = config.notes_env
 
     def install(self) -> None:
         # A review of a review is a review of the wrong thing, and the session
@@ -127,6 +149,23 @@ class _ReviewRuntime:
             )
         )
 
+    def _repository_notes(self) -> str:
+        """Notes for the repository under review, from the file the host named.
+
+        Falls back to the configured text, so a single-repository deployment
+        need not set anything up. A named file that is missing is worth a line
+        in the log and nothing more: a review without local knowledge is the
+        review this started as, not a broken one.
+        """
+        path = os.environ.get(self._notes_env, "").strip()
+        if not path:
+            return self._notes
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("review_request: no notes at {}: {}", path, exc)
+            return self._notes
+
     async def submit(self, args: Mapping[str, object]) -> ToolResult:
         try:
             request = _SubmitForReview.model_validate(args)
@@ -141,7 +180,7 @@ class _ReviewRuntime:
             )
         )
         try:
-            await child.run(_prompt(request))
+            await child.run(_prompt(request, self._repository_notes()))
             await child.idle()
             outcome = child.final_result()
             findings = outcome.text if outcome else ""

@@ -44,8 +44,7 @@ from agentm.core.abi import (
     ToolTerminate,
 )
 from agentm.core.abi.roles import bind_environment_operations
-
-from ..manifest import AgentManifest, load_manifest
+from policy_engine.shared.manifest import AgentManifest, load_manifest
 
 #: Enough to read, search and run, and nothing that rewrites history behind the
 #: agent's back. Mirrors the harbor scenario's base set, which is the one known

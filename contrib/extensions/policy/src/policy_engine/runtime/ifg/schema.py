@@ -416,9 +416,7 @@ def _ensure_ifg_columns(conn: Connection) -> None:
         for name, ddl in columns.items():
             if name in existing:
                 continue
-            conn.exec_driver_sql(
-                f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"  # noqa: S608
-            )
+            conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def delete_ifg_session(
@@ -449,12 +447,12 @@ def delete_ifg_session(
     for table in tables:
         if extractor_version is None:
             cursor = conn.exec_driver_sql(
-                f"DELETE FROM {table} WHERE session_id = ?",  # noqa: S608
+                f"DELETE FROM {table} WHERE session_id = ?",
                 (session_id,),
             )
         else:
             cursor = conn.exec_driver_sql(
-                f"DELETE FROM {table} WHERE session_id = ? AND extractor_version = ?",  # noqa: S608
+                f"DELETE FROM {table} WHERE session_id = ? AND extractor_version = ?",
                 (session_id, extractor_version),
             )
         deleted += cursor.rowcount
