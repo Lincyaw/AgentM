@@ -1,21 +1,16 @@
 # code-health: ignore-file[AM025] -- the vocabulary is read from YAML, which
-# has no type until something checks it; these three are that check.
-"""Compile step: decompose checklist when_notes into trigger expressions.
+# has no type until something checks it; these are that check.
+"""The predicate vocabulary, and the tagger prompt generated from it.
 
-Part of the evolution loop:
-  mine → **compile** → deploy → evaluate → select → diversify
-
-Reads checklist.yaml, calls the compiler agent on each item's when_note,
-deduplicates proposed predicates into a vocabulary, and writes back
-trigger expressions + vocabulary.yaml.
-
-The vocabulary is the single source of truth for the tagger's tag set.
-When predicates change, the tagger prompt is regenerated automatically.
+The vocabulary is the single source of truth for the tagger's tag set: the
+runtime regenerates the tagger prompt from it, so a predicate cannot exist in
+the checklist without the tagger knowing what to look for. The prune helpers
+are the offline half, used when a checklist revision retires items.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,35 +48,6 @@ def save_vocabulary(vocab: dict[str, PredicateDef], path: Path) -> None:
         name: {"definition": pred.definition} for name, pred in sorted(vocab.items())
     }
     path.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True))
-
-
-# -- Compiler prompt -----------------------------------------------------------
-
-
-def merge_vocabulary(
-    vocab: dict[str, PredicateDef], new_predicates: Sequence[PredicateDef]
-) -> dict[str, PredicateDef]:
-    merged = dict(vocab)
-    for pred in new_predicates:
-        if pred.name not in merged:
-            merged[pred.name] = pred
-    return merged
-
-
-# -- Checklist I/O -------------------------------------------------------------
-
-
-def update_checklist_triggers(checklist_path: Path, compiled: dict[str, str]) -> None:
-    raw = yaml.safe_load(checklist_path.read_text(encoding="utf-8"))
-    for item in raw.get("items", []):
-        item_id = item.get("id", "")
-        if item_id in compiled:
-            when = item.get("when", {})
-            when["trigger"] = compiled[item_id]
-            item["when"] = when
-    checklist_path.write_text(
-        yaml.dump(raw, default_flow_style=False, allow_unicode=True, width=120)
-    )
 
 
 # -- Tagger prompt generation from vocabulary ----------------------------------

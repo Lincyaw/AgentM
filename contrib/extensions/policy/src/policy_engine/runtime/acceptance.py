@@ -70,6 +70,31 @@ class AcceptanceVerdict:
         ]
         return "\n".join(parts)
 
+    def as_revision_message(self) -> str:
+        """What the agent is told mid-task, where there is nothing to resubmit.
+
+        Separate from ``as_message`` because that one ends by naming ``submit``,
+        and at a revision point the agent has not submitted and must not be
+        pointed at finishing. The close here hands the work back rather than
+        asking for a reply -- an injected message that reads as a question gets
+        answered, and answering it is how a run ends early.
+        """
+        parts = ["Hold on — a case that the rework does not survive:"]
+        if self.finding:
+            parts += ["", self.finding]
+        if self.evidence.strip():
+            parts += ["", self.evidence.strip()]
+        if self.next_step:
+            parts += ["", f"Next: {self.next_step}"]
+        parts += [
+            "",
+            (
+                "Decide what it means for the shape you just settled on, then "
+                "carry on with the task. No need to reply to this."
+            ),
+        ]
+        return "\n".join(parts)
+
 
 @dataclass(slots=True)
 class _VerdictSink:
@@ -83,14 +108,81 @@ def build_prompt(
     events: Sequence[str],
     concerns: Sequence[str],
 ) -> str:
-    parts = [f"## Task\n{task.strip()}"]
+    """The acceptance entry's framing. The critic's system prompt covers what
+    holds at every checkpoint; what is specific to this one — what the log
+    contains, what a concern demands, how the answer comes back — arrives with
+    the material it describes."""
+    parts = [
+        (
+            "A software-engineering agent has just declared this task "
+            "finished. Decide whether that holds up, before the work is "
+            "released. The run below lists every step as an event — files "
+            "read, files edited with a line count, commands with their exit "
+            "status, and what the agent said. File bodies and command output "
+            "are not included: use the workspace, not the log, to see what "
+            "the code does."
+        ),
+        f"## Task\n{task.strip()}",
+    ]
     if summary.strip():
         parts.append(f"## The agent's closing summary\n{summary.strip()}")
     if concerns:
         joined = "\n\n".join(f"- {c.strip()}" for c in concerns)
-        parts.append(f"## Process concerns raised during the run\n{joined}")
+        parts.append(
+            f"## Process concerns raised during the run\n{joined}\n\n"
+            "A concern that names a real gap is closed by an action in the "
+            "run, never by reasoning alone; one that genuinely does not "
+            "apply here is not a finding."
+        )
     parts.append("## The run\n" + "\n".join(events))
+    parts.append(
+        "When you have decided, call `submit_verdict` exactly once. Accept "
+        "only when you tried to break the work across the range and could "
+        "not."
+    )
     return "\n\n".join(parts)
+
+
+def build_revision_prompt(*, task: str, events: Sequence[str]) -> str:
+    """The revision checkpoint's framing: work in progress, not finished work.
+
+    A third entry to the same critic, and the difference from acceptance is the
+    tense. Nothing has been declared done, so there is no claim to test and no
+    verdict to pass on the work as a whole -- asking for one here gets a
+    reviewer that either rubber-stamps an unfinished change or rejects it for
+    being unfinished. What is worth asking is narrower: the agent has just
+    rebuilt something it had already built, so the first shape was wrong, and
+    the question is whether the second one is wrong too.
+
+    The scope is deliberately the rework rather than the whole change. A
+    reviewer given the run entire at the halfway mark reports on whatever is
+    least finished, which is everything, and its findings land where the agent
+    was going to go anyway.
+    """
+    return "\n\n".join(
+        [
+            (
+                "A software-engineering agent is part-way through a task and "
+                "has just reworked something it had already built. It has not "
+                "finished and is not asking for approval, so do not rule on "
+                "whether the change is complete.\n\n"
+                "Rebuilding means the first shape was wrong. Your question is "
+                "whether the second one is wrong too, and the way to answer it "
+                "is a case that breaks it -- run in the workspace, not argued. "
+                "One counterexample settles it."
+            ),
+            f"## Task\n{task.strip()}",
+            "## The run so far\n" + "\n".join(events),
+            (
+                "Call `submit_verdict` exactly once. `accepted: false` when you "
+                "have a case that breaks the rework -- put the case and its "
+                "output in `evidence`. `accepted: true` when you tried and "
+                "could not, and say in `evidence` what you tried: this agent "
+                "is mid-task and a reviewer that invents work to report costs "
+                "it the rest of its budget."
+            ),
+        ]
+    )
 
 
 def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
@@ -161,8 +253,10 @@ class AcceptanceReviewer:
         """
         sink = _VerdictSink()
         try:
-            manifest = load_manifest("acceptance")
-            # Only the verdict tool is added. A child inherits the scenario's
+            manifest = load_manifest("critic")
+            # Only the verdict tool is added — it is this entry's output
+            # contract, a closure over the sink, so it is owned here rather
+            # than named in the manifest. A child inherits the scenario's
             # extensions, so it already has the workspace tools routed to the
             # same sandbox — passing our own `bash` collided with tool_bash and
             # failed the whole spawn.
