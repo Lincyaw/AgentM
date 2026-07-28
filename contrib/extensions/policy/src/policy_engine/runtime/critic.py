@@ -31,6 +31,7 @@ like is the reviewer's to establish.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -282,6 +283,17 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
 # -- Verdict entries: submit and rework ----------------------------------------
 
 
+async def _shutdown(child: object) -> None:
+    """Close a review session, and never let closing it be the failure."""
+    closer = getattr(child, "shutdown", None)  # code-health: ignore[AM021]
+    if closer is None:
+        return
+    try:
+        await closer()
+    except Exception as exc:  # noqa: BLE001 - the verdict already stands
+        logger.warning("critic: review session did not close: {}", exc)
+
+
 @dataclass(slots=True)
 class Critic:
     api: AtomAPI
@@ -298,6 +310,10 @@ class Critic:
     #: prepends the worker's prompt to the critic's; it exists as the default
     #: only for hosts that register no critic shell.
     scenario: str = ""
+    #: Ceiling on one review. Observed reviews run ten to fifteen minutes, so
+    #: this only bites on a hang -- and a hang is the case that matters, since
+    #: the verdict entries block the agent until they return.
+    timeout_sec: float = 1200.0
 
     async def review(self, prompt: str) -> CriticVerdict:
         """Accepts on any failure of its own.
@@ -341,7 +357,21 @@ class Critic:
                     stream_fn=stream_fn,
                 )
             )
-            await child.run(prompt)
+            try:
+                await asyncio.wait_for(child.run(prompt), timeout=self.timeout_sec)
+            finally:
+                # The session outlives the await on every path -- timeout,
+                # cancellation, a verdict -- and nothing else closes it. The
+                # request entry has always done this; the verdict entry never
+                # did, so a review that hung left a child holding a sandbox
+                # and burning tokens for the rest of the run.
+                await _shutdown(child)
+        except TimeoutError:
+            logger.warning(
+                "critic: review exceeded {}s; accepting and moving on",
+                self.timeout_sec,
+            )
+            return CriticVerdict(accepted=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning("critic: review failed: {}", exc)
             return CriticVerdict(accepted=True)
