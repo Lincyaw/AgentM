@@ -12,12 +12,14 @@ results -- diagnoses what went wrong, proposes checks and repository notes, and
 measures whether they change anything by replaying the attempt with and without
 them. It runs for hours after the fact and answers to nothing but the numbers.
 
-What passes between them is the artefacts: a checklist the runtime injects, and
-the per-repository notes a reviewer is given. The loop writes them; the runtime
-and the review scenario read them. Neither imports the other.
+What passes between them is the artefacts: a checklist the runtime injects, the
+per-repository notes a reviewer is given, and the critic manifest both read.
+The loop writes the first two; the runtime delivers them. The loop's compile
+stage additionally imports the runtime's vocabulary and fact tables -- by
+design, since the gates it emits must be exactly what the runtime evaluates.
 
-``shared`` is what both need and neither owns: the trajectory store, the agent
-manifest loader, the state directory.
+``shared`` is what both need and neither owns: the query source, the agent
+manifest loader, the policy-file resolver.
 """
 
 from __future__ import annotations

@@ -241,11 +241,17 @@ async def _build_provider(model: str | None) -> ProviderConfig:
 async def _tag_sessions(
     dsn: str, schema: str, model: str | None, force: bool, interval: int
 ) -> None:
+    from policy_engine.runtime.record import render_turn
     from policy_engine.runtime.tagger import (
         TaggerConversation,
-        render_turn,
+        tagger_system_prompt,
         write_annotation,
     )
+
+    system = tagger_system_prompt()
+    if system is None:
+        typer.echo("no vocabulary.yaml: nothing to tag against", err=True)
+        raise typer.Exit(1)
 
     provider = await _build_provider(model)
     print(f"Provider: {provider.name} ({provider.model.id})")
@@ -270,7 +276,10 @@ async def _tag_sessions(
             "WHERE session_id = %(session_id)s ORDER BY turn_index"
         )
         conversation = TaggerConversation(
-            session_id=sid, stream_fn=provider.stream_fn, model=provider.model
+            session_id=sid,
+            stream_fn=provider.stream_fn,
+            model=provider.model,
+            system=system,
         )
 
         tagged = 0
@@ -428,7 +437,7 @@ def cmd_select(
     threshold: float = typer.Option(0.1, "--threshold"),
 ) -> None:
     """Prune low-fitness items and unused predicates."""
-    from policy_engine.runtime.compile import (
+    from policy_engine.shared.vocabulary import (
         load_vocabulary,
         prune_items,
         prune_vocabulary,

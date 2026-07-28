@@ -18,9 +18,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from agentm.core.abi import JsonValue
-from policy_engine.runtime import facts
-from policy_engine.runtime.compile import PredicateDef, load_vocabulary
+from policy_engine.shared import facts
 from policy_engine.shared.pg_query import PgQuerySource
+from policy_engine.shared.vocabulary import PredicateDef, load_vocabulary
 
 from .contracts import Candidate, CompiledCandidate
 from .runner import AgentRun, ResultTool, fan_out, load_stage_manifest

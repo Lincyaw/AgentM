@@ -1,12 +1,28 @@
 # code-health: ignore-file[AM025] -- checklist YAML is untyped at the boundary
-"""Trigger layer: checklist items with predicate gates.
+"""When an intervention fires: one predicate namespace, one budget.
 
-Each item's ``when`` block declares:
-- ``trigger``: a boolean expression over predicates from vocabulary.yaml
-- ``checkpoint``: when to evaluate (continuous / stop)
+An item's ``when`` block declares a boolean expression over predicates and,
+optionally, a fact precondition. A predicate is just a name that is true of
+this turn, and where it comes from is not the expression's business:
 
-A predicate is true when the tagger has emitted that tag for any turn
-in the session. Matching is deterministic boolean logic — no LLM call.
+- the tagger emits one for any turn it has read, and those accumulate
+- the run itself supplies the rest, computed from the tool stream at no cost:
+  ``stopping``, ``reworked_own_work``
+
+That mixture is the point. The tagger costs a model call and the stream ones
+are free, so a gate like ``reworked_own_work AND NOT has_run_tests`` is mostly
+free and could not be written at all while the two lived in separate
+mechanisms -- which they did, one as an expression and one as a hardcoded
+branch in the atom.
+
+``checkpoint: stop`` survives as sugar. It is read at load time and composed
+into the expression as ``stopping``, so there is one thing to evaluate rather
+than a parameter beside it.
+
+Firing is bounded by a single :class:`Budget` rather than a counter per kind of
+intervention. Four of those had accumulated, no two aware of each other, and
+their sum was what a run could actually be interrupted -- a number nothing
+computed and nobody had chosen.
 """
 
 from __future__ import annotations
@@ -27,14 +43,40 @@ from agentm.core.abi.events import Inject
 #: engine stays free of a database that way: it asks, the atom knows how.
 FactCheck = Callable[[str], bool]
 
+#: The agent is wrapping up. Supplied by the run, not the tagger.
+STOPPING = "stopping"
+
+#: The agent has just edited something it had itself written earlier this run.
+#: True for that turn only -- see ``Moment``.
+REWORKED = "reworked_own_work"
+
+
+@dataclass(slots=True, frozen=True)
+class Moment:
+    """One turn, as the gates see it.
+
+    Predicates arrive here already merged: the tagger's, which accumulate over
+    the session, and the run's own, which are true of this turn and false of
+    the next. Nothing downstream needs to know which is which, and keeping the
+    distinction out of the expression language is what lets an item combine
+    them.
+    """
+
+    turn_index: int
+    predicates: frozenset[str] = frozenset()
+
+    @property
+    def stopping(self) -> bool:
+        return STOPPING in self.predicates
+
 
 @dataclass(slots=True, frozen=True)
 class Gate:
     """When an item may fire.
 
     Two halves answering different questions, and both must hold. ``trigger``
-    asks whether the concern *resembles* this session, from the tagger's
-    predicates. ``precondition`` asks whether the situation the concern
+    asks whether the concern *resembles* this turn, over the predicate
+    namespace. ``precondition`` asks whether the situation the concern
     presupposes has actually arrived, from the session's recorded actions.
 
     The second half exists because of a measurement: one item was seen firing
@@ -46,7 +88,6 @@ class Gate:
     """
 
     trigger: str
-    checkpoint: str
     precondition: str = ""
 
 
@@ -56,8 +97,65 @@ class ChecklistItem:
     dimension: str
     check: str
     advice: str
+    #: Which action delivers this. Looked up in the atom's action registry, so
+    #: an unknown name is a checklist that names something not installed --
+    #: skipped with a warning rather than silently never firing, which is what
+    #: the old ``!= "inject"`` filter did to every value but one.
     deliver: str
+    #: How many times this item may fire in one run. One is right for a check
+    #: the agent either heeds or does not; a gate on a recurring moment wants
+    #: more, and had to be a separate mechanism to get it.
+    max_fires: int
     gate: Gate
+
+
+@dataclass(slots=True)
+class Budget:
+    """What the engine may spend interrupting one run.
+
+    One pool, because the thing actually being rationed is the agent's
+    attention and it does not care which mechanism took it. Before this there
+    were four independent counters -- mid-work injections, stop checks, review
+    rounds, revision reviews -- summing to thirteen interruptions that no code
+    computed and no one had chosen.
+
+    Per-item limits sit alongside the total: an item that has said its piece
+    should not say it again, whatever room is left.
+    """
+
+    total: int
+    spent: int = 0
+    fires: dict[str, int] = field(default_factory=dict)
+
+    def may_spend(self, label: str, limit: int = 1) -> bool:
+        if self.spent >= self.total:
+            return False
+        return self.fires.get(label, 0) < max(limit, 1)
+
+    def spend(self, label: str) -> None:
+        self.spent += 1
+        self.fires[label] = self.fires.get(label, 0) + 1
+
+    def may_fire(self, item: ChecklistItem) -> bool:
+        return self.may_spend(item.item_id, item.max_fires)
+
+    def charge(self, item: ChecklistItem) -> None:
+        self.spend(item.item_id)
+
+
+def compose_trigger(trigger: str, checkpoint: str) -> str:
+    """Fold ``checkpoint`` into the expression, so there is one thing to read.
+
+    Kept as sugar rather than removed: it reads better than ``AND stopping`` on
+    forty-odd items, and it was already the vocabulary of the checklist. What
+    it must not stay is a second gate evaluated beside the first, which is how
+    a moment that is neither `stop` nor a tag ended up with nowhere to live.
+    """
+    expr = trigger.strip() or "always"
+    side = STOPPING if checkpoint == "stop" else f"NOT {STOPPING}"
+    if expr == "always":
+        return side
+    return f"{side} AND ({expr})"
 
 
 def load_items(path: Path) -> dict[str, ChecklistItem]:
@@ -78,9 +176,12 @@ def load_items(path: Path) -> dict[str, ChecklistItem]:
             check=" ".join(str(entry.get("check", "")).split()),
             advice=" ".join(str(entry.get("advice", "")).split()),
             deliver=str(entry.get("deliver", "inject")),
+            max_fires=max(int(entry.get("max_fires", 1) or 1), 1),
             gate=Gate(
-                trigger=str(when.get("trigger", "always")),
-                checkpoint=str(when.get("checkpoint", "stop")),
+                trigger=compose_trigger(
+                    str(when.get("trigger", "always")),
+                    str(when.get("checkpoint", "stop")),
+                ),
                 precondition=" ".join(str(when.get("precondition", "")).split()),
             ),
         )
@@ -163,7 +264,7 @@ def render_finish_reminder() -> str:
 _TOKEN_RE = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*|AND|OR|NOT|\(|\)")
 
 
-def evaluate_trigger(expr: str, active_tags: frozenset[str]) -> bool:
+def evaluate_trigger(expr: str, predicates: frozenset[str]) -> bool:
     if expr == "always" or not expr.strip():
         return True
     tokens = _TOKEN_RE.findall(expr)
@@ -210,7 +311,7 @@ def evaluate_trigger(expr: str, active_tags: frozenset[str]) -> bool:
             return result
         if tok:
             _advance()
-            return tok in active_tags
+            return tok in predicates
         return False
 
     return _parse_or()
@@ -221,45 +322,45 @@ def evaluate_trigger(expr: str, active_tags: frozenset[str]) -> bool:
 
 @dataclass(slots=True)
 class TriggerEngine:
-    """Evaluates checklist items against tagger predicates."""
+    """Selects the item to fire at a moment. Selection only -- what firing
+    *does* belongs to the action the item names."""
 
     items: dict[str, ChecklistItem]
-    _fired: set[str] = field(default_factory=set)
+    budget: Budget
 
     def next_triggered(
         self,
+        moment: Moment,
         *,
-        stopping: bool,
-        active_tags: frozenset[str] = frozenset(),
         fact_check: FactCheck | None = None,
     ) -> ChecklistItem | None:
-        """The single highest-priority matching item, marked fired.
+        """The first matching item this moment can afford, charged to the budget.
 
         ``fact_check`` evaluates an item's precondition against the live session.
         Omitting it treats every precondition as unmet, so an item gated on facts
         stays silent rather than firing blind: a caller that cannot answer the
         question has not answered it yes.
+
+        The budget is charged on selection rather than on delivery. An action
+        that runs a reviewer and hears nothing back has still spent the turn and
+        the wall-clock, and charging only for findings would let a quiet
+        reviewer be called on every turn of the run.
         """
-        for item in self._matching(
-            stopping=stopping, active_tags=active_tags, fact_check=fact_check
-        ):
-            self._fired.add(item.item_id)
+        for item in self._matching(moment, fact_check=fact_check):
+            self.budget.charge(item)
             return item
         return None
 
     def _matching(
         self,
+        moment: Moment,
         *,
-        stopping: bool,
-        active_tags: frozenset[str],
         fact_check: FactCheck | None = None,
     ) -> Iterator[ChecklistItem]:
         for item in self.items.values():
-            if item.deliver != "inject" or item.item_id in self._fired:
+            if not self.budget.may_fire(item):
                 continue
-            if item.gate.checkpoint == "stop" and not stopping:
-                continue
-            if not evaluate_trigger(item.gate.trigger, active_tags):
+            if not evaluate_trigger(item.gate.trigger, moment.predicates):
                 continue
             if item.gate.precondition and (
                 fact_check is None or not fact_check(item.gate.precondition)

@@ -54,12 +54,13 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.roles import BASH_OPERATIONS_SERVICE
 from agentm.extensions import ExtensionManifest
-from policy_engine.runtime.acceptance import (
+from policy_engine.runtime.actions import Action, InjectAction, ReviewAction
+from policy_engine.runtime.critic import (
     PURPOSE as ACCEPTANCE_PURPOSE,
 )
-from policy_engine.runtime.acceptance import (
-    AcceptanceReviewer,
-    AcceptanceVerdict,
+from policy_engine.runtime.critic import (
+    Critic,
+    CriticVerdict,
     build_prompt,
     build_revision_prompt,
 )
@@ -67,26 +68,28 @@ from policy_engine.runtime.ifg.repository_index import (
     RepositoryIndex,
     RepositoryRefreshPlan,
 )
+from policy_engine.runtime.record import content_text as _content_text
+from policy_engine.runtime.record import render_turn
 from policy_engine.runtime.revision import RevisionDetector
 from policy_engine.runtime.symbol_sync import extract_symbols_for_paths, write_symbols
 from policy_engine.runtime.tagger import (
     TaggerConversation,
-    _content_text,
-    render_turn,
+    tagger_system_prompt,
     write_annotation,
 )
 from policy_engine.runtime.triggers import (
+    REWORKED,
+    STOPPING,
+    Budget,
+    Moment,
     TriggerEngine,
     build_injection,
     load_items,
-    render_check,
     render_finish_reminder,
-    render_stop_check,
 )
+from policy_engine.shared import facts
 from policy_engine.shared.paths import resolve_policy_path
 from policy_engine.shared.pg_query import PgQuerySource
-
-from . import facts
 
 
 class PolicyEngineConfig(BaseModel):
@@ -117,27 +120,25 @@ class PolicyEngineConfig(BaseModel):
     # Acceptance review at submit time: "off", or "on" to read the run against
     # the task before the session is allowed to end.
     critic: str = "off"
+    # Composition the reviewer runs under, for the verdict entries (submit and
+    # rework) — the same shell submit_for_review names. Empty inherits this
+    # scenario whole, which hands the reviewer the worker's write tools and
+    # prepends the worker's prompt to the critic's.
+    critic_scenario: str = ""
     # Turns per tagger call. The tags feed a cumulative set that triggers read
     # as a whole, so per-turn resolution buys nothing and costs one model call
     # per turn. The buffer is flushed early whenever a decision needs the tags.
     tagger_interval: int = 5
-    # Mid-work checks, injected while the agent is working.
-    max_injections: int = 5
-    # Checks raised when the agent wraps up. Past the cap it is left to finish.
-    max_stop_checks: int = 3
-    # How many times acceptance may send the agent back. The session must
-    # always be able to end, and a reviewer that never yields is a stuck loop.
+    # Everything the engine may spend interrupting one run, of any kind. This
+    # replaced three separate caps -- mid-work injections, stop checks, reviews
+    # at reworks -- which summed to eleven interruptions that nothing computed.
+    # An item may still cap itself with `max_fires`.
+    max_interventions: int = 6
+    # How many times acceptance may send the agent back from `submit`. Not part
+    # of the budget above: that one rations the agent's attention, this one
+    # guarantees the session can end. A reviewer that never yields is a stuck
+    # loop whatever the budget says.
     max_review_rounds: int = 2
-    # Review at the turns where the agent reworks its own earlier work: "off",
-    # or "on". Distinct from `critic`, which reviews finished work at submit
-    # and is therefore too late to change what gets built -- in the one run
-    # whose score moved, the deciding edit was turn 57 of 116.
-    revision_review: str = "off"
-    # Reviews spent on reworks. The detector fires four or five times in a
-    # measured run and each firing blocks the agent for the length of a full
-    # review, so the cap is what keeps a long task from spending its budget
-    # being reviewed.
-    max_revision_reviews: int = 3
 
 
 MANIFEST = ExtensionManifest(
@@ -153,6 +154,12 @@ _SUBMIT_DESCRIPTION = (
     "process check once you have addressed it or established that it does not "
     "apply to this task."
 )
+
+
+#: Budget label for the exit contract, so it is bounded by the same pool as
+#: everything else rather than by a counter of its own.
+_FINISH_REMINDER = "finish-reminder"
+_MAX_FINISH_REMINDERS = 2
 
 
 def _interventions_enabled() -> bool:
@@ -180,14 +187,16 @@ class _Runtime:
     session_id: str
     turn: int = 0
     triggers: TriggerEngine | None = None
-    injections: int = 0
+    #: Installed actions by the name an item's ``deliver`` uses. An item naming
+    #: something absent is skipped loudly; before this there was one action and
+    #: the field pretended otherwise.
+    actions: dict[str, Action] = field(default_factory=dict)
     repo_index: RepositoryIndex | None = None
     _pending_refreshes: list[RepositoryRefreshPlan] = field(default_factory=list)
     _synced_paths: set[str] = field(default_factory=set)
     _pg: PgQuerySource | None = None
     _current_turn_calls: list[_ToolCallRecord] = field(default_factory=list)
     _active_tags: set[str] = field(default_factory=set)
-    _stop_checks: int = 0
     _submitted: bool = False
     _tagger: TaggerConversation | None = None
     _provider_missing_logged: bool = False
@@ -195,11 +204,13 @@ class _Runtime:
     # reviewer reads the whole thing at submit.
     _turns: list[str] = field(default_factory=list)
     _tagged: int = 0
-    _reviewer: AcceptanceReviewer | None = None
+    _reviewer: Critic | None = None
     _concerns: list[str] = field(default_factory=list)
     _review_rounds: int = 0
+    #: A predicate source, not a mechanism of its own: it answers whether this
+    #: turn reworked earlier work, and the answer joins the tagger's tags in
+    #: one namespace the gates read.
     _revisions: RevisionDetector = field(default_factory=RevisionDetector)
-    _revision_reviews: int = 0
     # Preconditions answered so far this turn. A fact is derived from committed
     # turns, so within one decide the answer cannot change -- and one decide asks
     # twice, once on the stop path and once on the continuous one, for every item
@@ -256,26 +267,31 @@ class _Runtime:
             self.config.checklist, cwd=Path(self.api.ctx.cwd)
         )
         items = load_items(items_path) if items_path else {}
-        if not items and self.config.revision_review != "on":
+        if not items and self.config.critic != "on":
+            # An empty checklist is only fatal when nothing else would act. The
+            # exit contract and any review-delivering item both come from the
+            # critic being on, and neither reads the checklist.
             logger.warning(
                 "policy_engine: checklist {!r} not found or empty; "
                 "interventions disabled",
                 self.config.checklist,
             )
             return False
-        if not items:
-            # Revision review reads no checklist -- it fires on the shape of
-            # the edit stream -- so an empty one must not switch it off. It
-            # would otherwise be reachable only by shipping a checklist that
-            # exists to be non-empty.
-            logger.info(
-                "policy_engine: no checklist items; revision review only",
-            )
-        self._reviewer = AcceptanceReviewer(
+        self._reviewer = Critic(
             api=self.api,
             provider=self.config.critic_provider or self.config.provider,
+            scenario=self.config.critic_scenario,
         )
-        self.triggers = TriggerEngine(items=items)
+        self.actions = {
+            "inject": InjectAction(),
+            "review": ReviewAction(
+                reviewer=self._reviewer,
+                prompt_for=self._revision_prompt,
+            ),
+        }
+        self.triggers = TriggerEngine(
+            items=items, budget=Budget(total=self.config.max_interventions)
+        )
         if self._pg is None:
             self._pg = PgQuerySource(dsn, self.session_id)
         self._restore()
@@ -331,8 +347,9 @@ class _Runtime:
 
         self._submitted = True
         logger.info(
-            "policy_engine: submitted after {} stop check(s), {} review round(s)",
-            self._stop_checks,
+            "policy_engine: submitted after {}/{} intervention(s), {} review round(s)",
+            self.triggers.budget.spent if self.triggers else 0,
+            self.triggers.budget.total if self.triggers else 0,
             self._review_rounds,
         )
         return ToolTerminate(
@@ -340,50 +357,7 @@ class _Runtime:
             reason="policy:submitted",
         )
 
-    async def _review_revision(self, turn_index: int) -> LoopAction | None:
-        """Review the rework the agent just did, when it just did one.
-
-        The detector is fed on every turn whether or not a review can be spent
-        on the answer. It recognises a rework by matching an edit against what
-        this run wrote earlier, so a turn it does not see is a turn missing
-        from what the next one is compared against -- gating the call would
-        make the detector's memory a function of the budget.
-        """
-        reworked = self._revisions.observe(turn_index, self._current_turn_calls)
-        if not reworked or self.config.revision_review != "on":
-            return None
-        if self._reviewer is None:
-            return None
-        if self._revision_reviews >= self.config.max_revision_reviews:
-            logger.info(
-                "policy_engine: rework at turn {}, past the review cap ({})",
-                turn_index,
-                self.config.max_revision_reviews,
-            )
-            return None
-
-        self._revision_reviews += 1
-        verdict = await self._reviewer.review(
-            build_revision_prompt(task=self._first_user_message(), events=self._turns)
-        )
-        if verdict.accepted:
-            logger.info(
-                "policy_engine: rework at turn {} survived review ({}/{})",
-                turn_index,
-                self._revision_reviews,
-                self.config.max_revision_reviews,
-            )
-            return None
-        logger.info(
-            "policy_engine: rework at turn {} broken ({}/{}): {}",
-            turn_index,
-            self._revision_reviews,
-            self.config.max_revision_reviews,
-            verdict.finding[:120],
-        )
-        return build_injection(verdict.as_revision_message())
-
-    async def _review(self, args: dict[str, JsonValue]) -> AcceptanceVerdict | None:
+    async def _review(self, args: dict[str, JsonValue]) -> CriticVerdict | None:
         """The acceptance verdict when it rejects, else None."""
         if self.config.critic != "on":
             return None
@@ -471,70 +445,88 @@ class _Runtime:
             await self._flush_tagger()
         await indexing
 
-        # Wrapping up in prose is how this agent finishes; that moment is the
-        # stop checkpoint. Hand it one check and name the way out. The old
-        # design had no exit — every reply drew another check until the budget
-        # ran out — so the check now carries `submit` with it.
-        if stopping:
-            if self._submitted or self._stop_checks >= self.config.max_stop_checks:
-                return None
-            item = self.triggers.next_triggered(
-                stopping=True,
-                active_tags=frozenset(self._active_tags),
-                fact_check=self._fact_check,
-            )
-            if item is None:
-                # With acceptance on, finishing still has to go through review,
-                # and the agent only learns `submit` exists from this message.
-                # Leaving it to a checklist match meant the reviewer ran or not
-                # by coincidence: three recorded sessions, one review.
-                if self.config.critic != "on":
-                    return None
-                self._stop_checks += 1
-                logger.info(
-                    "policy_engine: finish reminder ({}/{}), no item matched",
-                    self._stop_checks,
-                    self.config.max_stop_checks,
-                )
-                return build_injection(render_finish_reminder())
-            self._stop_checks += 1
-            self._concerns.append(item.check)
-            logger.info(
-                "policy_engine: stop check {} ({}/{})",
-                item.item_id,
-                self._stop_checks,
-                self.config.max_stop_checks,
-            )
-            return build_injection(render_stop_check(item))
-
-        # Ahead of the checklist, and only because of when it fires. A rework
-        # is a moment, not a state: the turn after it the agent has moved on,
-        # and a checklist item taking this turn instead would cost the one
-        # chance to reach the shape while it is still being settled. The
-        # checklist has every other turn.
-        revised = await self._review_revision(event.observation.turn_index)
-        if revised is not None:
-            return revised
-
-        if self.injections >= self.config.max_injections:
+        moment = self._moment(event, stopping=stopping)
+        if stopping and self._submitted:
             return None
-        item = self.triggers.next_triggered(
-            stopping=False,
-            active_tags=frozenset(self._active_tags),
-            fact_check=self._fact_check,
-        )
+
+        item = self.triggers.next_triggered(moment, fact_check=self._fact_check)
         if item is None:
+            return self._finish_reminder(moment)
+
+        action = self.actions.get(item.deliver)
+        if action is None:
+            logger.warning(
+                "policy_engine: {} names action {!r}, which is not installed",
+                item.item_id,
+                item.deliver,
+            )
             return None
 
-        self.injections += 1
+        # Recorded whether or not the action produces anything. The acceptance
+        # reviewer reads these at submit as concerns the run raised, and one
+        # that fired and was silently satisfied is still a concern that was
+        # raised.
         self._concerns.append(item.check)
         logger.info(
-            "policy_engine: injecting {} ({}/{})",
+            "policy_engine: {} via {} at turn {} ({}/{})",
             item.item_id,
-            self.injections,
-            self.config.max_injections,
+            item.deliver,
+            moment.turn_index,
+            self.triggers.budget.spent,
+            self.triggers.budget.total,
         )
-        return build_injection(render_check(item))
+        return await action.deliver(item, moment)
+
+    def _revision_prompt(self, moment: Moment) -> str:
+        """What a review-delivering item sends the critic mid-task."""
+        return build_revision_prompt(
+            task=self._first_user_message(), events=self._turns
+        )
+
+    def _moment(self, event: DecideEvent, *, stopping: bool) -> Moment:
+        """This turn as the gates see it: the tagger's tags plus the run's own.
+
+        The stream predicates are recomputed every turn and never accumulate.
+        ``reworked_own_work`` is true of the turn that reworked something and
+        false of the next one, which is the whole reason it could not simply be
+        added to the tag set.
+
+        The detector observes unconditionally, even when nothing can fire. It
+        recognises a rework by matching an edit against what this run wrote
+        earlier, so a turn it does not see is a turn missing from what the next
+        one is compared against.
+        """
+        turn_index = event.observation.turn_index
+        predicates = set(self._active_tags)
+        if stopping:
+            predicates.add(STOPPING)
+        if self._revisions.observe(turn_index, self._current_turn_calls):
+            predicates.add(REWORKED)
+        return Moment(turn_index=turn_index, predicates=frozenset(predicates))
+
+    def _finish_reminder(self, moment: Moment) -> LoopAction | None:
+        """The exit contract, which is engine behaviour rather than an item.
+
+        The agent only learns ``submit`` exists from this message, so it cannot
+        depend on a checklist matching -- leaving it to one made review a
+        coincidence: three recorded sessions, one review. For the same reason
+        it is not itself a checklist item: a deployment shipping its own
+        checklist would drop it, and the agent would have no way to finish.
+
+        Charged to the same budget as everything else, which is what bounds it.
+        Twice, because an agent that wraps up in prose a second time has not
+        heard it; and if the budget is gone the session simply ends without a
+        review, which is the fail-open this whole subsystem already takes.
+        """
+        if not moment.stopping or self.config.critic != "on" or self._submitted:
+            return None
+        if self.triggers is None or not self.triggers.budget.may_spend(
+            _FINISH_REMINDER, _MAX_FINISH_REMINDERS
+        ):
+            return None
+        self.triggers.budget.spend(_FINISH_REMINDER)
+        logger.info("policy_engine: finish reminder, no item matched")
+        return build_injection(render_finish_reminder())
 
     def _fact_check(self, sql: str) -> bool:
         """Whether a precondition holds for this session, right now.
@@ -633,11 +625,18 @@ class _Runtime:
                     self.config.provider or "<active>",
                 )
             return None
+        system = tagger_system_prompt()
+        if system is None:
+            if not self._provider_missing_logged:
+                self._provider_missing_logged = True
+                logger.warning("policy_engine: no vocabulary; tagging off")
+            return None
         logger.info("policy_engine: tagging on provider {}", provider.name)
         self._tagger = TaggerConversation(
             session_id=self.session_id,
             stream_fn=provider.stream_fn,
             model=provider.model,
+            system=system,
         )
         return self._tagger
 

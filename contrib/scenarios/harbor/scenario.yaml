@@ -23,8 +23,10 @@ extensions:
   # to open. A form has no place to put any of that.
   #
   # The review runs in this same sandbox, because the point is a reader that can
-  # run the thing it doubts, not a second opinion about the diff.
-  - module: agentm_harbor.review_request
+  # run the thing it doubts, not a second opinion about the diff. The reviewer's
+  # prompt is the policy package's critic manifest -- the same reader that rules
+  # at submit -- while critic.yaml here supplies only the shell it runs in.
+  - module: policy_engine.runtime.critic
     config:
       scenario: "arl:harbor-critic"
       # Local knowledge reaches the reviewer per repository, from a
@@ -44,5 +46,8 @@ extensions:
       trajectory_dsn: "postgresql://agentm:agentm@localhost:55432/agentm_test"
       critic: "on"
       critic_provider: "azure-gpt"
-      max_injections: 5
+      # The verdict entries run under the same read-only shell as
+      # submit_for_review. Unset, the reviewer inherits this scenario whole:
+      # the worker's write tools, and the worker's prompt prepended to its own.
+      critic_scenario: "arl:harbor-critic"
   - module: agentm.extensions.builtin.tool_purpose
