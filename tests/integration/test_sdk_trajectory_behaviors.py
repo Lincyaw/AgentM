@@ -617,6 +617,73 @@ async def test_sdk_fork_replays_only_the_selected_prefix(
 
 
 @pytest.mark.asyncio
+async def test_sdk_cold_fork_appends_to_stored_prefix(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    source_provider = _StubProvider("source-answer")
+    store = trajectory_backend.connect()
+    source = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=source_provider,
+            model=_model(),
+            trajectory_store=store,
+        )
+    )
+    await source.run("source-question")
+    source_session_id = source.session_id
+    await source.shutdown()
+
+    source_meta, prefix = trajectory_backend.connect().load_prefix(
+        source_session_id,
+        0,
+    )
+    root_session_id = source_meta.config.get("root_session_id")
+    assert isinstance(root_session_id, str)
+    source_nodes = trajectory_backend.connect().query_nodes(
+        TrajectoryNodeQuery(
+            session_id=source_session_id,
+            turn_index=0,
+        )
+    )
+    assert source_nodes
+
+    fork_provider = _StubProvider("fork-answer")
+    forked = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=fork_provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+            initial_turns=prefix,
+            root_session_id=root_session_id,
+            parent_session_id=None,
+            fork_source_session_id=source_session_id,
+            fork_point=0,
+        )
+    )
+    try:
+        transcript = await forked.run("fork-question")
+    finally:
+        await forked.shutdown()
+
+    fork_store = trajectory_backend.connect()
+    fork_meta, _ = fork_store.load(forked.session_id)
+    fork_nodes = fork_store.query_nodes(
+        TrajectoryNodeQuery(session_id=forked.session_id)
+    )
+    fork_head = fork_store.get_head(forked.session_id)
+
+    assert _text(transcript)[-2:] == ["fork-question", "fork-answer"]
+    assert fork_meta.parent_id is None
+    assert fork_meta.config["fork_source_session_id"] == source_session_id
+    assert fork_nodes[0].parent_id is None
+    assert fork_nodes[0].logical_parent_id == source_nodes[-1].id
+    assert fork_head is not None
+    assert fork_head.parent_session_id is None
+
+
+@pytest.mark.asyncio
 async def test_sdk_node_fork_selectors_require_executable_turn_boundaries(
     trajectory_backend: _TrajectoryBackend,
 ) -> None:

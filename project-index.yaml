@@ -72,7 +72,9 @@ requirements:
       telemetry, and presenter cleanup reaches one known outcome.
       Durable spawned-child handoff completes graph registration and paired
       start/end lifecycle events before propagating caller cancellation;
-      trajectory forks record lineage without pretending to be live children.
+      trajectory forks, including cold forks assembled from stored prefixes,
+      record source lineage through fork metadata and logical-parent anchors
+      without pretending to be live children or changing head chain identity.
       Reference resource transactions and durable catalog mutations settle
       synchronous filesystem work and update local transaction phase before
       propagating async caller cancellation.
