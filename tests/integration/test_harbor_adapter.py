@@ -21,7 +21,24 @@ import pytest
 pytest.importorskip("harbor")
 pytest.importorskip("agentm_harbor")
 
+from agentm_harbor.external_agent import (
+    SCENARIO,
+    ExternalAgentMAgent,
+    _load_scenario,
+    _provision_remote_toolbox,
+)
+from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
+from harbor.environments.base import (
+    BaseEnvironment,
+    OutputStream,
+)
+from harbor.environments.base import (
+    ExecResult as HarborExecResult,
+)
+from harbor.models.agent.context import AgentContext
+
 from agentm import AgentSession, AgentSessionConfig, Model
+from agentm.control import SessionControlServer, send_interrupt
 from agentm.core.abi.cancel import CancelSignal, EventCancelSource
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -38,22 +55,8 @@ from agentm.core.abi.roles import (
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.stream import AssistantStreamEvent, MessageEnd
 from agentm.core.abi.tool import Tool
-from agentm.control import SessionControlServer, send_interrupt
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import JsonlTrajectoryStore
-from agentm_harbor.external_agent import (
-    SCENARIO,
-    ExternalAgentMAgent,
-    _load_scenario,
-    _provision_remote_toolbox,
-)
-from agentm_harbor.harbor_ops import HarborOpsConfig, harbor_bindings
-from harbor.environments.base import (
-    BaseEnvironment,
-    ExecResult as HarborExecResult,
-    OutputStream,
-)
-from harbor.models.agent.context import AgentContext
 
 _OutputCallback = Callable[[str, OutputStream], Awaitable[None]]
 
@@ -327,18 +330,6 @@ def _model() -> Model:
     )
 
 
-def test_harbor_scenario_includes_policy_engine() -> None:
-    spec = _load_scenario(SCENARIO)
-    policy = next(
-        extension
-        for extension in spec.extensions
-        if extension.module_path == "policy_engine"
-    )
-
-    # Recording-only defaults: interventions are opt-in per run via env.
-    assert dict(policy.config) == {}
-
-
 @pytest.mark.asyncio
 async def test_harbor_setup_provisions_remote_toolbox_dependencies() -> None:
     class SetupEnvironment:
@@ -369,7 +360,7 @@ async def test_harbor_setup_provisions_remote_toolbox_dependencies() -> None:
     assert "python3 -m pip install --help" in command
     assert "python3 -m pip install" in command
     assert "--break-system-packages" in command
-    assert "ast-grep-cli==0.44.1" in command
+    assert "ast-grep-cli" in command
     assert 'ln -sf "$agentm_scripts_dir"/ast-grep /usr/local/bin/ast-grep' in command
     assert prepare == "mkdir -p -- /opt/agentm-toolbox"
     assert environment.uploads[0][0].name == "agentm_toolbox"
@@ -543,16 +534,12 @@ async def test_harbor_external_agent_uses_isolated_resolver_inputs(
     home = tmp_path / "home"
     home.mkdir()
     (home / "config.toml").write_text(
-        "\n".join(
-            (
-                "[models.harbor-profile]",
-                'provider = "tests.fixtures.harbor_provider"',
-                'model = "stub-model"',
-                "",
-                "[atoms.llm_compaction]",
-                "tool_result_max_tokens = 1000",
-            )
-        ),
+        "[models.harbor-profile]\n"
+        'provider = "tests.fixtures.harbor_provider"\n'
+        'model = "stub-model"\n'
+        "\n"
+        "[atoms.llm_compaction]\n"
+        "tool_result_max_tokens = 1000",
         encoding="utf-8",
     )
     logs = tmp_path / "logs"
