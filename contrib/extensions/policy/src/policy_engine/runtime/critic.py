@@ -90,6 +90,47 @@ class CriticVerdict:
     evidence: str = ""
     finding: str = ""
     next_step: str = ""
+    #: What establishes the standard this verdict was measured against, and
+    #: what else the task text would permit. Empty means the reviewer never
+    #: examined its own criterion, which four measured reviews did not: each
+    #: opened by deriving a rule and then spent every turn applying it.
+    criterion: str = ""
+    #: The reviewer's own answer to whether the criterion is decidable from
+    #: what it can see. False is a finding in its own right and the one output
+    #: the old contract had no room for.
+    criterion_settled: bool = True
+
+    @property
+    def needs_attention(self) -> bool:
+        """Worth putting in front of the agent.
+
+        A rejection, or an accepted verdict whose criterion the reviewer could
+        not settle. The second is the case the old contract dropped: four
+        measured reviews each picked a standard, none could have said it was
+        undecidable, and all four picked the one grading rejects. An admission
+        of ambiguity reaches the agent while there is still time to resolve it;
+        a confident guess reaches it as fact.
+        """
+        return not self.accepted or not self.criterion_settled
+
+    def as_ambiguity_message(self) -> str:
+        """What the agent is told when the reviewer could not settle the standard."""
+        return "\n".join(
+            [
+                (
+                    "Before you go further — the requirement reads two ways "
+                    "and I could not tell which is meant."
+                ),
+                "",
+                self.criterion.strip() or "(no readings given)",
+                "",
+                (
+                    "Work out which one the task wants before building further "
+                    "on either. If nothing in the repository decides it, say "
+                    "so in your summary rather than picking silently."
+                ),
+            ]
+        )
 
     @property
     def has_evidence(self) -> bool:
@@ -339,6 +380,8 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
             evidence=str(args.get("evidence", "")),
             finding=str(args.get("finding", "")),
             next_step=str(args.get("next_step", "")),
+            criterion=str(args.get("criterion", "")),
+            criterion_settled=bool(args.get("criterion_settled", True)),
         )
         return ToolTerminate(
             result=ToolResult(content=[TextContent(type="text", text="Recorded.")]),
@@ -374,8 +417,30 @@ def _verdict_tool(sink: _VerdictSink) -> FunctionTool:
                     "type": "string",
                     "description": "When rejecting, the one action that closes it.",
                 },
+                "criterion": {
+                    "type": "string",
+                    "description": (
+                        "Before the inputs: name the standard you judged "
+                        "against, then the other reading of the task that "
+                        "would give a different standard, then what in the "
+                        "repository distinguishes them. Existing tests are "
+                        "evidence of current behaviour, not of required "
+                        "behaviour, and a task asking to change behaviour is "
+                        "asking to change what they assert."
+                    ),
+                },
+                "criterion_settled": {
+                    "type": "boolean",
+                    "description": (
+                        "False when nothing you can see decides between the "
+                        "readings. Answer false rather than picking one: a "
+                        "standard you chose is a standard the agent will be "
+                        "held to, and saying you could not tell is worth more "
+                        "than a confident guess defended at length."
+                    ),
+                },
             },
-            "required": ["accepted", "evidence"],
+            "required": ["accepted", "evidence", "criterion", "criterion_settled"],
         },
         fn=submit_verdict,
     )

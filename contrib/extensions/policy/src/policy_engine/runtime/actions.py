@@ -74,6 +74,13 @@ class ReviewAction:
 
     async def deliver(self, item: ChecklistItem, moment: Moment) -> LoopAction | None:
         verdict = await self.reviewer.review(self.prompt_for(moment))
+        if not verdict.criterion_settled:
+            logger.info(
+                "policy_engine: {} could not settle the criterion at turn {}",
+                item.item_id,
+                moment.turn_index,
+            )
+            return build_injection(verdict.as_ambiguity_message())
         if verdict.accepted:
             logger.info(
                 "policy_engine: {} reviewed turn {}, nothing found",
