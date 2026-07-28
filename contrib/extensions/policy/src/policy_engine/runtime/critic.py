@@ -147,6 +147,48 @@ class _VerdictSink:
     verdict: CriticVerdict | None = None
 
 
+#: Environment variable naming a file of notes for the repository under review.
+#: One name for every entry: the knowledge is about the repository, not about
+#: which checkpoint happens to be asking.
+NOTES_ENV = "AGENTM_REVIEW_NOTES"
+
+
+def repository_notes(env_var: str = NOTES_ENV, fallback: str = "") -> str:
+    """What is known about this repository, from the file the host named.
+
+    A named file that is missing is worth a line in the log and nothing more: a
+    review without local knowledge is the review this started as, not a broken
+    one.
+    """
+    path = os.environ.get(env_var, "").strip()
+    if not path:
+        return fallback
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("critic: no notes at {}: {}", path, exc)
+        return fallback
+
+
+def with_notes(prompt: str, notes: str) -> str:
+    """Prepend what is known about the repository to any entry's framing.
+
+    Every entry, not just the one the agent calls. Notes reached
+    ``submit_for_review`` alone and the three verdict entries -- plan, rework,
+    submit -- never saw them, which left local knowledge available only when
+    the agent chose to ask for it. Ahead of the framing on purpose: it is a
+    premise for reading everything that follows, not an afterthought.
+    """
+    if not notes.strip():
+        return prompt
+    return (
+        "## Known about this repository\n\n"
+        f"{notes.strip()}\n\n"
+        "That is established, and holds regardless of what the code or its "
+        "tests currently say.\n\n" + prompt
+    )
+
+
 # -- Entry framings ------------------------------------------------------------
 
 
@@ -373,6 +415,8 @@ class Critic:
     #: this only bites on a hang -- and a hang is the case that matters, since
     #: the verdict entries block the agent until they return.
     timeout_sec: float = 1200.0
+    #: Fallback notes when no file is named, for a single-repository host.
+    notes: str = ""
 
     async def review(self, prompt: str) -> CriticVerdict:
         """Accepts on any failure of its own.
@@ -381,6 +425,7 @@ class Critic:
         every path that is not an explicit rejection returns acceptance.
         """
         sink = _VerdictSink()
+        prompt = with_notes(prompt, repository_notes(fallback=self.notes))
         try:
             manifest = load_manifest("critic")
             # Only the verdict tool is added — it is this entry's output

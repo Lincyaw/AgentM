@@ -46,7 +46,11 @@ extensions:
   # so the only one that can be asked about direction rather than damage.
   - module: agentm.extensions.builtin.plan_mode
     config:
-      start_in_plan: true
+      # Off by default. Starting write-blocked changes every run, and the one
+      # measured plan review scored the same as no review at all -- an
+      # unproven checkpoint does not get to be the default. Installed so the
+      # approver has something to register over; flip this to try it.
+      start_in_plan: false
 
   - module: policy_engine
     config:
