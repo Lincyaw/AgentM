@@ -143,11 +143,13 @@ class _SystemPromptRuntime:
         lines = [
             "# Tools",
             "",
-            "You have the following tools available. Use the appropriate tool "
-            "when the task calls for it - prefer tools over generating answers "
-            "from memory when a tool can provide authoritative, up-to-date "
-            "information. You may call multiple tools in a single turn if "
-            "needed.",
+            (
+                "You have the following tools available. Use the appropriate tool "
+                "when the task calls for it - prefer tools over generating answers "
+                "from memory when a tool can provide authoritative, up-to-date "
+                "information. You may call multiple tools in a single turn if "
+                "needed."
+            ),
             "",
             "<available_tools>",
         ]

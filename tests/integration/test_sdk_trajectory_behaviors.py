@@ -53,10 +53,10 @@ from agentm.core.abi.trajectory import (
     TurnCheckpoint,
 )
 from agentm.core.abi.trigger import UserInput
+from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
 from agentm.extensions.builtin.llm_openai import (
     OpenAIStreamFn,
 )
-from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
 from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.sql import create_sql_engine
@@ -820,18 +820,7 @@ async def test_sdk_file_toolbox_transactions_share_behavior_and_protect_constitu
     protected = workspace / "src" / "agentm" / "core" / "abi"
     protected.mkdir(parents=True)
     (workspace / "core-manifest.yaml").write_text(
-        "\n".join(
-            (
-                "version: 1",
-                "constitution:",
-                "  paths:",
-                "    - src/agentm/core/**",
-                "    - core-manifest.yaml",
-                "managed:",
-                "  globs: []",
-                "",
-            )
-        )
+        "version: 1\nconstitution:\n  paths:\n    - src/agentm/core/**\n    - core-manifest.yaml\nmanaged:\n  globs: []\n"
     )
     (workspace / "note.txt").write_text("hello\n")
     provider = _StubProvider(
@@ -1453,7 +1442,7 @@ async def test_sdk_compaction_ignores_model_max_output_tokens(tmp_path: Path) ->
 
 
 class _EmptyOpenAIStream:
-    def __aiter__(self) -> "_EmptyOpenAIStream":
+    def __aiter__(self) -> _EmptyOpenAIStream:
         return self
 
     async def __anext__(self) -> object:
@@ -1467,7 +1456,7 @@ class _OpenAIChunkStream:
     def __init__(self, *chunks: object) -> None:
         self._chunks = iter(chunks)
 
-    def __aiter__(self) -> "_OpenAIChunkStream":
+    def __aiter__(self) -> _OpenAIChunkStream:
         return self
 
     async def __anext__(self) -> object:

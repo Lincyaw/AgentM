@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import cast
 
 from agentm.core.abi.messages import JsonValue
 from agentm.core.abi.trigger import (
@@ -30,21 +30,18 @@ class TriggerTerminated(RuntimeError):
         super().__init__(f"trigger terminated: {type(cause).__name__}: {cause}")
 
 
-_T = TypeVar("_T")
-
-
-class TriggerReceipt(Generic[_T]):
+class TriggerReceipt[T]:
     """Awaitable terminal receipt for one accepted trigger."""
 
     __slots__ = ("_future",)
 
     def __init__(self) -> None:
-        self._future: asyncio.Future[_T] = asyncio.get_running_loop().create_future()
+        self._future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
 
-    async def wait(self) -> _T:
+    async def wait(self) -> T:
         return await asyncio.shield(self._future)
 
-    def _succeed(self, result: _T) -> None:
+    def _succeed(self, result: T) -> None:
         if not self._future.done():
             self._future.set_result(result)
 

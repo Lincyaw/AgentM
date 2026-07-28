@@ -13,18 +13,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agentm.core.abi import (
     RESOURCE_TXN,
     RESOURCE_WRITER,
+    TOOL_RESULT_FORMAT_METADATA_KEY,
     AtomAPI,
     AtomInstallPriority,
     FunctionTool,
     ResourceRef,
     ResourceTxn,
-    TOOL_RESULT_FORMAT_METADATA_KEY,
     TextContent,
     ToolExecutionRequirements,
     ToolResult,
 )
 from agentm.extensions import ExtensionManifest
-
 from agentm_toolbox import FileToolbox
 from agentm_toolbox._file_ops import Result as ToolboxResult
 

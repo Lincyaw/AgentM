@@ -32,19 +32,22 @@ from __future__ import annotations
 
 import base64
 import copy
-from loguru import logger
 import os
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
+import httpx
+from loguru import logger
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi import (
     Aborted,
     AgentMessage,
-    AtomInstallPriority,
     AssistantMessage,
     AssistantStreamEvent,
+    AtomInstallPriority,
     CancelSignal,
     DiagnosticEvent,
     EndTurn,
@@ -75,19 +78,14 @@ from agentm.core.abi import (
     UserMessage,
     VendorSpecific,
 )
-from pydantic import BaseModel, ConfigDict
-
-from agentm.extensions import ExtensionManifest
-
-import httpx
-
+from agentm.core.abi.messages import thaw_json
+from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.async_cancel import (
     OperationCancelledBySignal,
     await_with_cancel_signal,
 )
-from agentm.core.abi.messages import thaw_json
-from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.tool_schema import _force_strict
+from agentm.extensions import ExtensionManifest
 
 
 class LlmOpenaiConfig(BaseModel):
@@ -142,9 +140,7 @@ def _is_openai_retryable(exc: BaseException) -> bool:
         return True
     # openai SDK doesn't wrap httpx transport errors during streaming —
     # raw httpx exceptions (ReadTimeout, ReadError, etc.) escape.
-    if isinstance(exc, httpx.TransportError):
-        return True
-    return False
+    return bool(isinstance(exc, httpx.TransportError))
 
 
 # Keywords that XGrammar-based constrained-decoding engines (Volcengine Ark,
@@ -1147,8 +1143,8 @@ class DuplicateProviderError(ValueError):
 
 
 __all__ = (
-    "DuplicateProviderError",
     "MANIFEST",
+    "DuplicateProviderError",
     "OpenAIStreamFn",
     "install",
 )

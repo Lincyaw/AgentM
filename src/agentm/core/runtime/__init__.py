@@ -10,18 +10,18 @@ Protocols and ``api.*`` hooks.
 
 from __future__ import annotations
 
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.catalog import (
     InMemoryAtomCatalog,
     InMemoryVersionedResourceStore,
 )
-from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.execution import Execution
-from agentm.core.runtime.trajectory import Trajectory
-from agentm.core.runtime.trigger_queue import TriggerQueue, QueueClosed
-from agentm.core.runtime.tree import InMemorySessionGraph
-from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
+from agentm.core.runtime.extension import ExtensionLoadError, load_extension
+from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
-from agentm.core.runtime.extension import load_extension, ExtensionLoadError
+from agentm.core.runtime.trajectory import Trajectory
+from agentm.core.runtime.tree import InMemorySessionGraph
+from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
 
 __all__ = [
     "Execution",

@@ -11,9 +11,9 @@ No readonly-field snapshot/restore machinery needed.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,8 +26,6 @@ EventReducer = Callable[[Any, Any], Any]
 @dataclass(frozen=True, slots=True)
 class Event:
     """Base for frozen events that handlers cannot mutate."""
-
-    pass
 
 
 @dataclass(slots=True)
@@ -53,7 +51,7 @@ class EventBus:
     """Channel-keyed pub/sub with priority-ordered dispatch."""
 
     _handlers: dict[str, list[_Subscription]] = field(default_factory=dict)
-    _observers: list["EventBusObserver"] = field(default_factory=list)
+    _observers: list[EventBusObserver] = field(default_factory=list)
     _next_seq: int = 0
     _frozen_clear: bool = False
 
@@ -87,7 +85,7 @@ class EventBus:
 
         return unsubscribe
 
-    def add_observer(self, observer: "EventBusObserver") -> Callable[[], None]:
+    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
         """Attach a bus observer; return an unsubscribe function."""
 
         self._observers.append(observer)

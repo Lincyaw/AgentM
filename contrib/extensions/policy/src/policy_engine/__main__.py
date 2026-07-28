@@ -28,6 +28,8 @@ import typer
 from agentm.core.abi import ProviderConfig
 from policy_engine.shared.pg_query import PgQuerySource
 
+from .loop.cli import app as _loop_app
+
 app = typer.Typer(
     name="policy_engine",
     add_completion=False,
@@ -35,7 +37,6 @@ app = typer.Typer(
     help="Policy engine: the evolution loop, plus offline tagging and pruning.",
 )
 
-from .loop.cli import app as _loop_app
 
 app.add_typer(_loop_app, name="loop")
 

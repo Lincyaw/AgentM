@@ -7,8 +7,8 @@ from importlib.metadata import PackageNotFoundError, version
 import typer
 
 from agentm.cli._chat import chat
-from agentm.cli._run import run
 from agentm.cli._config import config_app
+from agentm.cli._run import run
 from agentm.cli._scenario import scenario_app
 from agentm.cli._session import session_app
 from agentm.cli._trace import trace_app

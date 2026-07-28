@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from agentm.core.abi.trajectory import (
     Outcome,
     Turn,
-    TurnRef,
     TurnMeta,
+    TurnRef,
 )
 from agentm.core.abi.trigger import Trigger
 from agentm.core.runtime.execution import Execution, StateError
@@ -18,7 +18,7 @@ from agentm.core.runtime.execution import Execution, StateError
 class Trajectory:
     """An append-only sequence of committed Turns plus a single active Execution slot."""
 
-    __slots__ = ("_turns", "_active")
+    __slots__ = ("_active", "_turns")
 
     def __init__(self, turns: list[Turn] | None = None) -> None:
         self._turns: list[Turn] = list(turns) if turns else []

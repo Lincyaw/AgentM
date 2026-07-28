@@ -106,7 +106,31 @@ norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules"
 # expected/benign, warning+ for error-hiding) — see the silent-exception
 # discipline applied across src/agentm. Suppress with an explicit
 # ``# noqa: S110`` + reason only when logging is truly impossible.
-extend-select = ["B007", "B905", "RUF006", "S110", "S112"]
+# Stated as an explicit ``select`` rather than ``extend-select``: the baseline
+# ruff calls "default" is not stable across releases, and 0.16 widened it. The
+# list below is the rule set this project actually enforces, so a ruff upgrade
+# changes the tree only when we change this line.
+#
+# Deliberately not enforced, because each conflicts with a chosen discipline:
+#   BLE001 — broad ``except`` is fine here when it logs or surfaces, which is
+#            what AM001 in agentm.code_health already checks; S110/S112 above
+#            catch the silent cases, which are the ones that actually hurt.
+#   TRY004 — storage and wire decoders raise ValueError for malformed persisted
+#            data, and callers catch ValueError. TypeError is for a caller
+#            passing the wrong type, which is not what these guards detect.
+#   B008   — typer expresses CLI options as call-valued defaults; there is no
+#            other way to write a typer command.
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "B007",
+    "B905",
+    "RUF006",
+    "S110",
+    "S112",
+]
 
 [tool.mypy]
 python_version = "3.12"

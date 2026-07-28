@@ -15,8 +15,8 @@ from pydantic import BaseModel
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
-    CatalogActiveSetRecord,
     CatalogActiveSetInput,
+    CatalogActiveSetRecord,
     CatalogMeta,
     CatalogQuery,
     ResourceVersion,

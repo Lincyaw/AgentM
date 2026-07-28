@@ -16,11 +16,11 @@ Type hierarchy::
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-import math
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Literal
 
 from agentm.core.abi.messages import (
     AgentMessage,
@@ -39,7 +39,7 @@ from agentm.core.abi.termination import TerminationCause
 if TYPE_CHECKING:
     from agentm.core.abi.trigger import Trigger, TriggerMetadata
 
-TurnRef = Union[int, str]
+TurnRef = int | str
 TrajectoryNodeRef = str
 TrajectoryBranchId = str
 TrajectoryHeadId = str
@@ -866,12 +866,12 @@ def _validate_head_fields(
 
 
 __all__ = [
-    "ContentReplacementState",
     "DEFAULT_TRAJECTORY_BRANCH_ID",
     "DEFAULT_TRAJECTORY_HEAD_ID",
-    "Outcome",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
+    "ContentReplacementState",
+    "Outcome",
     "ToolRecord",
     "TrajectoryBranchId",
     "TrajectoryForkPoint",

@@ -9,12 +9,11 @@ how it is audited, or which paths are protected.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-import math
 from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
-
 
 WriterAuthor = Literal["agent", "human", "indexer"]
 PathClass = Literal["managed", "unmanaged", "constitution"]
@@ -101,7 +100,7 @@ class ResourceRef:
         return f"{self.namespace}:{self.path}"
 
     @classmethod
-    def parse(cls, value: str) -> "ResourceRef":
+    def parse(cls, value: str) -> ResourceRef:
         """Parse ``namespace:path`` into a ``ResourceRef``."""
 
         namespace, separator, path = value.partition(":")
@@ -425,8 +424,6 @@ class EnvironmentForkableResourceWriter(Protocol):
 
 
 __all__ = [
-    "EnvironmentForkableResourceWriter",
-    "PathClass",
     "RESOURCE_NAMESPACE_ARTIFACT",
     "RESOURCE_NAMESPACE_CATALOG",
     "RESOURCE_NAMESPACE_CONTENT",
@@ -435,6 +432,8 @@ __all__ = [
     "RESOURCE_NAMESPACE_SANDBOX",
     "RESOURCE_NAMESPACE_SUMMARY",
     "RESOURCE_NAMESPACE_WORKSPACE",
+    "EnvironmentForkableResourceWriter",
+    "PathClass",
     "ResourceMeta",
     "ResourceMutation",
     "ResourceMutationOp",

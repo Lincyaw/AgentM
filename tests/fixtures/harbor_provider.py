@@ -80,4 +80,4 @@ def install(api: AtomAPI, config: HarborProviderConfig) -> None:
     )
 
 
-__all__ = ("HarborProviderConfig", "MANIFEST", "install")
+__all__ = ("MANIFEST", "HarborProviderConfig", "install")

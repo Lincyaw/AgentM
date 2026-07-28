@@ -24,12 +24,16 @@ Usage::
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections.abc import Mapping
 from dataclasses import asdict
-import math
 from types import MappingProxyType
 from typing import Any, Final, Protocol, cast, runtime_checkable
 
+from agentm.core.abi._resource_codec import (
+    deserialize_resource_mutations,
+    serialize_resource_mutations,
+)
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
@@ -47,15 +51,11 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
-from agentm.core.abi._resource_codec import (
-    deserialize_resource_mutations,
-    serialize_resource_mutations,
-)
 from agentm.core.abi.termination import (
     BudgetExhausted,
-    PromptRunContinued,
     MaxTurnsExhausted,
     ModelEndTurn,
+    PromptRunContinued,
     ProviderRequestFailed,
     ProviderTruncated,
     SignalAborted,
@@ -82,9 +82,10 @@ from agentm.core.abi.trigger import (
 )
 from agentm.core.lib.json_value import (
     json_restore as _json_restore,
+)
+from agentm.core.lib.json_value import (
     json_safe as _json_safe,
 )
-
 
 TRAJECTORY_CODEC_VERSION = 3
 
@@ -792,7 +793,7 @@ class CodecRegistry:
             raise ValueError(f"termination cause type already registered: {name}")
         self._cause_types[name] = cls
 
-    def copy(self) -> "CodecRegistry":
+    def copy(self) -> CodecRegistry:
         """Return an independent registry with the same codec registrations."""
 
         copied = CodecRegistry()
@@ -803,7 +804,7 @@ class CodecRegistry:
     def copy_without_trigger_sources(
         self,
         sources: set[str],
-    ) -> "CodecRegistry":
+    ) -> CodecRegistry:
         """Copy the registry while leaving selected atom-owned codecs out."""
 
         copied = self.copy()
@@ -1368,9 +1369,9 @@ DEFAULT_CODEC = CodecRegistry()
 
 
 __all__ = [
+    "DEFAULT_CODEC",
     "CodecBackedTrajectoryStore",
     "CodecRegistry",
-    "DEFAULT_CODEC",
     "RawTrigger",
     "TriggerCodec",
     "deserialize_message",

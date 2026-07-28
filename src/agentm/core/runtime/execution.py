@@ -25,15 +25,15 @@ class Execution:
     """The mutable state of a turn while it is being executed."""
 
     __slots__ = (
-        "_index",
+        "_active",
         "_id",
+        "_index",
+        "_injected",
+        "_response",
         "_run_id",
         "_run_step",
-        "_trigger",
-        "_response",
         "_tool_results",
-        "_active",
-        "_injected",
+        "_trigger",
     )
 
     def __init__(

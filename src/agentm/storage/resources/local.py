@@ -11,12 +11,12 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import IO, Iterator, cast
+from typing import IO, cast
 
 import yaml
 
@@ -31,11 +31,10 @@ from agentm.core.abi.resource import (
     ResourceTxn,
     ResourceTxnContext,
     TransactionalResourceWriter,
-    WriteResult,
     WriterAuthor,
+    WriteResult,
 )
 from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
-
 
 _DEFAULT_NAMESPACES = (
     "artifact",
@@ -599,7 +598,7 @@ class LocalResourceStore(TransactionalResourceWriter, ResourceStore):
         *,
         workspace_root: str,
         child_session_id: str,
-    ) -> "LocalResourceStore":
+    ) -> LocalResourceStore:
         """Rebind workspace paths while sharing non-workspace namespaces."""
 
         del child_session_id
@@ -1068,9 +1067,9 @@ def _resource_mutation(
 
 
 def _transaction_id(context: ResourceTxnContext) -> str:
-    payload = (f"{context.session_id}\0{context.turn_id}\0{context.turn_index}").encode(
-        "utf-8"
-    )
+    payload = (
+        f"{context.session_id}\0{context.turn_id}\0{context.turn_index}"
+    ).encode()
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 

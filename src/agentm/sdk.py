@@ -7,8 +7,8 @@ from dataclasses import replace
 from typing import cast
 
 from agentm.core.abi.roles import HOST_BASH_OPERATIONS
-from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.session_api import AgentSessionConfig
 from agentm.core.abi.store import TrajectoryStore
 from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_core import SessionRuntimeConfig
@@ -66,7 +66,7 @@ class AgentSession(Session):
         config: AgentSessionConfig,
         *,
         host_services: ServiceRegistry | None = None,
-    ) -> "AgentSession":
+    ) -> AgentSession:
         merged = _default_host_services(host_services)
         if config.trajectory_store is not None:
             return cast(
@@ -114,7 +114,7 @@ class AgentSession(Session):
         config: AgentSessionConfig,
         *,
         host_services: ServiceRegistry | None = None,
-    ) -> "AgentSession":
+    ) -> AgentSession:
         return cast(
             AgentSession,
             await super().resume(

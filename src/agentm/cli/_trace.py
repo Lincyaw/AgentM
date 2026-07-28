@@ -9,7 +9,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Literal, NotRequired, TypeVar, TypedDict
+from typing import Literal, NotRequired, TypedDict, TypeVar
 
 import typer
 
@@ -603,7 +603,7 @@ def _emit_json(obj: object) -> None:
     sys.stdout.flush()
 
 
-def _emit_records(
+def _emit_records[RecordT](
     records: Iterable[RecordT],
     fmt: TraceFormat,
     render_fn: Callable[[RecordT], str],

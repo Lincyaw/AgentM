@@ -32,7 +32,7 @@ class StructuredOutputConfig(BaseModel):
     result_schema: dict[str, object] = Field(default_factory=dict, alias="schema")
 
     @model_validator(mode="after")
-    def _require_schema(self) -> "StructuredOutputConfig":
+    def _require_schema(self) -> StructuredOutputConfig:
         if not self.result_schema:
             raise ValueError("structured_output requires a non-empty result_schema")
         return self
@@ -53,7 +53,10 @@ MANIFEST = ExtensionManifest(
 class _SchemaValidator:
     def __init__(self) -> None:
         try:
-            from jsonschema import validate, ValidationError  # type: ignore[import-untyped]
+            from jsonschema import (  # type: ignore[import-untyped]
+                ValidationError,
+                validate,
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "structured_output requires the jsonschema dependency"

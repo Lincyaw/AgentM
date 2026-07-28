@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
 import json
 import math
 import re
+from collections.abc import Iterable, Mapping, Sequence
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
@@ -64,7 +64,7 @@ class ClickHouseObservabilityQueryStore:
         database: str = "otel",
         logs_table: str = "otel_logs",
         traces_table: str = "otel_traces",
-    ) -> "ClickHouseObservabilityQueryStore":
+    ) -> ClickHouseObservabilityQueryStore:
         """Open a ClickHouse SQLAlchemy engine for observability queries."""
 
         return cls(

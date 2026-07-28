@@ -13,8 +13,8 @@ from agentm.core.abi.query import (
     SpanRecord,
     TrajectoryQueryStore,
 )
-from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 from agentm.core.abi.store import TrajectoryDiagnostic
+from agentm.core.abi.trajectory import Turn, TurnCheckpoint
 
 
 class CompositeTraceQueryStore:

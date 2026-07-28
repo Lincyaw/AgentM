@@ -145,7 +145,7 @@ class GoalConfig(BaseModel):
     max_rejects: int = 5
 
     @model_validator(mode="after")
-    def _require_goal_source(self) -> "GoalConfig":
+    def _require_goal_source(self) -> GoalConfig:
         if not self.condition and not self.auto_init:
             raise ValueError("goal requires condition or auto_init=true")
         if self.auto_init and not self.auto_init_scenario:

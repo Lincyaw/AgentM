@@ -17,7 +17,6 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS repository_documents (
     path TEXT PRIMARY KEY,

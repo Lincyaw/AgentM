@@ -28,7 +28,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 __all__ = [
     "SENSITIVE_HEADER_NAMES",
@@ -70,7 +71,7 @@ _SENSITIVE_CONFIG_SUFFIXES: tuple[str, ...] = (
     "_password",
 )
 _URI_CREDENTIALS = re.compile(
-    r"(?P<scheme>\b[a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.I
+    r"(?P<scheme>\b[a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.IGNORECASE
 )
 _BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 _SECRET_ASSIGNMENT = re.compile(

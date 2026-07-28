@@ -9,15 +9,14 @@ resume restoration.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-import math
 from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.operations import EnvironmentOperations
 from agentm.core.abi.trajectory import Turn, TurnRef
-
 
 LifecycleMeta = Mapping[str, str | int | float | bool | None]
 EnvironmentRestoreState = Literal["restored", "degraded_readonly"]
@@ -191,7 +190,7 @@ class EffectScope(Protocol):
         *,
         source_session_id: str,
         child_session_id: str,
-    ) -> "EnvironmentFork": ...
+    ) -> EnvironmentFork: ...
 
     async def restore(
         self,
@@ -290,13 +289,13 @@ class EnvironmentSnapshotter(Protocol):
 __all__ = [
     "EffectScope",
     "EffectTxn",
+    "EnvironmentCheckpoint",
     "EnvironmentFork",
     "EnvironmentForkLease",
     "EnvironmentRestoreError",
     "EnvironmentRestoreFailureHandler",
-    "EnvironmentRestoreStatus",
     "EnvironmentRestoreState",
-    "EnvironmentCheckpoint",
+    "EnvironmentRestoreStatus",
     "EnvironmentSnapshot",
     "EnvironmentSnapshotter",
     "LifecycleMeta",

@@ -20,9 +20,9 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
+    AssistantContent,
     AtomAPI,
     AtomInstallPriority,
-    AssistantContent,
     DecideEvent,
     ModelEndTurn,
     OpaqueThinkingBlock,
@@ -61,9 +61,11 @@ def _is_thinking_only(content: Sequence[AssistantContent]) -> bool:
     for block in content:
         if isinstance(block, (ThinkingBlock, OpaqueThinkingBlock)):
             has_thinking = True
-        elif isinstance(block, TextContent) and block.text.strip():
-            return False
-        elif isinstance(block, ToolCallBlock):
+        elif (
+            isinstance(block, TextContent)
+            and block.text.strip()
+            or isinstance(block, ToolCallBlock)
+        ):
             return False
     return has_thinking
 

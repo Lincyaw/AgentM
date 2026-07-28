@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
 
 from agentm.core.abi.store import TrajectoryCompactionCommit
@@ -132,7 +133,7 @@ def _validate_node_batch(
         nodes[0].parent_id in batch_ids or nodes[0].logical_parent_id in batch_ids
     ):
         raise ValueError("first trajectory node cannot reference its own append batch")
-    for previous, node in zip(nodes, nodes[1:], strict=False):
+    for previous, node in itertools.pairwise(nodes):
         if node.parent_id != previous.id or node.logical_parent_id is not None:
             raise ValueError(
                 "trajectory append nodes must form one physical parent chain"

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
@@ -33,8 +35,6 @@ from agentm.core.abi import (
     UserMessage,
 )
 from agentm.core.abi.context import turn_to_messages
-from pydantic import BaseModel, ConfigDict, Field
-
 from agentm.core.lib.tokens import truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 

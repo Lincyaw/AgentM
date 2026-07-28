@@ -11,18 +11,18 @@ command is still running. No key bound → no buffering.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import time
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
-from typing import Callable, Final, cast
+from typing import Final, cast
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
-    AtomInstallPriority,
     BASH_OPERATIONS_SERVICE,
     AtomAPI,
+    AtomInstallPriority,
     BashOperations,
     CancelSignal,
     EnvironmentOperations,
@@ -300,7 +300,7 @@ class _BashTool(EnvironmentExecutableTool):
             logger.debug("tool_bash: exec failed for {!r}: {}", cmd, exc)
             return _error(f"Failed to run command {cmd!r}: {exc}")
         elapsed_s = time.monotonic() - t0
-        duration_ms = max(0, int(round(elapsed_s * 1000)))
+        duration_ms = max(0, round(elapsed_s * 1000))
         wall_time = round(elapsed_s, 1)
 
         stdout = result.stdout.decode("utf-8", errors="replace")

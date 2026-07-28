@@ -13,7 +13,6 @@ from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.manifest import AtomInstallPriority
 
-
 CatalogMeta = Mapping[str, str | int | float | bool | None]
 CatalogQuerySort = Literal["asc", "desc"]
 

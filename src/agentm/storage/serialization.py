@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import math
+from collections.abc import Mapping
 from typing import Any, cast
 
 from agentm.core.abi.catalog import (
@@ -27,7 +27,6 @@ from agentm.core.abi.trajectory import (
     TrajectoryNodeRole,
 )
 from agentm.core.lib.json_value import json_restore, json_safe
-
 
 JsonObject = dict[str, Any]
 STORAGE_RECORD_VERSION = 2

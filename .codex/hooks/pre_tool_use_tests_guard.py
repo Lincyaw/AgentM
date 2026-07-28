@@ -13,9 +13,8 @@ import json
 import re
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
-
 
 WRITE_TO_TESTS_PATTERNS = (
     re.compile(r"(?:^|[;&|]\s*)cat\b[\s\S]*?>{1,2}\s*['\"]?(?:\./)?tests/"),
@@ -345,9 +344,14 @@ def _paths_from_structured_input(
 ) -> set[str]:
     paths: set[str] = set()
     for key, value in _walk_tool_input(tool_input):
-        if key.lower() in {"path", "file_path", "filepath", "target_file", "filename"}:
-            if _is_tests_path(value, repo_root, cwd):
-                paths.add(_display_path(value, repo_root, cwd))
+        if key.lower() in {
+            "path",
+            "file_path",
+            "filepath",
+            "target_file",
+            "filename",
+        } and _is_tests_path(value, repo_root, cwd):
+            paths.add(_display_path(value, repo_root, cwd))
     return paths
 
 

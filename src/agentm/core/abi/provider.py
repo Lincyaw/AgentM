@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-import math
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from .stream import Model, StreamFn
-
 
 ProviderMetaScalar = str | int | float | bool | None
 ProviderMeta = Mapping[str, ProviderMetaScalar]

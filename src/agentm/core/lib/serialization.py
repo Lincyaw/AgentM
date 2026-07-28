@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import base64
+import json
+import math
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from enum import Enum
-import json
-import math
 from pathlib import Path
 from typing import Any
-
 
 _MAX_DEPTH = 12
 

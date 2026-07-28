@@ -30,7 +30,6 @@ from agentm.trajectory_view.model import (
     build_trace_snapshot,
 )
 
-
 # -- Data model --------------------------------------------------------------
 
 

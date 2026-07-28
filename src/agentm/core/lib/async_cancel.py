@@ -15,7 +15,7 @@ class OperationCancelledBySignal(Exception):
     """Raised when a ``CancelSignal`` wins a race against an awaitable."""
 
 
-async def await_with_cancel_signal(
+async def await_with_cancel_signal[T](
     awaitable: Awaitable[T],
     signal: CancelSignal | None,
 ) -> T:
@@ -48,7 +48,7 @@ async def await_with_cancel_signal(
         await asyncio.gather(value_task, signal_task, return_exceptions=True)
 
 
-async def await_known_outcome(awaitable: Awaitable[T]) -> T:
+async def await_known_outcome[T](awaitable: Awaitable[T]) -> T:
     """Settle a non-cancellable mutation before propagating task cancellation.
 
     Cancelling an awaiter for ``asyncio.to_thread`` does not stop the backend
@@ -62,7 +62,7 @@ async def await_known_outcome(awaitable: Awaitable[T]) -> T:
     return result
 
 
-async def settle_known_outcome(awaitable: Awaitable[T]) -> tuple[T, bool]:
+async def settle_known_outcome[T](awaitable: Awaitable[T]) -> tuple[T, bool]:
     """Return an operation result together with observed caller cancellation.
 
     Ownership-producing operations need the result even when their caller was

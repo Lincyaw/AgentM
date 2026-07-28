@@ -7,22 +7,20 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from loguru import logger
 
 from agentm import AgentSession, AgentSessionConfig
-from agentm.config.resolver import DefaultSessionSpecResolver
-from agentm.core.abi.messages import TextContent
-from agentm.scenarios import builtin_scenario_loader
-
 from agentm.cli._display import (
     EXIT_ERROR,
     EXIT_USAGE,
     SessionStats,
     stderr_console,
 )
+from agentm.config.resolver import DefaultSessionSpecResolver
+from agentm.core.abi.messages import TextContent
+from agentm.scenarios import builtin_scenario_loader
 
 
 async def _execute(
@@ -105,24 +103,22 @@ async def _execute(
 
 
 def run(
-    message: Optional[str] = typer.Option(
+    message: str | None = typer.Option(
         None, "-m", "--message", help="Prompt text (reads stdin if omitted)"
     ),
-    scenario: Optional[str] = typer.Option(
+    scenario: str | None = typer.Option(
         None, "-s", "--scenario", help="Named scenario"
     ),
-    extension: Optional[list[str]] = typer.Option(
+    extension: list[str] | None = typer.Option(
         None, "-e", "--extension", help="Extra extension modules"
     ),
-    project_config: Optional[str] = typer.Option(
+    project_config: str | None = typer.Option(
         None, "--project-config", help="Project config TOML path"
     ),
-    user_config: Optional[str] = typer.Option(
+    user_config: str | None = typer.Option(
         None, "--user-config", help="User config TOML path"
     ),
-    system: Optional[str] = typer.Option(
-        None, "--system", help="System prompt override"
-    ),
+    system: str | None = typer.Option(None, "--system", help="System prompt override"),
     format: str = typer.Option(
         "text", "--format", "-f", help="Output format: text, json"
     ),

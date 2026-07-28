@@ -29,7 +29,7 @@ import json
 from collections.abc import Mapping
 
 # code-health: ignore-file[AM022]
-from typing import Any, Literal  # noqa: UP035
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,15 +49,15 @@ _UpdateStatus = Literal["pending", "in_progress", "completed", "deleted"]
 
 class _Task:
     __slots__ = (
-        "id",
-        "subject",
-        "description",
         "active_form",
-        "status",
-        "parent_id",
-        "blocks",
         "blocked_by",
+        "blocks",
+        "description",
+        "id",
         "metadata",
+        "parent_id",
+        "status",
+        "subject",
     )
 
     def __init__(
@@ -389,7 +389,7 @@ class _TaskTrackingRuntime:
 
         return _ok(task.to_detail())
 
-    async def list_tasks(self, args: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+    async def list_tasks(self, args: dict[str, Any]) -> ToolResult:
         tasks = self._mgr.list_all()
         if not tasks:
             return _ok({"tasks": [], "summary": "No tasks."})

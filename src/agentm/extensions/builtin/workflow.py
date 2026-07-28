@@ -213,7 +213,7 @@ class _Journal:
                     existing = idx.get(f.stem)
                     if existing is None or ts > existing[0]:
                         idx[f.stem] = (ts, inv)
-                except Exception:  # noqa: S110 BLE001
+                except Exception:  # noqa: BLE001
                     logger.debug("skipping corrupt journal {}", f)
         self._inv_index = idx
 
@@ -229,7 +229,7 @@ class _Journal:
             body = entry_file.read_text(encoding="utf-8")
         except OSError:
             return _JournalState()
-        prompt, result, result_ts = _journal_decode(body)
+        _prompt, result, result_ts = _journal_decode(body)
         if self._inv_index is None:
             self.prime()
         assert self._inv_index is not None
@@ -651,7 +651,7 @@ class _WorkflowRun:
                 finally:
                     try:
                         await child.shutdown()
-                    except Exception:  # noqa: S110 BLE001
+                    except Exception:  # noqa: BLE001
                         logger.debug("child shutdown error (ignored)")
             except Exception as exc:
                 last_exc = exc

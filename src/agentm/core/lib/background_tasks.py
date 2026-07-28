@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 from agentm.core.abi.cancel import CancelSource
 
@@ -42,7 +42,7 @@ class SlotLimitReached(RuntimeError):
     """Raised when a bounded registry has no available worker slot."""
 
 
-class BackgroundTaskRegistry(Generic[T]):
+class BackgroundTaskRegistry[T: BackgroundTask]:
     """Async-safe registry of detached task handles with optional slot caps."""
 
     def __init__(self, *, max_workers: int | None) -> None:

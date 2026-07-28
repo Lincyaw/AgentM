@@ -221,12 +221,16 @@ def _format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     lines = [
         "\n\n# Skills",
         "",
-        "You have access to a skill system that extends your capabilities with "
-        "specialized, up-to-date instructions for specific domains.",
-        "Each skill below has a description of when it applies. When you receive "
-        "a task that matches a skill's description, you MUST call the `load_skill` "
-        "tool with that skill's name to read the full instructions BEFORE "
-        "responding to the task.",
+        (
+            "You have access to a skill system that extends your capabilities with "
+            "specialized, up-to-date instructions for specific domains."
+        ),
+        (
+            "Each skill below has a description of when it applies. When you receive "
+            "a task that matches a skill's description, you MUST call the `load_skill` "
+            "tool with that skill's name to read the full instructions BEFORE "
+            "responding to the task."
+        ),
         "",
         "<available_skills>",
     ]

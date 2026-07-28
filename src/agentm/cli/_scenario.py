@@ -8,6 +8,7 @@ import sys
 
 import typer
 
+from agentm.cli._display import EXIT_NOT_FOUND, stderr_console
 from agentm.core.abi.session_api import (
     ExtensionSpec,
     ScenarioSpec,
@@ -15,8 +16,6 @@ from agentm.core.abi.session_api import (
 )
 from agentm.core.lib.redact import redact_config
 from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
-
-from agentm.cli._display import EXIT_NOT_FOUND, stderr_console
 
 scenario_app = typer.Typer(
     name="scenario",

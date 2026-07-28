@@ -147,8 +147,7 @@ class SessionControlServer:
                 self._session.compact()
                 logger.info("session control: compaction scheduled")
                 return
-            if data.startswith(_INTERRUPT_PREFIX):
-                data = data[len(_INTERRUPT_PREFIX) :]
+            data = data.removeprefix(_INTERRUPT_PREFIX)
             if len(data) > _MAX_MESSAGE_BYTES:
                 response = (
                     f"error: message exceeds {_MAX_MESSAGE_BYTES} bytes\n".encode()

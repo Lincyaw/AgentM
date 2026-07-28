@@ -28,7 +28,6 @@ from agentm.core.abi.trajectory import (
     Turn,
 )
 
-
 ProjectionSource = Literal["turns", "node_chain"]
 
 

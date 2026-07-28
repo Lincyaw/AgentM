@@ -61,9 +61,7 @@ def _session_matches(row: SessionIdentity, filter: SessionFilter) -> bool:
         return False
     if filter.since is not None and row.created_at < filter.since:
         return False
-    if filter.until is not None and row.created_at > filter.until:
-        return False
-    return True
+    return not (filter.until is not None and row.created_at > filter.until)
 
 
 def _root_session_id(row: SessionIdentity) -> str:

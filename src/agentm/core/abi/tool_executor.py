@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-import math
 from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
@@ -13,7 +13,6 @@ from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.messages import freeze_json
 from agentm.core.abi.operations import EnvironmentOperations, EnvironmentRef
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
-
 
 IsolationLevel = Literal["none", "thread", "process", "environment"]
 FilesystemAccess = Literal["none", "read", "write"]
@@ -228,10 +227,10 @@ __all__ = [
     "IsolationLevel",
     "ToolConcurrency",
     "ToolExecutionCapabilities",
-    "ToolInterruptBehavior",
     "ToolExecutionRequest",
     "ToolExecutionRequirements",
     "ToolExecutionRequirementsProvider",
     "ToolExecutor",
+    "ToolInterruptBehavior",
     "tool_execution_requirements",
 ]

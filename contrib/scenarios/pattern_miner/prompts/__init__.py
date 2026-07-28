@@ -89,8 +89,10 @@ def build_distill_prompt(
     parts = [
         (_DISTILLER_DIR / "distill.md").read_text(encoding="utf-8"),
         f"\nDimension under distillation: {dimension}\n",
-        "Findings across the batch (one entry per case finding, with trial "
-        "provenance and the case's root attribution where available):\n",
+        (
+            "Findings across the batch (one entry per case finding, with trial "
+            "provenance and the case's root attribution where available):\n"
+        ),
         findings_json,
     ]
     if existing_items_json:

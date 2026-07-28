@@ -15,26 +15,38 @@ from __future__ import annotations
 import asyncio
 import copy
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Iterator
 
 from loguru import logger
 
+from agentm.core.abi.bus import EventBus, EventBusObserver, Handler
 from agentm.core.abi.cancel import (
     CancelReason,
     CancelSignal,
     CompositeCancelSignal,
     EventCancelSource,
 )
+from agentm.core.abi.catalog import (
+    ActiveSetFingerprint,
+)
 from agentm.core.abi.codec import (
     CodecBackedTrajectoryStore,
     CodecRegistry,
     TriggerCodec,
 )
-from agentm.core.abi.catalog import (
-    ActiveSetFingerprint,
+from agentm.core.abi.context import (
+    BindableContextPolicy,
+    ContextPolicy,
+    PolicyContext,
+    build_context_sync,
+)
+from agentm.core.abi.events import (
+    ApiRegisterEvent,
+    SessionReadyEvent,
+    SessionShutdownEvent,
+    TurnCommittedEvent,
 )
 from agentm.core.abi.lifecycle import (
     EnvironmentRestoreFailureHandler,
@@ -54,22 +66,6 @@ from agentm.core.abi.provider import (
     ProviderResolver,
     ProviderSessionIdentity,
 )
-from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
-from agentm.core.abi.tool import Tool
-from agentm.core.abi.bus import EventBus, EventBusObserver, Handler
-from agentm.core.abi.context import (
-    BindableContextPolicy,
-    ContextPolicy,
-    PolicyContext,
-    build_context_sync,
-)
-from agentm.core.abi.events import (
-    ApiRegisterEvent,
-    SessionReadyEvent,
-    SessionShutdownEvent,
-    TurnCommittedEvent,
-)
-from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_ROLE,
     BASH_OPERATIONS_ROLE,
@@ -91,6 +87,7 @@ from agentm.core.abi.roles import (
     TOOL_ORCHESTRATOR,
     TRAJECTORY_STORE_ROLE,
 )
+from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.session_api import (
     ExtensionSpec,
     ResolvedSessionSpec,
@@ -98,6 +95,8 @@ from agentm.core.abi.session_api import (
     SessionResult,
 )
 from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
+from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import (
     Turn,
 )

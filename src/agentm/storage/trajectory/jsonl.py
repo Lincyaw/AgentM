@@ -25,9 +25,9 @@ from agentm.core.abi.store import (
 )
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_HEAD_ID,
-    ContentReplacementState,
     TRAJECTORY_HEAD_INDEXES,
     TRAJECTORY_NODE_INDEXES,
+    ContentReplacementState,
     TrajectoryBranchId,
     TrajectoryHead,
     TrajectoryHeadAdvance,
@@ -39,7 +39,6 @@ from agentm.core.abi.trajectory import (
     TurnCheckpoint,
     TurnRef,
 )
-from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 from agentm.storage.serialization import (
     deserialize_content_state,
     deserialize_diagnostic,
@@ -50,6 +49,7 @@ from agentm.storage.serialization import (
     serialize_head,
     serialize_node,
 )
+from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 
 _VERSION = 2
 _SESSION = "session"

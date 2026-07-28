@@ -20,9 +20,9 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
+    ApiRegisterEvent,
     AtomAPI,
     AtomInstallPriority,
-    ApiRegisterEvent,
     BeforeSendEvent,
     BusPriority,
     DiagnosticEvent,
@@ -42,11 +42,11 @@ from agentm.core.abi import (
     TurnBeginEvent,
     TurnCommittedEvent,
 )
-from agentm.core.lib.serialization import to_jsonable
 from agentm.core.lib.redact import redact_messages
+from agentm.core.lib.serialization import to_jsonable
+from agentm.extensions import ExtensionManifest
 from agentm.extensions.observability.otel_dispatch import dispatch_otel
 from agentm.extensions.observability.otel_export import setup_session_telemetry
-from agentm.extensions import ExtensionManifest
 
 _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
 _REDACTED_CHANNELS: frozenset[str] = frozenset(

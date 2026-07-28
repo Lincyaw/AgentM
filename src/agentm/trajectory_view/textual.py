@@ -21,6 +21,13 @@ from textual.geometry import Size
 from textual.render import measure
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tab, Tabs
 
+from agentm.control import (
+    CompactionDeliveryError,
+    InterruptDeliveryError,
+    send_compact,
+    send_interrupt,
+)
+from agentm.core.abi.query import TrajectoryQueryStore
 from agentm.trajectory_view.model import (
     TraceQuery,
     TraceRow,
@@ -33,13 +40,6 @@ from agentm.trajectory_view.model import (
     build_trace_snapshot,
     default_trace_view_registry,
     parse_trace_query,
-)
-from agentm.core.abi.query import TrajectoryQueryStore
-from agentm.control import (
-    CompactionDeliveryError,
-    InterruptDeliveryError,
-    send_compact,
-    send_interrupt,
 )
 
 _TableRows = tuple[tuple[str, tuple[str, ...], int], ...]
@@ -462,15 +462,13 @@ class TraceConsoleApp(App[None]):
         query = self._query.raw.strip() or "-"
         follow = "follow:on" if self._follow else "follow:off"
         self.query_one("#status", Static).update(
-            (
-                f"sid:{_short_id(self._snapshot.session_id)} | "
-                f"{spec.id} | {self._snapshot.status_label} | "
-                f"rows:{len(self._view.rows)} | "
-                f"turns:{self._snapshot.metrics.committed_turns}"
-                f"+{self._snapshot.metrics.incomplete_turns} | "
-                f"err:{self._snapshot.metrics.tool_errors} | "
-                f"query:{query} | {follow}"
-            )
+            f"sid:{_short_id(self._snapshot.session_id)} | "
+            f"{spec.id} | {self._snapshot.status_label} | "
+            f"rows:{len(self._view.rows)} | "
+            f"turns:{self._snapshot.metrics.committed_turns}"
+            f"+{self._snapshot.metrics.incomplete_turns} | "
+            f"err:{self._snapshot.metrics.tool_errors} | "
+            f"query:{query} | {follow}"
         )
 
     def _render_turns(self, *, follow_tail: bool = False) -> None:

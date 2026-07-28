@@ -24,27 +24,29 @@ Conversion layout:
 from __future__ import annotations
 
 import base64
-from loguru import logger
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Literal,
     Protocol,
     runtime_checkable,
 )
 
+from loguru import logger
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi import (
+    RETRY_POLICY_SERVICE,
     Aborted,
     AgentMessage,
-    AtomInstallPriority,
     AssistantContent,
     AssistantMessage,
     AssistantStreamEvent,
+    AtomInstallPriority,
     CancelSignal,
     EndTurn,
     ImageContent,
@@ -73,16 +75,12 @@ from agentm.core.abi import (
     VendorSpecific,
 )
 from agentm.core.abi.messages import thaw_json
-from pydantic import BaseModel, ConfigDict
-
-from agentm.extensions import ExtensionManifest
-
-from agentm.core.abi import RETRY_POLICY_SERVICE
+from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.async_cancel import (
     OperationCancelledBySignal,
     await_with_cancel_signal,
 )
-from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.extensions import ExtensionManifest
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
@@ -1001,4 +999,4 @@ def install(session: Any, config: LlmAnthropicConfig) -> None:
     _AnthropicProviderRuntime(session, config).install()
 
 
-__all__ = ("AnthropicStreamFn", "MANIFEST", "install")
+__all__ = ("MANIFEST", "AnthropicStreamFn", "install")

@@ -31,22 +31,21 @@ down an OTLP handle leaves process providers alive until process teardown.
 from __future__ import annotations
 
 import atexit
-from collections.abc import Mapping
 import json
 import os
 import sys
 import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import IO, Any, Literal, Protocol, Sequence
+from typing import IO, Any, Literal, Protocol
 
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
+from opentelemetry._logs import Logger, SeverityNumber
 from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
-from opentelemetry._logs import Logger
-from opentelemetry._logs import SeverityNumber
 from opentelemetry.sdk._logs import LoggerProvider, ReadableLogRecord
 from opentelemetry.sdk._logs.export import (
     BatchLogRecordProcessor,
@@ -88,11 +87,11 @@ __all__ = [
     "shutdown_process_telemetry",
 ]
 
-from agentm.extensions.observability.paths import (  # noqa: E402
+from agentm.extensions.observability.paths import (
     file_export_requested,
     resolve_observability_dir,
 )
-from agentm.observability.otlp import (  # noqa: E402
+from agentm.observability.otlp import (
     iter_log_records,
     iter_spans,
     otlp_unwrap,
@@ -281,7 +280,7 @@ _global_lock = threading.Lock()
 _global_tracer_provider: TracerProvider | None = None
 _global_logger_provider: LoggerProvider | None = None
 _global_atexit_registered = False
-_process_otlp_sink: "OtlpSink | None" = None
+_process_otlp_sink: OtlpSink | None = None
 
 _DEFAULT_OTLP_ENDPOINT = "http://localhost:4317"
 
@@ -305,7 +304,7 @@ def _probe_endpoint(endpoint: str, timeout: float = 2.0) -> bool:
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.close()
         return True
-    except (socket.timeout, ConnectionRefusedError, OSError):
+    except (TimeoutError, ConnectionRefusedError, OSError):
         return False
 
 
@@ -378,11 +377,11 @@ class OtlpSink:
             span_exp: Any
             log_exp: Any
             if protocol == "http/protobuf":
-                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                    OTLPSpanExporter as HttpSpanExp,
-                )
                 from opentelemetry.exporter.otlp.proto.http._log_exporter import (
                     OTLPLogExporter as HttpLogExp,
+                )
+                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                    OTLPSpanExporter as HttpSpanExp,
                 )
 
                 span_exp = HttpSpanExp(
@@ -396,11 +395,11 @@ class OtlpSink:
                     timeout=timeout,
                 )
             else:
-                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                    OTLPSpanExporter as GrpcSpanExp,
-                )
                 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
                     OTLPLogExporter as GrpcLogExp,
+                )
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                    OTLPSpanExporter as GrpcSpanExp,
                 )
 
                 span_exp = GrpcSpanExp(

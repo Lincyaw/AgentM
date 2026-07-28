@@ -27,12 +27,12 @@ from dataclasses import replace
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
+    LOOP_BUDGET_SERVICE,
     AgentMessage,
     AtomAPI,
     AtomInstallPriority,
     BeforeRunEvent,
     BeforeSendEvent,
-    LOOP_BUDGET_SERVICE,
     LoopConfig,
     TextContent,
     ToolResultEvent,

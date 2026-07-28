@@ -55,7 +55,7 @@ class FrontmatterDocument:
         return f"---\n{header}\n---\n{self.body}"
 
     @classmethod
-    def parse(cls, text: str) -> "FrontmatterDocument":
+    def parse(cls, text: str) -> FrontmatterDocument:
         if not text.startswith("---\n"):
             return cls(body=text)
         closing = text.find("\n---\n", 4)

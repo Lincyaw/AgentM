@@ -15,13 +15,13 @@ asynchronous child agents.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+import uuid
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
-import json
-import time
 from typing import Literal
-import uuid
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
@@ -579,7 +579,7 @@ def install(api: AtomAPI, config: BackgroundExecConfig) -> None:
 
 
 __all__ = (
-    "BackgroundExecConfig",
     "MANIFEST",
+    "BackgroundExecConfig",
     "install",
 )

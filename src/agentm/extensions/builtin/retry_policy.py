@@ -82,4 +82,4 @@ def install(api: AtomAPI, config: RetryPolicyConfig) -> None:
     )
 
 
-__all__ = ("ExponentialBackoffRetry", "MANIFEST", "RetryPolicyConfig", "install")
+__all__ = ("MANIFEST", "ExponentialBackoffRetry", "RetryPolicyConfig", "install")

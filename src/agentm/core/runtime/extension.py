@@ -8,9 +8,9 @@ Atoms receive the Session object directly.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
-import hashlib
 import inspect
 import sys
 import threading
@@ -55,7 +55,7 @@ def current_installing_extension() -> str:
 
 
 async def install_extension(
-    api: "SessionRuntime",
+    api: SessionRuntime,
     extension: ExtensionSpec | str,
     config: dict[str, Any] | None = None,
     *,
@@ -153,7 +153,7 @@ def load_extension(
     token = _INSTALLING_EXTENSION.set(module_path)
     try:
         result = install(api, resolved_config)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _INSTALLING_EXTENSION.reset(token)
         raise ExtensionLoadError(module_path, exc) from exc
     if not inspect.isawaitable(result):
@@ -166,7 +166,7 @@ def load_extension(
         inner_token = _INSTALLING_EXTENSION.set(module_path)
         try:
             await awaitable_result
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ExtensionLoadError(module_path, exc) from exc
         finally:
             _INSTALLING_EXTENSION.reset(inner_token)
@@ -204,7 +204,7 @@ def load_extension_module(
     if spec.source.kind == "module":
         try:
             return importlib.import_module(spec.source.location)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ExtensionLoadError(spec.module_path, exc) from exc
     return _load_file_extension_module(spec.source)
 
@@ -220,7 +220,7 @@ def _load_file_extension_module(source: ExtensionSource) -> ModuleType:
         content = _read_verified_file_source(source)
         try:
             code = compile(content, str(path), "exec")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ExtensionLoadError(module_path, exc) from exc
 
         module = ModuleType(module_path)
@@ -236,7 +236,7 @@ def _load_file_extension_module(source: ExtensionSource) -> ModuleType:
         sys.modules[module_path] = module
         try:
             exec(code, module.__dict__)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             sys.modules.pop(module_path, None)
             raise ExtensionLoadError(module_path, exc) from exc
         return module
@@ -311,7 +311,7 @@ def validate_extension_source(source: ExtensionSource | str) -> None:
 
     try:
         module_spec = importlib.util.find_spec(source.location)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise ExtensionLoadError(module_path, exc) from exc
     if module_spec is None:
         raise ExtensionLoadError(
@@ -352,7 +352,7 @@ def _validate_extension_helper_source(
     visited.add(module_path)
     try:
         spec = importlib.util.find_spec(module_path)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise RuntimeError(
             f"extension validator cannot inspect helper {module_path!r}"
         ) from exc

@@ -6,10 +6,17 @@ from collections.abc import Callable
 
 import pytest
 
-from agentm.core.abi import BeforeSendEvent, CancelSignal, FunctionTool, TextContent
-from agentm.core.abi import TOOL_EXECUTOR, ToolExecutionCapabilities
-from agentm.core.abi import ToolExecutionRequest
-from agentm.core.abi import ToolExecutor, ToolResult
+from agentm.core.abi import (
+    TOOL_EXECUTOR,
+    BeforeSendEvent,
+    CancelSignal,
+    FunctionTool,
+    TextContent,
+    ToolExecutionCapabilities,
+    ToolExecutionRequest,
+    ToolExecutor,
+    ToolResult,
+)
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.tool_executor import ToolExecutionRequirements
 from agentm.extensions.builtin.tool_purpose import ToolPurposeConfig, install

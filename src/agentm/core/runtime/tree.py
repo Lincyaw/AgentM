@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections import deque
 
 from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.trajectory import TurnRef
 from agentm.core.abi.tree import (
     EdgeKind,
     SessionEdge,
     SessionNode,
 )
-from agentm.core.abi.trajectory import TurnRef
 
 
 class InMemorySessionGraph:

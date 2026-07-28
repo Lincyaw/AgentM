@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, Generic, Literal, TypeVar, cast, overload
+from typing import Final, Literal, TypeVar, cast, overload
 
 T = TypeVar("T")
 ServiceScope = Literal["session", "tree"]
@@ -34,7 +34,7 @@ class ServiceTypeMismatch(TypeError):
 
 
 @dataclass(frozen=True, slots=True)
-class ServiceRole(Generic[T]):
+class ServiceRole[T]:
     """Single-source descriptor for one well-known service boundary.
 
     ``scope`` is the canonical default; ``bind`` accepts an explicit override
@@ -56,7 +56,7 @@ class _ServiceEntry:
 class ServiceRegistry:
     """Typed, named service registry with runtime protocol checks."""
 
-    __slots__ = ("_services", "_bind_observer")
+    __slots__ = ("_bind_observer", "_services")
 
     def __init__(self) -> None:
         self._services: dict[str, _ServiceEntry] = {}
@@ -91,12 +91,11 @@ class ServiceRegistry:
         Re-registering the same name replaces the previous service.
         """
 
-        if protocol is not None:
-            if not isinstance(service, protocol):
-                raise ServiceTypeMismatch(
-                    f"service {name!r}: {type(service).__name__} does not "
-                    f"satisfy {protocol.__name__}"
-                )
+        if protocol is not None and not isinstance(service, protocol):
+            raise ServiceTypeMismatch(
+                f"service {name!r}: {type(service).__name__} does not "
+                f"satisfy {protocol.__name__}"
+            )
         self._services[name] = _ServiceEntry(
             service=service,
             protocol=protocol,
@@ -194,11 +193,11 @@ class ServiceRegistry:
         entry = self._services.get(name)
         return None if entry is None else entry.scope
 
-    def update_from(self, other: "ServiceRegistry") -> None:
+    def update_from(self, other: ServiceRegistry) -> None:
         """Merge another registry into this one (other wins on conflict)."""
         self._services.update(other._services)
 
-    def inherit_from(self, other: "ServiceRegistry") -> None:
+    def inherit_from(self, other: ServiceRegistry) -> None:
         """Merge inherited services and leave session-local state behind."""
         self._services.update(
             {

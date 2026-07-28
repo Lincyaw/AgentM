@@ -17,7 +17,6 @@ from agentm.core.abi.tool_executor import (
 )
 from agentm.execution.wire import decode_tool_output, encode_tool_arguments
 
-
 PROCESS_ENTRYPOINT_METADATA_KEY = "process_entrypoint"
 
 

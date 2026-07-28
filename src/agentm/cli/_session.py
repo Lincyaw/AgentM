@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import typer
 
@@ -15,7 +15,6 @@ from agentm.control import (
     InterruptDeliveryError,
     send_interrupt,
 )
-
 
 session_app = typer.Typer(
     name="session",

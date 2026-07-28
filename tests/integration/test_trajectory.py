@@ -16,22 +16,6 @@ from typing import Any
 
 import pytest
 
-from agentm.core.abi.messages import (
-    AgentMessage,
-    AssistantMessage,
-    OpaqueThinkingBlock,
-    TextContent,
-    ToolCallBlock,
-    ToolResultBlock,
-    UserMessage,
-)
-from agentm.core.abi.stream import MessageEnd, Model, TextDelta
-from agentm.core.abi.tool import (
-    FunctionTool,
-    ToolContinue,
-    ToolResult,
-    ToolTerminate,
-)
 from agentm.core.abi.bus import BusPriority, EventBus
 from agentm.core.abi.codec import CodecRegistry, RawTrigger
 from agentm.core.abi.context import (
@@ -55,14 +39,14 @@ from agentm.core.abi.events import (
     TurnBeginEvent,
     TurnCommittedEvent,
 )
-from agentm.core.abi.termination import (
-    BudgetExhausted,
-    PromptRunContinued,
-    MaxTurnsExhausted,
-    ModelEndTurn,
-    ProviderRequestFailed,
-    SignalAborted,
-    ToolTerminated,
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantMessage,
+    OpaqueThinkingBlock,
+    TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
+    UserMessage,
 )
 from agentm.core.abi.query import (
     ObservabilityQueryStore,
@@ -80,6 +64,22 @@ from agentm.core.abi.store import (
     TrajectoryNodeQuery,
     TrajectoryStore,
 )
+from agentm.core.abi.stream import MessageEnd, Model, TextDelta
+from agentm.core.abi.termination import (
+    BudgetExhausted,
+    MaxTurnsExhausted,
+    ModelEndTurn,
+    PromptRunContinued,
+    ProviderRequestFailed,
+    SignalAborted,
+    ToolTerminated,
+)
+from agentm.core.abi.tool import (
+    FunctionTool,
+    ToolContinue,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.core.abi.trajectory import (
     Outcome,
     ToolRecord,
@@ -96,17 +96,20 @@ from agentm.core.abi.trigger import (
     SubagentResult,
     UserInput,
 )
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.execution import Execution, StateError
 from agentm.core.runtime.session import Session, SessionRuntimeConfig
 from agentm.core.runtime.session_factory import SessionBuildConfig, create_session
 from agentm.core.runtime.session_meta import ResumeIdentityError
-from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
-from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 from agentm.core.runtime.trajectory import Trajectory
-from agentm.storage.trajectory import JsonlTrajectoryStore
-from agentm.core.runtime.trigger_queue import TriggerTerminated
 from agentm.core.runtime.tree import InMemorySessionGraph
-from agentm.core.runtime.trigger_queue import QueueClosed, TriggerQueue
+from agentm.core.runtime.trigger_queue import (
+    QueueClosed,
+    TriggerQueue,
+    TriggerTerminated,
+)
+from agentm.storage.trajectory import JsonlTrajectoryStore
+from agentm.storage.trajectory.memory import InMemoryTrajectoryStore
 
 # ---------------------------------------------------------------------------
 # Test infrastructure
@@ -687,7 +690,7 @@ async def test_store_persistence() -> None:
     await _wait_run(session2)
     await session2.shutdown()
 
-    meta, turns = store.load(session.id)
+    _meta, turns = store.load(session.id)
     assert len(turns) == 2
     assert store.session_exists(session.id)
     sessions = store.list_sessions()
@@ -1940,7 +1943,7 @@ async def test_store_append_failure_is_fail_stop() -> None:
         ) -> None:
             fail_count["n"] += 1
             if fail_count["n"] == 1:
-                raise IOError("store write failed api_key=very-secret")
+                raise OSError("store write failed api_key=very-secret")
             super().commit_turn(session_id, commit)
 
     store = FailingStore()
@@ -2042,7 +2045,7 @@ async def test_checkpoint_persist_failure_is_fail_stop() -> None:
             checkpoint: TurnCheckpoint,
         ) -> None:
             del session_id, checkpoint
-            raise IOError("checkpoint persist failed")
+            raise OSError("checkpoint persist failed")
 
     store = FailingCheckpointStore()
     mock = MockStreamFn()

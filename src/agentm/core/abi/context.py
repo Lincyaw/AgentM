@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from agentm.core.abi.stream import Model, StreamFn
 
 from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.messages import (
     AgentMessage,
     ToolResultBlock,
@@ -42,6 +41,7 @@ from agentm.core.abi.messages import (
     UserMessage,
     synthetic_user_message,
 )
+from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.trigger import (
     BackgroundCompletion,
@@ -64,8 +64,8 @@ class PolicyContext:
     parent_session_id: str | None = None
     services: ServiceRegistry | None = None
     store: object | None = None
-    model: "Model | None" = None
-    stream_fn: "StreamFn | None" = None
+    model: Model | None = None
+    stream_fn: StreamFn | None = None
     trigger_renderers: dict[str, TriggerRenderer] | None = None
 
 
@@ -348,8 +348,8 @@ __all__ = [
     "ContextPolicy",
     "ContextTransformCancelled",
     "PolicyContext",
-    "apply_trigger_metadata",
     "apply_context_policies",
+    "apply_trigger_metadata",
     "build_context",
     "build_context_sync",
     "render_trigger",

@@ -197,10 +197,10 @@ class _ExceptionSurfaceVisitor(ast.NodeVisitor):
             for child in ast.walk(node)
         )
 
-    def visit_Raise(self, node: ast.Raise) -> None:  # noqa: N802
+    def visit_Raise(self, node: ast.Raise) -> None:
         self.surfaced = True
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         if isinstance(func, ast.Name) and func.id in _SURFACE_CALL_NAMES:
             self.surfaced = True
@@ -217,27 +217,25 @@ class _ExceptionSurfaceVisitor(ast.NodeVisitor):
             return
         self.generic_visit(node)
 
-    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+    def visit_Return(self, node: ast.Return) -> None:
         if self._references_exception(node.value):
             self.surfaced = True
 
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:  # noqa: N802
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         # A nested handler surfacing its own exception does not surface the
         # outer exception currently being checked.
         return
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
 
-    def visit_AsyncFunctionDef(  # noqa: N802
-        self, node: ast.AsyncFunctionDef
-    ) -> None:
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         return
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
         return
 
-    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+    def visit_Lambda(self, node: ast.Lambda) -> None:
         return
 
 
@@ -284,15 +282,21 @@ def _check_missing_slots(tree: ast.Module, path: str) -> list[Issue]:
             is_dataclass = False
             has_slots = False
 
-            if isinstance(deco, ast.Name) and deco.id == "dataclass":
-                is_dataclass = True
-            elif isinstance(deco, ast.Attribute) and deco.attr == "dataclass":
+            if (
+                isinstance(deco, ast.Name)
+                and deco.id == "dataclass"
+                or isinstance(deco, ast.Attribute)
+                and deco.attr == "dataclass"
+            ):
                 is_dataclass = True
             elif isinstance(deco, ast.Call):
                 func = deco.func
-                if isinstance(func, ast.Name) and func.id == "dataclass":
-                    is_dataclass = True
-                elif isinstance(func, ast.Attribute) and func.attr == "dataclass":
+                if (
+                    isinstance(func, ast.Name)
+                    and func.id == "dataclass"
+                    or isinstance(func, ast.Attribute)
+                    and func.attr == "dataclass"
+                ):
                     is_dataclass = True
                 if is_dataclass:
                     for kw in deco.keywords:
@@ -341,23 +345,27 @@ def _check_private_in_all(tree: ast.Module, path: str) -> list[Issue]:
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "__all__":
-                if isinstance(node.value, (ast.List, ast.Tuple)):
-                    for elt in node.value.elts:
-                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                            if (
-                                elt.value.startswith("_")
-                                and elt.value not in _PUBLIC_MODULE_METADATA_DUNDERS
-                            ):
-                                issues.append(
-                                    Issue(
-                                        path=path,
-                                        line=elt.lineno,
-                                        rule="AM003",
-                                        message=f"private name {elt.value!r} in __all__",
-                                        severity="warning",
-                                    )
-                                )
+            if (
+                isinstance(target, ast.Name)
+                and target.id == "__all__"
+                and isinstance(node.value, (ast.List, ast.Tuple))
+            ):
+                for elt in node.value.elts:
+                    if (
+                        isinstance(elt, ast.Constant)
+                        and isinstance(elt.value, str)
+                        and elt.value.startswith("_")
+                        and elt.value not in _PUBLIC_MODULE_METADATA_DUNDERS
+                    ):
+                        issues.append(
+                            Issue(
+                                path=path,
+                                line=elt.lineno,
+                                rule="AM003",
+                                message=f"private name {elt.value!r} in __all__",
+                                severity="warning",
+                            )
+                        )
     return issues
 
 
@@ -397,21 +405,24 @@ def _check_atom_raw_io(tree: ast.Module, path: str, file_path: Path) -> list[Iss
                         severity="warning",
                     )
                 )
-        if isinstance(node, ast.Attribute):
-            if isinstance(node.value, ast.Name) and node.value.id == "subprocess":
-                issues.append(
-                    Issue(
-                        path=path,
-                        line=node.lineno,
-                        rule="AM004",
-                        message=(
-                            "subprocess usage in atom — use the operations:bash "
-                            "service: api.services.require(BASH_OPERATIONS_SERVICE, "
-                            "BashOperations)"
-                        ),
-                        severity="warning",
-                    )
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "subprocess"
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM004",
+                    message=(
+                        "subprocess usage in atom — use the operations:bash "
+                        "service: api.services.require(BASH_OPERATIONS_SERVICE, "
+                        "BashOperations)"
+                    ),
+                    severity="warning",
                 )
+            )
     return issues
 
 
@@ -479,19 +490,22 @@ def _check_mutable_abi_global(
             if target.id == "__all__":
                 continue
             ann_str = ast.dump(node.annotation) if node.annotation else ""
-            if any(
-                t in ann_str for t in ("Dict", "List", "Set", "dict", "list", "set")
+            if (
+                any(
+                    t in ann_str for t in ("Dict", "List", "Set", "dict", "list", "set")
+                )
+                and "Final" not in ann_str
+                and "ClassVar" not in ann_str
             ):
-                if "Final" not in ann_str and "ClassVar" not in ann_str:
-                    issues.append(
-                        Issue(
-                            path=path,
-                            line=node.lineno,
-                            rule="AM006",
-                            message=f"mutable module-level {target.id!r} in ABI — wrap in Final or move to runtime",
-                            severity="warning",
-                        )
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM006",
+                        message=f"mutable module-level {target.id!r} in ABI — wrap in Final or move to runtime",
+                        severity="warning",
                     )
+                )
         elif isinstance(node, ast.Assign):
             for tgt in node.targets:
                 if not isinstance(tgt, ast.Name):
@@ -776,9 +790,13 @@ def _collect_dict_schema_names(tree: ast.Module) -> set[str]:
                     node.value
                 ):
                     names.add(target.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.value is not None and _is_dict_with_type_object(node.value):
-                names.add(node.target.id)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+            and _is_dict_with_type_object(node.value)
+        ):
+            names.add(node.target.id)
     return names
 
 
@@ -808,27 +826,27 @@ class _SchemaReturnVisitor(ast.NodeVisitor):
         self.returns_schema = False
         self._local_schema_names = local_schema_names
 
-    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+    def visit_Return(self, node: ast.Return) -> None:
         value = node.value
         if value is None:
             return
-        if _is_dict_with_type_object(value):
+        if (
+            _is_dict_with_type_object(value)
+            or isinstance(value, ast.Name)
+            and value.id in self._local_schema_names
+        ):
             self.returns_schema = True
-        elif isinstance(value, ast.Name) and value.id in self._local_schema_names:
-            self.returns_schema = True
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
 
-    def visit_AsyncFunctionDef(  # noqa: N802
-        self, node: ast.AsyncFunctionDef
-    ) -> None:
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         return
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
         return
 
-    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+    def visit_Lambda(self, node: ast.Lambda) -> None:
         return
 
 
@@ -1253,38 +1271,38 @@ def _check_legacy_extension_shape(
                     ),
                 )
             )
-        if isinstance(node, (ast.For, ast.AsyncFor)):
-            if _tuple_target(node.target) and _attribute_named(
-                node.iter,
-                "extensions",
-            ):
-                issues.append(
-                    Issue(
-                        path=path,
-                        line=node.target.lineno,
-                        rule="AM019",
-                        message=(
-                            "resolved extensions are ExtensionSpec values; "
-                            "do not unpack them as (module, config)"
-                        ),
-                    )
+        if (
+            isinstance(node, (ast.For, ast.AsyncFor))
+            and _tuple_target(node.target)
+            and _attribute_named(node.iter, "extensions")
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.target.lineno,
+                    rule="AM019",
+                    message=(
+                        "resolved extensions are ExtensionSpec values; "
+                        "do not unpack them as (module, config)"
+                    ),
                 )
-        if isinstance(node, ast.comprehension):
-            if _tuple_target(node.target) and _attribute_named(
-                node.iter,
-                "extensions",
-            ):
-                issues.append(
-                    Issue(
-                        path=path,
-                        line=node.target.lineno,
-                        rule="AM019",
-                        message=(
-                            "resolved extensions are ExtensionSpec values; "
-                            "do not unpack them as (module, config)"
-                        ),
-                    )
+            )
+        if (
+            isinstance(node, ast.comprehension)
+            and _tuple_target(node.target)
+            and _attribute_named(node.iter, "extensions")
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.target.lineno,
+                    rule="AM019",
+                    message=(
+                        "resolved extensions are ExtensionSpec values; "
+                        "do not unpack them as (module, config)"
+                    ),
                 )
+            )
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(_tuple_target(target) for target in targets) and _attribute_named(

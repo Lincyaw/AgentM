@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import math
+from collections.abc import Mapping, Sequence
 from typing import cast
 
 from agentm.core.abi.resource import (

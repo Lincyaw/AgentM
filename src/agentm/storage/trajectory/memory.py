@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from collections.abc import Sequence
 
 from agentm.core.abi.store import (

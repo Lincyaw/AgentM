@@ -17,14 +17,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
+from agentm.core.abi.bus import Event
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, JsonValue
 from agentm.core.abi.stream import AssistantStreamEvent, Model
 from agentm.core.abi.termination import ModelEndTurn, TerminationCause
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
-from agentm.core.abi.bus import Event
 from agentm.core.abi.trajectory import Outcome, Turn, TurnMeta
 from agentm.core.abi.trigger import Trigger
-
 
 # --- Loop actions -----------------------------------------------------------
 

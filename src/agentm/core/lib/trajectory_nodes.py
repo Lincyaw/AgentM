@@ -7,7 +7,7 @@ from _thread import RLock
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from functools import wraps
-from typing import Concatenate, ParamSpec, Protocol, TypeVar
+from typing import Concatenate, Protocol
 
 from agentm.core.abi.context import apply_trigger_metadata, render_trigger
 from agentm.core.abi.messages import (
@@ -21,9 +21,9 @@ from agentm.core.abi.store import TrajectoryNodeQuery
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
-    ContentReplacementState,
     TRAJECTORY_HEAD_INDEXES,
     TRAJECTORY_NODE_INDEXES,
+    ContentReplacementState,
     TrajectoryBranchId,
     TrajectoryHead,
     TrajectoryHeadAdvance,
@@ -39,28 +39,22 @@ from agentm.core.lib.trajectory_store import (
     validate_node_append_state,
 )
 
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
-
 
 class _TrajectoryStateLockOwner(Protocol):
     _trajectory_state_lock: RLock
 
 
-_S = TypeVar("_S", bound=_TrajectoryStateLockOwner)
-
-
-def synchronized_trajectory_state(
-    method: Callable[Concatenate[_S, _P], _R],
-) -> Callable[Concatenate[_S, _P], _R]:
+def synchronized_trajectory_state[S: _TrajectoryStateLockOwner, **P, R](
+    method: Callable[Concatenate[S, P], R],
+) -> Callable[Concatenate[S, P], R]:
     """Serialize one complete in-memory trajectory-state operation."""
 
     @wraps(method)
     def synchronized(
-        self: _S,
-        *args: _P.args,
-        **kwargs: _P.kwargs,
-    ) -> _R:
+        self: S,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
         with self._trajectory_state_lock:
             return method(self, *args, **kwargs)
 
@@ -580,7 +574,7 @@ class TrajectoryIndexState:
 
         duplicates = batch_ids & self._node_ids
         if duplicates:
-            duplicate = sorted(duplicates)[0]
+            duplicate = min(duplicates)
             raise ValueError(f"duplicate trajectory node id: {duplicate}")
         if head.session_id != session_id:
             raise ValueError("head session_id does not match index session")
@@ -665,10 +659,10 @@ class TrajectoryIndexState:
 
 __all__ = [
     "TrajectoryIndexState",
-    "synchronized_trajectory_state",
     "build_chain",
     "leaf_nodes",
     "messages_to_nodes",
+    "synchronized_trajectory_state",
     "turn_to_nodes",
     "turns_to_nodes",
 ]

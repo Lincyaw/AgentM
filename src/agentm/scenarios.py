@@ -10,9 +10,9 @@ the runtime extension loader.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import hashlib
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,6 @@ from agentm.core.abi.session_api import (
     ScenarioSpec,
     normalize_extension_spec,
 )
-
 
 _BUILTIN_SCENARIOS: dict[str, ScenarioSpec] = {
     "empty": ScenarioSpec(extensions=()),

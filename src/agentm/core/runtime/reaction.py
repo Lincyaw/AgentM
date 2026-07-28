@@ -9,8 +9,9 @@ import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
+from agentm.core.abi.bus import EventBus
 from agentm.core.abi.cancel import (
     CancelSignal,
     CompositeCancelSignal,
@@ -21,50 +22,11 @@ from agentm.core.abi.compaction import (
     ContextProjection,
     ProjectionInput,
 )
-from agentm.core.abi.messages import (
-    AgentMessage,
-    AssistantMessage,
-    InterruptionMessagePolicy,
-    JsonValue,
-    TextContent,
-    ToolCallBlock,
-    ToolResultBlock,
-    ToolResultMessage,
-    UserMessage,
-    freeze_json,
-    thaw_json,
-)
-from agentm.core.abi.permission import (
-    PermissionAudience,
-    PermissionPolicy,
-    PermissionRequest,
-    permission_denial_result,
-)
-from agentm.core.abi.stream import (
-    AssistantStreamEvent,
-    MessageEnd,
-    Model,
-    TextDelta,
-)
-from agentm.core.abi.tool import (
-    Tool,
-    ToolContinue,
-    ToolOutcome,
-    ToolResult,
-    ToolTerminate,
-)
-from agentm.core.abi.tool_executor import tool_execution_requirements
-from agentm.core.abi.tool_orchestration import (
-    ToolOrchestrationRequest,
-    ToolOrchestrationResult,
-    ToolWorkItem,
-)
-from agentm.core.abi.bus import EventBus
 from agentm.core.abi.context import (
     ContextPolicy,
     ContextTransformCancelled,
-    apply_trigger_metadata,
     apply_context_policies,
+    apply_trigger_metadata,
     build_context,
     render_trigger,
     route_messages,
@@ -86,17 +48,55 @@ from agentm.core.abi.events import (
     ToolResultEvent,
     TurnObservation,
 )
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantMessage,
+    InterruptionMessagePolicy,
+    JsonValue,
+    TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
+    ToolResultMessage,
+    UserMessage,
+    freeze_json,
+    thaw_json,
+)
+from agentm.core.abi.permission import (
+    PermissionAudience,
+    PermissionPolicy,
+    PermissionRequest,
+    permission_denial_result,
+)
 from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.stream import (
+    AssistantStreamEvent,
+    MessageEnd,
+    Model,
+    TextDelta,
+)
 from agentm.core.abi.termination import (
     Aborted,
     BudgetExhausted,
-    PromptRunContinued,
     ModelEndTurn,
+    PromptRunContinued,
     ProviderRequestFailed,
     ProviderTruncated,
     SignalAborted,
     TerminationCause,
     ToolTerminated,
+)
+from agentm.core.abi.tool import (
+    Tool,
+    ToolContinue,
+    ToolOutcome,
+    ToolResult,
+    ToolTerminate,
+)
+from agentm.core.abi.tool_executor import tool_execution_requirements
+from agentm.core.abi.tool_orchestration import (
+    ToolOrchestrationRequest,
+    ToolOrchestrationResult,
+    ToolWorkItem,
 )
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
@@ -122,7 +122,6 @@ if TYPE_CHECKING:
     from agentm.core.runtime.driver import DriverConfig
 
 _INTERRUPTED_TOOL_TEXT = "Tool execution interrupted"
-_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +148,8 @@ def _signal_aborted(signal: CancelSignal | None) -> SignalAborted:
     return SignalAborted(reason=cancel_reason(signal) or "")
 
 
-def _last_of(returns: Sequence[object], typ: type[_T]) -> _T | None:
-    chosen: _T | None = None
+def _last_of[T](returns: Sequence[object], typ: type[T]) -> T | None:
+    chosen: T | None = None
     for value in returns:
         if isinstance(value, typ):
             chosen = value

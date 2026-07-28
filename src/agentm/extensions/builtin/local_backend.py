@@ -10,12 +10,11 @@ from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     BASH_OPERATIONS_SERVICE,
-    RESOURCE_READER,
-    RESOURCE_WRITER,
-    bind_resource_store,
     ENVIRONMENT_OPERATIONS_SERVICE,
+    RESOURCE_READER,
     RESOURCE_READER_SERVICE,
     RESOURCE_STORE_SERVICE,
+    RESOURCE_WRITER,
     RESOURCE_WRITER_SERVICE,
     AtomAPI,
     AtomInstallPriority,
@@ -24,6 +23,7 @@ from agentm.core.abi import (
     ResourceReader,
     ResourceStore,
     ResourceWriter,
+    bind_resource_store,
 )
 from agentm.environments.local import LocalBashOperations, LocalEnvironmentOperations
 from agentm.extensions import ExtensionManifest
@@ -118,4 +118,4 @@ def install(api: AtomAPI, config: LocalBackendConfig) -> None:
     api.services.bind(RESOURCE_WRITER, resources)
 
 
-__all__ = ("LocalBackendConfig", "MANIFEST", "install")
+__all__ = ("MANIFEST", "LocalBackendConfig", "install")

@@ -13,12 +13,12 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from signal import SIGKILL
-from typing import IO, Iterator
+from typing import IO
 
 from loguru import logger
 
@@ -34,7 +34,6 @@ from agentm.core.abi.lifecycle import (
 )
 from agentm.core.abi.operations import EnvironmentRef, ExecResult
 from agentm.core.abi.trajectory import Turn, TurnRef
-
 
 _DEFAULT_CONTROL_PLANE_EXCLUSIONS = (".agentm",)
 

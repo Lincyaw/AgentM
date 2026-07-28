@@ -28,7 +28,7 @@ def is_tty() -> bool:
 class SessionStats:
     """Tracks cumulative session token statistics."""
 
-    __slots__ = ("turns", "input_tokens", "output_tokens", "cache_read_tokens")
+    __slots__ = ("cache_read_tokens", "input_tokens", "output_tokens", "turns")
 
     def __init__(self) -> None:
         self.turns = 0

@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal, Protocol, Sequence, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_HEAD_ID,
-    ContentReplacementState,
     TRAJECTORY_HEAD_INDEXES,
     TRAJECTORY_NODE_INDEXES,
+    ContentReplacementState,
     TrajectoryBranchId,
     TrajectoryHead,
     TrajectoryHeadAdvance,
@@ -577,14 +577,14 @@ def _validate_optional_query_number(value: object, *, label: str) -> None:
 
 
 __all__ = [
-    "DiagnosticLevel",
-    "SessionMeta",
     "TRAJECTORY_HEAD_INDEXES",
     "TRAJECTORY_NODE_INDEXES",
+    "DiagnosticLevel",
+    "SessionMeta",
     "TrajectoryCommit",
     "TrajectoryCompactionCommit",
     "TrajectoryDiagnostic",
-    "TrajectoryStore",
     "TrajectoryNodeQuery",
     "TrajectoryNodeSort",
+    "TrajectoryStore",
 ]

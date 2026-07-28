@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+from agentm.core.abi.bus import EventBus
 from agentm.core.abi.cancel import (
     CancelSignal,
     CompositeCancelSignal,
@@ -30,6 +31,15 @@ from agentm.core.abi.cancel import (
 from agentm.core.abi.compaction import (
     ContextCompactionService,
     ContextProjection,
+)
+from agentm.core.abi.context import (
+    ContextPolicy,
+)
+from agentm.core.abi.events import (
+    DiagnosticEvent,
+    RunEndEvent,
+    TurnBeginEvent,
+    TurnCommittedEvent,
 )
 from agentm.core.abi.lifecycle import EffectScope, EffectTxn
 from agentm.core.abi.messages import (
@@ -53,10 +63,21 @@ from agentm.core.abi.roles import (
     RESOURCE_TXN_SERVICE,
 )
 from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.store import (
+    TrajectoryCommit,
+    TrajectoryDiagnostic,
+    TrajectoryNodeQuery,
+    TrajectoryStore,
+)
 from agentm.core.abi.stream import (
     Model,
     StreamFn,
     ThinkingLevel,
+)
+from agentm.core.abi.termination import (
+    MaxTurnsExhausted,
+    PromptRunContinued,
+    ProviderRequestFailed,
 )
 from agentm.core.abi.tool import (
     Tool,
@@ -66,27 +87,6 @@ from agentm.core.abi.tool_executor import (
 )
 from agentm.core.abi.tool_orchestration import (
     ToolOrchestrator,
-)
-from agentm.core.abi.bus import EventBus
-from agentm.core.abi.context import (
-    ContextPolicy,
-)
-from agentm.core.abi.events import (
-    DiagnosticEvent,
-    RunEndEvent,
-    TurnBeginEvent,
-    TurnCommittedEvent,
-)
-from agentm.core.abi.store import (
-    TrajectoryCommit,
-    TrajectoryDiagnostic,
-    TrajectoryNodeQuery,
-    TrajectoryStore,
-)
-from agentm.core.abi.termination import (
-    PromptRunContinued,
-    MaxTurnsExhausted,
-    ProviderRequestFailed,
 )
 from agentm.core.abi.trajectory import (
     DEFAULT_TRAJECTORY_BRANCH_ID,
@@ -105,16 +105,16 @@ from agentm.core.abi.trigger import (
     TriggerMetadata,
     TriggerRenderer,
 )
+from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
+from agentm.core.lib.context_projection import ExactNodeChainProjection
+from agentm.core.lib.redact import redact_text_secrets
+from agentm.core.lib.trajectory_nodes import turn_to_nodes
 from agentm.core.runtime.reaction import (
     ReactionRequest,
     react,
     record_interruption_message,
 )
-from agentm.core.lib.async_cancel import await_known_outcome, settle_known_outcome
-from agentm.core.lib.context_projection import ExactNodeChainProjection
-from agentm.core.lib.redact import redact_text_secrets
 from agentm.core.runtime.trajectory import Trajectory
-from agentm.core.lib.trajectory_nodes import turn_to_nodes
 from agentm.core.runtime.trigger_queue import (
     QueueClosed,
     TriggerQueue,

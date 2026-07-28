@@ -5,18 +5,16 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from loguru import logger
 
 from agentm import AgentSessionConfig
+from agentm.cli._display import EXIT_ERROR, stderr_console
 from agentm.config.resolver import DefaultSessionSpecResolver
 from agentm.core.abi.session_api import ExtensionSpec
 from agentm.core.lib.redact import redact_config
 from agentm.scenarios import builtin_scenario_loader
-
-from agentm.cli._display import EXIT_ERROR, stderr_console
 
 config_app = typer.Typer(
     name="config",
@@ -28,13 +26,13 @@ config_app = typer.Typer(
 
 @config_app.command("show")
 def show(
-    scenario: Optional[str] = typer.Option(
+    scenario: str | None = typer.Option(
         None, "-s", "--scenario", help="Scenario to resolve"
     ),
-    project_config: Optional[str] = typer.Option(
+    project_config: str | None = typer.Option(
         None, "--project-config", help="Project config TOML path"
     ),
-    user_config: Optional[str] = typer.Option(
+    user_config: str | None = typer.Option(
         None, "--user-config", help="User config TOML path"
     ),
     format: str = typer.Option(
@@ -107,8 +105,8 @@ def show(
         )
         return
 
-    from rich.table import Table
     from rich.console import Console
+    from rich.table import Table
 
     console = Console()
 
@@ -155,7 +153,7 @@ def show(
 
 @config_app.command("init")
 def init(
-    path: Optional[str] = typer.Argument(
+    path: str | None = typer.Argument(
         None, help="Output path (default: ./agentm.toml)"
     ),
     force: bool = typer.Option(False, "--force", help="Overwrite existing file"),

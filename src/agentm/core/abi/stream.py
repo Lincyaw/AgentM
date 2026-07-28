@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import ClassVar, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import ClassVar, Literal, Protocol, runtime_checkable
 
 from .cancel import CancelSignal
 from .messages import (
@@ -20,7 +20,6 @@ from .messages import (
     freeze_json,
 )
 from .tool import Tool
-
 
 # --- Stream events ----------------------------------------------------------
 
@@ -96,7 +95,7 @@ AssistantStreamEvent = (
     | ToolCallEnd
     | MessageEnd
 )
-ThinkingLevel: TypeAlias = Literal["off", "low", "medium", "high"]
+type ThinkingLevel = Literal["off", "low", "medium", "high"]
 
 
 # --- Model descriptor -------------------------------------------------------

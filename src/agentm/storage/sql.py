@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from sqlalchemy import create_engine
-from sqlalchemy.engine import Connection, Engine, URL, make_url
+from sqlalchemy.engine import URL, Connection, Engine, make_url
 from sqlalchemy.exc import NoSuchModuleError
 
 

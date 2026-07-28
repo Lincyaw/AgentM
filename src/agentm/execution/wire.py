@@ -6,9 +6,9 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
 import json
 import math
+from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from agentm.core.abi.messages import ImageContent, TextContent
@@ -18,7 +18,6 @@ from agentm.core.abi.tool import (
     ToolResult,
     ToolTerminate,
 )
-
 
 PROCESS_RESULT_SCHEMA_VERSION = 1
 _OutcomeKind = Literal["result", "continue", "terminate"]

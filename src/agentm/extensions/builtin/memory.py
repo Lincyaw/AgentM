@@ -39,14 +39,14 @@ restarts and can be mined by future evolution/query atoms.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from loguru import logger
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
 import frontmatter  # type: ignore[import-untyped]
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (

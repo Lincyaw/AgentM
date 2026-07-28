@@ -200,7 +200,7 @@ class FunctionTool:
     parameters: dict[str, object]
     fn: Callable[..., Awaitable[ToolResult | ToolOutcome]]
     metadata: dict[str, object] = field(default_factory=dict)
-    execution_requirements: "ToolExecutionRequirements | None" = None
+    execution_requirements: ToolExecutionRequirements | None = None
     _accepts_signal: bool = False
 
     def __init__(
@@ -211,7 +211,7 @@ class FunctionTool:
         parameters: dict[str, object] | type,
         fn: Callable[..., Awaitable[ToolResult | ToolOutcome]],
         metadata: dict[str, object] | None = None,
-        execution_requirements: "ToolExecutionRequirements | None" = None,
+        execution_requirements: ToolExecutionRequirements | None = None,
     ) -> None:
         self.name = name
         self.description = description
@@ -252,8 +252,8 @@ __all__ = [
     "FILE_OP_METADATA_KEY",
     "FILE_OP_READ",
     "FILE_OP_WRITE",
-    "FunctionTool",
     "TOOL_RESULT_FORMAT_METADATA_KEY",
+    "FunctionTool",
     "Tool",
     "ToolContinue",
     "ToolMetadataProvider",

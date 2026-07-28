@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 import os
-from pathlib import Path
 import time
 import uuid
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
@@ -23,11 +23,11 @@ from agentm.core.abi.stream import MessageEnd, TextDelta
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trigger import UserInput
 from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
-from agentm.storage.sql import create_sql_engine
 from agentm.storage.query import (
     ClickHouseObservabilityQueryStore,
     CompositeTraceQueryStore,
 )
+from agentm.storage.sql import create_sql_engine
 from agentm.storage.trajectory import JsonlTrajectoryStore
 
 _OBSERVABILITY = "agentm.extensions.builtin.observability"

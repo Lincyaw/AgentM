@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.cancel import CancelReason, CancelSignal
@@ -136,8 +136,8 @@ class ExtensionSpec:
         return ExtensionSpec(source=self.source, config=config)
 
 
-ExtensionShorthand: TypeAlias = tuple[str, Mapping[str, JsonValue]]
-ExtensionInput: TypeAlias = ExtensionSpec | ExtensionShorthand
+type ExtensionShorthand = tuple[str, Mapping[str, JsonValue]]
+type ExtensionInput = ExtensionSpec | ExtensionShorthand
 
 
 def normalize_extension_spec(value: ExtensionInput) -> ExtensionSpec:

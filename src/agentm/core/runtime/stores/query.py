@@ -4,5 +4,4 @@ from __future__ import annotations
 
 from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
 
-
 __all__ = ["TrajectoryStoreQueryAdapter"]

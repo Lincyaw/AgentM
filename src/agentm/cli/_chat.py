@@ -7,7 +7,6 @@ import asyncio
 import signal
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from loguru import logger
@@ -16,7 +15,9 @@ from rich.live import Live
 from rich.text import Text
 
 from agentm import AgentSession, AgentSessionConfig
+from agentm.cli._display import SessionStats, stderr_console
 from agentm.config.resolver import DefaultSessionSpecResolver
+from agentm.core.abi.events import StreamDeltaEvent
 from agentm.core.abi.messages import (
     OpaqueThinkingBlock,
     TextContent,
@@ -24,11 +25,8 @@ from agentm.core.abi.messages import (
     ToolCallBlock,
 )
 from agentm.core.abi.stream import TextDelta, ThinkingDelta
-from agentm.core.abi.events import StreamDeltaEvent
 from agentm.core.abi.termination import SignalAborted
 from agentm.scenarios import builtin_scenario_loader
-
-from agentm.cli._display import SessionStats, stderr_console
 
 
 class _StreamCollector:
@@ -220,21 +218,19 @@ async def _run_chat(
 
 
 def chat(
-    scenario: Optional[str] = typer.Option(
+    scenario: str | None = typer.Option(
         None, "-s", "--scenario", help="Named scenario"
     ),
-    extension: Optional[list[str]] = typer.Option(
+    extension: list[str] | None = typer.Option(
         None, "-e", "--extension", help="Extra extension modules"
     ),
-    project_config: Optional[str] = typer.Option(
+    project_config: str | None = typer.Option(
         None, "--project-config", help="Project config TOML path"
     ),
-    user_config: Optional[str] = typer.Option(
+    user_config: str | None = typer.Option(
         None, "--user-config", help="User config TOML path"
     ),
-    system: Optional[str] = typer.Option(
-        None, "--system", help="System prompt override"
-    ),
+    system: str | None = typer.Option(None, "--system", help="System prompt override"),
 ) -> None:
     """Interactive agent chat session.
 

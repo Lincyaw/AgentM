@@ -6,7 +6,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-
 import frontmatter as _fm  # type: ignore[import-untyped]
 
 

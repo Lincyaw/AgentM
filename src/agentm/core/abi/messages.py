@@ -14,19 +14,19 @@ Design constraints:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-import math
 from types import MappingProxyType
-from typing import Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from .termination import TerminationHint
 
 MessageVisibility = Literal["visible", "hidden", "replay_only"]
 MessageTokenAccounting = Literal["normal", "exclude", "metadata_only"]
 MessageReplayPolicy = Literal["include", "skip", "metadata_only"]
-JsonScalar: TypeAlias = str | int | float | bool | None
-JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
+type JsonScalar = str | int | float | bool | None
+type JsonValue = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 
 
 def _require_string(value: object, label: str, *, allow_empty: bool = True) -> None:
@@ -473,19 +473,19 @@ def tool_result(
 
 
 __all__ = [
+    "DEFAULT_MESSAGE_META",
     "AgentMessage",
     "AssistantContent",
     "AssistantMessage",
     "ImageContent",
     "InterruptionMessagePolicy",
     "JsonValue",
-    "DEFAULT_MESSAGE_META",
-    "TerminationHint",
     "MessageMeta",
     "MessageReplayPolicy",
     "MessageTokenAccounting",
     "MessageVisibility",
     "OpaqueThinkingBlock",
+    "TerminationHint",
     "TextContent",
     "ThinkingBlock",
     "ToolCallBlock",
@@ -493,9 +493,9 @@ __all__ = [
     "ToolResultMessage",
     "Usage",
     "UserMessage",
+    "freeze_json",
     "synthetic_user_message",
     "text_message",
-    "tool_result",
-    "freeze_json",
     "thaw_json",
+    "tool_result",
 ]

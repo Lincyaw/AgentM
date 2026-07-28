@@ -331,8 +331,10 @@ class _CaseToolsRuntime:
         surface: tuple[tuple[str, str, type[BaseModel], object], ...] = (
             (
                 "case_overview",
-                "Orient in the case: reward, trajectory size, clipped task "
-                "text, and the bundle file list. Call this first.",
+                (
+                    "Orient in the case: reward, trajectory size, clipped task "
+                    "text, and the bundle file list. Call this first."
+                ),
                 _NoArgs,
                 self.case_overview,
             ),
@@ -344,36 +346,46 @@ class _CaseToolsRuntime:
             ),
             (
                 "read_eval",
-                "Read the evaluation evidence (ground truth, offline-only): "
-                "reward, per-check verifier results, judge output.",
+                (
+                    "Read the evaluation evidence (ground truth, offline-only): "
+                    "reward, per-check verifier results, judge output."
+                ),
                 _ReadEvalArgs,
                 self.read_eval,
             ),
             (
                 "read_patch",
-                "Read the agent's final patch, or the oracle patch "
-                "(ground truth, offline-only).",
+                (
+                    "Read the agent's final patch, or the oracle patch "
+                    "(ground truth, offline-only)."
+                ),
                 _ReadPatchArgs,
                 self.read_patch,
             ),
             (
                 "list_turns",
-                "Per-turn summary of the trajectory: tools called, error "
-                "counts, sizes. The map for deciding where to read.",
+                (
+                    "Per-turn summary of the trajectory: tools called, error "
+                    "counts, sizes. The map for deciding where to read."
+                ),
                 _ListTurnsArgs,
                 self.list_turns,
             ),
             (
                 "read_turns",
-                "Read trajectory records: one whole turn, or paginate with "
-                "offset/limit, optionally filtered by role.",
+                (
+                    "Read trajectory records: one whole turn, or paginate with "
+                    "offset/limit, optionally filtered by role."
+                ),
                 _ReadTurnsArgs,
                 self.read_turns,
             ),
             (
                 "search_trajectory",
-                "Regex search across all trajectory records; returns turn "
-                "indexes with context windows.",
+                (
+                    "Regex search across all trajectory records; returns turn "
+                    "indexes with context windows."
+                ),
                 _SearchArgs,
                 self.search_trajectory,
             ),

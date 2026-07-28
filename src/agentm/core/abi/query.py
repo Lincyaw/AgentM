@@ -31,7 +31,7 @@ class SessionIdentity:
     config: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
-    def from_meta(cls, meta: SessionMeta) -> "SessionIdentity":
+    def from_meta(cls, meta: SessionMeta) -> SessionIdentity:
         root = meta.config.get("root_session_id")
         return cls(
             id=meta.id,
