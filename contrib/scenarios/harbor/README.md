@@ -249,16 +249,29 @@ produced a checkpoint.
 
 To branch only the AgentM trajectory, keep the standard ExternalAgent entry
 point and pass `--ae AGENTM_FORK_FROM_SESSION=<agentm_session_id>` together
-with `--ae AGENTM_FORK_TURN=<zero-based-turn-index>`. The adapter resumes the
-source prefix from the configured trajectory store under the current Harbor
-composition, creates the child with `AgentSession.fork()`, and records
-`agentm_parent_session_id` plus
-`agentm_fork_turn` in Harbor metadata. An optional
-`--ae AGENTM_FORK_PROMPT=<message>` replaces the task instruction for the
-first child turn. Loading the prefix under the current composition makes this
+with `--ae AGENTM_FORK_TURN=<zero-based-turn-index>`, which names a turn by its
+`turn.index` and is inclusive of it. The adapter loads that prefix from the
+configured trajectory store and builds one new session from it, under the
+current Harbor composition: the source's `root_session_id` and no parent. The
+new run is a continuation, not a subordinate — given a parent it would answer
+yes to every atom that asks whether it is a subagent, and `sub_agent` asks
+exactly that to stop children spawning children, so a forked run would silently
+lose `dispatch_agent`. Where it came from is recorded in Harbor metadata
+instead, as `agentm_parent_session_id` and `agentm_fork_turn`. An optional
+`--ae AGENTM_FORK_PROMPT=<message>` replaces the task instruction for the new
+run's first turn. Loading the prefix under the current composition makes this
 an explicit trajectory migration when the source atom active set is no longer
 available. AgentM trajectory forking can be combined with the ARL environment
 fork flags when the source sandbox checkpoint is still available.
+
+The two forks are requested separately and count in different units, so the
+adapter checks that they name the same moment. Every committed turn records the
+sandbox checkpoint it ended at, as an `arl-checkpoint` diagnostic under that
+session; a fork reads the record for `AGENTM_FORK_TURN` and refuses the run
+when it disagrees with `fork_step`, naming the step to pass instead. Two cases
+warn rather than refuse: a source run recorded before this existed has nothing
+to check against, and forking the trajectory into an unforked sandbox is a
+legitimate request for a run whose history describes files it does not have.
 
 ## Scenario manifest
 

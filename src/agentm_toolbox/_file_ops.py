@@ -348,7 +348,7 @@ class FileToolbox:
                 is_partial=is_partial,
                 content_hash=chash,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - surfaced to the model as a tool error
             return Result(text=f"Failed to read {path!r}: {exc}", is_error=True)
 
     # -- write --------------------------------------------------------------
@@ -605,9 +605,7 @@ class FileToolbox:
         edit_ranges = tuple(
             _span_line_range(original, start, end) for start, end in selected_spans
         )
-        coverage_error = self._check_edit_read_coverage(
-            path, read_state, edit_ranges
-        )
+        coverage_error = self._check_edit_read_coverage(path, read_state, edit_ranges)
         if coverage_error is not None:
             return coverage_error, None
         updated = (
@@ -665,7 +663,9 @@ class FileToolbox:
                 None,
             )
         end = min(end, total)
-        coverage_error = self._check_edit_read_coverage(path, read_state, ((start, end),))
+        coverage_error = self._check_edit_read_coverage(
+            path, read_state, ((start, end),)
+        )
         if coverage_error is not None:
             return coverage_error, None
         before = lines[: start - 1]

@@ -1,9 +1,8 @@
 # code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Kernel message data model.
 
-Implements the message types that flow through the agent loop, per
-``docs/refactor-abstract-inventory.md``: the data shape that crosses the LLM
-stream and tool-execution boundaries.
+Implements the message types that flow through the agent loop: the data shape
+that crosses the LLM stream and tool-execution boundaries.
 
 Design constraints:
 - Plain ``@dataclass(slots=True, frozen=True)`` — no pydantic, no langchain.
@@ -60,11 +59,14 @@ def freeze_json(value: object) -> JsonValue:
     raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
 
 
-def thaw_json(value: JsonValue) -> object:
+def thaw_json(value: object) -> object:
     """Recursively convert frozen JSON back to mutable containers.
 
     Inverse of :func:`freeze_json`: ``MappingProxyType`` → ``dict``,
-    ``tuple`` → ``list``.  Scalars pass through unchanged.
+    ``tuple`` → ``list``.  Scalars pass through unchanged. Accepts ``object``
+    (symmetric with ``freeze_json``) so callers holding untyped JSON payloads
+    — config fields, tool args — need no cast; non-container values pass
+    through unchanged.
     """
 
     if value is None or isinstance(value, (str, int, float, bool)):

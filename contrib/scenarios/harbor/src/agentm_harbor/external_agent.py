@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
+import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -20,12 +23,15 @@ from agentm import (
 )
 from agentm.config import DefaultSessionSpecResolver
 from agentm.control import SessionControlServer
+from agentm.core.abi.events import TurnCommittedEvent
 from agentm.core.abi.roles import (
     RESOURCE_WRITER,
     bind_environment_operations,
     bind_resource_store,
 )
 from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.store import SessionMeta, TrajectoryDiagnostic, TrajectoryStore
+from agentm.core.abi.trajectory import Turn
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.trajectory import resolve_trajectory_store_or_create
 from agentm_toolbox import (
@@ -200,6 +206,189 @@ def _fork_request(env: Mapping[str, str]) -> tuple[str, int] | None:
     return source_session_id, turn
 
 
+#: Diagnostic phase under which each committed turn records the sandbox
+#: checkpoint that existed when it ended. Two independent numbers describe one
+#: run -- an AgentM turn index and an ARL step -- and forking needs both. Their
+#: correspondence is knowable only while the run is happening, so it is written
+#: down then; a fork that had to guess it produced an agent whose history
+#: described a filesystem it was not given.
+_STEP_PHASE = "arl-checkpoint"
+
+
+def _arl_step(environment: BaseEnvironment) -> tuple[str, int] | None:
+    """The sandbox session and its newest checkpoint, when there is one."""
+    arl = getattr(environment, "arl", None)
+    session_id = getattr(arl, "session_id", None)
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    steps = getattr(arl, "steps", None)
+    if not isinstance(steps, list) or not steps:
+        return None
+    step_index = getattr(steps[-1], "step_index", None)
+    if not isinstance(step_index, int) or isinstance(step_index, bool):
+        return None
+    return session_id, step_index
+
+
+def _record_environment_steps(
+    session: AgentSession,
+    environment: BaseEnvironment,
+    store: TrajectoryStore,
+) -> None:
+    """Write down which sandbox checkpoint each turn ended at.
+
+    Costs one row per turn and buys the only thing that makes a two-sided fork
+    checkable: without it, ``AGENTM_FORK_TURN`` and ``fork_step`` are two
+    numbers from different counting systems that a person lines up by hand,
+    and lining them up wrong fails silently.
+    """
+
+    async def _on_committed(event: TurnCommittedEvent) -> None:
+        turn = event.turn
+        if turn is None:
+            return
+        current = _arl_step(environment)
+        if current is None:
+            return
+        arl_session_id, step_index = current
+        try:
+            await asyncio.to_thread(
+                store.append_diagnostic,
+                TrajectoryDiagnostic(
+                    id=uuid.uuid4().hex,
+                    session_id=session.session_id,
+                    timestamp=time.time(),
+                    level="info",
+                    source="agentm-harbor",
+                    phase=_STEP_PHASE,
+                    message=json.dumps({"arl_session_id": arl_session_id, "arl_step": step_index}),
+                    turn_index=turn.index,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - a lost mapping is not a lost run
+            logger.warning(
+                "agentm-external: could not record sandbox step for turn {}: {}",
+                turn.index,
+                exc,
+            )
+
+    session.on(TurnCommittedEvent.CHANNEL, _on_committed)
+
+
+async def _load_fork_prefix(
+    store: TrajectoryStore,
+    source_session_id: str,
+    fork_turn: int,
+) -> tuple[SessionMeta, list[Turn]]:
+    """The source's turns up to and including ``fork_turn``.
+
+    Both failures here are things an operator types by hand, so both say what
+    was asked for and what exists instead. Unwrapped, a mistyped turn arrives
+    as ``KeyError: 41`` from three layers down.
+    """
+    try:
+        return await asyncio.to_thread(store.load_prefix, source_session_id, fork_turn)
+    except KeyError as exc:
+        try:
+            _, turns = await asyncio.to_thread(store.load, source_session_id)
+        except KeyError:
+            raise ValueError(
+                f"no session {source_session_id} in this trajectory store -- "
+                "AGENTM_TRAJECTORY_DSN and AGENTM_TRAJECTORY_SCHEMA must name "
+                "the store the source run wrote to"
+            ) from exc
+        if not turns:
+            raise ValueError(
+                f"session {source_session_id} has no committed turns to fork from"
+            ) from exc
+        raise ValueError(
+            f"session {source_session_id} has no turn {fork_turn}; "
+            f"its committed turns run {turns[0].index}..{turns[-1].index}"
+        ) from exc
+
+
+def _check_environment_alignment(
+    store: TrajectoryStore,
+    environment: BaseEnvironment,
+    *,
+    source_session_id: str,
+    fork_turn: int,
+) -> None:
+    """Refuse a fork whose conversation and filesystem are from different moments.
+
+    The two halves are requested separately -- ``AGENTM_FORK_TURN`` here, and
+    ``fork_from``/``fork_step`` on the environment -- and nothing has connected
+    them until now. A mismatch does not fail: the run proceeds with an agent
+    that remembers writing files the sandbox never received, which reads as a
+    confused agent rather than as a bad launch.
+    """
+    arl = getattr(environment, "arl", None)
+    environment_source = getattr(arl, "parent_session_id", None)
+    environment_step = getattr(arl, "fork_step", None)
+    if not isinstance(environment_source, str) or not environment_source:
+        logger.warning(
+            "agentm-external: forking the trajectory of {} at turn {} into a "
+            "sandbox that was not forked -- the agent's history will describe "
+            "files this environment does not have",
+            source_session_id,
+            fork_turn,
+        )
+        return
+    if not isinstance(environment_step, int) or isinstance(environment_step, bool):
+        return
+
+    recorded = _recorded_step(store, source_session_id, fork_turn)
+    if recorded is None:
+        logger.warning(
+            "agentm-external: no recorded sandbox checkpoint for {} turn {}, so "
+            "its alignment with fork_step={} cannot be checked; the source run "
+            "predates step recording",
+            source_session_id,
+            fork_turn,
+            environment_step,
+        )
+        return
+    recorded_session_id, recorded_step = recorded
+    if recorded_session_id != environment_source:
+        raise ValueError(
+            f"fork mismatch: turn {fork_turn} of {source_session_id} was run in "
+            f"sandbox {recorded_session_id}, but the environment was forked from "
+            f"{environment_source}"
+        )
+    if recorded_step != environment_step:
+        raise ValueError(
+            f"fork mismatch: turn {fork_turn} of {source_session_id} ended at "
+            f"sandbox step {recorded_step}, but the environment was forked at "
+            f"step {environment_step} -- pass --ek fork_step={recorded_step}"
+        )
+
+
+def _recorded_step(
+    store: TrajectoryStore,
+    session_id: str,
+    turn_index: int,
+) -> tuple[str, int] | None:
+    """The sandbox checkpoint a turn ended at, as recorded while it ran."""
+    try:
+        diagnostics = store.list_diagnostics(session_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable log is not a mismatch
+        logger.warning("agentm-external: cannot read {} diagnostics: {}", session_id, exc)
+        return None
+    for diagnostic in reversed(diagnostics):
+        if diagnostic.phase != _STEP_PHASE or diagnostic.turn_index != turn_index:
+            continue
+        try:
+            payload = json.loads(diagnostic.message)
+        except ValueError as exc:
+            logger.warning("agentm-external: unreadable step record: {}", exc)
+            return None
+        arl_session_id = payload.get("arl_session_id")
+        arl_step = payload.get("arl_step")
+        if isinstance(arl_session_id, str) and isinstance(arl_step, int):
+            return arl_session_id, arl_step
+    return None
+
+
 def _sync_execution_metadata(
     context: AgentContext,
     environment: BaseEnvironment,
@@ -353,14 +542,24 @@ class ExternalAgentMAgent(BaseAgent):
                 )
             elif fork_request is not None:
                 source_session_id, fork_turn = fork_request
-                source_meta, source_turns = await asyncio.to_thread(
-                    trajectory.store.load_prefix,
+                source_meta, source_turns = await _load_fork_prefix(
+                    trajectory.store,
                     source_session_id,
                     fork_turn,
                 )
                 root_session_id = source_meta.config.get("root_session_id")
                 if not isinstance(root_session_id, str) or not root_session_id:
-                    raise ValueError("fork source metadata has no valid root_session_id")
+                    raise ValueError(
+                        f"session {source_session_id} cannot be forked: its stored "
+                        "metadata has no root_session_id, which happens when it was "
+                        "written by an SDK older than session metadata version 1"
+                    )
+                _check_environment_alignment(
+                    trajectory.store,
+                    environment,
+                    source_session_id=source_session_id,
+                    fork_turn=fork_turn,
+                )
                 # Built in one step, from a prefix that already ends at
                 # ``fork_turn`` -- ``load_prefix`` is inclusive of it.
                 #
@@ -382,6 +581,8 @@ class ExternalAgentMAgent(BaseAgent):
                         purpose="harbor-fork",
                         root_session_id=root_session_id,
                         parent_session_id=None,
+                        fork_source_session_id=source_session_id,
+                        fork_point=fork_turn,
                         initial_turns=source_turns,
                     ),
                     host_services=host_services,
@@ -411,6 +612,7 @@ class ExternalAgentMAgent(BaseAgent):
         )
         errors: list[BaseException] = []
         turns = session.get_turns()
+        _record_environment_steps(session, environment, trajectory.store)
         try:
             interrupt = SessionControlServer(session)
             await interrupt.start()

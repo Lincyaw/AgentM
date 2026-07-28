@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
 import math
+from collections.abc import Mapping, Sequence
 from typing import Final
 
 from agentm.core.abi.catalog import ActiveSetFingerprint
@@ -44,6 +44,11 @@ def session_meta_config(
         config["scenario"] = ctx.scenario
     if ctx.scenario_dir is not None:
         config["scenario_dir"] = ctx.scenario_dir
+    if ctx.fork_source_session_id is not None:
+        # Durable because the launcher's own record of it is not: a fork is
+        # otherwise indistinguishable in the store from a fresh run that
+        # happens to open with somebody else's turns.
+        config["fork_source_session_id"] = ctx.fork_source_session_id
     if resolved_spec is not None:
         config["resolved_spec_digest"] = resolved_spec_digest(resolved_spec)
         config["resolved_spec_provenance_json"] = _stable_json(
@@ -113,6 +118,8 @@ def context_from_session_meta(session_id: str, meta: SessionMeta) -> SessionCont
         purpose=meta.purpose,
         scenario=_config_str(config, "scenario"),
         scenario_dir=_config_str(config, "scenario_dir"),
+        fork_source_session_id=_config_str(config, "fork_source_session_id"),
+        fork_point=meta.fork_point,
     )
 
 
@@ -320,8 +327,8 @@ def _stable_json(value: object) -> str:
 
 
 __all__ = [
-    "ResumeIdentityError",
     "SESSION_METADATA_VERSION",
+    "ResumeIdentityError",
     "context_from_session_meta",
     "provider_identity_from_session_meta",
     "resolved_spec_digest",

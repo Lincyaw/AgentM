@@ -10,11 +10,11 @@ history is recoverable through the ``[Turn N]`` references consumed by the
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
 import hashlib
 import json
 import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import cast
 
 from loguru import logger
@@ -85,7 +85,6 @@ from agentm.core.lib.async_cancel import (
 )
 from agentm.core.lib.tokens import truncate_text_tokens
 from agentm.extensions import ExtensionManifest
-
 
 _SUMMARY_SYSTEM_PROMPT = (
     "You are a context compaction assistant for an AI agent session. "
@@ -265,7 +264,13 @@ class LlmCompactionPolicy(BindableContextPolicy):
 
     def bind(self, ctx: PolicyContext) -> None:
         self._session_id = ctx.session_id
-        self._parent_session_id = ctx.parent_session_id
+        # Inherited from whichever session this one continues, which for a fork
+        # is its source rather than a parent it deliberately does not have. Not
+        # having looked there, a forked run re-expanded the whole prefix it was
+        # handed and paid for a second summary of turns already summarised.
+        self._parent_session_id = (
+            self._api.ctx.fork_source_session_id or ctx.parent_session_id
+        )
         services = ctx.services
         if services is not None:
             resource_candidate = services.get(RESOURCE_STORE_SERVICE)
@@ -1381,11 +1386,11 @@ def _path_token(value: str) -> str:
 
 
 __all__ = [
+    "MANIFEST",
     "AgentSessionCompactor",
     "LlmCompactionConfig",
     "LlmCompactionPolicy",
     "LlmCompactionService",
-    "MANIFEST",
     "TrajectoryCompactionPublisher",
     "install",
 ]

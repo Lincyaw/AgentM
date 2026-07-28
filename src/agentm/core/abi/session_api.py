@@ -10,30 +10,30 @@ loader.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import hashlib
+import re
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-import hashlib
 from pathlib import Path
-import re
-from typing import Callable, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
+from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.cancel import CancelReason, CancelSignal
+from agentm.core.abi.codec import TriggerCodec
+from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
-from agentm.core.abi.stream import Model, StreamFn
-from agentm.core.abi.tool import Tool
 from agentm.core.abi.provider import (
     ProviderConfig,
     ProviderSessionIdentity,
 )
-from agentm.core.abi.bus import EventBus, Handler
-from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.store import (
     TrajectoryStore,
 )
-from agentm.core.abi.trajectory import Turn
-from agentm.core.abi.codec import TriggerCodec
+from agentm.core.abi.stream import Model, StreamFn
+from agentm.core.abi.tool import Tool
+from agentm.core.abi.trajectory import Turn, TurnRef
 from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer
 
 Unsubscribe = Callable[[], None]
@@ -76,7 +76,7 @@ class ExtensionSource:
             return self.location
         assert self.digest is not None
         identity = hashlib.sha256(
-            f"{self.location}\0{self.digest}".encode("utf-8")
+            f"{self.location}\0{self.digest}".encode()
         ).hexdigest()
         return f"_agentm_source_{identity}"
 
@@ -105,7 +105,7 @@ class ExtensionSpec:
         cls,
         module: str,
         config: Mapping[str, JsonValue] | None = None,
-    ) -> "ExtensionSpec":
+    ) -> ExtensionSpec:
         return cls(
             source=ExtensionSource(kind="module", location=module),
             config={} if config is None else config,
@@ -118,7 +118,7 @@ class ExtensionSpec:
         *,
         digest: str,
         config: Mapping[str, JsonValue] | None = None,
-    ) -> "ExtensionSpec":
+    ) -> ExtensionSpec:
         return cls(
             source=ExtensionSource(
                 kind="file",
@@ -132,7 +132,7 @@ class ExtensionSpec:
     def module_path(self) -> str:
         return self.source.module_name
 
-    def with_config(self, config: Mapping[str, JsonValue]) -> "ExtensionSpec":
+    def with_config(self, config: Mapping[str, JsonValue]) -> ExtensionSpec:
         return ExtensionSpec(source=self.source, config=config)
 
 
@@ -247,6 +247,14 @@ class AgentSessionConfig:
     session_id: str | None = None
     root_session_id: str | None = None
     parent_session_id: str | None = None
+    #: The session this run continues, and the turn it continues from, when it
+    #: was built from another session's prefix. Separate from
+    #: ``parent_session_id`` on purpose: a fork is the same run under a new id,
+    #: while a parent makes it somebody's subagent -- and every atom that asks
+    #: "am I a subagent" reads the parent. Recorded so the lineage survives in
+    #: the store rather than only in whatever launched the run.
+    fork_source_session_id: str | None = None
+    fork_point: TurnRef | None = None
     cancel_signal: CancelSignal | None = None
     parent_cancellation: ChildCancellationMode = "inherit"
 
@@ -293,6 +301,11 @@ class SessionContext:
     session_id: str = ""
     root_session_id: str = ""
     parent_session_id: str | None = None
+    #: Where this run was forked from, when it was. Not inherited by children:
+    #: a subagent spawned inside a forked run is a child of that run, not of
+    #: what the run was forked from.
+    fork_source_session_id: str | None = None
+    fork_point: TurnRef | None = None
     depth: int = 0
     cwd: str = ""
     purpose: str = "root"
@@ -467,7 +480,7 @@ class AtomAPI(Protocol):
         extra_services: ServiceRegistry | None = None,
         cancel_signal: CancelSignal | None = None,
         parent_cancellation: ChildCancellationMode = "inherit",
-    ) -> "SpawnedSession":
+    ) -> SpawnedSession:
         """Spawn a lightweight child inheriting parent's config.
 
         Only override what you need — everything else inherits from
@@ -478,7 +491,7 @@ class AtomAPI(Protocol):
     async def spawn_child_session(
         self,
         config: AgentSessionConfig,
-    ) -> "SpawnedSession":
+    ) -> SpawnedSession:
         """Spawn a fully-constructed child session from config.
 
         Goes through the factory pipeline: resolves scenario, loads
@@ -575,10 +588,11 @@ class SpawnedSession(Protocol):
 
 
 __all__ = [
+    "SESSION_CONFIG_PRECEDENCE",
     "AgentSessionConfig",
     "AtomAPI",
-    "ConfigSource",
     "ChildCancellationMode",
+    "ConfigSource",
     "ConfigValueProvenance",
     "ExtensionInput",
     "ExtensionSource",
@@ -588,10 +602,9 @@ __all__ = [
     "ResolvedSessionSpec",
     "ScenarioLoader",
     "ScenarioSpec",
-    "SessionResult",
-    "SESSION_CONFIG_PRECEDENCE",
-    "SessionSpecResolver",
     "SessionContext",
+    "SessionResult",
+    "SessionSpecResolver",
     "SpawnedSession",
     "Unsubscribe",
     "normalize_extension_spec",

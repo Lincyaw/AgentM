@@ -128,6 +128,16 @@ def build_prompt(
             lines += [f"The agent built: {diagnosis.agent_idea}", ""]
         if diagnosis.mechanism:
             lines += [f"Why that is wrong: {diagnosis.mechanism}", ""]
+        if diagnosis.unasked_question:
+            lines += [
+                f"The question nobody asked: {diagnosis.unasked_question}",
+                "",
+            ]
+        if diagnosis.discriminating_answer:
+            lines += [
+                f"What asking it would have shown: {diagnosis.discriminating_answer}",
+                "",
+            ]
         if diagnosis.lesson:
             lines += [f"What was thought to carry: {diagnosis.lesson}", ""]
         if diagnosis.cause_class:
@@ -145,7 +155,13 @@ def build_prompt(
             "Return the merged set. A note that would fit an unrelated "
             "repository unchanged does not belong here; a note about one of "
             "these defects rather than about the condition that hid it does "
-            "not either."
+            "not either.\n\n"
+            "The unasked questions are your best material. They are phrased "
+            "without hindsight on purpose, so a reviewer can ask one before "
+            "knowing the answer -- which is what a reviewer needs and a "
+            "statement of the defect is not. Where one generalises past the "
+            "case it came from, a note that hands it over is worth more than "
+            "a note that hands over what it revealed."
         )
     return "\n".join(lines)
 

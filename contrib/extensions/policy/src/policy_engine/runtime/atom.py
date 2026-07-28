@@ -164,6 +164,14 @@ _SUBMIT_DESCRIPTION = (
 _FINISH_REMINDER = "finish-reminder"
 _MAX_FINISH_REMINDERS = 2
 
+#: Enough of the exit contract's opening to recognise it in a restored turn,
+#: taken from the renderer itself so the two cannot drift apart.
+_FINISH_REMINDER_MARK = render_finish_reminder().split(".", 1)[0]
+
+#: What a restored interruption is charged to when the item that paid for it
+#: cannot be named — a reviewer's finding quotes the reviewer, not the item.
+_RESTORED_INTERVENTION = "restored-intervention"
+
 
 def _interventions_enabled() -> bool:
     value = os.environ.get("AGENTM_CHECKLIST_WATCH_ENABLED", "")
@@ -600,49 +608,127 @@ class _Runtime:
         """Rebuild what a fork does not carry, from the trajectory that does.
 
         Atom state is memory, so a session forked mid-run starts with an empty
-        event log, no record of which checks already fired, and no tags — and
-        the acceptance reviewer would then read an empty run. All three are
-        already durable: turns in the trajectory, fired checks in each turn's
-        injected messages, tags in policy.turn_annotations under the session
-        this one was forked from.
+        event log, nothing spent, no memory of what it wrote, and no tags — and
+        the acceptance reviewer would then read an empty run. All of it is
+        already durable: turns in the trajectory, delivered checks in each
+        turn's injected messages, tags in policy.turn_annotations under the
+        sessions this one descends from.
+
+        One kind of firing leaves nothing to find. A review that looked and
+        accepted spends from the budget and injects no message, so it cannot be
+        charged back here, and a forked run's allowance is that many
+        interruptions richer than the source's was.
         """
         for turn in self.api.get_turns():
             calls = [
-                {
-                    "name": record.call.name,
-                    "arguments": dict(record.call.arguments),
-                    "result_text": _content_text(record.result, 1500),
-                    "is_error": record.result.is_error,
-                }
+                _ToolCallRecord(
+                    name=record.call.name,
+                    arguments=dict(record.call.arguments),
+                    result_text=_content_text(record.result, 1500),
+                    is_error=record.result.is_error,
+                )
                 for record in turn.tool_results
             ]
             self._turns.append(
-                render_turn(turn.index, _content_text(turn.response, 3000), calls)
+                render_turn(
+                    turn.index,
+                    _content_text(turn.response, 3000),
+                    [
+                        {
+                            "name": call.name,
+                            "arguments": dict(call.arguments),
+                            "result_text": call.result_text,
+                            "is_error": call.is_error,
+                        }
+                        for call in calls
+                    ],
+                )
             )
-            self._concerns.extend(
-                _content_text(message, 4000) for message in turn.outcome.injected
-            )
+            # Replayed through the detector rather than skipped: it answers
+            # whether an edit reworks something this run wrote, and the writes
+            # it never saw are missing from every later comparison. Skipped,
+            # the first rework after a fork read as first-time work — and the
+            # turns just after a fork are the ones the fork exists to watch.
+            self._revisions.observe(turn.index, calls)
+            for message in turn.outcome.injected:
+                text = _content_text(message, 4000)
+                self._concerns.append(text)
+                self._recharge(text)
         self._tagged = len(self._turns)
         self.turn = len(self._turns)
         self._restore_tags()
         if self._turns:
             logger.info(
-                "policy_engine: restored {} turn(s), {} concern(s), {} tag(s)",
+                "policy_engine: restored {} turn(s), {} concern(s), {} tag(s), "
+                "{}/{} of the budget already spent",
                 len(self._turns),
                 len(self._concerns),
                 len(self._active_tags),
+                self.triggers.budget.spent if self.triggers else 0,
+                self.triggers.budget.total if self.triggers else 0,
             )
 
+    def _recharge(self, message: str) -> None:
+        """Charge the budget for one intervention the source run delivered.
+
+        The pool and each item's own fire limit are memory, so a fork that did
+        not rebuild them started on a fresh full allowance and let an item with
+        ``max_fires: 1`` say the same thing a second time — to an agent that
+        had already answered it. What went out is recoverable because every
+        check carries the item's own words.
+
+        A finding is in the reviewer's words rather than an item's, so it
+        cannot name the item that paid for it. It is still charged to the pool:
+        the agent was interrupted, and the pool is what rations that.
+        """
+        if self.triggers is None:
+            return
+        for item_id, item in self.triggers.items.items():
+            if item.check and item.check in message:
+                self.triggers.budget.spend(item_id)
+                return
+        if _FINISH_REMINDER_MARK and _FINISH_REMINDER_MARK in message:
+            self.triggers.budget.spend(_FINISH_REMINDER)
+            return
+        self.triggers.budget.spend(_RESTORED_INTERVENTION)
+
     def _restore_tags(self) -> None:
-        """Tags carry by root session: a fork is the same run under a new id."""
+        """Tags carry down the fork chain: a fork is the same run under a new id.
+
+        The chain rather than the root: A→B→C reaches A and C by root alone,
+        and everything B learned in between belongs to C as much as A's does.
+        Sessions that were never forked have a chain of one, and the root stays
+        in the seed set for runs recorded before the source was written down.
+        """
         if self._pg is None:
             return
+        schema = self._schema()
+        ids = [self.session_id, self.api.ctx.root_session_id]
+        if schema:
+            rows = self._pg.query(
+                "WITH RECURSIVE ancestry(id, source_id) AS ("
+                f"  SELECT id, meta_json->'config'->>'fork_source_session_id' "
+                f"  FROM {schema}.agentm_trajectory_sessions "
+                "   WHERE id = %(session_id)s"
+                "  UNION ALL"
+                f"  SELECT s.id, s.meta_json->'config'->>'fork_source_session_id' "
+                f"  FROM {schema}.agentm_trajectory_sessions s "
+                "   JOIN ancestry a ON s.id = a.source_id"
+                ") SELECT id FROM ancestry"
+            )
+            ids.extend(str(row[0]) for row in rows if row[0])
         rows = self._pg.query(
             "SELECT DISTINCT unnest(tags) FROM policy.turn_annotations "
             "WHERE session_id = ANY(%(ids)s)",
-            {"ids": [self.session_id, self.api.ctx.root_session_id]},
+            {"ids": sorted(set(ids))},
         )
         self._active_tags.update(str(row[0]) for row in rows if row[0])
+
+    def _schema(self) -> str:
+        """The trajectory schema this run writes to, or empty when unset."""
+        return self.config.trajectory_schema or os.environ.get(
+            "AGENTM_TRAJECTORY_SCHEMA", ""
+        )
 
     def _resolve_tagger(self) -> TaggerConversation | None:
         """The tagger, once a provider exists to run it on.

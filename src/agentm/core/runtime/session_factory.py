@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import uuid
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -21,10 +21,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from agentm.core.abi.bus import EventBus
-from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.cancel import CompositeCancelSignal
-from agentm.core.abi.codec import CodecRegistry
-from agentm.core.abi.context import ContextPolicy
+from agentm.core.abi.cancel import CancelSignal, CompositeCancelSignal
 from agentm.core.abi.catalog import (
     ActiveSetFingerprint,
     AtomActivation,
@@ -32,8 +29,9 @@ from agentm.core.abi.catalog import (
     ResourceVersion,
     VersionedResourceStore,
 )
+from agentm.core.abi.codec import CodecRegistry
+from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.errors import ExtensionLoadError
-from agentm.core.abi.messages import JsonValue, freeze_json
 from agentm.core.abi.manifest import (
     AtomInstallPriority,
     ExtensionManifest,
@@ -41,6 +39,7 @@ from agentm.core.abi.manifest import (
     provided_capability_keys,
     requirement_key,
 )
+from agentm.core.abi.messages import JsonValue, freeze_json
 from agentm.core.abi.provider import ProviderSessionIdentity
 from agentm.core.abi.roles import (
     ACTIVE_SET_FINGERPRINT_ROLE,
@@ -67,7 +66,7 @@ from agentm.core.abi.session_api import (
     SessionContext,
     normalize_extension_spec,
 )
-from agentm.core.abi.store import SessionMeta, TrajectoryStore
+from agentm.core.abi.store import SessionMeta, TrajectoryNodeQuery, TrajectoryStore
 from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import (
@@ -79,6 +78,9 @@ from agentm.core.abi.trajectory import (
 )
 from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import TriggerRenderer
+from agentm.core.lib.async_cancel import await_known_outcome
+from agentm.core.lib.trajectory_nodes import turns_to_nodes
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
 from agentm.core.runtime.catalog import (
     InMemoryAtomCatalog,
     InMemoryVersionedResourceStore,
@@ -93,9 +95,6 @@ from agentm.core.runtime.session import Session
 from agentm.core.runtime.session_core import SessionRuntimeConfig
 from agentm.core.runtime.session_meta import session_meta_config
 from agentm.core.runtime.trajectory import Trajectory
-from agentm.core.lib.async_cancel import await_known_outcome
-from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
-from agentm.core.lib.trajectory_nodes import turns_to_nodes
 
 if TYPE_CHECKING:
     from agentm.core.abi.session_api import AgentSessionConfig
@@ -336,6 +335,60 @@ def _get_scenario_loader(services: ServiceRegistry | None) -> ScenarioLoader | N
     return None
 
 
+async def _cold_fork_head(
+    store: TrajectoryStore | None,
+    *,
+    source_session_id: str,
+    fork_point: TurnRef,
+    ctx: SessionContext,
+) -> TrajectoryHead | None:
+    """A head anchored to the source's node at the fork point.
+
+    A fork built only from a prefix of turns is a run with no logical
+    predecessor: node-level readers see it beginning from nothing, and anything
+    that inherits state across a fork -- compaction being the one that exists
+    today -- has no source to inherit from. The in-process fork sets this
+    anchor; a fork assembled from the store had no way to, so this builds the
+    same one from what the store holds.
+
+    ``None`` when the source's nodes cannot be resolved, which is the previous
+    behaviour: an anchor that cannot be established must not stop the run.
+    """
+    if store is None:
+        return None
+    try:
+        nodes = await asyncio.to_thread(
+            store.query_nodes,
+            TrajectoryNodeQuery(
+                session_id=source_session_id,
+                turn_index=fork_point if isinstance(fork_point, int) else None,
+                turn_id=fork_point if isinstance(fork_point, str) else None,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - lineage is not worth a failed run
+        logger.warning(
+            "fork: no node index for {} at {}: {}", source_session_id, fork_point, exc
+        )
+        return None
+    if not nodes:
+        logger.warning(
+            "fork: {} has no node at {}; the fork will record no logical parent",
+            source_session_id,
+            fork_point,
+        )
+        return None
+    return TrajectoryHead(
+        session_id=ctx.session_id,
+        head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+        branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        root_session_id=ctx.root_session_id,
+        parent_session_id=source_session_id,
+        logical_parent_id=nodes[-1].id,
+        status="active",
+        updated_at=time.time(),
+    )
+
+
 async def _ensure_store_session(
     store: TrajectoryStore | None,
     *,
@@ -406,7 +459,7 @@ def _register_default_query_store(
     )
 
 
-def _resolve_session_spec(config: "AgentSessionConfig") -> ResolvedSessionSpec | None:
+def _resolve_session_spec(config: AgentSessionConfig) -> ResolvedSessionSpec | None:
     resolver = config.spec_resolver
     if resolver is None:
         return None
@@ -415,7 +468,7 @@ def _resolve_session_spec(config: "AgentSessionConfig") -> ResolvedSessionSpec |
 
 def _compose_config_services(
     services: ServiceRegistry,
-    config: "AgentSessionConfig",
+    config: AgentSessionConfig,
 ) -> ResolvedSessionSpec | None:
     """Register the non-boundary AgentSessionConfig services shared by root/child.
 
@@ -563,6 +616,7 @@ class SessionBuildConfig:
     initial_turns: list[Turn] | None = None
     initial_head: TrajectoryHead | None = None
     fork_point: TurnRef | None = None
+    fork_source_session_id: str | None = None
     tools: list[Tool] | None = None
     context_policies: list[ContextPolicy] | None = None
     trigger_renderers: dict[str, TriggerRenderer] | None = None
@@ -591,7 +645,7 @@ async def _cleanup_failed_session(
 ) -> None:
     try:
         await session.shutdown()
-    except BaseException as cleanup_error:
+    except BaseException as cleanup_error:  # noqa: BLE001 - re-raised with the creation error
         raise BaseExceptionGroup(
             "session creation and cleanup failed",
             (creation_error, cleanup_error),
@@ -636,6 +690,8 @@ async def create_session(
             session_id=resolved_session_id,
             root_session_id=resolved_root_id,
             parent_session_id=config.parent_session_id,
+            fork_source_session_id=config.fork_source_session_id,
+            fork_point=config.fork_point,
             cwd=config.cwd or "",
             purpose=config.purpose,
             scenario=scenario_name,
@@ -643,6 +699,19 @@ async def create_session(
         )
     else:
         ctx = config.session_context
+
+    initial_head = config.initial_head
+    if (
+        initial_head is None
+        and config.fork_source_session_id is not None
+        and config.fork_point is not None
+    ):
+        initial_head = await _cold_fork_head(
+            config.store,
+            source_session_id=config.fork_source_session_id,
+            fork_point=config.fork_point,
+            ctx=ctx,
+        )
 
     session = session_type(
         SessionRuntimeConfig(
@@ -708,7 +777,7 @@ async def create_session(
                 ),
             ),
             initial_turns=config.initial_turns or (),
-            initial_head=config.initial_head,
+            initial_head=initial_head,
             root_session_id=ctx.root_session_id,
             parent_session_id=ctx.parent_session_id,
             trigger_renderers=session.trigger_renderers,
@@ -721,7 +790,7 @@ async def create_session(
 
 
 async def create_from_config(
-    config: "AgentSessionConfig",
+    config: AgentSessionConfig,
     *,
     restored_context: SessionContext | None = None,
     restored_provider_identity: ProviderSessionIdentity | None = None,
@@ -774,6 +843,8 @@ async def create_from_config(
             session_id=config.session_id,
             root_session_id=config.root_session_id,
             parent_session_id=config.parent_session_id,
+            fork_source_session_id=config.fork_source_session_id,
+            fork_point=config.fork_point,
             bus=config.bus,
             initial_turns=config.initial_turns,
             services=services,
@@ -798,7 +869,7 @@ async def create_from_config(
 async def create_child_session(
     *,
     parent: Session,
-    config: "AgentSessionConfig",
+    config: AgentSessionConfig,
 ) -> Session:
     """Create a child session through the same SDK factory pipeline."""
 

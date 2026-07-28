@@ -1,46 +1,40 @@
 # code-health: ignore-file[AM025] -- replaying untyped trajectory payloads
-"""Policy engine CLI — the evolution loop.
+"""``python -m policy_engine`` — the loop, plus two offline maintenance jobs.
 
-Commands map to steps of the evolution loop:
+The evolution loop lives under ``loop`` (collect, diagnose, abstract, compile,
+replay, select, install), one artifact per stage; see ``loop --help``. What
+remains at the top level is maintenance that runs against recorded state rather
+than a batch:
 
-    compile     ② when_notes → trigger expressions + vocabulary
-    deploy      ③ regenerate tagger prompt from vocabulary (automatic)
-    replay      ④ replay one session through the live gating logic
-    evaluate    ④ replay all sessions → per-item fire rates + gate stats
-    select      ⑤ prune low-fitness items + unused predicates
-    evolve      run the full loop: compile → evaluate → select
+    tag      replay recorded sessions through the live tagger, writing
+             ``policy.turn_annotations`` — for judging a vocabulary or prompt
+             change on real runs without spending a sandbox
+    prune    retire low-fitness checklist items and the predicates nothing
+             references any more
 
-``replay``/``evaluate`` mirror the runtime's suppression gates, so a change to
-``max_injections`` can be backtested against recorded trajectories before it
-ships. Stop-checkpoint checks now run through the ``submit`` tool and cannot be
-replayed from trajectories recorded before that tool existed.
-
-Step ① (mine) lives in the pattern_miner scenario.
-Step ⑥ (diversify) is part of the miner's distill step.
+The old ``replay``/``evaluate`` simulators are gone: they modelled the
+injection path without preconditions, so they structurally could not evaluate
+what ``loop compile`` produces. ``loop check-gates`` asks the same question
+against real recorded sessions, and ``loop replay`` measures the real thing.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import typer
 
 from agentm.core.abi import ProviderConfig
-from policy_engine.runtime.triggers import ChecklistItem, TriggerEngine, load_items
 from policy_engine.shared.pg_query import PgQuerySource
 
 app = typer.Typer(
     name="policy_engine",
     add_completion=False,
     no_args_is_help=True,
-    help="Policy engine evolution loop.",
+    help="Policy engine: the evolution loop, plus offline tagging and pruning.",
 )
 
-# The learning loop, as addressable stages: collect, diagnose, abstract,
-# compile, replay, select. Registered as a sub-app so each stage is runnable on
-# its own for debugging and `loop run` chains the identical functions.
 from .loop.cli import app as _loop_app
 
 app.add_typer(_loop_app, name="loop")
@@ -49,135 +43,24 @@ _PKG = Path(__file__).parent / "runtime"
 DEFAULT_CHECKLIST = str(_PKG / "checklist.yaml")
 DEFAULT_VOCAB = str(_PKG / "vocabulary.yaml")
 
-# Defaults must mirror PolicyEngineConfig so a replay reproduces what the live
-# atom would have done.
-CHECKLIST_OPT = typer.Option(DEFAULT_CHECKLIST, "--checklist")
-VOCAB_OPT = typer.Option(DEFAULT_VOCAB, "--vocab")
 SCHEMA_OPT = typer.Option("harbor_live", "--schema")
-MODEL_OPT = typer.Option(None, "--model", help="model profile from config.toml")
-MAX_INJECTIONS_OPT = typer.Option(5, "--max-injections")
-MAX_STOP_CHECKS_OPT = typer.Option(3, "--max-stop-checks")
 
 
-@dataclass(slots=True)
-class _Emission:
-    turn_index: int
-    stopping: bool
-    item_id: str
+def _fork_point(source: PgQuerySource, schema: str) -> int:
+    """The last turn this session inherited from a fork source, or -1.
 
-
-@dataclass(slots=True)
-class _Suppression:
-    turn_index: int
-    reason: str
-
-
-def _load_turns(
-    source: PgQuerySource, schema: str
-) -> list[tuple[int, bool, frozenset[str]]]:
-    """Return (turn_index, has_tool_calls, tags) per turn, in order."""
-    rows = source.query(
-        "SELECT t.turn_index, "
-        "  EXISTS (SELECT 1 FROM jsonb_array_elements("
-        "    coalesce(t.turn_json->'response'->'content', '[]'::jsonb)) c "
-        "    WHERE c->>'type' = 'tool_call') AS has_tools, "
-        "  coalesce(a.tags, ARRAY[]::text[]) AS tags "
-        f"FROM {schema}.agentm_trajectory_turns t "
-        "LEFT JOIN policy.turn_annotations a "
-        "  ON a.session_id = t.session_id AND a.turn_index = t.turn_index "
-        "WHERE t.session_id = %(session_id)s ORDER BY t.turn_index"
-    )
-    return [(int(r[0]), bool(r[1]), frozenset(r[2] or ())) for r in rows]
-
-
-def _simulate(
-    turns: list[tuple[int, bool, frozenset[str]]],
-    items: dict[str, ChecklistItem],
-    *,
-    max_injections: int,
-    max_stop_checks: int,
-) -> tuple[list[_Emission], list[_Suppression]]:
-    """Replay the mid-work injection path over a recorded session.
-
-    Faithful for continuous checks: those still fire from ``_on_decide`` on the
-    same condition, so replaying recorded tags reproduces them exactly.
-
-    Not faithful for stop-checkpoint checks. Those are now raised by the
-    ``submit`` tool, and no recorded trajectory contains a submit call — the
-    agent had no such tool. What is reported instead is which stop-checkpoint
-    items were *matching* the first time the agent ended a turn without tool
-    calls: an upper bound on what a first submit would have been rejected on,
-    not a prediction of how the session would then have gone.
+    ``-1`` rather than ``None`` so callers can compare against it without a
+    branch: no fork means nothing was inherited, and every turn index is above
+    it.
     """
-    engine = TriggerEngine(items=items)
-    emissions: list[_Emission] = []
-    pending: list[_Suppression] = []
-    active: set[str] = set()
-    injections = 0
-    first_stop_seen = False
-
-    for turn_index, has_tools, tags in turns:
-        active.update(tags)
-        frozen = frozenset(active)
-
-        if not has_tools:
-            if not first_stop_seen:
-                first_stop_seen = True
-                for _ in range(max_stop_checks):
-                    item = engine.next_triggered(stopping=True, active_tags=frozen)
-                    if item is None:
-                        break
-                    pending.append(_Suppression(turn_index, item.item_id))
-            continue
-
-        if injections >= max_injections:
-            continue
-        item = engine.next_triggered(stopping=False, active_tags=frozen)
-        if item is not None:
-            injections += 1
-            emissions.append(_Emission(turn_index, False, item.item_id))
-
-    return emissions, pending
-
-
-@app.command("replay")
-def cmd_replay(
-    dsn: str,
-    session_id: str,
-    schema: str = SCHEMA_OPT,
-    checklist: str = CHECKLIST_OPT,
-    max_injections: int = MAX_INJECTIONS_OPT,
-    max_stop_checks: int = MAX_STOP_CHECKS_OPT,
-) -> None:
-    """Replay one session through the live gating logic."""
-    items = load_items(Path(checklist))
-    source = PgQuerySource(dsn, session_id)
-    turns = _load_turns(source, schema)
-    source.close()
-
-    if not turns:
-        print(f"No turns for session {session_id} in schema {schema}")
-        raise typer.Exit(code=1)
-
-    emissions, suppressions = _simulate(
-        turns,
-        items,
-        max_injections=max_injections,
-        max_stop_checks=max_stop_checks,
+    rows = source.query(
+        f"SELECT meta_json->>'fork_point' FROM {schema}.agentm_trajectory_sessions "
+        "WHERE id = %(session_id)s"
     )
-
-    tags = sorted({t for _, _, ts in turns for t in ts})
-    print(f"Session: {session_id}  ({len(turns)} turns)")
-    print(f"Active tags: {tags}")
-
-    print(f"\n=== Injections ({len(emissions)}) ===")
-    for e in emissions:
-        kind = "stop" if e.stopping else "continuous"
-        print(f"  t{e.turn_index:<4} [{kind:10s}] {e.item_id}")
-
-    print(f"\n=== Would be raised at first submit ({len(suppressions)}) ===")
-    for s in suppressions:
-        print(f"  t{s.turn_index:<4} {s.reason}")
+    if not rows or rows[0][0] is None:
+        return -1
+    raw = str(rows[0][0])
+    return int(raw) if raw.isdigit() else -1
 
 
 def _list_sessions(dsn: str, schema: str) -> list[str]:
@@ -198,7 +81,9 @@ def _list_sessions(dsn: str, schema: str) -> list[str]:
 def cmd_tag(
     dsn: str,
     schema: str = SCHEMA_OPT,
-    model: str | None = MODEL_OPT,
+    model: str | None = typer.Option(
+        None, "--model", help="model profile from config.toml"
+    ),
     force: bool = typer.Option(False, "--force", help="re-tag already tagged sessions"),
     interval: int = typer.Option(5, "--interval", help="turns per tagger call"),
 ) -> None:
@@ -270,10 +155,17 @@ async def _tag_sessions(
             source.close()
             continue
 
+        # A fork is stored holding a copy of its source's prefix, so those
+        # turns are in the store under both ids. Tagging both copies pays the
+        # model twice for one stretch of work and writes a second annotation
+        # row per turn; the runtime reads tags down the fork chain, so the
+        # copy earns nothing either way.
         turns = source.query(
             f"SELECT turn_index, turn_json "
             f"FROM {schema}.agentm_trajectory_turns "
-            "WHERE session_id = %(session_id)s ORDER BY turn_index"
+            "WHERE session_id = %(session_id)s "
+            "  AND turn_index > %(inherited_through)s ORDER BY turn_index",
+            {"inherited_through": _fork_point(source, schema)},
         )
         conversation = TaggerConversation(
             session_id=sid,
@@ -324,8 +216,9 @@ def _turn_for_tagger(
 ) -> tuple[str, list[dict[str, object]], str]:
     """Recover (assistant_text, tool_calls, task_text) from a stored turn.
 
-    Mirrors what the live atom collects from ToolResultEvent, so an offline
-    replay renders identically to a live run.
+    The dict shape and the rendering both come from ``runtime.record``; what
+    lives here is only the walk over raw ``turn_json``, which a live session
+    never has to do.
     """
     if not isinstance(turn_json, dict):
         return "", [], ""
@@ -371,72 +264,16 @@ def _turn_for_tagger(
     return "\n".join(assistant_parts), tool_calls, task_text
 
 
-@app.command("evaluate")
-def cmd_evaluate(
-    dsn: str,
-    schema: str = SCHEMA_OPT,
-    checklist: str = CHECKLIST_OPT,
-    max_injections: int = MAX_INJECTIONS_OPT,
-    max_stop_checks: int = MAX_STOP_CHECKS_OPT,
-) -> None:
-    """Replay all sessions, report per-item fire rates and gate stats."""
-    items = load_items(Path(checklist))
-    session_ids = _list_sessions(dsn, schema)
-    print(f"Evaluating {len(session_ids)} sessions against {len(items)} items")
-
-    fires: dict[str, int] = {item_id: 0 for item_id in items}
-    at_submit: dict[str, int] = {}
-    total_injects = 0
-    total_at_submit = 0
-    scored = 0
-
-    for sid in session_ids:
-        source = PgQuerySource(dsn, sid)
-        turns = _load_turns(source, schema)
-        source.close()
-        if not turns:
-            continue
-        scored += 1
-        emissions, pending = _simulate(
-            turns,
-            items,
-            max_injections=max_injections,
-            max_stop_checks=max_stop_checks,
-        )
-        for e in emissions:
-            total_injects += 1
-            fires[e.item_id] = fires.get(e.item_id, 0) + 1
-        for s in pending:
-            total_at_submit += 1
-            at_submit[s.reason] = at_submit.get(s.reason, 0) + 1
-
-    print(f"\n=== Over {scored} sessions ===")
-    print(f"  mid-work injections      {total_injects}")
-    print(f"  raised at first submit   {total_at_submit}")
-
-    print("\n=== Mid-work item fire rates ===")
-    for item_id, count in sorted(fires.items(), key=lambda x: -x[1]):
-        if not count:
-            continue
-        pct = 100.0 * count / max(scored, 1)
-        print(f"  {item_id:40s} {count:3d}/{scored} ({pct:.0f}%)")
-
-    print("\n=== Items raised at first submit ===")
-    for item_id, count in sorted(at_submit.items(), key=lambda x: -x[1]):
-        pct = 100.0 * count / max(scored, 1)
-        print(f"  {item_id:40s} {count:3d}/{scored} ({pct:.0f}%)")
-
-
-@app.command("select")
-def cmd_select(
-    checklist: str = CHECKLIST_OPT,
-    vocab_path_arg: str = VOCAB_OPT,
-    fitness_file: str | None = typer.Option(
-        None, "--fitness", help="JSON file: {item_id: score}"
+@app.command("prune")
+def cmd_prune(
+    checklist: str = typer.Option(DEFAULT_CHECKLIST, "--checklist"),
+    vocab_path_arg: str = typer.Option(DEFAULT_VOCAB, "--vocab"),
+    fitness_file: str = typer.Option(
+        ..., "--fitness", help="JSON file: {item_id: score}"
     ),
     threshold: float = typer.Option(0.1, "--threshold"),
 ) -> None:
-    """Prune low-fitness items and unused predicates."""
+    """Retire low-fitness items, then the predicates nothing references."""
     from policy_engine.shared.vocabulary import (
         load_vocabulary,
         prune_items,
@@ -447,10 +284,9 @@ def cmd_select(
     checklist_path = Path(checklist)
     vocab_path = Path(vocab_path_arg)
 
-    # For now, fitness is manual: read from a JSON file
-    fitness_path = Path(fitness_file) if fitness_file else None
-    if fitness_path is None or not fitness_path.is_file():
-        print("No fitness data; use --fitness <path.json> with {item_id: score}")
+    fitness_path = Path(fitness_file)
+    if not fitness_path.is_file():
+        print(f"no fitness file at {fitness_path}")
         raise typer.Exit(code=1)
     fitness = json.loads(fitness_path.read_text())
 
