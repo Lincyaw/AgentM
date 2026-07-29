@@ -22,6 +22,7 @@ from agentm.core.abi.messages import (
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
+    thaw_json,
 )
 from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
@@ -540,7 +541,7 @@ def build_trace_snapshot(
                             "tool_call",
                             title=f"CALL {block.name}",
                             content=json.dumps(
-                                dict(block.arguments),
+                                thaw_json(block.arguments),
                                 ensure_ascii=False,
                                 indent=2,
                             ),
@@ -548,7 +549,7 @@ def build_trace_snapshot(
                             tool_name=block.name,
                             metadata={
                                 "tool_call_id": block.id,
-                                "arguments": dict(block.arguments),
+                                "arguments": thaw_json(block.arguments),
                             },
                         )
                     )
