@@ -6,23 +6,23 @@ The loop budget is a policy, so it lives as an atom rather than a privileged
 manifest field: a scenario that wants a hard ceiling lists this atom with
 ``config``, exactly like any other capability.
 
-The optional ``reminder`` sub-config turns on budget-aware, cache-friendly
-runway warnings. When it is omitted the atom only sets the budget and stays
-silent. When present, the atom injects a short reminder at the tail of the
-last message as the agent nears the ``max_turns`` / ``max_tool_calls`` cap so
-the model can wrap up instead of being hard-stopped mid-thought.
+The optional ``reminder`` sub-config turns on budget-aware runway warnings.
+When it is omitted the atom only sets the budget and stays silent. When
+present, the atom appends a short reminder as the agent nears the
+``max_turns`` / ``max_tool_calls`` cap so the model can wrap up instead of
+being hard-stopped mid-thought.
 
-Cache discipline: the reminder is appended to the **end of the last message**
-in the send-list, never to the system prompt. Touching the system prompt would
-invalidate the entire KV / prefix cache every turn. The last message is the
-freshest, not-yet-cached tail, so appending there keeps the cached prefix
-byte-identical.
+Cache discipline: the reminder is a new message at the end of the send-list,
+never an edit to the system prompt or to a message already in it. Touching
+either would invalidate the KV prefix that everything before it shares, while
+a fresh trailing message leaves that prefix byte-identical. It also keeps the
+reminder a message in its own right, marked synthetic, rather than text
+smuggled into somebody else's turn.
 """
 
 from __future__ import annotations
 
 import time as _time
-from dataclasses import replace
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,9 +33,9 @@ from agentm.core.abi import (
     BeforeRunEvent,
     BeforeSendEvent,
     LoopConfig,
+    MessageMeta,
     TextContent,
     ToolResultEvent,
-    ToolResultMessage,
     TurnBeginEvent,
     UserMessage,
 )
@@ -135,10 +135,8 @@ class _TurnReminderRuntime:
             return {"messages": messages}
 
         text = _format_warning(turns_left, tools_left, self._finalize_tool)
-        updated = _append_to_last_message(messages, text)
-        if updated is None:
-            return None
-        return {"messages": updated}
+        messages.append(_reminder_message(text))
+        return {"messages": messages}
 
     def _runway(self) -> tuple[int | None, int | None] | None:
         cfg = self._api.services.get(LOOP_BUDGET_SERVICE)
@@ -178,6 +176,19 @@ def _last_step(
     )
 
 
+def _budget_meta(kind: str) -> MessageMeta:
+    return MessageMeta(synthetic=True, synthetic_kind=kind, origin="loop_budget")
+
+
+def _reminder_message(text: str) -> UserMessage:
+    return UserMessage(
+        role="user",
+        content=[TextContent(type="text", text=text)],
+        timestamp=_time.time(),
+        meta=_budget_meta("budget_reminder"),
+    )
+
+
 def _finalize_now_message(finalize_tool: str) -> UserMessage:
     return UserMessage(
         role="user",
@@ -192,6 +203,7 @@ def _finalize_now_message(finalize_tool: str) -> UserMessage:
             )
         ],
         timestamp=_time.time(),
+        meta=_budget_meta("budget_finalize"),
     )
 
 
@@ -223,26 +235,3 @@ def _format_warning(
         f"[budget] Only {budget} remaining before a hard stop. "
         f"Start wrapping up.{tool_hint}"
     )
-
-
-def _append_to_last_message(
-    messages: list[AgentMessage], text: str
-) -> list[AgentMessage] | None:
-    if not messages:
-        return None
-    last = messages[-1]
-    block = TextContent(type="text", text=text)
-
-    if isinstance(last, UserMessage):
-        new_last = replace(last, content=[*last.content, block])
-    elif isinstance(last, ToolResultMessage):
-        if not last.content:
-            return None
-        blocks = list(last.content)
-        last_block = blocks[-1]
-        blocks[-1] = replace(last_block, content=[*last_block.content, block])
-        new_last = replace(last, content=blocks)  # type: ignore[assignment]
-    else:
-        return None
-
-    return [*messages[:-1], new_last]

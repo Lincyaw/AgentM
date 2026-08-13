@@ -181,10 +181,22 @@ def _reduce_before_send(event: BeforeSendEvent, value: object) -> BeforeSendEven
     model = event.model
     tools = event.tools
     if "messages" in value:
-        replacement_messages = _message_list(value["messages"])
-        if replacement_messages is None:
+        returned_messages = _message_list(value["messages"])
+        if returned_messages is None:
             raise TypeError("BeforeSendEvent messages must be a message list")
-        messages = tuple(replacement_messages)
+        # Append-only. A handler may add to the tail of what it was given and
+        # nothing else: the prefix is the committed trajectory, and a handler
+        # that rewrote it would put words in front of the model that the
+        # record cannot account for. Its own additions stay identifiable as
+        # the tail beyond the incoming length.
+        incoming = tuple(event.messages)
+        returned = tuple(returned_messages)
+        if returned[: len(incoming)] != incoming:
+            raise TypeError(
+                "BeforeSendEvent messages is append-only: a handler may extend "
+                "the list it was given but may not alter or drop its entries"
+            )
+        messages = returned
     if "system" in value:
         replacement_system = value["system"]
         if replacement_system is not None and not isinstance(replacement_system, str):
