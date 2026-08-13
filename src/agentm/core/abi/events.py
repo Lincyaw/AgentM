@@ -260,23 +260,6 @@ class ExtensionInstallEvent(Event):
 
 
 @dataclass(frozen=True, slots=True)
-class ExtensionReloadEvent(Event):
-    CHANNEL: ClassVar[str] = "extension_reload"
-    name: str = ""
-    trigger: str = ""
-    error: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ExtensionUnloadEvent(Event):
-    CHANNEL: ClassVar[str] = "extension_unload"
-    name: str = ""
-    module_path: str = ""
-    trigger: str = ""
-    error: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class ResourcesDiscoverEvent(Event):
     CHANNEL: ClassVar[str] = "resources_discover"
     cwd: str = ""
@@ -332,8 +315,6 @@ __all__ = [
     "DecideEvent",
     "DiagnosticEvent",
     "ExtensionInstallEvent",
-    "ExtensionReloadEvent",
-    "ExtensionUnloadEvent",
     "Inject",
     "LlmRequestEndEvent",
     "LlmRequestStartEvent",

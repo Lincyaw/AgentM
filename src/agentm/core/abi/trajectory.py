@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from agentm.core.abi.trigger import Trigger, TriggerMetadata
 
 TurnRef = int | str
-TrajectoryNodeRef = str
 TrajectoryBranchId = str
 TrajectoryHeadId = str
 DEFAULT_TRAJECTORY_BRANCH_ID = "main"
@@ -884,7 +883,6 @@ __all__ = [
     "TrajectoryLeaf",
     "TrajectoryNode",
     "TrajectoryNodeKind",
-    "TrajectoryNodeRef",
     "TrajectoryNodeRole",
     "Turn",
     "TurnCheckpoint",
