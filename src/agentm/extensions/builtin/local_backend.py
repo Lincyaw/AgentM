@@ -9,10 +9,13 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
+    BASH_OPERATIONS_ROLE,
     BASH_OPERATIONS_SERVICE,
+    ENVIRONMENT_OPERATIONS,
     ENVIRONMENT_OPERATIONS_SERVICE,
     RESOURCE_READER,
     RESOURCE_READER_SERVICE,
+    RESOURCE_STORE,
     RESOURCE_STORE_SERVICE,
     RESOURCE_WRITER,
     RESOURCE_WRITER_SERVICE,
@@ -42,11 +45,11 @@ MANIFEST = ExtensionManifest(
     name="local_backend",
     description="Register one explicit local environment and resource backend.",
     registers=(
-        "service:operations:bash",
-        "service:operations:environment",
-        "service:resource_reader",
-        "service:resource_store",
-        "service:resource_writer",
+        BASH_OPERATIONS_ROLE.capability,
+        ENVIRONMENT_OPERATIONS.capability,
+        RESOURCE_READER.capability,
+        RESOURCE_STORE.capability,
+        RESOURCE_WRITER.capability,
     ),
     config_schema=LocalBackendConfig,
     requires=(),

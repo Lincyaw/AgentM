@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from agentm.core.abi import (
+    SESSION_COMPACTOR,
     SESSION_COMPACTOR_SERVICE,
+    TRAJECTORY_STORE_ROLE,
     AgentSessionConfig,
     AtomAPI,
     AtomInstallPriority,
@@ -79,9 +81,9 @@ class HarborCompactionConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="harbor_compaction",
     description=("Harbor-only chronological chunk session compactor."),
-    registers=(f"service:{SESSION_COMPACTOR_SERVICE}",),
+    registers=(SESSION_COMPACTOR.capability,),
     config_schema=HarborCompactionConfig,
-    requires=("service:trajectory_store",),
+    requires=(TRAJECTORY_STORE_ROLE.capability,),
     priority=AtomInstallPriority.SERVICE,
 )
 

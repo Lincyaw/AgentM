@@ -51,7 +51,7 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("event:tool_result",),
     config_schema=ToolResultCapConfig,
-    requires=("service:resource_writer",),
+    requires=(RESOURCE_WRITER.capability,),
     priority=AtomInstallPriority.TOOL,
 )
 

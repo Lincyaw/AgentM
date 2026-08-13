@@ -53,10 +53,15 @@ from agentm.core.abi.messages import (
 )
 from agentm.core.abi.resource import ResourceRef, ResourceStore
 from agentm.core.abi.roles import (
+    COMPACTION_PUBLISHER_ROLE,
     COMPACTION_PUBLISHER_SERVICE,
+    CONTEXT_COMPACTION,
     CONTEXT_COMPACTION_SERVICE,
+    RESOURCE_STORE,
     RESOURCE_STORE_SERVICE,
+    SESSION_COMPACTOR,
     SESSION_COMPACTOR_SERVICE,
+    TRAJECTORY_STORE_ROLE,
     TRAJECTORY_STORE_SERVICE,
 )
 from agentm.core.abi.session_api import (
@@ -225,15 +230,12 @@ MANIFEST = ExtensionManifest(
     description="Compact old context into durable provider-generated summaries.",
     registers=(
         "context_policy:llm_compaction",
-        f"service:{CONTEXT_COMPACTION_SERVICE}",
-        f"service:{SESSION_COMPACTOR_SERVICE}",
-        f"service:{COMPACTION_PUBLISHER_SERVICE}",
+        CONTEXT_COMPACTION.capability,
+        SESSION_COMPACTOR.capability,
+        COMPACTION_PUBLISHER_ROLE.capability,
     ),
     config_schema=LlmCompactionConfig,
-    requires=(
-        "service:resource_store",
-        "service:trajectory_store",
-    ),
+    requires=(RESOURCE_STORE.capability, TRAJECTORY_STORE_ROLE.capability),
     priority=AtomInstallPriority.CONTEXT,
 )
 

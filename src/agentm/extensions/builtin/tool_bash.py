@@ -14,13 +14,13 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
-from typing import Final, cast
+from typing import Final
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
-    BASH_OPERATIONS_SERVICE,
+    BASH_OPERATIONS_ROLE,
     AtomAPI,
     AtomInstallPriority,
     BashOperations,
@@ -155,7 +155,7 @@ MANIFEST = ExtensionManifest(
     description="Register the bash tool backed by BashOperations.",
     registers=("tool:bash",),
     config_schema=ToolBashConfig,
-    requires=("service:operations:bash",),
+    requires=(BASH_OPERATIONS_ROLE.capability,),
     priority=AtomInstallPriority.TOOL,
 )
 
@@ -352,10 +352,7 @@ class _BashTool(EnvironmentExecutableTool):
 
 def _require_bash_ops(session: AtomAPI) -> BashOperations:
     try:
-        return session.services.require(
-            BASH_OPERATIONS_SERVICE,
-            cast(type[BashOperations], BashOperations),
-        )
+        return session.services.require_role(BASH_OPERATIONS_ROLE)
     except (ServiceNotFound, ServiceTypeMismatch) as exc:
         raise RuntimeError(
             "tool_bash requires the operations atom to register bash"

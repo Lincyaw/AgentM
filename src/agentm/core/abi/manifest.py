@@ -103,6 +103,12 @@ class ExtensionManifest(BaseModel):
     precedence, and hard composition policy belong to ``AgentSessionConfig``
     and its ``ScenarioLoader``. ``priority`` is only a stable default for
     otherwise independent atoms; ``requires`` wins.
+
+    ``requires`` and ``registers`` hold explicit ``kind:name`` references. For
+    a service boundary that has a ``ServiceRole``, spell it ``ROLE.capability``
+    so the role stays the only place its key is written; anything else — a
+    tool, an atom, an event, a service with no role descriptor — is written
+    out, which is also what out-of-tree atoms already do.
     """
 
     model_config = ConfigDict(

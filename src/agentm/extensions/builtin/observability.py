@@ -20,6 +20,8 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
+    SESSION_TELEMETRY_ROLE,
+    SESSION_TELEMETRY_SERVICE,
     ApiRegisterEvent,
     AtomAPI,
     AtomInstallPriority,
@@ -86,6 +88,7 @@ MANIFEST = ExtensionManifest(
     name="observability",
     description="Attach session-scoped OTel spans and logs to the EventBus.",
     registers=(
+        SESSION_TELEMETRY_ROLE.capability,
         "event:session_ready",
         "event:session_shutdown",
         "event:turn_begin",
@@ -249,8 +252,9 @@ class _ObservabilityRuntime:
         import agentm.extensions.observability.event_otel  # noqa: F401
 
         self._session.services.register(
-            "session_telemetry",
+            SESSION_TELEMETRY_SERVICE,
             self._telemetry,
+            SessionTelemetry,
             scope="session",
         )
         self._stamp_session_metadata()

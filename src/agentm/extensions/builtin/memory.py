@@ -106,7 +106,7 @@ MANIFEST = ExtensionManifest(
         "tool:memory_delete",
     ),
     config_schema=MemoryConfig,
-    requires=("service:resource_writer",),
+    requires=(RESOURCE_WRITER.capability,),
     priority=AtomInstallPriority.CONTEXT,
 )
 
