@@ -29,6 +29,7 @@ class Execution:
         "_id",
         "_index",
         "_injected",
+        "_request_appended",
         "_response",
         "_run_id",
         "_run_step",
@@ -53,6 +54,7 @@ class Execution:
         self._tool_results: tuple[ToolRecord, ...] = ()
         self._active = True
         self._injected: list[AgentMessage] = []
+        self._request_appended: tuple[AgentMessage, ...] = ()
 
     @property
     def index(self) -> int:
@@ -89,6 +91,20 @@ class Execution:
     @property
     def injected(self) -> list[AgentMessage]:
         return self._injected
+
+    @property
+    def request_appended(self) -> tuple[AgentMessage, ...]:
+        return self._request_appended
+
+    def set_request_appended(self, messages: Sequence[AgentMessage]) -> None:
+        """Record what a send-time handler added to this turn's request.
+
+        The provider saw these after the committed prefix, so the turn has to
+        carry them or the record cannot account for the request.
+        """
+        if not self._active:
+            raise StateError("cannot record request additions on an inactive execution")
+        self._request_appended = tuple(messages)
 
     def add_injected(self, messages: list[AgentMessage]) -> None:
         if not self._active:
@@ -159,6 +175,7 @@ class Execution:
             outcome=final_outcome,
             timestamp=time.time(),
             meta=meta,
+            request_appended=self._request_appended,
         )
 
     def abandon(self) -> None:

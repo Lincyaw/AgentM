@@ -930,6 +930,8 @@ class CodecRegistry:
             data["model_context_window"] = meta.model_context_window
         if meta.system_prompt is not None:
             data["system_prompt"] = meta.system_prompt
+        if meta.tool_schema_digest is not None:
+            data["tool_schema_digest"] = meta.tool_schema_digest
         return data
 
     @staticmethod
@@ -947,8 +949,13 @@ class CodecRegistry:
                 "model_context_window",
                 "resource_mutations",
                 "system_prompt",
+                "tool_schema_digest",
             },
             "turn.meta",
+        )
+        raw_tool_digest = data.get("tool_schema_digest")
+        tool_schema_digest = (
+            raw_tool_digest if isinstance(raw_tool_digest, str) else None
         )
         raw_system_prompt = data.get("system_prompt")
         system_prompt: str | None = None
@@ -994,6 +1001,7 @@ class CodecRegistry:
                 data.get("resource_mutations", [])
             ),
             system_prompt=system_prompt,
+            tool_schema_digest=tool_schema_digest,
         )
 
     # --- Turn ---
@@ -1142,6 +1150,7 @@ class CodecRegistry:
             "timestamp": turn.timestamp,
             "meta": self._serialize_meta(turn.meta),
             "trigger_metadata": _serialize_trigger_metadata(turn.trigger_metadata),
+            "request_appended": _serialize_injected(turn.request_appended),
         }
 
     def deserialize_turn(self, data: dict[str, Any]) -> Turn:
@@ -1167,6 +1176,7 @@ class CodecRegistry:
                 "timestamp",
                 "meta",
                 "trigger_metadata",
+                "request_appended",
             },
             "turn",
         )
@@ -1199,6 +1209,10 @@ class CodecRegistry:
             ),
             timestamp=expect_number(data.get("timestamp"), "turn.timestamp"),
             meta=self._deserialize_meta(expect_object(data.get("meta"), "turn.meta")),
+            request_appended=_deserialize_injected(
+                data.get("request_appended", []),
+                path="turn.request_appended",
+            ),
             trigger_metadata=self._deserialize_trigger_metadata(
                 data.get("trigger_metadata")
             ),

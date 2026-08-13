@@ -606,6 +606,24 @@ async def _finalize_tool_outcome(
     )
 
 
+def _tool_schema_digest(tools: Sequence[Tool]) -> str | None:
+    """Digest the tool surface the model was actually offered.
+
+    The names and their schemas both matter: an atom that rewrites a
+    description changes what the model was told a tool does, and a run whose
+    tool surface differed is not the same run.
+    """
+
+    if not tools:
+        return None
+    payload = json.dumps(
+        [[tool.name, tool.description, tool.parameters] for tool in tools],
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _meta(
     inp: int,
     out: int,
@@ -614,6 +632,7 @@ def _meta(
     cache_read: int = 0,
     cache_write: int = 0,
     system_prompt: str | None = None,
+    tool_schema_digest: str | None = None,
 ) -> TurnMeta:
     return TurnMeta(
         total_input_tokens=inp,
@@ -624,6 +643,7 @@ def _meta(
         model_id=model.id if model is not None else None,
         model_context_window=model.context_window if model is not None else None,
         system_prompt=system_prompt,
+        tool_schema_digest=tool_schema_digest,
     )
 
 
@@ -849,6 +869,7 @@ async def react(
         system = before_event.system
     continuation_system_prompt = system
     resolved_system_prompt = system
+    resolved_tool_digest: str | None = None
 
     veto = _last_key(before_returns, "veto")
     if veto is not None:
@@ -856,7 +877,13 @@ async def react(
             raise TypeError("BeforeRunEvent veto must be a TerminationCause")
         return result(
             Outcome(cause=veto),
-            _meta(0, 0, start_ns, system_prompt=resolved_system_prompt),
+            _meta(
+                0,
+                0,
+                start_ns,
+                system_prompt=resolved_system_prompt,
+                tool_schema_digest=resolved_tool_digest,
+            ),
         )
     if turn_signal.is_set():
         return result(
@@ -868,6 +895,7 @@ async def react(
                 cache_read=total_cache_read,
                 cache_write=total_cache_write,
                 system_prompt=resolved_system_prompt,
+                tool_schema_digest=resolved_tool_digest,
             ),
         )
 
@@ -889,6 +917,7 @@ async def react(
         ),
         _reduce_before_send,
     )
+    sent_before_handlers = len(messages)
     messages = list(send_event.messages)
     effective_system = send_event.system
     effective_model = send_event.model
@@ -899,6 +928,11 @@ async def react(
     if effective_system is not None:
         resolved_system_prompt = effective_system
 
+    # The reduce is append-only, so whatever sits past the incoming length is
+    # exactly what handlers added. The turn carries it because the provider
+    # read it, and a prefix the record cannot account for is not evidence.
+    execution.set_request_appended(messages[sent_before_handlers:])
+
     messages = route_messages(messages, session_id=session_id)
 
     # Runtime constraints remain authoritative even if a transform adds tools.
@@ -908,6 +942,7 @@ async def react(
         ]
     if tool_calls_remaining is not None and tool_calls_used >= tool_calls_remaining:
         effective_tools = []
+    resolved_tool_digest = _tool_schema_digest(effective_tools)
     tool_index = {t.name: t for t in effective_tools}
 
     stream_events: list[AssistantStreamEvent] = []
@@ -1019,6 +1054,7 @@ async def react(
                 cache_read=total_cache_read,
                 cache_write=total_cache_write,
                 system_prompt=resolved_system_prompt,
+                tool_schema_digest=resolved_tool_digest,
             ),
         )
     await bus.emit(
@@ -1437,6 +1473,7 @@ async def react(
                 cache_read=total_cache_read,
                 cache_write=total_cache_write,
                 system_prompt=resolved_system_prompt,
+                tool_schema_digest=resolved_tool_digest,
             ),
         )
 
@@ -1464,6 +1501,7 @@ async def react(
             cache_read=total_cache_read,
             cache_write=total_cache_write,
             system_prompt=resolved_system_prompt,
+            tool_schema_digest=resolved_tool_digest,
         ),
     )
 

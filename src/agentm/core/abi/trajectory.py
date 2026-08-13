@@ -615,6 +615,7 @@ class TurnMeta:
     model_context_window: int | None = None
     resource_mutations: tuple[ResourceMutation, ...] = ()
     system_prompt: str | None = None
+    tool_schema_digest: str | None = None
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -626,6 +627,11 @@ class TurnMeta:
         ):
             _require_index(value, f"turn meta {label}")
         _require_string(self.model_id, "turn meta model_id", optional=True)
+        _require_string(
+            self.tool_schema_digest,
+            "turn meta tool_schema_digest",
+            optional=True,
+        )
         _require_index(
             self.model_context_window,
             "turn meta model_context_window",
@@ -794,6 +800,7 @@ class Turn:
     timestamp: float
     meta: TurnMeta = field(default_factory=TurnMeta)
     trigger_metadata: TriggerMetadata | None = None
+    request_appended: tuple[AgentMessage, ...] = ()
 
     def __post_init__(self) -> None:
         from agentm.core.abi.trigger import Trigger, TriggerMetadata
@@ -811,6 +818,7 @@ class Turn:
         _require_finite(self.timestamp, "turn timestamp")
         if not isinstance(self.meta, TurnMeta):
             raise TypeError("turn meta must be TurnMeta")
+        _validate_injected(self.request_appended, label="turn request_appended")
         _validate_resource_transaction_anchors(
             self.meta,
             turn_id=self.id,

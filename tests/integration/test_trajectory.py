@@ -45,6 +45,7 @@ from agentm.core.abi.messages import (
     TextContent,
     ToolCallBlock,
     ToolResultBlock,
+    MessageMeta,
     UserMessage,
 )
 from agentm.core.abi.query import (
@@ -404,6 +405,63 @@ async def test_before_send_system_prompt_does_not_accumulate_across_run() -> Non
     assert [
         turn.meta.system_prompt for turn in session.trajectory.turns
     ] == sent_systems
+
+
+@pytest.mark.asyncio
+async def test_before_send_additions_commit_and_rewrites_are_refused() -> None:
+    """What a send-time handler adds is committed; what it rewrites is refused."""
+
+    mock = MockStreamFn()
+    mock.enqueue(text_response("done"))
+    session = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=mock,
+            model=make_model(),
+            system="base prompt",
+        )
+    )
+
+    note = UserMessage(
+        role="user",
+        content=[TextContent(type="text", text="appended by a handler")],
+        timestamp=0.0,
+        meta=MessageMeta(synthetic=True, synthetic_kind="test_note"),
+    )
+    session.bus.on(
+        BeforeSendEvent.CHANNEL,
+        lambda event: {"messages": [*event.messages, note]},
+    )
+    session.start()
+    try:
+        await session.prompt("hello")
+        await _wait_run(session)
+    finally:
+        await session.shutdown()
+
+    sent = mock.calls[0]["messages"]
+    assert sent[-1].content[0].text == "appended by a handler"
+    turn = session.trajectory.turns[0]
+    assert [m.content[0].text for m in turn.request_appended] == [
+        "appended by a handler"
+    ]
+    assert turn.meta.tool_schema_digest is None
+
+    rewriter = await create_session(
+        SessionBuildConfig(
+            extensions=[],
+            stream_fn=MockStreamFn(),
+            model=make_model(),
+            system="base prompt",
+        )
+    )
+    rewriter.bus.on(BeforeSendEvent.CHANNEL, lambda event: {"messages": [note]})
+    rewriter.start()
+    try:
+        with pytest.raises(TypeError, match="append-only"):
+            await rewriter.run("hello")
+    finally:
+        await rewriter.shutdown()
 
 
 @pytest.mark.asyncio

@@ -227,6 +227,7 @@ def _turn_messages(
             turn.trigger_metadata,
         )
     )
+    messages.extend(turn.request_appended)
     if turn.response is not None:
         messages.append(turn.response)
         if turn.tool_results:
