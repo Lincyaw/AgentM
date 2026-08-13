@@ -18,6 +18,7 @@ from agentm.core.abi.tool import (
     ToolResult,
     ToolTerminate,
 )
+from agentm.core.lib.codec_primitives import expect_object, expect_only_fields
 
 PROCESS_RESULT_SCHEMA_VERSION = 1
 _OutcomeKind = Literal["result", "continue", "terminate"]
@@ -101,8 +102,10 @@ def decode_tool_output(payload: str) -> ToolResult | ToolOutcome:
         value = json.loads(payload, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as exc:
         raise ValueError("process result is not valid JSON") from exc
-    data = _object(value, "process result")
-    _only_fields(data, {"schema_version", "kind", "result", "reason"}, "process result")
+    data = expect_object(value, "process result")
+    expect_only_fields(
+        data, {"schema_version", "kind", "result", "reason"}, "process result"
+    )
     version = data.get("schema_version")
     if (
         not isinstance(version, int)
@@ -155,17 +158,17 @@ def _encode_result(result: ToolResult) -> dict[str, Any]:
 
 
 def _decode_result(value: object) -> ToolResult:
-    data = _object(value, "tool result")
-    _only_fields(data, {"content", "is_error", "extras"}, "tool result")
+    data = expect_object(value, "tool result")
+    expect_only_fields(data, {"content", "is_error", "extras"}, "tool result")
     raw_content = data.get("content")
     if not isinstance(raw_content, list):
         raise ValueError("tool result content must be a list")
     content: list[TextContent | ImageContent] = []
     for index, raw_block in enumerate(raw_content):
-        block = _object(raw_block, f"tool result content[{index}]")
+        block = expect_object(raw_block, f"tool result content[{index}]")
         block_type = block.get("type")
         if block_type == "text":
-            _only_fields(
+            expect_only_fields(
                 block,
                 {"type", "text"},
                 f"tool result content[{index}]",
@@ -176,7 +179,7 @@ def _decode_result(value: object) -> ToolResult:
             content.append(TextContent(type="text", text=text))
             continue
         if block_type == "image":
-            _only_fields(
+            expect_only_fields(
                 block,
                 {"type", "data_base64", "mime_type"},
                 f"tool result content[{index}]",
@@ -250,18 +253,6 @@ def _decode_json_value(value: object, path: str) -> Any:
             for index, item in enumerate(value)
         ]
     raise ValueError(f"{path} is not JSON-safe: {type(value).__name__}")
-
-
-def _object(value: object, path: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
-        raise ValueError(f"{path} must be an object")
-    return value
-
-
-def _only_fields(data: Mapping[str, object], allowed: set[str], path: str) -> None:
-    unknown = set(data) - allowed
-    if unknown:
-        raise ValueError(f"{path} has unknown fields: {sorted(unknown)}")
 
 
 def _reject_json_constant(value: str) -> None:

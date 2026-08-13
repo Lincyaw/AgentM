@@ -10,40 +10,15 @@ mapping is not possible.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
-
-def _object(value: Any, path: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{path} must be an object")
-    return value
-
-
-def _array(value: Any, path: str) -> list[Any]:
-    if not isinstance(value, list):
-        raise ValueError(f"{path} must be a list")
-    return value
-
-
-def _string(value: Any, path: str, *, allow_empty: bool = True) -> str:
-    if not isinstance(value, str) or (not allow_empty and not value):
-        raise ValueError(f"{path} must be a string")
-    return value
-
-
-def _integer(value: Any, path: str, *, minimum: int | None = None) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"{path} must be an integer")
-    if minimum is not None and value < minimum:
-        raise ValueError(f"{path} must be >= {minimum}")
-    return value
-
-
-def _only_fields(data: Mapping[str, Any], allowed: set[str], path: str) -> None:
-    unknown = set(data) - allowed
-    if unknown:
-        raise ValueError(f"{path} has unknown fields: {sorted(unknown)}")
+from agentm.core.lib.codec_primitives import (
+    expect_array,
+    expect_integer,
+    expect_object,
+    expect_only_fields,
+    expect_string,
+)
 
 
 def _legacy_injected_messages(
@@ -53,11 +28,11 @@ def _legacy_injected_messages(
     path: str,
 ) -> dict[int, list[dict[str, Any]]]:
     by_round: dict[int, list[dict[str, Any]]] = {}
-    for index, raw_entry in enumerate(_array(data, path)):
+    for index, raw_entry in enumerate(expect_array(data, path)):
         entry_path = f"{path}[{index}]"
-        entry = _object(raw_entry, entry_path)
-        _only_fields(entry, {"after_round", "messages"}, entry_path)
-        after_round = _integer(
+        entry = expect_object(raw_entry, entry_path)
+        expect_only_fields(entry, {"after_round", "messages"}, entry_path)
+        after_round = expect_integer(
             entry.get("after_round"),
             f"{entry_path}.after_round",
             minimum=-1,
@@ -67,9 +42,9 @@ def _legacy_injected_messages(
                 f"{entry_path}.after_round must reference a materialized round"
             )
         messages = [
-            _object(message, f"{entry_path}.messages[{message_index}]")
+            expect_object(message, f"{entry_path}.messages[{message_index}]")
             for message_index, message in enumerate(
-                _array(entry.get("messages"), f"{entry_path}.messages")
+                expect_array(entry.get("messages"), f"{entry_path}.messages")
             )
         ]
         by_round.setdefault(after_round, []).extend(messages)
@@ -84,8 +59,8 @@ def _legacy_round_messages(
     injected_path: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rounds = [
-        _object(raw_round, f"{path}.rounds[{index}]")
-        for index, raw_round in enumerate(_array(rounds_data, f"{path}.rounds"))
+        expect_object(raw_round, f"{path}.rounds[{index}]")
+        for index, raw_round in enumerate(expect_array(rounds_data, f"{path}.rounds"))
     ]
     injected = _legacy_injected_messages(
         injected_data,
@@ -95,9 +70,11 @@ def _legacy_round_messages(
     messages = list(injected.get(-1, ()))
     for round_index, round_data in enumerate(rounds):
         round_path = f"{path}.rounds[{round_index}]"
-        _only_fields(round_data, {"response", "tool_results"}, round_path)
-        messages.append(_object(round_data.get("response"), f"{round_path}.response"))
-        raw_results = _array(
+        expect_only_fields(round_data, {"response", "tool_results"}, round_path)
+        messages.append(
+            expect_object(round_data.get("response"), f"{round_path}.response")
+        )
+        raw_results = expect_array(
             round_data.get("tool_results"),
             f"{round_path}.tool_results",
         )
@@ -105,14 +82,14 @@ def _legacy_round_messages(
             result_blocks: list[dict[str, Any]] = []
             for result_index, raw_record in enumerate(raw_results):
                 record_path = f"{round_path}.tool_results[{result_index}]"
-                record = _object(raw_record, record_path)
-                _only_fields(
+                record = expect_object(raw_record, record_path)
+                expect_only_fields(
                     record,
                     {"call", "result", "backgrounded"},
                     record_path,
                 )
                 result_blocks.append(
-                    _object(record.get("result"), f"{record_path}.result")
+                    expect_object(record.get("result"), f"{record_path}.result")
                 )
             messages.append(
                 {
@@ -132,7 +109,7 @@ def migrate_v2_turn(
 ) -> dict[str, Any]:
     """Convert one version-2 Turn record into the current raw shape."""
 
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -147,15 +124,15 @@ def migrate_v2_turn(
         },
         "legacy turn",
     )
-    raw_outcome = _object(data.get("outcome"), "legacy turn.outcome")
-    _only_fields(raw_outcome, {"cause", "injected"}, "legacy turn.outcome")
+    raw_outcome = expect_object(data.get("outcome"), "legacy turn.outcome")
+    expect_only_fields(raw_outcome, {"cause", "injected"}, "legacy turn.outcome")
     rounds, replay_messages = _legacy_round_messages(
         data.get("rounds"),
         raw_outcome.get("injected", []),
         path="legacy turn",
         injected_path="legacy turn.outcome.injected",
     )
-    turn_id = _string(data.get("id"), "legacy turn.id", allow_empty=False)
+    turn_id = expect_string(data.get("id"), "legacy turn.id", allow_empty=False)
 
     response: object = None
     tool_results: object = []
@@ -197,7 +174,7 @@ def migrate_v2_checkpoint(
 ) -> dict[str, Any]:
     """Convert one version-2 TurnCheckpoint record into the current raw shape."""
 
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -218,7 +195,7 @@ def migrate_v2_checkpoint(
         path="legacy turn checkpoint",
         injected_path="legacy turn checkpoint.injected",
     )
-    checkpoint_id = _string(
+    checkpoint_id = expect_string(
         data.get("id"),
         "legacy turn checkpoint.id",
         allow_empty=False,

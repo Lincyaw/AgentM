@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -26,6 +25,17 @@ from agentm.core.abi.trajectory import (
     TrajectoryNodeKind,
     TrajectoryNodeRole,
 )
+from agentm.core.lib.codec_primitives import (
+    expect_only_fields,
+    expect_optional_integer,
+    expect_optional_string,
+    expect_string_tuple,
+    field_boolean,
+    field_integer,
+    field_literal,
+    field_number,
+    field_string,
+)
 from agentm.core.lib.json_value import json_restore, json_safe
 
 JsonObject = dict[str, Any]
@@ -33,90 +43,9 @@ STORAGE_RECORD_VERSION = 2
 
 
 def _validate_version(data: Mapping[str, Any], path: str) -> None:
-    version = _required_int(data, "schema_version", path=path, minimum=1)
+    version = field_integer(data, "schema_version", path=path, minimum=1)
     if version != STORAGE_RECORD_VERSION:
         raise ValueError(f"unsupported {path} schema version: {version}")
-
-
-def _required_str(
-    data: Mapping[str, Any],
-    key: str,
-    *,
-    path: str,
-    allow_empty: bool = False,
-) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or (not allow_empty and not value):
-        raise ValueError(f"{path}.{key} must be a string")
-    return value
-
-
-def _optional_str(value: Any, *, path: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError(f"{path} must be a string or null")
-    return value
-
-
-def _required_int(
-    data: Mapping[str, Any],
-    key: str,
-    *,
-    path: str,
-    minimum: int | None = None,
-) -> int:
-    value = data.get(key)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"{path}.{key} must be an integer")
-    if minimum is not None and value < minimum:
-        raise ValueError(f"{path}.{key} must be >= {minimum}")
-    return value
-
-
-def _optional_int(value: Any, *, path: str) -> int | None:
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"{path} must be an integer or null")
-    return value
-
-
-def _required_number(data: Mapping[str, Any], key: str, *, path: str) -> float:
-    value = data.get(key)
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-    ):
-        raise ValueError(f"{path}.{key} must be a finite number")
-    return float(value)
-
-
-def _required_bool(data: Mapping[str, Any], key: str, *, path: str) -> bool:
-    value = data.get(key)
-    if not isinstance(value, bool):
-        raise ValueError(f"{path}.{key} must be a bool")
-    return value
-
-
-def _enum(
-    data: Mapping[str, Any],
-    key: str,
-    *,
-    path: str,
-    allowed: set[str],
-) -> str:
-    value = _required_str(data, key, path=path)
-    if value not in allowed:
-        raise ValueError(f"{path}.{key} has invalid value {value!r}")
-    return value
-
-
-def _only_fields(data: Mapping[str, Any], allowed: set[str], path: str) -> None:
-    unknown = set(data) - allowed
-    if unknown:
-        raise ValueError(f"{path} has unknown fields: {sorted(unknown)}")
 
 
 def serialize_diagnostic(diagnostic: TrajectoryDiagnostic) -> JsonObject:
@@ -138,7 +67,7 @@ def serialize_diagnostic(diagnostic: TrajectoryDiagnostic) -> JsonObject:
 
 
 def deserialize_diagnostic(data: Mapping[str, Any]) -> TrajectoryDiagnostic:
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -158,45 +87,45 @@ def deserialize_diagnostic(data: Mapping[str, Any]) -> TrajectoryDiagnostic:
         "trajectory diagnostic",
     )
     _validate_version(data, "trajectory diagnostic")
-    level = _enum(
+    level = field_literal(
         data,
         "level",
         path="trajectory diagnostic",
         allowed={"info", "warning", "error"},
     )
     return TrajectoryDiagnostic(
-        id=_required_str(data, "id", path="trajectory diagnostic"),
-        session_id=_required_str(
+        id=field_string(data, "id", path="trajectory diagnostic"),
+        session_id=field_string(
             data,
             "session_id",
             path="trajectory diagnostic",
         ),
-        timestamp=_required_number(
+        timestamp=field_number(
             data,
             "timestamp",
             path="trajectory diagnostic",
         ),
         level=cast(DiagnosticLevel, level),
-        source=_required_str(data, "source", path="trajectory diagnostic"),
-        phase=_required_str(data, "phase", path="trajectory diagnostic"),
-        message=_required_str(data, "message", path="trajectory diagnostic"),
-        error_type=_optional_str(
+        source=field_string(data, "source", path="trajectory diagnostic"),
+        phase=field_string(data, "phase", path="trajectory diagnostic"),
+        message=field_string(data, "message", path="trajectory diagnostic"),
+        error_type=expect_optional_string(
             data.get("error_type"),
             path="trajectory diagnostic.error_type",
         ),
-        error_detail=_optional_str(
+        error_detail=expect_optional_string(
             data.get("error_detail"),
             path="trajectory diagnostic.error_detail",
         ),
-        turn_id=_optional_str(
+        turn_id=expect_optional_string(
             data.get("turn_id"),
             path="trajectory diagnostic.turn_id",
         ),
-        turn_index=_optional_int(
+        turn_index=expect_optional_integer(
             data.get("turn_index"),
             path="trajectory diagnostic.turn_index",
         ),
-        checkpoint_id=_optional_str(
+        checkpoint_id=expect_optional_string(
             data.get("checkpoint_id"),
             path="trajectory diagnostic.checkpoint_id",
         ),
@@ -237,7 +166,7 @@ def serialize_node(node: TrajectoryNode) -> JsonObject:
 
 
 def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -283,12 +212,12 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
     if not isinstance(payload, Mapping):
         raise ValueError("trajectory node payload must be an object")
     return TrajectoryNode(
-        id=_required_str(data, "id", path="trajectory node"),
-        session_id=_required_str(data, "session_id", path="trajectory node"),
-        seq=_required_int(data, "seq", path="trajectory node", minimum=0),
+        id=field_string(data, "id", path="trajectory node"),
+        session_id=field_string(data, "session_id", path="trajectory node"),
+        seq=field_integer(data, "seq", path="trajectory node", minimum=0),
         kind=cast(
             TrajectoryNodeKind,
-            _enum(
+            field_literal(
                 data,
                 "kind",
                 path="trajectory node",
@@ -299,71 +228,71 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
                 },
             ),
         ),
-        root_session_id=_optional_str(
+        root_session_id=expect_optional_string(
             data.get("root_session_id"),
             path="trajectory node.root_session_id",
         ),
-        parent_session_id=_optional_str(
+        parent_session_id=expect_optional_string(
             data.get("parent_session_id"),
             path="trajectory node.parent_session_id",
         ),
-        branch_id=_required_str(data, "branch_id", path="trajectory node"),
-        head_id=_required_str(data, "head_id", path="trajectory node"),
+        branch_id=field_string(data, "branch_id", path="trajectory node"),
+        head_id=field_string(data, "head_id", path="trajectory node"),
         role=cast(
             TrajectoryNodeRole,
-            _enum(
+            field_literal(
                 data,
                 "role",
                 path="trajectory node",
                 allowed={"user", "assistant", "tool_result", "control"},
             ),
         ),
-        parent_id=_optional_str(
+        parent_id=expect_optional_string(
             data.get("parent_id"),
             path="trajectory node.parent_id",
         ),
-        logical_parent_id=_optional_str(
+        logical_parent_id=expect_optional_string(
             data.get("logical_parent_id"),
             path="trajectory node.logical_parent_id",
         ),
-        turn_id=_optional_str(
+        turn_id=expect_optional_string(
             data.get("turn_id"),
             path="trajectory node.turn_id",
         ),
-        turn_index=_optional_int(
+        turn_index=expect_optional_integer(
             data.get("turn_index"),
             path="trajectory node.turn_index",
         ),
-        run_id=_optional_str(
+        run_id=expect_optional_string(
             data.get("run_id"),
             path="trajectory node.run_id",
         ),
-        run_step=_optional_int(
+        run_step=expect_optional_integer(
             data.get("run_step"),
             path="trajectory node.run_step",
         ),
-        message_index=_optional_int(
+        message_index=expect_optional_integer(
             data.get("message_index"),
             path="trajectory node.message_index",
         ),
-        agent_id=_optional_str(
+        agent_id=expect_optional_string(
             data.get("agent_id"),
             path="trajectory node.agent_id",
         ),
-        is_sidechain=_required_bool(
+        is_sidechain=field_boolean(
             data,
             "is_sidechain",
             path="trajectory node",
         ),
-        tool_call_ids=_string_tuple(data, "tool_call_ids"),
-        tool_names=_string_tuple(data, "tool_names"),
-        content_ref=_optional_str(
+        tool_call_ids=expect_string_tuple(data.get("tool_call_ids"), "tool_call_ids"),
+        tool_names=expect_string_tuple(data.get("tool_names"), "tool_names"),
+        content_ref=expect_optional_string(
             data.get("content_ref"),
             path="trajectory node.content_ref",
         ),
         visibility=cast(
             MessageVisibility,
-            _enum(
+            field_literal(
                 data,
                 "visibility",
                 path="trajectory node",
@@ -372,7 +301,7 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
         ),
         message=message,
         payload=dict(payload),
-        timestamp=_required_number(data, "timestamp", path="trajectory node"),
+        timestamp=field_number(data, "timestamp", path="trajectory node"),
     )
 
 
@@ -396,7 +325,7 @@ def serialize_head(head: TrajectoryHead) -> JsonObject:
 
 
 def deserialize_head(data: Mapping[str, Any]) -> TrajectoryHead:
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -421,45 +350,45 @@ def deserialize_head(data: Mapping[str, Any]) -> TrajectoryHead:
     if not isinstance(metadata, Mapping):
         raise ValueError("trajectory head metadata must be an object")
     return TrajectoryHead(
-        session_id=_required_str(data, "session_id", path="trajectory head"),
-        head_id=_required_str(data, "head_id", path="trajectory head"),
-        branch_id=_required_str(data, "branch_id", path="trajectory head"),
-        node_id=_optional_str(
+        session_id=field_string(data, "session_id", path="trajectory head"),
+        head_id=field_string(data, "head_id", path="trajectory head"),
+        branch_id=field_string(data, "branch_id", path="trajectory head"),
+        node_id=expect_optional_string(
             data.get("node_id"),
             path="trajectory head.node_id",
         ),
-        seq=_optional_int(data.get("seq"), path="trajectory head.seq"),
-        root_session_id=_optional_str(
+        seq=expect_optional_integer(data.get("seq"), path="trajectory head.seq"),
+        root_session_id=expect_optional_string(
             data.get("root_session_id"),
             path="trajectory head.root_session_id",
         ),
-        parent_session_id=_optional_str(
+        parent_session_id=expect_optional_string(
             data.get("parent_session_id"),
             path="trajectory head.parent_session_id",
         ),
-        logical_parent_id=_optional_str(
+        logical_parent_id=expect_optional_string(
             data.get("logical_parent_id"),
             path="trajectory head.logical_parent_id",
         ),
-        agent_id=_optional_str(
+        agent_id=expect_optional_string(
             data.get("agent_id"),
             path="trajectory head.agent_id",
         ),
-        is_sidechain=_required_bool(
+        is_sidechain=field_boolean(
             data,
             "is_sidechain",
             path="trajectory head",
         ),
         status=cast(
             TrajectoryHeadStatus,
-            _enum(
+            field_literal(
                 data,
                 "status",
                 path="trajectory head",
                 allowed={"active", "dead", "archived"},
             ),
         ),
-        updated_at=_required_number(data, "updated_at", path="trajectory head"),
+        updated_at=field_number(data, "updated_at", path="trajectory head"),
         metadata=dict(metadata),
     )
 
@@ -480,7 +409,7 @@ def serialize_content_state(state: ContentReplacementState) -> JsonObject:
 
 
 def deserialize_content_state(data: Mapping[str, Any]) -> ContentReplacementState:
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -509,31 +438,33 @@ def deserialize_content_state(data: Mapping[str, Any]) -> ContentReplacementStat
     ):
         raise ValueError("content replacements must map strings to strings")
     return ContentReplacementState(
-        state_key=_required_str(
+        state_key=field_string(
             data,
             "state_key",
             path="content replacement state",
         ),
-        seen_tool_call_ids=_string_tuple(data, "seen_tool_call_ids"),
+        seen_tool_call_ids=expect_string_tuple(
+            data.get("seen_tool_call_ids"), "seen_tool_call_ids"
+        ),
         replacements=dict(replacements),
-        source_session_id=_optional_str(
+        source_session_id=expect_optional_string(
             data.get("source_session_id"),
             path="content replacement state.source_session_id",
         ),
-        source_leaf_id=_optional_str(
+        source_leaf_id=expect_optional_string(
             data.get("source_leaf_id"),
             path="content replacement state.source_leaf_id",
         ),
-        leaf_node_id=_optional_str(
+        leaf_node_id=expect_optional_string(
             data.get("leaf_node_id"),
             path="content replacement state.leaf_node_id",
         ),
-        branch_id=_required_str(
+        branch_id=field_string(
             data,
             "branch_id",
             path="content replacement state",
         ),
-        head_id=_required_str(
+        head_id=field_string(
             data,
             "head_id",
             path="content replacement state",
@@ -555,7 +486,7 @@ def serialize_resource_version(version: ResourceVersion) -> JsonObject:
 
 
 def deserialize_resource_version(data: Mapping[str, Any]) -> ResourceVersion:
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -573,14 +504,14 @@ def deserialize_resource_version(data: Mapping[str, Any]) -> ResourceVersion:
     if not isinstance(metadata, Mapping):
         raise ValueError("resource version metadata must be an object")
     return ResourceVersion(
-        resource_id=_required_str(data, "resource_id", path="resource version"),
-        version_id=_required_str(data, "version_id", path="resource version"),
-        digest=_required_str(data, "digest", path="resource version"),
-        media_type=_optional_str(
+        resource_id=field_string(data, "resource_id", path="resource version"),
+        version_id=field_string(data, "version_id", path="resource version"),
+        digest=field_string(data, "digest", path="resource version"),
+        media_type=expect_optional_string(
             data.get("media_type"),
             path="resource version.media_type",
         ),
-        size_bytes=_required_int(
+        size_bytes=field_integer(
             data,
             "size_bytes",
             path="resource version",
@@ -610,7 +541,7 @@ def serialize_atom_activation(atom: AtomActivation) -> JsonObject:
 
 
 def deserialize_atom_activation(data: Mapping[str, Any]) -> AtomActivation:
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -631,19 +562,23 @@ def deserialize_atom_activation(data: Mapping[str, Any]) -> AtomActivation:
     if version_data is not None and not isinstance(version_data, Mapping):
         raise ValueError("atom activation version must be an object")
     return AtomActivation(
-        name=_required_str(data, "name", path="atom activation"),
-        module_path=_required_str(data, "module_path", path="atom activation"),
+        name=field_string(data, "name", path="atom activation"),
+        module_path=field_string(data, "module_path", path="atom activation"),
         version=(
             deserialize_resource_version(version_data)
             if isinstance(version_data, Mapping)
             else None
         ),
-        priority=_required_int(data, "priority", path="atom activation"),
-        requires=_string_tuple(data, "requires"),
-        registers=_string_tuple(data, "registers"),
-        required_capabilities=_string_tuple(data, "required_capabilities"),
-        provided_capabilities=_string_tuple(data, "provided_capabilities"),
-        config_fingerprint=_optional_str(
+        priority=field_integer(data, "priority", path="atom activation"),
+        requires=expect_string_tuple(data.get("requires"), "requires"),
+        registers=expect_string_tuple(data.get("registers"), "registers"),
+        required_capabilities=expect_string_tuple(
+            data.get("required_capabilities"), "required_capabilities"
+        ),
+        provided_capabilities=expect_string_tuple(
+            data.get("provided_capabilities"), "provided_capabilities"
+        ),
+        config_fingerprint=expect_optional_string(
             data.get("config_fingerprint"),
             path="atom activation.config_fingerprint",
         ),
@@ -665,7 +600,7 @@ def serialize_active_set_fingerprint(
 def deserialize_active_set_fingerprint(
     data: Mapping[str, Any],
 ) -> ActiveSetFingerprint:
-    _only_fields(
+    expect_only_fields(
         data,
         {"schema_version", "algorithm", "digest", "atoms", "metadata"},
         "active-set fingerprint",
@@ -680,12 +615,12 @@ def deserialize_active_set_fingerprint(
     ):
         raise ValueError("active-set atoms must be a list of objects")
     return ActiveSetFingerprint(
-        algorithm=_required_str(
+        algorithm=field_string(
             data,
             "algorithm",
             path="active-set fingerprint",
         ),
-        digest=_required_str(data, "digest", path="active-set fingerprint"),
+        digest=field_string(data, "digest", path="active-set fingerprint"),
         atoms=tuple(deserialize_atom_activation(item) for item in atoms),
         metadata=dict(metadata),
     )
@@ -706,7 +641,7 @@ def serialize_catalog_record(record: CatalogActiveSetRecord) -> JsonObject:
 
 
 def deserialize_catalog_record(data: Mapping[str, Any]) -> CatalogActiveSetRecord:
-    _only_fields(
+    expect_only_fields(
         data,
         {
             "schema_version",
@@ -729,34 +664,27 @@ def deserialize_catalog_record(data: Mapping[str, Any]) -> CatalogActiveSetRecor
     if not isinstance(fingerprint_data, Mapping):
         raise ValueError("catalog record is missing fingerprint")
     return CatalogActiveSetRecord(
-        session_id=_required_str(data, "session_id", path="catalog record"),
+        session_id=field_string(data, "session_id", path="catalog record"),
         fingerprint=deserialize_active_set_fingerprint(fingerprint_data),
-        root_session_id=_optional_str(
+        root_session_id=expect_optional_string(
             data.get("root_session_id"),
             path="catalog record.root_session_id",
         ),
-        parent_session_id=_optional_str(
+        parent_session_id=expect_optional_string(
             data.get("parent_session_id"),
             path="catalog record.parent_session_id",
         ),
-        scenario=_optional_str(
+        scenario=expect_optional_string(
             data.get("scenario"),
             path="catalog record.scenario",
         ),
-        provider=_optional_str(
+        provider=expect_optional_string(
             data.get("provider"),
             path="catalog record.provider",
         ),
-        created_at=_required_number(data, "created_at", path="catalog record"),
+        created_at=field_number(data, "created_at", path="catalog record"),
         metadata=dict(metadata),
     )
-
-
-def _string_tuple(data: Mapping[str, Any], key: str) -> tuple[str, ...]:
-    value = data.get(key)
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{key} must be a list of strings")
-    return tuple(value)
 
 
 __all__ = [

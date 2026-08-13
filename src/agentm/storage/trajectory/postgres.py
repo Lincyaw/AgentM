@@ -37,6 +37,12 @@ from agentm.core.abi.trajectory import (
     TurnCheckpoint,
     TurnRef,
 )
+from agentm.core.lib.codec_primitives import (
+    expect_boolean,
+    expect_integer,
+    expect_optional_string,
+    expect_string,
+)
 from agentm.core.lib.trajectory_store import (
     turn_prefix_cut,
     validate_checkpoint_commit,
@@ -860,10 +866,7 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
                 branch_id=_required_str(row[3], column="branch_id"),
                 head_id=_required_str(row[4], column="head_id"),
                 agent_id=_optional_str(row[5], column="agent_id"),
-                is_sidechain=_required_bool(
-                    row[6],
-                    column="is_sidechain",
-                ),
+                is_sidechain=_required_bool(row[6], column="is_sidechain"),
             )
             for row in rows
         ]
@@ -1360,28 +1363,24 @@ def _json_dumps(value: object) -> str:
     return _NUL_ESCAPE.sub(r"\1", text)
 
 
+def _column(name: str) -> str:
+    return f"Postgres column {name!r}"
+
+
 def _required_str(value: object, *, column: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Postgres column {column!r} must contain a non-empty string")
-    return value
+    return expect_string(value, _column(column), allow_empty=False)
 
 
 def _optional_str(value: object, *, column: str) -> str | None:
-    if value is None:
-        return None
-    return _required_str(value, column=column)
+    return expect_optional_string(value, _column(column), allow_empty=False)
 
 
 def _required_int(value: object, *, column: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError(f"Postgres column {column!r} must contain an integer")
-    return value
+    return expect_integer(value, _column(column))
 
 
 def _required_bool(value: object, *, column: str) -> bool:
-    if not isinstance(value, bool):
-        raise TypeError(f"Postgres column {column!r} must contain a boolean")
-    return value
+    return expect_boolean(value, _column(column))
 
 
 __all__ = [
