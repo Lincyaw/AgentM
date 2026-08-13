@@ -57,7 +57,7 @@ Enforced rules that differ from Python defaults:
 
 Inline suppression: `# code-health: ignore[AM022]` (line) or `# code-health: ignore-file[AM022]` (file).
 
-Tool schemas: use `agentm.core.lib.pydantic_to_openai_tool_schema`, not hand-written dicts.
+Tool schemas: use `agentm.core.lib.pydantic_to_tool_schema`, not hand-written dicts.
 
 ## Git Conventions
 
