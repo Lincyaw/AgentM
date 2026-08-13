@@ -37,6 +37,7 @@ from agentm.trajectory_view.model import (
     TraceTurnSummary,
     build_trace_snapshot,
 )
+from agentm.trajectory_view.textual import run_textual_viewer
 
 TraceFormat = Literal["text", "ndjson"]
 RecordT = TypeVar("RecordT")
@@ -1096,7 +1097,6 @@ def view_cmd(
     ctx: typer.Context,
     session: str | None = typer.Option(None, "--session", "-s"),
     follow: bool = typer.Option(False, "--follow", "-f"),
-    legacy: bool = typer.Option(False, "--legacy", help="Use the old ANSI pager."),
 ) -> None:
     """Interactive trace viewer with turn navigation and expand/collapse."""
     if not sys.stdout.isatty():
@@ -1105,39 +1105,7 @@ def view_cmd(
 
     query = _get_query_store(ctx)
     sid = _resolve_session_id(query, session)
-
-    if not legacy:
-        try:
-            from agentm.trajectory_view import run_textual_viewer
-        except ImportError:
-            stderr_console.print(
-                "[yellow]warning: Textual viewer unavailable; "
-                "falling back to legacy pager[/yellow]"
-            )
-        else:
-            run_textual_viewer(query, sid, follow=follow)
-            return
-
-    from agentm.cli._trace_viewer import run_interactive_viewer
-
-    try:
-        turns = list(query.turns(sid))
-    except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
-        raise typer.Exit(EXIT_NOT_FOUND)
-    checkpoints = list(query.checkpoints(sid))
-
-    reload = None
-    if follow:
-
-        def reload() -> tuple[list[Turn], list[TurnCheckpoint]]:
-            try:
-                t = list(query.turns(sid))
-            except KeyError:
-                t = []
-            return t, list(query.checkpoints(sid))
-
-    run_interactive_viewer(turns, sid, checkpoints=checkpoints, reload=reload)
+    run_textual_viewer(query, sid, follow=follow)
 
 
 # -- tools -------------------------------------------------------------------
