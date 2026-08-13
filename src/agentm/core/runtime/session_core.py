@@ -862,12 +862,17 @@ class SessionRuntime:
         self,
         snapshot: _ExtensionInstallSnapshot,
     ) -> None:
+        # Restore in place throughout. The driver and the install ledger hold
+        # references to these same container objects, so rebinding the attribute
+        # would roll back the session's view while leaving the driver serving
+        # whatever the failed install appended.
         self.bus.replace_from(snapshot.bus)
         self.services.replace_from(snapshot.services)
         self.codec.replace_from(snapshot.codec)
-        self.tools = list(snapshot.tools)
-        self.context_policies = list(snapshot.context_policies)
-        self.trigger_renderers = dict(snapshot.trigger_renderers)
+        self.tools[:] = snapshot.tools
+        self.context_policies[:] = snapshot.context_policies
+        self.trigger_renderers.clear()
+        self.trigger_renderers.update(snapshot.trigger_renderers)
         self._extensions.restore(snapshot.ledger)
         self._providers.restore(snapshot.providers)
 

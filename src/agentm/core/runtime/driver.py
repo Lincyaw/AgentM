@@ -563,7 +563,10 @@ async def drive(config: DriverConfig) -> None:
     bus = config.bus
     _interrupt = config.interrupt
     _shutdown = config.shutdown
-    policies = config.context_policies or []
+    # Alias the session's own list rather than copying it: an empty list is
+    # falsy, so `or []` would bind a fresh list here and every context policy
+    # registered after start would be invisible to the running driver.
+    policies = config.context_policies if config.context_policies is not None else []
     context_projection = config.services.get(
         CONTEXT_PROJECTION_SERVICE,
         cast(type[ContextProjection], ContextProjection),
