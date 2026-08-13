@@ -16,6 +16,7 @@ from agentm.core.abi.query import (
     QueryMeta,
     SpanRecord,
 )
+from agentm.core.lib.codec_primitives import expect_string
 from agentm.storage.sql import create_sql_engine
 
 
@@ -209,14 +210,12 @@ def _body_mapping(value: object) -> Mapping[str, object]:
 
 
 def _required_str(value: object, *, column: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(
-            f"ClickHouse column {column!r} must contain a non-empty string"
-        )
-    return value
+    return expect_string(value, f"ClickHouse column {column!r}", allow_empty=False)
 
 
 def _optional_str(value: object, *, column: str) -> str | None:
+    """ClickHouse returns the empty string where a nullable column is unset."""
+
     if value is None or value == "":
         return None
     return _required_str(value, column=column)

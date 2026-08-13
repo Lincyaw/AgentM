@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import cast
 
 from agentm.core.abi.resource import (
@@ -12,6 +12,12 @@ from agentm.core.abi.resource import (
     ResourceMutationOp,
     ResourceRef,
     ResourceTransactionRef,
+)
+from agentm.core.lib.codec_primitives import (
+    expect_object,
+    expect_only_fields,
+    expect_optional_string,
+    expect_string,
 )
 
 
@@ -51,8 +57,8 @@ def deserialize_resource_mutations(data: object) -> tuple[ResourceMutation, ...]
     mutations: list[ResourceMutation] = []
     for index, raw_item in enumerate(cast(Sequence[object], data)):
         label = f"resource_mutations[{index}]"
-        item = _object(raw_item, label)
-        _only_fields(
+        item = expect_object(raw_item, label)
+        expect_only_fields(
             item,
             {
                 "ref",
@@ -64,8 +70,8 @@ def deserialize_resource_mutations(data: object) -> tuple[ResourceMutation, ...]
             },
             label,
         )
-        ref_data = _object(item.get("ref"), f"{label}.ref")
-        _only_fields(ref_data, {"namespace", "path"}, f"{label}.ref")
+        ref_data = expect_object(item.get("ref"), f"{label}.ref")
+        expect_only_fields(ref_data, {"namespace", "path"}, f"{label}.ref")
         op_value = item.get("op")
         if op_value not in {"create", "write", "replace", "delete"}:
             raise ValueError(f"{label}.op is invalid")
@@ -78,24 +84,28 @@ def deserialize_resource_mutations(data: object) -> tuple[ResourceMutation, ...]
         mutations.append(
             ResourceMutation(
                 ref=ResourceRef(
-                    namespace=_required_string(
+                    namespace=expect_string(
                         ref_data.get("namespace"),
                         f"{label}.ref.namespace",
+                        allow_empty=False,
                     ),
-                    path=_required_string(
+                    path=expect_string(
                         ref_data.get("path"),
                         f"{label}.ref.path",
+                        allow_empty=False,
                     ),
                 ),
                 op=cast(ResourceMutationOp, op_value),
                 transaction=transaction,
-                before_version=_optional_string(
+                before_version=expect_optional_string(
                     item.get("before_version"),
                     f"{label}.before_version",
+                    allow_empty=False,
                 ),
-                after_version=_optional_string(
+                after_version=expect_optional_string(
                     item.get("after_version"),
                     f"{label}.after_version",
+                    allow_empty=False,
                 ),
                 metadata=_metadata(item.get("metadata", {}), f"{label}.metadata"),
             )
@@ -104,8 +114,8 @@ def deserialize_resource_mutations(data: object) -> tuple[ResourceMutation, ...]
 
 
 def _transaction_ref(value: object, label: str) -> ResourceTransactionRef:
-    data = _object(value, label)
-    _only_fields(data, {"id", "session_id", "turn_id", "turn_index"}, label)
+    data = expect_object(value, label)
+    expect_only_fields(data, {"id", "session_id", "turn_id", "turn_index"}, label)
     turn_index = data.get("turn_index")
     if (
         not isinstance(turn_index, int)
@@ -114,49 +124,26 @@ def _transaction_ref(value: object, label: str) -> ResourceTransactionRef:
     ):
         raise ValueError(f"{label}.turn_index must be a non-negative integer")
     return ResourceTransactionRef(
-        id=_required_string(data.get("id"), f"{label}.id"),
-        session_id=_required_string(
+        id=expect_string(data.get("id"), f"{label}.id", allow_empty=False),
+        session_id=expect_string(
             data.get("session_id"),
             f"{label}.session_id",
+            allow_empty=False,
         ),
-        turn_id=_required_string(data.get("turn_id"), f"{label}.turn_id"),
+        turn_id=expect_string(
+            data.get("turn_id"),
+            f"{label}.turn_id",
+            allow_empty=False,
+        ),
         turn_index=turn_index,
     )
-
-
-def _object(value: object, label: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
-        raise ValueError(f"{label} must be an object")
-    return cast(Mapping[str, object], value)
-
-
-def _only_fields(
-    value: Mapping[str, object],
-    allowed: set[str],
-    label: str,
-) -> None:
-    unknown = set(value) - allowed
-    if unknown:
-        raise ValueError(f"{label} has unknown fields: {sorted(unknown)!r}")
-
-
-def _required_string(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{label} must be a non-empty string")
-    return value
-
-
-def _optional_string(value: object, label: str) -> str | None:
-    if value is None:
-        return None
-    return _required_string(value, label)
 
 
 def _metadata(
     value: object,
     label: str,
 ) -> dict[str, str | int | float | bool | None]:
-    data = _object(value, label)
+    data = expect_object(value, label)
     metadata: dict[str, str | int | float | bool | None] = {}
     for key, item in data.items():
         if item is not None and not isinstance(item, (str, int, float, bool)):
