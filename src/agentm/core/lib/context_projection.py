@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
-from typing import Literal
 
 from agentm.core.abi.compaction import (
     ContextBudget,
@@ -20,8 +19,6 @@ from agentm.core.abi.trajectory import TrajectoryNode
 class ExactNodeChainProjection(ContextProjection):
     """Replay provider-visible messages from the active durable node chain."""
 
-    source: Literal["node_chain"] = "node_chain"
-
     def __init__(
         self,
         *,
@@ -36,18 +33,13 @@ class ExactNodeChainProjection(ContextProjection):
         self._include_replay_only = include_replay_only
         self._include_sidechain = include_sidechain
         self._metadata_only_content_refs = metadata_only_content_refs
-        self._report = ProjectionReport(source="node_chain")
+        self._report = ProjectionReport()
 
     def project(
         self,
         projection_input: ProjectionInput,
         budget: ContextBudget,
     ) -> Sequence[AgentMessage]:
-        if projection_input.source != self.source:
-            raise ValueError(
-                f"exact node-chain projection requires source {self.source!r}, "
-                f"got {projection_input.source!r}"
-            )
         groups: list[tuple[int, list[AgentMessage]]] = []
         group_keys: list[tuple[str, str | None, int]] = []
         content_refs: list[str] = []
@@ -78,7 +70,6 @@ class ExactNodeChainProjection(ContextProjection):
         )
         limited, kept_indexes, dropped_indexes = _limit_message_groups(groups, limit)
         self._report = ProjectionReport(
-            source="node_chain",
             session_id=projection_input.session_id,
             branch_id=projection_input.branch_id,
             head_id=projection_input.head_id,

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
@@ -27,8 +27,6 @@ from agentm.core.abi.trajectory import (
     TrajectoryNode,
     Turn,
 )
-
-ProjectionSource = Literal["turns", "node_chain"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,19 +191,18 @@ class CompactionPublisher(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ProjectionInput:
-    """Provider/context projection input with optional node-chain precision.
+    """Provider/context projection input over the committed node chain.
 
-    ``turns`` is the authoritative committed turn prefix. ``nodes`` is an
-    optional committed message chain from ``TrajectoryStore`` for projections
-    that need message-level replay, compact-boundary traversal, sidechain
-    filtering, prompt-cache identity, or content references. Projection changes
+    ``turns`` is the authoritative committed turn prefix. ``nodes`` is the
+    committed message chain from ``TrajectoryStore``, which is what gives a
+    projection message-level replay, compact-boundary traversal, sidechain
+    filtering, prompt-cache identity, and content references. Projection changes
     provider input only; it does not create external-world snapshots or make a
     mid-turn message an executable fork boundary.
     """
 
     turns: Sequence[Turn] = field(default_factory=tuple)
     nodes: Sequence[TrajectoryNode] = field(default_factory=tuple)
-    source: ProjectionSource = "turns"
     session_id: str = ""
     root_session_id: str | None = None
     parent_session_id: str | None = None
@@ -222,7 +219,6 @@ class ProjectionInput:
 class ProjectionReport:
     """Explainable metadata for the last projection decision."""
 
-    source: ProjectionSource = "turns"
     session_id: str = ""
     branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID
     head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID
@@ -240,13 +236,12 @@ class ProjectionReport:
 
 @runtime_checkable
 class ContextProjection(Protocol):
-    """Project one explicitly selected trajectory view into model context."""
+    """Project the committed trajectory chain into model context.
 
-    @property
-    def source(self) -> ProjectionSource:
-        """Trajectory view the runtime must materialize for this projection."""
-
-        ...
+    The runtime materializes the node chain before calling ``project``, which
+    is why a session that registers a projection must also have a trajectory
+    store.
+    """
 
     def project(
         self,
@@ -288,7 +283,6 @@ __all__ = [
     "ContextProjection",
     "ProjectionInput",
     "ProjectionReport",
-    "ProjectionSource",
     "SessionCompactor",
     "TurnRange",
 ]

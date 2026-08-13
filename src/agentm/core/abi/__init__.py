@@ -42,7 +42,6 @@ from .compaction import (
     ContextProjection,
     ProjectionInput,
     ProjectionReport,
-    ProjectionSource,
     SessionCompactor,
     TurnRange,
 )
@@ -574,7 +573,6 @@ __all__ = [
     "PolicyContext",
     "ProjectionInput",
     "ProjectionReport",
-    "ProjectionSource",
     "PromptRunContinued",
     "ProviderConfig",
     "ProviderError",

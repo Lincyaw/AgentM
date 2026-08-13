@@ -676,7 +676,6 @@ async def _history_messages(
         )
     projection_input = await _projection_input(
         turns=turns,
-        projection=projection,
         trajectory_store=trajectory_store,
         session_id=session_id,
         root_session_id=root_session_id,
@@ -694,25 +693,14 @@ async def _history_messages(
 async def _projection_input(
     *,
     turns: Sequence[Turn],
-    projection: ContextProjection,
     trajectory_store: TrajectoryStore | None,
     session_id: str,
     root_session_id: str | None,
     parent_session_id: str | None,
 ) -> ProjectionInput:
-    if projection.source == "turns":
-        return ProjectionInput(
-            turns=turns,
-            session_id=session_id,
-            root_session_id=root_session_id,
-            parent_session_id=parent_session_id,
-        )
-    if projection.source != "node_chain":
-        raise ValueError(f"unsupported context projection source {projection.source!r}")
     if trajectory_store is None:
         raise RuntimeError(
-            f"session {session_id}: node-chain ContextProjection requires "
-            "a trajectory store"
+            f"session {session_id}: a ContextProjection requires a trajectory store"
         )
     head = await asyncio.to_thread(
         trajectory_store.get_head,
@@ -729,7 +717,6 @@ async def _projection_input(
             )
         return ProjectionInput(
             turns=turns,
-            source="node_chain",
             session_id=session_id,
             root_session_id=root_session_id,
             parent_session_id=parent_session_id,
@@ -746,7 +733,6 @@ async def _projection_input(
     return ProjectionInput(
         turns=turns,
         nodes=tuple(nodes),
-        source="node_chain",
         session_id=session_id,
         root_session_id=root_session_id,
         parent_session_id=parent_session_id,

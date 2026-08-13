@@ -568,7 +568,15 @@ async def drive(config: DriverConfig) -> None:
         CONTEXT_PROJECTION_SERVICE,
         cast(type[ContextProjection], ContextProjection),
     )
-    if context_projection is None and config.store is not None:
+    if config.store is None:
+        if context_projection is not None:
+            raise RuntimeError(
+                f"session {config.session_id}: a registered ContextProjection "
+                "needs a trajectory store to project from, and this session has "
+                "none. Give the session a trajectory store, or drop the "
+                "context_projection service to fall back to turn-level context."
+            )
+    elif context_projection is None:
         context_projection = ExactNodeChainProjection()
     interruption_policy = config.services.get(
         INTERRUPTION_MESSAGE_POLICY_SERVICE,
