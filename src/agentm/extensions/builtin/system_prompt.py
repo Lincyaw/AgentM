@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     AtomAPI,
-    AtomInstallPriority,
     BeforeRunEvent,
     BeforeSendEvent,
     BusPriority,
@@ -38,7 +37,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:before_run", "event:before_send"),
     config_schema=SystemPromptConfig,
     requires=(),
-    priority=AtomInstallPriority.CONTEXT,
 )
 
 _CONTEXT_FILENAMES = ("AGENTS.md", "CLAUDE.md")

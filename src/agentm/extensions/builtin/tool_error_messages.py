@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import AtomAPI, AtomInstallPriority, ToolErrorEvent
+from agentm.core.abi import AtomAPI, ToolErrorEvent
 from agentm.extensions import ExtensionManifest
 
 
@@ -37,7 +37,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:tool_error",),
     config_schema=ToolErrorMessagesConfig,
     requires=(),  # Leaf atom: formats tool_error events only.
-    priority=AtomInstallPriority.TOOL,
 )
 
 

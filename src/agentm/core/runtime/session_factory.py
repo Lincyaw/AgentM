@@ -33,7 +33,6 @@ from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.manifest import (
-    AtomInstallPriority,
     ExtensionManifest,
     parse_capability_ref,
     provided_capability_keys,
@@ -110,7 +109,6 @@ class _ExtensionPlanItem:
     manifest: ExtensionManifest | None
     requires: tuple[str, ...]
     registers: tuple[str, ...]
-    priority: int
     provides: tuple[str, ...]
 
 
@@ -215,11 +213,6 @@ def _extension_plan(
             manifest=manifest,
             requires=manifest.requires if manifest is not None else (),
             registers=manifest.registers if manifest is not None else (),
-            priority=(
-                manifest.priority
-                if manifest is not None
-                else AtomInstallPriority.NORMAL
-            ),
             provides=provided_capability_keys(
                 atom_name=name,
                 registers=manifest.registers if manifest is not None else (),
@@ -263,7 +256,7 @@ def _extension_plan(
         if not ready:
             cycle = ", ".join(sorted(remaining))
             raise ValueError(f"cyclic atom dependencies: {cycle}")
-        ready.sort(key=lambda item: (item.priority, item.index))
+        ready.sort(key=lambda item: item.index)
         chosen = ready[0]
         ordered.append(chosen)
         provided.update(chosen.provides)
@@ -549,7 +542,6 @@ def _atom_activation(
         name=item.name,
         module_path=item.module_path,
         version=version,
-        priority=item.priority,
         requires=tuple(item.requires),
         registers=tuple(item.registers),
         required_capabilities=tuple(

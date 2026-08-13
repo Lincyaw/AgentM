@@ -24,7 +24,6 @@ from agentm.core.abi import (
     SESSION_TELEMETRY_SERVICE,
     ApiRegisterEvent,
     AtomAPI,
-    AtomInstallPriority,
     BeforeSendEvent,
     BusPriority,
     DiagnosticEvent,
@@ -104,7 +103,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=ObservabilityConfig,
     requires=(),
-    priority=AtomInstallPriority.OBSERVABILITY,
 )
 
 

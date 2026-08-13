@@ -47,7 +47,6 @@ from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     AssistantStreamEvent,
-    AtomInstallPriority,
     CancelSignal,
     DiagnosticEvent,
     EndTurn,
@@ -126,7 +125,6 @@ MANIFEST = ExtensionManifest(
     config_schema=LlmOpenaiConfig,
     sensitive_config_fields=("api_key", "default_headers", "default_query"),
     requires=(),
-    priority=AtomInstallPriority.PROVIDER,
 )
 
 

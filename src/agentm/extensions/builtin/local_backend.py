@@ -20,7 +20,6 @@ from agentm.core.abi import (
     RESOURCE_WRITER,
     RESOURCE_WRITER_SERVICE,
     AtomAPI,
-    AtomInstallPriority,
     BashOperations,
     EnvironmentOperations,
     ResourceReader,
@@ -53,7 +52,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=LocalBackendConfig,
     requires=(),
-    priority=AtomInstallPriority.SERVICE,
 )
 
 

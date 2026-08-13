@@ -27,7 +27,6 @@ from pydantic import BaseModel, Field
 from agentm.core.abi import (
     RESOURCE_WRITER,
     AtomAPI,
-    AtomInstallPriority,
     FunctionTool,
     JsonValue,
     ToolResult,
@@ -51,7 +50,6 @@ MANIFEST = ExtensionManifest(
         "tool:search_trajectory",
     ),
     requires=(RESOURCE_WRITER.capability,),
-    priority=AtomInstallPriority.TOOL,
 )
 
 _CLIP_NOTE = "\n[truncated {} chars; pass full=true for the rest]"

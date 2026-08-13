@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agentm.core.abi import (
     AtomAPI,
-    AtomInstallPriority,
     FunctionTool,
     JsonValue,
     TextContent,
@@ -46,7 +45,6 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("tool:submit_result",),
     config_schema=StructuredOutputConfig,
-    priority=AtomInstallPriority.TOOL,
 )
 
 

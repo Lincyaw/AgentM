@@ -37,7 +37,6 @@ from agentm.core.abi.context import (
     PolicyContext,
     turn_to_messages,
 )
-from agentm.core.abi.manifest import AtomInstallPriority
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
@@ -236,7 +235,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=LlmCompactionConfig,
     requires=(RESOURCE_STORE.capability, TRAJECTORY_STORE_ROLE.capability),
-    priority=AtomInstallPriority.CONTEXT,
 )
 
 

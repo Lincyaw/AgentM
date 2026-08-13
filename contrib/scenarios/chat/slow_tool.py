@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import AtomAPI
 from agentm.core.abi.cancel import CancelSignal, cancel_reason
-from agentm.core.abi.manifest import AtomInstallPriority, ExtensionManifest
+from agentm.core.abi.manifest import ExtensionManifest
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.tool import ToolResult
 from agentm.core.lib.tool_schema import pydantic_to_tool_schema
@@ -29,7 +29,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:slow_compute",),
     config_schema=SlowToolConfig,
     requires=(),
-    priority=AtomInstallPriority.TOOL,
 )
 
 

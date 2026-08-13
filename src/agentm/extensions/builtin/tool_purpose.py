@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict
 from agentm.core.abi import (
     TOOL_EXECUTOR,
     AtomAPI,
-    AtomInstallPriority,
     BeforeSendEvent,
     CancelSignal,
     Tool,
@@ -50,7 +49,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
     # Install after background_exec so purpose stripping is the outermost
     # execution-boundary adapter.
-    priority=AtomInstallPriority.CONTEXT + 200,
 )
 
 

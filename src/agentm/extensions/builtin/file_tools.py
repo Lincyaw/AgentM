@@ -15,7 +15,6 @@ from agentm.core.abi import (
     RESOURCE_WRITER,
     TOOL_RESULT_FORMAT_METADATA_KEY,
     AtomAPI,
-    AtomInstallPriority,
     FunctionTool,
     ResourceRef,
     ResourceTxn,
@@ -66,7 +65,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:read", "tool:write", "tool:edit"),
     config_schema=FileToolsConfig,
     requires=(RESOURCE_WRITER.capability,),
-    priority=AtomInstallPriority.TOOL,
 )
 
 # ---------------------------------------------------------------------------

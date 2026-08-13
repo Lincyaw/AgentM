@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentm.core.abi import (
     RESOURCE_WRITER,
     AtomAPI,
-    AtomInstallPriority,
     BusPriority,
     ImageContent,
     ResourceWriter,
@@ -52,7 +51,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:tool_result",),
     config_schema=ToolResultCapConfig,
     requires=(RESOURCE_WRITER.capability,),
-    priority=AtomInstallPriority.TOOL,
 )
 
 

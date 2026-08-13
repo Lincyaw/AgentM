@@ -453,7 +453,6 @@ def _activation_record(atom: AtomActivation) -> dict[str, Any]:
                 "digest": version.digest,
             }
         ),
-        "priority": atom.priority,
         "requires": list(atom.requires),
         "registers": list(atom.registers),
         "required_capabilities": list(atom.required_capabilities),

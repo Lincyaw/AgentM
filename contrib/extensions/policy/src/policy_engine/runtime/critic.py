@@ -47,7 +47,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from agentm.core.abi import (
     AgentSessionConfig,
     AtomAPI,
-    AtomInstallPriority,
     FunctionTool,
     JsonValue,
     TextContent,
@@ -585,7 +584,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:submit_for_review",),
     config_schema=ReviewRequestConfig,
     requires=("atom:system_prompt",),
-    priority=AtomInstallPriority.SERVICE,
 )
 
 

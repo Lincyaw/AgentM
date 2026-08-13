@@ -11,7 +11,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
-from agentm.core.abi.manifest import AtomInstallPriority
 
 CatalogMeta = Mapping[str, str | int | float | bool | None]
 CatalogQuerySort = Literal["asc", "desc"]
@@ -70,7 +69,6 @@ class AtomActivation:
     name: str
     module_path: str
     version: ResourceVersion | None = None
-    priority: int = AtomInstallPriority.NORMAL
     requires: tuple[str, ...] = ()
     registers: tuple[str, ...] = ()
     required_capabilities: tuple[str, ...] = ()

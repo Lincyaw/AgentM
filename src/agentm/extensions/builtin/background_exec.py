@@ -29,7 +29,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentm.core.abi import (
     TOOL_EXECUTOR,
     AtomAPI,
-    AtomInstallPriority,
     BackgroundCompletion,
     CancelSignal,
     EventCancelSource,
@@ -105,7 +104,6 @@ MANIFEST = ExtensionManifest(
     # Install after ordinary context/tool atoms so this wrapper remains the
     # outer owner while delegated executors keep their locks and sandboxes for
     # the background task's full lifetime.
-    priority=AtomInstallPriority.CONTEXT + 100,
 )
 
 

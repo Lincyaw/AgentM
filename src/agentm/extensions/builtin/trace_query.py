@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 from agentm.core.abi import (
     AssistantMessage,
     AtomAPI,
-    AtomInstallPriority,
     FunctionTool,
     JsonValue,
     TextContent,
@@ -41,7 +40,6 @@ MANIFEST = ExtensionManifest(
         "tool:get_tool_calls",
     ),
     requires=(),
-    priority=AtomInstallPriority.TOOL,
 )
 
 

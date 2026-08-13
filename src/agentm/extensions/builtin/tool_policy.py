@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AtomAPI,
-    AtomInstallPriority,
     BeforeSendEvent,
     JsonValue,
     Tool,
@@ -37,7 +36,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:before_send", "event:tool_call"),
     config_schema=ToolPolicyConfig,
     requires=(),
-    priority=AtomInstallPriority.POLICY,
 )
 
 _BLOCKED_FILE_MUTATIONS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (

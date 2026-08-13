@@ -8,7 +8,6 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi.manifest import AtomInstallPriority
 from agentm.core.abi.messages import (
     InterruptionMessagePolicy,
     MessageMeta,
@@ -60,7 +59,6 @@ MANIFEST = ExtensionManifest(
     registers=("service:interruption_message_policy",),
     config_schema=MessagePatternsConfig,
     requires=(),
-    priority=AtomInstallPriority.CONTEXT,
 )
 
 

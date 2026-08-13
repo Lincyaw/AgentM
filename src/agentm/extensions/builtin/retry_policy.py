@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentm.core.abi import (
     RETRY_POLICY_SERVICE,
     AtomAPI,
-    AtomInstallPriority,
 )
 from agentm.extensions import ExtensionManifest
 
@@ -35,7 +34,6 @@ MANIFEST = ExtensionManifest(
     registers=("service:retry_policy",),
     config_schema=RetryPolicyConfig,
     requires=(),
-    priority=AtomInstallPriority.POLICY,
 )
 
 

@@ -36,7 +36,6 @@ from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
     AtomAPI,
-    AtomInstallPriority,
     BashOperations,
     FunctionTool,
     JsonValue,
@@ -149,7 +148,6 @@ MANIFEST = ExtensionManifest(
     description="Detects structural failure patterns in trajectories, intervenes.",
     registers=("tool:submit",),
     config_schema=PolicyEngineConfig,
-    priority=AtomInstallPriority.POLICY,
 )
 
 _SUBMIT_DESCRIPTION = (

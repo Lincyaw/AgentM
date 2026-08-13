@@ -8,22 +8,6 @@ from typing import Final, Literal, cast, get_args
 from pydantic import BaseModel, ConfigDict
 
 
-class AtomInstallPriority:
-    """Conventional install priority bands.
-
-    Smaller numbers install earlier. ``requires`` is still the hard ordering
-    constraint; priority only orders otherwise independent atoms.
-    """
-
-    OBSERVABILITY = 100
-    SERVICE = 200
-    POLICY = 300
-    PROVIDER = 400
-    TOOL = 500
-    CONTEXT = 600
-    NORMAL = 500
-
-
 CapabilityKind = Literal[
     "atom",
     "service",
@@ -101,8 +85,14 @@ class ExtensionManifest(BaseModel):
 
     The manifest describes the atom itself. Scenario selection, config source
     precedence, and hard composition policy belong to ``AgentSessionConfig``
-    and its ``ScenarioLoader``. ``priority`` is only a stable default for
-    otherwise independent atoms; ``requires`` wins.
+    and its ``ScenarioLoader``.
+
+    An atom declares what it needs, never where it sits. ``requires`` is the
+    only ordering an atom can state, because it is the only ordering an atom
+    can know: where an atom belongs relative to its independent peers depends
+    on which peers are present, which is a fact about the composition. That
+    order is the scenario's, and it is read from the order its extensions are
+    listed in.
 
     ``requires`` and ``registers`` hold explicit ``kind:name`` references. For
     a service boundary that has a ``ServiceRole``, spell it ``ROLE.capability``
@@ -123,11 +113,9 @@ class ExtensionManifest(BaseModel):
     config_schema: type[BaseModel] | None = None
     sensitive_config_fields: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
-    priority: int = AtomInstallPriority.NORMAL
 
 
 __all__ = [
-    "AtomInstallPriority",
     "CapabilityKind",
     "CapabilityRef",
     "ExtensionManifest",

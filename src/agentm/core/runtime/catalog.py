@@ -296,7 +296,6 @@ def _manifest_record(
         "description": manifest.description,
         "registers": list(manifest.registers),
         "requires": list(manifest.requires),
-        "priority": manifest.priority,
         "config_schema": schema_name,
         "sensitive_config_fields": list(manifest.sensitive_config_fields),
     }
@@ -346,7 +345,6 @@ def _activation_record(atom: AtomActivation) -> dict[str, object]:
                 "digest": version.digest,
             }
         ),
-        "priority": atom.priority,
         "requires": list(atom.requires),
         "registers": list(atom.registers),
         "required_capabilities": list(atom.required_capabilities),

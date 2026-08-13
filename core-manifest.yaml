@@ -20,7 +20,9 @@ managed:
     - "*.md"
 
 extension_api:
-  current: 1
+  # 2: removed the ContextEvent channel, the ToolCallEvent "rewrite" return,
+  # and ExtensionManifest.priority. All three are breaking for atoms.
+  current: 2
   semver_rules:
     major: "Breaking change to ExtensionAPI signatures, event payloads, or hook semantics"
     minor: "New event/method added; existing surface backward compatible"

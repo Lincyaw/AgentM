@@ -35,7 +35,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AtomAPI,
-    AtomInstallPriority,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -208,7 +207,6 @@ MANIFEST = ExtensionManifest(
     ),
     requires=(),
     config_schema=TaskTrackingConfig,
-    priority=AtomInstallPriority.TOOL,
 )
 
 

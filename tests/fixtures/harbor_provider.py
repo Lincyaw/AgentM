@@ -7,7 +7,6 @@ from collections.abc import AsyncIterator
 from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.manifest import AtomInstallPriority
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
@@ -34,7 +33,6 @@ MANIFEST = ExtensionManifest(
     description="Register a deterministic provider for Harbor host tests.",
     registers=("provider:harbor-profile",),
     config_schema=HarborProviderConfig,
-    priority=AtomInstallPriority.PROVIDER,
 )
 
 

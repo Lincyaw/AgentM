@@ -29,7 +29,6 @@ from agentm.core.abi import (
     LOOP_BUDGET_SERVICE,
     AgentSessionConfig,
     AtomAPI,
-    AtomInstallPriority,
     EventCancelSource,
     FunctionTool,
     JsonValue,
@@ -91,7 +90,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=SubAgentConfig,
     requires=("atom:system_prompt",),
-    priority=AtomInstallPriority.SERVICE,
 )
 
 

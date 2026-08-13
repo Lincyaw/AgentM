@@ -27,7 +27,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from agentm.core.abi import (
     AgentSessionConfig,
     AtomAPI,
-    AtomInstallPriority,
     Event,
     EventBus,
     FunctionTool,
@@ -880,7 +879,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=WorkflowConfig,
     requires=(),
-    priority=AtomInstallPriority.TOOL,
 )
 
 

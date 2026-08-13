@@ -30,7 +30,6 @@ from agentm.core.abi import (
     LOOP_BUDGET_SERVICE,
     AgentMessage,
     AtomAPI,
-    AtomInstallPriority,
     BeforeRunEvent,
     BeforeSendEvent,
     LoopConfig,
@@ -73,7 +72,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=LoopBudgetConfig,
     requires=(),
-    priority=AtomInstallPriority.SERVICE,
 )
 
 

@@ -15,7 +15,6 @@ from agentm.core.abi import (
     TRAJECTORY_STORE_ROLE,
     AgentSessionConfig,
     AtomAPI,
-    AtomInstallPriority,
     CancelSignal,
     CompactionRequest,
     CompactionResult,
@@ -84,7 +83,6 @@ MANIFEST = ExtensionManifest(
     registers=(SESSION_COMPACTOR.capability,),
     config_schema=HarborCompactionConfig,
     requires=(TRAJECTORY_STORE_ROLE.capability,),
-    priority=AtomInstallPriority.SERVICE,
 )
 
 

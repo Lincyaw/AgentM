@@ -38,7 +38,6 @@ from agentm.core.abi import (
     PERMISSION_POLICY_ROLE,
     AgentMessage,
     AtomAPI,
-    AtomInstallPriority,
     BeforeSendEvent,
     CancelSignal,
     FunctionTool,
@@ -562,7 +561,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=PlanModeConfig,
     requires=(),
-    priority=AtomInstallPriority.POLICY,
 )
 
 

@@ -22,7 +22,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from agentm.core.abi import (
     BASH_OPERATIONS_ROLE,
     AtomAPI,
-    AtomInstallPriority,
     BashOperations,
     CancelSignal,
     EnvironmentOperations,
@@ -156,7 +155,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:bash",),
     config_schema=ToolBashConfig,
     requires=(BASH_OPERATIONS_ROLE.capability,),
-    priority=AtomInstallPriority.TOOL,
 )
 
 

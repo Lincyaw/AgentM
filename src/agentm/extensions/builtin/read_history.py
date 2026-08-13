@@ -24,7 +24,6 @@ from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     AtomAPI,
-    AtomInstallPriority,
     FunctionTool,
     OpaqueThinkingBlock,
     TextContent,
@@ -59,7 +58,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:read_history",),
     requires=(),  # Leaf atom: reads the committed trajectory only.
     config_schema=ReadHistoryConfig,
-    priority=AtomInstallPriority.TOOL,
 )
 
 

@@ -20,7 +20,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AtomAPI,
-    AtomInstallPriority,
     BeforeRunEvent,
     EventBusObserver,
     FunctionTool,
@@ -272,7 +271,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=SkillLoaderConfig,
     requires=(),
-    priority=AtomInstallPriority.CONTEXT,
 )
 
 _RESOURCE_RESPONSE_KEYS = frozenset({"skill_paths", "extra_skills"})

@@ -22,7 +22,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentm.core.abi import (
     AssistantContent,
     AtomAPI,
-    AtomInstallPriority,
     DecideEvent,
     ModelEndTurn,
     OpaqueThinkingBlock,
@@ -52,7 +51,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:decide",),
     config_schema=ThinkingRetryConfig,
     requires=(),
-    priority=AtomInstallPriority.POLICY,
 )
 
 

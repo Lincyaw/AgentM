@@ -25,7 +25,6 @@ from agentm.core.abi import (
     AgentMessage,
     AgentSessionConfig,
     AtomAPI,
-    AtomInstallPriority,
     BeforeSendEvent,
     DecideEvent,
     FunctionTool,
@@ -187,7 +186,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=GoalConfig,
     requires=(),
-    priority=AtomInstallPriority.NORMAL,
 )
 
 

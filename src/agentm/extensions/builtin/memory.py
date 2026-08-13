@@ -52,7 +52,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentm.core.abi import (
     RESOURCE_WRITER,
     AtomAPI,
-    AtomInstallPriority,
     BeforeRunEvent,
     FunctionTool,
     ResourceWriter,
@@ -107,7 +106,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=MemoryConfig,
     requires=(RESOURCE_WRITER.capability,),
-    priority=AtomInstallPriority.CONTEXT,
 )
 
 
