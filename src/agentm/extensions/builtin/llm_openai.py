@@ -84,6 +84,13 @@ from agentm.core.lib.async_cancel import (
     OperationCancelledBySignal,
     await_with_cancel_signal,
 )
+from agentm.core.lib.provider_install import (
+    DuplicateProviderError,
+    ProviderInstallSpec,
+    SdkFieldReader,
+    resolve_model_id,
+    resolve_provider_name,
+)
 from agentm.core.lib.tool_schema import _force_strict
 from agentm.extensions import ExtensionManifest
 
@@ -514,55 +521,12 @@ def _flush_tool_call(state: _StreamState, index: int) -> None:
     scratch["flushed"] = True
 
 
-_SDK_MISSING = object()
+_SDK = SdkFieldReader("OpenAI")
 
-
-def _optional_sdk_attr(value: object, name: str) -> object | None:
-    item = getattr(  # code-health: ignore[AM021] -- OpenAI SDK model boundary
-        value,
-        name,
-        _SDK_MISSING,
-    )
-    return None if item is _SDK_MISSING else item
-
-
-def _optional_sdk_string(value: object, name: str) -> str | None:
-    item = _optional_sdk_attr(value, name)
-    if item is None:
-        return None
-    if not isinstance(item, str):
-        raise TypeError(f"OpenAI SDK field {name!r} must be a string or None")
-    return item
-
-
-def _nonnegative_sdk_int(
-    value: object,
-    name: str,
-    *,
-    default: int | None = None,
-) -> int:
-    item = _optional_sdk_attr(value, name)
-    if item is None:
-        if default is None:
-            raise ValueError(f"OpenAI SDK field {name!r} is required")
-        return default
-    if not isinstance(item, int) or isinstance(item, bool) or item < 0:
-        raise TypeError(f"OpenAI SDK field {name!r} must be a non-negative integer")
-    return item
-
-
-def _sdk_sequence(
-    value: object,
-    name: str,
-    *,
-    optional: bool = False,
-) -> tuple[object, ...]:
-    item = _optional_sdk_attr(value, name)
-    if item is None and optional:
-        return ()
-    if not isinstance(item, (list, tuple)):
-        raise TypeError(f"OpenAI SDK field {name!r} must be a list")
-    return tuple(item)
+_optional_sdk_attr = _SDK.optional_attr
+_optional_sdk_string = _SDK.optional_string
+_nonnegative_sdk_int = _SDK.nonnegative_int
+_sdk_sequence = _SDK.sequence
 
 
 @runtime_checkable
@@ -992,6 +956,29 @@ async def _translate_chunk(
 # --- Extension entrypoint --------------------------------------------------
 
 
+# Canonical OpenAI base URLs — anything else is treated as a custom endpoint
+# (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for
+# such an endpoint the provider would otherwise silently register under the
+# default key ``"openai"`` and overwrite an earlier custom registration.
+_CANONICAL_OPENAI_BASE_URLS: frozenset[str] = frozenset(
+    {
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/",
+        "https://api.openai.com",
+        "https://api.openai.com/",
+    }
+)
+
+_INSTALL_SPEC = ProviderInstallSpec(
+    atom="agentm.extensions.builtin.llm_openai",
+    label="OpenAI",
+    default_name="openai",
+    canonical_base_urls=_CANONICAL_OPENAI_BASE_URLS,
+    name_examples=("doubao", "litellm", "deepseek"),
+    model_examples=("gpt-4o", "Kimi-K2"),
+)
+
+
 class _OpenAIProviderRuntime:
     """Install-time provider registration runtime for OpenAI-compatible models."""
 
@@ -1015,13 +1002,7 @@ class _OpenAIProviderRuntime:
         )
 
     def _model_id(self) -> str:
-        model_id = self._config.model
-        if not model_id or not isinstance(model_id, str):
-            raise ValueError(
-                "agentm.extensions.builtin.llm_openai.install: config.model is required and must "
-                "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
-            )
-        return model_id
+        return resolve_model_id(self._config.model, spec=_INSTALL_SPEC)
 
     def _verify_ssl(self) -> bool:
         verify_ssl = (
@@ -1069,26 +1050,11 @@ class _OpenAIProviderRuntime:
         return model_kwargs
 
     def _provider_name(self) -> str:
-        raw_name = self._config.name
-        base_url = self._config.base_url
-        if raw_name is None:
-            if _is_non_canonical_base_url(base_url):
-                raise DuplicateProviderError(
-                    "agentm.extensions.builtin.llm_openai.install: config['name'] is required when "
-                    f"base_url={base_url!r} is set to a non-canonical "
-                    "OpenAI-compatible endpoint. Multiple custom endpoints "
-                    "default to the bare 'openai' registry name and would "
-                    "silently overwrite each other. Pass an explicit "
-                    "config['name'] (e.g. 'doubao', 'litellm', 'deepseek')."
-                )
-            name = "openai"
-        else:
-            name = raw_name
-        if not isinstance(name, str) or not name:
-            raise ValueError(
-                "agentm.extensions.builtin.llm_openai.install: config['name'] must be a non-empty string."
-            )
-        return name
+        return resolve_provider_name(
+            self._config.name,
+            self._config.base_url,
+            spec=_INSTALL_SPEC,
+        )
 
 
 def install(session: Any, config: LlmOpenaiConfig) -> None:
@@ -1103,43 +1069,6 @@ def install(session: Any, config: LlmOpenaiConfig) -> None:
     """
 
     _OpenAIProviderRuntime(session, config).install()
-
-
-# Canonical OpenAI base URLs — anything else is treated as a custom endpoint
-# (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for
-# such an endpoint the provider would otherwise silently register under the
-# default key ``"openai"`` and overwrite an earlier custom registration.
-_CANONICAL_OPENAI_BASE_URLS: frozenset[str] = frozenset(
-    {
-        "https://api.openai.com/v1",
-        "https://api.openai.com/v1/",
-        "https://api.openai.com",
-        "https://api.openai.com/",
-    }
-)
-
-
-def _is_non_canonical_base_url(base_url: object) -> bool:
-    if base_url is None:
-        return False
-    if not isinstance(base_url, str) or not base_url.strip():
-        return False
-    return base_url.rstrip("/") not in {
-        url.rstrip("/") for url in _CANONICAL_OPENAI_BASE_URLS
-    }
-
-
-class DuplicateProviderError(ValueError):
-    """Raised when an OpenAI-compatible provider would shadow an existing one.
-
-    Two situations trigger this:
-
-    * ``config['base_url']`` points at a non-canonical (custom) OpenAI-compatible
-      endpoint and ``config['name']`` was not supplied — the install would
-      otherwise default to the bare ``"openai"`` registry key and silently
-      collide with another custom endpoint registered in the same session.
-    * The session already has a provider registered under the requested name.
-    """
 
 
 __all__ = (

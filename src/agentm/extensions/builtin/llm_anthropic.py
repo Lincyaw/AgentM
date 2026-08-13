@@ -80,6 +80,12 @@ from agentm.core.lib.async_cancel import (
     OperationCancelledBySignal,
     await_with_cancel_signal,
 )
+from agentm.core.lib.provider_install import (
+    ProviderInstallSpec,
+    SdkFieldReader,
+    resolve_model_id,
+    resolve_provider_name,
+)
 from agentm.extensions import ExtensionManifest
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
@@ -415,60 +421,13 @@ def _finalize_block(state: _StreamState, index: int) -> None:
         )
 
 
-_SDK_MISSING = object()
+_SDK = SdkFieldReader("Anthropic")
 
-
-def _optional_sdk_attr(value: object, name: str) -> object | None:
-    item = getattr(  # code-health: ignore[AM021] -- Anthropic SDK model boundary
-        value,
-        name,
-        _SDK_MISSING,
-    )
-    return None if item is _SDK_MISSING else item
-
-
-def _required_sdk_attr(value: object, name: str) -> object:
-    item = _optional_sdk_attr(value, name)
-    if item is None:
-        raise ValueError(f"Anthropic SDK field {name!r} is required")
-    return item
-
-
-def _optional_sdk_string(value: object, name: str) -> str | None:
-    item = _optional_sdk_attr(value, name)
-    if item is None:
-        return None
-    if not isinstance(item, str):
-        raise TypeError(f"Anthropic SDK field {name!r} must be a string or None")
-    return item
-
-
-def _required_sdk_string(
-    value: object,
-    name: str,
-    *,
-    allow_empty: bool = True,
-) -> str:
-    item = _required_sdk_attr(value, name)
-    if not isinstance(item, str) or (not allow_empty and not item):
-        raise TypeError(f"Anthropic SDK field {name!r} must be a string")
-    return item
-
-
-def _nonnegative_sdk_int(
-    value: object,
-    name: str,
-    *,
-    default: int | None = None,
-) -> int:
-    item = _optional_sdk_attr(value, name)
-    if item is None:
-        if default is None:
-            raise ValueError(f"Anthropic SDK field {name!r} is required")
-        return default
-    if not isinstance(item, int) or isinstance(item, bool) or item < 0:
-        raise TypeError(f"Anthropic SDK field {name!r} must be a non-negative integer")
-    return item
+_optional_sdk_attr = _SDK.optional_attr
+_required_sdk_attr = _SDK.required_attr
+_optional_sdk_string = _SDK.optional_string
+_required_sdk_string = _SDK.required_string
+_nonnegative_sdk_int = _SDK.nonnegative_int
 
 
 @runtime_checkable
@@ -897,14 +856,14 @@ _CANONICAL_ANTHROPIC_BASE_URLS: frozenset[str] = frozenset(
 )
 
 
-def _is_non_canonical_base_url(base_url: object) -> bool:
-    if base_url is None:
-        return False
-    if not isinstance(base_url, str) or not base_url.strip():
-        return False
-    return base_url.rstrip("/") not in {
-        url.rstrip("/") for url in _CANONICAL_ANTHROPIC_BASE_URLS
-    }
+_INSTALL_SPEC = ProviderInstallSpec(
+    atom="agentm.extensions.builtin.llm_anthropic",
+    label="Anthropic",
+    default_name="anthropic",
+    canonical_base_urls=_CANONICAL_ANTHROPIC_BASE_URLS,
+    name_examples=("mimo", "minimax", "doubao"),
+    model_examples=("claude-opus-4-7",),
+)
 
 
 class _AnthropicProviderRuntime:
@@ -929,13 +888,7 @@ class _AnthropicProviderRuntime:
         )
 
     def _model_id(self) -> str:
-        model_id = self._config.model
-        if not model_id or not isinstance(model_id, str):
-            raise ValueError(
-                "agentm.extensions.builtin.llm_anthropic.install: config.model is required and must "
-                "be a non-empty string (e.g. 'claude-opus-4-7')."
-            )
-        return model_id
+        return resolve_model_id(self._config.model, spec=_INSTALL_SPEC)
 
     def _build_stream_fn(self) -> AnthropicStreamFn:
         default_headers = self._config.default_headers
@@ -955,27 +908,11 @@ class _AnthropicProviderRuntime:
         )
 
     def _provider_name(self) -> str:
-        raw_name = self._config.name
-        base_url = self._config.base_url
-        if raw_name is None:
-            if _is_non_canonical_base_url(base_url):
-                raise ValueError(
-                    "agentm.extensions.builtin.llm_anthropic.install: config.name "
-                    f"is required when base_url={base_url!r} is set to a "
-                    "non-canonical Anthropic-compatible endpoint. Multiple custom "
-                    "endpoints default to the bare 'anthropic' registry name and "
-                    "would silently overwrite each other. Pass an explicit "
-                    "config.name (e.g. 'mimo', 'minimax', 'doubao')."
-                )
-            name = "anthropic"
-        else:
-            name = raw_name
-        if not isinstance(name, str) or not name:
-            raise ValueError(
-                "agentm.extensions.builtin.llm_anthropic.install: "
-                "config.name must be a non-empty string"
-            )
-        return name
+        return resolve_provider_name(
+            self._config.name,
+            self._config.base_url,
+            spec=_INSTALL_SPEC,
+        )
 
     def _model_kwargs(self) -> dict[str, int]:
         # Optional model-spec overrides; defaults handled in ``_build_model``.
