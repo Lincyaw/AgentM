@@ -5,6 +5,10 @@ Owns driver task, trajectory, trigger queue, bus, tools, services,
 context policies, and shutdown logic.  ``Session`` (session.py) extends
 this with child, fork, and resume operations.
 
+Two collaborators own the state the runtime only routes to: which model
+the session talks to lives in ``provider_registry.py``, and which atom
+registered what lives in ``extension_install.py``.
+
 Runtime boundaries (resource ports, tool execution, permission, effect
 scope, catalogs) are plain service-role bindings; there are no
 per-boundary register/get methods.
@@ -64,7 +68,6 @@ from agentm.core.abi.operations import BashOperations, EnvironmentOperations
 from agentm.core.abi.permission import PermissionAudience
 from agentm.core.abi.provider import (
     ProviderConfig,
-    ProviderResolver,
     ProviderSessionIdentity,
 )
 from agentm.core.abi.roles import (
@@ -78,8 +81,6 @@ from agentm.core.abi.roles import (
     ENVIRONMENT_RESTORE_STATUS_ROLE,
     EXPERIMENT_SERVICE,
     PERMISSION_POLICY_ROLE,
-    PROVIDER_RESOLVER_SERVICE,
-    PROVIDER_SESSION_IDENTITY,
     RESOLVED_SESSION_SPEC_SERVICE,
     RESOURCE_WRITER,
     SESSION_TELEMETRY_ROLE,
@@ -111,6 +112,8 @@ from agentm.core.abi.trigger import (
 from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.lib.session_result import compute_session_result
 from agentm.core.runtime.driver import DriverConfig, drive
+from agentm.core.runtime.extension_install import InstallLedger, LedgerSnapshot
+from agentm.core.runtime.provider_registry import ProviderRegistry, ProviderSnapshot
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
@@ -183,20 +186,10 @@ class _ExtensionInstallSnapshot:
     services: ServiceRegistry
     codec: CodecRegistry
     tools: tuple[Tool, ...]
-    tool_owners: dict[int, str | None]
     context_policies: tuple[ContextPolicy, ...]
-    context_policy_owners: dict[int, str | None]
-    context_policy_priorities: dict[int, int]
     trigger_renderers: dict[str, TriggerRenderer]
-    trigger_renderer_owners: dict[str, str | None]
-    trigger_codec_owners: dict[str, str | None]
-    stream_fn: StreamFn | None
-    model: Model | None
-    active_provider_name: str | None
-    provider_identity: ProviderSessionIdentity | None
-    provider_owners: dict[str, str | None]
-    installed_extensions: tuple[str, ...]
-    installed_extension_specs: tuple[ExtensionSpec, ...]
+    ledger: LedgerSnapshot
+    providers: ProviderSnapshot
 
 
 class SessionRuntime:
@@ -242,24 +235,16 @@ class SessionRuntime:
         self.graph = graph
         self.triggers = TriggerQueue()
         self.tools: list[Tool] = list(tools or [])
-        self._tool_owners: dict[int, str | None] = {
-            id(tool): None for tool in self.tools
-        }
         self.system = runtime.system
         self.context_policies: list[ContextPolicy] = list(context_policies or [])
-        self._context_policy_owners: dict[int, str | None] = {
-            id(policy): None for policy in self.context_policies
-        }
-        self._context_policy_priorities: dict[int, int] = {
-            id(policy): 500 for policy in self.context_policies
-        }
         self.trigger_renderers: dict[str, TriggerRenderer] = dict(
             trigger_renderers or {}
         )
-        self._trigger_renderer_owners: dict[str, str | None] = {
-            source: None for source in self.trigger_renderers
-        }
-        self._trigger_codec_owners: dict[str, str | None] = {}
+        self._extensions = InstallLedger(
+            tools=self.tools,
+            context_policies=self.context_policies,
+            trigger_renderers=self.trigger_renderers,
+        )
         store_codec = (
             store.codec if isinstance(store, CodecBackedTrajectoryStore) else None
         )
@@ -280,8 +265,6 @@ class SessionRuntime:
                     "session services contain a different trajectory store"
                 )
 
-        self._stream_fn = runtime.stream_fn
-        self._model = runtime.model
         self._max_turns = runtime.max_turns
         self._max_tool_calls = runtime.max_tool_calls
         self._thinking = runtime.thinking
@@ -293,22 +276,15 @@ class SessionRuntime:
         self._driver_task: asyncio.Task[None] | None = None
         self._shutdown_task: asyncio.Task[None] | None = None
         self._cleanup_callbacks: list[Callable[[], Awaitable[None]]] = []
-        self.installed_extensions: list[str] = []
-        self._installed_extension_specs: list[ExtensionSpec] = []
-        self._active_provider_name: str | None = None
-        self._provider_owners: dict[str, str | None] = {}
-        inherited_provider_identity = self.services.get_role(PROVIDER_SESSION_IDENTITY)
-        self._provider_identity: ProviderSessionIdentity | None = (
-            runtime.provider_identity
-            if runtime.provider_identity is not None
-            else inherited_provider_identity
+        self._providers = ProviderRegistry(
+            services=self.services,
+            committed_turns=lambda: self.trajectory.turns,
+            active_set=self._active_set_fingerprint,
+            emit_register_event=self._emit_register_event,
+            stream_fn=runtime.stream_fn,
+            model=runtime.model,
+            identity=runtime.provider_identity,
         )
-        if self._provider_identity is not None:
-            self.services.bind(
-                PROVIDER_SESSION_IDENTITY,
-                self._provider_identity,
-                replace=True,
-            )
         if self.services.get_role(TOOL_ORCHESTRATOR) is None:
             self.services.bind(TOOL_ORCHESTRATOR, default_tool_orchestrator())
         if runtime.tool_allowlist is not None:
@@ -329,10 +305,10 @@ class SessionRuntime:
     def start(self) -> None:
         if self._driver_task is not None:
             return
-        self._activate_provider()
-        if self._stream_fn is None:
+        self._providers.activate()
+        if self._providers.stream_fn is None:
             raise RuntimeError(f"session {self.id}: cannot start without stream_fn")
-        if self._model is None:
+        if self._providers.model is None:
             raise RuntimeError(f"session {self.id}: cannot start without model")
 
         for policy in self.context_policies:
@@ -340,7 +316,7 @@ class SessionRuntime:
 
         self.bus.on(
             TurnCommittedEvent.CHANNEL,
-            self._freeze_provider_on_turn_commit,
+            self._providers.on_turn_committed,
             owner="agentm.core.session",
         )
         self.bus.freeze_clear()
@@ -357,7 +333,7 @@ class SessionRuntime:
                 cwd=self.ctx.cwd,
                 tool_names=tuple(t.name for t in self.tools),
                 extension_module_paths=tuple(self.installed_extensions),
-                model=self._model,
+                model=self._providers.model,
             ),
         )
 
@@ -367,8 +343,8 @@ class SessionRuntime:
             parent_session_id=self.ctx.parent_session_id,
             services=self.services,
             store=self.store,
-            model=self._model,
-            stream_fn=self._stream_fn,
+            model=self._providers.model,
+            stream_fn=self._providers.stream_fn,
             trigger_renderers=dict(self.trigger_renderers),
         )
 
@@ -376,21 +352,20 @@ class SessionRuntime:
         if isinstance(policy, BindableContextPolicy):
             policy.bind(self._policy_context())
 
-    def _freeze_provider_on_turn_commit(self, _: TurnCommittedEvent) -> None:
-        self._freeze_provider_after_commits()
-
     async def _run_driver(self) -> None:
         try:
-            assert self._stream_fn is not None
-            assert self._model is not None
+            stream_fn = self._providers.stream_fn
+            model = self._providers.model
+            assert stream_fn is not None
+            assert model is not None
             audience: PermissionAudience = "user" if self.ctx.depth == 0 else "subagent"
             await drive(
                 DriverConfig(
                     trajectory=self.trajectory,
                     triggers=self.triggers,
                     bus=self.bus,
-                    stream_fn=self._stream_fn,
-                    model=self._model,
+                    stream_fn=stream_fn,
+                    model=model,
                     tools=self.tools,
                     store=self.store,
                     session_id=self.id,
@@ -594,7 +569,13 @@ class SessionRuntime:
 
     @property
     def model(self) -> Model | None:
-        return self._model
+        return self._providers.model
+
+    @property
+    def installed_extensions(self) -> list[str]:
+        """Module paths of the atoms installed into this session, in order."""
+
+        return self._extensions.module_paths
 
     @property
     def session_id(self) -> str:
@@ -653,7 +634,7 @@ class SessionRuntime:
         if tool.name in existing:
             raise ValueError(f"duplicate tool: {tool.name}")
         self.tools.append(tool)
-        self._tool_owners[id(tool)] = current_installing_extension() or None
+        self._extensions.note_tool(tool, current_installing_extension() or None)
         self._emit_register_event("tool", tool.name, {"tool": tool})
 
     def register_context_policy(
@@ -664,18 +645,18 @@ class SessionRuntime:
         if any(existing is policy for existing in self.context_policies):
             raise ValueError("context policy instance is already registered")
         self.context_policies.append(policy)
-        self._context_policy_priorities[id(policy)] = priority
-        self._context_policy_owners[id(policy)] = current_installing_extension() or None
-        self.context_policies.sort(
-            key=lambda item: self._context_policy_priorities[id(item)]
+        self._extensions.note_context_policy(
+            policy,
+            current_installing_extension() or None,
+            priority=priority,
         )
+        self.context_policies.sort(key=self._extensions.priority_of)
         if self._driver_task is not None:
             try:
                 self._bind_context_policy(policy)
             except BaseException:
                 self.context_policies.remove(policy)
-                self._context_policy_priorities.pop(id(policy), None)
-                self._context_policy_owners.pop(id(policy), None)
+                self._extensions.drop_context_policy(policy)
                 raise
         self._emit_register_event(
             "context_policy",
@@ -687,7 +668,9 @@ class SessionRuntime:
         from agentm.core.runtime.extension import current_installing_extension
 
         self.trigger_renderers[source] = renderer
-        self._trigger_renderer_owners[source] = current_installing_extension() or None
+        self._extensions.note_trigger_renderer(
+            source, current_installing_extension() or None
+        )
         self._emit_register_event(
             "trigger_renderer",
             source,
@@ -700,7 +683,9 @@ class SessionRuntime:
         if not isinstance(codec, TriggerCodec):
             raise TypeError("trigger codec must implement serialize and deserialize")
         self.codec.register_trigger_codec(source, codec)
-        self._trigger_codec_owners[source] = current_installing_extension() or None
+        self._extensions.note_trigger_codec(
+            source, current_installing_extension() or None
+        )
         self._emit_register_event(
             "trigger_codec",
             source,
@@ -780,219 +765,24 @@ class SessionRuntime:
         replace: bool = False,
     ) -> None:
         """Register an LLM provider and refresh the active provider."""
-        if not isinstance(name, str) or not name:
-            raise ValueError("provider registry name must be a non-empty string")
-        if not isinstance(config, ProviderConfig):
-            raise TypeError("provider config must be ProviderConfig")
-        if config.name != name:
-            raise ValueError(
-                f"provider registry name {name!r} does not match "
-                f"ProviderConfig.name {config.name!r}"
-            )
-        key = f"provider:{name}"
-        previous = self.services.get(key)
-        if previous is not None and not replace:
-            raise ValueError(
-                f"provider {name!r} is already registered in this session; give "
-                "each provider a unique name (config['name']) or pass replace=True"
-            )
-        prospective = self._provider_configs()
-        prospective[name] = config
-        if self._provider_identity is None:
-            self._resolve_provider_name(prospective)
-        elif (
-            self._provider_identity.name == name
-            and self._provider_identity.model_id is not None
-            and config.model.id != self._provider_identity.model_id
-        ):
-            raise RuntimeError(
-                "cannot replace the session-bound provider with model "
-                f"{config.model.id!r}; expected "
-                f"{self._provider_identity.model_id!r}"
-            )
-        from agentm.core.runtime.extension import current_installing_extension
 
-        previous_owner = self._provider_owners.get(name)
-        self.services.register(key, config, scope="session")
-        self._provider_owners[name] = current_installing_extension() or None
-        try:
-            self._activate_provider()
-        except BaseException:
-            if previous is None:
-                self.services.unregister(key)
-                self._provider_owners.pop(name, None)
-            else:
-                self.services.register(key, previous, scope="session")
-                self._provider_owners[name] = previous_owner
-            raise
-        self._emit_register_event("provider", name, {"provider": config})
+        self._providers.register(name, config, replace=replace)
 
     def has_provider(self, name: str) -> bool:
-        return self.services.get(f"provider:{name}") is not None
+        return self._providers.has(name)
 
     def get_provider(self, name: str | None = None) -> ProviderConfig | None:
-        if name is None:
-            self._activate_provider()
-        provider_name = name or self._active_provider_name
-        if provider_name is None:
-            return None
-        provider = self.services.get(f"provider:{provider_name}")
-        return provider if isinstance(provider, ProviderConfig) else None
+        return self._providers.get(name)
 
     def provider_names(self) -> list[str]:
-        prefix = "provider:"
-        return sorted(
-            name[len(prefix) :]
-            for name in self.services.names()
-            if name.startswith(prefix)
-        )
-
-    def _provider_configs(self) -> dict[str, ProviderConfig]:
-        prefix = "provider:"
-        providers: dict[str, ProviderConfig] = {}
-        for service_name in self.services.names():
-            if not service_name.startswith(prefix):
-                continue
-            provider = self.services.get(service_name)
-            if isinstance(provider, ProviderConfig):
-                providers[service_name[len(prefix) :]] = provider
-        return providers
-
-    def _provider_resolver(self) -> ProviderResolver | None:
-        candidate = self.services.get(PROVIDER_RESOLVER_SERVICE)
-        return candidate if isinstance(candidate, ProviderResolver) else None
-
-    def _activate_provider(self) -> None:
-        providers = self._provider_configs()
-        if not providers:
-            if (
-                self._provider_identity is not None
-                and self._model is not None
-                and self._provider_identity.model_id is not None
-                and self._model.id != self._provider_identity.model_id
-            ):
-                raise RuntimeError(
-                    "cannot activate provider: session is bound to model "
-                    f"{self._provider_identity.model_id!r}, got "
-                    f"{self._model.id!r}"
-                )
-            return
-        self._freeze_provider_after_commits()
-        if self._provider_identity is not None:
-            provider = providers.get(self._provider_identity.name)
-            if provider is None:
-                if not self.trajectory.turns:
-                    return
-                raise RuntimeError(
-                    "cannot activate provider: session is bound to provider "
-                    f"{self._provider_identity.name!r}, but it is not registered"
-                )
-            model_id = provider.model.id
-            if (
-                self._provider_identity.model_id is not None
-                and model_id != self._provider_identity.model_id
-            ):
-                raise RuntimeError(
-                    "cannot activate provider: session is bound to model "
-                    f"{self._provider_identity.model_id!r}, got {model_id!r}"
-                )
-            self._active_provider_name = self._provider_identity.name
-            self._stream_fn = provider.stream_fn
-            self._model = provider.model
-            return
-        selected = self._resolve_provider_name(providers)
-        if selected is None:
-            return
-        provider = providers[selected]
-        self._active_provider_name = selected
-        self._stream_fn = provider.stream_fn
-        self._model = provider.model
-
-    def _freeze_provider_after_commits(self) -> None:
-        if self._provider_identity is not None or not self.trajectory.turns:
-            return
-        providers = self._provider_configs()
-        first_model_id = next(
-            (
-                turn.meta.model_id
-                for turn in self.trajectory.turns
-                if turn.meta.model_id
-            ),
-            None,
-        )
-        if not providers:
-            if self._model is None:
-                return
-            active_set = self._active_set_fingerprint()
-            self._set_provider_identity(
-                ProviderSessionIdentity(
-                    name=self._active_provider_name or "direct",
-                    model_id=first_model_id or self._model.id,
-                    active_set_digest=(
-                        active_set.digest if active_set is not None else None
-                    ),
-                    frozen_after_turn_index=self.trajectory.turns[0].index,
-                )
-            )
-            return
-        provider_name = self._active_provider_name
-        if provider_name is None or provider_name not in providers:
-            raise RuntimeError(
-                "cannot freeze provider identity: committed turns have no "
-                "active registered provider"
-            )
-        provider = providers[provider_name]
-        if first_model_id is not None and provider.model.id != first_model_id:
-            raise RuntimeError(
-                "cannot freeze provider identity: committed model "
-                f"{first_model_id!r} does not match selected provider model "
-                f"{provider.model.id!r}"
-            )
-        active_set = self._active_set_fingerprint()
-        self._set_provider_identity(
-            ProviderSessionIdentity(
-                name=provider_name,
-                model_id=first_model_id or provider.model.id,
-                active_set_digest=active_set.digest if active_set is not None else None,
-                frozen_after_turn_index=self.trajectory.turns[0].index,
-            )
-        )
-
-    def _set_provider_identity(self, identity: ProviderSessionIdentity) -> None:
-        self._provider_identity = identity
-        self.services.bind(PROVIDER_SESSION_IDENTITY, identity, replace=True)
+        return self._providers.names()
 
     def provider_session_identity(self) -> ProviderSessionIdentity | None:
         """Return the provider/model identity bound to this session, if known."""
 
-        self._freeze_provider_after_commits()
-        if self._provider_identity is not None:
-            active_set = self._active_set_fingerprint()
-            if active_set is not None:
-                bound_digest = self._provider_identity.active_set_digest
-                if bound_digest is None:
-                    self._set_provider_identity(
-                        replace(
-                            self._provider_identity,
-                            active_set_digest=active_set.digest,
-                        )
-                    )
-                elif bound_digest != active_set.digest:
-                    raise RuntimeError(
-                        "provider identity active set does not match the session: "
-                        f"{bound_digest} != {active_set.digest}"
-                    )
-            return self._provider_identity
-        if self._active_provider_name is None:
-            self._activate_provider()
-        if self._model is None:
-            return None
-        active_set = self._active_set_fingerprint()
-        return ProviderSessionIdentity(
-            name=self._active_provider_name or "direct",
-            model_id=self._model.id,
-            active_set_digest=active_set.digest if active_set is not None else None,
-        )
+        return self._providers.session_identity()
+
+    # --- Environment restore ---
 
     def _environment_restore_failure_handler(
         self,
@@ -1004,31 +794,6 @@ class SessionRuntime:
         status: EnvironmentRestoreStatus,
     ) -> None:
         self.services.bind(ENVIRONMENT_RESTORE_STATUS_ROLE, status, replace=True)
-
-    def _resolve_provider_name(
-        self,
-        providers: dict[str, ProviderConfig],
-    ) -> str:
-        if not providers:
-            raise LookupError("cannot resolve an empty provider registry")
-        resolver = self._provider_resolver()
-        if resolver is not None:
-            selected = resolver.resolve_provider(providers)
-            if selected is None:
-                raise LookupError(
-                    "provider resolver returned None for a non-empty registry"
-                )
-            if selected not in providers:
-                raise LookupError(
-                    f"provider resolver selected unregistered provider {selected!r}"
-                )
-            return selected
-        if len(providers) == 1:
-            return next(iter(providers))
-        raise RuntimeError(
-            "multiple providers are registered; configure a ProviderResolver "
-            "instead of relying on registration order"
-        )
 
     # --- Resolved composition metadata ---
 
@@ -1087,20 +852,10 @@ class SessionRuntime:
             services=self.services.copy(),
             codec=self.codec.copy(),
             tools=tuple(self.tools),
-            tool_owners=dict(self._tool_owners),
             context_policies=tuple(self.context_policies),
-            context_policy_owners=dict(self._context_policy_owners),
-            context_policy_priorities=dict(self._context_policy_priorities),
             trigger_renderers=dict(self.trigger_renderers),
-            trigger_renderer_owners=dict(self._trigger_renderer_owners),
-            trigger_codec_owners=dict(self._trigger_codec_owners),
-            stream_fn=self._stream_fn,
-            model=self._model,
-            active_provider_name=self._active_provider_name,
-            provider_identity=self._provider_identity,
-            provider_owners=dict(self._provider_owners),
-            installed_extensions=tuple(self.installed_extensions),
-            installed_extension_specs=tuple(self._installed_extension_specs),
+            ledger=self._extensions.capture(),
+            providers=self._providers.capture(),
         )
 
     def _restore_extension_install_state(
@@ -1111,20 +866,10 @@ class SessionRuntime:
         self.services.replace_from(snapshot.services)
         self.codec.replace_from(snapshot.codec)
         self.tools = list(snapshot.tools)
-        self._tool_owners = dict(snapshot.tool_owners)
         self.context_policies = list(snapshot.context_policies)
-        self._context_policy_owners = dict(snapshot.context_policy_owners)
-        self._context_policy_priorities = dict(snapshot.context_policy_priorities)
         self.trigger_renderers = dict(snapshot.trigger_renderers)
-        self._trigger_renderer_owners = dict(snapshot.trigger_renderer_owners)
-        self._trigger_codec_owners = dict(snapshot.trigger_codec_owners)
-        self._stream_fn = snapshot.stream_fn
-        self._model = snapshot.model
-        self._active_provider_name = snapshot.active_provider_name
-        self._provider_identity = snapshot.provider_identity
-        self._provider_owners = dict(snapshot.provider_owners)
-        self.installed_extensions = list(snapshot.installed_extensions)
-        self._installed_extension_specs = list(snapshot.installed_extension_specs)
+        self._extensions.restore(snapshot.ledger)
+        self._providers.restore(snapshot.providers)
 
     def record_installed_extension(
         self,
@@ -1134,54 +879,7 @@ class SessionRuntime:
 
         if not isinstance(spec, ExtensionSpec):
             raise TypeError("installed extension record requires ExtensionSpec")
-        self.installed_extensions.append(spec.module_path)
-        self._installed_extension_specs.append(
-            ExtensionSpec(source=spec.source, config=spec.config)
-        )
-
-    def _external_tools(self) -> list[Tool]:
-        return [tool for tool in self.tools if self._tool_owners.get(id(tool)) is None]
-
-    def _external_context_policies(self) -> list[ContextPolicy]:
-        return [
-            policy
-            for policy in self.context_policies
-            if self._context_policy_owners.get(id(policy)) is None
-        ]
-
-    def _external_trigger_renderers(self) -> dict[str, TriggerRenderer]:
-        return {
-            source: renderer
-            for source, renderer in self.trigger_renderers.items()
-            if self._trigger_renderer_owners.get(source) is None
-        }
-
-    def _composition_codec(self) -> CodecRegistry:
-        return self.codec.copy_without_trigger_sources(
-            {
-                source
-                for source, owner in self._trigger_codec_owners.items()
-                if owner is not None
-            }
-        )
-
-    def _composition_extensions(
-        self,
-        *,
-        include_provider_atoms: bool,
-    ) -> list[ExtensionSpec]:
-        excluded = (
-            set()
-            if include_provider_atoms
-            else {
-                owner for owner in self._provider_owners.values() if owner is not None
-            }
-        )
-        return [
-            ExtensionSpec(source=spec.source, config=spec.config)
-            for spec in self._installed_extension_specs
-            if spec.module_path not in excluded
-        ]
+        self._extensions.record_installed(spec)
 
     def composition_snapshot(
         self,
@@ -1190,20 +888,34 @@ class SessionRuntime:
     ) -> CompositionSnapshot:
         """Snapshot the rebuildable composition for spawn/fork/child paths."""
 
+        provider_atoms: set[str] = (
+            set()
+            if include_provider_atoms
+            else {
+                owner
+                for owner in self._providers.owners().values()
+                if owner is not None
+            }
+        )
         return CompositionSnapshot(
             extensions=tuple(
-                self._composition_extensions(
-                    include_provider_atoms=include_provider_atoms,
+                self._extensions.composition_extensions(
+                    excluded_module_paths=provider_atoms,
                 )
             ),
-            external_tools=tuple(self._external_tools()),
+            external_tools=tuple(self._extensions.external_tools(self.tools)),
             external_context_policies=tuple(
-                copy.copy(policy) for policy in self._external_context_policies()
+                copy.copy(policy)
+                for policy in self._extensions.external_context_policies(
+                    self.context_policies
+                )
             ),
-            external_trigger_renderers=self._external_trigger_renderers(),
-            codec=self._composition_codec(),
-            stream_fn=self._stream_fn,
-            model=self._model,
+            external_trigger_renderers=self._extensions.external_trigger_renderers(
+                self.trigger_renderers
+            ),
+            codec=self._extensions.composition_codec(self.codec),
+            stream_fn=self._providers.stream_fn,
+            model=self._providers.model,
             system=self.system,
             max_turns=self._max_turns,
             max_tool_calls=self._max_tool_calls,
