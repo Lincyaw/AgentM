@@ -190,6 +190,8 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
             "is_sidechain",
             "tool_call_ids",
             "tool_names",
+            # Written by serialize_node before ef009950 removed the prompt-cache
+            # subsystem; tolerated on read so pre-2026-07-23 sessions still load.
             "cache_key",
             "content_ref",
             "visibility",
@@ -531,7 +533,6 @@ def serialize_atom_activation(atom: AtomActivation) -> JsonObject:
             if atom.version is not None
             else None
         ),
-        "priority": atom.priority,
         "requires": list(atom.requires),
         "registers": list(atom.registers),
         "required_capabilities": list(atom.required_capabilities),
@@ -548,7 +549,6 @@ def deserialize_atom_activation(data: Mapping[str, Any]) -> AtomActivation:
             "name",
             "module_path",
             "version",
-            "priority",
             "requires",
             "registers",
             "required_capabilities",
@@ -569,7 +569,6 @@ def deserialize_atom_activation(data: Mapping[str, Any]) -> AtomActivation:
             if isinstance(version_data, Mapping)
             else None
         ),
-        priority=field_integer(data, "priority", path="atom activation"),
         requires=expect_string_tuple(data.get("requires"), "requires"),
         registers=expect_string_tuple(data.get("registers"), "registers"),
         required_capabilities=expect_string_tuple(

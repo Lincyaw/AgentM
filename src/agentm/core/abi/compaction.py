@@ -227,7 +227,6 @@ class ProjectionReport:
     summarized: tuple[TurnRange, ...] = ()
     dropped: tuple[TurnRange, ...] = ()
     content_refs: tuple[str, ...] = ()
-    cache_keys: tuple[str, ...] = ()
     synthetic_message_count: int = 0
     metadata: Mapping[str, str | int | float | bool | None] = field(
         default_factory=dict

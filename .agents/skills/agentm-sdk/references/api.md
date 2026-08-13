@@ -167,7 +167,6 @@ api.on(TurnEndEvent.CHANNEL, _on_turn_end)
 | `SessionReadyEvent` | Session initialized | One-time setup |
 | `TurnStartEvent` / `TurnEndEvent` | Each LLM turn | Per-turn bookkeeping |
 | `ToolCallEvent` / `ToolResultEvent` | Tool invocation | Gating, logging |
-| `ContextEvent` | Context assembly | Per-turn context injection |
 | `BeforeSendEvent` | Before LLM call | Last-chance message edit |
 | `SessionShutdownEvent` | Session ending | Cleanup |
 

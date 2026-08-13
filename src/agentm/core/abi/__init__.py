@@ -64,7 +64,6 @@ from .events import (
     BeforeSendEvent,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
-    ContextEvent,
     DecideEvent,
     DiagnosticEvent,
     ExtensionInstallEvent,
@@ -101,7 +100,6 @@ from .lifecycle import (
     LifecycleMeta,
 )
 from .manifest import (
-    AtomInstallPriority,
     CapabilityKind,
     CapabilityRef,
     ExtensionManifest,
@@ -463,7 +461,6 @@ __all__ = [
     "AtomAPI",
     "AtomActivation",
     "AtomCatalog",
-    "AtomInstallPriority",
     "BackgroundCompletion",
     "BashOperations",
     "BeforeRunEvent",
@@ -496,7 +493,6 @@ __all__ = [
     "ContentReplacementState",
     "ContextBudget",
     "ContextCompactionService",
-    "ContextEvent",
     "ContextPolicy",
     "ContextProjection",
     "ContextTransformCancelled",

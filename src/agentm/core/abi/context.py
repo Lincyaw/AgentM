@@ -8,20 +8,23 @@ ContextPolicies in priority order.
 Policies are the pluggability axis for compaction, injection, cache
 discipline, system reminders, and any future context transformation.
 
-Two context-transform mechanisms exist by design:
+**ContextPolicy** is the one transform mechanism: it runs inside
+``build_context`` before each provider request, sees committed Turns only,
+is async, and reaches session identity and services through ``bind()``.
+Use it for compaction, summary, and anything else that depends on the
+trajectory's structure.
 
-- **ContextPolicy** — runs inside ``build_context`` before each provider
-  request. Sees committed Turns only. Async. Has access to
-  session identity and services via ``bind()``.  Use for transforms
-  that depend on the full trajectory structure (compaction, summary).
+``ContextPolicy`` is the only mechanism that transforms the committed
+prefix, and everything it produces is reachable from the record.
 
-- **ContextEvent** (bus) — runs after ``build_context`` for the active Turn.
-  Sees committed Turns + trigger + in-flight messages.
-  Async.  Use for transforms that need the live tail (cache-discipline
-  suffix, token injection).
-
-The split is deliberate: policies transform the durable prefix,
-bus handlers transform the live tail.
+``BeforeSendEvent`` can still replace the message list on its way to the
+provider, and one shipped atom uses it. That path is *not* recorded: the
+system prompt it produces is folded back into ``TurnMeta.system_prompt`` and
+committed, but the message list it produces is not. A request assembled that
+way is therefore not reproducible from the trajectory, which is the one
+property the trajectory exists to provide. Treat it as a known gap rather
+than a supported extension point; late additions belong in the trigger that
+carries them, so they commit as messages like anything else.
 """
 
 from __future__ import annotations

@@ -26,7 +26,6 @@ from agentm.core.abi.context import (
 from agentm.core.abi.events import (
     BeforeRunEvent,
     BeforeSendEvent,
-    ContextEvent,
     DecideEvent,
     Inject,
     LoopAction,
@@ -237,7 +236,6 @@ class EventCollector:
         channels = [
             TurnBeginEvent.CHANNEL,
             TurnCommittedEvent.CHANNEL,
-            ContextEvent.CHANNEL,
             BeforeSendEvent.CHANNEL,
             StreamDeltaEvent.CHANNEL,
             ToolCallEvent.CHANNEL,
@@ -621,7 +619,6 @@ async def test_event_coverage() -> None:
     assert len(collector.events[DecideEvent.CHANNEL]) >= 1
     assert len(collector.events[BeforeRunEvent.CHANNEL]) >= 1
     assert len(collector.events[StreamDeltaEvent.CHANNEL]) >= 1
-    assert len(collector.events[ContextEvent.CHANNEL]) >= 1
     assert len(collector.events[BeforeSendEvent.CHANNEL]) >= 1
 
 

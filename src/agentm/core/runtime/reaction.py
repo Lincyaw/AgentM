@@ -33,7 +33,6 @@ from agentm.core.abi.context import (
 from agentm.core.abi.events import (
     BeforeRunEvent,
     BeforeSendEvent,
-    ContextEvent,
     DecideEvent,
     Inject,
     LlmRequestEndEvent,
@@ -172,15 +171,6 @@ def _reduce_before_run(event: BeforeRunEvent, value: object) -> BeforeRunEvent:
             raise TypeError("BeforeRunEvent system must be str or None")
         system = replacement_system
     return replace(event, messages=messages, system=system)
-
-
-def _reduce_context(event: ContextEvent, value: object) -> ContextEvent:
-    replacement_messages = _message_list(value)
-    if replacement_messages is None and isinstance(value, Mapping):
-        replacement_messages = _message_list(value.get("messages"))
-    if replacement_messages is None:
-        raise TypeError("ContextEvent handlers must return a message list or None")
-    return replace(event, messages=tuple(replacement_messages))
 
 
 def _reduce_before_send(event: BeforeSendEvent, value: object) -> BeforeSendEvent:
@@ -869,13 +859,6 @@ async def react(
             ),
         )
 
-    context_event, _ctx_returns = await bus.emit_reduced(
-        ContextEvent.CHANNEL,
-        ContextEvent(messages=tuple(messages), turn_index=execution.index),
-        _reduce_context,
-    )
-    messages = list(context_event.messages)
-
     allowed_tool_names = set(tool_allowlist) if tool_allowlist is not None else None
     send_tools = list(tools)
     if allowed_tool_names is not None:
@@ -1185,6 +1168,18 @@ async def react(
                     args=dict(tc.arguments),
                 ),
             )
+            for returned in tc_returns:
+                if isinstance(returned, Mapping):
+                    unknown = set(returned) - {"block", "reason"}
+                    if unknown:
+                        # An atom written against an older ABI may still try to
+                        # rewrite arguments. Ignoring it would run the tool with
+                        # the arguments the handler believed it had replaced,
+                        # so refuse the turn instead of failing open.
+                        raise TypeError(
+                            "ToolCallEvent handlers return only 'block' and "
+                            f"'reason'; got {sorted(unknown)}"
+                        )
             blocked = _last_key(tc_returns, "block")
 
             if blocked:
@@ -1211,16 +1206,7 @@ async def react(
                 )
                 continue
 
-            rewrite = _last_key(tc_returns, "rewrite")
             args = dict(tc.arguments)
-            if rewrite is not None:
-                if not isinstance(rewrite, Mapping):
-                    raise TypeError("ToolCallEvent rewrite must be an object")
-                frozen_rewrite = freeze_json(rewrite)
-                if not isinstance(frozen_rewrite, Mapping):
-                    raise TypeError("ToolCallEvent rewrite must be an object")
-                args.update(frozen_rewrite)
-            tool_args_by_index[index] = dict(args)
             if allowed_tool_names is not None and tc.name not in allowed_tool_names:
                 await materialize_tool_outcome(
                     index,

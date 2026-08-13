@@ -2,12 +2,9 @@
 
 All events are frozen.  Handlers express intent through return values:
 
-- ContextEvent handler returns ``list[AgentMessage] | None``
-  (replacement message list, or None for no opinion)
 - BeforeSendEvent handler returns a dict of field overrides or None
 - DecideEvent handler returns a ``LoopAction | None``
-- ToolCallEvent handler returns ``{"block": True, "reason": ...}``
-  or ``{"rewrite": {...}}`` or None
+- ToolCallEvent handler returns ``{"block": True, "reason": ...}`` or None
 - ToolResultEvent handler returns a replacement ToolResult or None
 - Observation-only events: handler return is ignored
 """
@@ -72,15 +69,6 @@ class TurnCommittedEvent(Event):
 
 
 @dataclass(frozen=True, slots=True)
-class ContextEvent(Event):
-    """Handlers return ``list[AgentMessage] | None`` to replace messages."""
-
-    CHANNEL: ClassVar[str] = "context"
-    messages: tuple[AgentMessage, ...] = ()
-    turn_index: int = 0
-
-
-@dataclass(frozen=True, slots=True)
 class BeforeSendEvent(Event):
     """Final preflight before LLM call.
 
@@ -112,8 +100,10 @@ class StreamDeltaEvent(Event):
 
 @dataclass(frozen=True, slots=True)
 class ToolCallEvent(Event):
-    """Handlers return ``{"block": True, "reason": ...}`` or
-    ``{"rewrite": {arg_overrides}}`` or None.
+    """Handlers return ``{"block": True, "reason": ...}`` or None.
+
+    A handler cannot rewrite arguments: the recorded call and the executed
+    call must be the same call, or the trajectory stops being evidence.
     """
 
     CHANNEL: ClassVar[str] = "tool_call"
@@ -311,7 +301,6 @@ __all__ = [
     "BeforeSendEvent",
     "ChildSessionEndEvent",
     "ChildSessionStartEvent",
-    "ContextEvent",
     "DecideEvent",
     "DiagnosticEvent",
     "ExtensionInstallEvent",
