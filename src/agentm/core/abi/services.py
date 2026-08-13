@@ -45,6 +45,17 @@ class ServiceRole[T]:
     protocol: type[T] | None = None
     scope: ServiceScope = "tree"
 
+    @property
+    def capability(self) -> str:
+        """This role as a manifest ``requires``/``registers`` entry.
+
+        The role owns the service key, so an atom that depends on or provides
+        the boundary declares it from here instead of restating the key as a
+        ``"service:..."`` literal that nothing keeps in sync.
+        """
+
+        return f"service:{self.key}"
+
 
 @dataclass(frozen=True, slots=True)
 class _ServiceEntry:

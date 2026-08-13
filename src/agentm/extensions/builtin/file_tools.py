@@ -65,7 +65,7 @@ MANIFEST = ExtensionManifest(
     description="Register the read, write, and edit tools for guarded file I/O.",
     registers=("tool:read", "tool:write", "tool:edit"),
     config_schema=FileToolsConfig,
-    requires=("service:resource_writer",),
+    requires=(RESOURCE_WRITER.capability,),
     priority=AtomInstallPriority.TOOL,
 )
 

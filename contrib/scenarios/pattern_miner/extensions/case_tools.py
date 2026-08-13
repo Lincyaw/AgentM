@@ -50,7 +50,7 @@ MANIFEST = ExtensionManifest(
         "tool:read_turns",
         "tool:search_trajectory",
     ),
-    requires=(),
+    requires=(RESOURCE_WRITER.capability,),
     priority=AtomInstallPriority.TOOL,
 )
 
