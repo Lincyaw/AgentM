@@ -1,17 +1,21 @@
 """Let the agent write a tool and install it into its own running session.
 
-The model authors a single-file atom, this atom writes it to disk, hands it to
-the loader, and the session gains the tool from its next turn onward.
+The model supplies what the tool does; this atom supplies the contract around
+it. That split matters: the atom module shape, the manifest, the registration
+call and the result wrapping are mechanism the model has no reason to know, and
+asking it to reproduce them from memory turns every authoring attempt into a
+guess at an API. The model writes a function body and a parameter schema.
 
-Policy lives here, mechanism does not. Everything this atom does is reachable
-through ``AtomAPI``: it writes source through the resource writer, and installs
-through ``install_extension``. Validation failures come back as tool results so
-the model can read the error and fix its own code.
+Policy lives here, mechanism does not. Source is written through the resource
+writer and installed through ``install_extension``; failures come back as tool
+results so the model can read the error and fix its own code.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import textwrap
 from pathlib import Path
 
 from loguru import logger
@@ -24,6 +28,7 @@ from agentm.core.abi import (
     ExtensionSource,
     ExtensionSpec,
     FunctionTool,
+    JsonValue,
     TextContent,
     ToolResult,
 )
@@ -41,7 +46,7 @@ class ToolAuthoringConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="tool_authoring",
-    description="Write a new tool as an atom and install it into this session.",
+    description="Write a new tool and install it into this running session.",
     registers=("tool:write_tool",),
     config_schema=ToolAuthoringConfig,
     requires=(RESOURCE_WRITER.capability,),
@@ -53,17 +58,74 @@ class WriteToolArgs(BaseModel):
 
     name: str = Field(
         description=(
-            "Tool name the model will call. Also names the atom module, so it "
-            "must be a valid Python identifier."
+            "Name the tool will be called by. Must be a valid Python identifier."
         )
     )
-    source: str = Field(
+    description: str = Field(
+        description="What the tool does, as the model calling it will read it."
+    )
+    parameters: dict[str, JsonValue] = Field(
         description=(
-            "Complete source of a single-file atom. It must define MANIFEST = "
-            "ExtensionManifest(...) and def install(api, config). Register the "
-            "tool with api.register_tool(FunctionTool(...))."
+            "JSON Schema object describing the arguments, with 'type': "
+            "'object' and a 'properties' map."
         )
     )
+    body: str = Field(
+        description=(
+            "Python body of the tool. It receives the arguments as a dict "
+            "named args and must return a value; the return is converted to "
+            "text. Write only the body, no def line. The standard library is "
+            "importable inside the body."
+        )
+    )
+
+
+_TEMPLATE = '''\
+"""Tool authored at runtime by the agent."""
+
+import json
+
+from agentm.core.abi import (
+    ExtensionManifest,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
+
+MANIFEST = ExtensionManifest(
+    name={name!r},
+    description={description!r},
+    registers=({registers!r},),
+)
+
+_PARAMETERS = json.loads({parameters!r})
+
+
+def _impl(args):
+{body}
+
+
+async def _run(args):
+    try:
+        value = _impl(args)
+    except Exception as exc:
+        return ToolResult(
+            content=[TextContent(type="text", text=f"{{type(exc).__name__}}: {{exc}}")],
+            is_error=True,
+        )
+    return ToolResult(content=[TextContent(type="text", text=str(value))])
+
+
+def install(api, config):
+    api.register_tool(
+        FunctionTool(
+            name={name!r},
+            description={description!r},
+            parameters=_PARAMETERS,
+            fn=_run,
+        )
+    )
+'''
 
 
 def _ok(text: str) -> ToolResult:
@@ -75,6 +137,20 @@ def _error(text: str) -> ToolResult:
         content=[TextContent(type="text", text=text)],
         is_error=True,
     )
+
+
+def _render_atom(parsed: WriteToolArgs) -> str:
+    body = textwrap.indent(textwrap.dedent(parsed.body).strip("\n"), "    ")
+    if not body.strip():
+        body = "    return None"
+    source = _TEMPLATE.format(
+        name=parsed.name,
+        description=parsed.description,
+        registers=f"tool:{parsed.name}",
+        parameters=json.dumps(parsed.parameters),
+        body=body,
+    )
+    return source
 
 
 class _ToolAuthor:
@@ -93,7 +169,16 @@ class _ToolAuthor:
                 "underscores, not starting with a digit."
             )
 
-        source_bytes = parsed.source.encode()
+        source = _render_atom(parsed)
+        try:
+            compile(source, parsed.name, "exec")
+        except SyntaxError as exc:
+            return _error(
+                f"the body does not compile: line {exc.lineno}: {exc.msg}. "
+                "Nothing was written or installed. Send a corrected body."
+            )
+
+        source_bytes = source.encode()
         digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
         path = self._directory / f"{parsed.name}_{digest[7:15]}.py"
 
@@ -128,14 +213,14 @@ class _ToolAuthor:
             logger.warning("authored tool {} failed to install: {}", parsed.name, exc)
             return _error(
                 f"the tool did not install: {exc}\n\n"
-                "The source is saved but inactive. Fix the code and call "
-                "write_tool again."
+                "The source is saved but inactive. Fix it and call write_tool "
+                "again."
             )
 
         logger.info("authored tool installed: {} from {}", parsed.name, path)
         return _ok(
-            f"Installed. {parsed.name!r} is available from your next turn "
-            f"onward; it is not callable in this one. Source saved at {path}."
+            f"Installed. {parsed.name!r} is callable from your next turn "
+            f"onward, not this one. Source saved at {path}."
         )
 
 
@@ -147,9 +232,10 @@ def install(api: AtomAPI, config: ToolAuthoringConfig) -> None:
         FunctionTool(
             name="write_tool",
             description=(
-                "Write a new tool and install it into this session. Provide the "
-                "complete source of a single-file atom defining MANIFEST and "
-                "install(api, config). The tool becomes callable on your next "
+                "Create a new tool and install it into this session. You supply "
+                "the tool's name, description, JSON Schema parameters, and a "
+                "Python body that receives the arguments as a dict named args "
+                "and returns a value. The tool becomes callable on your next "
                 "turn, not the current one."
             ),
             parameters=pydantic_to_tool_schema(WriteToolArgs),
