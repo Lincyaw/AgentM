@@ -15,7 +15,6 @@ extensions:
     config:
       tool_result_max_tokens: 200
       total_max_tokens: 1000
-  - module: agentm.extensions.builtin.skill_loader
   # Not a tool for running agents. An agent given one of those writes a brief
   # for a subordinate: it appends instructions, grants permissions the reviewer
   # does not have, and states what the correct output would be -- which the
@@ -51,6 +50,9 @@ extensions:
       # unproven checkpoint does not get to be the default. Installed so the
       # approver has something to register over; flip this to try it.
       start_in_plan: false
+  # After plan_mode: both append to the system prompt, and this order is the
+  # one every recorded arm was run under.
+  - module: agentm.extensions.builtin.skill_loader
 
   - module: policy_engine
     config:

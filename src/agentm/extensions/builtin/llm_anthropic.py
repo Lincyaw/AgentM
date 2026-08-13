@@ -262,9 +262,14 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
     was_tool_result_user = False
     for msg in messages:
         if isinstance(msg, UserMessage):
-            out.append(
-                {"role": "user", "content": _encode_user_content(list(msg.content))}
-            )
+            blocks = _encode_user_content(list(msg.content))
+            if out and previous_role == "user":
+                # Anthropic takes one user turn at a time. A synthetic trailing
+                # message after tool results would otherwise emit a second
+                # consecutive user entry, so it joins the turn it follows.
+                out[-1]["content"].extend(blocks)
+            else:
+                out.append({"role": "user", "content": blocks})
             previous_role = "user"
             was_tool_result_user = False
         elif isinstance(msg, AssistantMessage):

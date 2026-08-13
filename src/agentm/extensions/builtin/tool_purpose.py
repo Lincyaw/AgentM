@@ -3,6 +3,10 @@
 
 Injects a ``purpose`` parameter into tool schemas sent to the model, then
 strips that synthetic argument before delegating to the real tool.
+
+The strip happens on the way inward, and the real tool is always innermost, so
+this executor works wherever it lands among other executor decorators. Nothing
+here depends on being the outermost one.
 """
 
 from __future__ import annotations
@@ -47,8 +51,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:before_send", "executor:tool_purpose"),
     config_schema=ToolPurposeConfig,
     requires=(),
-    # Install after background_exec so purpose stripping is the outermost
-    # execution-boundary adapter.
 )
 
 
