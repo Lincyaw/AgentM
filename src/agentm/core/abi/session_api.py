@@ -500,6 +500,27 @@ class AtomAPI(Protocol):
         """
         ...
 
+    async def install_extension(
+        self,
+        extension: ExtensionSpec | str,
+        config: dict[str, JsonValue] | None = None,
+        *,
+        trigger: str = "runtime",
+    ) -> None:
+        """Install another atom into this session.
+
+        Works on a running session: the driver re-reads the tool list at each
+        turn boundary, so a tool registered here is callable from the next turn
+        and cannot change the surface the in-flight turn already advertised.
+        What the driver captured at start — the tool executor and the
+        permission policy — is not reachable this way.
+
+        Requirements are solved against the session's live capabilities rather
+        than against a composition plan, and a failed install rolls the
+        session's registrations back before raising.
+        """
+        ...
+
     # --- Model access --------------------------------------------------------
 
     @property

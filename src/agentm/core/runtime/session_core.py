@@ -64,6 +64,7 @@ from agentm.core.abi.messages import (
     TextContent,
     freeze_json,
 )
+from agentm.core.abi.manifest import requirement_key
 from agentm.core.abi.operations import BashOperations, EnvironmentOperations
 from agentm.core.abi.permission import PermissionAudience
 from agentm.core.abi.provider import (
@@ -831,20 +832,58 @@ class SessionRuntime:
         *,
         trigger: str = "runtime",
     ) -> None:
-        """Install an extension through the standard lifecycle path."""
+        """Install an extension through the standard lifecycle path.
+
+        Installing into a running session is allowed. The driver re-reads the
+        session's tool list at every turn boundary, so an atom installed while a
+        turn is in flight becomes visible to the model on the next turn and
+        cannot change the tool surface the running turn already advertised.
+
+        What the driver captured once at start is not reachable this way: an
+        atom installed at runtime cannot replace the tool executor or the
+        permission policy the running driver consults.
+        """
         from agentm.core.runtime.extension import install_extension
 
-        if self._driver_task is not None:
-            raise RuntimeError(
-                "extensions cannot be installed after session start; "
-                "compose atoms before start"
-            )
+        runtime_install = self._driver_task is not None
+        if runtime_install:
+            self._verify_runtime_requirements(extension)
         await install_extension(
             cast("Session", self),
             extension,
             None if isinstance(extension, ExtensionSpec) else config or {},
             trigger=trigger,
+            runtime=runtime_install,
         )
+
+    def _verify_runtime_requirements(
+        self,
+        extension: ExtensionSpec | str,
+    ) -> None:
+        """Solve one atom's requirements against the live capability set.
+
+        Composition-time solving orders the whole plan at once. A late install
+        has no plan to be ordered within, so its requirements are checked
+        against what the session actually provides right now, and the failure
+        reads the same either way.
+        """
+        from agentm.core.runtime.extension import load_manifest_for_spec
+
+        manifest = load_manifest_for_spec(extension)
+        if manifest is None or not manifest.requires:
+            return
+        available = {f"service:{name}" for name in self.services.names()}
+        available |= {f"atom:{path}" for path in self._extensions.module_paths}
+        missing = [
+            requirement
+            for requirement in manifest.requires
+            if requirement_key(requirement) not in available
+        ]
+        if missing:
+            raise ValueError(
+                f"unsatisfied atom dependencies: {manifest.name} requires "
+                f"{', '.join(missing)}"
+            )
 
     def _capture_extension_install_state(self) -> _ExtensionInstallSnapshot:
         return _ExtensionInstallSnapshot(
@@ -879,12 +918,14 @@ class SessionRuntime:
     def record_installed_extension(
         self,
         spec: ExtensionSpec,
+        *,
+        runtime: bool = False,
     ) -> None:
         """Record one installed extension for composition snapshots."""
 
         if not isinstance(spec, ExtensionSpec):
             raise TypeError("installed extension record requires ExtensionSpec")
-        self._extensions.record_installed(spec)
+        self._extensions.record_installed(spec, runtime=runtime)
 
     def composition_snapshot(
         self,
