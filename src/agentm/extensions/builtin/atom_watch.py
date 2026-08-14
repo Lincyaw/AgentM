@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Final, Protocol, runtime_checkable
 
 from loguru import logger
@@ -55,6 +56,23 @@ _FOLLOWER_SERVICE: Final = "atom_watch_follower"
 A version of this atom that supersedes another registers over this key, so the
 loop the previous version is running can see that it is no longer the session's
 follower and hand over.
+"""
+
+_MAX_UNCONFIRMED_HANDOVERS: Final = 3
+"""How many passes in a row may find a successor that has not taken over.
+
+A superseded follower keeps its loop until the successor confirms, because the
+reasons a successor declines -- a scenario file caught half written, a loader
+not registered yet -- are the ones the next pass recovers from. Those clear
+within a pass or two, so three of them is a wide margin.
+
+The bound is what makes keeping the loop safe rather than permanent. Nothing
+else can stop this task once another version holds the service: superseding
+detaches this atom's handlers, the shutdown handler among them, and shutdown
+only emits on the bus. A successor that will never confirm -- a value that is
+not a follower at all, a ``take_over`` that raises on every call -- would
+otherwise leave this loop installing and detaching atoms against a session
+that has already ended.
 """
 
 
@@ -126,6 +144,25 @@ class _Composition:
     @classmethod
     def of(cls, resolved: Sequence[ExtensionSpec]) -> _Composition:
         return cls(entries={_key(spec): _Applied(running=spec) for spec in resolved})
+
+
+class _Handover(Enum):
+    """What one pass concluded about a newer version of this atom."""
+
+    NOT_SUPERSEDED = auto()
+    """No other version holds the follower service. Keep the loop."""
+
+    UNCONFIRMED = auto()
+    """Another version holds the service but is not following yet.
+
+    Keep the loop -- giving it up here would end scenario following for the
+    session, since the loop that would retry is the one that returned -- but
+    count it: consecutive ones are how a handover that will never land is told
+    apart from one that is a pass away.
+    """
+
+    RELEASED = auto()
+    """This follower is no longer the session's. The loop is over."""
 
 
 @runtime_checkable
@@ -236,22 +273,44 @@ class _ScenarioFollower:
     # --- Loop ---
 
     async def _loop(self) -> None:
+        unconfirmed = 0
         while True:
             await asyncio.sleep(self._interval)
+            # Handing over runs the replacement's code, which the host just
+            # loaded from a file someone is editing, so it gets a guard of its
+            # own. Sharing the pass's guard would cost the session its tick
+            # every time the handover raised, and a successor raises for
+            # reasons that do not change by themselves -- a signature this
+            # version does not call the way that one declares it -- so the
+            # session would keep its loop and converge on nothing.
             try:
-                # Handing over runs the replacement's code, which is code the
-                # host just loaded from a file someone is editing: it belongs
-                # under the same guard as a pass.
-                if self._hand_over_if_superseded():
+                handover = self._hand_over_if_superseded()
+            except Exception as exc:  # noqa: BLE001 - a dev loop must not die
+                logger.warning("atom watch could not hand the loop over: {}", exc)
+                handover = _Handover.UNCONFIRMED
+            if handover is _Handover.RELEASED:
+                return
+            if handover is _Handover.NOT_SUPERSEDED:
+                unconfirmed = 0
+            else:
+                unconfirmed += 1
+                if unconfirmed >= _MAX_UNCONFIRMED_HANDOVERS:
+                    logger.error(
+                        "atom watch stopping: superseded, and its replacement "
+                        "has not taken the scenario loop over in {} passes. "
+                        "This session no longer follows its scenario.",
+                        unconfirmed,
+                    )
                     return
+            try:
                 await self._tick()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - a dev loop must not die
                 logger.warning("atom watch pass failed: {}", exc)
 
-    def _hand_over_if_superseded(self) -> bool:
-        """Give the loop to a newer version of this atom; report having done so.
+    def _hand_over_if_superseded(self) -> _Handover:
+        """Offer the loop to a newer version of this atom; report the outcome.
 
         Superseding an atom detaches its handlers, including the shutdown
         handler that cancels this task, so a follower that reloaded itself has
@@ -262,33 +321,35 @@ class _ScenarioFollower:
         The loop is only given up once the successor confirms it is following.
         A successor that could not start leaves this one running: the session
         would otherwise stop tracking its scenario for good, since the loop
-        that would have retried is the one that just returned.
+        that would have retried is the one that just returned. Retention is the
+        caller's to bound -- see ``_MAX_UNCONFIRMED_HANDOVERS``, since one that
+        will never confirm has no other way to stop this task.
         """
 
         follower = self._api.services.get(_FOLLOWER_SERVICE)
         if follower is self:
-            return False
+            return _Handover.NOT_SUPERSEDED
         if follower is None:
             # Nothing registered over this atom; it was detached outright.
             logger.info(
                 "atom watch stopping: this session no longer follows a scenario",
             )
-            return True
+            return _Handover.RELEASED
         if not isinstance(follower, _Follower):
             logger.warning(
                 "atom watch keeping the scenario loop: {} took the follower "
                 "service over but cannot follow",
                 type(follower).__name__,
             )
-            return False
+            return _Handover.UNCONFIRMED
         if not follower.take_over(self._applied.entries):
             logger.warning(
                 "atom watch keeping the scenario loop: its replacement has "
                 "not started following",
             )
-            return False
+            return _Handover.UNCONFIRMED
         logger.info("atom watch handed the scenario loop to its replacement")
-        return True
+        return _Handover.RELEASED
 
     async def _tick(self) -> None:
         resolved = self._resolve()
@@ -312,7 +373,14 @@ class _ScenarioFollower:
             key = _key(spec)
             previous = applied.get(key)
             if not rebuilding:
-                if previous is not None and previous.failed == spec:
+                # Whether this position is undisturbed is the first thing to
+                # settle, because both of the ways to leave it alone below
+                # depend on it: an atom the scenario moved is one this pass
+                # rebuilds, latched or not.
+                in_place = (
+                    position < len(applied_order) and applied_order[position] == key
+                )
+                if in_place and previous is not None and previous.failed == spec:
                     # This exact version already failed here and nothing before
                     # it has moved. The session runs what it ran before, so the
                     # position is as satisfied as it is going to get: the
@@ -327,10 +395,7 @@ class _ScenarioFollower:
                     # one a tick.
                     landed[key] = previous
                     continue
-                in_place = (
-                    position < len(applied_order) and applied_order[position] == key
-                )
-                if previous is not None and previous.running == spec and in_place:
+                if in_place and previous is not None and previous.running == spec:
                     # The scenario came back to what is running here, so any
                     # version that failed against this position is moot.
                     landed[key] = _Applied(running=spec)
