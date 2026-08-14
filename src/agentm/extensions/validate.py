@@ -48,8 +48,20 @@ class ValidationIssue:
 
 def validate_atom_file(
     path: str | Path,
+    *,
+    atom_package: str | None = None,
+    module_name: str | None = None,
 ) -> list[ValidationIssue]:
-    """Validate one atom source file."""
+    """Validate one atom source file.
+
+    ``atom_package`` is the dotted name of the package this file belongs to
+    when the atom is a package. Imports within that package are the atom's own
+    parts, so they are allowed where an import of a different atom is not.
+
+    ``module_name`` is this file's own dotted name, used to resolve relative
+    imports before checking them. Without it a relative import that escapes the
+    package is unreadable and passes unchecked.
+    """
 
     src_path = Path(path)
     try:
@@ -78,10 +90,19 @@ def validate_atom_file(
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                _record_forbidden_import(issues, alias.name, src_path, node.lineno)
+                _record_forbidden_import(
+                    issues, alias.name, src_path, node.lineno, atom_package
+                )
         elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            _record_forbidden_import(issues, module, src_path, node.lineno)
+            module = _absolute_module(
+                node.module or "",
+                node.level,
+                module_name=module_name,
+                is_init=src_path.name == "__init__.py",
+            )
+            _record_forbidden_import(
+                issues, module, src_path, node.lineno, atom_package
+            )
             if module == "agentm.core":
                 for alias in node.names:
                     _record_forbidden_import(
@@ -89,20 +110,63 @@ def validate_atom_file(
                         f"agentm.core.{alias.name}",
                         src_path,
                         node.lineno,
+                        atom_package,
                     )
     return issues
 
 
 def validate_atom_package(
     package_dir: str | Path,
+    *,
+    atom_package: str | None = None,
 ) -> list[ValidationIssue]:
     """Validate every Python file in a package atom."""
 
     root = Path(package_dir)
     issues: list[ValidationIssue] = []
     for path in sorted(root.rglob("*.py")):
-        issues.extend(validate_atom_file(path))
+        issues.extend(
+            validate_atom_file(
+                path,
+                atom_package=atom_package,
+                module_name=_module_name_of(path, root, atom_package),
+            )
+        )
     return issues
+
+
+def _module_name_of(path: Path, root: Path, atom_package: str | None) -> str | None:
+    """Dotted name of one file inside a package rooted at ``atom_package``."""
+
+    if atom_package is None:
+        return None
+    parts = list(path.relative_to(root).parts)
+    if parts[-1] == "__init__.py":
+        parts.pop()
+    elif parts[-1].endswith(".py"):
+        parts[-1] = parts[-1][: -len(".py")]
+    return ".".join([atom_package, *parts])
+
+
+def _absolute_module(
+    module: str,
+    level: int,
+    *,
+    module_name: str | None,
+    is_init: bool,
+) -> str:
+    """Resolve a relative import to the dotted name it actually names."""
+
+    if level == 0 or module_name is None:
+        return module
+    package = module_name if is_init else module_name.rpartition(".")[0]
+    parts = package.split(".") if package else []
+    climb = level - 1
+    parts = parts[: len(parts) - climb] if climb <= len(parts) else []
+    base = ".".join(parts)
+    if not base:
+        return module
+    return f"{base}.{module}" if module else base
 
 
 def extension_helper_imports(path: str | Path) -> list[str]:
@@ -136,8 +200,9 @@ def _record_forbidden_import(
     module: str,
     path: Path,
     line: int,
+    atom_package: str | None = None,
 ) -> None:
-    reason = _forbidden_import_reason(module)
+    reason = _forbidden_import_reason(module, atom_package)
     if reason is None:
         return
     issues.append(
@@ -151,7 +216,11 @@ def _record_forbidden_import(
     )
 
 
-def _forbidden_import_reason(module: str) -> str | None:
+def _forbidden_import_reason(module: str, atom_package: str | None) -> str | None:
+    if atom_package is not None and (
+        module == atom_package or module.startswith(f"{atom_package}.")
+    ):
+        return None
     for forbidden, reason in _FORBIDDEN_IMPORTS.items():
         if module == forbidden or module.startswith(f"{forbidden}."):
             return reason

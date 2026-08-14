@@ -29,14 +29,14 @@ The SDK is mechanism, not policy. Policy enters through atoms.
 ```
 presenters   agentm.cli / AgentSession.create (SDK embedding)
 atoms        extensions/builtin/ + contrib/scenarios/ + contrib/extensions/
-substrate    core/ (abi + runtime + lib) — write-protected by core-manifest.yaml
+substrate    core/ (abi + runtime + lib)
 ```
 
-Dependency arrows go down only. `core-manifest.yaml` guards constitutional paths — changes to `core/abi/`, `core/lib/`, `core/runtime/`, and `extensions/validate.py` require deliberate acknowledgment.
+Dependency arrows go down only. Layering is enforced by `agentm lint` (AM010/AM017) in CI and the pre-commit hook. `core/abi/`, `core/lib/`, `core/runtime/` and `extensions/validate.py` are the constitutional paths: changes there are breaking for every atom, so make them deliberately.
 
 ## Atom Contract
 
-An atom is a single-file Python module with a `MANIFEST` and an `install(api, config)` function. Atoms may import from `agentm.core.abi`, `agentm.core.lib`, and `agentm.extensions`. They must NOT import from `agentm.core.runtime`, `agentm.core._internal`, or other atoms. The load-time validator rejects violations. Atoms reach runtime subsystems through `AtomAPI` methods and services.
+An atom is a Python module or package exporting a `MANIFEST` and an `install(api, config)` function. A package atom puts both in its `__init__.py` and may import freely within itself; a file atom (`kind="file"`) is a single module. Atoms may import from `agentm.core.abi`, `agentm.core.lib`, and `agentm.extensions`. They must NOT import from `agentm.core.runtime`, `agentm.core._internal`, or other atoms. The load-time validator rejects violations. Atoms reach runtime subsystems through `AtomAPI` methods and services.
 
 ## Code Style
 

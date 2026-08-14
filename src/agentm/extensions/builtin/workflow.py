@@ -1,9 +1,8 @@
 # code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """``workflow`` atom -- orchestration functions with journal-based resume.
 
-Single-file atom: journal, lineage, SDK primitives (agent / parallel /
-pipeline), callable/module/script runners, and tool registration are all
-inlined below.
+Journal, lineage, SDK primitives (agent / parallel / pipeline),
+callable/module/script runners, and tool registration all live here.
 
 Developer-authored ``.py`` files use normal module mode and export
 ``async def run(ctx: WorkflowContext)``. Inline model-authored scripts retain

@@ -53,7 +53,9 @@ from agentm.core.abi.trajectory import (
     TurnCheckpoint,
 )
 from agentm.core.abi.trigger import UserInput
+from agentm.core.runtime.extension import load_extension_module
 from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
+from agentm.extensions.validate import validate_atom_package
 from agentm.extensions.builtin.llm_openai import (
     OpenAIStreamFn,
 )
@@ -1670,3 +1672,64 @@ async def test_sdk_resume_rehydrates_atom_defined_trigger(
         "custom-answer",
         "after-resume",
     ]
+
+
+def _write_package_atom(root: Path, name: str, extra_import: str = "") -> None:
+    package = root / name
+    (package / "inner").mkdir(parents=True)
+    (package / "inner" / "__init__.py").write_text("")
+    (package / "inner" / "helper.py").write_text("GREETING = 'hi'\n")
+    (package / "__init__.py").write_text(
+        "from agentm.core.abi import ExtensionManifest\n"
+        f"from {name}.inner.helper import GREETING\n"
+        "from .inner.helper import GREETING as RELATIVE\n"
+        f"{extra_import}"
+        "MANIFEST = ExtensionManifest(\n"
+        f"    name={name!r},\n"
+        "    description=GREETING + RELATIVE,\n"
+        ")\n\n\n"
+        "def install(api, config):\n"
+        "    return None\n"
+    )
+
+
+def test_package_atom_loads_and_keeps_atoms_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An atom may be a package; it may import itself but not another atom."""
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_package_atom(tmp_path, "good_atom")
+    _write_package_atom(
+        tmp_path,
+        "coupled_atom",
+        extra_import="from agentm.extensions.builtin.tool_bash import BASH_OUTPUT_TAILS_SERVICE\n",
+    )
+
+    module = load_extension_module(ExtensionSpec.from_module("good_atom"))
+    assert module.MANIFEST.name == "good_atom"
+
+    with pytest.raises(ExtensionLoadError, match="atom-to-atom coupling"):
+        load_extension_module(ExtensionSpec.from_module("coupled_atom"))
+
+
+def test_package_atom_cannot_reach_a_sibling_by_relative_import(
+    tmp_path: Path,
+) -> None:
+    """A relative import is resolved before it is checked, so it cannot escape."""
+
+    package = tmp_path / "pkg"
+    (package / "inner").mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "inner" / "__init__.py").write_text("")
+    (package / "inner" / "escape.py").write_text(
+        "from ...tool_bash import BASH_OUTPUT_TAILS_SERVICE\n"
+    )
+
+    issues = validate_atom_package(
+        package,
+        atom_package="agentm.extensions.builtin.pkg",
+    )
+    assert [issue.rule for issue in issues] == ["forbidden-import"]
+    assert "agentm.extensions.builtin.tool_bash" in issues[0].message

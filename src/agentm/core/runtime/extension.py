@@ -738,13 +738,17 @@ def validate_extension_source(source: ExtensionSource | str) -> None:
     visited: set[str] = {module_path}
     if module_spec.submodule_search_locations:
         for package_dir in module_spec.submodule_search_locations:
-            issues.extend(validate_atom_package(package_dir))
+            issues.extend(
+                validate_atom_package(package_dir, atom_package=source.location)
+            )
     elif module_spec.origin is not None:
         src_file = Path(module_spec.origin)
         if src_file.suffix != ".py":
             return
         if src_file.name == "__init__.py":
-            issues = validate_atom_package(src_file.parent)
+            issues = validate_atom_package(
+                src_file.parent, atom_package=source.location
+            )
         else:
             issues = validate_atom_file(src_file)
             for helper in extension_helper_imports(src_file):
@@ -779,13 +783,15 @@ def _validate_extension_helper_source(
     issues: list[ValidationIssue] = []
     if spec.submodule_search_locations:
         for package_dir in spec.submodule_search_locations:
-            issues.extend(validate_atom_package(package_dir))
+            issues.extend(validate_atom_package(package_dir, atom_package=module_path))
     elif spec.origin is not None:
         src_file = Path(spec.origin)
         if src_file.suffix != ".py":
             return []
         if src_file.name == "__init__.py":
-            issues.extend(validate_atom_package(src_file.parent))
+            issues.extend(
+                validate_atom_package(src_file.parent, atom_package=module_path)
+            )
         else:
             issues.extend(validate_atom_file(src_file))
             for helper in extension_helper_imports(src_file):

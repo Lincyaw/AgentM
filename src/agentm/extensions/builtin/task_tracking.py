@@ -18,8 +18,8 @@ Tools:
 Dependency model: ``blocks`` / ``blocked_by`` edges between tasks.
 Completing a task auto-removes it from downstream ``blocked_by`` lists.
 
-§11: single file; ``MANIFEST`` + ``install(api, config)``; no atom-to-atom
-imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
+§11: ``MANIFEST`` + ``install(api, config)``; no atom-to-atom imports;
+``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 State is per-session and in-memory.
 """
 
