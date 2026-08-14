@@ -16,6 +16,7 @@ import typer
 from agentm.cli._display import EXIT_NOT_FOUND, EXIT_TIMEOUT, is_tty, stderr_console
 from agentm.cli._store import resolve_trajectory_store
 from agentm.core.abi.messages import (
+    thaw_json,
     ImageContent,
     OpaqueThinkingBlock,
     TextContent,
@@ -496,7 +497,7 @@ def _follow_print_turn_payload(record: Turn | TurnCheckpoint) -> None:
             elif isinstance(block, OpaqueThinkingBlock):
                 text_parts.append(f"[thinking: {block.provider}]")
             elif isinstance(block, ToolCallBlock):
-                args = json.dumps(dict(block.arguments), ensure_ascii=False)[:120]
+                args = json.dumps(thaw_json(block.arguments), ensure_ascii=False)[:120]
                 text_parts.append(f"[call: {block.name}({args})]")
     if text_parts:
         _follow_print(
@@ -1120,7 +1121,11 @@ def _metadata_mapping(row: TraceRow, key: str) -> dict[str, object]:
     value = row.metadata.get(key)
     if not isinstance(value, Mapping):
         return {}
-    return {str(item_key): item_value for item_key, item_value in value.items()}
+    # Thaw rather than dict(): tool arguments are frozen all the way down, so a
+    # shallow copy leaves nested MappingProxyType values that json.dumps rejects.
+    return {
+        str(item_key): thaw_json(item_value) for item_key, item_value in value.items()
+    }
 
 
 def _tool_records_from_snapshot(

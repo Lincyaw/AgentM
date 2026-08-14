@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from agentm.core.abi.messages import (
+    thaw_json,
     ImageContent,
     OpaqueThinkingBlock,
     TextContent,
@@ -540,7 +541,7 @@ def build_trace_snapshot(
                             "tool_call",
                             title=f"CALL {block.name}",
                             content=json.dumps(
-                                dict(block.arguments),
+                                thaw_json(block.arguments),
                                 ensure_ascii=False,
                                 indent=2,
                             ),
