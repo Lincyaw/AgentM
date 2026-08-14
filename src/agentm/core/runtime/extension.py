@@ -333,6 +333,10 @@ class _AtomAPIFacade:
             extension, config, trigger=trigger, replace=replace
         )
 
+    def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:
+        self._require_active("uninstall extensions")
+        return self.__session.uninstall_extension(atom)
+
     @property
     def model(self) -> "Model | None":
         return self.__session.model
@@ -440,8 +444,12 @@ async def install_extension(
         manifest = load_manifest_for_spec(spec)
         atom_name = manifest.name if manifest is not None else None
         if replace and atom_name is not None:
+            # Detach even when the module path is unchanged. It is derived from
+            # the source digest, so a config-only reload resolves to the same
+            # module, and skipping the detach would leave the previous
+            # registrations in place for install() to collide with.
             found = api.installed_atom_module_path(atom_name)
-            if found is not None and found != module_path:
+            if found is not None:
                 superseded = found
                 api.remove_atom_registrations(superseded)
         result = load_extension(spec, atom_api)

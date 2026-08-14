@@ -529,6 +529,19 @@ class AtomAPI(Protocol):
         """
         ...
 
+    def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:
+        """Detach an atom; report whether one was installed.
+
+        Accepts the spec it was installed from, or its manifest name.
+
+        Takes away what the atom offers the model — its tools, context
+        policies, trigger renderers, services and event handlers — and leaves
+        its trigger codecs registered, because a committed turn names its
+        trigger source and a session that could no longer decode it would fail
+        to resume.
+        """
+        ...
+
     # --- Model access --------------------------------------------------------
 
     @property

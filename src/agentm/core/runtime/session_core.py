@@ -990,6 +990,32 @@ class SessionRuntime:
             removed_handlers,
         )
 
+    def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:
+        """Detach an atom; report whether one was installed.
+
+        Accepts the spec it was installed from, whose module path is derived
+        from its source and needs nothing loaded, or a manifest name for a
+        caller that only knows what the atom calls itself.
+
+        Removal is the same operation superseding already performs, so it
+        keeps the same limit: an atom's trigger codecs stay registered. A
+        committed turn names its trigger source, and a session that could no
+        longer decode it would fail to resume, so removing an atom takes away
+        what it offers the model and leaves what the record depends on.
+        """
+
+        if isinstance(atom, ExtensionSpec):
+            module_path: str | None = atom.module_path
+            if module_path not in self._extensions.module_paths:
+                return False
+        else:
+            module_path = self._extensions.installed_module_path(atom)
+        if module_path is None:
+            return False
+        self.remove_atom_registrations(module_path)
+        logger.info("uninstalled atom {}", module_path)
+        return True
+
     def installed_atom_module_path(self, atom_name: str) -> str | None:
         """Module path of an installed atom by its manifest name, if present."""
 

@@ -1,91 +1,120 @@
-"""Reload atoms from a watched directory while the session runs.
+# code-health: ignore-file[AM025] -- narrows a host-supplied loader and its two return shapes
+"""Follow the scenario while the session runs.
 
-Compose this atom to get the development loop: edit an atom's source on disk
-and the running session picks it up, without restarting and without losing the
-conversation so far. Compose without it and the session's atoms are fixed at
-start, which is what a recorded run wants.
+Compose this atom and the session's composition tracks its scenario: add an
+extension to the scenario and it installs, remove one and it detaches, change
+an atom's config or edit its source and it reloads. Compose without it and the
+composition is fixed at start.
 
-That is the whole of the mode distinction. There is no dev flag in the runtime;
-the difference between a development session and a normal one is which atoms
-were composed, the same way a package's dev script differs from its start
-script.
+That is the whole of the mode distinction, and it deliberately is not a flag. A
+development session differs from a recorded one by which atoms were composed,
+the same way a package's dev script differs from its start script.
 
-Watching is deliberately coarse: a poll on size and mtime, no dependency on a
-filesystem notification library. The interval is the upper bound on how stale a
-change can be, and a development loop does not need better.
+Watching the scenario rather than a directory of source files is what makes
+this a composition change rather than a pile of modules. A scenario states the
+order atoms install in, the config each one gets, and — by omission — which
+ones should not be there at all. A directory can say none of those things: it
+has no order worth honoring, no place to put config, and no way to express a
+removal.
+
+There is no file watching here. The scenario is re-resolved on a timer and the
+resolved specs are compared, so this follows a scenario wherever the host keeps
+one, and an edited atom source shows up for free: the loader digests the file
+it names, so changing that file changes the spec.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-from pathlib import Path
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from agentm.core.abi import (
+    SCENARIO_LOADER_SERVICE,
     AtomAPI,
     DiagnosticEvent,
     ExtensionManifest,
-    ExtensionSource,
+    ExtensionInput,
     ExtensionSpec,
+    ScenarioLoader,
+    ScenarioSpec,
     SessionReadyEvent,
     SessionShutdownEvent,
+    normalize_extension_spec,
 )
 
 
 class AtomWatchConfig(BaseModel):
-    """Which directory to watch, and how often."""
+    """How often to re-read the scenario, and whether omission detaches."""
 
-    directory: str = Field(
-        default=".agentm/atoms",
-        description=(
-            "Directory, relative to cwd, watched for atom source. Deliberately "
-            "not tool_authoring's directory: that atom installs what it writes, "
-            "so watching it would reinstall every authored tool a second time."
-        ),
-    )
     interval_seconds: float = Field(
-        default=1.0,
+        default=2.0,
         gt=0.0,
-        description="Seconds between scans. The upper bound on staleness.",
+        description="Seconds between scenario reads. The staleness bound.",
     )
-    install_new: bool = Field(
+    apply_removals: bool = Field(
         default=True,
-        description="Install files that appear after the session has started.",
+        description=(
+            "Detach atoms the scenario stops listing. Off leaves a removed "
+            "atom running, which is the safer default for a session whose "
+            "scenario is edited by something other than its developer."
+        ),
     )
 
 
 MANIFEST = ExtensionManifest(
     name="atom_watch",
-    description="Reload atoms from a watched directory while the session runs.",
+    description="Track the scenario's composition while the session runs.",
     registers=("event:session_ready", "event:session_shutdown"),
     config_schema=AtomWatchConfig,
 )
 
 
-class _Watcher:
-    """Polls a directory and reinstalls atoms whose source changed."""
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """Resolved scenario extensions, keyed by which atom rather than version.
+
+    ``location`` identifies the atom across edits: a file keeps its path while
+    its digest changes, and a module keeps its dotted name while its config
+    does. The spec held against that key carries the version.
+    """
+
+    specs: dict[str, ExtensionSpec]
+
+    @classmethod
+    def of(cls, resolved: Sequence[ExtensionSpec]) -> _Composition:
+        return cls(specs={_key(spec): spec for spec in resolved})
+
+
+class _ScenarioFollower:
+    """Re-reads the scenario and moves the session's composition toward it."""
 
     def __init__(self, api: AtomAPI, config: AtomWatchConfig) -> None:
         self._api = api
-        self._directory = Path(api.ctx.cwd) / config.directory
         self._interval = config.interval_seconds
-        self._install_new = config.install_new
+        self._apply_removals = config.apply_removals
         self._task: asyncio.Task[None] | None = None
-        self._seen: dict[Path, tuple[int, float]] = {}
-        self._settling: dict[Path, tuple[int, float]] = {}
+        self._applied = _Composition(specs={})
+
+    # --- Lifecycle ---
 
     def on_session_ready(self, _event: SessionReadyEvent) -> None:
-        """Take the current directory as the baseline and start polling."""
-
-        self._seen = self._scan()
+        resolved = self._resolve()
+        if resolved is None:
+            logger.info(
+                "atom watch idle: this session has no scenario to follow",
+            )
+            return
+        self._applied = _Composition.of(resolved)
         self._task = asyncio.create_task(self._loop(), name="agentm-atom-watch")
         logger.info(
-            "watching {} for atom changes every {}s",
-            self._directory,
+            "following scenario {} every {}s ({} extensions)",
+            self._api.ctx.scenario,
             self._interval,
+            len(self._applied.specs),
         )
 
     async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
@@ -96,20 +125,32 @@ class _Watcher:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    def _scan(self) -> dict[Path, tuple[int, float]]:
-        found: dict[Path, tuple[int, float]] = {}
+    # --- Scenario ---
+
+    def _resolve(self) -> list[ExtensionSpec] | None:
+        scenario = self._api.ctx.scenario
+        if not scenario:
+            return None
+        loader = self._api.services.get(SCENARIO_LOADER_SERVICE)
+        if not isinstance(loader, ScenarioLoader):
+            logger.warning(
+                "atom watch has no scenario loader; composition cannot be "
+                "followed for scenario {}",
+                scenario,
+            )
+            return None
         try:
-            entries = sorted(self._directory.glob("*.py"))
-        except OSError as exc:
-            logger.warning("atom watch cannot read {}: {}", self._directory, exc)
-            return found
-        for path in entries:
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            found[path] = (stat.st_size, stat.st_mtime)
-        return found
+            result = loader(scenario)
+        except Exception as exc:  # noqa: BLE001 - a bad edit must not kill the loop
+            logger.warning("scenario {} did not resolve: {}", scenario, exc)
+            return None
+        if isinstance(result, ScenarioSpec):
+            inputs: Sequence[ExtensionInput] = result.extensions
+        else:
+            inputs = result
+        return [normalize_extension_spec(item) for item in inputs]
+
+    # --- Loop ---
 
     async def _loop(self) -> None:
         while True:
@@ -119,86 +160,93 @@ class _Watcher:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - a dev loop must not die
-                logger.warning("atom watch scan failed: {}", exc)
+                logger.warning("atom watch pass failed: {}", exc)
 
     async def _tick(self) -> None:
-        current = self._scan()
-        settling: dict[Path, tuple[int, float]] = {}
-        ready: list[Path] = []
-        for path, stamp in current.items():
-            if self._seen.get(path) == stamp:
-                continue
-            if not self._install_new and path not in self._seen:
-                # Adopt a file this watcher will not install, so it is left
-                # alone from here rather than reconsidered every tick.
-                self._seen[path] = stamp
-                continue
-            # An editor that rewrites in place is visible mid-write, and a
-            # truncated file that happens to parse would install as a whole
-            # atom. A change has to hold still for one scan before it loads.
-            # `_seen` only advances once a stamp has been acted on, so a file
-            # that keeps changing keeps being reconsidered.
-            if self._settling.get(path) == stamp:
-                self._seen[path] = stamp
-                ready.append(path)
-            else:
-                settling[path] = stamp
-        self._settling = settling
-        self._seen = {
-            path: stamp for path, stamp in self._seen.items() if path in current
-        }
-        for path in ready:
-            await self._reload(path)
-
-    async def _reload(self, path: Path) -> None:
-        try:
-            content = path.read_bytes()
-        except OSError as exc:
-            logger.warning("atom watch cannot read {}: {}", path, exc)
+        resolved = self._resolve()
+        if resolved is None:
             return
-        digest = "sha256:" + hashlib.sha256(content).hexdigest()
-        spec = ExtensionSpec(
-            source=ExtensionSource(
-                kind="file",
-                location=str(path.resolve()),
-                digest=digest,
-            ),
-            config={},
-        )
-        # Hold the work bracket only across the install, so a reload in flight
-        # is not cut short, and the session can still reach idle between scans.
+        current = _Composition.of(resolved)
+        applied = self._applied.specs
+
+        # Install and reload in scenario order, so an atom that requires
+        # another still arrives after it.
+        landed: list[ExtensionSpec] = []
+        for spec in resolved:
+            previous = applied.get(_key(spec))
+            if previous is not None and previous == spec:
+                landed.append(spec)
+                continue
+            if await self._apply(spec, reloading=previous is not None):
+                landed.append(spec)
+            elif previous is not None:
+                # A reload that failed leaves the previous version running, so
+                # the applied picture keeps naming it rather than the edit that
+                # did not take.
+                landed.append(previous)
+
+        if self._apply_removals:
+            for key, spec in applied.items():
+                if key not in current.specs:
+                    self._detach(spec)
+
+        self._applied = _Composition.of(landed)
+
+    async def _apply(self, spec: ExtensionSpec, *, reloading: bool) -> bool:
+        # The bracket is held only across the install: it clears the session's
+        # idle flag, so holding it for the whole watch would mean a session
+        # that never reports idle.
         with self._api.track_background():
             try:
                 await self._api.install_extension(
                     spec,
-                    trigger="atom_watch",
+                    trigger="scenario_watch",
                     replace=True,
                 )
             except Exception as exc:  # noqa: BLE001 - surfaced, not swallowed
-                logger.warning("atom watch could not load {}: {}", path.name, exc)
-                await self._api.bus.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="warning",
-                        source="atom_watch",
-                        message=f"{path.name} failed to reload: {exc}",
-                    ),
-                )
-                return
-        logger.info("reloaded atom from {}", path.name)
+                where = spec.source.location
+                verb = "reload" if reloading else "install"
+                logger.warning("scenario atom {} did not {}: {}", where, verb, exc)
+                await self._diagnose("warning", f"{where} failed to {verb}: {exc}")
+                return False
+        verb = "reloaded" if reloading else "installed"
+        logger.info("{} scenario atom {}", verb, spec.source.location)
+        await self._diagnose(
+            "info",
+            f"{spec.source.location} {verb} from the scenario; "
+            "its tools apply from the next turn",
+        )
+        return True
+
+    def _detach(self, spec: ExtensionSpec) -> None:
+        if self._api.uninstall_extension(spec):
+            logger.info(
+                "detached atom {}: the scenario stopped listing it",
+                spec.source.location,
+            )
+
+    # --- Helpers ---
+
+    async def _diagnose(self, level: str, message: str) -> None:
         await self._api.bus.emit(
             DiagnosticEvent.CHANNEL,
             DiagnosticEvent(
-                level="info",
+                level="warning" if level == "warning" else "info",
                 source="atom_watch",
-                message=f"{path.name} reloaded; its tools apply from the next turn",
+                message=message,
             ),
         )
 
 
-def install(api: AtomAPI, config: AtomWatchConfig) -> None:
-    """Start watching once the session is ready."""
+def _key(spec: ExtensionSpec) -> str:
+    """Identity of an atom across edits: what it is, not which version."""
 
-    watcher = _Watcher(api, config)
-    api.on(SessionReadyEvent.CHANNEL, watcher.on_session_ready)
-    api.on(SessionShutdownEvent.CHANNEL, watcher.on_session_shutdown)
+    return f"{spec.source.kind}:{spec.source.location}"
+
+
+def install(api: AtomAPI, config: AtomWatchConfig) -> None:
+    """Start following the scenario once the session is ready."""
+
+    follower = _ScenarioFollower(api, config)
+    api.on(SessionReadyEvent.CHANNEL, follower.on_session_ready)
+    api.on(SessionShutdownEvent.CHANNEL, follower.on_session_shutdown)
