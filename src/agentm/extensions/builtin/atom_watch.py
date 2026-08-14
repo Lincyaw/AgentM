@@ -294,14 +294,35 @@ class _ScenarioFollower:
                 unconfirmed = 0
             else:
                 unconfirmed += 1
+                # A successor declines for exactly one reason: its own
+                # _resolve() returned None. When ours returns None too, the
+                # scenario is momentarily unreadable for both of us -- a
+                # half-written file, a loader not yet registered -- and the
+                # bound must not fire on it. The rest of this module already
+                # treats an unreadable scenario as a no-op rather than a fatal
+                # event, and a loop retained in that state installs and
+                # detaches nothing, so the orphan the bound guards against is
+                # absent. What the bound is for is a successor structurally
+                # unable to take over, and that one still stops us in k passes.
+                # Resolved here rather than above so a readable scenario costs
+                # no second load: _tick() below resolves it again anyway.
                 if unconfirmed >= _MAX_UNCONFIRMED_HANDOVERS:
-                    logger.error(
-                        "atom watch stopping: superseded, and its replacement "
-                        "has not taken the scenario loop over in {} passes. "
-                        "This session no longer follows its scenario.",
-                        unconfirmed,
-                    )
-                    return
+                    if self._resolve() is None:
+                        unconfirmed -= 1
+                        logger.debug(
+                            "atom watch keeping the loop: the scenario is not "
+                            "readable, so its replacement could not take it "
+                            "over either"
+                        )
+                    else:
+                        logger.error(
+                            "atom watch stopping: superseded, and its "
+                            "replacement has not taken the scenario loop over "
+                            "in {} passes. This session no longer follows its "
+                            "scenario.",
+                            unconfirmed,
+                        )
+                        return
             try:
                 await self._tick()
             except asyncio.CancelledError:
@@ -331,6 +352,11 @@ class _ScenarioFollower:
             return _Handover.NOT_SUPERSEDED
         if follower is None:
             # Nothing registered over this atom; it was detached outright.
+            # A supersede leaves the key absent too, but only between
+            # remove_atom_registrations and load_extension, which
+            # install_extension runs with no await between them -- so this
+            # task cannot observe that window. See the note on
+            # SessionRuntime.remove_atom_registrations.
             logger.info(
                 "atom watch stopping: this session no longer follows a scenario",
             )

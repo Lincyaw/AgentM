@@ -996,6 +996,15 @@ class SessionRuntime:
         whatever they read, so superseding one removes the whole composed chain
         rather than unwrapping a layer, and the replacement rebuilds from the
         bare default. Atoms that wrap a service are not supersede-safe.
+
+        One sequencing property this leaves behind is load-bearing outside
+        core. On the supersede path ``install_extension`` calls this and then
+        ``load_extension`` with no await between them, so the window in which
+        a superseded atom's keys are absent is not observable by any other
+        task. ``atom_watch`` reads its own follower key to tell "superseded"
+        from "detached outright" and would release the session's only polling
+        loop if it ever observed that window. Introducing an await between the
+        detach and the replacement's load would break it.
         """
 
         registrations = self._extensions.registrations_of(module_path)
