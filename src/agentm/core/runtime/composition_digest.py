@@ -87,11 +87,20 @@ bug in this module, not a licence to widen the list.
   read for its content every turn.
 
 * The attributes of an object that is neither a dataclass nor a container.  The
-  structural walk opens the JSON-ish types, ``dataclasses.fields``, and a plain
-  function's closure cells; a class that satisfies a Protocol by holding
-  mutable attributes is still digested by its type name alone, so a service
-  that mutates itself in place reads here as unchanged.  Naming that class is
-  the honest limit of a walk that must not run user code to look inside.
+  structural walk opens the JSON-ish types and ``dataclasses.fields``; a class
+  that satisfies a Protocol by holding mutable attributes is still digested by
+  its type name alone, so a service that mutates itself in place reads here as
+  unchanged.  Naming that class is the honest limit of a walk that must not run
+  user code to look inside.
+
+* What a closure captured.  A plain function is named, not opened.  Opening one
+  would make the digest depend on whatever happened to be in scope where the
+  function was defined — a session id, a temporary path — and two sessions
+  built the same way would stop comparing equal, which is the comparison a
+  revertibility check across two probe sessions rests on.  Nothing a real
+  composition registers needs it: both shipped providers build their
+  ``StreamFn`` as a ``@dataclass(slots=True)``, so the credential that made
+  this worth looking at is opened by the dataclass branch.
 
 What is deliberately *not* excluded is the one residue the runtime creates on
 purpose: uninstalling an atom leaves its trigger codecs registered, so a
@@ -106,7 +115,7 @@ import asyncio
 import hashlib
 from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, fields, is_dataclass
-from types import CellType, FunctionType, MappingProxyType
+from types import MappingProxyType
 from typing import Final, cast
 
 from loguru import logger
@@ -339,8 +348,8 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
         # Digested for content rather than named: this and the backing
         # ``service:provider:<name>`` value are the only two places a provider
         # rebuilt with the same name and model but a different base URL or
-        # credential can show up, because both of those live in the cells of
-        # the stream function and nothing else here reads them.
+        # credential can show up, because both of those are fields of the
+        # stream function and nothing else here reads them.
         active_stream_fn=(
             None if providers.stream_fn is None else _service_value(providers.stream_fn)
         ),
@@ -399,16 +408,17 @@ def _service_value(value: object) -> str:
     every data service look alike: ``"v1"`` and ``"v2"`` are both ``str``, and
     ``tool_allowlist`` — a boundary the driver reads every turn — would compare
     equal however it was rewritten.  Values built out of the JSON-ish types are
-    therefore walked structurally, as are ``dataclasses.fields`` and a plain
-    function's closure cells, and everything else falls back to the type name.
+    therefore walked structurally, as are ``dataclasses.fields``, and
+    everything else falls back to the type name.
 
     What the walk still cannot see, stated so a caller does not read more into
     an equality than it carries: a class that satisfies a Protocol by holding
     mutable attributes has no fields to enumerate, so it digests by its type
     name alone and a service that mutates itself in place reads as unchanged.
-    Nor can it see through a callable that is not a plain function — a bound
-    method, or an instance with ``__call__`` — because what it holds is
-    reachable only by naming attributes the digest has no schema for.
+    Nor can it see inside a callable — a closure, a bound method, or an
+    instance with ``__call__`` — because what it holds is reachable only by
+    naming attributes the digest has no schema for, or by opening cells whose
+    contents are as often session-specific as they are compositional.
 
     The walk is hashed rather than kept verbatim for two reasons: a service can
     hold a credential, and a failure message that printed one would leak it into
@@ -457,29 +467,27 @@ def _encode(value: object, depth: int) -> str:
             for key, item in mapping.items()
         )
         return f"{kind.__name__}:{{{','.join(pairs)}}}"
-    if is_dataclass(kind):
+    if is_dataclass(kind) and "__dataclass_fields__" in kind.__dict__:
         # Where the services in a real composition actually live. Walking only
         # the JSON-ish types left this branch unreached by every service a
         # session holds, so the digest was structural in principle and opaque
         # in practice. Declaration order is kept because it is fixed by the
         # class rather than by the write, so it cannot make two equal values
         # digest apart.
+        #
+        # The ``__dict__`` check is what keeps this branch to the exact type,
+        # the way every branch above is: ``is_dataclass`` alone follows the
+        # MRO and answers yes for an undecorated subclass of a dataclass, and
+        # ``fields()`` would then enumerate the base's fields and silently skip
+        # whatever state the subclass added, reporting a changed value as
+        # unchanged. Such a subclass is named instead, which is the same answer
+        # the walk gives every other type it cannot open. It stays paired with
+        # ``is_dataclass`` because that is what says ``fields()`` may be called.
         attributes = ",".join(
             f"{spec.name}={_encode_attribute(value, spec.name, depth - 1)}"
             for spec in fields(kind)
         )
         return f"{kind.__qualname__}:({attributes})"
-    if kind is FunctionType:
-        # A closure is the one opaque callable whose difference is routinely
-        # the thing that matters: two provider stream functions built by the
-        # same factory share a qualname and differ only in the base URL and
-        # credential captured in their cells, which is exactly the change the
-        # provider tables could not see.
-        function = cast("FunctionType", value)
-        cells = ",".join(
-            _encode_cell(cell, depth - 1) for cell in function.__closure__ or ()
-        )
-        return f"function:{function.__qualname__}({cells})"
     return f"opaque:{_identity(value)}"
 
 
@@ -493,17 +501,6 @@ def _encode_attribute(value: object, name: str, depth: int) -> str:
 
     item = getattr(value, name, _UNSET)  # code-health: ignore[AM021]
     return "unset" if item is _UNSET else _encode(item, depth)
-
-
-def _encode_cell(cell: CellType, depth: int) -> str:
-    """One closure cell, or the fact that it has not been filled yet."""
-
-    try:
-        contents = cell.cell_contents
-    except ValueError:
-        # A recursive closure's cell before the function it names is bound.
-        return "empty"
-    return _encode(contents, depth)
 
 
 def _background_tasks() -> tuple[str, ...]:

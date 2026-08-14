@@ -16,27 +16,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from agentm import ExtensionSpec
-from agentm.core.abi.cancel import CancelSignal
-from agentm.core.abi.messages import AgentMessage, TextContent
+from agentm.core.abi.messages import TextContent
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_SESSION_IDENTITY
-from agentm.core.abi.stream import (
-    AssistantStreamEvent,
-    Model,
-    StreamFn,
-    ThinkingLevel,
-)
+from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.termination import ModelEndTurn
-from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import Outcome, TurnMeta
 from agentm.core.abi.trigger import UserInput
+from agentm.core.runtime.composition_digest import _service_value
+from agentm.extensions.builtin.llm_anthropic import AnthropicStreamFn
 from agentm.testing import (
     assert_revertible,
     composition_digest,
@@ -84,6 +78,16 @@ class _Budget:
     label: str
 
 
+class _StatefulBudget(_Budget):
+    """A subclass that is a dataclass by inheritance and carries more state."""
+
+    __slots__ = ("spent",)
+
+    def __init__(self, limit: int, label: str, spent: int) -> None:
+        super().__init__(limit=limit, label=label)
+        object.__setattr__(self, "spent", spent)
+
+
 class _MutableProbe:
     """A service that satisfies its consumers by holding attributes."""
 
@@ -94,22 +98,16 @@ class _MutableProbe:
 
 
 def _probe_stream_fn(base_url: str) -> StreamFn:
-    """A stream function whose only difference from the next is in its cells."""
+    """A stream function of the shape a shipped provider actually registers.
 
-    async def _stream(
-        *,
-        messages: list[AgentMessage],
-        model: Model,
-        tools: list[Tool],
-        system: str | None = None,
-        signal: CancelSignal | None = None,
-        thinking: ThinkingLevel = "off",
-    ) -> AsyncIterator[AssistantStreamEvent]:
-        del messages, model, tools, system, signal, thinking
-        raise AssertionError(f"the probe provider at {base_url} is never streamed")
-        yield  # pragma: no cover - unreachable, and makes this a generator
+    The real one, not a stand-in: both provider atoms in this repository build
+    their ``StreamFn`` as a ``@dataclass(slots=True)`` carrying the base URL and
+    the key, so this is the shape the digest has to be able to open. A closure
+    written here instead would witness a branch nothing in the repository
+    reaches, and would say nothing about the providers that ship.
+    """
 
-    return _stream
+    return AnthropicStreamFn(api_key="probe-key", base_url=base_url)
 
 
 @pytest.mark.asyncio
@@ -232,18 +230,31 @@ async def test_the_digest_opens_a_dataclass_service_and_says_what_it_cannot(
         opaque.state = "after"
         assert digest_differences(blind, composition_digest(session)) == ()
 
+        # A subclass that inherits its dataclass-ness carries state ``fields()``
+        # does not enumerate, so opening it by its base's fields would report a
+        # value that changed as unchanged. It is named instead -- the same
+        # answer the walk gives every other type it cannot open, and the reason
+        # this branch tests the exact type rather than asking ``is_dataclass``.
+        session.services.register(
+            "probe", _StatefulBudget(limit=4, label="a", spent=0), scope="session"
+        )
+        inherited = composition_digest(session)
+        assert [
+            entry.value for entry in inherited.services if entry.key == "probe"
+        ] == [_service_value(_StatefulBudget(limit=9, label="z", spent=7))]
+
 
 @pytest.mark.asyncio
 async def test_two_providers_differing_only_in_credential_are_not_equal(
     tmp_path: Path,
 ) -> None:
-    """The registration tables name a provider; the credential is in a closure.
+    """The registration tables name a provider; the credential is in its fields.
 
     ``ProviderEntry`` carries the name, the owner and the model id, and the
-    active pair is a function built by the same factory either way, so a
-    provider rebuilt against a different base URL or key used to digest
-    identically in every table at once. The base URL is captured in the stream
-    function's cells, so that is where the digest reads it.
+    active pair is the same type of stream function either way, so a provider
+    rebuilt against a different base URL or key used to digest identically in
+    every table at once. The base URL is a field of the stream function, so
+    that is where the digest reads it.
     """
 
     model = Model(
