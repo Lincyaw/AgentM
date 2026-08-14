@@ -101,6 +101,7 @@ from agentm.core.abi.store import TrajectoryStore
 from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import (
+    AtomInstall,
     Turn,
 )
 from agentm.core.abi.tree import SessionGraphProtocol
@@ -275,6 +276,7 @@ class SessionRuntime:
         self._closed = False
         self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
+        self._pending_atom_installs: list[AtomInstall] = []
         self._shutdown_task: asyncio.Task[None] | None = None
         self._cleanup_callbacks: list[Callable[[], Awaitable[None]]] = []
         self._providers = ProviderRegistry(
@@ -369,6 +371,7 @@ class SessionRuntime:
                     model=model,
                     tools=self.tools,
                     store=self.store,
+                    drain_atom_installs=self.drain_atom_installs,
                     session_id=self.id,
                     root_session_id=self.ctx.root_session_id,
                     parent_session_id=self.ctx.parent_session_id,
@@ -865,6 +868,42 @@ class SessionRuntime:
             runtime=runtime_install,
             replace=replace,
         )
+        if runtime_install:
+            self._note_atom_install(extension)
+
+    def _note_atom_install(self, extension: ExtensionSpec | str) -> None:
+        """Queue a durable record of one runtime install for the next commit."""
+
+        from agentm.core.runtime.extension import (
+            coerce_extension_spec,
+            load_manifest_for_spec,
+        )
+
+        spec = coerce_extension_spec(extension, None)
+        manifest = load_manifest_for_spec(spec)
+        if manifest is None:
+            logger.warning(
+                "atom {} installed at runtime without a MANIFEST; it cannot be "
+                "recorded on the turn and will not survive resume",
+                spec.module_path,
+            )
+            return
+        self._pending_atom_installs.append(
+            AtomInstall(
+                atom_name=manifest.name,
+                source_kind=spec.source.kind,
+                location=spec.source.location,
+                digest=spec.source.digest,
+                config=spec.config,
+            )
+        )
+
+    def drain_atom_installs(self) -> tuple[AtomInstall, ...]:
+        """Take the runtime installs awaiting a turn to be recorded on."""
+
+        drained = tuple(self._pending_atom_installs)
+        self._pending_atom_installs.clear()
+        return drained
 
     def _verify_runtime_requirements(
         self,

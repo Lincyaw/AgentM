@@ -342,6 +342,7 @@ from .tool_orchestration import (
     ToolWorkItem,
 )
 from .trajectory import (
+    AtomInstall,
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
     TRAJECTORY_HEAD_INDEXES,
@@ -384,6 +385,7 @@ from .trigger import (
 )
 
 __all__ = [
+    "AtomInstall",
     "ACTIVE_SET_FINGERPRINT_ROLE",
     "ACTIVE_SET_FINGERPRINT_SERVICE",
     "ATOM_CATALOG_ROLE",

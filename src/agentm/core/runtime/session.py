@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Self, cast
 
+from loguru import logger
+
 from agentm.core.abi.cancel import (
     CancelSignal,
     CompositeCancelSignal,
@@ -44,6 +46,8 @@ from agentm.core.abi.roles import (
 )
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import (
+    ExtensionSource,
+    ExtensionSpec,
     AgentSessionConfig,
     ChildCancellationMode,
     ResolvedSessionSpec,
@@ -55,6 +59,7 @@ from agentm.core.abi.store import (
 from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import (
+    AtomInstall,
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
     TrajectoryForkPoint,
@@ -75,6 +80,45 @@ from agentm.core.runtime.session_meta import (
     validate_resume_metadata,
 )
 from agentm.core.runtime.trajectory import Trajectory
+
+
+async def _reinstall_recorded_atoms(
+    session: "Session",
+    turns: Sequence[Turn],
+) -> None:
+    """Reinstall atoms that were installed while the original session ran.
+
+    Composition rebuilds the atoms the session was created with; these were
+    added afterwards and live only on the turns that committed them. Without
+    this a resumed session holds a history calling tools it does not have.
+
+    Order follows the trajectory: turn index first, then position within the
+    turn, which is the order the original session installed them in.
+    """
+
+    records = [install for turn in turns for install in turn.meta.atom_installs]
+    if not records:
+        return
+    latest: dict[str, AtomInstall] = {}
+    for record in records:
+        latest[record.atom_name] = record
+    for record in latest.values():
+        spec = ExtensionSpec(
+            source=ExtensionSource(
+                kind=record.source_kind,
+                location=record.location,
+                digest=record.digest,
+            ),
+            config=record.config,
+        )
+        try:
+            await session.install_extension(spec, trigger="resume", replace=True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"session {session.id}: cannot resume without the atom "
+                f"{record.atom_name!r} its history used: {exc}"
+            ) from exc
+        logger.debug("reinstalled recorded atom {}", record.atom_name)
 
 
 def _rehydrate_turn_triggers(
@@ -697,6 +741,10 @@ class Session(SessionRuntime):
             host_services=host_services,
         )
         try:
+            # Before rehydrating triggers: an atom recorded on a committed turn
+            # may own the codec that turn's trigger needs, and the tools the
+            # history calls belong to the session before it takes another one.
+            await _reinstall_recorded_atoms(session, turns)
             restored_turns = _rehydrate_turn_triggers(turns, session.codec)
             if restored_turns != turns:
                 session.trajectory = Trajectory(restored_turns)

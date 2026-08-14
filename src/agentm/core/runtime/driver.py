@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import cast
@@ -89,6 +90,7 @@ from agentm.core.abi.tool_orchestration import (
     ToolOrchestrator,
 )
 from agentm.core.abi.trajectory import (
+    AtomInstall,
     DEFAULT_TRAJECTORY_BRANCH_ID,
     DEFAULT_TRAJECTORY_HEAD_ID,
     Outcome,
@@ -513,6 +515,10 @@ class DriverConfig:
     trigger_renderers: dict[str, TriggerRenderer] | None = None
     cancel_signal: CancelSignal | None = None
     effect_scope: EffectScope | None = None
+    # Runtime installs recorded on the turn that commits them. The driver holds
+    # a drain rather than the session, keeping the layering the rest of this
+    # config already has.
+    drain_atom_installs: Callable[[], tuple[AtomInstall, ...]] | None = None
     resource_writer: ResourceWriter | None = None
     tool_executor: ToolExecutor | None = None
     permission_policy: PermissionPolicy | None = None
@@ -841,12 +847,18 @@ async def drive(config: DriverConfig) -> None:
                 ) = await settle_known_outcome(_prepare_resource_txn(resource_txn))
                 if cancelled_during_resource_prepare:
                     raise asyncio.CancelledError
-                if resource_mutations:
+                atom_installs = (
+                    config.drain_atom_installs()
+                    if config.drain_atom_installs is not None
+                    else ()
+                )
+                if resource_mutations or atom_installs:
                     turn = replace(
                         turn,
                         meta=replace(
                             turn.meta,
                             resource_mutations=resource_mutations,
+                            atom_installs=atom_installs,
                         ),
                     )
                 phase = "resource_apply"

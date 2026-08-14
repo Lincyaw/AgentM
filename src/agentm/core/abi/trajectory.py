@@ -603,6 +603,55 @@ class TrajectoryLeaf:
 
 
 @dataclass(frozen=True, slots=True)
+class AtomInstall:
+    """One atom installed into a running session, recorded on its turn.
+
+    Composition before start is described by the session's active set. An atom
+    installed while the session runs has no place in that record, so the turn it
+    landed on carries it instead: the source it was loaded from, its digest, and
+    the config it was given — enough for a resume to install exactly the same
+    code rather than a session whose history calls tools it no longer has.
+
+    Deliberately not ``ExtensionSpec``: that type lives in the session ABI,
+    which imports this module, and the durable record must not depend on the
+    live composition types.
+
+    An install becomes replayable once a turn commits after it. A tool the
+    model authors is recorded, because authoring is itself a tool call inside a
+    turn. A reload from a watched directory fires on a poll timer, so it is
+    recorded only if a turn follows it, and a session that reloads and then
+    ends carries no record of that reload here. Both cases are noted as
+    trajectory diagnostics when they happen, including the ones that failed;
+    that record is what happened, this one is what to reinstall.
+    """
+
+    atom_name: str
+    source_kind: Literal["module", "file"]
+    location: str
+    digest: str | None = None
+    config: Mapping[str, JsonValue] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    def __post_init__(self) -> None:
+        _require_string(self.atom_name, "atom install atom_name")
+        _require_string(self.location, "atom install location")
+        if self.source_kind not in {"module", "file"}:
+            raise ValueError(
+                f"atom install source_kind must be module or file: {self.source_kind!r}"
+            )
+        if self.source_kind == "file":
+            if not isinstance(self.digest, str) or not self.digest:
+                raise ValueError("a file-backed atom install must carry a digest")
+        elif self.digest is not None:
+            raise ValueError("a module atom install cannot carry a digest")
+        frozen = freeze_json(self.config)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("atom install config must be an object")
+        object.__setattr__(self, "config", frozen)
+
+
+@dataclass(frozen=True, slots=True)
 class TurnMeta:
     """Observability data attached to a committed Turn."""
 
@@ -614,6 +663,7 @@ class TurnMeta:
     model_id: str | None = None
     model_context_window: int | None = None
     resource_mutations: tuple[ResourceMutation, ...] = ()
+    atom_installs: tuple[AtomInstall, ...] = ()
     system_prompt: str | None = None
     tool_schema_digest: str | None = None
 
@@ -643,6 +693,10 @@ class TurnMeta:
             raise TypeError(
                 "turn meta resource_mutations must be a tuple of ResourceMutation"
             )
+        if not isinstance(self.atom_installs, tuple) or not all(
+            isinstance(item, AtomInstall) for item in self.atom_installs
+        ):
+            raise TypeError("turn meta atom_installs must be a tuple of AtomInstall")
         if self.system_prompt is not None and not isinstance(self.system_prompt, str):
             raise TypeError("turn meta system_prompt must be a string or None")
 
@@ -873,6 +927,7 @@ def _validate_head_fields(
 
 
 __all__ = [
+    "AtomInstall",
     "DEFAULT_TRAJECTORY_BRANCH_ID",
     "DEFAULT_TRAJECTORY_HEAD_ID",
     "TRAJECTORY_HEAD_INDEXES",

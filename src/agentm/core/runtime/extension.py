@@ -10,6 +10,7 @@ import hashlib
 import importlib
 import importlib.util
 import inspect
+from contextlib import suppress
 import sys
 import threading
 import time
@@ -18,7 +19,7 @@ from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any
+from typing import Literal, TYPE_CHECKING, Any
 from uuid import uuid4
 
 from loguru import logger
@@ -348,6 +349,7 @@ async def _record_runtime_install(
     module_path: str,
     trigger: str,
     superseded: str | None,
+    error: str | None = None,
 ) -> None:
     """Note in the trajectory that this session's atom set changed mid-run.
 
@@ -355,25 +357,45 @@ async def _record_runtime_install(
     with and is not recomputed, so without this a run that gained or replaced
     an atom is indistinguishable in the record from one that did not. The
     per-turn tool digest shows that something changed; this says what.
+
+    This is the audit half. The replay half is ``TurnMeta.atom_installs``,
+    which records what to install to reconstruct the composition and is
+    written when a turn commits. Two things only this can carry: an install
+    that was refused, which a list of what *is* installed has no room for, and
+    an install that happened with no turn to attach to — a watched reload
+    fires on a poll timer and can land while the session sits idle.
     """
 
     store = api.store
     if store is None:
         return
+    level: Literal["info", "warning", "error"]
+    if error is not None:
+        phase = "install_failed"
+        level = "warning"
+        message = f"atom {atom_name!r} was refused by the running session"
+    elif superseded is not None:
+        phase = "supersede"
+        level = "info"
+        message = f"atom {atom_name!r} replaced {superseded}"
+    else:
+        phase = "install"
+        level = "info"
+        message = f"atom {atom_name!r} installed into the running session"
     diagnostic = TrajectoryDiagnostic(
         id=uuid4().hex,
         session_id=api.id,
         timestamp=time.time(),
-        level="info",
+        level=level,
         source="extension",
-        phase="supersede" if superseded is not None else "install",
-        message=(
-            f"atom {atom_name!r} replaced {superseded}"
-            if superseded is not None
-            else f"atom {atom_name!r} installed into the running session"
+        phase=phase,
+        message=message,
+        error_type=None if error is None else "ExtensionLoadError",
+        error_detail=(
+            f"module={module_path} trigger={trigger}"
+            if error is None
+            else f"module={module_path} trigger={trigger}: {error}"
         ),
-        error_type=None,
-        error_detail=f"module={module_path} trigger={trigger}",
         turn_id=None,
         turn_index=None,
         checkpoint_id=None,
@@ -397,7 +419,7 @@ async def install_extension(
 ) -> None:
     """Install one extension and emit the standard install lifecycle event."""
 
-    spec = _coerce_extension_spec(extension, config)
+    spec = coerce_extension_spec(extension, config)
     module_path = spec.module_path
     started_ns = time.perf_counter_ns()
     name = module_path.rsplit(".", 1)[-1]
@@ -446,6 +468,16 @@ async def install_extension(
                 (exc, rollback_error),
             ) from exc
         logger.exception("failed to install atom: {}", module_path)
+        if runtime:
+            with suppress(Exception):
+                await _record_runtime_install(
+                    api,
+                    atom_name=name,
+                    module_path=module_path,
+                    trigger=trigger,
+                    superseded=superseded,
+                    error=error,
+                )
         raise
     finally:
         await api.bus.emit(
@@ -477,7 +509,7 @@ def load_extension(
     Raises ``ExtensionLoadError`` on any failure.
     """
 
-    spec = _coerce_extension_spec(extension, config)
+    spec = coerce_extension_spec(extension, config)
     module_path = spec.module_path
     module = load_extension_module(spec, validate=validate)
 
@@ -539,7 +571,7 @@ def load_manifest_for_spec(
 ) -> ExtensionManifest | None:
     """Return the MANIFEST declared by an atom, without installing it."""
 
-    spec = _coerce_extension_spec(extension, None)
+    spec = coerce_extension_spec(extension, None)
     module = load_extension_module(spec)
     manifest = module.__dict__.get("MANIFEST")
     if manifest is None:
@@ -552,7 +584,7 @@ def load_manifest_for_spec(
     return manifest
 
 
-def _coerce_extension_spec(
+def coerce_extension_spec(
     extension: ExtensionSpec | str,
     config: dict[str, Any] | None,
 ) -> ExtensionSpec:

@@ -28,7 +28,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import asdict
 from types import MappingProxyType
-from typing import Any, Final, Protocol, cast, runtime_checkable
+from typing import Any, Final, Literal, Protocol, cast, runtime_checkable
 
 from agentm.core.abi._codec_v2 import (
     migrate_v2_checkpoint,
@@ -67,6 +67,7 @@ from agentm.core.abi.termination import (
     ToolTerminated,
 )
 from agentm.core.abi.trajectory import (
+    AtomInstall,
     Outcome,
     ToolRecord,
     Turn,
@@ -429,6 +430,44 @@ def _deserialize_content_block(data: dict[str, Any]) -> Any:
             extras=_json_restore(data.get("extras")),
         )
     raise ValueError(f"unknown content block type: {t!r}")
+
+
+def _serialize_atom_install(install: AtomInstall) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "atom_name": install.atom_name,
+        "source_kind": install.source_kind,
+        "location": install.location,
+    }
+    if install.digest is not None:
+        data["digest"] = install.digest
+    if install.config:
+        data["config"] = _json_safe(install.config)
+    return data
+
+
+def _deserialize_atom_install(data: Mapping[str, Any]) -> AtomInstall:
+    expect_only_fields(
+        data,
+        {"atom_name", "source_kind", "location", "digest", "config"},
+        "atom install",
+    )
+    config = _json_restore(data.get("config", {}))
+    if not isinstance(config, dict):
+        raise ValueError("atom install config must be an object")
+    source_kind = expect_literal(
+        data.get("source_kind"), "atom install.source_kind", {"module", "file"}
+    )
+    return AtomInstall(
+        atom_name=expect_string(
+            data.get("atom_name"), "atom install.atom_name", allow_empty=False
+        ),
+        source_kind=cast(Literal["module", "file"], source_kind),
+        location=expect_string(
+            data.get("location"), "atom install.location", allow_empty=False
+        ),
+        digest=expect_optional_string(data.get("digest"), "atom install.digest"),
+        config=config,
+    )
 
 
 def serialize_message(msg: AgentMessage) -> dict[str, Any]:
@@ -938,6 +977,10 @@ class CodecRegistry:
             "model_id": meta.model_id,
             "resource_mutations": serialize_resource_mutations(meta.resource_mutations),
         }
+        if meta.atom_installs:
+            data["atom_installs"] = [
+                _serialize_atom_install(item) for item in meta.atom_installs
+            ]
         if meta.model_context_window is not None:
             data["model_context_window"] = meta.model_context_window
         if meta.system_prompt is not None:
@@ -960,10 +1003,18 @@ class CodecRegistry:
                 "model_id",
                 "model_context_window",
                 "resource_mutations",
+                "atom_installs",
                 "system_prompt",
                 "tool_schema_digest",
             },
             "turn.meta",
+        )
+        atom_installs = tuple(
+            _deserialize_atom_install(expect_object(item, "turn.meta.atom_installs[]"))
+            for item in expect_array(
+                data.get("atom_installs", []),
+                "turn.meta.atom_installs",
+            )
         )
         raw_tool_digest = data.get("tool_schema_digest")
         tool_schema_digest = (
@@ -974,6 +1025,7 @@ class CodecRegistry:
         if isinstance(raw_system_prompt, str):
             system_prompt = raw_system_prompt
         return TurnMeta(
+            atom_installs=atom_installs,
             total_input_tokens=expect_integer(
                 data.get("total_input_tokens"),
                 "turn.meta.total_input_tokens",
