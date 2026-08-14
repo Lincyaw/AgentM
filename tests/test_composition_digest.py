@@ -16,14 +16,25 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from agentm import ExtensionSpec
-from agentm.core.abi.messages import TextContent
+from agentm.core.abi.cancel import CancelSignal
+from agentm.core.abi.messages import AgentMessage, TextContent
+from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_SESSION_IDENTITY
+from agentm.core.abi.stream import (
+    AssistantStreamEvent,
+    Model,
+    StreamFn,
+    ThinkingLevel,
+)
 from agentm.core.abi.termination import ModelEndTurn
+from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import Outcome, TurnMeta
 from agentm.core.abi.trigger import UserInput
 from agentm.testing import (
@@ -63,6 +74,42 @@ def _file_atom(root: Path, name: str, source: str) -> ExtensionSpec:
     path.write_text(source, encoding="utf-8")
     digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     return ExtensionSpec.from_file(str(path), digest=digest)
+
+
+@dataclass(frozen=True, slots=True)
+class _Budget:
+    """A service shaped the way real services are: a dataclass of values."""
+
+    limit: int
+    label: str
+
+
+class _MutableProbe:
+    """A service that satisfies its consumers by holding attributes."""
+
+    __slots__ = ("state",)
+
+    def __init__(self, state: str) -> None:
+        self.state = state
+
+
+def _probe_stream_fn(base_url: str) -> StreamFn:
+    """A stream function whose only difference from the next is in its cells."""
+
+    async def _stream(
+        *,
+        messages: list[AgentMessage],
+        model: Model,
+        tools: list[Tool],
+        system: str | None = None,
+        signal: CancelSignal | None = None,
+        thinking: ThinkingLevel = "off",
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        del messages, model, tools, system, signal, thinking
+        raise AssertionError(f"the probe provider at {base_url} is never streamed")
+        yield  # pragma: no cover - unreachable, and makes this a generator
+
+    return _stream
 
 
 @pytest.mark.asyncio
@@ -145,6 +192,98 @@ async def test_the_digest_reads_what_a_service_resolves_to(tmp_path: Path) -> No
         allowlist = composition_digest(session)
         session.services.register("probe", ("b", "c"), scope="session")
         assert digest_differences(allowlist, composition_digest(session)) != ()
+
+
+@pytest.mark.asyncio
+async def test_the_digest_opens_a_dataclass_service_and_says_what_it_cannot(
+    tmp_path: Path,
+) -> None:
+    """The structural walk has to reach where real services live.
+
+    Almost nothing a composition registers is a bare ``str`` or ``dict``: the
+    services in a realistic session are dataclasses and Protocol
+    implementations, and a walk that opened only the JSON-ish types was
+    structural in principle and opaque on every value that exists in practice.
+    Dataclasses are opened by their fields.
+
+    The second half is the limit stated as a test rather than as a sentence: an
+    object that satisfies a Protocol by holding mutable attributes has no
+    fields to enumerate, so mutating it in place is invisible here. That is the
+    known coarseness of this equivalence, and a caller that needs it narrower
+    has to make the value a dataclass.
+    """
+
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("probe", _Budget(limit=4, label="a"), scope="session")
+        first = composition_digest(session)
+
+        session.services.register("probe", _Budget(limit=4, label="a"), scope="session")
+        assert digest_differences(first, composition_digest(session)) == ()
+
+        session.services.register("probe", _Budget(limit=9, label="a"), scope="session")
+        assert [
+            difference.field
+            for difference in digest_differences(first, composition_digest(session))
+        ] == ["services"]
+
+        opaque = _MutableProbe("before")
+        session.services.register("probe", opaque, scope="session")
+        blind = composition_digest(session)
+        opaque.state = "after"
+        assert digest_differences(blind, composition_digest(session)) == ()
+
+
+@pytest.mark.asyncio
+async def test_two_providers_differing_only_in_credential_are_not_equal(
+    tmp_path: Path,
+) -> None:
+    """The registration tables name a provider; the credential is in a closure.
+
+    ``ProviderEntry`` carries the name, the owner and the model id, and the
+    active pair is a function built by the same factory either way, so a
+    provider rebuilt against a different base URL or key used to digest
+    identically in every table at once. The base URL is captured in the stream
+    function's cells, so that is where the digest reads it.
+    """
+
+    model = Model(
+        id="probe-model",
+        provider="probe",
+        context_window=1000,
+        max_output_tokens=100,
+    )
+
+    async with probe_session(str(tmp_path)) as session:
+        session.register_provider(
+            "probe",
+            ProviderConfig(
+                stream_fn=_probe_stream_fn("https://one.invalid"),
+                model=model,
+                name="probe",
+            ),
+        )
+        first = composition_digest(session)
+
+        session.register_provider(
+            "probe",
+            ProviderConfig(
+                stream_fn=_probe_stream_fn("https://two.invalid"),
+                model=model,
+                name="probe",
+            ),
+            replace=True,
+        )
+        moved = {
+            difference.field
+            for difference in digest_differences(first, composition_digest(session))
+        }
+        assert {"services", "active_stream_fn"} <= moved
+        # The tables that name a provider are the ones this change is invisible
+        # in, which is why it has to be visible in the two above. Asserted as an
+        # absence rather than left implicit: if a later field started carrying
+        # the credential, the two that carry it now could stop and nothing here
+        # would say so.
+        assert {"providers", "active_model_id", "provider_identity"} & moved == set()
 
 
 @pytest.mark.asyncio

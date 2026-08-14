@@ -86,6 +86,13 @@ bug in this module, not a licence to widen the list.
   often as it is behaviour and a session boundary like ``tool_allowlist`` is
   read for its content every turn.
 
+* The attributes of an object that is neither a dataclass nor a container.  The
+  structural walk opens the JSON-ish types, ``dataclasses.fields``, and a plain
+  function's closure cells; a class that satisfies a Protocol by holding
+  mutable attributes is still digested by its type name alone, so a service
+  that mutates itself in place reads here as unchanged.  Naming that class is
+  the honest limit of a walk that must not run user code to look inside.
+
 What is deliberately *not* excluded is the one residue the runtime creates on
 purpose: uninstalling an atom leaves its trigger codecs registered, so a
 committed turn naming that source stays decodable.  Absorbing that into the
@@ -98,7 +105,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Mapping, Sequence, Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
+from types import CellType, FunctionType, MappingProxyType
 from typing import Final, cast
 
 from loguru import logger
@@ -176,7 +184,14 @@ class ObserverEntry:
 
 @dataclass(frozen=True, slots=True)
 class ProviderEntry:
-    """One registered provider and the model it names."""
+    """One registered provider and the model it names.
+
+    Deliberately not the whole ``ProviderConfig``: the registry keeps its
+    configs in the service registry, so the same object is already digested for
+    content as ``service:provider:<name>``, and restating it here would report
+    one change as two.  What is *only* here is the ownership, which lives in
+    the registry's own index rather than in the service.
+    """
 
     name: str
     owner: str | None
@@ -321,8 +336,13 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
         ),
         active_provider=providers._active_name,
         active_model_id=None if providers.model is None else providers.model.id,
+        # Digested for content rather than named: this and the backing
+        # ``service:provider:<name>`` value are the only two places a provider
+        # rebuilt with the same name and model but a different base URL or
+        # credential can show up, because both of those live in the cells of
+        # the stream function and nothing else here reads them.
         active_stream_fn=(
-            None if providers.stream_fn is None else _identity(providers.stream_fn)
+            None if providers.stream_fn is None else _service_value(providers.stream_fn)
         ),
         provider_identity=(
             None if identity is None else f"{identity.name}/{identity.model_id}"
@@ -368,6 +388,9 @@ A bound depth is what makes the walk safe on a value that contains itself, and
 eight levels is past anything a service holds in practice.
 """
 
+_UNSET: Final[object] = object()
+"""Stands for a dataclass field that was declared and never assigned."""
+
 
 def _service_value(value: object) -> str:
     """A content-sensitive digest of one registered service.
@@ -376,8 +399,16 @@ def _service_value(value: object) -> str:
     every data service look alike: ``"v1"`` and ``"v2"`` are both ``str``, and
     ``tool_allowlist`` — a boundary the driver reads every turn — would compare
     equal however it was rewritten.  Values built out of the JSON-ish types are
-    therefore walked structurally, and everything else falls back to the type
-    name, which is all a digest can honestly say about an opaque object.
+    therefore walked structurally, as are ``dataclasses.fields`` and a plain
+    function's closure cells, and everything else falls back to the type name.
+
+    What the walk still cannot see, stated so a caller does not read more into
+    an equality than it carries: a class that satisfies a Protocol by holding
+    mutable attributes has no fields to enumerate, so it digests by its type
+    name alone and a service that mutates itself in place reads as unchanged.
+    Nor can it see through a callable that is not a plain function — a bound
+    method, or an instance with ``__call__`` — because what it holds is
+    reachable only by naming attributes the digest has no schema for.
 
     The walk is hashed rather than kept verbatim for two reasons: a service can
     hold a credential, and a failure message that printed one would leak it into
@@ -419,14 +450,60 @@ def _encode(value: object, depth: int) -> str:
         members = cast("AbstractSet[object]", value)
         encoded = sorted(_encode(member, depth - 1) for member in members)
         return f"{kind.__name__}:{{{','.join(encoded)}}}"
-    if kind is dict:
+    if kind is dict or kind is MappingProxyType:
         mapping = cast("Mapping[object, object]", value)
         pairs = sorted(
             f"{_encode(key, depth - 1)}={_encode(item, depth - 1)}"
             for key, item in mapping.items()
         )
-        return f"dict:{{{','.join(pairs)}}}"
+        return f"{kind.__name__}:{{{','.join(pairs)}}}"
+    if is_dataclass(kind):
+        # Where the services in a real composition actually live. Walking only
+        # the JSON-ish types left this branch unreached by every service a
+        # session holds, so the digest was structural in principle and opaque
+        # in practice. Declaration order is kept because it is fixed by the
+        # class rather than by the write, so it cannot make two equal values
+        # digest apart.
+        attributes = ",".join(
+            f"{spec.name}={_encode_attribute(value, spec.name, depth - 1)}"
+            for spec in fields(kind)
+        )
+        return f"{kind.__qualname__}:({attributes})"
+    if kind is FunctionType:
+        # A closure is the one opaque callable whose difference is routinely
+        # the thing that matters: two provider stream functions built by the
+        # same factory share a qualname and differ only in the base URL and
+        # credential captured in their cells, which is exactly the change the
+        # provider tables could not see.
+        function = cast("FunctionType", value)
+        cells = ",".join(
+            _encode_cell(cell, depth - 1) for cell in function.__closure__ or ()
+        )
+        return f"function:{function.__qualname__}({cells})"
     return f"opaque:{_identity(value)}"
+
+
+def _encode_attribute(value: object, name: str, depth: int) -> str:
+    """One dataclass field, or the fact that it was never assigned.
+
+    A slotted dataclass can be constructed with a field left unset, and reading
+    one raises rather than returning a default; the absence is stable, so it is
+    digested as itself instead of failing the read.
+    """
+
+    item = getattr(value, name, _UNSET)  # code-health: ignore[AM021]
+    return "unset" if item is _UNSET else _encode(item, depth)
+
+
+def _encode_cell(cell: CellType, depth: int) -> str:
+    """One closure cell, or the fact that it has not been filled yet."""
+
+    try:
+        contents = cell.cell_contents
+    except ValueError:
+        # A recursive closure's cell before the function it names is bound.
+        return "empty"
+    return _encode(contents, depth)
 
 
 def _background_tasks() -> tuple[str, ...]:
