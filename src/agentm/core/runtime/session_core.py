@@ -64,7 +64,7 @@ from agentm.core.abi.messages import (
     TextContent,
     freeze_json,
 )
-from agentm.core.abi.manifest import requirement_key
+from agentm.core.abi.manifest import live_capability_keys, requirement_key
 from agentm.core.abi.operations import BashOperations, EnvironmentOperations
 from agentm.core.abi.permission import PermissionAudience
 from agentm.core.abi.provider import (
@@ -257,7 +257,7 @@ class SessionRuntime:
         else:
             self.codec = CodecRegistry()
         self.services = ServiceRegistry() if services is None else services
-        self.services.set_bind_observer(self._on_service_bind)
+        self.services.set_write_observer(self._on_service_write)
         if store is not None:
             selected_store = self.services.get_role(TRAJECTORY_STORE_ROLE)
             if selected_store is None:
@@ -627,7 +627,11 @@ class SessionRuntime:
 
     def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
         """Register a bus observer for session-scoped instrumentation."""
-        return self.bus.add_observer(observer)
+
+        from agentm.core.runtime.extension import current_installing_extension
+
+        owner = current_installing_extension() or None
+        return self.bus.add_observer(observer, owner=owner)
 
     # --- Registration ---
 
@@ -736,20 +740,33 @@ class SessionRuntime:
                 {"service_name": service_name, "service": value},
             )
 
-    def _on_service_bind(
+    def _on_service_write(
         self,
         key: str,
         service: object,
         scope: ServiceScope,
+        *,
+        role_bind: bool,
     ) -> None:
+        """Attribute every service write; announce only the role bindings.
+
+        Attribution is unconditional because uninstall reads it: a service an
+        atom registered plainly is as much that atom's as one it bound to a
+        role, and one that goes unrecorded outlives the atom forever. The
+        register event stays role-only — plain registrations are frequent and
+        include the driver's per-turn resource transaction, which nothing on
+        the bus wants to hear about once a turn.
+        """
+
         from agentm.core.runtime.extension import current_installing_extension
 
         self._extensions.note_service(key, current_installing_extension() or None)
-        self._emit_register_event(
-            "service",
-            key,
-            {"service": service, "scope": scope},
-        )
+        if role_bind:
+            self._emit_register_event(
+                "service",
+                key,
+                {"service": service, "scope": scope},
+            )
 
     def _emit_register_event(
         self,
@@ -905,6 +922,23 @@ class SessionRuntime:
         self._pending_atom_installs.clear()
         return drained
 
+    def _live_capability_keys(self) -> set[str]:
+        """What this session provides right now, keyed as manifests key it.
+
+        Everything present counts, the embedder's own tools included. This is
+        deliberately wider than the set a cold composition solves against (see
+        ``session_factory._service_capabilities``): that set is narrow because
+        it decides install *order*, and a late install has no order to decide.
+        """
+
+        return live_capability_keys(
+            services=self.services.names(),
+            atoms=self._extensions.installed_atom_names(),
+            tools=[tool.name for tool in self.tools],
+            providers=self._providers.names(),
+            trigger_renderers=self.trigger_renderers.keys(),
+        )
+
     def _verify_runtime_requirements(
         self,
         extension: ExtensionSpec | str,
@@ -915,14 +949,19 @@ class SessionRuntime:
         has no plan to be ordered within, so its requirements are checked
         against what the session actually provides right now, and the failure
         reads the same either way.
+
+        The two solvers take deliberately different inputs and only the failure
+        message is shared. Ordering is what makes the cold set narrow, and
+        ordering does not exist here: a satisfiable requirement is satisfiable
+        no matter who provided it, so a host tool counts at runtime where it
+        would not count at composition time.
         """
         from agentm.core.runtime.extension import load_manifest_for_spec
 
         manifest = load_manifest_for_spec(extension)
         if manifest is None or not manifest.requires:
             return
-        available = {f"service:{name}" for name in self.services.names()}
-        available |= {f"atom:{path}" for path in self._extensions.module_paths}
+        available = self._live_capability_keys()
         missing = [
             requirement
             for requirement in manifest.requires
@@ -974,17 +1013,28 @@ class SessionRuntime:
             self.trigger_renderers.pop(source, None)
         for key in registrations.service_keys:
             self.services.unregister(key)
-        removed_handlers = self.bus.remove_owner(module_path)
+        # The provider service key is covered by the loop above, but the
+        # registry keeps its own ownership index and active-provider name, and
+        # both would keep naming a provider whose backing service is gone.
+        removed_providers = [
+            name
+            for name, owner in self._providers.owners().items()
+            if owner == module_path
+        ]
+        for name in removed_providers:
+            self._providers.unregister(name)
+        removed_bus_attachments = self.bus.remove_owner(module_path)
         self._extensions.forget(module_path)
         logger.debug(
             "detached atom {}: {} tools, {} policies, {} renderers, "
-            "{} services, {} handlers",
+            "{} services, {} providers, {} bus subscriptions and observers",
             module_path,
             len(registrations.tool_ids),
             len(registrations.context_policy_ids),
             len(registrations.trigger_renderer_sources),
             len(registrations.service_keys),
-            removed_handlers,
+            len(removed_providers),
+            removed_bus_attachments,
         )
 
     def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:

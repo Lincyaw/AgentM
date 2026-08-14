@@ -40,6 +40,12 @@ class _Subscription:
     owner: str | None = None
 
 
+@dataclass(slots=True)
+class _ObserverRecord:
+    observer: EventBusObserver
+    owner: str | None = None
+
+
 def _sub_key(sub: _Subscription) -> tuple[int, int]:
     return (sub.priority, sub.seq)
 
@@ -55,7 +61,7 @@ class EventBus:
     """Channel-keyed pub/sub with priority-ordered dispatch."""
 
     _handlers: dict[str, list[_Subscription]] = field(default_factory=dict)
-    _observers: list[EventBusObserver] = field(default_factory=list)
+    _observers: list[_ObserverRecord] = field(default_factory=list)
     _next_seq: int = 0
     _frozen_clear: bool = False
 
@@ -90,11 +96,12 @@ class EventBus:
         return unsubscribe
 
     def remove_owner(self, owner: str) -> int:
-        """Drop every subscription made by ``owner``; return how many.
+        """Drop every subscription and observer made by ``owner``; return how many.
 
         Each subscription already carries the atom that made it, so replacing
         one atom with a newer version does not need the unsubscribe closures
-        that atom never kept.
+        that atom never kept. An observer sees every dispatch on the bus, so
+        one left behind by an uninstalled atom is the loudest kind of leak.
         """
 
         removed = 0
@@ -105,16 +112,25 @@ class EventBus:
                 self._handlers[channel] = kept
             else:
                 del self._handlers[channel]
+        kept_observers = [record for record in self._observers if record.owner != owner]
+        removed += len(self._observers) - len(kept_observers)
+        self._observers = kept_observers
         return removed
 
-    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
+    def add_observer(
+        self,
+        observer: EventBusObserver,
+        *,
+        owner: str | None = None,
+    ) -> Callable[[], None]:
         """Attach a bus observer; return an unsubscribe function."""
 
-        self._observers.append(observer)
+        record = _ObserverRecord(observer=observer, owner=owner)
+        self._observers.append(record)
 
         def unsubscribe() -> None:
             try:
-                self._observers.remove(observer)
+                self._observers.remove(record)
             except ValueError:
                 return
 
@@ -347,9 +363,9 @@ class EventBus:
         self._observers.clear()
 
     def _observer_emit_start(self, channel: str, event: Any, dispatch_id: str) -> None:
-        for observer in list(self._observers):
+        for record in list(self._observers):
             try:
-                observer.on_emit_start(channel, event, dispatch_id)
+                record.observer.on_emit_start(channel, event, dispatch_id)
             except Exception:
                 logger.debug("event bus observer on_emit_start failed")
 
@@ -361,9 +377,11 @@ class EventBus:
         dispatch_id: str,
         owner: str | None,
     ) -> None:
-        for observer in list(self._observers):
+        for record in list(self._observers):
             try:
-                observer.on_handler_start(channel, handler, event, dispatch_id, owner)
+                record.observer.on_handler_start(
+                    channel, handler, event, dispatch_id, owner
+                )
             except Exception:
                 logger.debug("event bus observer on_handler_start failed")
 
@@ -378,9 +396,9 @@ class EventBus:
         dispatch_id: str,
         owner: str | None,
     ) -> None:
-        for observer in list(self._observers):
+        for record in list(self._observers):
             try:
-                observer.on_handler_done(
+                record.observer.on_handler_done(
                     channel,
                     handler,
                     event,
@@ -400,9 +418,9 @@ class EventBus:
         results: list[Any],
         dispatch_id: str,
     ) -> None:
-        for observer in list(self._observers):
+        for record in list(self._observers):
             try:
-                observer.on_emit_end(channel, event, results, dispatch_id)
+                record.observer.on_emit_end(channel, event, results, dispatch_id)
             except Exception:
                 logger.debug("event bus observer on_emit_end failed")
 

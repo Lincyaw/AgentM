@@ -17,6 +17,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
+from loguru import logger
+
 from agentm.core.abi.catalog import ActiveSetFingerprint
 from agentm.core.abi.provider import (
     ProviderConfig,
@@ -120,13 +122,34 @@ class ProviderRegistry:
             self.activate()
         except BaseException:
             if previous is None:
-                self._services.unregister(key)
-                self._owners.pop(name, None)
+                self.unregister(name)
             else:
                 self._services.register(key, previous, scope="session")
                 self._owners[name] = previous_owner
             raise
         self._emit_register_event("provider", name, {"provider": config})
+
+    def unregister(self, name: str) -> None:
+        """Drop one provider binding, its ownership record, and its active name.
+
+        The active ``stream_fn``/``model`` pair is deliberately left alone: it
+        is what the running driver is already streaming through, and a session
+        that lost its model mid-turn would be worse off than one whose model
+        outlives the atom that named it.
+
+        The active *name* is not left alone, because it is not merely read back
+        — the next committed turn freezes it into the session identity, which is
+        durable, serialized into the trajectory, and validated on resume. A name
+        no registration backs must not reach that identity. What the session is
+        left with is a stream function nothing names, which is what ``"direct"``
+        already means; the next ``activate()`` re-resolves a name from whatever
+        providers remain.
+        """
+
+        self._services.unregister(f"{_SERVICE_PREFIX}{name}")
+        self._owners.pop(name, None)
+        if self._active_name == name:
+            self._active_name = None
 
     def has(self, name: str) -> bool:
         return self._services.get(f"{_SERVICE_PREFIX}{name}") is not None
@@ -243,6 +266,26 @@ class ProviderRegistry:
         self.freeze_after_commits()
 
     def freeze_after_commits(self) -> None:
+        """Bind the session to its provider once a turn has been committed.
+
+        Reachable from ``activate()`` and, independently, from the
+        turn-committed bus hook, so it cannot assume anything has re-resolved
+        the active provider first. An identity is minted only for a name the
+        registry can still account for: ``"direct"`` when no named provider is
+        active, otherwise a name present in ``configs()``. A name absent from
+        ``configs()`` is refused rather than frozen — freezing it would write a
+        provider registered nowhere into the trajectory, where resume validates
+        it and the next ``activate()`` raises for it.
+
+        One consequence is worth stating because it is a behaviour change and
+        the freeze is one-way. A session whose provider atom departs before its
+        first observed commit now freezes ``"direct"`` where it previously
+        froze the atom's name, so resuming that trajectory with the atom back
+        in the composition fails the install. Every alternative in that state
+        also fails — the departed name would fail resume validation instead —
+        so the trade is deliberate, not an oversight.
+        """
+
         turns = self._committed_turns()
         if self._identity is not None or not turns:
             return
@@ -252,12 +295,20 @@ class ProviderRegistry:
             None,
         )
         if not providers:
+            if self._active_name is not None:
+                logger.warning(
+                    "refusing to freeze provider identity: {!r} is still the "
+                    "active provider but is registered nowhere; a later "
+                    "activate() will raise for it",
+                    self._active_name,
+                )
+                return
             if self.model is None:
                 return
             active_set = self._active_set()
             self.set_identity(
                 ProviderSessionIdentity(
-                    name=self._active_name or "direct",
+                    name="direct",
                     model_id=first_model_id or self.model.id,
                     active_set_digest=(
                         active_set.digest if active_set is not None else None

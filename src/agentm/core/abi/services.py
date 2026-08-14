@@ -13,16 +13,31 @@ protocol.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, Literal, TypeVar, cast, overload
+from typing import Final, Literal, Protocol, TypeVar, cast, overload
 
 T = TypeVar("T")
 ServiceScope = Literal["session", "tree"]
 """Whether a service is local to one session or inherited by child sessions."""
 _INHERITED_SCOPES: Final[frozenset[ServiceScope]] = frozenset({"tree"})
 
-BindObserver = Callable[[str, object, ServiceScope], None]
+
+class WriteObserver(Protocol):
+    """Callback fired after every write into a registry.
+
+    ``role_bind`` separates a deliberate role binding from a plain
+    ``register``: both are writes the owning session must attribute, only the
+    first is a boundary decision worth announcing.
+    """
+
+    def __call__(
+        self,
+        key: str,
+        service: object,
+        scope: ServiceScope,
+        *,
+        role_bind: bool,
+    ) -> None: ...
 
 
 class ServiceNotFound(KeyError):
@@ -67,21 +82,23 @@ class _ServiceEntry:
 class ServiceRegistry:
     """Typed, named service registry with runtime protocol checks."""
 
-    __slots__ = ("_bind_observer", "_services")
+    __slots__ = ("_services", "_write_observer")
 
     def __init__(self) -> None:
         self._services: dict[str, _ServiceEntry] = {}
-        self._bind_observer: BindObserver | None = None
+        self._write_observer: WriteObserver | None = None
 
-    def set_bind_observer(self, observer: BindObserver | None) -> None:
-        """Install a callback fired after each role ``bind`` (not ``register``).
+    def set_write_observer(self, observer: WriteObserver | None) -> None:
+        """Install a callback fired after every write, ``register`` included.
 
-        The owning session uses this to emit registration lifecycle events.
-        Observers are per-registry and are not copied by ``inherit_from`` /
-        ``update_from``.
+        The owning session uses this to attribute each service to the atom
+        that put it there, and to announce role bindings. Attribution has to
+        happen at the mutation site: a session cannot ask N call sites to
+        remember to report themselves. Observers are per-registry and are not
+        copied by ``inherit_from`` / ``update_from``.
         """
 
-        self._bind_observer = observer
+        self._write_observer = observer
 
     def register(
         self,
@@ -102,6 +119,17 @@ class ServiceRegistry:
         Re-registering the same name replaces the previous service.
         """
 
+        self._write(name, service, protocol, scope=scope, role_bind=False)
+
+    def _write(
+        self,
+        name: str,
+        service: object,
+        protocol: type | None,
+        *,
+        scope: ServiceScope,
+        role_bind: bool,
+    ) -> None:
         if protocol is not None and not isinstance(service, protocol):
             raise ServiceTypeMismatch(
                 f"service {name!r}: {type(service).__name__} does not "
@@ -112,6 +140,8 @@ class ServiceRegistry:
             protocol=protocol,
             scope=scope,
         )
+        if self._write_observer is not None:
+            self._write_observer(name, service, scope, role_bind=role_bind)
 
     def bind(
         self,
@@ -131,14 +161,13 @@ class ServiceRegistry:
         if self.has(role.key) and not replace:
             raise ValueError(f"service {role.key!r} already bound")
         effective_scope = role.scope if scope is None else scope
-        self.register(
+        self._write(
             role.key,
             service,
             role.protocol,
             scope=effective_scope,
+            role_bind=True,
         )
-        if self._bind_observer is not None:
-            self._bind_observer(role.key, service, effective_scope)
 
     @overload
     def get(self, name: str) -> object | None: ...
@@ -209,14 +238,14 @@ class ServiceRegistry:
 
         copied = ServiceRegistry()
         copied._services = dict(self._services)
-        copied._bind_observer = self._bind_observer
+        copied._write_observer = self._write_observer
         return copied
 
     def replace_from(self, other: ServiceRegistry) -> None:
         """Restore registrations and observer from ``other``."""
 
         self._services = dict(other._services)
-        self._bind_observer = other._bind_observer
+        self._write_observer = other._write_observer
 
     def update_from(self, other: ServiceRegistry) -> None:
         """Merge another registry into this one (other wins on conflict)."""
@@ -234,10 +263,10 @@ class ServiceRegistry:
 
 
 __all__ = [
-    "BindObserver",
     "ServiceNotFound",
     "ServiceRegistry",
     "ServiceRole",
     "ServiceScope",
     "ServiceTypeMismatch",
+    "WriteObserver",
 ]

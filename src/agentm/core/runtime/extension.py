@@ -115,7 +115,13 @@ class _AtomEventBusFacade(EventBus):
         del owner
         return self.__session.on(channel, handler, priority=priority)
 
-    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
+    def add_observer(
+        self,
+        observer: EventBusObserver,
+        *,
+        owner: str | None = None,
+    ) -> Callable[[], None]:
+        del owner
         return self.__session.add_observer(observer)
 
     async def emit(self, channel: str, event: Any) -> list[Any]:

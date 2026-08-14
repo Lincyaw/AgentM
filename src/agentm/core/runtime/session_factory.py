@@ -34,6 +34,7 @@ from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.manifest import (
     ExtensionManifest,
+    live_capability_keys,
     parse_capability_ref,
     provided_capability_keys,
     requirement_key,
@@ -188,9 +189,25 @@ def _load_manifest(spec: ExtensionSpec) -> ExtensionManifest | None:
 
 
 def _service_capabilities(services: ServiceRegistry | None) -> set[str]:
+    """Host-provided capabilities a cold composition may solve against.
+
+    Only services: nothing else exists yet at composition time, and the
+    embedder's tools are deliberately not offered to the solver — an atom's
+    place in the plan is decided by the atoms in the plan, so letting a host
+    tool satisfy ``tool:x`` would reorder installs behind the embedder's back.
+
+    A late install solves against a wider set (``SessionRuntime.
+    _live_capability_keys``), and that difference is the contract, not drift:
+    what narrows this set is ordering, and a late install has no plan to be
+    ordered within. So an atom requiring ``tool:x`` that only the embedder
+    provides is rejected at composition time and accepted at runtime — the
+    first because it cannot be placed, the second because there is nothing to
+    place it among.
+    """
+
     if services is None:
         return set()
-    return {f"service:{name}" for name in services.names()}
+    return live_capability_keys(services=services.names())
 
 
 def _extension_plan(
