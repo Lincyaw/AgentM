@@ -1,5 +1,13 @@
 # code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
-"""Tool execution capability port."""
+"""Tool execution port.
+
+A tool declares only what is true of the tool: whether its work can be
+abandoned mid-flight, and whether it can run alongside others. Where it runs
+is a property of the session's composition, not of the tool, so isolation,
+filesystem reach and network access are not asked here -- the execution world
+is chosen once, by whoever binds the operations ports, and a tool that could
+name a different one would be describing a deployment it cannot see.
+"""
 
 from __future__ import annotations
 
@@ -14,8 +22,6 @@ from agentm.core.abi.messages import freeze_json
 from agentm.core.abi.operations import EnvironmentOperations, EnvironmentRef
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
 
-IsolationLevel = Literal["none", "thread", "process", "environment"]
-FilesystemAccess = Literal["none", "read", "write"]
 ToolConcurrency = Literal["exclusive", "parallel_safe"]
 ToolInterruptBehavior = Literal["block", "cancel"]
 
@@ -24,71 +30,17 @@ ToolInterruptBehavior = Literal["block", "cancel"]
 class ToolExecutionRequirements:
     """Requirements a tool may declare without choosing the runtime backend."""
 
-    isolation: IsolationLevel = "none"
     killable: bool = False
-    filesystem: FilesystemAccess = "none"
-    network: bool = False
     concurrency: ToolConcurrency = "exclusive"
     interrupt: ToolInterruptBehavior = "block"
-    environment_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.isolation not in {"none", "thread", "process", "environment"}:
-            raise ValueError(f"invalid tool isolation: {self.isolation!r}")
-        if self.filesystem not in {"none", "read", "write"}:
-            raise ValueError(f"invalid tool filesystem access: {self.filesystem!r}")
         if self.concurrency not in {"exclusive", "parallel_safe"}:
             raise ValueError(f"invalid tool concurrency: {self.concurrency!r}")
         if self.interrupt not in {"block", "cancel"}:
             raise ValueError(f"invalid tool interrupt behavior: {self.interrupt!r}")
-        if not isinstance(self.killable, bool) or not isinstance(self.network, bool):
-            raise TypeError("tool killable and network requirements must be bools")
-        if self.environment_id is not None and (
-            not isinstance(self.environment_id, str) or not self.environment_id
-        ):
-            raise TypeError("tool environment_id must be a non-empty string or None")
-
-
-@dataclass(frozen=True, slots=True)
-class ToolExecutionCapabilities:
-    """Capabilities provided by a concrete tool executor backend."""
-
-    environment: EnvironmentRef | None = None
-    isolation: tuple[IsolationLevel, ...] = ("none",)
-    filesystem: tuple[FilesystemAccess, ...] = ("none",)
-    killable: bool = False
-    network: bool = False
-    concurrency: tuple[ToolConcurrency, ...] = ("exclusive", "parallel_safe")
-    interrupt: tuple[ToolInterruptBehavior, ...] = ("block",)
-
-    def __post_init__(self) -> None:
-        if self.environment is not None and not isinstance(
-            self.environment,
-            EnvironmentRef,
-        ):
-            raise TypeError("executor environment must be an EnvironmentRef or None")
-        _validate_capability_tuple(
-            self.isolation,
-            {"none", "thread", "process", "environment"},
-            "executor isolation",
-        )
-        _validate_capability_tuple(
-            self.filesystem,
-            {"none", "read", "write"},
-            "executor filesystem",
-        )
-        _validate_capability_tuple(
-            self.concurrency,
-            {"exclusive", "parallel_safe"},
-            "executor concurrency",
-        )
-        _validate_capability_tuple(
-            self.interrupt,
-            {"block", "cancel"},
-            "executor interrupt",
-        )
-        if not isinstance(self.killable, bool) or not isinstance(self.network, bool):
-            raise TypeError("executor killable and network capabilities must be bools")
+        if not isinstance(self.killable, bool):
+            raise TypeError("tool killable requirement must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,13 +76,6 @@ class ToolExecutionRequest:
             )
         if self.cwd is not None and (not isinstance(self.cwd, str) or not self.cwd):
             raise TypeError("tool execution request cwd must be non-empty or None")
-        if self.requirements.environment_id is not None and (
-            self.environment is None
-            or self.environment.id != self.requirements.environment_id
-        ):
-            raise ValueError(
-                "tool execution request environment does not satisfy environment_id"
-            )
         if self.metadata is not None:
             object.__setattr__(
                 self,
@@ -164,8 +109,6 @@ class EnvironmentExecutableTool(Protocol):
 class ToolExecutor(Protocol):
     """Runtime-owned boundary that executes tool calls."""
 
-    def capabilities(self) -> ToolExecutionCapabilities: ...
-
     async def execute(
         self,
         request: ToolExecutionRequest,
@@ -191,21 +134,6 @@ def tool_execution_requirements(tool: Tool) -> ToolExecutionRequirements:
     return candidate
 
 
-def _validate_capability_tuple(
-    value: object,
-    allowed: set[str],
-    label: str,
-) -> None:
-    if (
-        not isinstance(value, tuple)
-        or not value
-        or any(not isinstance(item, str) or item not in allowed for item in value)
-    ):
-        raise ValueError(f"{label} must be a non-empty tuple of supported values")
-    if len(set(value)) != len(value):
-        raise ValueError(f"{label} must not contain duplicates")
-
-
 def _freeze_metadata(
     value: Mapping[str, str | int | float | bool | None],
 ) -> Mapping[str, str | int | float | bool | None]:
@@ -223,10 +151,7 @@ def _freeze_metadata(
 
 __all__ = [
     "EnvironmentExecutableTool",
-    "FilesystemAccess",
-    "IsolationLevel",
     "ToolConcurrency",
-    "ToolExecutionCapabilities",
     "ToolExecutionRequest",
     "ToolExecutionRequirements",
     "ToolExecutionRequirementsProvider",

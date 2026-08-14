@@ -23,7 +23,6 @@ from agentm.core.abi import (
     BeforeSendEvent,
     CancelSignal,
     Tool,
-    ToolExecutionCapabilities,
     ToolExecutionRequest,
     ToolExecutor,
     ToolOutcome,
@@ -58,9 +57,6 @@ MANIFEST = ExtensionManifest(
 class _PurposeExecutor:
     _executor: ToolExecutor
     _injected_tools: set[str]
-
-    def capabilities(self) -> ToolExecutionCapabilities:
-        return self._executor.capabilities()
 
     async def execute(
         self,

@@ -37,7 +37,6 @@ from agentm.core.abi import (
     SessionShutdownEvent,
     TextContent,
     ToolContinue,
-    ToolExecutionCapabilities,
     ToolExecutionRequest,
     ToolExecutor,
     ToolOutcome,
@@ -443,9 +442,6 @@ class _BackgroundExecutor:
     ) -> None:
         self._inner = inner
         self._manager = manager
-
-    def capabilities(self) -> ToolExecutionCapabilities:
-        return self._inner.capabilities()
 
     async def execute(
         self,

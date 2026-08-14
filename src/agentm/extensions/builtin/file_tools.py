@@ -19,7 +19,6 @@ from agentm.core.abi import (
     ResourceRef,
     ResourceTxn,
     TextContent,
-    ToolExecutionRequirements,
     ToolResult,
 )
 from agentm.extensions import ExtensionManifest
@@ -427,7 +426,6 @@ class _FileToolsRuntime:
                 parameters=_ReadArgs,
                 fn=self._read_execute,
                 metadata={"file_op": "read"},
-                execution_requirements=ToolExecutionRequirements(filesystem="read"),
             )
         )
 
@@ -467,7 +465,6 @@ class _FileToolsRuntime:
                 parameters=_WriteArgs,
                 fn=self._write_execute,
                 metadata={"file_op": "write"},
-                execution_requirements=ToolExecutionRequirements(filesystem="write"),
             )
         )
 
@@ -517,7 +514,6 @@ class _FileToolsRuntime:
                 parameters=_EditArgs,
                 fn=self._edit_execute,
                 metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
-                execution_requirements=ToolExecutionRequirements(filesystem="write"),
             )
         )
 

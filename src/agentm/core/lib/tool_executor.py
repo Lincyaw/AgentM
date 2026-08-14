@@ -10,7 +10,6 @@ from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.messages import JsonValue, thaw_json
 from agentm.core.abi.tool import Tool, ToolOutcome, ToolResult
 from agentm.core.abi.tool_executor import (
-    ToolExecutionCapabilities,
     ToolExecutionRequest,
     ToolExecutionRequirements,
     ToolExecutor,
@@ -65,14 +64,6 @@ async def _execute_direct(
 class DirectToolExecutor:
     """Default executor: run the tool coroutine in the current event loop."""
 
-    def capabilities(self) -> ToolExecutionCapabilities:
-        return ToolExecutionCapabilities(
-            isolation=("none",),
-            filesystem=("none", "read", "write"),
-            network=True,
-            interrupt=("block", "cancel"),
-        )
-
     async def execute(
         self,
         request: ToolExecutionRequest,
@@ -90,34 +81,6 @@ class DirectToolExecutor:
 _DIRECT_EXECUTOR = DirectToolExecutor()
 
 
-def _validate_requirements(
-    requirements: ToolExecutionRequirements,
-    capabilities: ToolExecutionCapabilities,
-) -> None:
-    unsupported: list[str] = []
-    if requirements.isolation not in capabilities.isolation:
-        unsupported.append(f"isolation={requirements.isolation}")
-    if requirements.filesystem not in capabilities.filesystem:
-        unsupported.append(f"filesystem={requirements.filesystem}")
-    if requirements.killable and not capabilities.killable:
-        unsupported.append("killable=true")
-    if requirements.network and not capabilities.network:
-        unsupported.append("network=true")
-    if requirements.concurrency not in capabilities.concurrency:
-        unsupported.append(f"concurrency={requirements.concurrency}")
-    if requirements.interrupt not in capabilities.interrupt:
-        unsupported.append(f"interrupt={requirements.interrupt}")
-    if requirements.environment_id is not None and (
-        capabilities.environment is None
-        or capabilities.environment.id != requirements.environment_id
-    ):
-        unsupported.append(f"environment_id={requirements.environment_id}")
-    if unsupported:
-        raise RuntimeError(
-            "tool executor does not satisfy requirements: " + ", ".join(unsupported)
-        )
-
-
 async def execute_tool_call(
     tool: Tool,
     args: Mapping[str, object],
@@ -132,13 +95,10 @@ async def execute_tool_call(
         requirements if requirements is not None else tool_execution_requirements(tool)
     )
     chosen = _DIRECT_EXECUTOR if executor is None else executor
-    capabilities = chosen.capabilities()
-    _validate_requirements(resolved_requirements, capabilities)
     request = ToolExecutionRequest(
         tool=tool,
         args=args,
         requirements=resolved_requirements,
-        environment=capabilities.environment,
     )
     return await chosen.execute(request, signal=signal)
 

@@ -12,7 +12,6 @@ from agentm.core.abi import (
     CancelSignal,
     FunctionTool,
     TextContent,
-    ToolExecutionCapabilities,
     ToolExecutionRequest,
     ToolExecutor,
     ToolResult,
@@ -48,9 +47,6 @@ class _RecordingExecutor:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def capabilities(self) -> ToolExecutionCapabilities:
-        return ToolExecutionCapabilities()
-
     async def execute(
         self,
         request: ToolExecutionRequest,
@@ -83,7 +79,7 @@ def _tool(
         },
         fn=_ok,
         metadata={"file_op": "read"},
-        execution_requirements=ToolExecutionRequirements(filesystem="read"),
+        execution_requirements=ToolExecutionRequirements(interrupt="cancel"),
     )
 
 

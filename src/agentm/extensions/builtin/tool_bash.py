@@ -190,8 +190,6 @@ def install(session: AtomAPI, config: ToolBashConfig) -> None:
 class _BashTool(EnvironmentExecutableTool):
     name = "bash"
     execution_requirements = ToolExecutionRequirements(
-        filesystem="write",
-        network=True,
         interrupt="cancel",
     )
     description = (
