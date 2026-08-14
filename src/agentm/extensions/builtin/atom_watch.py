@@ -18,14 +18,16 @@ names, so changing that file changes the spec.
 
 An atom that does not install settles rather than being retried on the timer:
 the session keeps running the version it already has, and the attempt comes
-back when the spec changes -- which is what editing the file does. The timer
+back when the spec changes -- which is what editing the file does -- or when a
+pass is rebuilding that position anyway, since what an atom needs to install
+can be supplied by a change somewhere else in the composition. The timer
 converges on the scenario; it does not hammer a broken one.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol, runtime_checkable
 
@@ -86,15 +88,6 @@ MANIFEST = ExtensionManifest(
 )
 
 
-@runtime_checkable
-class _Follower(Protocol):
-    """What one version of this atom needs from the version replacing it."""
-
-    def take_over(self) -> None:
-        """Follow the scenario from here on, in place of the caller."""
-        ...
-
-
 @dataclass(frozen=True, slots=True)
 class _Applied:
     """What the session holds at one position of the followed composition.
@@ -104,11 +97,13 @@ class _Applied:
     and leaves what was there. It is ``None`` at a position nothing ever
     reached.
 
-    ``failed`` is the version that did not apply, kept so the same version is
-    not attempted again on every pass. Retrying it would set the composition
-    rebuilding from this position on every tick, so every healthy atom after it
-    would lose its in-memory state twice a second for as long as the source
-    stayed broken.
+    ``failed`` is the version that did not apply, kept so a pass that would
+    otherwise leave the composition alone does not attempt it again. Retrying
+    it there would set the composition rebuilding from this position on every
+    tick, so every healthy atom after it would lose its in-memory state twice a
+    second for as long as the source stayed broken. A pass that is rebuilding
+    this position anyway does retry it, because an install fails for reasons
+    outside the spec that failed.
     """
 
     running: ExtensionSpec | None
@@ -133,6 +128,25 @@ class _Composition:
         return cls(entries={_key(spec): _Applied(running=spec) for spec in resolved})
 
 
+@runtime_checkable
+class _Follower(Protocol):
+    """What one version of this atom needs from the version replacing it."""
+
+    def take_over(self, applied: Mapping[str, _Applied]) -> bool:
+        """Follow the scenario from here on; report a loop now running.
+
+        ``applied`` is what the caller converged the session to. It cannot be
+        derived from the scenario, which says what should be installed rather
+        than what is: a position may hold an older version, or nothing at all
+        where an install failed.
+
+        Reporting False leaves the caller following, because the reasons a
+        successor does not start -- a half-written scenario file, a loader not
+        yet registered -- are the ones a later pass recovers from.
+        """
+        ...
+
+
 class _ScenarioFollower:
     """Re-reads the scenario and moves the session's composition toward it."""
 
@@ -146,28 +160,37 @@ class _ScenarioFollower:
     # --- Lifecycle ---
 
     def on_session_ready(self, _event: SessionReadyEvent) -> None:
-        self._start()
+        # The session factory has just installed the plan, so every position
+        # holds the version the scenario names.
+        self._start(applied=None)
 
-    def take_over(self) -> None:
+    def take_over(self, applied: Mapping[str, _Applied]) -> bool:
         """Follow the scenario in place of the version this one replaced.
 
         ``SessionReadyEvent`` fires once per session, so a version installed
         into a running session cannot start from it. The version being replaced
-        starts this one instead, from the loop it is about to leave.
+        starts this one instead, from the loop it is about to leave, and hands
+        over what it converged the session to.
         """
 
-        self._start()
+        return self._start(applied=applied)
 
-    def _start(self) -> None:
+    def _start(self, *, applied: Mapping[str, _Applied] | None) -> bool:
+        """Start the polling loop; report whether one is running afterwards."""
+
         if self._task is not None:
-            return
+            return True
         resolved = self._resolve()
         if resolved is None:
             logger.info(
                 "atom watch idle: this session has no scenario to follow",
             )
-            return
-        self._applied = _Composition.of(resolved)
+            return False
+        self._applied = (
+            _Composition.of(resolved)
+            if applied is None
+            else _Composition(entries=dict(applied))
+        )
         self._task = asyncio.create_task(self._loop(), name="agentm-atom-watch")
         logger.info(
             "following scenario {} every {}s ({} extensions)",
@@ -175,6 +198,7 @@ class _ScenarioFollower:
             self._interval,
             len(self._applied.entries),
         )
+        return True
 
     async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
         task = self._task
@@ -214,9 +238,12 @@ class _ScenarioFollower:
     async def _loop(self) -> None:
         while True:
             await asyncio.sleep(self._interval)
-            if self._hand_over_if_superseded():
-                return
             try:
+                # Handing over runs the replacement's code, which is code the
+                # host just loaded from a file someone is editing: it belongs
+                # under the same guard as a pass.
+                if self._hand_over_if_superseded():
+                    return
                 await self._tick()
             except asyncio.CancelledError:
                 raise
@@ -231,18 +258,36 @@ class _ScenarioFollower:
         to notice on its own that the session moved on. The version installed
         over this one registered itself as the session's follower and has no
         session-ready event left to start from, so it is started here.
+
+        The loop is only given up once the successor confirms it is following.
+        A successor that could not start leaves this one running: the session
+        would otherwise stop tracking its scenario for good, since the loop
+        that would have retried is the one that just returned.
         """
 
         follower = self._api.services.get(_FOLLOWER_SERVICE)
         if follower is self:
             return False
-        if isinstance(follower, _Follower):
-            logger.info("atom watch handing the scenario loop to its replacement")
-            follower.take_over()
-        else:
+        if follower is None:
+            # Nothing registered over this atom; it was detached outright.
             logger.info(
                 "atom watch stopping: this session no longer follows a scenario",
             )
+            return True
+        if not isinstance(follower, _Follower):
+            logger.warning(
+                "atom watch keeping the scenario loop: {} took the follower "
+                "service over but cannot follow",
+                type(follower).__name__,
+            )
+            return False
+        if not follower.take_over(self._applied.entries):
+            logger.warning(
+                "atom watch keeping the scenario loop: its replacement has "
+                "not started following",
+            )
+            return False
+        logger.info("atom watch handed the scenario loop to its replacement")
         return True
 
     async def _tick(self) -> None:
@@ -266,17 +311,22 @@ class _ScenarioFollower:
         for position, spec in enumerate(resolved):
             key = _key(spec)
             previous = applied.get(key)
-            if previous is not None and previous.failed == spec:
-                # This exact version already failed here. The session runs what
-                # it ran before, so the position is as satisfied as it is going
-                # to get: the scenario disagreeing with it forever would rebuild
-                # every atom after it on every pass. The attempt comes back when
-                # the spec does -- for a file that is its digest, so an edit is
-                # what lifts this. Failures are reported from _apply, which this
-                # keeps to one report per broken version rather than one a tick.
-                landed[key] = previous
-                continue
             if not rebuilding:
+                if previous is not None and previous.failed == spec:
+                    # This exact version already failed here and nothing before
+                    # it has moved. The session runs what it ran before, so the
+                    # position is as satisfied as it is going to get: the
+                    # scenario disagreeing with it forever would rebuild every
+                    # atom after it on every pass. The attempt comes back when
+                    # the spec does -- for a file that is its digest, so an edit
+                    # is what lifts this -- or when a pass is rebuilding this
+                    # position anyway, since an install also fails for reasons
+                    # outside its own spec: a requirement no atom offers yet, an
+                    # environment the composition around it had not set up. Both
+                    # keep failures to one report per broken version rather than
+                    # one a tick.
+                    landed[key] = previous
+                    continue
                 in_place = (
                     position < len(applied_order) and applied_order[position] == key
                 )

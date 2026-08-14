@@ -6,6 +6,11 @@ atom expensive: retrying it on the timer would reinstall the whole tail every
 pass and every one of those atoms would lose what it held in memory. These
 lock down that a failed apply is attempted once, that the tail is left alone
 until the failing source changes, and that a failed atom is still detachable.
+
+Settling is not giving up: an atom fails to install for reasons outside its own
+source, so a pass that rebuilds its position attempts it again, and a follower
+handing the loop to a newer version of itself hands over what the session is
+actually running rather than what the scenario asks for.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from agentm.core.abi import (
     SessionShutdownEvent,
 )
 from agentm.extensions.builtin.atom_watch import (
+    _FOLLOWER_SERVICE,
     AtomWatchConfig,
     _ScenarioFollower,
 )
@@ -41,9 +47,12 @@ class _FakeLoader:
 
     def __init__(self, specs: Sequence[ExtensionSpec]) -> None:
         self.specs = list(specs)
+        self.raises = False
 
     def __call__(self, scenario: str) -> Sequence[ExtensionInput]:
         del scenario
+        if self.raises:
+            raise RuntimeError("scenario file is half written")
         return list(self.specs)
 
 
@@ -62,6 +71,9 @@ class _CountingAPI:
         self.installed: list[ExtensionSpec] = []
         self.detached: list[ExtensionSpec] = []
         self.broken: set[str] = set()
+        # An atom that only installs once another one is there, the way a
+        # requirement is only solvable once the atom offering it is composed.
+        self.requires: dict[str, str] = {}
 
     @contextlib.contextmanager
     def track_background(self) -> Iterator[None]:
@@ -76,9 +88,13 @@ class _CountingAPI:
         replace: bool = False,
     ) -> None:
         del config, trigger, replace
+        required = self.requires.get(extension.source.location)
+        satisfied = required is None or required in _names(self.installed)
         self.installed.append(extension)
         if extension.source.digest in self.broken:
             raise RuntimeError("module body raised")
+        if not satisfied:
+            raise RuntimeError(f"nothing offers {required}")
 
     def uninstall_extension(self, atom: ExtensionSpec) -> bool:
         self.detached.append(atom)
@@ -171,3 +187,64 @@ async def test_dropping_an_atom_that_failed_still_detaches_it() -> None:
     # The version still running is the one detached, not the edit that never
     # took.
     assert api.detached == [seeded[2]]
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_retries_an_atom_the_composition_can_now_satisfy() -> None:
+    api, loader, follower = await _following([_spec("a0"), _spec("a1")])
+    api.requires["/atoms/x.py"] = "/atoms/dep.py"
+    loader.specs.append(_spec("x"))
+    await follower._tick()
+    assert _names(api.installed) == ["/atoms/x.py"]
+    api.installed.clear()
+
+    loader.specs.insert(0, _spec("dep"))
+    await follower._tick()
+
+    # x failed for a reason outside its own source, and the scenario just
+    # supplied it. The pass rebuilds from position 0, so x is attempted again
+    # on the way past rather than staying settled against a cause that is gone.
+    assert _names(api.installed) == [
+        "/atoms/dep.py",
+        "/atoms/a0.py",
+        "/atoms/a1.py",
+        "/atoms/x.py",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_that_cannot_start_leaves_the_loop_following() -> None:
+    api, loader, follower = await _following([_spec("a0")])
+    successor = _ScenarioFollower(api, AtomWatchConfig())  # type: ignore[arg-type]
+    api.services.register(_FOLLOWER_SERVICE, successor)
+    loader.raises = True
+
+    # Mid-edit the scenario resolves to nothing, which is a pass to skip and
+    # not a reason to stop following: handing the loop over here would end
+    # scenario following for the session, since nothing restarts it.
+    handed_over = follower._hand_over_if_superseded()
+    loader.raises = False
+    confirmed = follower._hand_over_if_superseded()
+    await successor.on_session_shutdown(SessionShutdownEvent())
+
+    assert handed_over is False
+    assert confirmed is True
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_inherits_what_is_running_not_what_is_asked_for() -> None:
+    api, loader, follower = await _following([_spec("a0"), _spec("a1")])
+    broken = _spec("x")
+    api.broken.add(str(broken.source.digest))
+    loader.specs.append(broken)
+    await follower._tick()
+
+    successor = _ScenarioFollower(api, AtomWatchConfig())  # type: ignore[arg-type]
+    assert successor.take_over(follower._applied.entries) is True
+    await successor.on_session_shutdown(SessionShutdownEvent())
+    del loader.specs[-1]
+    await successor._tick()
+
+    # x never installed, so the scenario dropping it detaches nothing. A
+    # successor that read the scenario instead would believe x was running.
+    assert api.detached == []
