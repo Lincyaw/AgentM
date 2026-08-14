@@ -17,12 +17,12 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from agentm.core.abi.messages import (
-    thaw_json,
     ImageContent,
     OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
+    thaw_json,
 )
 from agentm.core.abi.termination import ProviderRequestFailed
 from agentm.core.abi.trajectory import Turn, TurnCheckpoint
@@ -549,7 +549,7 @@ def build_trace_snapshot(
                             tool_name=block.name,
                             metadata={
                                 "tool_call_id": block.id,
-                                "arguments": dict(block.arguments),
+                                "arguments": thaw_json(block.arguments),
                             },
                         )
                     )

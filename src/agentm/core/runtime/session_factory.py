@@ -375,7 +375,7 @@ async def _cold_fork_head(
         head_id=DEFAULT_TRAJECTORY_HEAD_ID,
         branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
         root_session_id=ctx.root_session_id,
-        parent_session_id=source_session_id,
+        parent_session_id=ctx.parent_session_id,
         logical_parent_id=nodes[-1].id,
         status="active",
         updated_at=time.time(),

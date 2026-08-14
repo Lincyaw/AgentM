@@ -148,6 +148,8 @@ class _WatchEvent(TypedDict):
 @dataclass(frozen=True, slots=True)
 class _TraceContext:
     query: TrajectoryQueryStore
+    output: TraceFormat | None = None
+    session: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +158,8 @@ class _StoreOverride:
 
     dsn: str | None = None
     schema: str | None = None
+    output: TraceFormat | None = None
+    session: str | None = None
 
     def env(self) -> dict[str, str] | None:
         """The override as the environment the resolver already understands."""
@@ -395,7 +399,13 @@ def _trace_default(
     ),
 ) -> None:
     """Open the interactive viewer for the latest session when no subcommand is given."""
-    ctx.obj = _StoreOverride(dsn=dsn, schema=schema)
+    output = _resolve_format(fmt) if fmt is not None else None
+    ctx.obj = _StoreOverride(
+        dsn=dsn,
+        schema=schema,
+        output=output,
+        session=session,
+    )
     if ctx.invoked_subcommand is not None:
         return
     if follow and not sys.stdout.isatty():
@@ -425,7 +435,11 @@ def _get_query_store(ctx: typer.Context) -> TrajectoryQueryStore:
     resolved = resolve_trajectory_store(env=override.env())
     if resolved is not None:
         query = TrajectoryStoreQueryAdapter(resolved.store)
-        ctx.obj = _TraceContext(query=query)
+        ctx.obj = _TraceContext(
+            query=query,
+            output=override.output,
+            session=override.session,
+        )
         ctx.call_on_close(resolved.close)
         return query
     stderr_console.print(
@@ -448,6 +462,20 @@ def _resolve_session_id(
         stderr_console.print("[red]error: no sessions in store[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
     return max(metas, key=lambda item: item.created_at).id
+
+
+def _resolve_command_session(
+    ctx: typer.Context,
+    session: str | None,
+) -> str | None:
+    """Prefer a subcommand session, then inherit the trace-level option."""
+
+    if session is not None:
+        return session
+    state = ctx.obj
+    if isinstance(state, (_TraceContext, _StoreOverride)):
+        return state.session
+    return None
 
 
 # -- follow ----------------------------------------------------------------
@@ -538,7 +566,7 @@ def _follow_session(
     session: str | None,
 ) -> None:
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
 
     shown_turn_ids: set[str] = set()
     checkpoint_id: str | None = None
@@ -590,14 +618,23 @@ def _follow_session(
 def _resolve_format(fmt: str | None) -> TraceFormat:
     if fmt == "text":
         return "text"
-    if fmt == "ndjson":
+    if fmt in {"json", "ndjson"}:
         return "ndjson"
     if fmt is not None:
         raise typer.BadParameter(
-            "format must be 'text' or 'ndjson'",
+            "format must be 'text', 'json', or 'ndjson'",
             param_hint="--format",
         )
     return "text" if is_tty() else "ndjson"
+
+
+def _resolve_command_format(ctx: typer.Context, fmt: str | None) -> TraceFormat:
+    if fmt is not None:
+        return _resolve_format(fmt)
+    state = ctx.obj
+    if isinstance(state, (_TraceContext, _StoreOverride)) and state.output is not None:
+        return state.output
+    return _resolve_format(None)
 
 
 def _emit_json(obj: object) -> None:
@@ -671,7 +708,7 @@ def status_cmd(
 ) -> None:
     """Print one scriptable snapshot of session trajectory progress."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     try:
         status = _load_status_record(query, sid)
     except KeyError:
@@ -708,9 +745,9 @@ def wait_cmd(
             "provide --min-committed-turns and/or --require-active-checkpoint"
         )
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     deadline = time.monotonic() + timeout
-    chosen_fmt = _resolve_format(fmt)
+    chosen_fmt = _resolve_command_format(ctx, fmt)
     while True:
         try:
             status = _load_status_record(query, sid)
@@ -753,8 +790,8 @@ def watch_cmd(
     if limit is not None and limit < 0:
         raise typer.BadParameter("limit must be non-negative", param_hint="--limit")
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
-    chosen_fmt = _resolve_format(fmt)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
+    chosen_fmt = _resolve_command_format(ctx, fmt)
     seen: set[str] = set()
     try:
         initial = _watch_events(query, sid)
@@ -815,7 +852,7 @@ def diagnostics_cmd(
     if limit is not None and limit < 0:
         raise typer.BadParameter("limit must be non-negative", param_hint="--limit")
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     try:
         records = [
             _diagnostic_record(diagnostic)
@@ -826,7 +863,7 @@ def diagnostics_cmd(
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
-    chosen_fmt = _resolve_format(fmt)
+    chosen_fmt = _resolve_command_format(ctx, fmt)
 
     def _render(record: _DiagnosticRecord) -> str:
         location = f"turn={record['turn_index']} checkpoint={record['checkpoint_id']}"
@@ -886,7 +923,7 @@ def sessions_cmd(
         ]
     if limit is not None:
         rows_with_checkpoints = rows_with_checkpoints[:limit]
-    chosen_fmt = _resolve_format(fmt)
+    chosen_fmt = _resolve_command_format(ctx, fmt)
 
     if chosen_fmt == "text":
         stderr_console.print(f"[dim]{len(rows_with_checkpoints)} session(s)[/dim]")
@@ -949,13 +986,13 @@ def turns_cmd(
 ) -> None:
     """Print per-turn summaries for a session."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     try:
         snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
-    chosen_fmt = _resolve_format(fmt)
+    chosen_fmt = _resolve_command_format(ctx, fmt)
     summaries = [_turn_summary_record(summary) for summary in snapshot.turns]
     if status is not None:
         if status not in {"committed", "incomplete"}:
@@ -1011,13 +1048,13 @@ def messages_cmd(
 ) -> None:
     """Print the conversation messages for a session."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     try:
         snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
-    chosen_fmt = _resolve_format(fmt)
+    chosen_fmt = _resolve_command_format(ctx, fmt)
     all_msgs = _message_records_from_snapshot(
         snapshot,
         hide_thinking=hide_thinking,
@@ -1056,7 +1093,7 @@ def usage_cmd(
 ) -> None:
     """Token usage summary for a session."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     try:
         turns = list(query.turns(sid))
     except KeyError:
@@ -1081,7 +1118,7 @@ def usage_cmd(
         "cache_hit_rate": round(hit_pct, 1),
         "total_tokens": total_in + total_out,
     }
-    chosen_fmt = _resolve_format(fmt)
+    chosen_fmt = _resolve_command_format(ctx, fmt)
     if chosen_fmt == "text":
         sys.stdout.write(
             f"session:          {sid}\nturns:            {summary['turns']}\ninput tokens:     {total_in:>12,}\n  cache read:     {cache_read:>12,}  ({hit_pct:.1f}%)\n  cache write:    {cache_write:>12,}\n  non-cached:     {total_in - cache_read:>12,}\noutput tokens:    {total_out:>12,}\ntotal tokens:     {total_in + total_out:>12,}\n"
@@ -1105,7 +1142,7 @@ def view_cmd(
         raise typer.Exit(2)
 
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     run_textual_viewer(query, sid, follow=follow)
 
 
@@ -1178,13 +1215,13 @@ def tools_cmd(
 ) -> None:
     """Print tool calls with arguments and results."""
     query = _get_query_store(ctx)
-    sid = _resolve_session_id(query, session)
+    sid = _resolve_session_id(query, _resolve_command_session(ctx, session))
     try:
         snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
         stderr_console.print(f"[red]error: session not found: {sid}[/red]")
         raise typer.Exit(EXIT_NOT_FOUND)
-    chosen_fmt = _resolve_format(fmt)
+    chosen_fmt = _resolve_command_format(ctx, fmt)
     if result_chars is not None and result_chars < 0:
         raise typer.BadParameter(
             "result chars must be non-negative",

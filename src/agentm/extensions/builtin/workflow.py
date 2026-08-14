@@ -1,8 +1,13 @@
 # code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
-"""``workflow`` atom -- orchestration scripts with journal-based resume.
+"""``workflow`` atom -- orchestration functions with journal-based resume.
 
 Single-file atom: journal, lineage, SDK primitives (agent / parallel /
-pipeline), script runner, and tool registration are all inlined below.
+pipeline), callable/module/script runners, and tool registration are all
+inlined below.
+
+Developer-authored ``.py`` files use normal module mode and export
+``async def run(ctx: WorkflowContext)``. Inline model-authored scripts retain
+the curated exec-mode namespace for compatibility.
 """
 
 from __future__ import annotations
@@ -11,9 +16,11 @@ import ast
 import asyncio
 import builtins as _builtins
 import hashlib
+import importlib.util
 import inspect
 import json
 import os
+import sys
 import textwrap
 import time
 from collections.abc import Awaitable, Callable
@@ -409,7 +416,9 @@ class _BudgetTracker:
 
 
 @dataclass(frozen=True, slots=True)
-class _Budget:
+class WorkflowBudget:
+    """Read-only token budget exposed to callable and script workflows."""
+
     _tracker: _BudgetTracker
 
     @property
@@ -448,6 +457,7 @@ class _WorkflowRun:
         *,
         schema: type[BaseModel] | dict[str, JsonValue] | None = None,
         scenario: str | None = None,
+        cwd: str | None = None,
         model: str | None = None,
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[tuple[str, dict[str, JsonValue]]] | None = None,
@@ -468,6 +478,7 @@ class _WorkflowRun:
         opts: dict[str, object] = {
             "schema": json_schema,
             "scenario": scenario,
+            "cwd": cwd,
             "tool_allowlist": tool_allowlist,
             "extra_extensions": extra_extensions,
             "atom_config": atom_config,
@@ -503,6 +514,7 @@ class _WorkflowRun:
                         current_prompt,
                         scenario,
                         json_schema,
+                        cwd=cwd,
                         tool_allowlist=tool_allowlist,
                         extra_extensions=extra_extensions,
                         atom_config=atom_config,
@@ -597,6 +609,7 @@ class _WorkflowRun:
         scenario: str | None,
         schema: dict[str, JsonValue] | None,
         *,
+        cwd: str | None = None,
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[tuple[str, dict[str, JsonValue]]] | None = None,
         atom_config: dict[str, dict[str, JsonValue]] | None = None,
@@ -611,7 +624,7 @@ class _WorkflowRun:
         if extra_extensions:
             extensions.extend(extra_extensions)
         config = AgentSessionConfig(
-            cwd=self.cwd_override or self.api.ctx.cwd,
+            cwd=cwd or self.cwd_override or self.api.ctx.cwd,
             scenario=scenario or self.default_scenario or self.api.ctx.scenario,
             extra_extensions=extensions,  # type: ignore[arg-type]
             atom_config_overrides=overrides,
@@ -666,6 +679,93 @@ class _WorkflowRun:
         )
 
 
+class WorkflowContext:
+    """Typed SDK passed to developer-authored workflow functions.
+
+    A workflow module can import this type and expose::
+
+        async def run(ctx: WorkflowContext) -> object:
+            return await ctx.agent("...")
+    """
+
+    __slots__ = ("_run",)
+
+    def __init__(self, run: _WorkflowRun) -> None:
+        self._run = run
+
+    @property
+    def args(self) -> dict[str, object]:
+        """Caller-supplied workflow arguments."""
+
+        return self._run.args_payload
+
+    @property
+    def budget(self) -> WorkflowBudget:
+        """Aggregated child-session token budget."""
+
+        return WorkflowBudget(self._run.budget)
+
+    async def agent(
+        self,
+        prompt: str,
+        *,
+        schema: type[BaseModel] | dict[str, JsonValue] | None = None,
+        scenario: str | None = None,
+        cwd: str | None = None,
+        model: str | None = None,
+        tool_allowlist: list[str] | None = None,
+        extra_extensions: list[tuple[str, dict[str, JsonValue]]] | None = None,
+        atom_config: dict[str, dict[str, JsonValue]] | None = None,
+        retry: int = 0,
+        timeout: float | None = None,
+        label: str | None = None,
+        max_turns: int | None = None,
+    ) -> AgentResult:
+        """Run one journaled child scenario agent."""
+
+        return await self._run.agent(
+            prompt,
+            schema=schema,
+            scenario=scenario,
+            cwd=cwd,
+            model=model,
+            tool_allowlist=tool_allowlist,
+            extra_extensions=extra_extensions,
+            atom_config=atom_config,
+            retry=retry,
+            timeout=timeout,
+            label=label,
+            max_turns=max_turns,
+        )
+
+    async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T | None]:
+        """Await independent workflow operations with bounded agent concurrency."""
+
+        return await self._run.parallel(aws)
+
+    async def pipeline(
+        self,
+        items: list[object],
+        *stages: Callable[[object], object],
+    ) -> list[object]:
+        """Run each item through a sequence of sync or async stages."""
+
+        return await self._run.pipeline(items, *stages)
+
+    def log(self, message: object) -> None:
+        """Emit a workflow progress message."""
+
+        self._run.log(message)
+
+    def phase(self, name: object) -> None:
+        """Mark the current workflow phase."""
+
+        self._run.phase(name)
+
+
+type WorkflowCallable = Callable[[WorkflowContext], Awaitable[object]]
+
+
 # ===== Output extraction ====================================================
 
 
@@ -694,6 +794,41 @@ def _retry_prompt(original: str, exc: Exception, attempt: int) -> str:
 # ===== Script validation + execution ========================================
 
 
+def _is_module_workflow(source: str) -> bool:
+    """Return whether a file exports a top-level async ``run`` entrypoint."""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, ast.AsyncFunctionDef) and node.name == "run"
+        for node in ast.iter_child_nodes(tree)
+    )
+
+
+def _validate_module_workflow(source: str) -> list[tuple[int, str]]:
+    """Validate the minimal callable contract of a normal Python module."""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return [(exc.lineno or 0, f"SyntaxError: {exc.msg}")]
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "run":
+            continue
+        positional = (*node.args.posonlyargs, *node.args.args)
+        if not positional:
+            return [
+                (
+                    node.lineno,
+                    "workflow run() must accept a WorkflowContext parameter",
+                )
+            ]
+        return []
+    return [(0, "workflow module must define async def run(ctx: WorkflowContext)")]
+
+
 def _validate_script(source: str) -> list[tuple[int, str]]:
     try:
         tree = ast.parse(source)
@@ -718,7 +853,7 @@ def _build_namespace(run: _WorkflowRun) -> dict[str, object]:
         "agent": run.agent,
         "parallel": run.parallel,
         "pipeline": run.pipeline,
-        "budget": _Budget(run.budget),
+        "budget": WorkflowBudget(run.budget),
         "args": run.args_payload,
         "json": json,
         "log": run.log,
@@ -734,7 +869,33 @@ async def _exec_script(script: str, ns: dict[str, object]) -> object:
     return await workflow_fn()
 
 
+async def _exec_module_file(path: Path, run: _WorkflowRun) -> object:
+    """Import a normal Python workflow module and await its ``run(ctx)``."""
+
+    module_name = (
+        "_agentm_workflow_" + hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+    )
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load workflow module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        raw_workflow = vars(module).get("run")
+        if not callable(raw_workflow):
+            raise RuntimeError(
+                "workflow module must define async def run(ctx: WorkflowContext)"
+            )
+        workflow = cast(WorkflowCallable, raw_workflow)
+        return await workflow(WorkflowContext(run))
+    finally:
+        sys.modules.pop(module_name, None)
+
+
 def _coerce(raw: object) -> str:
+    if isinstance(raw, BaseModel):
+        return raw.model_dump_json()
     if isinstance(raw, str):
         return raw
     if raw is None:
@@ -754,6 +915,8 @@ def _default_concurrency() -> int:
 
 
 class WorkflowRunner:
+    """Programmatic runner for callable, module, and legacy script workflows."""
+
     def __init__(
         self,
         api: AtomAPI,
@@ -782,6 +945,21 @@ class WorkflowRunner:
             raise ValueError("workflow: empty script")
         return await self._execute(script, args or {}, cwd=cwd)
 
+    async def run_callable(
+        self,
+        workflow: WorkflowCallable,
+        args: dict[str, object] | None = None,
+        *,
+        cwd: str | None = None,
+    ) -> WorkflowResult:
+        """Run a normal async Python workflow function."""
+
+        return await self._execute_entry(
+            lambda run: workflow(WorkflowContext(run)),
+            args or {},
+            cwd=cwd,
+        )
+
     async def run_file(
         self,
         path: str | Path,
@@ -789,13 +967,26 @@ class WorkflowRunner:
         *,
         cwd: str | None = None,
     ) -> WorkflowResult:
+        """Run a Python module entrypoint or a legacy exec-mode script file."""
+
         sp = Path(path)
         if not sp.is_absolute():
             sp = expand_path_from_cwd(sp, self._api.ctx.cwd)
         sp = sp.resolve()
         if not sp.is_file():
             raise FileNotFoundError(f"workflow script not found: {sp}")
-        return await self._execute(sp.read_text(encoding="utf-8"), args or {}, cwd=cwd)
+        source = sp.read_text(encoding="utf-8")
+        if not _is_module_workflow(source):
+            return await self._execute(source, args or {}, cwd=cwd)
+        errors = _validate_module_workflow(source)
+        if errors:
+            detail = "\n".join(f"  line {ln}: {msg}" for ln, msg in errors)
+            raise ValueError(f"workflow module validation failed:\n{detail}")
+        return await self._execute_entry(
+            lambda run: _exec_module_file(sp, run),
+            args or {},
+            cwd=cwd,
+        )
 
     async def _execute(
         self, script: str, args_payload: dict[str, object], *, cwd: str | None = None
@@ -804,6 +995,19 @@ class WorkflowRunner:
         if errors:
             detail = "\n".join(f"  line {ln}: {msg}" for ln, msg in errors)
             raise ValueError(f"workflow script validation failed:\n{detail}")
+        return await self._execute_entry(
+            lambda run: _exec_script(script, _build_namespace(run)),
+            args_payload,
+            cwd=cwd,
+        )
+
+    async def _execute_entry(
+        self,
+        entry: Callable[[_WorkflowRun], Awaitable[object]],
+        args_payload: dict[str, object],
+        *,
+        cwd: str | None,
+    ) -> WorkflowResult:
         journal = _Journal.create(self._api.ctx.cwd, self._api.ctx.root_session_id)
         journal.prime()
         run = _WorkflowRun(
@@ -817,7 +1021,7 @@ class WorkflowRunner:
             cwd_override=cwd,
         )
         t0 = time.monotonic()
-        coro = _exec_script(script, _build_namespace(run))
+        coro = entry(run)
         raw = await (
             asyncio.wait_for(coro, timeout=self._wall_clock_timeout)
             if self._wall_clock_timeout
@@ -837,17 +1041,22 @@ class WorkflowRunner:
     async def handle_tool(self, args: dict[str, JsonValue]) -> ToolResult:
         parsed = _WorkflowToolArgs.model_validate(args)
         script = parsed.script
-        if parsed.script_path and not script:
-            try:
-                script = expand_path_from_cwd(
-                    parsed.script_path, self._api.ctx.cwd
-                ).read_text(encoding="utf-8")
-            except OSError as exc:
-                return error_result(f"cannot read script: {exc}")
-        if not script:
+        if not script and not parsed.script_path:
             return error_result("either 'script' or 'script_path' is required")
         try:
-            result = await self._execute(script, parsed.args or {}, cwd=parsed.cwd)
+            if parsed.script_path and not script:
+                result = await self.run_file(
+                    parsed.script_path,
+                    parsed.args or {},
+                    cwd=parsed.cwd,
+                )
+            else:
+                assert script is not None
+                result = await self.run_script(
+                    script,
+                    parsed.args or {},
+                    cwd=parsed.cwd,
+                )
         except Exception as exc:
             return error_result(f"workflow failed: {type(exc).__name__}: {exc}")
         return text_result(
@@ -870,7 +1079,10 @@ class WorkflowConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="workflow",
-    description="Run orchestration scripts with agent/parallel/pipeline and journal-based resume.",
+    description=(
+        "Run callable or file-based workflows with agent/parallel/pipeline "
+        "and journal-based resume."
+    ),
     registers=(
         "tool:workflow",
         "tool:workflow_lineage",
@@ -887,7 +1099,13 @@ class _WorkflowToolArgs(BaseModel):
     script: str | None = Field(
         default=None, description="Inline async Python orchestration script."
     )
-    script_path: str | None = Field(default=None, description="Path to script file.")
+    script_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a Python workflow module exporting async def "
+            "run(ctx: WorkflowContext), or a legacy exec-mode script."
+        ),
+    )
     args: dict[str, object] | None = Field(
         default=None, description="JSON payload exposed as args."
     )
@@ -926,7 +1144,7 @@ class _WorkflowAtomRuntime:
         self._api.register_tool(
             FunctionTool(
                 name="workflow",
-                description="Run an async Python orchestration script. SDK: agent(prompt, *, schema=, scenario=, extra_extensions=, atom_config=, retry=, timeout=, max_turns=, label=), parallel([awaitables]), pipeline(items, *stages), budget, args, json, log(msg), phase(name). `return` becomes the result. Results are journal-cached for resume.",
+                description="Run a Python workflow module exporting async def run(ctx: WorkflowContext), or a legacy inline orchestration script. Callable SDK: ctx.agent(..., cwd=...), ctx.parallel(...), ctx.pipeline(...), ctx.budget, ctx.args, ctx.log(...), ctx.phase(...). Results are journal-cached for resume.",
                 parameters=pydantic_to_tool_schema(_WorkflowToolArgs),
                 fn=self._runner.handle_tool,
                 metadata={"workflow": True},
@@ -1017,3 +1235,16 @@ def install(api: AtomAPI, config: WorkflowConfig) -> None:
     if api.ctx.purpose == _WORKER_PURPOSE:
         return
     _WorkflowAtomRuntime(api, config).install()
+
+
+__all__ = [
+    "AgentResult",
+    "MANIFEST",
+    "WorkflowBudget",
+    "WorkflowCallable",
+    "WorkflowConfig",
+    "WorkflowContext",
+    "WorkflowResult",
+    "WorkflowRunner",
+    "install",
+]
