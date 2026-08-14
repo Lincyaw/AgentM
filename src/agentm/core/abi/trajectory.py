@@ -623,6 +623,16 @@ class AtomInstall:
     ends carries no record of that reload here. Both cases are noted as
     trajectory diagnostics when they happen, including the ones that failed;
     that record is what happened, this one is what to reinstall.
+
+    That reopening a trajectory installs the atoms it names is a decision, not
+    a side effect of wanting resume to work. It was taken deliberately: resume
+    means continuing the session that was recorded, and a session missing the
+    tools its own history called is not that session. The consequence is worth
+    stating plainly, because trajectories here are reopened by verifiers and
+    scoring as well as by people — replaying a record executes the code that
+    record names. The digest catches a source that changed underneath; it does
+    not catch one that is gone, and a resume whose atom no longer resolves
+    fails rather than continuing without it.
     """
 
     atom_name: str
