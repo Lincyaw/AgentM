@@ -17,6 +17,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
+from loguru import logger
+
 from agentm.core.abi.catalog import ActiveSetFingerprint
 from agentm.core.abi.provider import (
     ProviderConfig,
@@ -274,6 +276,14 @@ class ProviderRegistry:
         ``configs()`` is refused rather than frozen — freezing it would write a
         provider registered nowhere into the trajectory, where resume validates
         it and the next ``activate()`` raises for it.
+
+        One consequence is worth stating because it is a behaviour change and
+        the freeze is one-way. A session whose provider atom departs before its
+        first observed commit now freezes ``"direct"`` where it previously
+        froze the atom's name, so resuming that trajectory with the atom back
+        in the composition fails the install. Every alternative in that state
+        also fails — the departed name would fail resume validation instead —
+        so the trade is deliberate, not an oversight.
         """
 
         turns = self._committed_turns()
@@ -285,7 +295,15 @@ class ProviderRegistry:
             None,
         )
         if not providers:
-            if self.model is None or self._active_name is not None:
+            if self._active_name is not None:
+                logger.warning(
+                    "refusing to freeze provider identity: {!r} is still the "
+                    "active provider but is registered nowhere; a later "
+                    "activate() will raise for it",
+                    self._active_name,
+                )
+                return
+            if self.model is None:
                 return
             active_set = self._active_set()
             self.set_identity(
