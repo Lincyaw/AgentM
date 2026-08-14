@@ -949,9 +949,11 @@ class SessionRuntime:
         are ordered by ``(priority, seq)`` with a monotonic ``seq``, so
         re-registering puts the atom last within its band. For a channel where
         position decides the outcome -- the system prompt is last-writer-wins,
-        the tool list is mapped by each handler in turn -- a reloaded atom
-        composes differently from the same atom installed at startup. Reload is
-        a development loop, not a way to reproduce a run.
+        the tool list is mapped by each handler in turn -- an atom installed on
+        its own composes differently from the same atom installed at startup.
+        A caller that cares about dispatch order has to reinstall everything
+        the composition lists after it, which is what ``atom_watch`` does when
+        the scenario changes; one call here cannot know what those are.
 
         A service key is unregistered outright, including one this atom bound
         over another atom's value. Executor decorators do that: each reads the

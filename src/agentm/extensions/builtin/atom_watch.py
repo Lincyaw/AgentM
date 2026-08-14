@@ -171,12 +171,30 @@ class _ScenarioFollower:
 
         # Install and reload in scenario order, so an atom that requires
         # another still arrives after it.
+        #
+        # From the first position where the session and the scenario disagree,
+        # every atom after it is reinstalled too, even one whose own spec did
+        # not change. Bus handlers dispatch in the order they subscribed, so
+        # reloading only the edited atom would leave it running after atoms the
+        # scenario lists later, and a channel where position decides the
+        # outcome -- the system prompt is last-writer-wins, the tool list is
+        # mapped by each handler in turn -- would compose differently from a
+        # cold start of the same scenario. Reinstalling the tail costs those
+        # atoms whatever they were holding in memory; a development loop can
+        # pay that, and a session that reloads nothing never does.
+        applied_order = list(applied)
+        rebuilding = False
         landed: list[ExtensionSpec] = []
-        for spec in resolved:
+        for position, spec in enumerate(resolved):
             previous = applied.get(_key(spec))
-            if previous is not None and previous == spec:
-                landed.append(spec)
-                continue
+            if not rebuilding:
+                in_place = position < len(applied_order) and applied_order[
+                    position
+                ] == _key(spec)
+                if previous is not None and previous == spec and in_place:
+                    landed.append(spec)
+                    continue
+                rebuilding = True
             if await self._apply(spec, reloading=previous is not None):
                 landed.append(spec)
             elif previous is not None:
