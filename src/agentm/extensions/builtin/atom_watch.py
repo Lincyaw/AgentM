@@ -39,8 +39,12 @@ class AtomWatchConfig(BaseModel):
     """Which directory to watch, and how often."""
 
     directory: str = Field(
-        default=".agentm/authored_tools",
-        description="Directory, relative to cwd, watched for atom source.",
+        default=".agentm/atoms",
+        description=(
+            "Directory, relative to cwd, watched for atom source. Deliberately "
+            "not tool_authoring's directory: that atom installs what it writes, "
+            "so watching it would reinstall every authored tool a second time."
+        ),
     )
     interval_seconds: float = Field(
         default=1.0,
@@ -71,6 +75,7 @@ class _Watcher:
         self._install_new = config.install_new
         self._task: asyncio.Task[None] | None = None
         self._seen: dict[Path, tuple[int, float]] = {}
+        self._settling: dict[Path, tuple[int, float]] = {}
 
     def on_session_ready(self, _event: SessionReadyEvent) -> None:
         """Take the current directory as the baseline and start polling."""
@@ -118,16 +123,31 @@ class _Watcher:
 
     async def _tick(self) -> None:
         current = self._scan()
-        changed = [
-            path
-            for path, stamp in current.items()
-            if self._seen.get(path) != stamp
-            and (self._install_new or path in self._seen)
-        ]
-        # Record every path scanned, including ones skipped as new, so a file
-        # is reported once rather than on every tick.
-        self._seen = current
-        for path in changed:
+        settling: dict[Path, tuple[int, float]] = {}
+        ready: list[Path] = []
+        for path, stamp in current.items():
+            if self._seen.get(path) == stamp:
+                continue
+            if not self._install_new and path not in self._seen:
+                # Adopt a file this watcher will not install, so it is left
+                # alone from here rather than reconsidered every tick.
+                self._seen[path] = stamp
+                continue
+            # An editor that rewrites in place is visible mid-write, and a
+            # truncated file that happens to parse would install as a whole
+            # atom. A change has to hold still for one scan before it loads.
+            # `_seen` only advances once a stamp has been acted on, so a file
+            # that keeps changing keeps being reconsidered.
+            if self._settling.get(path) == stamp:
+                self._seen[path] = stamp
+                ready.append(path)
+            else:
+                settling[path] = stamp
+        self._settling = settling
+        self._seen = {
+            path: stamp for path, stamp in self._seen.items() if path in current
+        }
+        for path in ready:
             await self._reload(path)
 
     async def _reload(self, path: Path) -> None:

@@ -226,6 +226,17 @@ class _ToolAuthor:
                 f"could not save the tool source: {write_result.error}. "
                 "Nothing was installed."
             )
+        # The write went through the resource writer, which may put the file in
+        # a sandbox; the loader reads it from this process's filesystem. When
+        # those are different worlds the install fails on a missing file and
+        # says nothing about why, so the mismatch is named here instead.
+        if not path.exists():
+            return _error(
+                "the source was saved, but not where this process can load it "
+                "from: this session's resource writer and its Python loader are "
+                "in different filesystems. Authoring tools needs a session whose "
+                "files are local. Nothing was installed."
+            )
 
         spec = ExtensionSpec(
             source=ExtensionSource(

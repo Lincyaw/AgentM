@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
 import importlib.util
@@ -18,6 +19,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from loguru import logger
 from pydantic import BaseModel as PydanticBaseModel
@@ -43,6 +45,8 @@ from agentm.core.abi.session_api import (
     SpawnedSession,
 )
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
+from agentm.core.abi.store import TrajectoryDiagnostic
+from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
     ValidationIssue,
     extension_helper_imports,
@@ -337,6 +341,51 @@ class _AtomAPIFacade:
         return self.__session.experiment
 
 
+async def _record_runtime_install(
+    api: "Session",
+    *,
+    atom_name: str,
+    module_path: str,
+    trigger: str,
+    superseded: str | None,
+) -> None:
+    """Note in the trajectory that this session's atom set changed mid-run.
+
+    The active-set fingerprint describes the composition the session started
+    with and is not recomputed, so without this a run that gained or replaced
+    an atom is indistinguishable in the record from one that did not. The
+    per-turn tool digest shows that something changed; this says what.
+    """
+
+    store = api.store
+    if store is None:
+        return
+    diagnostic = TrajectoryDiagnostic(
+        id=uuid4().hex,
+        session_id=api.id,
+        timestamp=time.time(),
+        level="info",
+        source="extension",
+        phase="supersede" if superseded is not None else "install",
+        message=(
+            f"atom {atom_name!r} replaced {superseded}"
+            if superseded is not None
+            else f"atom {atom_name!r} installed into the running session"
+        ),
+        error_type=None,
+        error_detail=f"module={module_path} trigger={trigger}",
+        turn_id=None,
+        turn_index=None,
+        checkpoint_id=None,
+    )
+    try:
+        await await_known_outcome(
+            asyncio.to_thread(store.append_diagnostic, diagnostic)
+        )
+    except Exception as exc:  # noqa: BLE001 - a note must not fail the install
+        logger.warning("could not record runtime install of {}: {}", atom_name, exc)
+
+
 async def install_extension(
     api: "Session",
     extension: ExtensionSpec | str,
@@ -362,19 +411,29 @@ async def install_extension(
         ),
     )
     error: str | None = None
+    superseded: str | None = None
     snapshot = api._capture_extension_install_state()
     atom_api = _AtomAPIFacade(api)
     try:
         manifest = load_manifest_for_spec(spec)
         atom_name = manifest.name if manifest is not None else None
         if replace and atom_name is not None:
-            superseded = api.installed_atom_module_path(atom_name)
-            if superseded is not None and superseded != module_path:
+            found = api.installed_atom_module_path(atom_name)
+            if found is not None and found != module_path:
+                superseded = found
                 api.remove_atom_registrations(superseded)
         result = load_extension(spec, atom_api)
         if inspect.isawaitable(result):
             await result
         api.record_installed_extension(spec, runtime=runtime, atom_name=atom_name)
+        if runtime:
+            await _record_runtime_install(
+                api,
+                atom_name=atom_name or name,
+                module_path=module_path,
+                trigger=trigger,
+                superseded=superseded,
+            )
         atom_api.activate()
         logger.debug("installed atom: {}", module_path)
     except BaseException as exc:

@@ -902,6 +902,25 @@ class SessionRuntime:
         its trigger source, and a session that could not decode that source
         would fail to resume; the superseding version registers over the same
         source instead of the source disappearing between the two.
+
+        Two consequences a caller has to know, because neither is repairable
+        from here:
+
+        A replacement does not land where the original sat. Bus subscriptions
+        are ordered by ``(priority, seq)`` with a monotonic ``seq``, so
+        re-registering puts the atom last within its band. For a channel where
+        position decides the outcome -- the system prompt is last-writer-wins,
+        the tool list is mapped by each handler in turn -- a reloaded atom
+        composes differently from the same atom installed at startup. Reload is
+        a development loop, not a way to reproduce a run.
+
+        A service key is unregistered outright, including one this atom bound
+        over another atom's value. Executor decorators do that: each reads the
+        current binding and binds itself wrapping it, so the ledger's owner for
+        that key is whoever bound last. Superseding that atom removes the whole
+        composed chain rather than unwrapping one layer, and the replacement
+        rebuilds from whatever the bare default is. Atoms that wrap a service
+        are not supersede-safe.
         """
 
         registrations = self._extensions.registrations_of(module_path)
