@@ -506,6 +506,7 @@ class AtomAPI(Protocol):
         config: dict[str, JsonValue] | None = None,
         *,
         trigger: str = "runtime",
+        replace: bool = False,
     ) -> None:
         """Install another atom into this session.
 
@@ -518,6 +519,13 @@ class AtomAPI(Protocol):
         Requirements are solved against the session's live capabilities rather
         than against a composition plan, and a failed install rolls the
         session's registrations back before raising.
+
+        ``replace`` supersedes an already-installed atom carrying the same
+        manifest name: its tools, context policies, trigger renderers, services
+        and event handlers are detached first, so a revised version can take
+        the name over instead of colliding with itself. Its trigger codecs stay
+        registered until the replacement re-registers them, because a committed
+        turn naming that source has to remain decodable.
         """
         ...
 

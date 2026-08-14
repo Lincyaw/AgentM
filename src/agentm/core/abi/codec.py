@@ -741,11 +741,23 @@ class CodecRegistry:
         self._trigger_codecs: dict[str, TriggerCodec] = dict(_BUILTIN_CODECS)
         self._cause_types: dict[str, type[TerminationCause]] = dict(_BUILTIN_CAUSES)
 
-    def register_trigger_codec(self, source: str, codec: TriggerCodec) -> None:
-        """Register a codec for a custom trigger source."""
+    def register_trigger_codec(
+        self,
+        source: str,
+        codec: TriggerCodec,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register a codec for a custom trigger source.
+
+        ``replace`` lets a newer version of the same atom take over a source it
+        already owns. The source stays decodable across the swap, which is what
+        a committed turn naming that source depends on.
+        """
+
         if not isinstance(source, str) or not source:
             raise ValueError("trigger codec source must be a non-empty string")
-        if source in self._trigger_codecs:
+        if source in self._trigger_codecs and not replace:
             raise ValueError(f"trigger codec already registered for {source!r}")
         self._trigger_codecs[source] = codec
 
