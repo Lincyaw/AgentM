@@ -17,6 +17,13 @@ written down is a wish.  Two things make it explicit here:
   unnamed field differs and when a named one does not.  A residue that gets
   fixed therefore breaks the test that tolerated it, which is what stops the
   list quietly outliving the thing it excuses.
+
+``residue`` is coarse on purpose but coarser than it looks: its granularity is
+the whole digest field, so naming ``trigger_codecs`` to excuse one deliberately
+retained codec also excuses every other codec that field could ever hold.  It
+says "this kind of thing does not come back", never "this one entry does not".
+A caller that needs the narrower claim has to make it itself, out of
+``digest_differences``.
 """
 
 from __future__ import annotations
@@ -184,8 +191,10 @@ async def assert_revertible(
     """Install ``atom`` into ``session``, uninstall it, and diff the digest.
 
     ``residue`` names the digest fields this atom is known not to restore, each
-    of which must be justified where it is passed. Raises ``AssertionError``
-    with a field-by-field account of anything that does not match.
+    of which must be justified where it is passed. Whole fields: a named field
+    is tolerated however much of it is left behind, so it excuses a kind of
+    leftover rather than a particular one. Raises ``AssertionError`` with a
+    field-by-field account of anything that does not match.
     """
 
     label = _label(atom)

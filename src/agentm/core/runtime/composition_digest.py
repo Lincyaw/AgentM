@@ -21,12 +21,21 @@ target shape means to replace those tables rather than publish them.
 What is covered, and in what order
 ----------------------------------
 
-Order is part of the value wherever a read can observe it, and dropped where no
-read can.  Tools are advertised to the model in list order; context policies
-transform in list order; bus handlers dispatch in list order per channel; bus
-observers fire in list order.  Those stay ordered.  Services, trigger
-renderers, trigger codecs, providers and termination causes are addressed by
-key and nothing distinguishes two insertion orders, so they are sorted.
+Order is part of the value wherever a read can observe it, and dropped where it
+is not what the read is about.  Tools are advertised to the model in list
+order; context policies transform in list order; bus handlers dispatch in list
+order per channel; bus observers fire in list order.  Those stay ordered.
+Services, trigger renderers, trigger codecs, providers and termination causes
+are addressed by key, so they are sorted by key here.
+
+Sorting those is a deliberate narrowing rather than a claim that nothing can
+observe their order: ``ServiceRegistry.names()`` and
+``ProviderRegistry.configs()`` are both public and both hand out insertion
+order, and the second reaches a third-party resolver.  What the digest says is
+that the same keys resolve to the same things, not that they were written in
+the same sequence — an atom that reverts cleanly and leaves a differently
+ordered ``names()`` is not a leak, and treating it as one would make every
+revertibility check depend on install order.
 
 What this digest deliberately excludes
 --------------------------------------
@@ -68,11 +77,14 @@ bug in this module, not a licence to widen the list.
 * A trigger in flight.  That is turn state, not composition state; both digests
   in a revertibility check are taken with no turn running.
 
-* The difference between two objects that share a name.  Handlers, policies and
-  service values are digested by qualname (see ``_identity``), so swapping one
-  closure for another defined in the same function, or one service value for a
-  different instance of the same class, is invisible here.  This is the known
-  coarseness of the equivalence rather than a claim that such a swap is safe.
+* The difference between two opaque objects that share a name.  Handlers,
+  observers, policies and codecs are digested by qualname (see ``_identity``),
+  so swapping one closure for another defined in the same function is invisible
+  here.  This is the known coarseness of the equivalence rather than a claim
+  that such a swap is safe.  Service *values* are the exception: they are
+  digested structurally (see ``_service_value``), because a service is data as
+  often as it is behaviour and a session boundary like ``tool_allowlist`` is
+  read for its content every turn.
 
 What is deliberately *not* excluded is the one residue the runtime creates on
 purpose: uninstalling an atom leaves its trigger codecs registered, so a
@@ -84,7 +96,10 @@ and a caller declares it — see ``agentm.testing.assert_revertible``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
+from typing import Final, cast
 
 from loguru import logger
 
@@ -129,7 +144,11 @@ class SourceEntry:
 
 @dataclass(frozen=True, slots=True)
 class ServiceEntry:
-    """One service key with its scope, its owner, and what it resolves to."""
+    """One service key with its scope, its owner, and what it resolves to.
+
+    ``value`` is the structural digest of the registered object, not the object
+    — see ``_service_value`` for what it can and cannot tell apart.
+    """
 
     key: str
     scope: ServiceScope | None
@@ -176,6 +195,7 @@ class CompositionDigest:
     trigger_codecs: tuple[SourceEntry, ...]
     termination_causes: tuple[str, ...]
     services: tuple[ServiceEntry, ...]
+    service_write_observer: str | None
     subscriptions: tuple[SubscriptionEntry, ...]
     observers: tuple[ObserverEntry, ...]
     providers: tuple[ProviderEntry, ...]
@@ -259,9 +279,18 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
                 key=key,
                 scope=session.services.scope(key),
                 owner=ledger.service_owners.get(key),
-                value=_identity(session.services.get(key)),
+                value=_service_value(session.services.get(key)),
             )
             for key in sorted(session.services.names())
+        ),
+        # The observer is what attributes every later service write. It is
+        # public on the registry an atom holds, so an atom can replace it or
+        # clear it, and every write after that would be attributed to nobody
+        # while the digest reported nothing amiss.
+        service_write_observer=(
+            None
+            if session.services._write_observer is None
+            else _identity(session.services._write_observer)
         ),
         # Per-channel list order is dispatch order; the channels themselves are
         # sorted because no emission spans two of them.
@@ -313,11 +342,12 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
 def _identity(value: object) -> str:
     """A stable, printable name for something the digest can only name.
 
-    Handlers, observers, cleanup callbacks, policies, codecs and service values
-    are arbitrary objects. Their addresses change on every reinstall, so the
-    digest names them instead: the qualname where there is one, the type's
-    qualname otherwise. Two distinct closures defined in the same function are
-    indistinguishable here; that is the known coarseness of this equivalence.
+    Handlers, observers, cleanup callbacks, policies and codecs are arbitrary
+    objects, as is a service value the structural walk cannot open. Their
+    addresses change on every reinstall, so the digest names them instead: the
+    qualname where there is one, the type's qualname otherwise. Two distinct
+    closures defined in the same function are indistinguishable here; that is
+    the known coarseness of this equivalence.
     """
 
     if value is None:
@@ -329,6 +359,74 @@ def _identity(value: object) -> str:
     if type(name) is str:
         return name
     return type(value).__qualname__
+
+
+_VALUE_DEPTH: Final[int] = 8
+"""How far ``_service_value`` walks into a nested value before giving up.
+
+A bound depth is what makes the walk safe on a value that contains itself, and
+eight levels is past anything a service holds in practice.
+"""
+
+
+def _service_value(value: object) -> str:
+    """A content-sensitive digest of one registered service.
+
+    Naming a service by its type, the way ``_identity`` names a handler, makes
+    every data service look alike: ``"v1"`` and ``"v2"`` are both ``str``, and
+    ``tool_allowlist`` — a boundary the driver reads every turn — would compare
+    equal however it was rewritten.  Values built out of the JSON-ish types are
+    therefore walked structurally, and everything else falls back to the type
+    name, which is all a digest can honestly say about an opaque object.
+
+    The walk is hashed rather than kept verbatim for two reasons: a service can
+    hold a credential, and a failure message that printed one would leak it into
+    every log that captured the test output; and a value's ``repr`` has no
+    bound, while a digest entry has to stay readable next to a hundred others.
+    The kind is kept in front of the hash so a difference still says what sort
+    of thing changed.
+
+    Structural equality here follows Python's: ordered containers keep their
+    order, sets and mappings do not, and a list never digests as the tuple with
+    the same elements.  Two distinct opaque instances of one class still digest
+    alike, nested inside a container as much as at the top level.
+    """
+
+    kind = "none" if value is None else type(value).__qualname__
+    encoded = _encode(value, _VALUE_DEPTH).encode("utf-8", errors="surrogatepass")
+    return f"{kind}/{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def _encode(value: object, depth: int) -> str:
+    """Canonical text for ``value``: structural where it can be, named where not."""
+
+    if value is None:
+        return "none"
+    kind = type(value)
+    # Exact types rather than ``isinstance``: a subclass may carry state this
+    # walk would not see, and naming it is the honest answer for one.
+    if kind is bool or kind is int or kind is float or kind is str or kind is bytes:
+        return f"{kind.__name__}:{value!r}"
+    if depth <= 0:
+        # Deeper than the walk goes, or a value that contains itself.
+        return f"deep:{_identity(value)}"
+    if kind is tuple or kind is list:
+        items = cast("Sequence[object]", value)
+        return (
+            f"{kind.__name__}:[{','.join(_encode(item, depth - 1) for item in items)}]"
+        )
+    if kind is set or kind is frozenset:
+        members = cast("AbstractSet[object]", value)
+        encoded = sorted(_encode(member, depth - 1) for member in members)
+        return f"{kind.__name__}:{{{','.join(encoded)}}}"
+    if kind is dict:
+        mapping = cast("Mapping[object, object]", value)
+        pairs = sorted(
+            f"{_encode(key, depth - 1)}={_encode(item, depth - 1)}"
+            for key, item in mapping.items()
+        )
+        return f"dict:{{{','.join(pairs)}}}"
+    return f"opaque:{_identity(value)}"
 
 
 def _background_tasks() -> tuple[str, ...]:

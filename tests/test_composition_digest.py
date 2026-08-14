@@ -26,7 +26,12 @@ from agentm.core.abi.roles import PROVIDER_SESSION_IDENTITY
 from agentm.core.abi.termination import ModelEndTurn
 from agentm.core.abi.trajectory import Outcome, TurnMeta
 from agentm.core.abi.trigger import UserInput
-from agentm.testing import assert_revertible, composition_digest, probe_session
+from agentm.testing import (
+    assert_revertible,
+    composition_digest,
+    digest_differences,
+    probe_session,
+)
 
 _LEAKY_ATOM = """\
 import asyncio
@@ -108,6 +113,59 @@ async def test_taking_a_digest_does_not_freeze_the_provider_identity(
 
         assert composition_digest(session) == composition_digest(session)
         assert session.services.get_role(PROVIDER_SESSION_IDENTITY) is None
+
+
+@pytest.mark.asyncio
+async def test_the_digest_reads_what_a_service_resolves_to(tmp_path: Path) -> None:
+    """A service is data as often as it is behaviour, and data has content.
+
+    Digesting a service by its type name makes every string service equal to
+    every other, which would let an atom rewrite a session boundary — the
+    allowlist the driver reads each turn is one — and revert to a digest that
+    says nothing moved. Content is compared structurally, so equal values
+    written twice still agree and unequal ones do not.
+    """
+
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("probe", "v1", scope="session")
+        first = composition_digest(session)
+
+        session.services.register("probe", "v2", scope="session")
+        assert digest_differences(first, composition_digest(session)) != ()
+
+        session.services.register("probe", "v1", scope="session")
+        assert digest_differences(first, composition_digest(session)) == ()
+
+        session.services.register("probe", {"keep": 4}, scope="session")
+        mapping = composition_digest(session)
+        session.services.register("probe", {"keep": 99}, scope="session")
+        assert digest_differences(mapping, composition_digest(session)) != ()
+
+        session.services.register("probe", ("a",), scope="session")
+        allowlist = composition_digest(session)
+        session.services.register("probe", ("b", "c"), scope="session")
+        assert digest_differences(allowlist, composition_digest(session)) != ()
+
+
+@pytest.mark.asyncio
+async def test_the_digest_reads_the_attribution_of_later_writes(
+    tmp_path: Path,
+) -> None:
+    """Switching attribution off is itself a write, and the loudest kind.
+
+    ``set_write_observer`` is public on the registry an atom is handed. An atom
+    that clears it keeps every service it registers afterwards out of the
+    ledger, so the digest has to see the observer itself — otherwise the one
+    write that hides all later writes is the one write nothing witnesses.
+    """
+
+    async with probe_session(str(tmp_path)) as session:
+        before = composition_digest(session)
+        session.services.set_write_observer(None)
+        assert [
+            difference.field
+            for difference in digest_differences(before, composition_digest(session))
+        ] == ["service_write_observer"]
 
 
 @pytest.mark.asyncio
