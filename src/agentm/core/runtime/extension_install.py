@@ -37,6 +37,7 @@ class LedgerSnapshot:
     trigger_codec_owners: dict[str, str | None]
     module_paths: tuple[str, ...]
     specs: tuple[ExtensionSpec, ...]
+    runtime_module_paths: frozenset[str]
 
 
 class InstallLedger:
@@ -62,6 +63,7 @@ class InstallLedger:
         self._trigger_codec_owners: dict[str, str | None] = {}
         self.module_paths: list[str] = []
         self._specs: list[ExtensionSpec] = []
+        self._runtime_module_paths: set[str] = set()
 
     # --- Attribution ---
 
@@ -93,9 +95,20 @@ class InstallLedger:
     def note_trigger_codec(self, source: str, owner: str | None) -> None:
         self._trigger_codec_owners[source] = owner
 
-    def record_installed(self, spec: ExtensionSpec) -> None:
+    def record_installed(self, spec: ExtensionSpec, *, runtime: bool = False) -> None:
+        """Record one installed atom.
+
+        ``runtime`` marks an atom installed into a running session rather than
+        composed before start. The distinction matters for rebuilds: the active
+        set recorded at creation covers the composed atoms only, and a rebuild
+        that replayed a runtime atom would compute a different digest than the
+        one the source session froze into its provider identity.
+        """
+
         self.module_paths.append(spec.module_path)
         self._specs.append(ExtensionSpec(source=spec.source, config=spec.config))
+        if runtime:
+            self._runtime_module_paths.add(spec.module_path)
 
     # --- Composition rebuild ---
 
@@ -135,12 +148,28 @@ class InstallLedger:
         self,
         *,
         excluded_module_paths: Collection[str] = (),
+        include_runtime: bool = False,
     ) -> list[ExtensionSpec]:
+        """Specs to replay when rebuilding this session's composition.
+
+        Runtime-installed atoms are excluded by default: a rebuild replays these
+        specs before the active set is recorded, so including them would make a
+        child's digest disagree with the identity its source froze. A caller
+        that wants the live picture rather than the composed one passes
+        ``include_runtime=True``.
+        """
+
         return [
             ExtensionSpec(source=spec.source, config=spec.config)
             for spec in self._specs
             if spec.module_path not in excluded_module_paths
+            and (include_runtime or spec.module_path not in self._runtime_module_paths)
         ]
+
+    def runtime_module_paths(self) -> frozenset[str]:
+        """Module paths installed into the running session."""
+
+        return frozenset(self._runtime_module_paths)
 
     # --- Install rollback ---
 
@@ -153,6 +182,7 @@ class InstallLedger:
             trigger_codec_owners=dict(self._trigger_codec_owners),
             module_paths=tuple(self.module_paths),
             specs=tuple(self._specs),
+            runtime_module_paths=frozenset(self._runtime_module_paths),
         )
 
     def restore(self, snapshot: LedgerSnapshot) -> None:
@@ -163,6 +193,7 @@ class InstallLedger:
         self._trigger_codec_owners = dict(snapshot.trigger_codec_owners)
         self.module_paths = list(snapshot.module_paths)
         self._specs = list(snapshot.specs)
+        self._runtime_module_paths = set(snapshot.runtime_module_paths)
 
 
 __all__ = ["InstallLedger", "LedgerSnapshot"]

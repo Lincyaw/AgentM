@@ -315,6 +315,16 @@ class _AtomAPIFacade:
         self._require_active("spawn child sessions")
         return await self.__session.spawn_child_session(config)
 
+    async def install_extension(
+        self,
+        extension: ExtensionSpec | str,
+        config: dict[str, Any] | None = None,
+        *,
+        trigger: str = "runtime",
+    ) -> None:
+        self._require_active("install extensions")
+        await self.__session.install_extension(extension, config, trigger=trigger)
+
     @property
     def model(self) -> "Model | None":
         return self.__session.model
@@ -330,6 +340,7 @@ async def install_extension(
     config: dict[str, Any] | None = None,
     *,
     trigger: str = "session_start",
+    runtime: bool = False,
 ) -> None:
     """Install one extension and emit the standard install lifecycle event."""
 
@@ -353,7 +364,7 @@ async def install_extension(
         result = load_extension(spec, atom_api)
         if inspect.isawaitable(result):
             await result
-        api.record_installed_extension(spec)
+        api.record_installed_extension(spec, runtime=runtime)
         atom_api.activate()
         logger.debug("installed atom: {}", module_path)
     except BaseException as exc:
@@ -452,6 +463,24 @@ def load_extension(
             _INSTALLING_EXTENSION.reset(inner_token)
 
     return _await_install()
+
+
+def load_manifest_for_spec(
+    extension: ExtensionSpec | str,
+) -> ExtensionManifest | None:
+    """Return the MANIFEST declared by an atom, without installing it."""
+
+    spec = _coerce_extension_spec(extension, None)
+    module = load_extension_module(spec)
+    manifest = module.__dict__.get("MANIFEST")
+    if manifest is None:
+        return None
+    if not isinstance(manifest, ExtensionManifest):
+        raise ExtensionLoadError(
+            spec.module_path,
+            TypeError("MANIFEST must be an ExtensionManifest"),
+        )
+    return manifest
 
 
 def _coerce_extension_spec(
