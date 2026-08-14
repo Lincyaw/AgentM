@@ -1,9 +1,8 @@
 """Agent manifests: the prompt and shape of every model this package runs.
 
 One file per agent under ``agents/``, and one loader, so a manifest field is
-either read or absent. Both manifests previously declared ``max_turns``,
-``tools`` and ``result_schema`` while the code read only ``system`` and hard
-coded the rest — a reader editing the YAML would have changed nothing.
+either read or absent. A field the code does not read must not appear, or
+editing the YAML changes nothing.
 
 Tools are named here, not defined here: a tool is a closure over runtime
 objects — the sandbox's BashOperations, the sink a verdict lands in — which a

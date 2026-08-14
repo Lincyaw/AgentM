@@ -197,8 +197,7 @@ class _Runtime:
     turn: int = 0
     triggers: TriggerEngine | None = None
     #: Installed actions by the name an item's ``deliver`` uses. An item naming
-    #: something absent is skipped loudly; before this there was one action and
-    #: the field pretended otherwise.
+    #: something absent is skipped loudly.
     actions: dict[str, Action] = field(default_factory=dict)
     repo_index: RepositoryIndex | None = None
     _pending_refreshes: list[RepositoryRefreshPlan] = field(default_factory=list)
@@ -259,9 +258,9 @@ class _Runtime:
         interventions = self._install_interventions(dsn)
         # DecideEvent drives both halves — draining the refresh queue, and,
         # with interventions on, tagging plus injection. Subscribed once, after
-        # the checks above decided which halves exist: a handler subscribed
-        # before an early return used to leave the refresh queue filling with
-        # nothing ever draining it.
+        # the checks above have decided which halves exist: subscribing ahead of
+        # an early return leaves the refresh queue filling with nothing draining
+        # it.
         if self.repo_index is not None or interventions:
             self.api.on(DecideEvent.CHANNEL, self._on_decide)
 
@@ -822,9 +821,9 @@ class _Runtime:
     async def _flush_symbol_refreshes(self) -> None:
         """Re-index the paths touched since the last flush.
 
-        Deduped first: a turn that edits one file three times used to spawn
-        three ast-grep runs over the same file, since each tool call queued its
-        own plan and the already-synced check ran only after the flush.
+        Deduped first: each tool call queues its own plan and the already-synced
+        check runs only after the flush, so a turn that edits one file three
+        times would otherwise spawn three ast-grep runs over it.
         """
         if not self._pending_refreshes or self.repo_index is None:
             return

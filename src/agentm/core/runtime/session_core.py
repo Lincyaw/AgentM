@@ -937,31 +937,26 @@ class SessionRuntime:
     def remove_atom_registrations(self, module_path: str) -> None:
         """Detach everything one atom registered, so a newer version can land.
 
-        Trigger codecs are left registered on purpose. A committed turn names
-        its trigger source, and a session that could not decode that source
-        would fail to resume; the superseding version registers over the same
-        source instead of the source disappearing between the two.
+        Trigger codecs stay registered: a committed turn names its trigger
+        source, and a session that could not decode that source would fail to
+        resume. The superseding version registers over the same source.
 
-        Two consequences a caller has to know, because neither is repairable
+        Two limits the caller has to handle, because neither is repairable
         from here:
 
-        A replacement does not land where the original sat. Bus subscriptions
-        are ordered by ``(priority, seq)`` with a monotonic ``seq``, so
-        re-registering puts the atom last within its band. For a channel where
-        position decides the outcome -- the system prompt is last-writer-wins,
-        the tool list is mapped by each handler in turn -- an atom installed on
-        its own composes differently from the same atom installed at startup.
-        A caller that cares about dispatch order has to reinstall everything
-        the composition lists after it, which is what ``atom_watch`` does when
-        the scenario changes; one call here cannot know what those are.
+        A replacement lands last within its bus priority band rather than where
+        the original sat, since subscriptions order by ``(priority, seq)`` with
+        a monotonic ``seq``. Where position decides the outcome -- the system
+        prompt is last-writer-wins, the tool list is mapped by each handler in
+        turn -- a caller that cares has to reinstall everything the composition
+        lists after this atom, which is what ``atom_watch`` does; one call here
+        cannot know what those are.
 
         A service key is unregistered outright, including one this atom bound
-        over another atom's value. Executor decorators do that: each reads the
-        current binding and binds itself wrapping it, so the ledger's owner for
-        that key is whoever bound last. Superseding that atom removes the whole
-        composed chain rather than unwrapping one layer, and the replacement
-        rebuilds from whatever the bare default is. Atoms that wrap a service
-        are not supersede-safe.
+        over another atom's value. Executor decorators bind themselves wrapping
+        whatever they read, so superseding one removes the whole composed chain
+        rather than unwrapping a layer, and the replacement rebuilds from the
+        bare default. Atoms that wrap a service are not supersede-safe.
         """
 
         registrations = self._extensions.registrations_of(module_path)

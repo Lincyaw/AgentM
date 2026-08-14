@@ -113,11 +113,9 @@ class ChecklistItem:
 class Budget:
     """What the engine may spend interrupting one run.
 
-    One pool, because the thing actually being rationed is the agent's
-    attention and it does not care which mechanism took it. Before this there
-    were four independent counters -- mid-work injections, stop checks, review
-    rounds, revision reviews -- summing to thirteen interruptions that no code
-    computed and no one had chosen.
+    One pool, not one counter per mechanism, because the thing actually being
+    rationed is the agent's attention and it does not care which mechanism took
+    it.
 
     Per-item limits sit alongside the total: an item that has said its piece
     should not say it again, whatever room is left.

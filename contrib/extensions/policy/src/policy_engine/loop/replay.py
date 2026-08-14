@@ -75,8 +75,8 @@ def replay(
     """Every candidate against the case it came from.
 
     Serial, because two sandboxes for one image race to destroy each other's
-    pod. Job directories no longer collide -- they are named per arm and
-    candidate -- so runs for *different* cases are safe to overlap, and are.
+    pod. Job directories are named per arm and candidate, so runs for
+    *different* cases are safe to overlap, and are.
     """
     by_case = {case.case_id: case for case in cases}
     measurements: list[ReplayMeasurement] = []

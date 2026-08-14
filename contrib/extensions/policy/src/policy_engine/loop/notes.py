@@ -2,17 +2,13 @@
 # JSON; the isinstance checks here are where it becomes a Note.
 """Diagnoses of one repository become notes for whoever reviews it next.
 
-The stage exists because of a measurement. Twenty-one checks written for the
-agent doing the work moved no graded score. One note written for its reviewer --
-that the tests here run against a real database, so a mocked store proves
-nothing about a change concerned with locking -- changed the reviewer's method on
-the first attempt: it stood up a real Postgres rather than modelling the
-interleaving it needed, and found a defect it had previously only argued for.
-
-So the loop produces two kinds of artefact, and they are not interchangeable. A
+The loop produces two kinds of artefact, and they are not interchangeable. A
 ``Candidate`` is sent to the agent mid-work and asks it to do something now. A
-``Note`` is handed to a reviewer and holds for as long as the
-repository does.
+``Note`` is handed to a reviewer and holds for as long as the repository does.
+
+A note tells the reviewer what its method has to account for -- that the tests
+here run against a real database, so a mocked store proves nothing about a
+change concerned with locking -- and not what to do.
 
 Grouped by repository, and merged rather than appended. A repository with
 fifteen notes has the same effect as one with none.

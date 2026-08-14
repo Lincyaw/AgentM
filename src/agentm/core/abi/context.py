@@ -17,14 +17,10 @@ trajectory's structure.
 ``ContextPolicy`` is the only mechanism that transforms the committed
 prefix, and everything it produces is reachable from the record.
 
-``BeforeSendEvent`` can still replace the message list on its way to the
-provider, and one shipped atom uses it. That path is *not* recorded: the
-system prompt it produces is folded back into ``TurnMeta.system_prompt`` and
-committed, but the message list it produces is not. A request assembled that
-way is therefore not reproducible from the trajectory, which is the one
-property the trajectory exists to provide. Treat it as a known gap rather
-than a supported extension point; late additions belong in the trigger that
-carries them, so they commit as messages like anything else.
+``BeforeSendEvent`` runs after this, on the assembled request. It may append
+messages but not alter the ones it was given; what it appends commits as
+``Turn.request_appended``. Both paths are therefore reproducible from the
+trajectory, which is the property the trajectory exists to provide.
 """
 
 from __future__ import annotations

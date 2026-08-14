@@ -5,19 +5,17 @@ The agent reads, searches and runs inspection commands as usual; anything that
 would write is refused. It leaves the mode by calling ``exit_plan_mode`` with a
 plan, which an approver accepts or sends back.
 
-Two things are worth stating because they shaped the code.
-
-**The mode is folded out of the trajectory, not remembered.** Every mode change
-is already durable: a host toggle arrives as a ``ModeChange`` trigger on a turn,
+**The mode is derived from the trajectory, not stored.** Every mode change is
+already durable: a host toggle arrives as a ``ModeChange`` trigger on a turn,
 and the agent's own switches are ``enter_plan_mode`` / ``exit_plan_mode`` tool
-records. Replaying, resuming or forking a trajectory therefore lands in the mode
-that history implies, with no separate field to keep in step.
+records. Replaying, resuming or forking a trajectory therefore lands in the
+mode that history implies, with no separate field to keep in step.
 
 **The permission boundary is what enforces it.** ``PERMISSION_POLICY_ROLE`` is
 tree-scoped, so a spawned child inherits this very policy object and cannot be
 used as a way around the mode. Hiding the write tools from the catalog is a
-convenience on top: it saves tokens and removes the temptation, but a child
-assembles its own catalog and would not be covered by it.
+convenience on top: it saves tokens, but a child assembles its own catalog and
+is not covered by it.
 """
 
 from __future__ import annotations

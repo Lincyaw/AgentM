@@ -690,9 +690,9 @@ class HarborReplay:
         resume_at: int = -1,
     ) -> ReplayOutcome:
         # Everything that can fail is inside the try, including writing our own
-        # scratch files: a full disk here used to raise straight through the
-        # caller and end a whole batch, discarding the measurements already
-        # taken. One arm failing must cost that arm.
+        # scratch files: one arm failing must cost that arm, not the batch. A
+        # full disk raising through the caller would discard the measurements
+        # already taken.
         work = Path(self.work_dir)
         config_path = work / f"{label}.json"
         log_path = work / f"{label}.log"
@@ -859,17 +859,15 @@ class HarborReplay:
     def _origin(self, case: FailureCase, resume_at: int) -> dict[str, JsonValue]:
         """Where the re-run's workspace comes from, or empty if nowhere.
 
-        Only one answer now: the agent's own commands and edits, out of a
-        database of ours, re-applied to a fresh sandbox in order. It costs a
-        re-run of everything before the decision, and it works for any attempt
-        whose rows we still hold, which is the property that matters.
+        One answer only: the agent's own commands and edits, out of a database
+        of ours, re-applied to a fresh sandbox in order. It costs a re-run of
+        everything before the decision, and it works for any attempt whose rows
+        we still hold, which is the property that matters.
 
-        There used to be a fallback to the sandbox's stored checkpoint. It was
-        removed rather than fixed: the checkpoint expires with the sandbox
-        within hours, so it was never available for the attempts worth studying,
-        and its one remaining effect was to launch a job that the agent then
-        refused to start. Reporting that we cannot resume is more useful than a
-        run that scores something else.
+        There is deliberately no fallback to the sandbox's stored checkpoint:
+        that expires with the sandbox within hours, so it is never there for the
+        attempts worth studying. Reporting that we cannot resume is more useful
+        than a run that scores something else.
         """
         session = str(case.backend_ref.get("agentm_session_id", ""))
         if resume_at < 0 or not session or not self.trajectory_dsn:

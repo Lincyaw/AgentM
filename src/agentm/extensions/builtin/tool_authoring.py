@@ -1,14 +1,12 @@
 """Let the agent write a tool and install it into its own running session.
 
-The model supplies what the tool does; this atom supplies the contract around
-it. That split matters: the atom module shape, the manifest, the registration
-call and the result wrapping are mechanism the model has no reason to know, and
-asking it to reproduce them from memory turns every authoring attempt into a
-guess at an API. The model writes a function body and a parameter schema.
+The model writes a function body and a parameter schema; this atom supplies the
+contract around it — the module shape, the manifest, the registration call and
+the result wrapping.
 
-Policy lives here, mechanism does not. Source is written through the resource
-writer and installed through ``install_extension``; failures come back as tool
-results so the model can read the error and fix its own code.
+Source is written through the resource writer and installed through
+``install_extension``; failures come back as tool results so the model can read
+the error and fix its own code.
 """
 
 from __future__ import annotations
@@ -172,9 +170,10 @@ class _ToolAuthor:
     def _prune(self, name: str, keep: Path) -> None:
         """Drop older source files for one tool, newest first, keeping ``keep``.
 
-        Authored tools do not survive resume, so an superseded version is not
-        reachable from any durable record and pruning loses nothing that was
-        durable.
+        Each edit is a new content-addressed file, so a revision loop would
+        otherwise fill the directory. A committed turn names the file its
+        version was installed from, so a fork taken before an edit needs that
+        file to still be there: ``keep_versions`` is how far back that reaches.
         """
 
         versions = sorted(

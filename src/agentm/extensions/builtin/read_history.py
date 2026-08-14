@@ -11,7 +11,7 @@ what this tool accepts.
 In-session by design: it reads the live committed trajectory (the source of
 truth), not the observability JSONL — so there is no flush lag and no
 dependency on the observability atom. For cross-session trace mining use
-``query_traces`` / ``agentm trace`` instead.
+``agentm trace`` instead.
 """
 
 from __future__ import annotations

@@ -676,7 +676,6 @@ _LAYER_RULES: Final[list[tuple[str, str, str]]] = [
     ("core/", "agentm.cli", "core must not import CLI presenters"),
     ("core/", "agentm.config", "core must not import host config resolution"),
     ("core/", "agentm.environments", "core must not import environment backends"),
-    ("core/", "agentm.execution", "core must not import execution backends"),
     ("core/", "agentm.extensions", "core must not import extension implementations"),
     ("core/", "agentm.gateway", "core must not import gateway hosts"),
     ("core/", "agentm.observability", "core must not import observability backends"),

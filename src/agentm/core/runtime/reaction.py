@@ -1217,15 +1217,13 @@ async def react(
                 ),
             )
             for returned in tc_returns:
-                # An atom written against an older ABI may still try to rewrite
-                # arguments. Ignoring it would run the tool with the arguments
-                # that handler believed it had replaced, so refuse the turn
-                # rather than fail open. Other keys are left alone: this channel
-                # never enumerated its returns, and a handler carrying its own
-                # bookkeeping is not the hazard.
+                # A handler asking to rewrite arguments is refused rather than
+                # ignored: ignoring it would run the tool with the arguments
+                # that handler believed it had replaced. Unknown keys pass, so
+                # a handler may carry its own bookkeeping here.
                 if isinstance(returned, Mapping) and "rewrite" in returned:
                     raise TypeError(
-                        "ToolCallEvent no longer accepts 'rewrite': the recorded "
+                        "ToolCallEvent does not accept 'rewrite': the recorded "
                         "call and the executed call must be the same call"
                     )
             blocked = _last_key(tc_returns, "block")

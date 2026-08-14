@@ -1,6 +1,6 @@
 """Default user-visible text for kernel-emitted ``ToolErrorEvent``s.
 
-The kernel ``AgentLoop`` emits :class:`ToolErrorEvent` whenever a tool call
+The kernel emits :class:`ToolErrorEvent` whenever a tool call
 cannot produce a normal result — execution raised, the tool name is
 unknown, or a ``tool_call`` handler blocked it. The kernel itself only
 constructs an empty :class:`ToolResult` (``is_error=True``); writing the

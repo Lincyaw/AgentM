@@ -190,8 +190,7 @@ def deserialize_node(data: Mapping[str, Any]) -> TrajectoryNode:
             "is_sidechain",
             "tool_call_ids",
             "tool_names",
-            # Written by serialize_node before ef009950 removed the prompt-cache
-            # subsystem; tolerated on read so pre-2026-07-23 sessions still load.
+            # Read-only tolerance: stored nodes carry this, nothing writes it.
             "cache_key",
             "content_ref",
             "visibility",

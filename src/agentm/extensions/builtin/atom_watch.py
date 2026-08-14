@@ -6,21 +6,14 @@ extension to the scenario and it installs, remove one and it detaches, change
 an atom's config or edit its source and it reloads. Compose without it and the
 composition is fixed at start.
 
-That is the whole of the mode distinction, and it deliberately is not a flag. A
-development session differs from a recorded one by which atoms were composed,
-the same way a package's dev script differs from its start script.
-
-Watching the scenario rather than a directory of source files is what makes
-this a composition change rather than a pile of modules. A scenario states the
-order atoms install in, the config each one gets, and — by omission — which
-ones should not be there at all. A directory can say none of those things: it
-has no order worth honoring, no place to put config, and no way to express a
-removal.
+What is followed is the scenario, not a directory of source files: a scenario
+states the order atoms install in, the config each one gets, and by omission
+which ones should not be there at all.
 
 There is no file watching here. The scenario is re-resolved on a timer and the
 resolved specs are compared, so this follows a scenario wherever the host keeps
-one, and an edited atom source shows up for free: the loader digests the file
-it names, so changing that file changes the spec.
+one, and an edited atom source shows up anyway: the loader digests the file it
+names, so changing that file changes the spec.
 """
 
 from __future__ import annotations
@@ -174,14 +167,10 @@ class _ScenarioFollower:
         #
         # From the first position where the session and the scenario disagree,
         # every atom after it is reinstalled too, even one whose own spec did
-        # not change. Bus handlers dispatch in the order they subscribed, so
-        # reloading only the edited atom would leave it running after atoms the
-        # scenario lists later, and a channel where position decides the
-        # outcome -- the system prompt is last-writer-wins, the tool list is
-        # mapped by each handler in turn -- would compose differently from a
-        # cold start of the same scenario. Reinstalling the tail costs those
-        # atoms whatever they were holding in memory; a development loop can
-        # pay that, and a session that reloads nothing never does.
+        # not change. Bus handlers dispatch in subscription order, so leaving
+        # the tail alone would compose differently from a cold start of the
+        # same scenario. Reinstalled atoms lose whatever they held in memory;
+        # a session whose scenario did not change reinstalls nothing.
         applied_order = list(applied)
         rebuilding = False
         landed: list[ExtensionSpec] = []

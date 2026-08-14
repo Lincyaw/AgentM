@@ -1,26 +1,22 @@
 # code-health: ignore-file[AM025] -- tool-call payloads and model JSON are untyped
 """Side-car tagger: one growing conversation over the agent's whole trajectory.
 
-The tagger used to be a stateless per-turn call that saw exactly one turn. That
-made half the vocabulary unanswerable: predicates quantified over the session
-("*all* executed test commands narrow scope", "*only* agent-authored tests",
-"the same failure in *at least two* runs", "differs from a *previous* run")
-cannot be decided from a single step, so the tagger either stayed silent or
-guessed. What it did emit was mostly redundant — "agent_has_edited" re-asserted
-on every editing turn.
+One conversation that grows by one exchange per turn. The system prompt and
+every prior turn stay byte-identical at the head, which is the shape prompt
+caching rewards, and each turn only has to report what became true *this* step.
 
-So it is now one conversation that grows by one exchange per turn. The system
-prompt and every prior turn stay byte-identical at the head, which is the shape
-prompt caching rewards, and each turn only has to report what became true *this*
-step.
+The conversation is what makes half the vocabulary answerable at all: predicates
+quantified over the session ("*all* executed test commands narrow scope",
+"*only* agent-authored tests", "the same failure in *at least two* runs")
+cannot be decided from a single step.
 
-Turns arrive already rendered (see ``record``): events, not content, because
-bodies are what made the old input large and none of them decide a predicate.
+Turns arrive already rendered (see ``record``): events, not content. Bodies are
+what make the input large and none of them decide a predicate.
 
 The system prompt is generated from the vocabulary, so a predicate cannot be
 gated on in the checklist without the tagger being told what to look for. No
-vocabulary means no tagger — a prompt with an empty tag list used to ship here
-as a "fallback", which spent a model call per batch to learn nothing.
+vocabulary means no tagger: there is no empty-tag-list fallback, which would
+spend a model call per batch to learn nothing.
 
 The provider comes from the session's own registry (``AtomAPI.get_provider``),
 so this shares the host's retry policy, cancellation and token accounting

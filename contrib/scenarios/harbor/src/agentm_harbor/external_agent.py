@@ -563,18 +563,15 @@ class ExternalAgentMAgent(BaseAgent):
                 # Built in one step, from a prefix that already ends at
                 # ``fork_turn`` -- ``load_prefix`` is inclusive of it.
                 #
-                # The two-step version, which loaded the prefix under the source's
-                # own id and then forked off it, produced the same turns but left
-                # the run marked as somebody's child. Nothing distinguishes that
-                # from a dispatched subagent: both carry a parent and a depth, so
-                # every atom that asks "am I a subagent" answers yes. ``sub_agent``
-                # asks exactly that, to stop children spawning children, and so a
-                # resumed run silently had no ``dispatch_agent`` -- measured: the
-                # agent went looking for it as a shell command.
+                # A resumed attempt is a continuation, not a subordinate, so it
+                # carries no parent. Nothing distinguishes a run with a parent
+                # from a dispatched subagent, and every atom that asks "am I a
+                # subagent" reads that pointer -- ``sub_agent`` asks it to stop
+                # children spawning children, so a resumed run marked as a child
+                # silently has no ``dispatch_agent``.
                 #
-                # A resumed attempt is a continuation, not a subordinate. Where it
-                # came from is recorded in the trial metadata below, which is where
-                # the readers of that fact already look.
+                # Where the run came from is recorded in the trial metadata
+                # below, which is where the readers of that fact already look.
                 session = await AgentSession.create(
                     replace(
                         session_config,
@@ -600,7 +597,7 @@ class ExternalAgentMAgent(BaseAgent):
             raise
 
         # The origin is reported from the request, not from the session's own
-        # parent pointer, which a resumed run deliberately no longer sets.
+        # parent pointer, which a resumed run does not set.
         fork_parent_session_id = fork_request[0] if fork_request is not None else None
         selected_fork_turn = fork_request[1] if fork_request is not None else None
         _sync_execution_metadata(

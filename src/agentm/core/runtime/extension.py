@@ -359,15 +359,12 @@ async def _record_runtime_install(
 
     The active-set fingerprint describes the composition the session started
     with and is not recomputed, so without this a run that gained or replaced
-    an atom is indistinguishable in the record from one that did not. The
-    per-turn tool digest shows that something changed; this says what.
+    an atom reads in the record like one that did not. The per-turn tool digest
+    shows that something changed; this says what.
 
-    This is the audit half. The replay half is ``TurnMeta.atom_installs``,
-    which records what to install to reconstruct the composition and is
-    written when a turn commits. Two things only this can carry: an install
-    that was refused, which a list of what *is* installed has no room for, and
-    an install that happened with no turn to attach to — a watched reload
-    fires on a poll timer and can land while the session sits idle.
+    This is the audit record; ``TurnMeta.atom_installs`` is the replay one. Two
+    things only this can carry: an install that was refused, and one that
+    landed with no turn following it to attach to.
     """
 
     store = api.store

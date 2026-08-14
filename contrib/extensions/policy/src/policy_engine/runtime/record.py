@@ -3,11 +3,9 @@
 """The session record: turns rendered as events, once, for every reader.
 
 Four things read the same rendering — the tagger's batches, the critic's
-prompts, fork restore, and the offline tag command — and each used to build its
-own ``{"name", "arguments", "result_text", "is_error"}`` dict by hand. One of
-those copies carried a docstring *claiming* it mirrored the live one; nothing
-enforced it. This module is that enforcement: one record type, one renderer,
-and a reader that drifts now has to edit the same lines as everyone else.
+prompts, fork restore, and the offline tag command. One record type and one
+renderer serve all four, so a reader that drifts has to edit the same lines as
+everyone else.
 
 Turns are rendered as events, not content: which file was read, which was
 edited and by how much, which command ran and what it exited with. Bodies —

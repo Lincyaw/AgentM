@@ -606,33 +606,24 @@ class TrajectoryLeaf:
 class AtomInstall:
     """One atom installed into a running session, recorded on its turn.
 
-    Composition before start is described by the session's active set. An atom
-    installed while the session runs has no place in that record, so the turn it
-    landed on carries it instead: the source it was loaded from, its digest, and
-    the config it was given — enough for a resume to install exactly the same
-    code rather than a session whose history calls tools it no longer has.
+    The session's active set describes the composition it started with; an atom
+    installed after that is carried by the turn it landed on. Source, digest and
+    config are enough for a resume to install the same code, so its history does
+    not call tools the resumed session lacks.
 
-    Deliberately not ``ExtensionSpec``: that type lives in the session ABI,
-    which imports this module, and the durable record must not depend on the
-    live composition types.
+    Not ``ExtensionSpec``: that type lives in the session ABI, which imports
+    this module, and the durable record must not depend on live composition
+    types.
 
-    An install becomes replayable once a turn commits after it. A tool the
-    model authors is recorded, because authoring is itself a tool call inside a
-    turn. A reload from a watched directory fires on a poll timer, so it is
-    recorded only if a turn follows it, and a session that reloads and then
-    ends carries no record of that reload here. Both cases are noted as
-    trajectory diagnostics when they happen, including the ones that failed;
-    that record is what happened, this one is what to reinstall.
+    An install is recorded only once a turn commits after it, so a scenario
+    reload that lands while the session sits idle and then ends leaves nothing
+    here. ``TrajectoryDiagnostic`` notes every install as it happens, refusals
+    included: that record is what happened, this one is what to reinstall.
 
-    That reopening a trajectory installs the atoms it names is a decision, not
-    a side effect of wanting resume to work. It was taken deliberately: resume
-    means continuing the session that was recorded, and a session missing the
-    tools its own history called is not that session. The consequence is worth
-    stating plainly, because trajectories here are reopened by verifiers and
-    scoring as well as by people — replaying a record executes the code that
-    record names. The digest catches a source that changed underneath; it does
-    not catch one that is gone, and a resume whose atom no longer resolves
-    fails rather than continuing without it.
+    Reopening a trajectory installs the atoms it names, so replaying a record
+    executes the code that record names — by a verifier or a scorer as much as
+    by a person. A source that changed is caught by the digest; one that is
+    gone fails the resume rather than continuing without it.
     """
 
     atom_name: str

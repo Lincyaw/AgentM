@@ -56,9 +56,8 @@ from agentm.core.abi import (
 if TYPE_CHECKING:
     # Type-only: ``arl`` is optional at runtime and is imported inside the two
     # functions that build a client. Naming the real type rather than restating
-    # its methods as a Protocol keeps the signatures the gateway actually has --
-    # a hand-copied set drifts, and the ``type: ignore`` that used to sit on
-    # every call site is exactly what would have hidden the drift.
+    # its methods as a Protocol keeps the signatures the gateway actually has;
+    # a hand-copied set drifts.
     from arl.async_client import AsyncGatewayClient
     from arl.types import SessionInfo
 

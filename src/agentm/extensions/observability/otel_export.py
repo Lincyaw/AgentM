@@ -774,7 +774,7 @@ class SessionTelemetry:
         """Register an open span for later closure by a paired End event.
 
         Many event families come in Start/End pairs whose lifetime maps to
-        a single OTel span: ``BeforeAgentStartEvent``→``AgentEndEvent``,
+        a single OTel span: ``BeforeRunEvent``→``RunEndEvent``,
         ``LlmRequestStartEvent``→``LlmRequestEndEvent``,
         ``ToolCallEvent``→``ToolResultEvent``. The Start translator calls
         ``tracer.start_span(...)`` and stashes the resulting :class:`Span`

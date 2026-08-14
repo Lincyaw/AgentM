@@ -72,9 +72,13 @@ class TurnCommittedEvent(Event):
 class BeforeSendEvent(Event):
     """Final preflight before LLM call.
 
-    Handlers return a dict of overrides (``messages``, ``system``,
-    ``tools``, ``model``) or None. Handlers run in priority order and each
-    handler receives the event produced by the preceding handler.
+    Handlers return a dict of ``messages``, ``system``, ``tools`` or ``model``,
+    or None. They run in priority order, each receiving the event the previous
+    one produced.
+
+    ``system``, ``tools`` and ``model`` are replaced outright. ``messages`` is
+    append-only: a handler may extend the list it was given but may not alter
+    or drop its entries, and what it appends commits on the turn.
     """
 
     CHANNEL: ClassVar[str] = "before_send"

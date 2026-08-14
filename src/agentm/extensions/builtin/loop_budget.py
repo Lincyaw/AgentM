@@ -2,9 +2,7 @@
 """Builtin ``loop_budget`` atom -- sets the agent-loop turn / tool budget and,
 optionally, warns the model as it approaches that budget.
 
-The loop budget is a policy, so it lives as an atom rather than a privileged
-manifest field: a scenario that wants a hard ceiling lists this atom with
-``config``, exactly like any other capability.
+A scenario that wants a hard ceiling lists this atom with ``config``.
 
 The optional ``reminder`` sub-config turns on budget-aware runway warnings.
 When it is omitted the atom only sets the budget and stays silent. When
@@ -12,12 +10,10 @@ present, the atom appends a short reminder as the agent nears the
 ``max_turns`` / ``max_tool_calls`` cap so the model can wrap up instead of
 being hard-stopped mid-thought.
 
-Cache discipline: the reminder is a new message at the end of the send-list,
-never an edit to the system prompt or to a message already in it. Touching
-either would invalidate the KV prefix that everything before it shares, while
-a fresh trailing message leaves that prefix byte-identical. It also keeps the
-reminder a message in its own right, marked synthetic, rather than text
-smuggled into somebody else's turn.
+The reminder is a new message at the end of the send-list, marked synthetic,
+never an edit to the system prompt or to a message already in it: editing
+either invalidates the KV prefix everything before it shares, while a trailing
+message leaves that prefix byte-identical.
 """
 
 from __future__ import annotations
