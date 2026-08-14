@@ -922,8 +922,14 @@ class SessionRuntime:
         self._pending_atom_installs.clear()
         return drained
 
-    def live_capability_keys(self) -> set[str]:
-        """What this session provides right now, keyed as manifests key it."""
+    def _live_capability_keys(self) -> set[str]:
+        """What this session provides right now, keyed as manifests key it.
+
+        Everything present counts, the embedder's own tools included. This is
+        deliberately wider than the set a cold composition solves against (see
+        ``session_factory._service_capabilities``): that set is narrow because
+        it decides install *order*, and a late install has no order to decide.
+        """
 
         return live_capability_keys(
             services=self.services.names(),
@@ -943,13 +949,19 @@ class SessionRuntime:
         has no plan to be ordered within, so its requirements are checked
         against what the session actually provides right now, and the failure
         reads the same either way.
+
+        The two solvers take deliberately different inputs and only the failure
+        message is shared. Ordering is what makes the cold set narrow, and
+        ordering does not exist here: a satisfiable requirement is satisfiable
+        no matter who provided it, so a host tool counts at runtime where it
+        would not count at composition time.
         """
         from agentm.core.runtime.extension import load_manifest_for_spec
 
         manifest = load_manifest_for_spec(extension)
         if manifest is None or not manifest.requires:
             return
-        available = self.live_capability_keys()
+        available = self._live_capability_keys()
         missing = [
             requirement
             for requirement in manifest.requires
@@ -1002,8 +1014,8 @@ class SessionRuntime:
         for key in registrations.service_keys:
             self.services.unregister(key)
         # The provider service key is covered by the loop above, but the
-        # registry keeps its own ownership index and would keep enumerating a
-        # provider whose backing service is gone.
+        # registry keeps its own ownership index and active-provider name, and
+        # both would keep naming a provider whose backing service is gone.
         removed_providers = [
             name
             for name, owner in self._providers.owners().items()
@@ -1011,18 +1023,18 @@ class SessionRuntime:
         ]
         for name in removed_providers:
             self._providers.unregister(name)
-        removed_subscriptions = self.bus.remove_owner(module_path)
+        removed_bus_attachments = self.bus.remove_owner(module_path)
         self._extensions.forget(module_path)
         logger.debug(
             "detached atom {}: {} tools, {} policies, {} renderers, "
-            "{} services, {} providers, {} bus subscriptions",
+            "{} services, {} providers, {} bus subscriptions and observers",
             module_path,
             len(registrations.tool_ids),
             len(registrations.context_policy_ids),
             len(registrations.trigger_renderer_sources),
             len(registrations.service_keys),
             len(removed_providers),
-            removed_subscriptions,
+            removed_bus_attachments,
         )
 
     def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:

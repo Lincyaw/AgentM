@@ -3,8 +3,9 @@
 An atom's registrations are recovered from an ownership ledger keyed on the
 atom that made them. Anything the ledger never saw survives uninstall forever,
 so each test here installs one kind of registration and asserts it is gone
-again. The last two guard the other direction: a requirement is spelled in
-manifest names, and the driver's per-turn service is nobody's registration.
+again. The rest guard the other direction: what an uninstall must not leave
+behind in the session's own state, which capabilities each dependency solver
+is fed, and which writes reach the event stream.
 """
 
 from __future__ import annotations
@@ -15,7 +16,16 @@ from pathlib import Path
 import pytest
 
 from agentm import AgentSession, AgentSessionConfig, ExtensionSpec, Model
-from agentm.core.abi.roles import RESOURCE_TXN_SERVICE
+from agentm.core.abi.events import ApiRegisterEvent, TurnCommittedEvent
+from agentm.core.abi.messages import TextContent
+from agentm.core.abi.provider import ProviderSessionIdentity
+from agentm.core.abi.roles import PROVIDER_SESSION_IDENTITY, RESOURCE_TXN_SERVICE
+from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi.termination import ModelEndTurn
+from agentm.core.abi.trajectory import Outcome, TurnMeta
+from agentm.core.abi.trigger import UserInput
+from agentm.core.runtime.session_factory import _service_capabilities
 
 
 _SYSTEM_PROMPT = "agentm.extensions.builtin.system_prompt"
@@ -286,6 +296,125 @@ async def test_runtime_install_solves_atom_requirements_by_manifest_name(
         session.start()
         await session.install_extension(spec)
         assert spec.module_path in session.installed_extensions
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_uninstalling_the_only_provider_freezes_no_name_for_it(
+    tmp_path: Path,
+) -> None:
+    """A departed provider must not be what a later commit binds the session to.
+
+    Freezing runs from the turn-committed bus hook, not only from
+    ``activate()``, so it sees whatever the uninstall left behind. An identity
+    naming a provider registered nowhere would be durable: written into the
+    trajectory, validated on resume, and enough to make every later
+    ``activate()`` raise once any other provider registers.
+    """
+
+    spec = _file_atom(tmp_path, "provider_atom", _PROVIDER_ATOM)
+    session = await _session(tmp_path, spec)
+    try:
+        session.start()
+        session.trajectory.begin(
+            UserInput(content=(TextContent(type="text", text="hi"),)),
+            run_id="attribution",
+            run_step=0,
+        )
+        turn = session.trajectory.commit(
+            Outcome(cause=ModelEndTurn()),
+            TurnMeta(model_id="probe-model"),
+        )
+
+        assert session.uninstall_extension(spec)
+        session.bus.emit_sync(
+            TurnCommittedEvent.CHANNEL,
+            TurnCommittedEvent(turn=turn),
+        )
+
+        identity = session.provider_session_identity()
+        assert identity is not None
+        assert identity.name not in session.provider_names()
+        assert identity.name == "direct"
+        assert identity.model_id == "probe-model"
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_solver_counts_capabilities_the_host_provides(
+    tmp_path: Path,
+) -> None:
+    """A late install solves against everything present, host tools included.
+
+    The cold solver below is narrower on purpose. Locking both input sets is
+    what keeps that a contract rather than a divergence nobody chose.
+    """
+
+    async def probe(args: dict[str, object]) -> ToolResult:
+        del args
+        return ToolResult(content=(TextContent(type="text", text=""),))
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[ExtensionSpec.from_module(_SYSTEM_PROMPT)],
+            extra_tools=[
+                FunctionTool(
+                    name="host_probe",
+                    description="A tool the embedder provides, not an atom.",
+                    parameters={"type": "object", "properties": {}},
+                    fn=probe,
+                )
+            ],
+            stream_fn=_StubProvider(),
+            model=_model(),
+        )
+    )
+    try:
+        assert "tool:host_probe" in session._live_capability_keys()
+        assert "atom:system_prompt" in session._live_capability_keys()
+    finally:
+        await session.shutdown()
+
+
+def test_the_cold_solver_is_offered_services_and_nothing_else() -> None:
+    """Composition-time solving decides install order, so it sees services only.
+
+    Anything wider would let a capability outside the plan remove an ordering
+    edge between atoms inside it.
+    """
+
+    services = ServiceRegistry()
+    services.register("attribution_probe", object(), scope="session")
+    assert _service_capabilities(services) == {"service:attribution_probe"}
+
+
+@pytest.mark.asyncio
+async def test_a_plain_service_registration_is_not_announced(tmp_path: Path) -> None:
+    """Attribution happens on every write; the event fires only for role binds.
+
+    The driver registers a resource transaction through the plain path once per
+    turn. If that started emitting, the event stream would carry one register
+    event per turn forever and nothing else here would notice. The role bind is
+    the control: it proves the subscription this asserts silence on is live.
+    """
+
+    session = await _session(tmp_path)
+    try:
+        events: list[ApiRegisterEvent] = []
+        session.bus.on(ApiRegisterEvent.CHANNEL, events.append)
+
+        session.services.register(RESOURCE_TXN_SERVICE, object(), scope="session")
+        assert events == []
+
+        session.services.bind(
+            PROVIDER_SESSION_IDENTITY,
+            ProviderSessionIdentity(name="direct", model_id="stub-model"),
+            replace=True,
+        )
+        assert [event.name for event in events] == [PROVIDER_SESSION_IDENTITY.key]
     finally:
         await session.shutdown()
 

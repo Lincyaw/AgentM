@@ -128,16 +128,26 @@ class ProviderRegistry:
         self._emit_register_event("provider", name, {"provider": config})
 
     def unregister(self, name: str) -> None:
-        """Drop one provider binding and the ownership record behind it.
+        """Drop one provider binding, its ownership record, and its active name.
 
         The active ``stream_fn``/``model`` pair is deliberately left alone: it
         is what the running driver is already streaming through, and a session
         that lost its model mid-turn would be worse off than one whose model
         outlives the atom that named it.
+
+        The active *name* is not left alone, because it is not merely read back
+        — the next committed turn freezes it into the session identity, which is
+        durable, serialized into the trajectory, and validated on resume. A name
+        no registration backs must not reach that identity. What the session is
+        left with is a stream function nothing names, which is what ``"direct"``
+        already means; the next ``activate()`` re-resolves a name from whatever
+        providers remain.
         """
 
         self._services.unregister(f"{_SERVICE_PREFIX}{name}")
         self._owners.pop(name, None)
+        if self._active_name == name:
+            self._active_name = None
 
     def has(self, name: str) -> bool:
         return self._services.get(f"{_SERVICE_PREFIX}{name}") is not None
@@ -254,6 +264,18 @@ class ProviderRegistry:
         self.freeze_after_commits()
 
     def freeze_after_commits(self) -> None:
+        """Bind the session to its provider once a turn has been committed.
+
+        Reachable from ``activate()`` and, independently, from the
+        turn-committed bus hook, so it cannot assume anything has re-resolved
+        the active provider first. An identity is minted only for a name the
+        registry can still account for: ``"direct"`` when no named provider is
+        active, otherwise a name present in ``configs()``. A name absent from
+        ``configs()`` is refused rather than frozen — freezing it would write a
+        provider registered nowhere into the trajectory, where resume validates
+        it and the next ``activate()`` raises for it.
+        """
+
         turns = self._committed_turns()
         if self._identity is not None or not turns:
             return
@@ -263,12 +285,12 @@ class ProviderRegistry:
             None,
         )
         if not providers:
-            if self.model is None:
+            if self.model is None or self._active_name is not None:
                 return
             active_set = self._active_set()
             self.set_identity(
                 ProviderSessionIdentity(
-                    name=self._active_name or "direct",
+                    name="direct",
                     model_id=first_model_id or self.model.id,
                     active_set_digest=(
                         active_set.digest if active_set is not None else None
