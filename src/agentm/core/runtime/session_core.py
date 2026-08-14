@@ -683,10 +683,15 @@ class SessionRuntime:
 
         if not isinstance(codec, TriggerCodec):
             raise TypeError("trigger codec must implement serialize and deserialize")
-        self.codec.register_trigger_codec(source, codec)
-        self._extensions.note_trigger_codec(
-            source, current_installing_extension() or None
+        owner = current_installing_extension() or None
+        # A superseded atom keeps its codec registered so committed turns stay
+        # decodable; its replacement takes the source over rather than colliding.
+        self.codec.register_trigger_codec(
+            source,
+            codec,
+            replace=self._extensions.trigger_codec_is_superseded(source),
         )
+        self._extensions.note_trigger_codec(source, owner)
         self._emit_register_event(
             "trigger_codec",
             source,
@@ -734,6 +739,9 @@ class SessionRuntime:
         service: object,
         scope: ServiceScope,
     ) -> None:
+        from agentm.core.runtime.extension import current_installing_extension
+
+        self._extensions.note_service(key, current_installing_extension() or None)
         self._emit_register_event(
             "service",
             key,
@@ -831,6 +839,7 @@ class SessionRuntime:
         config: dict[str, object] | None = None,
         *,
         trigger: str = "runtime",
+        replace: bool = False,
     ) -> None:
         """Install an extension through the standard lifecycle path.
 
@@ -854,6 +863,7 @@ class SessionRuntime:
             None if isinstance(extension, ExtensionSpec) else config or {},
             trigger=trigger,
             runtime=runtime_install,
+            replace=replace,
         )
 
     def _verify_runtime_requirements(
@@ -884,6 +894,48 @@ class SessionRuntime:
                 f"unsatisfied atom dependencies: {manifest.name} requires "
                 f"{', '.join(missing)}"
             )
+
+    def remove_atom_registrations(self, module_path: str) -> None:
+        """Detach everything one atom registered, so a newer version can land.
+
+        Trigger codecs are left registered on purpose. A committed turn names
+        its trigger source, and a session that could not decode that source
+        would fail to resume; the superseding version registers over the same
+        source instead of the source disappearing between the two.
+        """
+
+        registrations = self._extensions.registrations_of(module_path)
+        if registrations.tool_ids:
+            self.tools[:] = [
+                tool for tool in self.tools if id(tool) not in registrations.tool_ids
+            ]
+        if registrations.context_policy_ids:
+            self.context_policies[:] = [
+                policy
+                for policy in self.context_policies
+                if id(policy) not in registrations.context_policy_ids
+            ]
+        for source in registrations.trigger_renderer_sources:
+            self.trigger_renderers.pop(source, None)
+        for key in registrations.service_keys:
+            self.services.unregister(key)
+        removed_handlers = self.bus.remove_owner(module_path)
+        self._extensions.forget(module_path)
+        logger.debug(
+            "detached atom {}: {} tools, {} policies, {} renderers, "
+            "{} services, {} handlers",
+            module_path,
+            len(registrations.tool_ids),
+            len(registrations.context_policy_ids),
+            len(registrations.trigger_renderer_sources),
+            len(registrations.service_keys),
+            removed_handlers,
+        )
+
+    def installed_atom_module_path(self, atom_name: str) -> str | None:
+        """Module path of an installed atom by its manifest name, if present."""
+
+        return self._extensions.installed_module_path(atom_name)
 
     def _capture_extension_install_state(self) -> _ExtensionInstallSnapshot:
         return _ExtensionInstallSnapshot(
@@ -920,12 +972,13 @@ class SessionRuntime:
         spec: ExtensionSpec,
         *,
         runtime: bool = False,
+        atom_name: str | None = None,
     ) -> None:
         """Record one installed extension for composition snapshots."""
 
         if not isinstance(spec, ExtensionSpec):
             raise TypeError("installed extension record requires ExtensionSpec")
-        self._extensions.record_installed(spec, runtime=runtime)
+        self._extensions.record_installed(spec, runtime=runtime, atom_name=atom_name)
 
     def composition_snapshot(
         self,

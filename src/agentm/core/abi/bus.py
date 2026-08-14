@@ -89,6 +89,24 @@ class EventBus:
 
         return unsubscribe
 
+    def remove_owner(self, owner: str) -> int:
+        """Drop every subscription made by ``owner``; return how many.
+
+        Each subscription already carries the atom that made it, so replacing
+        one atom with a newer version does not need the unsubscribe closures
+        that atom never kept.
+        """
+
+        removed = 0
+        for channel, subs in list(self._handlers.items()):
+            kept = [sub for sub in subs if sub.owner != owner]
+            removed += len(subs) - len(kept)
+            if kept:
+                self._handlers[channel] = kept
+            else:
+                del self._handlers[channel]
+        return removed
+
     def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
         """Attach a bus observer; return an unsubscribe function."""
 

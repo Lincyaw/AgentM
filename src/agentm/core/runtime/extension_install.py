@@ -27,6 +27,17 @@ _DEFAULT_CONTEXT_POLICY_PRIORITY = 500
 
 
 @dataclass(frozen=True, slots=True)
+class AtomRegistrations:
+    """Everything one atom registered, addressed the way each store needs."""
+
+    tool_ids: frozenset[int]
+    context_policy_ids: frozenset[int]
+    trigger_renderer_sources: frozenset[str]
+    trigger_codec_sources: frozenset[str]
+    service_keys: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class LedgerSnapshot:
     """Ownership bookkeeping captured before one atom installation."""
 
@@ -35,9 +46,11 @@ class LedgerSnapshot:
     context_policy_priorities: dict[int, int]
     trigger_renderer_owners: dict[str, str | None]
     trigger_codec_owners: dict[str, str | None]
+    service_owners: dict[str, str | None]
     module_paths: tuple[str, ...]
     specs: tuple[ExtensionSpec, ...]
     runtime_module_paths: frozenset[str]
+    atom_names: dict[str, str]
 
 
 class InstallLedger:
@@ -61,9 +74,11 @@ class InstallLedger:
             source: None for source in trigger_renderers
         }
         self._trigger_codec_owners: dict[str, str | None] = {}
+        self._service_owners: dict[str, str | None] = {}
         self.module_paths: list[str] = []
         self._specs: list[ExtensionSpec] = []
         self._runtime_module_paths: set[str] = set()
+        self._atom_names: dict[str, str] = {}
 
     # --- Attribution ---
 
@@ -95,7 +110,27 @@ class InstallLedger:
     def note_trigger_codec(self, source: str, owner: str | None) -> None:
         self._trigger_codec_owners[source] = owner
 
-    def record_installed(self, spec: ExtensionSpec, *, runtime: bool = False) -> None:
+    def trigger_codec_is_superseded(self, source: str) -> bool:
+        """True when this source is owned by an atom no longer installed.
+
+        ``forget`` deliberately leaves a codec's ownership entry behind so the
+        source stays decodable. Its owner disappearing from the installed set
+        is exactly the signal that a replacement is expected to take it over.
+        """
+
+        owner = self._trigger_codec_owners.get(source)
+        return owner is not None and owner not in self.module_paths
+
+    def note_service(self, key: str, owner: str | None) -> None:
+        self._service_owners[key] = owner
+
+    def record_installed(
+        self,
+        spec: ExtensionSpec,
+        *,
+        runtime: bool = False,
+        atom_name: str | None = None,
+    ) -> None:
         """Record one installed atom.
 
         ``runtime`` marks an atom installed into a running session rather than
@@ -109,6 +144,8 @@ class InstallLedger:
         self._specs.append(ExtensionSpec(source=spec.source, config=spec.config))
         if runtime:
             self._runtime_module_paths.add(spec.module_path)
+        if atom_name:
+            self._atom_names[atom_name] = spec.module_path
 
     # --- Composition rebuild ---
 
@@ -171,6 +208,73 @@ class InstallLedger:
 
         return frozenset(self._runtime_module_paths)
 
+    # --- Supersede ---
+
+    def installed_module_path(self, atom_name: str) -> str | None:
+        """Module path installed under ``atom_name``, if one is.
+
+        Keyed on the manifest name rather than derived from the module path:
+        a file-backed atom is loaded under a content-addressed module name, so
+        two revisions of one atom share a manifest name and nothing else.
+        """
+
+        return self._atom_names.get(atom_name)
+
+    def registrations_of(self, module_path: str) -> AtomRegistrations:
+        """Everything one atom put into the session, by owner attribution."""
+
+        return AtomRegistrations(
+            tool_ids=frozenset(
+                key for key, owner in self._tool_owners.items() if owner == module_path
+            ),
+            context_policy_ids=frozenset(
+                key
+                for key, owner in self._context_policy_owners.items()
+                if owner == module_path
+            ),
+            trigger_renderer_sources=frozenset(
+                key
+                for key, owner in self._trigger_renderer_owners.items()
+                if owner == module_path
+            ),
+            trigger_codec_sources=frozenset(
+                key
+                for key, owner in self._trigger_codec_owners.items()
+                if owner == module_path
+            ),
+            service_keys=frozenset(
+                key
+                for key, owner in self._service_owners.items()
+                if owner == module_path
+            ),
+        )
+
+    def forget(self, module_path: str) -> None:
+        """Drop one atom's attribution and its replayable spec.
+
+        Trigger codecs are deliberately not forgotten: a persisted trigger
+        still names its source, and a session that could no longer decode it
+        would fail to resume. The superseding version re-registers over the
+        same source instead.
+        """
+
+        registrations = self.registrations_of(module_path)
+        for tool_id in registrations.tool_ids:
+            self._tool_owners.pop(tool_id, None)
+        for policy_id in registrations.context_policy_ids:
+            self._context_policy_owners.pop(policy_id, None)
+            self._context_policy_priorities.pop(policy_id, None)
+        for source in registrations.trigger_renderer_sources:
+            self._trigger_renderer_owners.pop(source, None)
+        for key in registrations.service_keys:
+            self._service_owners.pop(key, None)
+        self.module_paths = [path for path in self.module_paths if path != module_path]
+        self._specs = [spec for spec in self._specs if spec.module_path != module_path]
+        self._runtime_module_paths.discard(module_path)
+        self._atom_names = {
+            name: path for name, path in self._atom_names.items() if path != module_path
+        }
+
     # --- Install rollback ---
 
     def capture(self) -> LedgerSnapshot:
@@ -180,9 +284,11 @@ class InstallLedger:
             context_policy_priorities=dict(self._context_policy_priorities),
             trigger_renderer_owners=dict(self._trigger_renderer_owners),
             trigger_codec_owners=dict(self._trigger_codec_owners),
+            service_owners=dict(self._service_owners),
             module_paths=tuple(self.module_paths),
             specs=tuple(self._specs),
             runtime_module_paths=frozenset(self._runtime_module_paths),
+            atom_names=dict(self._atom_names),
         )
 
     def restore(self, snapshot: LedgerSnapshot) -> None:
@@ -191,9 +297,11 @@ class InstallLedger:
         self._context_policy_priorities = dict(snapshot.context_policy_priorities)
         self._trigger_renderer_owners = dict(snapshot.trigger_renderer_owners)
         self._trigger_codec_owners = dict(snapshot.trigger_codec_owners)
+        self._service_owners = dict(snapshot.service_owners)
         self.module_paths = list(snapshot.module_paths)
         self._specs = list(snapshot.specs)
         self._runtime_module_paths = set(snapshot.runtime_module_paths)
+        self._atom_names = dict(snapshot.atom_names)
 
 
-__all__ = ["InstallLedger", "LedgerSnapshot"]
+__all__ = ["AtomRegistrations", "InstallLedger", "LedgerSnapshot"]

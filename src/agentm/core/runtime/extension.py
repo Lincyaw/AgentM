@@ -321,9 +321,12 @@ class _AtomAPIFacade:
         config: dict[str, Any] | None = None,
         *,
         trigger: str = "runtime",
+        replace: bool = False,
     ) -> None:
         self._require_active("install extensions")
-        await self.__session.install_extension(extension, config, trigger=trigger)
+        await self.__session.install_extension(
+            extension, config, trigger=trigger, replace=replace
+        )
 
     @property
     def model(self) -> "Model | None":
@@ -341,6 +344,7 @@ async def install_extension(
     *,
     trigger: str = "session_start",
     runtime: bool = False,
+    replace: bool = False,
 ) -> None:
     """Install one extension and emit the standard install lifecycle event."""
 
@@ -361,10 +365,16 @@ async def install_extension(
     snapshot = api._capture_extension_install_state()
     atom_api = _AtomAPIFacade(api)
     try:
+        manifest = load_manifest_for_spec(spec)
+        atom_name = manifest.name if manifest is not None else None
+        if replace and atom_name is not None:
+            superseded = api.installed_atom_module_path(atom_name)
+            if superseded is not None and superseded != module_path:
+                api.remove_atom_registrations(superseded)
         result = load_extension(spec, atom_api)
         if inspect.isawaitable(result):
             await result
-        api.record_installed_extension(spec, runtime=runtime)
+        api.record_installed_extension(spec, runtime=runtime, atom_name=atom_name)
         atom_api.activate()
         logger.debug("installed atom: {}", module_path)
     except BaseException as exc:

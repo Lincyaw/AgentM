@@ -42,6 +42,14 @@ class ToolAuthoringConfig(BaseModel):
         default=".agentm/authored_tools",
         description="Directory, relative to cwd, holding authored atom source.",
     )
+    keep_versions: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Superseded source files to keep per tool. Each edit is a distinct "
+            "content-addressed file, so a revision loop accumulates them."
+        ),
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -159,6 +167,26 @@ class _ToolAuthor:
     def __init__(self, api: AtomAPI, config: ToolAuthoringConfig) -> None:
         self._api = api
         self._directory = Path(api.ctx.cwd) / config.directory
+        self._keep_versions = config.keep_versions
+
+    def _prune(self, name: str, keep: Path) -> None:
+        """Drop older source files for one tool, newest first, keeping ``keep``.
+
+        Authored tools do not survive resume, so an superseded version is not
+        reachable from any durable record and pruning loses nothing that was
+        durable.
+        """
+
+        versions = sorted(
+            (p for p in self._directory.glob(f"{name}_*.py") if p != keep),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in versions[self._keep_versions - 1 :]:
+            try:
+                stale.unlink()
+            except OSError as exc:
+                logger.warning("could not prune {}: {}", stale, exc)
 
     async def write_tool(self, args: dict[str, object]) -> ToolResult:
         parsed = WriteToolArgs.model_validate(args)
@@ -208,7 +236,7 @@ class _ToolAuthor:
             config={},
         )
         try:
-            await self._api.install_extension(spec, trigger="authored")
+            await self._api.install_extension(spec, trigger="authored", replace=True)
         except Exception as exc:  # noqa: BLE001 - reported to the model verbatim
             logger.warning("authored tool {} failed to install: {}", parsed.name, exc)
             return _error(
@@ -217,10 +245,12 @@ class _ToolAuthor:
                 "again."
             )
 
+        self._prune(parsed.name, path)
         logger.info("authored tool installed: {} from {}", parsed.name, path)
         return _ok(
             f"Installed. {parsed.name!r} is callable from your next turn "
-            f"onward, not this one. Source saved at {path}."
+            f"onward, not this one. Calling write_tool again with the same "
+            f"name replaces it. Source saved at {path}."
         )
 
 
