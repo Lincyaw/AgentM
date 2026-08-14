@@ -216,6 +216,7 @@ requirements:
       - path: src/agentm/execution/wire.py
       - path: src/agentm/execution/worker.py
       - path: src/agentm/extensions/builtin/file_tools.py
+      - path: src/agentm/extensions/builtin/atom_watch.py
       - path: src/agentm/extensions/builtin/background_exec.py
       - path: src/agentm/extensions/builtin/llm_anthropic.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
@@ -285,6 +286,7 @@ requirements:
       - path: tests/fixtures/harbor_provider.py
       - path: tests/fixtures/process_tools.py
       - path: tests/fixtures/prompt_cache_adapter.py
+      - path: tests/test_atom_watch.py
       - path: tests/test_authoring.py
       - path: tests/integration/test_atom_attribution.py
       - path: tests/integration/test_harbor_adapter.py
