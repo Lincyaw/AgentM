@@ -120,13 +120,24 @@ class ProviderRegistry:
             self.activate()
         except BaseException:
             if previous is None:
-                self._services.unregister(key)
-                self._owners.pop(name, None)
+                self.unregister(name)
             else:
                 self._services.register(key, previous, scope="session")
                 self._owners[name] = previous_owner
             raise
         self._emit_register_event("provider", name, {"provider": config})
+
+    def unregister(self, name: str) -> None:
+        """Drop one provider binding and the ownership record behind it.
+
+        The active ``stream_fn``/``model`` pair is deliberately left alone: it
+        is what the running driver is already streaming through, and a session
+        that lost its model mid-turn would be worse off than one whose model
+        outlives the atom that named it.
+        """
+
+        self._services.unregister(f"{_SERVICE_PREFIX}{name}")
+        self._owners.pop(name, None)
 
     def has(self, name: str) -> bool:
         return self._services.get(f"{_SERVICE_PREFIX}{name}") is not None

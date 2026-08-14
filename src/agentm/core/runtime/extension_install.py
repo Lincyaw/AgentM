@@ -220,6 +220,11 @@ class InstallLedger:
 
         return self._atom_names.get(atom_name)
 
+    def installed_atom_names(self) -> frozenset[str]:
+        """Manifest names of the installed atoms, as a requirement spells them."""
+
+        return frozenset(self._atom_names)
+
     def registrations_of(self, module_path: str) -> AtomRegistrations:
         """Everything one atom put into the session, by owner attribution."""
 

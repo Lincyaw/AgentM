@@ -198,6 +198,8 @@ requirements:
       - path: src/agentm/core/runtime/reaction.py
       - path: src/agentm/core/runtime/reaction_types.py
       - path: src/agentm/core/runtime/extension.py
+      - path: src/agentm/core/runtime/extension_install.py
+      - path: src/agentm/core/runtime/provider_registry.py
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/runtime/session_core.py
       - path: src/agentm/core/runtime/session_factory.py
@@ -284,6 +286,7 @@ requirements:
       - path: tests/fixtures/process_tools.py
       - path: tests/fixtures/prompt_cache_adapter.py
       - path: tests/test_authoring.py
+      - path: tests/integration/test_atom_attribution.py
       - path: tests/integration/test_harbor_adapter.py
       - path: tests/integration/test_observability_backends.py
       - path: tests/integration/test_provider_stream_behaviors.py

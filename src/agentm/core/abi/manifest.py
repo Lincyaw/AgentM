@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Final, Literal, cast, get_args
 
@@ -80,6 +81,31 @@ def provided_capability_keys(
     return tuple(dict.fromkeys(keys))
 
 
+def live_capability_keys(
+    *,
+    services: Collection[str] = (),
+    atoms: Collection[str] = (),
+    tools: Collection[str] = (),
+    providers: Collection[str] = (),
+    trigger_renderers: Collection[str] = (),
+) -> set[str]:
+    """Spell a live composition's capabilities the way manifests spell them.
+
+    A requirement is written in manifest vocabulary — ``atom:<manifest name>``,
+    not the dotted or content-addressed module the atom happens to load under.
+    Anything solving requirements against a running session has to name what
+    the session holds in that same vocabulary, so the spelling lives here once
+    rather than being restated by each solver.
+    """
+
+    keys = {f"service:{name}" for name in services}
+    keys |= {f"atom:{name}" for name in atoms}
+    keys |= {f"tool:{name}" for name in tools}
+    keys |= {f"provider:{name}" for name in providers}
+    keys |= {f"trigger_renderer:{source}" for source in trigger_renderers}
+    return keys
+
+
 class ExtensionManifest(BaseModel):
     """Declarative identity for an installable atom.
 
@@ -119,6 +145,7 @@ __all__ = [
     "CapabilityKind",
     "CapabilityRef",
     "ExtensionManifest",
+    "live_capability_keys",
     "parse_capability_ref",
     "provided_capability_keys",
     "requirement_key",
