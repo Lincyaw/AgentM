@@ -194,6 +194,7 @@ requirements:
       - path: src/agentm/core/lib/trajectory_store.py
       - path: src/agentm/core/lib/trajectory_nodes.py
       - path: src/agentm/core/runtime/catalog.py
+      - path: src/agentm/core/runtime/composition_digest.py
       - path: src/agentm/core/runtime/driver.py
       - path: src/agentm/core/runtime/reaction.py
       - path: src/agentm/core/runtime/reaction_types.py
@@ -268,6 +269,8 @@ requirements:
       - path: src/agentm/storage/trajectory/memory.py
       - path: src/agentm/storage/trajectory/postgres.py
       - path: src/agentm/storage/trajectory/resolve.py
+      - path: src/agentm/testing/__init__.py
+      - path: src/agentm/testing/revertibility.py
       - path: src/agentm_toolbox/_file_ops.py
       - path: src/agentm_toolbox/_state.py
       - path: contrib/scenarios/chat/manifest.yaml
@@ -295,6 +298,7 @@ requirements:
       - path: tests/integration/test_sdk_trajectory_behaviors.py
       - path: tests/integration/test_trajectory.py
       - path: tests/test_code_health.py
+      - path: tests/test_composition_digest.py
       - path: tests/test_control.py
       - path: tests/test_gateway_contracts.py
       - path: tests/test_lifecycle_catalog_ports.py
