@@ -217,6 +217,15 @@ class EffectRecord:
     context object still holds. A record that survives an uninstall therefore
     means the write survived it too.
 
+    Which is why a ``retain`` reason is not how deliberate residue shows up
+    after the fact. It reads here while the atom is installed -- what the
+    session is holding, and on whose word -- and it leaves with its context,
+    because an uninstalled atom holds nothing. The residue itself stays visible
+    where it actually landed: the one retained write the runtime makes is a
+    trigger codec, and an uninstalled atom's codec is still a
+    ``trigger_codecs`` entry, still attributed to the atom that registered it.
+    Two accounts of one fact, each true of a different moment.
+
     ``settled`` is False for an async body that was queued and has not run; one
     of those is a write that has not happened yet, which is exactly the kind of
     residue a caller comparing two digests needs to see.

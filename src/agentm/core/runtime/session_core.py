@@ -129,6 +129,7 @@ from agentm.core.runtime.atom_context import (
     ChainedRenderers,
     ChainedTools,
     ContextOwnership,
+    DepartedContexts,
     PolicyRow,
     ownership_of,
     policy_row,
@@ -275,6 +276,7 @@ class SessionRuntime:
         ]
         self._own_renderers: dict[str, TriggerRenderer] = dict(trigger_renderers or {})
         self._linked: list[AtomContext] = []
+        self._departed = DepartedContexts()
         self.tools: Sequence[Tool] = ChainedTools(self._own_tools, self._linked)
         self.context_policies: Sequence[ContextPolicy] = ChainedPolicies(
             self._own_policies, self._linked
@@ -324,6 +326,7 @@ class SessionRuntime:
             committed_turns=lambda: self.trajectory.turns,
             active_set=self._active_set_fingerprint,
             emit_register_event=self._emit_register_event,
+            refile_service=self.refile_service,
             stream_fn=runtime.stream_fn,
             model=runtime.model,
             identity=runtime.provider_identity,
@@ -526,6 +529,10 @@ class SessionRuntime:
         for context in tuple(self._linked):
             context.unlink_from(self)
             cleanup_errors.extend(context.suspend().dispose())
+        # A context this session *removed* is undone rather than released: its
+        # removal already decided that what it wrote comes back out, and an
+        # effect recorded through it since is under the same decision.
+        cleanup_errors.extend(self._departed.undo())
         self.bus._force_clear()
         if cleanup_errors:
             raise BaseExceptionGroup("session shutdown cleanup failed", cleanup_errors)
@@ -799,6 +806,38 @@ class SessionRuntime:
                 key,
                 {"service_name": service_name, "service": value},
             )
+
+    def note_atom_trigger_codec(
+        self,
+        source: str,
+        codec: TriggerCodec,
+        owner: str,
+    ) -> None:
+        """Register one atom's trigger codec on the session, and record it.
+
+        The one registration an atom makes that does not land in its own
+        tables, so the rule about it lives here rather than there: a superseded
+        atom keeps its codec so committed turns stay decodable, and its
+        replacement takes the source over rather than colliding.
+        """
+
+        self.codec.register_trigger_codec(
+            source,
+            codec,
+            replace=self._extensions.trigger_codec_is_superseded(source),
+        )
+        self._extensions.note_trigger_codec(source, owner)
+
+    def refile_service(self, key: str) -> None:
+        """Re-file one service key under whoever's write resolves now.
+
+        For a key that changes hands without being written -- a rollback taking
+        a shadowing write back out. No write observer fires for a removal, and
+        the new owner is a property of the context tree, which the registry
+        that removed the write cannot read for itself.
+        """
+
+        self._extensions.note_service(key, self.ownership().service(key))
 
     def _on_service_write(
         self,
@@ -1116,6 +1155,7 @@ class SessionRuntime:
             return None
         context.unlink_from(self)
         residue = context.suspend()
+        self._departed.note(context)
         self._extensions.forget(module_path)
         removed_providers = self._uncover(residue, module_path)
         logger.debug(
@@ -1228,11 +1268,35 @@ class SessionRuntime:
     # --- Context tree ---
 
     def link_context(self, context: AtomContext) -> None:
-        """Aggregate one atom context into what this session resolves."""
+        """Aggregate one atom context into what this session resolves.
+
+        At most one context per module path is ever linked, and this is where
+        that holds. Everything else that answers for an atom is keyed on the
+        module path and holds exactly one entry for it -- the ledger's
+        attribution, its replayable spec, ``forget``, ``context_for`` -- so a
+        second live context under one path is state they cannot represent:
+        removal would unlink one incarnation while the ledger dropped the path
+        outright, leaving the other linked with nothing left to name it.
+
+        Superseding is not that case, because the previous context is unlinked
+        before its replacement links. Refused here rather than in the install
+        path because this is the list that would hold the second one, and the
+        cold path already refuses it as a duplicate atom name.
+        """
 
         if any(existing is context for existing in self._linked):
             return
+        module_path = context.module_path
+        if any(existing.module_path == module_path for existing in self._linked):
+            raise ValueError(
+                f"atom {module_path} is already installed in this session; "
+                "install it with replace=True to supersede the one that is, or "
+                "uninstall that one first"
+            )
         self._linked.append(context)
+        # A supersede rollback links a removed context again, and a context
+        # this session holds has nothing left for shutdown to undo separately.
+        self._departed.forget(context)
 
     def unlink_context(self, context: AtomContext) -> None:
         """Stop aggregating one atom context; safe to repeat."""
@@ -1254,12 +1318,13 @@ class SessionRuntime:
     def context_for(self, module_path: str) -> AtomContext | None:
         """The linked context of one atom, if it is still linked.
 
-        The last one linked under that module path wins, which is what a second
-        incarnation of the same atom means: the first's context, if a task of
-        it survives, is unlinked and answers for nobody.
+        There is at most one, and ``link_context`` is what makes that true.  A
+        second incarnation of an atom exists only across a supersede, where the
+        first is unlinked before the second links: the first's context, if a
+        task of it survives, is not returned here and answers for nobody.
         """
 
-        for context in reversed(self._linked):
+        for context in self._linked:
             if context.module_path == module_path:
                 return context
         return None
@@ -1278,9 +1343,14 @@ class SessionRuntime:
         return tuple(rows)
 
     def ownership(self) -> ContextOwnership:
-        """Which context holds each tool, policy, renderer and service."""
+        """Which context holds each tool, policy, renderer and service.
 
-        return ownership_of(self._linked)
+        The session's own registry takes part: a service key resolves by write
+        order across the whole chain, so a host write later than every atom's
+        owns it -- as nobody.
+        """
+
+        return ownership_of(self.services, self._linked)
 
     @property
     def driver_running(self) -> bool:

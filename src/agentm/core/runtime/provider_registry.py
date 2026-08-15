@@ -57,6 +57,7 @@ class ProviderRegistry:
         committed_turns: Callable[[], Sequence[Turn]],
         active_set: Callable[[], ActiveSetFingerprint | None],
         emit_register_event: Callable[[str, str, dict[str, object]], None],
+        refile_service: Callable[[str], None],
         stream_fn: StreamFn | None = None,
         model: Model | None = None,
         identity: ProviderSessionIdentity | None = None,
@@ -65,6 +66,7 @@ class ProviderRegistry:
         self._committed_turns = committed_turns
         self._active_set = active_set
         self._emit_register_event = emit_register_event
+        self._refile_service = refile_service
         self.stream_fn = stream_fn
         self.model = model
         self._active_name: str | None = None
@@ -107,6 +109,14 @@ class ProviderRegistry:
         key = f"{_SERVICE_PREFIX}{name}"
         target = self._services if into is None else into
         previous = self._services.get(key)
+        # What this write is about to shadow *in the registry being written*,
+        # which is the only thing an undo of it may put back. ``previous`` is
+        # what the whole chain resolves, and that entry may live in another
+        # node: writing it here would copy another context's registration into
+        # this one, where it would win by being the newer write and be attributed
+        # to whoever owns this table.
+        held = target.own_table().get(key)
+        shadowed = None if held is None else held.service
         if previous is not None and not replace:
             raise ValueError(
                 f"provider {name!r} is already registered in this session; give "
@@ -131,13 +141,20 @@ class ProviderRegistry:
         try:
             self.activate()
         except BaseException:
-            if previous is None:
+            if shadowed is None:
+                # Taking the write out is the whole undo: whatever the chain
+                # resolved before, in whichever node held it, is uncovered by
+                # its removal. Nothing fires for a removal, so the ledger is
+                # told who the key belongs to now.
                 target.unregister(key)
+                self._refile_service(key)
+            else:
+                target.register(key, shadowed, scope="session")
+            if previous is None:
                 self._owners.pop(name, None)
                 if self._active_name == name:
                     self._active_name = None
             else:
-                target.register(key, previous, scope="session")
                 self._owners[name] = previous_owner
             raise
         self._emit_register_event("provider", name, {"provider": config})

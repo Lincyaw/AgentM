@@ -246,28 +246,6 @@ class EventBus:
 
         return unsubscribe
 
-    def remove_owner(self, owner: str) -> int:
-        """Drop every subscription and observer made by ``owner``; return how many.
-
-        Each subscription already carries the atom that made it, so replacing
-        one atom with a newer version does not need the unsubscribe closures
-        that atom never kept. An observer sees every dispatch on the bus, so
-        one left behind by an uninstalled atom is the loudest kind of leak.
-        """
-
-        removed = 0
-        for channel, subs in list(self._handlers.items()):
-            kept = [sub for sub in subs if sub.owner != owner]
-            removed += len(subs) - len(kept)
-            if kept:
-                self._handlers[channel] = kept
-            else:
-                del self._handlers[channel]
-        kept_observers = [record for record in self._observers if record.owner != owner]
-        removed += len(self._observers) - len(kept_observers)
-        self._observers = kept_observers
-        return removed
-
     def add_observer(
         self,
         observer: EventBusObserver,
@@ -499,7 +477,19 @@ class EventBus:
         self._linked = list(other._linked)
 
     def clear(self) -> None:
-        """Clear all handlers.  Blocked after freeze_clear()."""
+        """Clear all handlers, linked segments included.  Blocked after freeze_clear().
+
+        A linked segment's handlers are handlers this bus dispatches, so
+        leaving one linked would leave behind exactly what this promises to
+        remove.  A segment is linked or not as a whole, so its observers go
+        with it; this bus's own observers stay, as they always have.
+
+        Unlinking here is not coordinated with whoever linked the segments: a
+        session holds the same links in its context list and its service
+        registry, and clearing the bus does not touch those.  This is the bus's
+        own operation, and a composed session freezes it at ``start()`` for
+        that reason.
+        """
         if self._frozen_clear:
             logger.warning(
                 "EventBus.clear() ignored — bus is frozen; "
@@ -507,6 +497,7 @@ class EventBus:
             )
             return
         self._handlers.clear()
+        self._linked.clear()
 
     def _force_clear(self) -> None:
         """Unconditional clear — for Session.shutdown() only."""

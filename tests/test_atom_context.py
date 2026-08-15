@@ -19,16 +19,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
+from agentm.core.abi.effects import EffectInverse
 from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.roles import RESOURCE_TXN_SERVICE
+from agentm.core.abi.provider import ProviderConfig
+from agentm.core.abi.roles import PROVIDER_RESOLVER_SERVICE, RESOURCE_TXN_SERVICE
 from agentm.core.abi.session_api import AtomAPI, ExtensionSpec
+from agentm.core.abi.stream import Model
 from agentm.core.runtime.composition_digest import composition_digest
 from agentm.core.runtime.session_core import SessionRuntime
-from agentm.testing import digest_differences, probe_session
+from agentm.testing import NeverStreams, digest_differences, probe_session
 
 # --- Reading the two accounts -----------------------------------------------
 
@@ -429,6 +433,49 @@ class Probe:
 def install(api, config):
     del config
     api.register_context_policy(Probe())
+"""
+)
+
+# A second install of one module path: same file, so the same module object and
+# the same module-level counter, which is what tells the two incarnations apart.
+_TWICE = (
+    _MANIFEST
+    + """
+
+_INCARNATIONS = []
+
+
+def install(api, config):
+    del config
+    _INCARNATIONS.append(1)
+    api.services.register(
+        "dup_key", f"incarnation-{{len(_INCARNATIONS)}}", scope="session"
+    )
+    api.on("attribution.dup", lambda event: None)
+"""
+)
+
+# Two atoms contesting one service key, each keeping its api so the test can
+# write through it after both are installed.
+_CONTESTED = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.register("{name}_api", api, scope="session")
+    api.services.register("contested", "{name}-first", scope="session")
+"""
+)
+
+# An atom that publishes its api and nothing else.
+_KEEPER = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.register("kept_api", api, scope="session")
 """
 )
 
@@ -1029,3 +1076,183 @@ async def test_an_unlinked_context_reads_the_session_it_left(
         session.services.register("written_after", "host", scope="session")
         assert api.services.get("written_after") == "host"
         assert api.services.get("sync_write") is None
+
+
+# --- The cardinality, the order, and the reach of a write --------------------
+
+
+@pytest.mark.asyncio
+async def test_one_module_path_gets_one_live_context(tmp_path: Path) -> None:
+    """A second live incarnation is refused, so removal can reach every one.
+
+    Everything that answers for an atom is keyed on its module path and holds
+    one entry: the ledger's attribution, its replayable spec, ``context_for``.
+    Two linked contexts under one path would leave removal unlinking one while
+    the ledger dropped the path, and the other linked with nothing to name it.
+    """
+
+    spec = _atom(tmp_path, "twice_atom", _TWICE)
+    async with probe_session(str(tmp_path)) as session:
+        pristine = composition_digest(session)
+        await session.install_extension(spec)
+
+        with pytest.raises(ValueError, match="already installed"):
+            await session.install_extension(spec)
+
+        # The refused install left nothing: one context, one incarnation.
+        assert [context.module_path for context in session.linked_contexts()] == [
+            spec.module_path
+        ]
+        assert session.services.get("dup_key") == "incarnation-1"
+
+        assert session.uninstall_extension(spec) is True
+        assert session.uninstall_extension(spec) is False
+        # Nothing of the atom is left dispatching or resolving.
+        assert session.services.get("dup_key") is None
+        assert session.bus.subscriptions("attribution.dup") == []
+        assert _composition_differences(pristine, composition_digest(session)) == ()
+
+
+@pytest.mark.asyncio
+async def test_the_service_index_names_the_context_a_key_resolves_out_of(
+    tmp_path: Path,
+) -> None:
+    """Ownership is decided by write order, the way resolution is.
+
+    A key resolves to the highest write order anywhere in the chain, so an atom
+    that rebinds a key a later-linked atom took wins it back. An index built by
+    walking the contexts in link order would name the other one, and the digest
+    would then report one context's value under another's name.
+    """
+
+    spec_a = _atom(tmp_path, "contest_a", _CONTESTED)
+    spec_b = _atom(tmp_path, "contest_b", _CONTESTED)
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(spec_a)
+        await session.install_extension(spec_b)
+        assert session.services.get("contested") == "contest_b-first"
+        assert _owner(session, "contested") == spec_b.module_path
+
+        api_a = _kept(session, "contest_a_api")
+        api_a.services.register("contested", "a-later", scope="session")
+        assert session.services.get("contested") == "a-later"
+        assert _owner(session, "contested") == spec_a.module_path
+        entry = next(
+            row
+            for row in composition_digest(session).services
+            if row.key == "contested"
+        )
+        assert entry.owner == spec_a.module_path
+
+        # The host writing last owns it as nobody, for the same reason.
+        session.services.register("contested", "host-last", scope="session")
+        assert session.services.get("contested") == "host-last"
+        assert _owner(session, "contested") is None
+
+        # And the loser is uncovered when the winner leaves, under its own name.
+        assert session.uninstall_extension(spec_a) is True
+        assert session.services.get("contested") == "host-last"
+        assert _owner(session, "contested") is None
+
+
+@pytest.mark.asyncio
+async def test_a_departed_atoms_effect_runs_and_is_undone_at_shutdown(
+    tmp_path: Path,
+) -> None:
+    """The one write of a departed atom that is not inert, and what bounds it.
+
+    A table write into an unlinked context reaches nobody because the write is
+    the row. An effect body is arbitrary code that runs where it is called, so
+    it changes the world whatever the context's link state -- refusing it would
+    be a revocation bit read at a write. What departure costs it is the
+    audience: the session does not report it, and no uninstall will undo it,
+    because the uninstall already happened. The session undoes it at shutdown
+    instead, which is as far as anything here can promise.
+    """
+
+    spec = _atom(tmp_path, "keeper_atom", _KEEPER)
+    world: list[str] = []
+
+    def _write() -> EffectInverse:
+        world.append("changed")
+        return lambda: world.remove("changed")
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(spec)
+        api = _kept(session)
+        assert session.uninstall_extension(spec) is True
+
+        api.effect(_write, provides="after-departure")
+        assert world == ["changed"]
+        assert all(
+            record.provides != "after-departure"
+            for record in composition_digest(session).effects
+        )
+
+    assert world == []
+
+
+class _ResolverThatAnswersOnce:
+    """Picks a provider once, then stops, so activation fails after the write.
+
+    The registry checks that a provider is resolvable *before* it writes and
+    activates it after, so a resolver that stops answering between the two is
+    how a test reaches the rollback at all. The rollback is the subject; this
+    is only the way in.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self.calls = 0
+
+    def resolve_provider(self, providers: Mapping[str, ProviderConfig]) -> str | None:
+        del providers
+        self.calls += 1
+        return self._name if self.calls == 1 else None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_provider_registration_leaves_one_account_of_it(
+    tmp_path: Path,
+) -> None:
+    """The undo of a shadowing write is removing it, not copying what it hid.
+
+    The previous registration lives in the previous atom's own table. Writing
+    it back into the *new* atom's table restores the value and moves the
+    ownership: the key would then resolve out of the atom whose registration
+    failed, and the three accounts of who owns it -- the context tree, the
+    ledger, the provider index -- would give two different answers.
+    """
+
+    spec_a = _atom(tmp_path, "prov_a", _PROVIDER)
+    spec_b = _atom(tmp_path, "prov_keeper", _KEEPER)
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(spec_a)
+        await session.install_extension(spec_b)
+        assert _owner(session, "provider:shared_provider") == spec_a.module_path
+
+        resolver = _ResolverThatAnswersOnce("shared_provider")
+        session.services.register(PROVIDER_RESOLVER_SERVICE, resolver, scope="session")
+        before = composition_digest(session)
+
+        api_b = _kept(session)
+        with pytest.raises(LookupError):
+            api_b.register_provider(
+                "shared_provider",
+                ProviderConfig(
+                    stream_fn=NeverStreams(),
+                    model=Model(
+                        id="probe-model",
+                        provider="probe",
+                        context_window=1000,
+                        max_output_tokens=100,
+                    ),
+                    name="shared_provider",
+                ),
+                replace=True,
+            )
+
+        assert resolver.calls == 2
+        assert _owner(session, "provider:shared_provider") == spec_a.module_path
+        assert session._providers.owners()["shared_provider"] == spec_a.module_path
+        assert _composition_differences(before, composition_digest(session)) == ()

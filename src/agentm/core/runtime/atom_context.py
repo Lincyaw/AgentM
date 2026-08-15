@@ -26,6 +26,21 @@ signal.  One model answers both.
 reads them, the session's stores never receive them, there is no orphan row to
 clean up, and the write neither succeeds visibly nor raises.
 
+That last sentence is about *table* writes, and the limit of it is worth
+stating rather than leaving to be discovered.  A table write is inert once the
+table is out of the session, because the write is the row.  ``api.effect`` is
+not a table write: the body is arbitrary code and it runs where it is called,
+so a departed atom that records an effect changes the world exactly as it
+always did.  What departure takes away is the *audience* — the inverse lands in
+a log the session no longer aggregates, so ``composition_digest`` does not
+report it and no uninstall will run it, because the uninstall already happened.
+Refusing the call instead would mean the log asking whether its context is
+still linked, which is a revocation bit read at a write, and that is the shape
+this design exists to remove.  What the session does instead is keep a weak
+hold on the contexts it has removed (``DepartedContexts`` below) and undo, at
+shutdown, whatever such a write recorded while it was still alive.  Past the
+session's own lifetime nothing can be promised, and nothing here promises it.
+
 *A failed ``replace=True`` has nothing to un-revert.*  Superseding moves the
 previous context's tables aside rather than running their inverses, so the
 rollback puts them back and relinks.  Linking is symmetric, reversible data.
@@ -49,6 +64,7 @@ writes with no table:
 from __future__ import annotations
 
 import itertools
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -157,6 +173,10 @@ class AtomContext:
     """
 
     __slots__ = (
+        # A session that has unlinked a context keeps a weak hold on it, so
+        # that an effect recorded through it afterwards still has its inverse
+        # run at shutdown.
+        "__weakref__",
         "_module_path",
         "_effects",
         "_segment",
@@ -206,11 +226,16 @@ class AtomContext:
     # --- Linking ---
 
     def link_into(self, session: SessionRuntime) -> None:
-        """Make this context part of what the session resolves."""
+        """Make this context part of what the session resolves.
 
+        The session's own list goes first because it is the one that refuses a
+        second live context for one module path; refused there, nothing else
+        has been linked yet and there is nothing to unwind.
+        """
+
+        session.link_context(self)
         session.services.link(self._services)
         session.bus.link(self._segment)
-        session.link_context(self)
 
     def unlink_from(self, session: SessionRuntime) -> None:
         """Stop the session aggregating this context; safe to repeat."""
@@ -354,15 +379,7 @@ class AtomContext:
         module_path = self._module_path
 
         def _register() -> None:
-            # A superseded atom keeps its codec registered so committed turns
-            # stay decodable; its replacement takes the source over rather than
-            # colliding.
-            session.codec.register_trigger_codec(
-                source,
-                codec,
-                replace=session._extensions.trigger_codec_is_superseded(source),
-            )
-            session._extensions.note_trigger_codec(source, module_path)
+            session.note_atom_trigger_codec(source, codec, module_path)
             self._emit_register_event("trigger_codec", source, {"codec": codec})
 
         self._effects.effect(
@@ -500,6 +517,17 @@ class ChainedTools(Sequence[Tool]):
     A live view rather than a rebuilt list.  The driver takes this once at
     start and re-reads it at every turn boundary, which is what makes an atom
     installed mid-run advertise its tools from the next turn.
+
+    Position here is link position, not write order, and the difference is
+    visible: a host tool registered after an atom sorts *before* that atom's,
+    where a single appended list would have put it last.  It is left that way
+    on purpose.  Services and policies are numbered per write because their
+    number decides an outcome — which of two writes to one key wins, and where
+    a policy sits in a composed chain.  A tool name resolves to nothing: two
+    tools cannot share one, ``register_tool`` refuses the collision outright,
+    and what the list order decides is only the sequence the model is shown
+    them in.  Numbering every tool to reproduce an interleaving nothing reads
+    would be a second ordering account to keep in step with this one.
     """
 
     __slots__ = ("_linked", "_own")
@@ -640,13 +668,40 @@ class ContextOwnership:
         return self.services.get(key)
 
 
-def ownership_of(linked: Sequence[AtomContext]) -> ContextOwnership:
-    """Index which linked context holds each tool, policy, renderer, service."""
+def ownership_of(
+    own: ServiceRegistry,
+    linked: Sequence[AtomContext],
+) -> ContextOwnership:
+    """Index which linked context holds each tool, policy, renderer, service.
+
+    Every table here is indexed the way that table is *resolved*, because an
+    index that ordered its candidates differently from the reader it describes
+    would name one context while the session served another's value.
+
+    Services are the one table where that is not link order.  A key resolves to
+    the highest ``_ServiceEntry.order`` anywhere in the chain — write order, so
+    that linking a registry cannot change what a key already resolved to — and
+    a context can rebind a key long after a later-linked context wrote it.  So
+    the winner is picked by the same number ``ServiceRegistry._lookup`` picks
+    it by, and the session's own registry takes part: a host write that is
+    later than every atom's wins the key and belongs to nobody, which is what a
+    ``None`` owner means.
+
+    The rest need no tiebreak.  Tools and policies are keyed by identity and no
+    two contexts can hold the same object.  Renderers overlay in link order —
+    ``ChainedRenderers`` builds its view the same way, later-linked last — so
+    iterating ``linked`` in order and overwriting is exactly the resolution.
+    The host's own renderers are deliberately absent for the same reason: a
+    linked context wins that source however late the host wrote it.
+    """
 
     tools: dict[int, str] = {}
     policies: dict[int, str] = {}
     renderers: dict[str, str] = {}
     services: dict[str, str] = {}
+    winning: dict[str, int] = {
+        key: entry.order for key, entry in own.own_table().items()
+    }
     for context in linked:
         owner = context.module_path
         for tool in context.tables.tools:
@@ -655,14 +710,69 @@ def ownership_of(linked: Sequence[AtomContext]) -> ContextOwnership:
             policies[id(row.policy)] = owner
         for source in context.tables.renderers:
             renderers[source] = owner
-        for key in context.services.own_names():
-            services[key] = owner
+        for key, entry in context.services.own_table().items():
+            held = winning.get(key)
+            if held is None or entry.order > held:
+                winning[key] = entry.order
+                services[key] = owner
     return ContextOwnership(
         tools=tools,
         policies=policies,
         renderers=renderers,
         services=services,
     )
+
+
+class DepartedContexts:
+    """The contexts a session has unlinked, held weakly until it shuts down.
+
+    Here for the one write of a departed atom that is not inert.  A table write
+    into an unlinked context reaches nobody because the write *is* the row; an
+    effect body is arbitrary code that runs where it is called, so recording
+    one after departure changes something and leaves the inverse in a log the
+    session no longer aggregates.  Refusing that call instead would be the log
+    reading a revocation bit, which is the shape this design removes.
+
+    Weakly, because a context nobody holds has nobody left to write through it,
+    and a session that supersedes an atom on a timer must not accumulate every
+    incarnation it ever removed.
+    """
+
+    __slots__ = ("_refs",)
+
+    def __init__(self) -> None:
+        self._refs: list[weakref.ref[AtomContext]] = []
+
+    def note(self, context: AtomContext) -> None:
+        """Record one departure, dropping references whose context is gone."""
+
+        self._refs[:] = [ref for ref in self._refs if ref() is not None]
+        self._refs.append(weakref.ref(context))
+
+    def forget(self, context: AtomContext) -> None:
+        """Drop one context, for a rollback that has linked it again."""
+
+        self._refs[:] = [
+            ref for ref in self._refs if ref() is not None and ref() is not context
+        ]
+
+    def undo(self) -> tuple[BaseException, ...]:
+        """Revert what each departed context recorded, newest departure first.
+
+        Reverted rather than released, which is the difference from a context
+        that is still linked when the session shuts down: that one is being
+        abandoned along with the composition it belongs to, while this one's
+        removal already decided that what it wrote comes back out — and a write
+        made after that decision is under the same decision, just late.
+        """
+
+        failures: list[BaseException] = []
+        for ref in reversed(self._refs):
+            context = ref()
+            if context is not None:
+                failures.extend(context.suspend().revert())
+        self._refs.clear()
+        return tuple(failures)
 
 
 def unlink_all(session_bus: EventBus, contexts: Sequence[AtomContext]) -> None:
@@ -680,6 +790,7 @@ __all__ = [
     "ChainedTools",
     "ContextOwnership",
     "ContextTables",
+    "DepartedContexts",
     "PolicyRow",
     "ownership_of",
     "policy_row",

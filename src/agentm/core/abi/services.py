@@ -99,6 +99,14 @@ class ServiceRole[T]:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnedService:
+    """One entry in a registry's own table: what it holds, and when written."""
+
+    service: object
+    order: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ServiceEntry:
     service: object
     protocol: type | None = None
@@ -169,6 +177,24 @@ class ServiceRegistry:
         """The keys in this registry's own table, chain excluded."""
 
         return list(self._services)
+
+    def own_table(self) -> dict[str, OwnedService]:
+        """This node's own entries, chain excluded, with their write order.
+
+        Two readers need this and both need the order rather than the mere
+        fact of an entry.  One says which node a key resolves *out of*, across
+        nodes that cannot see each other: the answer is the highest order, the
+        same tiebreak ``_lookup`` applies, and asking each node "is this yours"
+        would answer in a different order from resolution.  The other undoes a
+        write by putting back what it shadowed *here* -- restoring what the
+        chain resolved would copy another node's entry into this one, where it
+        would win by being newer.
+        """
+
+        return {
+            name: OwnedService(service=entry.service, order=entry.order)
+            for name, entry in self._services.items()
+        }
 
     # --- Resolution ---
 
@@ -418,6 +444,7 @@ class ServiceRegistry:
 
 
 __all__ = [
+    "OwnedService",
     "ServiceNotFound",
     "ServiceRegistry",
     "ServiceRole",

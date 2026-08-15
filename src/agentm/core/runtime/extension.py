@@ -76,6 +76,20 @@ if TYPE_CHECKING:
 
 _FILE_EXTENSION_LOAD_LOCK = threading.Lock()
 
+_INACTIVE_API = (
+    "atom cannot {action} during installation; defer work to SessionReadyEvent. "
+    "A task that reads this after the installation is over is a task of an "
+    "installation that failed: the api of a failed install is never activated, "
+    "so this will not start working and the task should stop."
+)
+"""Refusal for the surface an atom may not touch before its ``install`` returns.
+
+One string for the two facades, which is also what keeps the second sentence
+true of both: activation happens once, for an installation that got that far,
+and nothing clears it -- so an api still refusing is either mid-install or the
+residue of one that never landed.
+"""
+
 
 class _AtomEventBusFacade(EventBus):
     """Atom-visible bus surface without lifecycle-control capabilities.
@@ -103,10 +117,7 @@ class _AtomEventBusFacade(EventBus):
 
     def _require_active(self, action: str) -> None:
         if not self.__active():
-            raise RuntimeError(
-                f"atom cannot {action} during installation; "
-                "defer work to SessionReadyEvent"
-            )
+            raise RuntimeError(_INACTIVE_API.format(action=action))
 
     def on(
         self,
@@ -191,10 +202,7 @@ class _AtomAPIFacade:
 
     def _require_active(self, action: str) -> None:
         if not self.__active:
-            raise RuntimeError(
-                f"atom cannot {action} during installation; "
-                "defer work to SessionReadyEvent"
-            )
+            raise RuntimeError(_INACTIVE_API.format(action=action))
 
     @property
     def ctx(self) -> SessionContext:
@@ -493,12 +501,23 @@ async def install_extension(
     try:
         manifest = load_manifest_for_spec(spec)
         atom_name = manifest.name if manifest is not None else None
-        if replace and atom_name is not None:
+        if replace:
             # Unlink even when the module path is unchanged. It is derived from
             # the source digest, so a config-only reload resolves to the same
             # module, and skipping the detach would leave the previous
             # registrations in place for install() to collide with.
-            found = api.installed_atom_module_path(atom_name)
+            #
+            # By manifest name first, because a file atom is loaded under a
+            # content-addressed module name and two revisions of one atom share
+            # a name and nothing else. By module path when there is no manifest
+            # to name: ``replace=True`` means supersede whatever is installed
+            # here, and the session refuses a second live context for a path
+            # that is.
+            found = (
+                None if atom_name is None else api.installed_atom_module_path(atom_name)
+            )
+            if found is None and api.context_for(module_path) is not None:
+                found = module_path
             if found is not None:
                 superseded = found
                 superseded_residue = api.remove_atom_registrations(superseded)
