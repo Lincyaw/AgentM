@@ -16,7 +16,6 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractContextManager
-from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
 from typing import Literal, TYPE_CHECKING, Any
@@ -32,6 +31,7 @@ from agentm.core.abi.bus import (
     EventReducer,
     Handler,
 )
+from agentm.core.abi.effects import EffectBody, EffectHandle
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.events import ExtensionInstallEvent
 from agentm.core.abi.manifest import ExtensionManifest
@@ -48,6 +48,7 @@ from agentm.core.abi.session_api import (
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.store import TrajectoryDiagnostic
 from agentm.core.lib.async_cancel import await_known_outcome
+from agentm.core.runtime.atom_context import AtomContext
 from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
     ValidationIssue,
     extension_helper_imports,
@@ -73,36 +74,50 @@ if TYPE_CHECKING:
     from agentm.core.runtime.session import Session
 
 
-_INSTALLING_EXTENSION: ContextVar[str | None] = ContextVar(
-    "_installing_extension", default=None
-)
 _FILE_EXTENSION_LOAD_LOCK = threading.Lock()
 
+_INACTIVE_API = (
+    "atom cannot {action} during installation; defer work to SessionReadyEvent. "
+    "A task that reads this after the installation is over is a task of an "
+    "installation that failed: the api of a failed install is never activated, "
+    "so this will not start working and the task should stop."
+)
+"""Refusal for the surface an atom may not touch before its ``install`` returns.
 
-def current_installing_extension() -> str:
-    return _INSTALLING_EXTENSION.get() or ""
+One string for the two facades, which is also what keeps the second sentence
+true of both: activation happens once, for an installation that got that far,
+and nothing clears it -- so an api still refusing is either mid-install or the
+residue of one that never landed.
+"""
 
 
 class _AtomEventBusFacade(EventBus):
-    """Atom-visible bus surface without lifecycle-control capabilities."""
+    """Atom-visible bus surface without lifecycle-control capabilities.
 
-    __slots__ = ("__active", "__session")
+    Subscribing writes into the atom's own context segment; emitting reaches
+    the session's bus, which dispatches to every linked segment.  That
+    asymmetry is the whole model in one class: a write goes where the object
+    is, a read resolves up the chain -- so an atom that has been unlinked can
+    still emit, which is what a superseded ``atom_watch`` needs in order to
+    report the handover it is in the middle of.
+    """
+
+    __slots__ = ("__active", "__context", "__session")
 
     def __init__(
         self,
         session: "Session",
+        context: AtomContext,
         active: Callable[[], bool],
     ) -> None:
         super().__init__()
         self.__session = session
+        self.__context = context
         self.__active = active
 
     def _require_active(self, action: str) -> None:
         if not self.__active():
-            raise RuntimeError(
-                f"atom cannot {action} during installation; "
-                "defer work to SessionReadyEvent"
-            )
+            raise RuntimeError(_INACTIVE_API.format(action=action))
 
     def on(
         self,
@@ -112,8 +127,12 @@ class _AtomEventBusFacade(EventBus):
         priority: int = 500,
         owner: str | None = None,
     ) -> Callable[[], None]:
+        # ``owner`` exists on ``EventBus.on`` and is accepted here only so this
+        # stays substitutable for one. It is dropped rather than honoured:
+        # attribution is which segment the subscription lands in, and this
+        # object can reach exactly one.
         del owner
-        return self.__session.on(channel, handler, priority=priority)
+        return self.__context.on(channel, handler, priority=priority)
 
     def add_observer(
         self,
@@ -122,7 +141,7 @@ class _AtomEventBusFacade(EventBus):
         owner: str | None = None,
     ) -> Callable[[], None]:
         del owner
-        return self.__session.add_observer(observer)
+        return self.__context.add_observer(observer)
 
     async def emit(self, channel: str, event: Any) -> list[Any]:
         self._require_active("emit events")
@@ -153,14 +172,27 @@ class _AtomEventBusFacade(EventBus):
 
 
 class _AtomAPIFacade:
-    """Concrete capability object exposing exactly the declared AtomAPI."""
+    """The object one installation is handed: its context, plus the session.
 
-    __slots__ = ("__active", "__bus", "__session")
+    Every write goes to ``self.__context`` -- the atom's own tables -- and
+    every read and lifecycle call goes to the session.  There is no owner slot,
+    no ``for_owner``, and nothing to revoke: an installation that has been
+    unlinked keeps this object and keeps reading through it, while its writes
+    land in tables nobody aggregates.
 
-    def __init__(self, session: "Session") -> None:
+    ``__active`` is the one flag here and it is only about *during* install: an
+    atom may not emit, spawn, or push a trigger before its own ``install()``
+    has returned.  It is set once and never cleared, so it can never start
+    refusing something that used to work.
+    """
+
+    __slots__ = ("__active", "__bus", "__context", "__session")
+
+    def __init__(self, session: "Session", context: AtomContext) -> None:
         self.__active = False
         self.__session = session
-        self.__bus = _AtomEventBusFacade(session, self._is_active)
+        self.__context = context
+        self.__bus = _AtomEventBusFacade(session, context, self._is_active)
 
     def _is_active(self) -> bool:
         return self.__active
@@ -170,10 +202,7 @@ class _AtomAPIFacade:
 
     def _require_active(self, action: str) -> None:
         if not self.__active:
-            raise RuntimeError(
-                f"atom cannot {action} during installation; "
-                "defer work to SessionReadyEvent"
-            )
+            raise RuntimeError(_INACTIVE_API.format(action=action))
 
     @property
     def ctx(self) -> SessionContext:
@@ -186,14 +215,14 @@ class _AtomAPIFacade:
         *,
         priority: int = 500,
     ) -> Callable[[], None]:
-        return self.__session.on(channel, handler, priority=priority)
+        return self.__context.on(channel, handler, priority=priority)
 
     @property
     def bus(self) -> EventBus:
         return self.__bus
 
     def register_tool(self, tool: "Tool") -> None:
-        self.__session.register_tool(tool)
+        self.__context.register_tool(tool)
 
     def register_context_policy(
         self,
@@ -201,17 +230,17 @@ class _AtomAPIFacade:
         *,
         priority: int = 500,
     ) -> None:
-        self.__session.register_context_policy(policy, priority=priority)
+        self.__context.register_context_policy(policy, priority=priority)
 
     def register_trigger_renderer(
         self,
         source: str,
         renderer: "TriggerRenderer",
     ) -> None:
-        self.__session.register_trigger_renderer(source, renderer)
+        self.__context.register_trigger_renderer(source, renderer)
 
     def register_trigger_codec(self, source: str, codec: "TriggerCodec") -> None:
-        self.__session.register_trigger_codec(source, codec)
+        self.__context.register_trigger_codec(source, codec)
 
     def register_operations(
         self,
@@ -220,7 +249,7 @@ class _AtomAPIFacade:
         service_scope: ServiceScope = "session",
         **kwargs: object,
     ) -> None:
-        self.__session.register_operations(
+        self.__context.register_operations(
             replace=replace,
             service_scope=service_scope,
             **kwargs,
@@ -233,7 +262,25 @@ class _AtomAPIFacade:
         *,
         replace: bool = False,
     ) -> None:
-        self.__session.register_provider(name, config, replace=replace)
+        self.__context.register_provider(name, config, replace=replace)
+
+    def effect(
+        self,
+        body: EffectBody,
+        *,
+        provides: str = "",
+        retain: str = "",
+        subject: object = None,
+    ) -> EffectHandle:
+        return self.__context.effect(
+            body,
+            provides=provides,
+            retain=retain,
+            subject=subject,
+        )
+
+    async def settle(self) -> None:
+        await self.__context.settle()
 
     def has_provider(self, name: str) -> bool:
         return self.__session.has_provider(name)
@@ -287,7 +334,9 @@ class _AtomAPIFacade:
 
     @property
     def services(self) -> ServiceRegistry:
-        return self.__session.services
+        """This atom's own registry, which resolves up into the session's."""
+
+        return self.__context.services
 
     async def spawn(
         self,
@@ -441,23 +490,56 @@ async def install_extension(
     )
     error: str | None = None
     superseded: str | None = None
+    # Taken before anything moves, so it holds the link list with the atom
+    # about to be superseded still in it and the one about to be installed not
+    # yet in it. Putting it back is what makes a failed installation's writes
+    # disappear and a superseded atom's come back.
     snapshot = api._capture_extension_install_state()
-    atom_api = _AtomAPIFacade(api)
+    context = AtomContext(api, module_path)
+    atom_api = _AtomAPIFacade(api, context)
+    superseded_residue = None
     try:
         manifest = load_manifest_for_spec(spec)
         atom_name = manifest.name if manifest is not None else None
-        if replace and atom_name is not None:
-            # Detach even when the module path is unchanged. It is derived from
+        if replace:
+            # Unlink even when the module path is unchanged. It is derived from
             # the source digest, so a config-only reload resolves to the same
             # module, and skipping the detach would leave the previous
             # registrations in place for install() to collide with.
-            found = api.installed_atom_module_path(atom_name)
+            #
+            # By manifest name first, because a file atom is loaded under a
+            # content-addressed module name and two revisions of one atom share
+            # a name and nothing else. By module path when there is no manifest
+            # to name: ``replace=True`` means supersede whatever is installed
+            # here, and the session refuses a second live context for a path
+            # that is.
+            found = (
+                None if atom_name is None else api.installed_atom_module_path(atom_name)
+            )
+            if found is None and api.context_for(module_path) is not None:
+                found = module_path
             if found is not None:
                 superseded = found
-                api.remove_atom_registrations(superseded)
+                superseded_residue = api.remove_atom_registrations(superseded)
+        # Linked before ``install()`` runs, so what the atom writes is part of
+        # the session while it is writing it -- the duplicate-tool check, the
+        # capability verification and the atom's own reads all depend on that.
+        context.link_into(api)
         result = load_extension(spec, atom_api)
         if inspect.isawaitable(result):
             await result
+        # The context's own queued bodies, run by the context that queued them.
+        # Nothing is handed out or taken back: settling is draining your own
+        # log, and a body queued after this one returns is reported by the
+        # digest as unsettled rather than silently accepted.
+        await context.settle()
+        # Here rather than at the end: ``activate`` opens the surface an atom
+        # may not touch while it is installing, and everything below awaits.
+        # A flag flipped after an await is a window in which a task the atom
+        # started is refused something it is entitled to -- which is the shape
+        # that has to stay closed. After this line there is no await left
+        # between the atom's own code finishing and its api being usable.
+        atom_api.activate()
         api.record_installed_extension(spec, runtime=runtime, atom_name=atom_name)
         if runtime:
             await _record_runtime_install(
@@ -467,12 +549,37 @@ async def install_extension(
                 trigger=trigger,
                 superseded=superseded,
             )
-        atom_api.activate()
+        if superseded_residue is not None:
+            # The replacement landed, so what the previous incarnation held is
+            # finally undone rather than merely set aside. Its tables are
+            # already out of the session; this runs the writes that had no
+            # table -- whatever it recorded through ``api.effect``.
+            failures = superseded_residue.revert()
+            if failures:
+                logger.warning(
+                    "superseded atom {} left {} effect(s) that would not undo",
+                    superseded,
+                    len(failures),
+                )
         logger.debug("installed atom: {}", module_path)
     except BaseException as exc:
         error = str(exc) or type(exc).__name__
         try:
             api._restore_extension_install_state(snapshot)
+            # The failed installation's own context is unlinked by the restore
+            # above; its tables go with it, and what it recorded through
+            # ``api.effect`` is undone here because nothing else describes it.
+            # An atom that kept its api can go on recording effects through it
+            # afterwards -- a body is arbitrary code and runs where it is
+            # called -- so the context is noted as departed and whatever it
+            # records is undone at shutdown, exactly as a detached atom's is.
+            api.note_departed_context(context)
+            context.suspend().revert()
+            if superseded_residue is not None:
+                # Nothing to un-revert: the survivor was set aside, not undone,
+                # so it is simply given back what it held -- into the same
+                # context object it is still holding the api of.
+                superseded_residue.context.resume(superseded_residue)
         except BaseException as rollback_error:
             raise BaseExceptionGroup(
                 f"atom installation and rollback failed: {module_path}",
@@ -553,26 +660,19 @@ def load_extension(
                     ValueError(_format_config_validation_error(schema_cls, exc)),
                 ) from exc
 
-    token = _INSTALLING_EXTENSION.set(module_path)
     try:
         result = install(api, resolved_config)
     except Exception as exc:
-        _INSTALLING_EXTENSION.reset(token)
         raise ExtensionLoadError(module_path, exc) from exc
     if not inspect.isawaitable(result):
-        _INSTALLING_EXTENSION.reset(token)
         return None
     awaitable_result = result
-    _INSTALLING_EXTENSION.reset(token)
 
     async def _await_install() -> None:
-        inner_token = _INSTALLING_EXTENSION.set(module_path)
         try:
             await awaitable_result
         except Exception as exc:
             raise ExtensionLoadError(module_path, exc) from exc
-        finally:
-            _INSTALLING_EXTENSION.reset(inner_token)
 
     return _await_install()
 
@@ -826,7 +926,6 @@ def _raise_blocking_validation_issues(
 
 __all__ = [
     "ExtensionLoadError",
-    "current_installing_extension",
     "install_extension",
     "load_extension",
     "load_extension_module",

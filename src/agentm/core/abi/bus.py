@@ -57,13 +57,165 @@ class BusPriority:
 
 
 @dataclass(slots=True)
+class BusSegment:
+    """One context's own subscriptions, dispatched as part of a bus.
+
+    An atom subscribes into its own segment and the session dispatches to it
+    because the segment is *linked* into the bus.  Detaching the atom unlinks
+    the segment, so its handlers stop being reached without anything being
+    removed from them — and a rollback that relinks it puts every handler back
+    exactly where it dispatched from, because position is ``(priority, seq)``
+    and both were fixed when the subscription was made.
+
+    ``seq`` comes from the bus rather than from the segment: dispatch order is
+    a property of the whole bus, and two segments numbering themselves
+    independently would interleave by accident.
+    """
+
+    _bus: EventBus
+    owner: str | None = None
+    handlers: dict[str, list[_Subscription]] = field(default_factory=dict)
+    observers: list[_ObserverRecord] = field(default_factory=list)
+
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = BusPriority.NORMAL,
+    ) -> Callable[[], None]:
+        """Subscribe into this segment; return an unsubscribe fn."""
+
+        import bisect
+
+        sub = _Subscription(
+            priority=priority,
+            seq=self._bus._take_seq(),
+            handler=handler,
+            owner=self.owner,
+        )
+        subs = self.handlers.setdefault(channel, [])
+        bisect.insort(subs, sub, key=_sub_key)
+
+        def unsubscribe() -> None:
+            channel_subs = self.handlers.get(channel)
+            if channel_subs is None:
+                return
+            for idx, existing in enumerate(channel_subs):
+                if existing is sub:
+                    del channel_subs[idx]
+                    return
+
+        return unsubscribe
+
+    def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
+        """Attach an observer into this segment; return an unsubscribe fn."""
+
+        record = _ObserverRecord(observer=observer, owner=self.owner)
+        self.observers.append(record)
+
+        def unsubscribe() -> None:
+            try:
+                self.observers.remove(record)
+            except ValueError:
+                return
+
+        return unsubscribe
+
+    def take(self) -> BusSegment:
+        """Move every attachment into a fresh segment, leaving this empty."""
+
+        moved = BusSegment(_bus=self._bus, owner=self.owner)
+        moved.handlers = self.handlers
+        moved.observers = self.observers
+        self.handlers = {}
+        self.observers = []
+        return moved
+
+    def give(self, other: BusSegment) -> None:
+        """Take every attachment back from a segment ``take`` moved it into."""
+
+        for channel, subs in other.handlers.items():
+            kept = self.handlers.setdefault(channel, [])
+            kept[:0] = subs
+            kept.sort(key=_sub_key)
+        self.observers[:0] = other.observers
+        other.handlers = {}
+        other.observers = []
+
+
+@dataclass(slots=True)
 class EventBus:
-    """Channel-keyed pub/sub with priority-ordered dispatch."""
+    """Channel-keyed pub/sub with priority-ordered dispatch.
+
+    What it dispatches is the union of its own subscriptions and those of every
+    linked ``BusSegment``, ordered by ``(priority, seq)`` across all of them —
+    the same total order a single table gave, since ``seq`` is allocated here.
+    """
 
     _handlers: dict[str, list[_Subscription]] = field(default_factory=dict)
     _observers: list[_ObserverRecord] = field(default_factory=list)
     _next_seq: int = 0
     _frozen_clear: bool = False
+    _linked: list[BusSegment] = field(default_factory=list)
+
+    # --- Segments ---
+
+    def _take_seq(self) -> int:
+        seq = self._next_seq
+        self._next_seq += 1
+        return seq
+
+    def segment(self, owner: str | None = None) -> BusSegment:
+        """Mint a segment that dispatches in this bus's order once linked."""
+
+        return BusSegment(_bus=self, owner=owner)
+
+    def link(self, segment: BusSegment) -> None:
+        """Dispatch to ``segment``'s attachments as well as this bus's own."""
+
+        if any(existing is segment for existing in self._linked):
+            return
+        self._linked.append(segment)
+
+    def unlink(self, segment: BusSegment) -> None:
+        """Stop dispatching to ``segment``; safe to repeat."""
+
+        self._linked = [
+            existing for existing in self._linked if existing is not segment
+        ]
+
+    def subscriptions(self, channel: str) -> list[_Subscription]:
+        """Everything ``channel`` dispatches to, in dispatch order."""
+
+        own = self._handlers.get(channel)
+        if not self._linked:
+            return list(own) if own else []
+        merged: list[_Subscription] = list(own) if own else []
+        for segment in self._linked:
+            linked = segment.handlers.get(channel)
+            if linked:
+                merged.extend(linked)
+        merged.sort(key=_sub_key)
+        return merged
+
+    def channels(self) -> list[str]:
+        """Every channel with at least one subscription anywhere on the bus."""
+
+        names = set(self._handlers)
+        for segment in self._linked:
+            names.update(segment.handlers)
+        return sorted(names)
+
+    def all_observers(self) -> list[_ObserverRecord]:
+        """Every observer, this bus's own first and then each linked segment's."""
+
+        if not self._linked:
+            return list(self._observers)
+        records = list(self._observers)
+        for segment in self._linked:
+            records.extend(segment.observers)
+        return records
 
     def on(
         self,
@@ -78,9 +230,8 @@ class EventBus:
         import bisect
 
         sub = _Subscription(
-            priority=priority, seq=self._next_seq, handler=handler, owner=owner
+            priority=priority, seq=self._take_seq(), handler=handler, owner=owner
         )
-        self._next_seq += 1
         subs = self._handlers.setdefault(channel, [])
         bisect.insort(subs, sub, key=_sub_key)
 
@@ -94,28 +245,6 @@ class EventBus:
                     return
 
         return unsubscribe
-
-    def remove_owner(self, owner: str) -> int:
-        """Drop every subscription and observer made by ``owner``; return how many.
-
-        Each subscription already carries the atom that made it, so replacing
-        one atom with a newer version does not need the unsubscribe closures
-        that atom never kept. An observer sees every dispatch on the bus, so
-        one left behind by an uninstalled atom is the loudest kind of leak.
-        """
-
-        removed = 0
-        for channel, subs in list(self._handlers.items()):
-            kept = [sub for sub in subs if sub.owner != owner]
-            removed += len(subs) - len(kept)
-            if kept:
-                self._handlers[channel] = kept
-            else:
-                del self._handlers[channel]
-        kept_observers = [record for record in self._observers if record.owner != owner]
-        removed += len(self._observers) - len(kept_observers)
-        self._observers = kept_observers
-        return removed
 
     def add_observer(
         self,
@@ -145,13 +274,13 @@ class EventBus:
 
         dispatch_id = uuid.uuid4().hex
         self._observer_emit_start(channel, event, dispatch_id)
-        subs = self._handlers.get(channel)
-        if not subs:
+        # Already a fresh list, which is also the guard against a handler
+        # mutating subscriptions while this dispatch walks them.
+        snapshot = self.subscriptions(channel)
+        if not snapshot:
             self._observer_emit_end(channel, event, [], dispatch_id)
             return []
 
-        # Snapshot to guard against handlers mutating subscriptions
-        snapshot = list(subs)
         results: list[Any] = []
         for sub in snapshot:
             start_ns = time.perf_counter_ns()
@@ -214,12 +343,11 @@ class EventBus:
         dispatch_id = uuid.uuid4().hex
         initial_event = event
         self._observer_emit_start(channel, initial_event, dispatch_id)
-        subs = self._handlers.get(channel)
-        if not subs:
+        snapshot = self.subscriptions(channel)
+        if not snapshot:
             self._observer_emit_end(channel, initial_event, [], dispatch_id)
             return event, []
 
-        snapshot = list(subs)
         results: list[Any] = []
         try:
             for sub in snapshot:
@@ -272,13 +400,13 @@ class EventBus:
 
         dispatch_id = uuid.uuid4().hex
         self._observer_emit_start(channel, event, dispatch_id)
-        subs = self._handlers.get(channel)
-        if not subs:
+        # Already a fresh list, which is also the guard against a handler
+        # mutating subscriptions while this dispatch walks them.
+        snapshot = self.subscriptions(channel)
+        if not snapshot:
             self._observer_emit_end(channel, event, [], dispatch_id)
             return []
 
-        # Snapshot to guard against handlers mutating subscriptions
-        snapshot = list(subs)
         results: list[Any] = []
         for sub in snapshot:
             start_ns = time.perf_counter_ns()
@@ -333,6 +461,7 @@ class EventBus:
         copied._observers = list(self._observers)
         copied._next_seq = self._next_seq
         copied._frozen_clear = self._frozen_clear
+        copied._linked = list(self._linked)
         return copied
 
     def replace_from(self, other: EventBus) -> None:
@@ -345,9 +474,22 @@ class EventBus:
         self._observers = list(other._observers)
         self._next_seq = other._next_seq
         self._frozen_clear = other._frozen_clear
+        self._linked = list(other._linked)
 
     def clear(self) -> None:
-        """Clear all handlers.  Blocked after freeze_clear()."""
+        """Clear all handlers, linked segments included.  Blocked after freeze_clear().
+
+        A linked segment's handlers are handlers this bus dispatches, so
+        leaving one linked would leave behind exactly what this promises to
+        remove.  A segment is linked or not as a whole, so its observers go
+        with it; this bus's own observers stay, as they always have.
+
+        Unlinking here is not coordinated with whoever linked the segments: a
+        session holds the same links in its context list and its service
+        registry, and clearing the bus does not touch those.  This is the bus's
+        own operation, and a composed session freezes it at ``start()`` for
+        that reason.
+        """
         if self._frozen_clear:
             logger.warning(
                 "EventBus.clear() ignored — bus is frozen; "
@@ -355,15 +497,17 @@ class EventBus:
             )
             return
         self._handlers.clear()
+        self._linked.clear()
 
     def _force_clear(self) -> None:
         """Unconditional clear — for Session.shutdown() only."""
         self._frozen_clear = False
         self._handlers.clear()
         self._observers.clear()
+        self._linked.clear()
 
     def _observer_emit_start(self, channel: str, event: Any, dispatch_id: str) -> None:
-        for record in list(self._observers):
+        for record in self.all_observers():
             try:
                 record.observer.on_emit_start(channel, event, dispatch_id)
             except Exception:
@@ -377,7 +521,7 @@ class EventBus:
         dispatch_id: str,
         owner: str | None,
     ) -> None:
-        for record in list(self._observers):
+        for record in self.all_observers():
             try:
                 record.observer.on_handler_start(
                     channel, handler, event, dispatch_id, owner
@@ -396,7 +540,7 @@ class EventBus:
         dispatch_id: str,
         owner: str | None,
     ) -> None:
-        for record in list(self._observers):
+        for record in self.all_observers():
             try:
                 record.observer.on_handler_done(
                     channel,
@@ -418,7 +562,7 @@ class EventBus:
         results: list[Any],
         dispatch_id: str,
     ) -> None:
-        for record in list(self._observers):
+        for record in self.all_observers():
             try:
                 record.observer.on_emit_end(channel, event, results, dispatch_id)
             except Exception:
@@ -459,6 +603,7 @@ class EventBusObserver:
 
 __all__ = [
     "BusPriority",
+    "BusSegment",
     "Event",
     "EventBus",
     "EventBusObserver",

@@ -22,6 +22,7 @@ from agentm.core.abi.bus import EventBus, Handler
 from agentm.core.abi.cancel import CancelReason, CancelSignal
 from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.context import ContextPolicy
+from agentm.core.abi.effects import EffectBody, EffectHandle
 from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
 from agentm.core.abi.provider import (
     ProviderConfig,
@@ -459,10 +460,52 @@ class AtomAPI(Protocol):
         """Durable trajectory store, when the host configured persistence."""
         ...
 
+    # --- Effects (the escape hatch) ------------------------------------------
+
+    def effect(
+        self,
+        body: EffectBody,
+        *,
+        provides: str = "",
+        retain: str = "",
+        subject: object = None,
+    ) -> EffectHandle:
+        """Perform a write the platform has no table for, handing back its undo.
+
+        For everything ``register_*`` does not cover — a background task, an
+        open connection, a patched attribute. ``body`` performs the write and
+        returns (or yields) the function that undoes it; the inverse runs when
+        this atom is uninstalled, in the reverse of the order the writes
+        happened. A body that produces no inverse, records no nested effect and
+        names no ``retain`` reason is refused where it was written.
+
+        An ``async`` body must be an async generator, and it runs at the next
+        ``settle`` rather than here.
+        """
+        ...
+
+    async def settle(self) -> None:
+        """Run the async effect bodies this atom has queued and not yet run.
+
+        The installation calls this once ``install()`` has returned, which is
+        what runs an async body recorded during installation. An atom that
+        queues one later — from a task of its own — settles it itself. There is
+        no window and nothing to hold: settling is draining your own log.
+        """
+        ...
+
     # --- Services (typed DI) -------------------------------------------------
 
     @property
-    def services(self) -> ServiceRegistry: ...
+    def services(self) -> ServiceRegistry:
+        """This atom's own service registry, resolving up into the session's.
+
+        Writes land in the atom's own table and the session sees them because
+        the atom's context is linked into it; uninstalling unlinks it. Reads
+        resolve up the chain, so an atom still reads what the session holds
+        after it has been detached — including whatever replaced it.
+        """
+        ...
 
     # --- Child session -------------------------------------------------------
 

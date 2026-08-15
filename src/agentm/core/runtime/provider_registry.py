@@ -57,6 +57,7 @@ class ProviderRegistry:
         committed_turns: Callable[[], Sequence[Turn]],
         active_set: Callable[[], ActiveSetFingerprint | None],
         emit_register_event: Callable[[str, str, dict[str, object]], None],
+        refile_service: Callable[[str], str | None],
         stream_fn: StreamFn | None = None,
         model: Model | None = None,
         identity: ProviderSessionIdentity | None = None,
@@ -65,6 +66,7 @@ class ProviderRegistry:
         self._committed_turns = committed_turns
         self._active_set = active_set
         self._emit_register_event = emit_register_event
+        self._refile_service = refile_service
         self.stream_fn = stream_fn
         self.model = model
         self._active_name: str | None = None
@@ -82,8 +84,19 @@ class ProviderRegistry:
         config: ProviderConfig,
         *,
         replace: bool = False,
+        into: ServiceRegistry | None = None,
+        owner: str | None = None,
     ) -> None:
-        """Register an LLM provider and refresh the active provider."""
+        """Register an LLM provider and refresh the active provider.
+
+        ``into`` is the registry the backing ``provider:<name>`` service is
+        written to, and ``owner`` is who that registry belongs to. Both come
+        from the atom context performing the write, never from an argument the
+        atom chose: this method is runtime-internal and unreachable from
+        ``AtomAPI``, which offers ``register_provider(name, config)`` and
+        nothing else. Omitting them is the host writing as itself.
+        """
+
         if not isinstance(name, str) or not name:
             raise ValueError("provider registry name must be a non-empty string")
         if not isinstance(config, ProviderConfig):
@@ -94,6 +107,7 @@ class ProviderRegistry:
                 f"ProviderConfig.name {config.name!r}"
             )
         key = f"{_SERVICE_PREFIX}{name}"
+        target = self._services if into is None else into
         previous = self._services.get(key)
         if previous is not None and not replace:
             raise ValueError(
@@ -113,19 +127,35 @@ class ProviderRegistry:
                 "cannot replace the session-bound provider with model "
                 f"{config.model.id!r}; expected {self._identity.model_id!r}"
             )
-        from agentm.core.runtime.extension import current_installing_extension
-
-        previous_owner = self._owners.get(name)
-        self._services.register(key, config, scope="session")
-        self._owners[name] = current_installing_extension() or None
+        # What this write is about to shadow *in the registry being written*,
+        # which is the only thing an undo of it may put back -- and moved out
+        # rather than overwritten, so the undo can put back the entry itself.
+        # ``previous`` is what the whole *chain* resolves, and that entry may
+        # live in another node: writing it here would copy another context's
+        # registration into this one, where it would win by being the newer
+        # write and be attributed to whoever owns this table. Re-registering
+        # even this node's own entry would do half of that -- same value, fresh
+        # write order, so a registration that had lost the key would win it.
+        shadowed = target.swap_entry(key, None)
+        target.register(key, config, scope="session")
+        self._owners[name] = owner
         try:
             self.activate()
         except BaseException:
+            # The undo of the swap is the same swap back: the failed write
+            # leaves, and whatever this node held goes back at the number it
+            # had, so whatever the chain resolved before -- in whichever node
+            # held it -- resolves again. Nothing fires for a swap, so both
+            # accounts of who holds the key are re-filed off the tree rather
+            # than guessed from what the index said before.
+            target.swap_entry(key, shadowed)
+            uncovered_owner = self._refile_service(key)
             if previous is None:
-                self.unregister(name)
+                self._owners.pop(name, None)
+                if self._active_name == name:
+                    self._active_name = None
             else:
-                self._services.register(key, previous, scope="session")
-                self._owners[name] = previous_owner
+                self._owners[name] = uncovered_owner
             raise
         self._emit_register_event("provider", name, {"provider": config})
 
@@ -150,6 +180,17 @@ class ProviderRegistry:
         self._owners.pop(name, None)
         if self._active_name == name:
             self._active_name = None
+
+    def note_owner(self, name: str, owner: str | None) -> None:
+        """Re-file one provider under the atom whose registration now resolves.
+
+        Unlinking a context uncovers whatever it was shadowing, and this index
+        is the one account of provider ownership that no chain resolves for
+        itself. Not a caller's choice of name: the session reads it off the
+        context tree and passes what it found.
+        """
+
+        self._owners[name] = owner
 
     def has(self, name: str) -> bool:
         return self._services.get(f"{_SERVICE_PREFIX}{name}") is not None

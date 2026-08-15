@@ -160,6 +160,7 @@ requirements:
       - path: src/agentm/core/abi/catalog.py
       - path: src/agentm/core/abi/codec.py
       - path: src/agentm/core/abi/compaction.py
+      - path: src/agentm/core/abi/effects.py
       - path: src/agentm/core/abi/context.py
       - path: src/agentm/core/abi/events.py
       - path: src/agentm/core/abi/lifecycle.py
@@ -193,6 +194,7 @@ requirements:
       - path: src/agentm/core/lib/tool_schema.py
       - path: src/agentm/core/lib/trajectory_store.py
       - path: src/agentm/core/lib/trajectory_nodes.py
+      - path: src/agentm/core/runtime/atom_context.py
       - path: src/agentm/core/runtime/catalog.py
       - path: src/agentm/core/runtime/composition_digest.py
       - path: src/agentm/core/runtime/driver.py
@@ -202,6 +204,7 @@ requirements:
       - path: src/agentm/core/runtime/extension_install.py
       - path: src/agentm/core/runtime/provider_registry.py
       - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/runtime/session_composition.py
       - path: src/agentm/core/runtime/session_core.py
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_meta.py

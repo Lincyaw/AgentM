@@ -56,6 +56,15 @@ from .context import (
     render_trigger,
     turn_to_messages,
 )
+from .effects import (
+    EffectBody,
+    EffectEntry,
+    EffectHandle,
+    EffectInverse,
+    EffectLog,
+    EffectOutcome,
+    EffectWithoutInverse,
+)
 from .errors import ExtensionLoadError
 from .events import (
     ApiRegisterEvent,
@@ -517,6 +526,13 @@ __all__ = [
     "EnvironmentRestoreStatus",
     "EnvironmentSnapshot",
     "EnvironmentSnapshotter",
+    "EffectBody",
+    "EffectEntry",
+    "EffectHandle",
+    "EffectInverse",
+    "EffectLog",
+    "EffectOutcome",
+    "EffectWithoutInverse",
     "Event",
     "EventBus",
     "EventBusObserver",

@@ -407,7 +407,7 @@ async def _ensure_store_session(
     initial_head: TrajectoryHead | None,
     root_session_id: str,
     parent_session_id: str | None,
-    trigger_renderers: dict[str, TriggerRenderer],
+    trigger_renderers: Mapping[str, TriggerRenderer],
 ) -> None:
     if store is None:
         return
@@ -421,7 +421,7 @@ async def _ensure_store_session(
                 session_id=meta.id,
                 root_session_id=root_session_id,
                 parent_session_id=parent_session_id,
-                renderers=trigger_renderers,
+                renderers=dict(trigger_renderers),
             )
         )
         last = nodes[-1] if nodes else None

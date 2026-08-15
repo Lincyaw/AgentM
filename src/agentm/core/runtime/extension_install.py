@@ -14,7 +14,7 @@ are carried over directly.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from agentm.core.abi.codec import CodecRegistry
@@ -164,7 +164,7 @@ class InstallLedger:
 
     def external_trigger_renderers(
         self,
-        renderers: dict[str, TriggerRenderer],
+        renderers: Mapping[str, TriggerRenderer],
     ) -> dict[str, TriggerRenderer]:
         return {
             source: renderer
