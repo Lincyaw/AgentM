@@ -53,8 +53,8 @@ bug in this module, not a licence to widen the list.
 
 * ``id()`` of any object.  Freshly constructed objects get fresh addresses, so
   an atom reinstalled from the same source would never compare equal.  ``id()``
-  appears below only as a *lookup key* into the install ledger, which keys
-  ownership that way, and never as a digested value.
+  appears below only as a *lookup key* into ``ContextOwnership``, which indexes
+  tools and policies by identity, and never as a digested value.
 
 * Session id, root/parent session id, turn ids, timestamps, and dispatch ids.
   These identify an occurrence, not a composition.
@@ -127,7 +127,7 @@ from agentm.core.runtime.session_core import SessionRuntime
 
 @dataclass(frozen=True, slots=True)
 class AtomEntry:
-    """One installed atom, as the ledger accounts for it."""
+    """One installed atom, as the installed set accounts for it."""
 
     module_path: str
     name: str | None
@@ -268,19 +268,13 @@ class CompositionDigest:
 def composition_digest(session: SessionRuntime) -> CompositionDigest:
     """Digest what ``session`` currently holds, without disturbing any of it."""
 
-    # ``capture`` is the ledger's own snapshot: the same ownership maps the
-    # install-failure rollback restores, read here rather than restored. Its
-    # tool and policy maps are keyed by ``id()``, which is why the lookups
-    # below take ids of live objects — an id is a key into this snapshot and
-    # never reaches the digest.
-    ledger = session._extensions.capture()
+    codec_owners = session._codec_owners
     bus = session.bus
     codec = session.codec
     providers = session._providers
-    # Ownership is read off the context tree, not off the ledger: a thing
-    # belongs to the context whose table it is in, and that is the only account
-    # a detach acts on. The ledger keeps a parallel one, which the attribution
-    # tests compare against this rather than this depending on.
+    # Ownership is read off the context tree, which is the only account of it:
+    # a thing belongs to the context whose table it is in, and that is what a
+    # detach acts on.
     owners = session.ownership()
     linked = session.linked_contexts()
 
@@ -289,22 +283,26 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
     # both of those re-resolve, and one of them freezes an identity into the
     # session. A digest that mutates its subject cannot witness anything.
     identity = providers._identity
-    atom_names = {path: name for name, path in ledger.atom_names.items()}
+    # The installed atoms are the linked contexts, so this reads the same list
+    # everything else reads. It used to be digested beside a separate table of
+    # replayable specs, on the reasoning that one left behind would resurrect a
+    # departed atom in every session spawned afterwards -- there is no separate
+    # table to leave behind now, so ``composition_specs`` witnesses the filter
+    # rather than a second list: which of the held atoms a child would replay.
+    installed = tuple(context for context in linked if context.installed)
 
     return CompositionDigest(
         atoms=tuple(
             AtomEntry(
-                module_path=module_path,
-                name=atom_names.get(module_path),
-                runtime=module_path in ledger.runtime_module_paths,
+                module_path=context.module_path,
+                name=context.atom_name,
+                runtime=context.runtime,
             )
-            for module_path in ledger.module_paths
+            for context in installed
         ),
-        # The replayable specs are what a child or a fork is rebuilt from. They
-        # track the installed set but are dropped by a separate line in
-        # ``forget``, so one left behind would resurrect a departed atom in
-        # every session spawned afterwards.
-        composition_specs=tuple(spec.module_path for spec in ledger.specs),
+        composition_specs=tuple(
+            context.spec.module_path for context in installed if not context.runtime
+        ),
         tools=tuple(
             ToolEntry(name=tool.name, owner=owners.tool(tool)) for tool in session.tools
         ),
@@ -328,7 +326,7 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
             SourceEntry(
                 source=source,
                 implementation=_identity(codec._trigger_codecs[source]),
-                owner=ledger.trigger_codec_owners.get(source),
+                owner=codec_owners.owner(source),
             )
             for source in sorted(codec._trigger_codecs)
         ),
@@ -573,8 +571,8 @@ def _encode_attribute(value: object, name: str, depth: int) -> str:
 def _background_tasks() -> tuple[str, ...]:
     """Coroutine names of the tasks still pending on the running loop.
 
-    A background task is the archetypal write the install ledger cannot see: an
-    atom that starts one keeps running after everything it registered has been
+    A background task is the archetypal write no table describes: an atom that
+    starts one keeps running after everything it registered has been
     detached. Names are sorted because two tasks started in either order are the
     same residue.
     """

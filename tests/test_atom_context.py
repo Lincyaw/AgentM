@@ -3,13 +3,12 @@
 An atom is handed its own context — its own tables, linked into the session —
 so "who wrote this" is answered by *which table the write landed in*, and never
 by a parameter, a flag, or anything ambient.  These run one cell per control
-path and check three things each: what the context tree says, what the install
-ledger's parallel account says, and whether the session can actually see the
-write.
+path and check two things each: what the context tree says, and whether the
+session can actually see the write.
 
-The two accounts have to agree.  The ledger is still maintained (removal no
-longer reads it, but a later batch retires it and until then a divergence is a
-bug in one of them), so every cell that asserts an owner asserts it twice.
+There used to be a second account to check this one against.  There is not any
+more, which is why the helpers below read the tree and nothing else: a cell
+that disagreed with it would have nowhere to disagree from.
 
 Cells are numbered to match the acceptance list they were written against.
 """
@@ -27,16 +26,18 @@ from pathlib import Path
 import pytest
 
 from agentm.core.abi.effects import EffectInverse
-from agentm.core.abi.events import SessionShutdownEvent
+from agentm.core.abi.events import ApiRegisterEvent, SessionShutdownEvent
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_RESOLVER_SERVICE, RESOURCE_TXN_SERVICE
+from agentm.core.abi.messages import TextContent
 from agentm.core.abi.session_api import AtomAPI, ExtensionSpec
 from agentm.core.abi.stream import Model
+from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.runtime.composition_digest import composition_digest
 from agentm.core.runtime.session_core import SessionRuntime
 from agentm.testing import NeverStreams, digest_differences, probe_session
 
-# --- Reading the two accounts -----------------------------------------------
+# --- Reading the one account -------------------------------------------------
 
 
 def _tree_owner(session: SessionRuntime, key: str) -> str | None:
@@ -45,45 +46,29 @@ def _tree_owner(session: SessionRuntime, key: str) -> str | None:
     return session.ownership().service(key)
 
 
-def _ledger_owner(session: SessionRuntime, key: str) -> str | None:
-    """Who holds a service key, according to the install ledger."""
-
-    return session._extensions.capture().service_owners.get(key)
-
-
-def _owner(session: SessionRuntime, key: str) -> str | None:
-    """The owner both accounts agree on; fails the test when they do not."""
-
-    tree = _tree_owner(session, key)
-    ledger = _ledger_owner(session, key)
-    assert tree == ledger, (
-        f"context tree says {key} belongs to {tree!r} and the install ledger "
-        f"says {ledger!r}"
-    )
-    return tree
+_owner = _tree_owner
+"""The owner of a service key.  One account, so one reader."""
 
 
 def _renderer_owner(session: SessionRuntime, source: str) -> str | None:
-    """The owner of a trigger source both accounts agree on."""
+    """Which context's binding of a trigger source resolves."""
 
-    tree = session.ownership().renderer(source)
-    ledger = session._extensions.capture().trigger_renderer_owners.get(source)
-    assert tree == ledger, (
-        f"context tree says {source} belongs to {tree!r} and the install "
-        f"ledger says {ledger!r}"
-    )
-    return tree
+    return session.ownership().renderer(source)
 
 
 def _tool_owner(session: SessionRuntime, name: str) -> str | None:
     ownership = session.ownership()
-    ledger = session._extensions.capture()
     for tool in session.tools:
         if tool.name == name:
-            tree_owner = ownership.tool(tool)
-            assert tree_owner == ledger.tool_owners.get(id(tool))
-            return tree_owner
+            return ownership.tool(tool)
     raise AssertionError(f"no tool named {name}")
+
+
+async def _ok_tool(args: Mapping[str, object]) -> ToolResult:
+    """A tool body for a host tool a test only has to be able to register."""
+
+    del args
+    return ToolResult(content=(TextContent(type="text", text="ok"),))
 
 
 def _file_atom(root: Path, name: str, source: str) -> ExtensionSpec:
@@ -546,6 +531,47 @@ def install(api, config):
 """
 )
 
+# A plain atom with a manifest name, for a test that removes it by that name.
+_VICTIM = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.register("{name}_write", "victim", scope="session")
+"""
+)
+
+# An install body that reaches a third atom through an api another atom
+# published, removes it, and then refuses -- one task, no awaits.
+_SABOTEUR = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.require("kept_api", object).uninstall_extension("{victim}")
+    raise RuntimeError("saboteur refuses to install")
+"""
+)
+
+# An install body that awaits, so another task runs while it is in flight, and
+# then refuses.  The gate lets the test decide when the failure lands.
+_SLOW_REFUSES = (
+    _MANIFEST
+    + """
+
+import asyncio
+
+
+async def install(api, config):
+    del config
+    api.services.require("install_gate", asyncio.Event).set()
+    await asyncio.sleep(0.05)
+    raise RuntimeError("{name} broke")
+"""
+)
+
 # 22 -- an atom that installs another atom, the way atom_watch and
 # tool_authoring do: from its own code after its installation is over.
 _NESTED = (
@@ -556,6 +582,113 @@ def install(api, config):
     del config
     api.services.register("outer_api", api, scope="session")
     api.services.register("outer_write", "outer", scope="session")
+"""
+)
+
+
+# Every registration path an atom can reach from ``api``, in one install body.
+# The probe for the claim the host's own tables rest on: an atom writes into
+# its own context, so a table of the session's is a table no installation can
+# move.
+_EVERY_WRITE = (
+    _MANIFEST
+    + """
+
+from agentm.core.abi.bus import EventBusObserver
+from agentm.core.abi.messages import TextContent
+from agentm.core.abi.operations import ExecResult
+from agentm.core.abi.provider import ProviderConfig
+from agentm.core.abi.stream import Model
+from agentm.core.abi.tool import FunctionTool, ToolResult
+
+
+class Renderer:
+    def render(self, trigger):
+        del trigger
+        return []
+
+
+class Codec:
+    def serialize(self, trigger):
+        del trigger
+        return {{}}
+
+    def deserialize(self, data):
+        del data
+        raise AssertionError("a probe codec never decodes")
+
+
+class Policy:
+    async def transform(self, messages, turns):
+        del turns
+        return messages
+
+
+class Bash:
+    async def exec(
+        self,
+        cmd,
+        *,
+        cwd,
+        timeout=None,
+        env=None,
+        stdin=None,
+        on_data=None,
+        signal=None,
+        log_path=None,
+    ):
+        del cmd, cwd, timeout, env, stdin, on_data, signal, log_path
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0, timed_out=False)
+
+
+class Stream:
+    async def __call__(self, **kwargs):
+        raise AssertionError("a probe provider never streams")
+
+
+class Observer(EventBusObserver):
+    def on_emit_start(self, channel, event, dispatch_id):
+        del channel, event, dispatch_id
+
+
+async def _probe(args):
+    del args
+    return ToolResult(content=(TextContent(type="text", text="ok"),))
+
+
+def install(api, config):
+    del config
+    api.services.register("every_write_api", api, scope="session")
+    api.register_tool(
+        FunctionTool(
+            name="{name}_tool",
+            description="every registration path an atom has",
+            parameters={{"type": "object", "properties": {{}}}},
+            fn=_probe,
+        )
+    )
+    api.register_context_policy(Policy(), priority=123)
+    api.register_trigger_renderer("{name}_source", Renderer())
+    api.register_trigger_codec("{name}_source", Codec())
+    api.register_operations(bash=Bash(), replace=True)
+    api.register_provider(
+        "{name}_provider",
+        ProviderConfig(
+            stream_fn=Stream(),
+            model=Model(
+                id="probe-model",
+                provider="probe",
+                context_window=1000,
+                max_output_tokens=100,
+            ),
+            name="{name}_provider",
+        ),
+        replace=True,
+    )
+    api.services.register("{name}_service", "value", scope="session")
+    api.on("{name}.channel", lambda event: None)
+    api.bus.add_observer(Observer())
+    api.effect(lambda: (lambda: None), provides="{name}-effect")
 """
 )
 
@@ -657,7 +790,6 @@ async def test_cell_3_and_4_surviving_task_before_and_after_uninstall(
         await asyncio.wait_for(done.wait(), timeout=1.0)
         assert session.services.get("late_write") is None
         assert _tree_owner(session, "late_write") is None
-        assert _ledger_owner(session, "late_write") is None
         # Nothing the session holds moved because of that write.
         assert _composition_differences(after_detach, composition_digest(session)) == ()
         del before
@@ -1107,9 +1239,10 @@ async def test_cell_22_a_write_during_a_spawn_from_inside_an_install(
 ) -> None:
     """A child built while the parent is mid-install sees the linked contexts.
 
-    The parent's composition snapshot is taken from the ledger's replayable
-    specs, so an atom that has not been recorded yet is not replayed into the
-    child -- but everything already linked is, with its own contexts there.
+    The parent's composition snapshot is taken from the replayable specs of
+    the installed set, so an atom that has not been recorded yet is not
+    replayed into the child -- but everything already linked is, with its own
+    contexts there.
     """
 
     spec = _atom(tmp_path, "sync_atom", _SYNC)
@@ -1153,9 +1286,10 @@ async def test_one_module_path_gets_one_live_context(tmp_path: Path) -> None:
     """A second live incarnation is refused, so removal can reach every one.
 
     Everything that answers for an atom is keyed on its module path and holds
-    one entry: the ledger's attribution, its replayable spec, ``context_for``.
-    Two linked contexts under one path would leave removal unlinking one while
-    the ledger dropped the path, and the other linked with nothing to name it.
+    one entry: its replayable spec, ``retire``, ``context_for``.  Two linked
+    contexts under one path would leave removal unlinking one while the
+    installed set dropped the path, and the other linked with nothing to name
+    it.
     """
 
     spec = _atom(tmp_path, "twice_atom", _TWICE)
@@ -1285,10 +1419,10 @@ async def test_a_failed_provider_registration_leaves_one_account_of_it(
     """The undo of a shadowing write puts the key back where it resolved from.
 
     Two branches, and the same failure in each: a rollback that decides who
-    owns a key by anything other than asking the tree afterwards leaves the
-    three accounts of it -- the context tree, the ledger, the provider index --
-    giving different answers, and a *failed* call having changed what the
-    session serves.
+    owns a key by anything other than asking the tree afterwards leaves the two
+    accounts of it -- the context tree and the provider index -- giving
+    different answers, and a *failed* call having changed what the session
+    serves.
 
     The first branch is a write into a table that held nothing for the key: the
     previous registration lives in the previous atom's own table, so writing it
@@ -1410,8 +1544,7 @@ async def test_a_trigger_source_resolves_to_the_last_binding_written(
     the test a table has to meet before its rows need numbering -- the same one
     ``ChainedTools`` states for why a tool name does not. Resolving by link
     order instead would mean an atom rebinding a source it already holds has
-    silently no effect while a later-linked context holds it, and the ledger
-    naming the writer while the session serves somebody else's renderer.
+    silently no effect while a later-linked context holds it.
     """
 
     spec_a = _atom(tmp_path, "rend_a", _RENDERER)
@@ -1552,3 +1685,342 @@ async def test_a_restored_survivor_is_no_longer_held_as_departed(
         assert session._departed.undo() == ()
         assert marks == ["eff_atom"]
         assert session.services.get("kept_api") is not None
+
+
+@pytest.mark.asyncio
+async def test_an_installation_writes_into_no_table_of_the_hosts(
+    tmp_path: Path,
+) -> None:
+    """The claim the host's own tables rest on, run rather than reasoned about.
+
+    An atom is handed its own context, so every registration path it can reach
+    lands in that context's tables.  The session's own three -- tools,
+    policies, renderers -- are therefore the embedder's alone, which is what
+    lets a rollback stop copying them and a child inherit them directly.  This
+    drives every path ``AtomAPI`` offers, from install, from a tool call, and
+    from an atom installing another atom, and asserts the three tables are the
+    objects they were.
+    """
+
+    spec = _atom(tmp_path, "every_write", _EVERY_WRITE)
+    nested = _atom(tmp_path, "sync_atom", _SYNC)
+    async with probe_session(str(tmp_path)) as session:
+        host_tools = list(session._own_tools)
+        host_policies = list(session._own_policies)
+        host_renderers = dict(session._own_renderers)
+
+        await session.install_extension(spec)
+        api = _kept(session, "every_write_api")
+        await api.install_extension(nested)
+        tool = next(t for t in session.tools if t.name == "every_write_tool")
+        await tool.fn({})
+
+        assert session._own_tools == host_tools
+        assert session._own_policies == host_policies
+        assert session._own_renderers == host_renderers
+
+        # The control: the writes really happened, in the atom's own tables.
+        assert _owner(session, "every_write_service") == spec.module_path
+        assert _tool_owner(session, "every_write_tool") == spec.module_path
+        assert _renderer_owner(session, "every_write_source") == spec.module_path
+        assert _owner(session, "sync_write") == nested.module_path
+
+
+@pytest.mark.asyncio
+async def test_a_failed_install_on_a_started_session_leaves_the_installed_set(
+    tmp_path: Path,
+) -> None:
+    """The rollback is an inverse now, so the two shapes of it are asserted.
+
+    An installation records exactly one atom, so undoing it retires exactly
+    that record -- and because the record is written last, an installation that
+    failed has none to retire. A supersede is the other shape: it takes the
+    record of the atom it displaced *out*, so the rollback has to put that one
+    back, at the position it held. Nothing reconstructs the installed set from
+    a picture of it taken beforehand, which is why the position is carried by
+    the inverse rather than recovered.
+
+    Driven on a started session because that is where a runtime install differs
+    from a composed one, and where the failure path also writes a diagnostic.
+    """
+
+    marks: list[str] = []
+    first = _atom(tmp_path, "keeper_atom", _KEEPER)
+    middle = _atom(tmp_path, "eff_atom", _EFFECTFUL)
+    last = _atom(tmp_path, "sync_atom", _SYNC)
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("effect_marks", marks, scope="session")
+        await session.install_extension(first)
+        await session.install_extension(middle)
+        await session.install_extension(last)
+        session.start()
+        installed = list(session.installed_extensions)
+        assert installed == [first.module_path, middle.module_path, last.module_path]
+        before = composition_digest(session)
+
+        # An installation that fails before it records anything.
+        failing = _atom(tmp_path, "failing_atom", _FAILING)
+        with pytest.raises(Exception, match="refuses to install"):
+            await session.install_extension(failing)
+        await asyncio.sleep(0)
+        assert session.installed_extensions == installed
+        assert _composition_differences(before, composition_digest(session)) == ()
+
+        # A supersede whose replacement refuses: the displaced record comes
+        # back in the middle, not at the end.
+        replacement = _file_atom(
+            tmp_path, "eff_atom_v2", _REFUSES.format(name="eff_atom")
+        )
+        with pytest.raises(Exception, match="v2 broke"):
+            await session.install_extension(replacement, replace=True)
+        await asyncio.sleep(0)
+        assert session.installed_extensions == installed
+        assert session.installed_atom_module_path("eff_atom") == middle.module_path
+        assert _composition_differences(before, composition_digest(session)) == ()
+
+        # And the survivor is still an atom, not merely a row: it detaches.
+        assert session.uninstall_extension(middle)
+        assert marks == []
+
+
+# --- The installed set is the link list -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_atom_removed_during_a_failed_install_is_not_left_half_held(
+    tmp_path: Path,
+) -> None:
+    """A third atom removed from inside a failing install stays removed.
+
+    No concurrency and no awaits: ``pub`` publishes its own activated api as a
+    service, which this repo's own fixtures do, and ``sab``'s plain synchronous
+    ``install()`` calls ``uninstall_extension`` through it and then raises. One
+    task, one stack.
+
+    The wedge this reproduces was a rollback that put the link list back from a
+    picture taken before the install while the record of which atoms were
+    installed was undone per-record: ``vic`` came back linked with nothing left
+    naming it, so it could be neither removed nor installed again, and the only
+    recovery re-recorded it at the end of the set, corrupting composition order
+    for the session and every child of it.
+
+    Either end state is defensible and this asserts the one the inverse
+    produces: the removal was a real removal by a party that is not this
+    install, so it is not undone. ``vic`` is gone and installable again. The
+    composition digest cannot tell the two apart -- the removal suspends the
+    context before the failure, so the resurrected one is empty -- which is why
+    this asks the session what it holds rather than diffing a digest.
+    """
+
+    pub = _atom(tmp_path, "pub", _KEEPER)
+    vic = _atom(tmp_path, "vic", _VICTIM)
+    sab = _file_atom(tmp_path, "sab", _SABOTEUR.format(name="sab", victim="vic"))
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(pub)
+        await session.install_extension(vic)
+        assert session.services.get("vic_write") == "victim"
+
+        with pytest.raises(Exception, match="saboteur refuses to install"):
+            await session.install_extension(sab)
+
+        assert session.installed_extensions == [pub.module_path]
+        assert session.context_for(vic.module_path) is None
+        assert session.installed_atom_module_path("vic") is None
+        assert session.services.get("vic_write") is None
+        # Gone means installable, and installable means back in the set once.
+        await session.install_extension(vic)
+        assert session.installed_extensions == [pub.module_path, vic.module_path]
+        assert session.services.get("vic_write") == "victim"
+        assert session.uninstall_extension(vic)
+
+
+@pytest.mark.asyncio
+async def test_an_atom_detached_by_another_task_is_not_resurrected(
+    tmp_path: Path,
+) -> None:
+    """The concurrent shape of the same rule, and the pre-existing half of it.
+
+    The failing install awaits, and another task detaches an atom the install
+    never touched while it is awaiting. A rollback that restored the link list
+    from a picture taken before the install put that atom back -- reversing a
+    decision that was never this install's to reverse, and relinking a context
+    whose effects had already been run backwards.
+
+    True before the installed set was collapsed as well, which is why it is
+    stated as its own cell: a detach by a third party survives the rollback,
+    and what the rollback undoes is what this install itself did.
+    """
+
+    victim = _atom(tmp_path, "vic", _VICTIM)
+    failing = _atom(tmp_path, "slow_atom", _SLOW_REFUSES)
+    gate = asyncio.Event()
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("install_gate", gate, scope="session")
+        await session.install_extension(victim)
+
+        async def _detach_once_installing() -> None:
+            await gate.wait()
+            assert session.uninstall_extension(victim)
+
+        detach = asyncio.create_task(_detach_once_installing())
+        with pytest.raises(Exception, match="slow_atom broke"):
+            await session.install_extension(failing)
+        await detach
+
+        assert session.installed_extensions == []
+        assert session.context_for(victim.module_path) is None
+        assert session.services.get("vic_write") is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_supersede_puts_the_atom_back_among_its_neighbours(
+    tmp_path: Path,
+) -> None:
+    """Order under failure is the order a cold start would produce.
+
+    ``a``, ``b``, ``c`` composed; a supersede of ``b`` that awaits and then
+    refuses, with ``a`` detached by another task inside that window. The
+    survivor has to come back *between its neighbours*, not at the index it
+    happened to occupy: the list moved under it, so an integer position would
+    put ``b`` after ``c`` and every child spawned afterwards would replay the
+    composition in an order no cold start produces.
+    """
+
+    first = _atom(tmp_path, "a_atom", _VICTIM)
+    middle = _atom(tmp_path, "b_atom", _VICTIM)
+    last = _atom(tmp_path, "c_atom", _VICTIM)
+    gate = asyncio.Event()
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("install_gate", gate, scope="session")
+        for spec in (first, middle, last):
+            await session.install_extension(spec)
+        assert session.installed_extensions == [
+            first.module_path,
+            middle.module_path,
+            last.module_path,
+        ]
+
+        async def _detach_once_installing() -> None:
+            await gate.wait()
+            assert session.uninstall_extension(first)
+
+        # Loads under b_atom's manifest name, so the supersede really runs.
+        replacement = _file_atom(
+            tmp_path, "b_atom_v2", _SLOW_REFUSES.format(name="b_atom")
+        )
+        detach = asyncio.create_task(_detach_once_installing())
+        with pytest.raises(Exception, match="b_atom broke"):
+            await session.install_extension(replacement, replace=True)
+        await detach
+
+        assert session.installed_extensions == [middle.module_path, last.module_path]
+        assert session.installed_atom_module_path("b_atom") == middle.module_path
+        assert [
+            spec.module_path for spec in session.composition_snapshot().extensions
+        ] == [middle.module_path, last.module_path]
+        assert session.uninstall_extension(middle)
+
+
+# An atom that registers a tool -- which emits ``ApiRegisterEvent`` through
+# ``emit_sync``, re-entrantly -- and then refuses to install.
+_EMITS_THEN_FAILS = (
+    _MANIFEST
+    + """
+
+from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi.messages import TextContent
+
+
+async def _noop(args):
+    del args
+    return ToolResult(content=(TextContent(type="text", text="ok"),))
+
+
+def install(api, config):
+    del config
+    api.register_tool(
+        FunctionTool(
+            name="{name}_tool",
+            description="fires a register event before the refusal",
+            parameters={{"type": "object", "properties": {{}}}},
+            fn=_noop,
+        )
+    )
+    raise RuntimeError("{name} refuses to install")
+"""
+)
+
+
+@pytest.mark.asyncio
+async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
+    tmp_path: Path,
+) -> None:
+    """The real edge on "an installation writes into no table of the host's".
+
+    No path an *atom* reaches writes into a host table. But a registration
+    emits ``ApiRegisterEvent`` through ``bus.emit_sync``, re-entrantly, from
+    inside the atom's own registration call, so an embedder's handler runs on
+    the install's stack and can write into the host's tables from there. The
+    host's tables are not in the install snapshot, so such a write survives the
+    install's failure.
+
+    That is the documented behaviour rather than a defect this branch fixes,
+    and it is pinned here because the alternative -- putting the three host
+    tables back into the snapshot -- would restore a whole-state picture beside
+    an inverse-shaped rollback and rebuild the hybrid this round removes.
+
+    Two halves make it worth writing down rather than leaving to be found.
+    One handler gets two fates, decided by which store it reached for: its
+    write into a host table survives, and its service registration and its
+    subscription do not, because the registry and the bus are still restored
+    from a picture. And the same embedder code is atomic, half-atomic or inert
+    depending on ``def`` versus ``async def``, because ``emit_sync`` closes an
+    async handler's coroutine and logs.
+    """
+
+    spec = _atom(tmp_path, "emitter_atom", _EMITS_THEN_FAILS)
+    async with probe_session(str(tmp_path)) as session:
+        host_tool = FunctionTool(
+            name="host_tool",
+            description="registered by the embedder from inside an install",
+            parameters={"type": "object", "properties": {}},
+            fn=_ok_tool,
+        )
+        fired: list[str] = []
+        never: list[str] = []
+        heard: list[str] = []
+
+        def _sync_handler(event: object) -> None:
+            del event
+            if fired:
+                return
+            fired.append("sync")
+            session.register_tool(host_tool)
+            session.services.register("host_from_handler", "written mid-install")
+            session.on("host.channel", lambda event: heard.append("host"))
+
+        async def _async_handler(event: object) -> None:
+            del event
+            never.append("async")
+
+        session.on(ApiRegisterEvent.CHANNEL, _sync_handler)
+        session.on(ApiRegisterEvent.CHANNEL, _async_handler)
+
+        with pytest.raises(Exception, match="emitter_atom refuses to install"):
+            await session.install_extension(spec)
+
+        # It ran on the install's stack, and what it wrote into a host table is
+        # still there.
+        assert fired == ["sync"]
+        assert host_tool in session._own_tools
+        assert [tool.name for tool in session.tools] == ["host_tool"]
+        # The same handler's other two writes are gone, because the registry
+        # and the bus are still restored from a picture. This is the asymmetry
+        # the snapshot's docstring names; it is pinned rather than endorsed.
+        assert session.services.get("host_from_handler") is None
+        session.bus.emit_sync("host.channel", object())
+        assert heard == []
+        # The atom's own write went with the rollback, which is the control.
+        assert session.installed_extensions == []
+        # And the async handler never ran at all: emit_sync closed it.
+        assert never == []

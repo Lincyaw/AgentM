@@ -1,11 +1,11 @@
 """Uninstall removes what the atom put there, and nothing else does.
 
-An atom's registrations are recovered from an ownership ledger keyed on the
-atom that made them. Anything the ledger never saw survives uninstall forever,
-so each test here installs one kind of registration and asserts it is gone
-again. The rest guard the other direction: what an uninstall must not leave
-behind in the session's own state, which capabilities each dependency solver
-is fed, and which writes reach the event stream.
+An atom's registrations live in that atom's own context, and uninstalling
+unlinks it. Anything that landed somewhere else survives uninstall forever, so
+each test here installs one kind of registration and asserts it is gone again.
+The rest guard the other direction: what an uninstall must not leave behind in
+the session's own state, which capabilities each dependency solver is fed, and
+which writes reach the event stream.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.abi.termination import ModelEndTurn
 from agentm.core.abi.trajectory import Outcome, TurnMeta
 from agentm.core.abi.trigger import UserInput
+from agentm.core.runtime.session_core import SessionRuntime
 from agentm.core.runtime.session_factory import _service_capabilities
 
 
@@ -425,9 +426,9 @@ async def test_turn_scoped_service_does_not_disturb_the_composition(
 ) -> None:
     """The driver re-registers a resource transaction every turn.
 
-    That write now reaches the ownership ledger like any other, with no atom
-    installing, so it is recorded as the embedder's. It must stay out of the
-    rebuildable composition and out of any atom's registrations.
+    It lands in the session's own registry, with no atom installing, so it is
+    the embedder's. It must stay out of the rebuildable composition and out of
+    any atom's registrations.
     """
 
     spec = _file_atom(tmp_path, "plain_service_atom", _PLAIN_SERVICE_ATOM)
@@ -445,5 +446,152 @@ async def test_turn_scoped_service_does_not_disturb_the_composition(
 
         assert session.uninstall_extension(spec)
         assert RESOURCE_TXN_SERVICE in session.services.names()
+    finally:
+        await session.shutdown()
+
+
+_THREE_REGISTRATIONS_ATOM = """\
+from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.messages import TextContent
+from agentm.core.abi.tool import FunctionTool, ToolResult
+
+
+MANIFEST = ExtensionManifest(
+    name="three_registrations_atom",
+    description="Registers one of each kind the embedder also registers.",
+)
+
+
+class AtomRenderer:
+    label = "atom"
+
+    def render(self, trigger):
+        del trigger
+        return []
+
+
+class AtomPolicy:
+    label = "atom"
+
+    async def transform(self, messages, turns):
+        del turns
+        return messages
+
+
+async def _probe(args):
+    del args
+    return ToolResult(content=(TextContent(type="text", text="ok"),))
+
+
+def install(api, config):
+    del config
+    api.register_tool(
+        FunctionTool(
+            name="atom_tool",
+            description="a tool the atom provides",
+            parameters={"type": "object", "properties": {}},
+            fn=_probe,
+        )
+    )
+    api.register_context_policy(AtomPolicy())
+    api.register_trigger_renderer("atom_source", AtomRenderer())
+    # The source the embedder already bound. The atom's binding is the later
+    # write, so it takes the source over -- in the parent and, once replayed,
+    # in the child.
+    api.register_trigger_renderer("shared_source", AtomRenderer())
+"""
+
+
+class _HostRenderer:
+    label = "host"
+
+    def render(self, trigger: object) -> list[object]:
+        del trigger
+        return []
+
+
+class _HostPolicy:
+    label = "host"
+
+    async def transform(self, messages: object, turns: object) -> object:
+        del turns
+        return messages
+
+
+@pytest.mark.asyncio
+async def test_a_child_inherits_the_embedders_tables_and_replays_the_atoms(
+    tmp_path: Path,
+) -> None:
+    """What a child is handed directly, and what it is handed by replay.
+
+    A child rebuilds the atoms from their specs, so the only registrations
+    carried over are the ones no replay would reproduce: the embedder's. Those
+    are the session's own three tables, handed over whole -- an atom cannot
+    write into them, so there is nothing to filter out and no second account of
+    who registered what to filter by.
+
+    The contested source is the case where "the host's table" and "the sources
+    the host currently owns" are not the same set. The embedder binds it first
+    and the atom takes it over, so the parent serves the atom's renderer while
+    the host's binding sits shadowed in the host's own table. The child gets
+    both, in the same relation, and serves the same renderer the parent does.
+    """
+
+    spec = _file_atom(tmp_path, "three_registrations_atom", _THREE_REGISTRATIONS_ATOM)
+
+    async def probe(args: dict[str, object]) -> ToolResult:
+        del args
+        return ToolResult(content=(TextContent(type="text", text=""),))
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extra_tools=[
+                FunctionTool(
+                    name="host_tool",
+                    description="a tool the embedder provides",
+                    parameters={"type": "object", "properties": {}},
+                    fn=probe,
+                )
+            ],
+            stream_fn=_StubProvider(),
+            model=_model(),
+        )
+    )
+    try:
+        session.register_context_policy(_HostPolicy())
+        session.register_trigger_renderer("host_source", _HostRenderer())
+        session.register_trigger_renderer("shared_source", _HostRenderer())
+        await session.install_extension(spec)
+
+        assert session.trigger_renderers["shared_source"].label == "atom"
+
+        child = await session.spawn(purpose="probe")
+        try:
+            assert isinstance(child, SessionRuntime)
+            # The embedder's three, and only the embedder's, in the child's own
+            # tables.
+            assert [tool.name for tool in child._own_tools] == ["host_tool"]
+            assert [type(row.policy).__name__ for row in child._own_policies] == [
+                "_HostPolicy"
+            ]
+            assert sorted(child._own_renderers) == ["host_source", "shared_source"]
+            assert child._own_renderers["shared_source"].renderer.label == "host"
+
+            # The atom's three are in the child too, replayed into the child's
+            # own context for that atom rather than copied into the tables
+            # above -- which is what makes them detachable there.
+            ownership = child.ownership()
+            atom_tool = next(tool for tool in child.tools if tool.name == "atom_tool")
+            assert ownership.tool(atom_tool) == spec.module_path
+            assert ownership.renderer("atom_source") == spec.module_path
+            assert ownership.renderer("shared_source") == spec.module_path
+            assert child.trigger_renderers["shared_source"].label == "atom"
+            assert [type(policy).__name__ for policy in child.context_policies] == [
+                "_HostPolicy",
+                "AtomPolicy",
+            ]
+        finally:
+            await child.shutdown()
     finally:
         await session.shutdown()

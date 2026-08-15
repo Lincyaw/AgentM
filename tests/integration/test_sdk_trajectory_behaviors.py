@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
+import subprocess
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -1733,3 +1737,181 @@ def test_package_atom_cannot_reach_a_sibling_by_relative_import(
     )
     assert [issue.rule for issue in issues] == ["forbidden-import"]
     assert "agentm.extensions.builtin.tool_bash" in issues[0].message
+
+
+_HANDOVER_ATOM = '''\
+"""Revision {rev} of one atom that owns a trigger source."""
+
+from dataclasses import dataclass
+
+from agentm.core.abi.messages import text_message
+from agentm.extensions import ExtensionManifest
+
+MANIFEST = ExtensionManifest(
+    name="handover",
+    description="owns the 'handover' trigger source",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HandoverTrigger:
+    value: str
+    source: str = "handover"
+
+
+class _Codec:
+    def serialize(self, trigger):
+        return {{"__source__": trigger.source, "value": trigger.value}}
+
+    def deserialize(self, data):
+        value = data.get("value")
+        if not isinstance(value, str):
+            raise ValueError("handover trigger value must be a string")
+        return HandoverTrigger(value=value)
+
+
+class _Renderer:
+    def render(self, trigger):
+        return [text_message("{rev}:" + trigger.value)]
+
+
+def install(api, config):
+    del config
+    api.register_trigger_codec("handover", _Codec())
+    api.register_trigger_renderer("handover", _Renderer())
+    api.services.register("handover_trigger", HandoverTrigger, scope="session")
+'''
+
+_RESUME_IN_A_FRESH_PROCESS = """\
+import asyncio
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+from agentm import AgentSession, AgentSessionConfig, ExtensionSpec, Model
+from agentm.storage.trajectory import JsonlTrajectoryStore
+from agentm.testing import NeverStreams
+
+
+async def main() -> None:
+    store_path, atom_path, session_id = sys.argv[1:4]
+    digest = "sha256:" + hashlib.sha256(Path(atom_path).read_bytes()).hexdigest()
+    resumed = await AgentSession.resume(
+        session_id,
+        JsonlTrajectoryStore(Path(store_path)),
+        AgentSessionConfig(
+            extensions=[ExtensionSpec.from_file(atom_path, digest=digest)],
+            stream_fn=NeverStreams(),
+            model=Model(
+                id="stub-model",
+                provider="stub",
+                context_window=128_000,
+                max_output_tokens=4_096,
+            ),
+        ),
+    )
+    try:
+        turn = resumed.get_turns()[0]
+        print(json.dumps({
+            "trigger_type": type(turn.trigger).__name__,
+            "value": getattr(turn.trigger, "value", None),
+            "installed": [
+                resumed.context_for(path).atom_name
+                for path in resumed.installed_extensions
+            ],
+            "rendered": [
+                block.text
+                for message in resumed.get_messages()
+                for block in message.content
+                if getattr(block, "type", None) == "text"
+            ],
+        }))
+    finally:
+        await resumed.shutdown()
+
+
+asyncio.run(main())
+"""
+
+
+def _handover_atom(root: Path, name: str, rev: str) -> ExtensionSpec:
+    path = root / f"{name}.py"
+    path.write_text(_HANDOVER_ATOM.format(rev=rev), encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    return ExtensionSpec.from_file(str(path), digest=digest)
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_atoms_source_resumes_in_a_fresh_process(
+    tmp_path: Path,
+) -> None:
+    """What the retained codec is for, measured end to end instead of argued.
+
+    Revision 1 of an atom owns a trigger source; a turn commits under it;
+    revision 2 supersedes the atom while the session runs, and the next turn
+    records that install durably. Then a second Python process -- no module
+    cache, no registry, nothing carried over -- resumes the trajectory off
+    disk and has to make sense of a trigger encoded by a codec that no revision
+    still installed ever registered.
+
+    It works because the source is *owned* rather than merely present. The
+    resume replays the composition, which installs revision 1 and registers the
+    source under it, and then replays the recorded runtime install, which
+    supersedes revision 1 -- and it is the owner having left the installed set
+    that lets revision 2 take the source over rather than collide with a codec
+    nobody can remove. The committed turn then decodes through revision 2.
+    Without the takeover the resume fails outright; without the retention there
+    would be no source to take over.
+    """
+
+    store_path = tmp_path / "handover-turns"
+    v1 = _handover_atom(tmp_path, "handover_v1", "v1")
+    v2 = _handover_atom(tmp_path, "handover_v2", "v2")
+    provider = _StubProvider("answered", "after-supersede")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[v1],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        make_trigger = session.services.get("handover_trigger")
+        assert make_trigger is not None
+        await session.push_trigger(make_trigger("payload")).wait()
+        await session.install_extension(v2, replace=True)
+        assert session.installed_atom_module_path("handover") == v2.module_path
+        # The turn that carries the runtime install into the record; without
+        # one the resume would never learn the atom set had changed.
+        await session.run("after-supersede")
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    script = tmp_path / "resume_probe.py"
+    script.write_text(_RESUME_IN_A_FRESH_PROCESS, encoding="utf-8")
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [
+            sys.executable,
+            str(script),
+            str(store_path),
+            str(tmp_path / "handover_v1.py"),
+            session_id,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert completed.returncode == 0, completed.stderr
+    reported = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert reported["trigger_type"] == "HandoverTrigger"
+    assert reported["value"] == "payload"
+    # Rendered by revision 2, which is the atom the resumed session holds --
+    # revision 1 is the one that encoded the turn and is gone by now.
+    assert reported["rendered"][0] == "v2:payload"
+    assert reported["installed"] == ["handover"]

@@ -106,7 +106,15 @@ class _ModeChangeCodec:
     """Persist the trigger so a resumed trajectory folds to the same mode."""
 
     def serialize(self, trigger: ModeChange) -> dict[str, JsonValue]:
-        return {"mode": trigger.mode, "reason": trigger.reason}
+        # ``__source__`` is what names the codec on the way back in, and
+        # ``CodecRegistry.serialize_trigger`` refuses an encoding that omits it
+        # rather than filling it in -- a codec that emitted a different source
+        # would decode as something else, so the encoding has to say so itself.
+        return {
+            "__source__": trigger.source,
+            "mode": trigger.mode,
+            "reason": trigger.reason,
+        }
 
     def deserialize(self, data: Mapping[str, JsonValue]) -> Trigger:
         raw = data.get("mode")

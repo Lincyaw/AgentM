@@ -57,7 +57,7 @@ class ProviderRegistry:
         committed_turns: Callable[[], Sequence[Turn]],
         active_set: Callable[[], ActiveSetFingerprint | None],
         emit_register_event: Callable[[str, str, dict[str, object]], None],
-        refile_service: Callable[[str], str | None],
+        service_owner: Callable[[str], str | None],
         stream_fn: StreamFn | None = None,
         model: Model | None = None,
         identity: ProviderSessionIdentity | None = None,
@@ -66,7 +66,7 @@ class ProviderRegistry:
         self._committed_turns = committed_turns
         self._active_set = active_set
         self._emit_register_event = emit_register_event
-        self._refile_service = refile_service
+        self._service_owner = service_owner
         self.stream_fn = stream_fn
         self.model = model
         self._active_name: str | None = None
@@ -145,11 +145,11 @@ class ProviderRegistry:
             # The undo of the swap is the same swap back: the failed write
             # leaves, and whatever this node held goes back at the number it
             # had, so whatever the chain resolved before -- in whichever node
-            # held it -- resolves again. Nothing fires for a swap, so both
-            # accounts of who holds the key are re-filed off the tree rather
-            # than guessed from what the index said before.
+            # held it -- resolves again. Nothing fires for a swap, so this
+            # index is re-filed off the tree rather than guessed from what it
+            # said before.
             target.swap_entry(key, shadowed)
-            uncovered_owner = self._refile_service(key)
+            uncovered_owner = self._service_owner(key)
             if previous is None:
                 self._owners.pop(name, None)
                 if self._active_name == name:
