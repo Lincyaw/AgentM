@@ -471,14 +471,21 @@ class EventBus:
         return copied
 
     def replace_from(self, other: EventBus) -> None:
-        """Restore subscriptions and observers from ``other``, links untouched."""
+        """Restore subscriptions and observers from ``other``, links untouched.
+
+        ``_next_seq`` is deliberately not restored.  It is an allocator, not
+        state: a sequence number it has handed out is held by the subscription
+        that got it, and a linked segment's subscriptions outlive this call.
+        Rewinding it re-issues numbers that are still in use, two live
+        subscriptions tie on ``(priority, seq)``, and the one subscribed later
+        dispatches first.  Handing out a number nobody holds costs nothing.
+        """
 
         self._handlers = {
             channel: list(subscriptions)
             for channel, subscriptions in other._handlers.items()
         }
         self._observers = list(other._observers)
-        self._next_seq = other._next_seq
         self._frozen_clear = other._frozen_clear
 
     def clear(self) -> None:

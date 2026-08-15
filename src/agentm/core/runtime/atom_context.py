@@ -73,7 +73,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from agentm.core.abi.bus import BusSegment, EventBus, EventBusObserver, Handler
+from agentm.core.abi.bus import BusSegment, EventBusObserver, Handler
 from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.effects import EffectBody, EffectHandle, EffectLog
@@ -965,13 +965,6 @@ class DepartedContexts:
         ]
 
 
-def unlink_all(session_bus: EventBus, contexts: Sequence[AtomContext]) -> None:
-    """Take every context out of a bus, for a session that is closing."""
-
-    for context in contexts:
-        session_bus.unlink(context.segment)
-
-
 __all__ = [
     "AtomContext",
     "AtomDeparture",
@@ -987,5 +980,4 @@ __all__ = [
     "ownership_of",
     "policy_row",
     "renderer_row",
-    "unlink_all",
 ]

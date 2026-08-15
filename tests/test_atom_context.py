@@ -1969,9 +1969,13 @@ async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
     tables back into the snapshot -- would restore a whole-state picture beside
     an inverse-shaped rollback and rebuild the hybrid this round removes.
 
-    The second half is the part that makes it worth writing down: the same
-    embedder code is atomic or not depending on ``def`` versus ``async def``,
-    because ``emit_sync`` closes an async handler's coroutine and logs.
+    Two halves make it worth writing down rather than leaving to be found.
+    One handler gets two fates, decided by which store it reached for: its
+    write into a host table survives, and its service registration and its
+    subscription do not, because the registry and the bus are still restored
+    from a picture. And the same embedder code is atomic, half-atomic or inert
+    depending on ``def`` versus ``async def``, because ``emit_sync`` closes an
+    async handler's coroutine and logs.
     """
 
     spec = _atom(tmp_path, "emitter_atom", _EMITS_THEN_FAILS)
@@ -1984,6 +1988,7 @@ async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
         )
         fired: list[str] = []
         never: list[str] = []
+        heard: list[str] = []
 
         def _sync_handler(event: object) -> None:
             del event
@@ -1991,6 +1996,8 @@ async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
                 return
             fired.append("sync")
             session.register_tool(host_tool)
+            session.services.register("host_from_handler", "written mid-install")
+            session.on("host.channel", lambda event: heard.append("host"))
 
         async def _async_handler(event: object) -> None:
             del event
@@ -2002,10 +2009,17 @@ async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
         with pytest.raises(Exception, match="emitter_atom refuses to install"):
             await session.install_extension(spec)
 
-        # It ran on the install's stack, and what it wrote is still there.
+        # It ran on the install's stack, and what it wrote into a host table is
+        # still there.
         assert fired == ["sync"]
         assert host_tool in session._own_tools
         assert [tool.name for tool in session.tools] == ["host_tool"]
+        # The same handler's other two writes are gone, because the registry
+        # and the bus are still restored from a picture. This is the asymmetry
+        # the snapshot's docstring names; it is pinned rather than endorsed.
+        assert session.services.get("host_from_handler") is None
+        session.bus.emit_sync("host.channel", object())
+        assert heard == []
         # The atom's own write went with the rollback, which is the control.
         assert session.installed_extensions == []
         # And the async handler never ran at all: emit_sync closed it.

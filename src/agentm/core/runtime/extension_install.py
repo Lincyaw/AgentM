@@ -40,16 +40,21 @@ class ExtensionInstallSnapshot:
     session holds is undone by the inverse of what this install itself linked
     and unlinked instead.
 
-    Nor the host's own tools, policies and renderers, and the real edge of that
-    claim is worth stating rather than leaving to be found.  No path an *atom*
-    can reach writes into a host table
+    Nor the host's own tools, policies and renderers -- those three tables and
+    no others, which is the whole of the claim and worth stating exactly,
+    because the reachability it rests on is narrower than "a host table"
+    sounds.  No path an *atom* can reach writes into any of them
     (``test_an_installation_writes_into_no_table_of_the_hosts``).  But every
     registration emits ``ApiRegisterEvent`` through ``bus.emit_sync``,
     re-entrantly, from inside the atom's registration call, so an embedder's
-    **synchronous** handler can write into a host table mid-install and that
-    write survives the install's failure.  An ``async def`` handler cannot --
-    ``emit_sync`` closes the coroutine and logs -- so the same embedder code is
-    atomic or not depending on ``def`` versus ``async def``.  Pinned by
+    **synchronous** handler runs on the install's stack and can write anywhere
+    the session lets it.  Its writes into those three tables survive the
+    install's failure; its ``services.register`` and its ``on`` do not,
+    because the registry and the bus are still pictured below.  One handler,
+    two fates, decided by which store it reached for.  An ``async def`` handler
+    reaches neither -- ``emit_sync`` closes the coroutine and logs -- so the
+    same embedder code is atomic, half-atomic or inert depending on ``def``
+    versus ``async def`` and on the store.  Pinned by
     ``test_a_sync_register_handler_writes_into_the_host_during_an_install``.
 
     What is left is the store contents an install really does move: the bus's
