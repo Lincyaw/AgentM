@@ -129,7 +129,17 @@ async def test_the_digest_records_tools_in_advertised_order(tmp_path: Path) -> N
         ]
         assert len(digest.tools) > 1
 
-        session.tools.reverse()
+        # Reordered where the tools actually live. ``session.tools`` is a live
+        # view over the host's table plus every linked atom context, so there
+        # is no session-level list to reverse -- which is the point: a tool
+        # belongs to the context that registered it.
+        context = session.context_for(
+            ExtensionSpec.from_module(
+                "agentm.extensions.builtin.task_tracking"
+            ).module_path
+        )
+        assert context is not None
+        context.tables.tools.reverse()
         assert composition_digest(session).tools != digest.tools
 
 

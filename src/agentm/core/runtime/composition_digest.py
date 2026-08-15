@@ -120,6 +120,7 @@ from typing import Final, cast
 
 from loguru import logger
 
+from agentm.core.abi.effects import EffectLog
 from agentm.core.abi.services import ServiceScope
 from agentm.core.runtime.session_core import SessionRuntime
 
@@ -208,6 +209,26 @@ class ProviderEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class EffectRecord:
+    """One write an atom context recorded that no table of the runtime holds.
+
+    Liveness, not heldness: it is read off the *linked* contexts, so an atom
+    that has been unlinked contributes nothing here however much its own
+    context object still holds. A record that survives an uninstall therefore
+    means the write survived it too.
+
+    ``settled`` is False for an async body that was queued and has not run; one
+    of those is a write that has not happened yet, which is exactly the kind of
+    residue a caller comparing two digests needs to see.
+    """
+
+    owner: str
+    provides: str
+    retain: str
+    settled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class CompositionDigest:
     """Everything a session holds that an installation could have written."""
 
@@ -220,6 +241,7 @@ class CompositionDigest:
     termination_causes: tuple[str, ...]
     services: tuple[ServiceEntry, ...]
     service_write_observer: str | None
+    effects: tuple[EffectRecord, ...]
     subscriptions: tuple[SubscriptionEntry, ...]
     observers: tuple[ObserverEntry, ...]
     providers: tuple[ProviderEntry, ...]
@@ -246,9 +268,14 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
     bus = session.bus
     codec = session.codec
     providers = session._providers
+    # Ownership is read off the context tree, not off the ledger: a thing
+    # belongs to the context whose table it is in, and that is the only account
+    # a detach acts on. The ledger keeps a parallel one, which the attribution
+    # tests compare against this rather than this depending on.
+    owners = session.ownership()
+    linked = session.linked_contexts()
 
     provider_configs = providers.configs()
-    provider_owners = providers.owners()
     # Read the registry's fields rather than ``get()``/``session_identity()``:
     # both of those re-resolve, and one of them freezes an identity into the
     # session. A digest that mutates its subject cannot witness anything.
@@ -270,22 +297,21 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
         # every session spawned afterwards.
         composition_specs=tuple(spec.module_path for spec in ledger.specs),
         tools=tuple(
-            ToolEntry(name=tool.name, owner=ledger.tool_owners.get(id(tool)))
-            for tool in session.tools
+            ToolEntry(name=tool.name, owner=owners.tool(tool)) for tool in session.tools
         ),
         context_policies=tuple(
             PolicyEntry(
-                priority=ledger.context_policy_priorities.get(id(policy)),
-                policy=_identity(policy),
-                owner=ledger.context_policy_owners.get(id(policy)),
+                priority=row.priority,
+                policy=_identity(row.policy),
+                owner=owners.policy(row.policy),
             )
-            for policy in session.context_policies
+            for row in session.policy_rows()
         ),
         trigger_renderers=tuple(
             SourceEntry(
                 source=source,
                 implementation=_identity(session.trigger_renderers[source]),
-                owner=ledger.trigger_renderer_owners.get(source),
+                owner=owners.renderer(source),
             )
             for source in sorted(session.trigger_renderers)
         ),
@@ -302,7 +328,7 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
             ServiceEntry(
                 key=key,
                 scope=session.services.scope(key),
-                owner=ledger.service_owners.get(key),
+                owner=owners.service(key),
                 value=_service_value(session.services.get(key)),
             )
             for key in sorted(session.services.names())
@@ -316,8 +342,16 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
             if session.services._write_observer is None
             else _identity(session.services._write_observer)
         ),
+        effects=tuple(
+            record
+            for context in linked
+            for record in _effect_records(context.module_path, context.effects)
+        ),
         # Per-channel list order is dispatch order; the channels themselves are
         # sorted because no emission spans two of them.
+        # Read through the bus's merged view rather than its own table: what
+        # dispatches on a channel is the session's own subscriptions plus every
+        # linked context's, and only the merge is in dispatch order.
         subscriptions=tuple(
             SubscriptionEntry(
                 channel=channel,
@@ -325,20 +359,20 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
                 owner=subscription.owner,
                 handler=_identity(subscription.handler),
             )
-            for channel in sorted(bus._handlers)
-            for subscription in bus._handlers[channel]
+            for channel in bus.channels()
+            for subscription in bus.subscriptions(channel)
         ),
         observers=tuple(
             ObserverEntry(
                 observer=_identity(record.observer),
                 owner=record.owner,
             )
-            for record in bus._observers
+            for record in bus.all_observers()
         ),
         providers=tuple(
             ProviderEntry(
                 name=name,
-                owner=provider_owners.get(name),
+                owner=owners.service(f"provider:{name}"),
                 model_id=provider_configs[name].model.id,
             )
             for name in sorted(provider_configs)
@@ -366,6 +400,30 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
         pending_background_work=session.triggers._pending_work,
         background_tasks=_background_tasks(),
     )
+
+
+def _effect_records(owner: str, log: EffectLog) -> list[EffectRecord]:
+    """One context's recorded writes: what ran, then what is still queued."""
+
+    records = [
+        EffectRecord(
+            owner=owner,
+            provides=entry.provides,
+            retain=entry.retain,
+            settled=True,
+        )
+        for entry in log.entries
+    ]
+    records.extend(
+        EffectRecord(
+            owner=owner,
+            provides=handle.provides,
+            retain=handle.retain,
+            settled=False,
+        )
+        for handle in log.unsettled
+    )
+    return records
 
 
 def _identity(value: object) -> str:
@@ -533,6 +591,7 @@ def _background_tasks() -> tuple[str, ...]:
 __all__ = [
     "AtomEntry",
     "CompositionDigest",
+    "EffectRecord",
     "ObserverEntry",
     "PolicyEntry",
     "ProviderEntry",
