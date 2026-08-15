@@ -1,22 +1,21 @@
-"""Installed atoms — which atoms a session holds, and how to replay them.
+"""What one installation has to put back, and who registered each codec.
 
-What an atom *registered* is not here.  It went into that atom's own
-``AtomContext`` (``atom_context.py``), the session sees it because the context
-is linked, and detaching unlinks.  Ownership is therefore "which node did the
-write land in", and there is nothing here that could give a second answer.
+Which atoms a session holds is not here and has no table of its own: an atom's
+installation *is* its ``AtomContext`` (``atom_context.py``), so the session's
+link list is the installed set, in the order the atoms joined.  Linking is
+recording; unlinking is retiring; the spec that replays an atom and the name
+its manifest gives it are fields of that one record.  A second list keyed by
+module path would be a second answer to "which atoms does this session hold",
+and two answers restored by two mechanisms can be driven apart — which is
+exactly what happened, with no concurrency at all, when a third atom was
+removed from inside an installation that then failed.
 
-What is here is the other half, which no table of the session can answer for:
-which atoms were installed, in which order, from which spec.  A child or a fork
-is rebuilt by replaying those specs, and ``replace=True`` finds the incarnation
-to supersede by manifest name.
+So what a failed installation restores is only what is here: the *contents* of
+the stores an install writes into.  Everything about the shape of the context
+tree is undone by an inverse instead.
 
-Rollback is by inverse rather than by snapshot.  One installation records
-exactly one atom, so undoing it retires exactly that record; superseding one
-hands its record to the caller that took it out, which gives it back if the
-replacement never lands.
-
-``TriggerCodecOwners`` is the one attribution table left, for the one write an
-atom makes that a context table cannot hold — see its docstring.
+``TriggerCodecOwners`` stays because it describes the one write an atom makes
+that a context table cannot hold — see its docstring.
 """
 
 from __future__ import annotations
@@ -24,150 +23,47 @@ from __future__ import annotations
 from collections.abc import Collection
 from dataclasses import dataclass
 
+from agentm.core.abi.bus import EventBus
 from agentm.core.abi.codec import CodecRegistry
-from agentm.core.abi.session_api import ExtensionSpec
+from agentm.core.abi.services import ServiceRegistry
+from agentm.core.runtime.provider_registry import ProviderSnapshot
 
 
 @dataclass(frozen=True, slots=True)
-class InstalledAtom:
-    """One installed atom: what replays it, and what it calls itself.
+class ExtensionInstallSnapshot:
+    """The *contents* of the shared stores, before an install.
 
-    ``runtime`` marks an atom installed into a running session rather than
-    composed before start.  The distinction matters for rebuilds: the active
-    set recorded at creation covers the composed atoms only, and a rebuild that
-    replayed a runtime atom would compute a different digest than the one the
-    source session froze into its provider identity.
+    Not the shape of the context tree.  A picture of a list put back at a
+    moment other than the one it was taken at overwrites whatever anybody else
+    decided in between, in both directions -- it resurrects a context a third
+    party unlinked and erases one a third party linked -- so which contexts the
+    session holds is undone by the inverse of what this install itself linked
+    and unlinked instead.
+
+    Nor the host's own tools, policies and renderers, and the real edge of that
+    claim is worth stating rather than leaving to be found.  No path an *atom*
+    can reach writes into a host table
+    (``test_an_installation_writes_into_no_table_of_the_hosts``).  But every
+    registration emits ``ApiRegisterEvent`` through ``bus.emit_sync``,
+    re-entrantly, from inside the atom's registration call, so an embedder's
+    **synchronous** handler can write into a host table mid-install and that
+    write survives the install's failure.  An ``async def`` handler cannot --
+    ``emit_sync`` closes the coroutine and logs -- so the same embedder code is
+    atomic or not depending on ``def`` versus ``async def``.  Pinned by
+    ``test_a_sync_register_handler_writes_into_the_host_during_an_install``.
+
+    What is left is the store contents an install really does move: the bus's
+    own subscriptions, the registry's own entries, and the codec registry,
+    which holds the one write landing outside the atom's context -- with
+    ``codec_owners`` beside it, because who registered a source has to come
+    back with the source.
     """
 
-    module_path: str
-    spec: ExtensionSpec
-    runtime: bool
-    atom_name: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class RetiredAtom:
-    """One record ``retire`` took out, and where it goes back.
-
-    The inverse of recording an installation, held by whoever performed the
-    removal.  The position travels with it because the installed set has an
-    order and a rebuild replays in that order: a superseded atom whose
-    replacement fails must come back where it was, not at the end.
-    """
-
-    atom: InstalledAtom
-    position: int
-
-
-class InstalledAtoms:
-    """The atoms installed into one session, in the order they were installed."""
-
-    __slots__ = ("_atoms",)
-
-    def __init__(self) -> None:
-        self._atoms: list[InstalledAtom] = []
-
-    # --- Recording ---
-
-    def record(
-        self,
-        spec: ExtensionSpec,
-        *,
-        runtime: bool = False,
-        atom_name: str | None = None,
-    ) -> None:
-        """Record one installed atom, at the end of the installed set."""
-
-        self._atoms.append(
-            InstalledAtom(
-                module_path=spec.module_path,
-                spec=ExtensionSpec(source=spec.source, config=spec.config),
-                runtime=runtime,
-                atom_name=atom_name,
-            )
-        )
-
-    def retire(self, module_path: str) -> RetiredAtom | None:
-        """Take one atom out of the installed set and hand back its inverse.
-
-        ``None`` when nothing was installed under that path, which is also the
-        answer a detach of an atom that is not there needs.
-        """
-
-        for position, atom in enumerate(self._atoms):
-            if atom.module_path == module_path:
-                del self._atoms[position]
-                return RetiredAtom(atom=atom, position=position)
-        return None
-
-    def reinstate(self, retired: RetiredAtom) -> None:
-        """Put back what ``retire`` took out, where it was."""
-
-        self._atoms.insert(retired.position, retired.atom)
-
-    # --- Reading ---
-
-    @property
-    def module_paths(self) -> list[str]:
-        """Module paths of the installed atoms, in install order."""
-
-        return [atom.module_path for atom in self._atoms]
-
-    def spec_module_paths(self) -> tuple[str, ...]:
-        """Module paths of the replayable specs, in install order."""
-
-        return tuple(atom.spec.module_path for atom in self._atoms)
-
-    def runtime_module_paths(self) -> frozenset[str]:
-        """Module paths installed into the running session."""
-
-        return frozenset(atom.module_path for atom in self._atoms if atom.runtime)
-
-    def atom_names(self) -> dict[str, str]:
-        """Manifest name to module path, for the atoms that carry a manifest."""
-
-        return {
-            atom.atom_name: atom.module_path
-            for atom in self._atoms
-            if atom.atom_name is not None
-        }
-
-    def installed_module_path(self, atom_name: str) -> str | None:
-        """Module path installed under ``atom_name``, if one is.
-
-        Keyed on the manifest name rather than derived from the module path:
-        a file-backed atom is loaded under a content-addressed module name, so
-        two revisions of one atom share a manifest name and nothing else.
-        """
-
-        return self.atom_names().get(atom_name)
-
-    def installed_atom_names(self) -> frozenset[str]:
-        """Manifest names of the installed atoms, as a requirement spells them."""
-
-        return frozenset(self.atom_names())
-
-    def composition_extensions(
-        self,
-        *,
-        excluded_module_paths: Collection[str] = (),
-        include_runtime: bool = False,
-    ) -> list[ExtensionSpec]:
-        """Specs to replay when rebuilding this session's composition.
-
-        Runtime-installed atoms are excluded by default: a rebuild replays these
-        specs before the active set is recorded, so including them would make a
-        child's digest disagree with the identity its source froze. A caller
-        that wants the live picture rather than the composed one passes
-        ``include_runtime=True``.
-        """
-
-        return [
-            ExtensionSpec(source=atom.spec.source, config=atom.spec.config)
-            for atom in self._atoms
-            if atom.module_path not in excluded_module_paths
-            and (include_runtime or not atom.runtime)
-        ]
+    bus: EventBus
+    services: ServiceRegistry
+    codec: CodecRegistry
+    codec_owners: TriggerCodecOwners
+    providers: ProviderSnapshot
 
 
 class TriggerCodecOwners:
@@ -233,9 +129,4 @@ class TriggerCodecOwners:
         self._owners = dict(other._owners)
 
 
-__all__ = [
-    "InstalledAtom",
-    "InstalledAtoms",
-    "RetiredAtom",
-    "TriggerCodecOwners",
-]
+__all__ = ["ExtensionInstallSnapshot", "TriggerCodecOwners"]

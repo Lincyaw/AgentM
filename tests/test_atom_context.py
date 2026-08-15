@@ -26,11 +26,13 @@ from pathlib import Path
 import pytest
 
 from agentm.core.abi.effects import EffectInverse
-from agentm.core.abi.events import SessionShutdownEvent
+from agentm.core.abi.events import ApiRegisterEvent, SessionShutdownEvent
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_RESOLVER_SERVICE, RESOURCE_TXN_SERVICE
+from agentm.core.abi.messages import TextContent
 from agentm.core.abi.session_api import AtomAPI, ExtensionSpec
 from agentm.core.abi.stream import Model
+from agentm.core.abi.tool import FunctionTool, ToolResult
 from agentm.core.runtime.composition_digest import composition_digest
 from agentm.core.runtime.session_core import SessionRuntime
 from agentm.testing import NeverStreams, digest_differences, probe_session
@@ -60,6 +62,13 @@ def _tool_owner(session: SessionRuntime, name: str) -> str | None:
         if tool.name == name:
             return ownership.tool(tool)
     raise AssertionError(f"no tool named {name}")
+
+
+async def _ok_tool(args: Mapping[str, object]) -> ToolResult:
+    """A tool body for a host tool a test only has to be able to register."""
+
+    del args
+    return ToolResult(content=(TextContent(type="text", text="ok"),))
 
 
 def _file_atom(root: Path, name: str, source: str) -> ExtensionSpec:
@@ -519,6 +528,47 @@ _KEEPER = (
 def install(api, config):
     del config
     api.services.register("kept_api", api, scope="session")
+"""
+)
+
+# A plain atom with a manifest name, for a test that removes it by that name.
+_VICTIM = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.register("{name}_write", "victim", scope="session")
+"""
+)
+
+# An install body that reaches a third atom through an api another atom
+# published, removes it, and then refuses -- one task, no awaits.
+_SABOTEUR = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.require("kept_api", object).uninstall_extension("{victim}")
+    raise RuntimeError("saboteur refuses to install")
+"""
+)
+
+# An install body that awaits, so another task runs while it is in flight, and
+# then refuses.  The gate lets the test decide when the failure lands.
+_SLOW_REFUSES = (
+    _MANIFEST
+    + """
+
+import asyncio
+
+
+async def install(api, config):
+    del config
+    api.services.require("install_gate", asyncio.Event).set()
+    await asyncio.sleep(0.05)
+    raise RuntimeError("{name} broke")
 """
 )
 
@@ -1731,3 +1781,232 @@ async def test_a_failed_install_on_a_started_session_leaves_the_installed_set(
         # And the survivor is still an atom, not merely a row: it detaches.
         assert session.uninstall_extension(middle)
         assert marks == []
+
+
+# --- The installed set is the link list -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_atom_removed_during_a_failed_install_is_not_left_half_held(
+    tmp_path: Path,
+) -> None:
+    """A third atom removed from inside a failing install stays removed.
+
+    No concurrency and no awaits: ``pub`` publishes its own activated api as a
+    service, which this repo's own fixtures do, and ``sab``'s plain synchronous
+    ``install()`` calls ``uninstall_extension`` through it and then raises. One
+    task, one stack.
+
+    The wedge this reproduces was a rollback that put the link list back from a
+    picture taken before the install while the record of which atoms were
+    installed was undone per-record: ``vic`` came back linked with nothing left
+    naming it, so it could be neither removed nor installed again, and the only
+    recovery re-recorded it at the end of the set, corrupting composition order
+    for the session and every child of it.
+
+    Either end state is defensible and this asserts the one the inverse
+    produces: the removal was a real removal by a party that is not this
+    install, so it is not undone. ``vic`` is gone and installable again. The
+    composition digest cannot tell the two apart -- the removal suspends the
+    context before the failure, so the resurrected one is empty -- which is why
+    this asks the session what it holds rather than diffing a digest.
+    """
+
+    pub = _atom(tmp_path, "pub", _KEEPER)
+    vic = _atom(tmp_path, "vic", _VICTIM)
+    sab = _file_atom(tmp_path, "sab", _SABOTEUR.format(name="sab", victim="vic"))
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(pub)
+        await session.install_extension(vic)
+        assert session.services.get("vic_write") == "victim"
+
+        with pytest.raises(Exception, match="saboteur refuses to install"):
+            await session.install_extension(sab)
+
+        assert session.installed_extensions == [pub.module_path]
+        assert session.context_for(vic.module_path) is None
+        assert session.installed_atom_module_path("vic") is None
+        assert session.services.get("vic_write") is None
+        # Gone means installable, and installable means back in the set once.
+        await session.install_extension(vic)
+        assert session.installed_extensions == [pub.module_path, vic.module_path]
+        assert session.services.get("vic_write") == "victim"
+        assert session.uninstall_extension(vic)
+
+
+@pytest.mark.asyncio
+async def test_an_atom_detached_by_another_task_is_not_resurrected(
+    tmp_path: Path,
+) -> None:
+    """The concurrent shape of the same rule, and the pre-existing half of it.
+
+    The failing install awaits, and another task detaches an atom the install
+    never touched while it is awaiting. A rollback that restored the link list
+    from a picture taken before the install put that atom back -- reversing a
+    decision that was never this install's to reverse, and relinking a context
+    whose effects had already been run backwards.
+
+    True before the installed set was collapsed as well, which is why it is
+    stated as its own cell: a detach by a third party survives the rollback,
+    and what the rollback undoes is what this install itself did.
+    """
+
+    victim = _atom(tmp_path, "vic", _VICTIM)
+    failing = _atom(tmp_path, "slow_atom", _SLOW_REFUSES)
+    gate = asyncio.Event()
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("install_gate", gate, scope="session")
+        await session.install_extension(victim)
+
+        async def _detach_once_installing() -> None:
+            await gate.wait()
+            assert session.uninstall_extension(victim)
+
+        detach = asyncio.create_task(_detach_once_installing())
+        with pytest.raises(Exception, match="slow_atom broke"):
+            await session.install_extension(failing)
+        await detach
+
+        assert session.installed_extensions == []
+        assert session.context_for(victim.module_path) is None
+        assert session.services.get("vic_write") is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_supersede_puts_the_atom_back_among_its_neighbours(
+    tmp_path: Path,
+) -> None:
+    """Order under failure is the order a cold start would produce.
+
+    ``a``, ``b``, ``c`` composed; a supersede of ``b`` that awaits and then
+    refuses, with ``a`` detached by another task inside that window. The
+    survivor has to come back *between its neighbours*, not at the index it
+    happened to occupy: the list moved under it, so an integer position would
+    put ``b`` after ``c`` and every child spawned afterwards would replay the
+    composition in an order no cold start produces.
+    """
+
+    first = _atom(tmp_path, "a_atom", _VICTIM)
+    middle = _atom(tmp_path, "b_atom", _VICTIM)
+    last = _atom(tmp_path, "c_atom", _VICTIM)
+    gate = asyncio.Event()
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("install_gate", gate, scope="session")
+        for spec in (first, middle, last):
+            await session.install_extension(spec)
+        assert session.installed_extensions == [
+            first.module_path,
+            middle.module_path,
+            last.module_path,
+        ]
+
+        async def _detach_once_installing() -> None:
+            await gate.wait()
+            assert session.uninstall_extension(first)
+
+        # Loads under b_atom's manifest name, so the supersede really runs.
+        replacement = _file_atom(
+            tmp_path, "b_atom_v2", _SLOW_REFUSES.format(name="b_atom")
+        )
+        detach = asyncio.create_task(_detach_once_installing())
+        with pytest.raises(Exception, match="b_atom broke"):
+            await session.install_extension(replacement, replace=True)
+        await detach
+
+        assert session.installed_extensions == [middle.module_path, last.module_path]
+        assert session.installed_atom_module_path("b_atom") == middle.module_path
+        assert [
+            spec.module_path for spec in session.composition_snapshot().extensions
+        ] == [middle.module_path, last.module_path]
+        assert session.uninstall_extension(middle)
+
+
+# An atom that registers a tool -- which emits ``ApiRegisterEvent`` through
+# ``emit_sync``, re-entrantly -- and then refuses to install.
+_EMITS_THEN_FAILS = (
+    _MANIFEST
+    + """
+
+from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi.messages import TextContent
+
+
+async def _noop(args):
+    del args
+    return ToolResult(content=(TextContent(type="text", text="ok"),))
+
+
+def install(api, config):
+    del config
+    api.register_tool(
+        FunctionTool(
+            name="{name}_tool",
+            description="fires a register event before the refusal",
+            parameters={{"type": "object", "properties": {{}}}},
+            fn=_noop,
+        )
+    )
+    raise RuntimeError("{name} refuses to install")
+"""
+)
+
+
+@pytest.mark.asyncio
+async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
+    tmp_path: Path,
+) -> None:
+    """The real edge on "an installation writes into no table of the host's".
+
+    No path an *atom* reaches writes into a host table. But a registration
+    emits ``ApiRegisterEvent`` through ``bus.emit_sync``, re-entrantly, from
+    inside the atom's own registration call, so an embedder's handler runs on
+    the install's stack and can write into the host's tables from there. The
+    host's tables are not in the install snapshot, so such a write survives the
+    install's failure.
+
+    That is the documented behaviour rather than a defect this branch fixes,
+    and it is pinned here because the alternative -- putting the three host
+    tables back into the snapshot -- would restore a whole-state picture beside
+    an inverse-shaped rollback and rebuild the hybrid this round removes.
+
+    The second half is the part that makes it worth writing down: the same
+    embedder code is atomic or not depending on ``def`` versus ``async def``,
+    because ``emit_sync`` closes an async handler's coroutine and logs.
+    """
+
+    spec = _atom(tmp_path, "emitter_atom", _EMITS_THEN_FAILS)
+    async with probe_session(str(tmp_path)) as session:
+        host_tool = FunctionTool(
+            name="host_tool",
+            description="registered by the embedder from inside an install",
+            parameters={"type": "object", "properties": {}},
+            fn=_ok_tool,
+        )
+        fired: list[str] = []
+        never: list[str] = []
+
+        def _sync_handler(event: object) -> None:
+            del event
+            if fired:
+                return
+            fired.append("sync")
+            session.register_tool(host_tool)
+
+        async def _async_handler(event: object) -> None:
+            del event
+            never.append("async")
+
+        session.on(ApiRegisterEvent.CHANNEL, _sync_handler)
+        session.on(ApiRegisterEvent.CHANNEL, _async_handler)
+
+        with pytest.raises(Exception, match="emitter_atom refuses to install"):
+            await session.install_extension(spec)
+
+        # It ran on the install's stack, and what it wrote is still there.
+        assert fired == ["sync"]
+        assert host_tool in session._own_tools
+        assert [tool.name for tool in session.tools] == ["host_tool"]
+        # The atom's own write went with the rollback, which is the control.
+        assert session.installed_extensions == []
+        # And the async handler never ran at all: emit_sync closed it.
+        assert never == []

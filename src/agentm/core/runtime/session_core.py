@@ -5,10 +5,8 @@ Owns driver task, trajectory, trigger queue, bus, tools, services,
 context policies, and shutdown logic.  ``Session`` (session.py) extends
 this with child, fork, and resume operations.
 
-Two collaborators own the state the runtime only routes to: which model
-the session talks to lives in ``provider_registry.py``, and which atoms are
-installed -- their replayable specs, not their registrations -- lives in
-``extension_install.py``.
+One collaborator owns state the runtime only routes to: which model the
+session talks to lives in ``provider_registry.py``.
 
 What an atom registered does not live in this session's tables at all.  Each
 installation gets its own ``AtomContext`` (``atom_context.py``) with its own
@@ -18,6 +16,14 @@ context's.  Detaching an atom unlinks its context; the methods below are
 therefore the host's write path, attributed to nobody, and an atom never
 reaches them.  There is no second account of who owns what: ``ownership()``
 reads the tree, and the tables below are the embedder's by construction.
+
+Which atoms are installed is that same list and not a second one.  A context
+carries the spec that replays it and the name its manifest gives it, so
+linking one is recording the installation and unlinking it is retiring it --
+``installed_extensions`` is a read of ``_linked``, in link order.  A rollback
+is the inverse of what the installation itself linked and unlinked, never a
+picture of the list taken beforehand: a picture put back at a later moment
+undoes decisions that were never that installation's to undo.
 
 Runtime boundaries (resource ports, tool execution, permission, effect
 scope, catalogs) are plain service-role bindings; there are no
@@ -31,7 +37,7 @@ import copy
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from loguru import logger
@@ -122,7 +128,7 @@ from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.lib.session_result import compute_session_result
 from agentm.core.runtime.atom_context import (
     AtomContext,
-    AtomResidue,
+    AtomDeparture,
     ChainedPolicies,
     ChainedRenderers,
     ChainedTools,
@@ -136,11 +142,10 @@ from agentm.core.runtime.atom_context import (
 )
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.extension_install import (
-    InstalledAtoms,
-    RetiredAtom,
+    ExtensionInstallSnapshot,
     TriggerCodecOwners,
 )
-from agentm.core.runtime.provider_registry import ProviderRegistry, ProviderSnapshot
+from agentm.core.runtime.provider_registry import ProviderRegistry
 from agentm.core.runtime.session_composition import (
     CompositionSnapshot,
     SessionRuntimeConfig,
@@ -151,43 +156,6 @@ from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
 
 if TYPE_CHECKING:
     from agentm.core.runtime.session import Session
-
-
-@dataclass(frozen=True, slots=True)
-class _ExtensionInstallSnapshot:
-    """The shared stores and the *shape* of the context tree, before an install.
-
-    All an installation can move.  An atom writes into its own context, so
-    putting the link list back is what takes a failed installation's writes
-    away and gives a superseded atom's back.  The host's own tools, policies
-    and renderers are not here because nothing an atom can reach writes into
-    them -- ``test_an_installation_writes_into_no_table_of_the_hosts``.  The
-    stores are the exception: the bus and the registry hold link lists of their
-    own, and the codec registry holds the one write that lands outside the
-    atom's context, with ``codec_owners`` beside it because who registered a
-    source has to come back with the source.
-    """
-
-    bus: EventBus
-    services: ServiceRegistry
-    codec: CodecRegistry
-    codec_owners: TriggerCodecOwners
-    linked: tuple[AtomContext, ...]
-    providers: ProviderSnapshot
-
-
-@dataclass(frozen=True, slots=True)
-class AtomDeparture:
-    """What removing one atom took out, for the caller that decides its fate.
-
-    ``residue`` is what the atom's context held and ``record`` is its place in
-    the installed set; both are reverted by a detach that is final and handed
-    back by a supersede whose replacement never lands, which is why neither is
-    acted on at the removal.  Either is ``None`` when there was none.
-    """
-
-    residue: AtomResidue | None
-    record: RetiredAtom | None
 
 
 class SessionRuntime:
@@ -255,7 +223,6 @@ class SessionRuntime:
         self.trigger_renderers: Mapping[str, TriggerRenderer] = ChainedRenderers(
             self._own_renderers, self._linked
         )
-        self._extensions = InstalledAtoms()
         self._codec_owners = TriggerCodecOwners()
         store_codec = (
             store.codec if isinstance(store, CodecBackedTrajectoryStore) else None
@@ -624,9 +591,19 @@ class SessionRuntime:
 
     @property
     def installed_extensions(self) -> list[str]:
-        """Module paths of the atoms installed into this session, in order."""
+        """Module paths of the atoms installed into this session, in order.
 
-        return self._extensions.module_paths
+        Read off the link list, because the link list *is* the installed set.
+        The order is link order -- when each atom joined, which is also when
+        its tools became visible -- decided once here so that a cold start, a
+        replay and a rollback cannot disagree about it.
+
+        ``installed`` rather than merely linked: a context is linked just
+        before its ``install()`` runs, so an atom mid-install is held but not
+        installed.  That flag is a field of the one context, not a second row.
+        """
+
+        return [context.module_path for context in self._linked if context.installed]
 
     @property
     def session_id(self) -> str:
@@ -727,9 +704,7 @@ class SessionRuntime:
         self.codec.register_trigger_codec(
             source,
             codec,
-            replace=self._codec_owners.is_superseded(
-                source, self._extensions.module_paths
-            ),
+            replace=self._codec_owners.is_superseded(source, self.installed_extensions),
         )
         self._codec_owners.note(source, None)
         self._emit_register_event(
@@ -785,14 +760,18 @@ class SessionRuntime:
         tables, so the rule about it lives here rather than there: a superseded
         atom keeps its codec so committed turns stay decodable, and its
         replacement takes the source over rather than colliding.
+
+        This is the reader that needs "installed" to mean *finished*: a
+        supersede links the replacement's context before running its
+        ``install()``, so counting the link alone would find the replacement's
+        own module path present, call the source not superseded, and collide
+        with the codec its previous incarnation registered.
         """
 
         self.codec.register_trigger_codec(
             source,
             codec,
-            replace=self._codec_owners.is_superseded(
-                source, self._extensions.module_paths
-            ),
+            replace=self._codec_owners.is_superseded(source, self.installed_extensions),
         )
         self._codec_owners.note(source, owner)
 
@@ -1027,7 +1006,11 @@ class SessionRuntime:
 
         return live_capability_keys(
             services=self.services.names(),
-            atoms=self._extensions.installed_atom_names(),
+            atoms=frozenset(
+                context.atom_name
+                for context in self._linked
+                if context.installed and context.atom_name is not None
+            ),
             tools=[tool.name for tool in self.tools],
             providers=self._providers.names(),
             trigger_renderers=self.trigger_renderers.keys(),
@@ -1068,7 +1051,11 @@ class SessionRuntime:
             )
 
     def remove_atom_registrations(self, module_path: str) -> AtomDeparture:
-        """Unlink one atom's context and take it out of the installed set.
+        """Unlink one atom's context, which is what takes it out of the set.
+
+        One action, not two: the context is the installation record, so there
+        is no separate row to retire alongside the unlink and nothing that can
+        be retired without the unlink or the other way round.
 
         Returns what it took out rather than disposing of it, because the two
         callers want opposite things from it. ``uninstall_extension`` reverts
@@ -1108,13 +1095,13 @@ class SessionRuntime:
 
         context = self.context_for(module_path)
         if context is None:
-            return AtomDeparture(
-                residue=None, record=self._extensions.retire(module_path)
-            )
+            return AtomDeparture(residue=None, preceded_by=())
+        # Read before the unlink, so the inverse knows the neighbours it has to
+        # come back among rather than the index it happened to sit at.
+        preceded_by = tuple(self._linked[: self._linked.index(context)])
         context.unlink_from(self)
         residue = context.suspend()
         self._departed.note(context)
-        record = self._extensions.retire(module_path)
         removed_providers = self._uncover(module_path)
         logger.debug(
             "unlinked atom {}: {} tools, {} policies, {} renderers, "
@@ -1128,21 +1115,30 @@ class SessionRuntime:
             len(residue.segment.handlers),
             len(residue.effects),
         )
-        return AtomDeparture(residue=residue, record=record)
+        return AtomDeparture(residue=residue, preceded_by=preceded_by)
 
     def restore_atom_registrations(self, departure: AtomDeparture) -> None:
-        """Put back what ``remove_atom_registrations`` took out.
+        """Put back what ``remove_atom_registrations`` took out, where it was.
 
         The inverse of the removal, for a supersede whose replacement never
-        landed. Linking is not part of it: the failed installation's rollback
-        puts the whole link list back at once, because a link list is the one
-        thing an installation moves that is not this atom's.
+        landed. Linking is part of it now: relinking the context *is* putting
+        the atom back into the installed set, because there is nothing else
+        that says it is in there.
+
+        The departure is taken back at the same time. A context this session
+        holds again must not have its effects reverted at shutdown as though it
+        had left, and doing it here keeps the two facts in one place: nothing
+        else relinks a context that departed, and relying on the shutdown loops
+        running in a particular order would make that order load-bearing and
+        unstated.
         """
 
-        if departure.record is not None:
-            self._extensions.reinstate(departure.record)
-        if departure.residue is not None:
-            departure.residue.context.resume(departure.residue)
+        residue = departure.residue
+        if residue is None:
+            return
+        residue.context.link_into(self, after=departure.preceded_by)
+        residue.context.resume(residue)
+        self._departed.forget(residue.context)
 
     def _uncover(self, module_path: str) -> list[str]:
         """Say who holds the providers an unlinked context was shadowing.
@@ -1211,10 +1207,10 @@ class SessionRuntime:
 
         if isinstance(atom, ExtensionSpec):
             module_path: str | None = atom.module_path
-            if module_path not in self._extensions.module_paths:
+            if module_path not in self.installed_extensions:
                 return False
         else:
-            module_path = self._extensions.installed_module_path(atom)
+            module_path = self.installed_atom_module_path(atom)
         if module_path is None:
             return False
         departure = self.remove_atom_registrations(module_path)
@@ -1226,27 +1222,44 @@ class SessionRuntime:
         return True
 
     def installed_atom_module_path(self, atom_name: str) -> str | None:
-        """Module path of an installed atom by its manifest name, if present."""
+        """Module path of an installed atom by its manifest name, if present.
 
-        return self._extensions.installed_module_path(atom_name)
+        Keyed on the manifest name rather than derived from the module path:
+        a file-backed atom is loaded under a content-addressed module name, so
+        two revisions of one atom share a manifest name and nothing else. Read
+        back to front, so that of two atoms claiming one name the later install
+        answers -- which is what a single name-keyed table gave.
+        """
+
+        for context in reversed(self._linked):
+            if context.installed and context.atom_name == atom_name:
+                return context.module_path
+        return None
 
     # --- Context tree ---
 
-    def link_context(self, context: AtomContext) -> None:
+    def link_context(
+        self,
+        context: AtomContext,
+        *,
+        after: Sequence[AtomContext] | None = None,
+    ) -> None:
         """Aggregate one atom context into what this session resolves.
 
-        At most one context per module path is ever linked, and this is where
-        that holds. Everything else that answers for an atom is keyed on the
-        module path and holds exactly one entry for it -- its replayable spec,
-        ``retire``, ``context_for`` -- so a second live context under one path
-        is state they cannot represent: removal would unlink one incarnation
-        while the installed set dropped the path outright, leaving the other
-        linked with nothing left to name it.
+        Linking is what puts an atom into the installed set, because the
+        context is the installation record: its spec is what replays it and its
+        manifest name is what names it. At most one context per module path is
+        ever linked, and this is where that holds -- ``context_for`` and the
+        installed set are the same list, so a second live context under one
+        path is state neither can represent. Superseding is not that case: the
+        previous context is unlinked before its replacement links.
 
-        Superseding is not that case, because the previous context is unlinked
-        before its replacement links. Refused here rather than in the install
-        path because this is the list that would hold the second one, and the
-        cold path already refuses it as a duplicate atom name.
+        ``after`` names the contexts this one was linked behind before it was
+        taken out, and is how a rollback puts a superseded atom back among its
+        neighbours: directly after the last of them still linked, or first if
+        none is. An index would be wrong the moment anything else left the
+        list, and the set's order is replayed into every child. ``None``, the
+        fresh-install case, appends -- link order is join order.
         """
 
         if any(existing is context for existing in self._linked):
@@ -1258,7 +1271,14 @@ class SessionRuntime:
                 "install it with replace=True to supersede the one that is, or "
                 "uninstall that one first"
             )
-        self._linked.append(context)
+        if after is None:
+            self._linked.append(context)
+            return
+        position = 0
+        for index, existing in enumerate(self._linked):
+            if any(existing is anchor for anchor in after):
+                position = index + 1
+        self._linked.insert(position, context)
 
     def unlink_context(self, context: AtomContext) -> None:
         """Stop aggregating one atom context; safe to repeat."""
@@ -1324,45 +1344,37 @@ class SessionRuntime:
 
         return self._driver_task is not None
 
-    def _capture_extension_install_state(self) -> _ExtensionInstallSnapshot:
-        """The shared stores plus the shape of the context tree."""
+    def _capture_extension_install_state(self) -> ExtensionInstallSnapshot:
+        """The contents of the shared stores, for a rollback to put back."""
 
-        return _ExtensionInstallSnapshot(
+        return ExtensionInstallSnapshot(
             bus=self.bus.copy(),
             services=self.services.copy(),
             codec=self.codec.copy(),
             codec_owners=self._codec_owners.copy(),
-            linked=tuple(self._linked),
             providers=self._providers.capture(),
         )
 
     def _restore_extension_install_state(
         self,
-        snapshot: _ExtensionInstallSnapshot,
+        snapshot: ExtensionInstallSnapshot,
     ) -> None:
         # Restore in place throughout. The driver holds references to these
         # same container objects, so rebinding the attribute would roll back the
         # session's view while leaving the driver serving whatever the failed
         # install appended.
         #
-        # Three link lists say the same thing and all three are put back: the
-        # bus's segments, the registry's child registries, and this session's
-        # contexts. A failed installation's context is absent from all of them
-        # afterwards, and a superseded one is present in all of them again.
+        # Contents only. The three link lists that say which contexts the
+        # session holds -- the bus's segments, the registry's child registries,
+        # and this session's contexts -- are not restored from here at all:
+        # they move together through ``link_into``/``unlink_from``, and the
+        # rollback runs the inverse of what the installation itself linked and
+        # unlinked. Putting a picture of them back would undo whatever anybody
+        # else decided while the install was awaiting, in both directions.
         self.bus.replace_from(snapshot.bus)
         self.services.replace_from(snapshot.services)
         self.codec.replace_from(snapshot.codec)
         self._codec_owners.replace_from(snapshot.codec_owners)
-        self._linked[:] = snapshot.linked
-        # This assignment is what puts a superseded atom back, so it is also
-        # where the departure it was noted under is taken back: a context this
-        # session holds again must not have its effects reverted at shutdown as
-        # though it had left. Doing it here rather than in ``link_context``
-        # keeps the two facts in one place -- nothing else relinks a context
-        # that departed, and relying on the shutdown loops running in a
-        # particular order would make that order load-bearing and unstated.
-        for context in snapshot.linked:
-            self._departed.forget(context)
         self._providers.restore(snapshot.providers)
 
     def note_departed_context(self, context: AtomContext) -> None:
@@ -1376,19 +1388,6 @@ class SessionRuntime:
 
         self._departed.note(context)
 
-    def record_installed_extension(
-        self,
-        spec: ExtensionSpec,
-        *,
-        runtime: bool = False,
-        atom_name: str | None = None,
-    ) -> None:
-        """Record one installed extension for composition snapshots."""
-
-        if not isinstance(spec, ExtensionSpec):
-            raise TypeError("installed extension record requires ExtensionSpec")
-        self._extensions.record(spec, runtime=runtime, atom_name=atom_name)
-
     def composition_snapshot(
         self,
         *,
@@ -1396,9 +1395,17 @@ class SessionRuntime:
     ) -> CompositionSnapshot:
         """Snapshot the rebuildable composition for spawn/fork/child paths.
 
-        The atoms are replayed from their specs, so what is carried over is
-        what no replay reproduces: the host's own three tables, whole and
-        unfiltered, because an installation cannot write into them.
+        The atoms are replayed from their specs, read off the contexts that
+        hold them, in link order -- the order a cold start composes them in and
+        therefore the order the child links them in. Runtime-installed atoms
+        are left out: a rebuild replays these specs before the active set is
+        recorded, so including one would make a child's digest disagree with
+        the identity its source froze. So are contexts whose install has not
+        finished, which have not installed once here.
+
+        Beside them goes what no replay reproduces: the host's own three
+        tables, whole and unfiltered, because an installation cannot write
+        into them.
         """
 
         provider_atoms: set[str] = (
@@ -1412,14 +1419,24 @@ class SessionRuntime:
         )
         return CompositionSnapshot(
             extensions=tuple(
-                self._extensions.composition_extensions(
-                    excluded_module_paths=provider_atoms,
-                )
+                context.spec
+                for context in self._linked
+                if context.installed
+                and not context.runtime
+                and context.module_path not in provider_atoms
             ),
             external_tools=tuple(self._own_tools),
             external_context_policies=tuple(
                 copy.copy(row.policy) for row in self._own_policies
             ),
+            # Every renderer the host bound, a source an atom later rebound
+            # included -- where a filtered table used to leave that source out.
+            # On the dominant spawn path this is more faithful: the atom is
+            # replayed into the child and rebinds the source there as it did
+            # here. The case that loses is ``include_provider_atoms=False``
+            # (spawn with a direct provider override): a provider atom that
+            # *also* rebinds an embedder-bound source is not replayed, so the
+            # child renders it with the host's renderer where it used to raise.
             external_trigger_renderers={
                 source: row.renderer for source, row in self._own_renderers.items()
             },

@@ -268,7 +268,6 @@ class CompositionDigest:
 def composition_digest(session: SessionRuntime) -> CompositionDigest:
     """Digest what ``session`` currently holds, without disturbing any of it."""
 
-    installed = session._extensions
     codec_owners = session._codec_owners
     bus = session.bus
     codec = session.codec
@@ -284,23 +283,26 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
     # both of those re-resolve, and one of them freezes an identity into the
     # session. A digest that mutates its subject cannot witness anything.
     identity = providers._identity
-    atom_names = {path: name for name, path in installed.atom_names().items()}
-    runtime_paths = installed.runtime_module_paths()
+    # The installed atoms are the linked contexts, so this reads the same list
+    # everything else reads. It used to be digested beside a separate table of
+    # replayable specs, on the reasoning that one left behind would resurrect a
+    # departed atom in every session spawned afterwards -- there is no separate
+    # table to leave behind now, so ``composition_specs`` witnesses the filter
+    # rather than a second list: which of the held atoms a child would replay.
+    installed = tuple(context for context in linked if context.installed)
 
     return CompositionDigest(
         atoms=tuple(
             AtomEntry(
-                module_path=module_path,
-                name=atom_names.get(module_path),
-                runtime=module_path in runtime_paths,
+                module_path=context.module_path,
+                name=context.atom_name,
+                runtime=context.runtime,
             )
-            for module_path in installed.module_paths
+            for context in installed
         ),
-        # The replayable specs are what a child or a fork is rebuilt from, and
-        # they are digested beside the atoms rather than assumed to agree with
-        # them: one left behind would resurrect a departed atom in every
-        # session spawned afterwards.
-        composition_specs=installed.spec_module_paths(),
+        composition_specs=tuple(
+            context.spec.module_path for context in installed if not context.runtime
+        ),
         tools=tuple(
             ToolEntry(name=tool.name, owner=owners.tool(tool)) for tool in session.tools
         ),

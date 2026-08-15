@@ -451,7 +451,14 @@ class EventBus:
         self._frozen_clear = True
 
     def copy(self) -> EventBus:
-        """Snapshot subscriptions and observers for composition transactions."""
+        """Snapshot subscriptions and observers for composition transactions.
+
+        This bus's *own* subscriptions.  Which segments are linked is not part
+        of it: a segment is linked and unlinked by whoever owns it, together
+        with that owner's other two link lists, and a restore that put a list
+        of segments back would undo linking somebody else did in between while
+        the two lists that move with it stayed as they were.
+        """
 
         copied = EventBus()
         copied._handlers = {
@@ -461,11 +468,10 @@ class EventBus:
         copied._observers = list(self._observers)
         copied._next_seq = self._next_seq
         copied._frozen_clear = self._frozen_clear
-        copied._linked = list(self._linked)
         return copied
 
     def replace_from(self, other: EventBus) -> None:
-        """Restore subscriptions and observers from ``other``."""
+        """Restore subscriptions and observers from ``other``, links untouched."""
 
         self._handlers = {
             channel: list(subscriptions)
@@ -474,7 +480,6 @@ class EventBus:
         self._observers = list(other._observers)
         self._next_seq = other._next_seq
         self._frozen_clear = other._frozen_clear
-        self._linked = list(other._linked)
 
     def clear(self) -> None:
         """Clear all handlers, linked segments included.  Blocked after freeze_clear().

@@ -81,6 +81,7 @@ from agentm.core.abi.operations import BashOperations, EnvironmentOperations
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import BASH_OPERATIONS_ROLE, ENVIRONMENT_OPERATIONS
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
+from agentm.core.abi.session_api import ExtensionSpec
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trigger import TriggerRenderer
 
@@ -193,13 +194,41 @@ class AtomResidue:
         return self.effects.dispose()
 
 
+@dataclass(frozen=True, slots=True)
+class AtomDeparture:
+    """What removing one atom took out, for the caller that decides its fate.
+
+    ``residue`` is what the atom's context held, reverted by a detach that is
+    final and handed back by a supersede whose replacement never lands, which
+    is why it is not acted on at the removal.  ``None`` when no context was
+    holding that module path.
+
+    ``preceded_by`` is the rest of the inverse: the contexts linked ahead of
+    this one, so a relink puts it back among its neighbours.  An integer index
+    would not survive the list moving underneath it, and the installed set's
+    order is replayed into every child, so an atom put back in the wrong place
+    corrupts the composition of every session spawned afterwards.
+    """
+
+    residue: AtomResidue | None
+    preceded_by: tuple[AtomContext, ...]
+
+
 class AtomContext:
-    """One atom's context — its tables, its effect log, and its link state.
+    """One atom's context — its tables, its install record, and its link state.
 
     Constructed by ``install_extension`` for one installation and given to that
     atom.  Two incarnations of the same module path get two contexts, so a task
     surviving from the first writes into the first's tables and the second
     inherits nothing.
+
+    The context also *is* the installation record.  What replays this atom (its
+    spec), what it calls itself (its manifest name), and whether it was
+    composed or installed into a running session are fields here rather than
+    rows in a second list keyed by module path, because a second list is a
+    second answer to "which atoms does this session hold" and the two can be
+    driven apart.  Linking a context is recording the install; unlinking is
+    retiring it; there is nothing else to keep in step.
     """
 
     __slots__ = (
@@ -207,21 +236,33 @@ class AtomContext:
         # that an effect recorded through it afterwards still has its inverse
         # run at shutdown.
         "__weakref__",
-        "_module_path",
+        "_atom_name",
         "_effects",
+        "_installed",
+        "_runtime",
         "_segment",
         "_services",
         "_session",
+        "_spec",
         "_tables",
     )
 
-    def __init__(self, session: SessionRuntime, module_path: str) -> None:
+    def __init__(
+        self,
+        session: SessionRuntime,
+        spec: ExtensionSpec,
+        *,
+        runtime: bool = False,
+    ) -> None:
         self._session = session
-        self._module_path = module_path
+        self._spec = spec
+        self._runtime = runtime
+        self._atom_name: str | None = None
+        self._installed = False
         self._tables = ContextTables()
         self._services = ServiceRegistry(parent=session.services)
         self._services.set_write_observer(self._observe_service_write)
-        self._segment = session.bus.segment(module_path)
+        self._segment = session.bus.segment(spec.module_path)
         self._effects = EffectLog()
 
     @property
@@ -233,7 +274,62 @@ class AtomContext:
         the object is, not where a string says.
         """
 
-        return self._module_path
+        return self._spec.module_path
+
+    @property
+    def spec(self) -> ExtensionSpec:
+        """What replays this atom into a child, a fork, or a resume."""
+
+        return self._spec
+
+    @property
+    def runtime(self) -> bool:
+        """Whether this atom was installed into an already-running session.
+
+        The distinction matters for rebuilds: the active set recorded at
+        creation covers the composed atoms only, and a rebuild that replayed a
+        runtime atom would compute a different digest than the one the source
+        session froze into its provider identity.
+        """
+
+        return self._runtime
+
+    @property
+    def atom_name(self) -> str | None:
+        """What the manifest calls this atom, once its install has finished.
+
+        Keyed on separately from the module path because a file-backed atom is
+        loaded under a content-addressed module name, so two revisions of one
+        atom share a manifest name and nothing else.  ``None`` until the
+        install finishes, and for an atom that carries no manifest.
+        """
+
+        return self._atom_name
+
+    @property
+    def installed(self) -> bool:
+        """Whether this atom's ``install()`` ran to completion.
+
+        A context is linked *before* ``install()`` runs, so that what the atom
+        writes is part of the session while it is writing it.  Between those
+        two moments the atom is held but not installed, and the readers that
+        mean "finished" rather than "held" — the replayable composition, and
+        whether a trigger source may be taken over — say so by reading this.
+        It is a field of the one record, not a second record: nothing can
+        answer for a context that is not here to answer.
+        """
+
+        return self._installed
+
+    def note_installed(self, atom_name: str | None) -> None:
+        """Mark this installation finished, under the name its manifest gives.
+
+        Called last by ``install_extension``, after everything that could fail
+        has run, so a context carrying this flag is one whose install landed.
+        """
+
+        self._atom_name = atom_name
+        self._installed = True
 
     @property
     def services(self) -> ServiceRegistry:
@@ -255,15 +351,26 @@ class AtomContext:
 
     # --- Linking ---
 
-    def link_into(self, session: SessionRuntime) -> None:
+    def link_into(
+        self,
+        session: SessionRuntime,
+        *,
+        after: Sequence[AtomContext] | None = None,
+    ) -> None:
         """Make this context part of what the session resolves.
 
         The session's own list goes first because it is the one that refuses a
         second live context for one module path; refused there, nothing else
         has been linked yet and there is nothing to unwind.
+
+        ``after`` is for a relink that has to land where the context was rather
+        than at the end — see ``SessionRuntime.link_context``.  Only the
+        session's list takes it: the bus orders subscriptions by ``(priority,
+        seq)`` and the registry resolves a key by write order, so neither reads
+        the position of a segment or a child registry in its own link list.
         """
 
-        session.link_context(self)
+        session.link_context(self, after=after)
         session.services.link(self._services)
         session.bus.link(self._segment)
 
@@ -407,7 +514,7 @@ class AtomContext:
         if not isinstance(codec, TriggerCodec):  # code-health: ignore[AM025]
             raise TypeError("trigger codec must implement serialize and deserialize")
         session = self._session
-        module_path = self._module_path
+        module_path = self.module_path
 
         def _register() -> None:
             session.note_atom_trigger_codec(source, codec, module_path)
@@ -470,7 +577,7 @@ class AtomContext:
             config,
             replace=replace,
             into=self._services,
-            owner=self._module_path,
+            owner=self.module_path,
         )
 
     def effect(
@@ -529,12 +636,12 @@ class AtomContext:
             kind,
             name,
             payload,
-            owner=self._module_path,
+            owner=self.module_path,
         )
 
     def __repr__(self) -> str:
         return (
-            f"AtomContext({self._module_path!r}, tools={len(self._tables.tools)}, "
+            f"AtomContext({self.module_path!r}, tools={len(self._tables.tools)}, "
             f"policies={len(self._tables.policies)}, "
             f"services={len(self._services.own_table())}, "
             f"effects={len(self._effects)})"
@@ -609,6 +716,19 @@ class ChainedPolicies(Sequence[ContextPolicy]):
             rows.extend(context.tables.policies)
         rows.sort(key=_policy_key)
         return rows
+
+    def priority_of(self, policy: ContextPolicy) -> int | None:
+        """The priority one policy was registered at, or None if it is gone.
+
+        A public read on the object ``session.context_policies`` hands an
+        embedder: the view exposes policies, and a host that wants to know
+        where one sits in the composed chain has nowhere else to ask.
+        """
+
+        for row in self._rows():
+            if row.policy is policy:
+                return row.priority
+        return None
 
     def __len__(self) -> int:
         return len(self._rows())
@@ -854,6 +974,7 @@ def unlink_all(session_bus: EventBus, contexts: Sequence[AtomContext]) -> None:
 
 __all__ = [
     "AtomContext",
+    "AtomDeparture",
     "AtomResidue",
     "ChainedPolicies",
     "ChainedRenderers",

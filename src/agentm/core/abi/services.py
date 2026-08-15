@@ -419,26 +419,25 @@ class ServiceRegistry:
         return None if entry is None else entry.scope
 
     def copy(self) -> ServiceRegistry:
-        """Snapshot this node's own table, observer and links.
+        """Snapshot this node's own table and observer.
 
-        The linked registries are held by reference, not copied: a snapshot is
-        taken so a failed installation can put the *shape* of the tree back,
-        and copying the nodes would put back stale contents for every context
-        that went on being written to.
+        Which registries are linked is not part of it.  A child registry is
+        linked and unlinked by whoever owns the context it belongs to, together
+        with that context's other two link lists, and a restore that put a list
+        of children back would undo a link somebody else made in between while
+        the two lists that move with it stayed as they were.
         """
 
         copied = ServiceRegistry(parent=self._parent)
         copied._services = dict(self._services)
         copied._write_observer = self._write_observer
-        copied._linked = list(self._linked)
         return copied
 
     def replace_from(self, other: ServiceRegistry) -> None:
-        """Restore own table, observer and links from ``other``."""
+        """Restore own table and observer from ``other``, links untouched."""
 
         self._services = dict(other._services)
         self._write_observer = other._write_observer
-        self._linked = list(other._linked)
 
     def update_from(self, other: ServiceRegistry) -> None:
         """Merge everything ``other`` resolves into this one (other wins)."""

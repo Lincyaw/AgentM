@@ -490,12 +490,11 @@ async def install_extension(
     )
     error: str | None = None
     superseded: str | None = None
-    # Taken before anything moves, so it holds the link list with the atom
-    # about to be superseded still in it and the one about to be installed not
-    # yet in it. Putting it back is what makes a failed installation's writes
-    # disappear and a superseded atom's come back.
+    # Taken before anything moves. The contents of the shared stores only: the
+    # context tree is put back by the inverse of what this installation itself
+    # linked and unlinked, not by a picture of it.
     snapshot = api._capture_extension_install_state()
-    context = AtomContext(api, module_path)
+    context = AtomContext(api, spec, runtime=runtime)
     atom_api = _AtomAPIFacade(api, context)
     superseded_departure = None
     try:
@@ -564,17 +563,26 @@ async def install_extension(
                     len(failures),
                 )
         # Last, and that placement is what the rollback below rests on: nothing
-        # after this line can fail, so a record that exists is the record of an
-        # installation that finished, and the failure path has only the
-        # supersede's inverse to run rather than this one's as well.
-        api.record_installed_extension(spec, runtime=runtime, atom_name=atom_name)
+        # after this line can fail, so a context carrying this flag is one whose
+        # installation finished. The context has been in the session's list
+        # since ``link_into`` -- this does not add it, it says the install
+        # landed, which is the difference between an atom the session is
+        # running and one it is in the middle of installing.
+        context.note_installed(atom_name)
         logger.debug("installed atom: {}", module_path)
     except BaseException as exc:
         error = str(exc) or type(exc).__name__
         try:
+            # The inverse of ``link_into``, and the whole of what this
+            # installation did to the session's context tree. Safe to run when
+            # the link never happened, and deliberately narrow: an atom some
+            # other task detached while this install was awaiting stays
+            # detached, because that removal was not this installation's to
+            # undo. Unlinking is also what takes the atom out of the installed
+            # set -- the context is the record.
+            context.unlink_from(api)
             api._restore_extension_install_state(snapshot)
-            # The failed installation's own context is unlinked by the restore
-            # above; its tables go with it, and what it recorded through
+            # Its tables go with the unlink, and what it recorded through
             # ``api.effect`` is undone here because nothing else describes it.
             # An atom that kept its api can go on recording effects through it
             # afterwards -- a body is arbitrary code and runs where it is
@@ -586,7 +594,7 @@ async def install_extension(
                 # Nothing to un-revert: the survivor was set aside, not undone,
                 # so it is simply given back what it held -- its tables, into
                 # the same context object it is still holding the api of, and
-                # its place in the installed set, at the position it had.
+                # its place in the session, among the neighbours it had.
                 api.restore_atom_registrations(superseded_departure)
         except BaseException as rollback_error:
             raise BaseExceptionGroup(
