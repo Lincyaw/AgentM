@@ -57,7 +57,7 @@ class ProviderRegistry:
         committed_turns: Callable[[], Sequence[Turn]],
         active_set: Callable[[], ActiveSetFingerprint | None],
         emit_register_event: Callable[[str, str, dict[str, object]], None],
-        refile_service: Callable[[str], None],
+        refile_service: Callable[[str], str | None],
         stream_fn: StreamFn | None = None,
         model: Model | None = None,
         identity: ProviderSessionIdentity | None = None,
@@ -109,14 +109,6 @@ class ProviderRegistry:
         key = f"{_SERVICE_PREFIX}{name}"
         target = self._services if into is None else into
         previous = self._services.get(key)
-        # What this write is about to shadow *in the registry being written*,
-        # which is the only thing an undo of it may put back. ``previous`` is
-        # what the whole chain resolves, and that entry may live in another
-        # node: writing it here would copy another context's registration into
-        # this one, where it would win by being the newer write and be attributed
-        # to whoever owns this table.
-        held = target.own_table().get(key)
-        shadowed = None if held is None else held.service
         if previous is not None and not replace:
             raise ValueError(
                 f"provider {name!r} is already registered in this session; give "
@@ -135,27 +127,35 @@ class ProviderRegistry:
                 "cannot replace the session-bound provider with model "
                 f"{config.model.id!r}; expected {self._identity.model_id!r}"
             )
-        previous_owner = self._owners.get(name)
+        # What this write is about to shadow *in the registry being written*,
+        # which is the only thing an undo of it may put back -- and moved out
+        # rather than overwritten, so the undo can put back the entry itself.
+        # ``previous`` is what the whole *chain* resolves, and that entry may
+        # live in another node: writing it here would copy another context's
+        # registration into this one, where it would win by being the newer
+        # write and be attributed to whoever owns this table. Re-registering
+        # even this node's own entry would do half of that -- same value, fresh
+        # write order, so a registration that had lost the key would win it.
+        shadowed = target.swap_entry(key, None)
         target.register(key, config, scope="session")
         self._owners[name] = owner
         try:
             self.activate()
         except BaseException:
-            if shadowed is None:
-                # Taking the write out is the whole undo: whatever the chain
-                # resolved before, in whichever node held it, is uncovered by
-                # its removal. Nothing fires for a removal, so the ledger is
-                # told who the key belongs to now.
-                target.unregister(key)
-                self._refile_service(key)
-            else:
-                target.register(key, shadowed, scope="session")
+            # The undo of the swap is the same swap back: the failed write
+            # leaves, and whatever this node held goes back at the number it
+            # had, so whatever the chain resolved before -- in whichever node
+            # held it -- resolves again. Nothing fires for a swap, so both
+            # accounts of who holds the key are re-filed off the tree rather
+            # than guessed from what the index said before.
+            target.swap_entry(key, shadowed)
+            uncovered_owner = self._refile_service(key)
             if previous is None:
                 self._owners.pop(name, None)
                 if self._active_name == name:
                     self._active_name = None
             else:
-                self._owners[name] = previous_owner
+                self._owners[name] = uncovered_owner
             raise
         self._emit_register_event("provider", name, {"provider": config})
 

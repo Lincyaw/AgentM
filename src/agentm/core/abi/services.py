@@ -99,15 +99,16 @@ class ServiceRole[T]:
 
 
 @dataclass(frozen=True, slots=True)
-class OwnedService:
-    """One entry in a registry's own table: what it holds, and when written."""
+class ServiceEntry:
+    """One registration: the value, how it was checked, and when it was written.
 
-    service: object
-    order: int
+    ``order`` is the whole reason this is a value and not a bare service: it is
+    what decides which of two writes to one key across two nodes wins, so an
+    entry that is moved out of a table and put back has to be put back *as this
+    object*.  Re-registering the value would mint a fresh number and hand it a
+    key it may have lost.
+    """
 
-
-@dataclass(frozen=True, slots=True)
-class _ServiceEntry:
     service: object
     protocol: type | None = None
     scope: ServiceScope = "tree"
@@ -120,7 +121,7 @@ class ServiceRegistry:
     __slots__ = ("_linked", "_parent", "_services", "_write_observer")
 
     def __init__(self, *, parent: ServiceRegistry | None = None) -> None:
-        self._services: dict[str, _ServiceEntry] = {}
+        self._services: dict[str, ServiceEntry] = {}
         self._write_observer: WriteObserver | None = None
         #: The registry this one resolves through when it holds no entry for a
         #: key. Set once, at construction, by whoever derives a context; there
@@ -173,28 +174,40 @@ class ServiceRegistry:
         self._services = restored
         other._services = {}
 
-    def own_names(self) -> list[str]:
-        """The keys in this registry's own table, chain excluded."""
-
-        return list(self._services)
-
-    def own_table(self) -> dict[str, OwnedService]:
+    def own_table(self) -> dict[str, ServiceEntry]:
         """This node's own entries, chain excluded, with their write order.
 
-        Two readers need this and both need the order rather than the mere
-        fact of an entry.  One says which node a key resolves *out of*, across
-        nodes that cannot see each other: the answer is the highest order, the
-        same tiebreak ``_lookup`` applies, and asking each node "is this yours"
-        would answer in a different order from resolution.  The other undoes a
-        write by putting back what it shadowed *here* -- restoring what the
-        chain resolved would copy another node's entry into this one, where it
-        would win by being newer.
+        For the reader that has to say which node a key resolves *out of*,
+        across nodes that cannot see each other: the answer is the highest
+        order, the same tiebreak ``_lookup`` applies, and asking each node "is
+        this yours" would answer in a different order from resolution.  The
+        entries are frozen, so handing them out is handing out what they say,
+        and iterating it is this node's own keys.
         """
 
-        return {
-            name: OwnedService(service=entry.service, order=entry.order)
-            for name, entry in self._services.items()
-        }
+        return dict(self._services)
+
+    def swap_entry(self, name: str, entry: ServiceEntry | None) -> ServiceEntry | None:
+        """Make this node's own entry for ``name`` be ``entry``; return the old.
+
+        The single-key ``take_own``/``give_own``, and there for the same reason:
+        a caller about to shadow a key *in the table that holds it* has to be
+        able to put back exactly what was there.  ``register`` cannot do that --
+        it mints the next write order, so the entry it puts back is newer than
+        the one it replaced and wins a key that entry had lost.  The undo of a
+        swap is the same swap with what it handed back, which is why this is one
+        operation and not two.
+
+        No observer fires either way: moving an entry is not a write, and who
+        the key belongs to afterwards is a property of the tree rather than of
+        the node it moved in or out of.  The caller reads that off the tree and
+        re-files it, the way a removal already does.
+        """
+
+        held = self._services.pop(name, None)
+        if entry is not None:
+            self._services[name] = entry
+        return held
 
     # --- Resolution ---
 
@@ -203,7 +216,7 @@ class ServiceRegistry:
         name: str,
         *,
         skip: ServiceRegistry | None = None,
-    ) -> _ServiceEntry | None:
+    ) -> ServiceEntry | None:
         """The winning entry for ``name`` across this node and its chain.
 
         ``skip`` is the node the lookup arrived from, so a child asking its
@@ -230,12 +243,12 @@ class ServiceRegistry:
         self,
         *,
         skip: ServiceRegistry | None = None,
-    ) -> dict[str, _ServiceEntry]:
+    ) -> dict[str, ServiceEntry]:
         """Every key this node can see, each at its winning entry."""
 
         resolved = dict(self._services)
 
-        def _offer(candidates: dict[str, _ServiceEntry]) -> None:
+        def _offer(candidates: dict[str, ServiceEntry]) -> None:
             for key, entry in candidates.items():
                 held = resolved.get(key)
                 if held is None or entry.order > held.order:
@@ -297,7 +310,7 @@ class ServiceRegistry:
                 f"service {name!r}: {type(service).__name__} does not "
                 f"satisfy {protocol.__name__}"
             )
-        self._services[name] = _ServiceEntry(
+        self._services[name] = ServiceEntry(
             service=service,
             protocol=protocol,
             scope=scope,
@@ -444,7 +457,7 @@ class ServiceRegistry:
 
 
 __all__ = [
-    "OwnedService",
+    "ServiceEntry",
     "ServiceNotFound",
     "ServiceRegistry",
     "ServiceRole",

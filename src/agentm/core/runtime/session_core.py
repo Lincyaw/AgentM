@@ -30,7 +30,7 @@ import copy
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from loguru import logger
@@ -38,7 +38,6 @@ from loguru import logger
 from agentm.core.abi.bus import EventBus, EventBusObserver, Handler
 from agentm.core.abi.cancel import (
     CancelReason,
-    CancelSignal,
     CompositeCancelSignal,
     EventCancelSource,
 )
@@ -106,14 +105,12 @@ from agentm.core.abi.session_api import (
     SessionContext,
     SessionResult,
 )
-from agentm.core.abi.store import TrajectoryStore
-from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
+from agentm.core.abi.stream import Model
 from agentm.core.abi.tool import Tool
 from agentm.core.abi.trajectory import (
     AtomInstall,
     Turn,
 )
-from agentm.core.abi.tree import SessionGraphProtocol
 from agentm.core.abi.trigger import (
     Trigger,
     TriggerPriority,
@@ -131,74 +128,24 @@ from agentm.core.runtime.atom_context import (
     ContextOwnership,
     DepartedContexts,
     PolicyRow,
+    RendererRow,
     ownership_of,
     policy_row,
+    renderer_row,
 )
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.extension_install import InstallLedger, LedgerSnapshot
 from agentm.core.runtime.provider_registry import ProviderRegistry, ProviderSnapshot
+from agentm.core.runtime.session_composition import (
+    CompositionSnapshot,
+    SessionRuntimeConfig,
+)
 from agentm.core.runtime.tool_orchestration import default_tool_orchestrator
 from agentm.core.runtime.trajectory import Trajectory
 from agentm.core.runtime.trigger_queue import TriggerQueue, TriggerReceipt
 
 if TYPE_CHECKING:
     from agentm.core.runtime.session import Session
-
-
-@dataclass(slots=True)
-class SessionRuntimeConfig:
-    """Low-level runtime dependencies after factory composition is resolved."""
-
-    ctx: SessionContext | None = None
-    session_id: str | None = None
-    trajectory: Trajectory | None = None
-    bus: EventBus | None = None
-    store: TrajectoryStore | None = None
-    graph: SessionGraphProtocol | None = None
-    stream_fn: StreamFn | None = None
-    model: Model | None = None
-    tools: list[Tool] = field(default_factory=list)
-    system: str | None = None
-    context_policies: list[ContextPolicy] = field(default_factory=list)
-    trigger_renderers: dict[str, TriggerRenderer] = field(default_factory=dict)
-    codec: CodecRegistry | None = None
-    max_turns: int | None = None
-    max_tool_calls: int | None = None
-    tool_allowlist: Sequence[str] | None = None
-    thinking: ThinkingLevel = "off"
-    cancel_signal: CancelSignal | None = None
-    provider_identity: ProviderSessionIdentity | None = None
-    services: ServiceRegistry | None = None
-    cwd: str = ""
-    purpose: str = "root"
-
-    # Capability boundaries (resource ports, tool execution, permission,
-    # effect scope, catalogs, provider resolver) are NOT fields here: they are
-    # bound into ``services`` by the factory before construction. The registry
-    # is the single representation of a session's boundaries.
-
-
-@dataclass(frozen=True, slots=True)
-class CompositionSnapshot:
-    """Typed view of a session's rebuildable composition.
-
-    The formal surface for spawn/fork/child construction — factories consume
-    this instead of reading session privates.
-    """
-
-    extensions: tuple[ExtensionSpec, ...]
-    external_tools: tuple[Tool, ...]
-    external_context_policies: tuple[ContextPolicy, ...]
-    external_trigger_renderers: dict[str, TriggerRenderer]
-    codec: CodecRegistry
-    stream_fn: StreamFn | None
-    model: Model | None
-    system: str | None
-    max_turns: int | None
-    max_tool_calls: int | None
-    tool_allowlist: tuple[str, ...] | None
-    thinking: ThinkingLevel
-    lineage_cancel: CancelSignal
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +163,7 @@ class _ExtensionInstallSnapshot:
     codec: CodecRegistry
     tools: tuple[Tool, ...]
     context_policies: tuple[PolicyRow, ...]
-    trigger_renderers: dict[str, TriggerRenderer]
+    trigger_renderers: dict[str, RendererRow]
     linked: tuple[AtomContext, ...]
     ledger: LedgerSnapshot
     providers: ProviderSnapshot
@@ -274,7 +221,10 @@ class SessionRuntime:
         self._own_policies: list[PolicyRow] = [
             policy_row(policy, 500) for policy in context_policies or []
         ]
-        self._own_renderers: dict[str, TriggerRenderer] = dict(trigger_renderers or {})
+        self._own_renderers: dict[str, RendererRow] = {
+            source: renderer_row(renderer)
+            for source, renderer in (trigger_renderers or {}).items()
+        }
         self._linked: list[AtomContext] = []
         self._departed = DepartedContexts()
         self.tools: Sequence[Tool] = ChainedTools(self._own_tools, self._linked)
@@ -747,8 +697,8 @@ class SessionRuntime:
         )
 
     def register_trigger_renderer(self, source: str, renderer: TriggerRenderer) -> None:
-        self._own_renderers[source] = renderer
-        self._extensions.note_trigger_renderer(source, None)
+        self._own_renderers[source] = renderer_row(renderer)
+        self.refile_trigger_renderer(source)
         self._emit_register_event(
             "trigger_renderer",
             source,
@@ -828,16 +778,34 @@ class SessionRuntime:
         )
         self._extensions.note_trigger_codec(source, owner)
 
-    def refile_service(self, key: str) -> None:
+    def refile_service(self, key: str) -> str | None:
         """Re-file one service key under whoever's write resolves now.
 
         For a key that changes hands without being written -- a rollback taking
-        a shadowing write back out. No write observer fires for a removal, and
-        the new owner is a property of the context tree, which the registry
-        that removed the write cannot read for itself.
+        a shadowing write back out, or putting a shadowed entry back. No write
+        observer fires for either, and the new owner is a property of the
+        context tree, which the registry that moved the entry cannot read for
+        itself. Returned as well as filed, because a caller that keeps its own
+        index of the same key must file the answer the tree gave rather than a
+        second answer of its own.
         """
 
-        self._extensions.note_service(key, self.ownership().service(key))
+        owner = self.ownership().service(key)
+        self._extensions.note_service(key, owner)
+        return owner
+
+    def refile_trigger_renderer(self, source: str) -> None:
+        """Re-file one trigger source under whoever's binding resolves now.
+
+        Registering a renderer does not make the registrar the owner: a source
+        resolves to the highest write order in the chain, so a write that lands
+        under an existing later one leaves the source where it was. The ledger
+        is told what the tree resolves rather than who did the writing.
+        """
+
+        self._extensions.note_trigger_renderer(
+            source, self.ownership().renderer(source)
+        )
 
     def _on_service_write(
         self,
@@ -1165,7 +1133,7 @@ class SessionRuntime:
             len(residue.tables.tools),
             len(residue.tables.policies),
             len(residue.tables.renderers),
-            len(residue.services.own_names()),
+            len(residue.services.own_table()),
             len(removed_providers),
             len(residue.segment.handlers),
             len(residue.effects),
@@ -1187,7 +1155,7 @@ class SessionRuntime:
         """
 
         held = self.ownership()
-        for key in residue.services.own_names():
+        for key in residue.services.own_table():
             if self.services.has(key):
                 self._extensions.note_service(key, held.service(key))
         for source in residue.tables.renderers:
@@ -1294,9 +1262,6 @@ class SessionRuntime:
                 "uninstall that one first"
             )
         self._linked.append(context)
-        # A supersede rollback links a removed context again, and a context
-        # this session holds has nothing left for shutdown to undo separately.
-        self._departed.forget(context)
 
     def unlink_context(self, context: AtomContext) -> None:
         """Stop aggregating one atom context; safe to repeat."""
@@ -1345,12 +1310,12 @@ class SessionRuntime:
     def ownership(self) -> ContextOwnership:
         """Which context holds each tool, policy, renderer and service.
 
-        The session's own registry takes part: a service key resolves by write
-        order across the whole chain, so a host write later than every atom's
-        owns it -- as nobody.
+        The session's own tables take part: a service key and a trigger source
+        both resolve by write order across the whole chain, so a host write
+        later than every atom's owns it -- as nobody.
         """
 
-        return ownership_of(self.services, self._linked)
+        return ownership_of(self.services, self._own_renderers, self._linked)
 
     @property
     def driver_running(self) -> bool:
@@ -1394,8 +1359,28 @@ class SessionRuntime:
         self._own_renderers.clear()
         self._own_renderers.update(snapshot.trigger_renderers)
         self._linked[:] = snapshot.linked
+        # This assignment is what puts a superseded atom back, so it is also
+        # where the departure it was noted under is taken back: a context this
+        # session holds again must not have its effects reverted at shutdown as
+        # though it had left. Doing it here rather than in ``link_context``
+        # keeps the two facts in one place -- nothing else relinks a context
+        # that departed, and relying on the shutdown loops running in a
+        # particular order would make that order load-bearing and unstated.
+        for context in snapshot.linked:
+            self._departed.forget(context)
         self._extensions.restore(snapshot.ledger)
         self._providers.restore(snapshot.providers)
+
+    def note_departed_context(self, context: AtomContext) -> None:
+        """Hold a context the session has taken out, for what it records later.
+
+        A failed installation's context leaves the session the same way a
+        detached atom's does, and the rollback reverts its residue for the same
+        reason. An effect it records afterwards is under the same decision, so
+        it is undone at shutdown rather than left in the world.
+        """
+
+        self._departed.note(context)
 
     def record_installed_extension(
         self,

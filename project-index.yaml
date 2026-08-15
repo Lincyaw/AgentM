@@ -204,6 +204,7 @@ requirements:
       - path: src/agentm/core/runtime/extension_install.py
       - path: src/agentm/core/runtime/provider_registry.py
       - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/runtime/session_composition.py
       - path: src/agentm/core/runtime/session_core.py
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_meta.py

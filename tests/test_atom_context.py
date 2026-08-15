@@ -17,8 +17,10 @@ Cells are numbered to match the acceptance list they were written against.
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import sys
+import weakref
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -57,6 +59,18 @@ def _owner(session: SessionRuntime, key: str) -> str | None:
     assert tree == ledger, (
         f"context tree says {key} belongs to {tree!r} and the install ledger "
         f"says {ledger!r}"
+    )
+    return tree
+
+
+def _renderer_owner(session: SessionRuntime, source: str) -> str | None:
+    """The owner of a trigger source both accounts agree on."""
+
+    tree = session.ownership().renderer(source)
+    ledger = session._extensions.capture().trigger_renderer_owners.get(source)
+    assert tree == ledger, (
+        f"context tree says {source} belongs to {tree!r} and the install "
+        f"ledger says {ledger!r}"
     )
     return tree
 
@@ -332,6 +346,7 @@ class Stream:
 
 def install(api, config):
     del config
+    api.services.register("{name}_api", api, scope="session")
     api.register_provider(
         "shared_provider",
         ProviderConfig(
@@ -346,6 +361,58 @@ def install(api, config):
         ),
         replace=True,
     )
+"""
+)
+
+# A trigger renderer two atoms contest, each keeping its api so the test can
+# rebind the source through the atom that bound it first.
+_RENDERER = (
+    _MANIFEST
+    + """
+
+class Renderer:
+    def __init__(self, label):
+        self.label = label
+
+    def render(self, trigger):
+        del trigger
+        return []
+
+
+def install(api, config):
+    del config
+    api.services.register("{name}_api", api, scope="session")
+    api.register_trigger_renderer("shared_src", Renderer("{name}"))
+"""
+)
+
+# An atom whose install records an effect, so a rollback that puts it back can
+# be asked whether the session still considers it departed.
+_EFFECTFUL = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.register("kept_api", api, scope="session")
+    marks = api.services.get("effect_marks")
+
+    def _write():
+        marks.append("{name}")
+        return lambda: marks.remove("{name}")
+
+    api.effect(_write, provides="{name}-mark")
+"""
+)
+
+# A replacement that loads (so the supersede runs) and then refuses.
+_REFUSES = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del api, config
+    raise RuntimeError("v2 broke")
 """
 )
 
@@ -1215,13 +1282,21 @@ class _ResolverThatAnswersOnce:
 async def test_a_failed_provider_registration_leaves_one_account_of_it(
     tmp_path: Path,
 ) -> None:
-    """The undo of a shadowing write is removing it, not copying what it hid.
+    """The undo of a shadowing write puts the key back where it resolved from.
 
-    The previous registration lives in the previous atom's own table. Writing
-    it back into the *new* atom's table restores the value and moves the
-    ownership: the key would then resolve out of the atom whose registration
-    failed, and the three accounts of who owns it -- the context tree, the
-    ledger, the provider index -- would give two different answers.
+    Two branches, and the same failure in each: a rollback that decides who
+    owns a key by anything other than asking the tree afterwards leaves the
+    three accounts of it -- the context tree, the ledger, the provider index --
+    giving different answers, and a *failed* call having changed what the
+    session serves.
+
+    The first branch is a write into a table that held nothing for the key: the
+    previous registration lives in the previous atom's own table, so writing it
+    back into the new atom's would move the ownership to the atom whose
+    registration failed. The second is a write into a table that already held
+    the key -- an atom re-registering its own provider. Putting that entry back
+    with ``register`` restores the value at a *fresh* write order, so the entry
+    comes back newer than it was and wins a key it had lost to a later atom.
     """
 
     spec_a = _atom(tmp_path, "prov_a", _PROVIDER)
@@ -1256,3 +1331,224 @@ async def test_a_failed_provider_registration_leaves_one_account_of_it(
         assert _owner(session, "provider:shared_provider") == spec_a.module_path
         assert session._providers.owners()["shared_provider"] == spec_a.module_path
         assert _composition_differences(before, composition_digest(session)) == ()
+
+    # The other branch: the failing registration goes into a table that already
+    # holds the key, and the entry it shadows has already lost that key to a
+    # later atom.
+    spec_x = _atom(tmp_path, "prov_x", _PROVIDER)
+    spec_y = _atom(tmp_path, "prov_y", _PROVIDER)
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(spec_x)
+        await session.install_extension(spec_y)
+        key = "provider:shared_provider"
+        assert _owner(session, key) == spec_y.module_path
+        assert session._providers.owners()["shared_provider"] == spec_y.module_path
+        served = session.get_provider("shared_provider")
+        assert served is not None
+        assert served.stream_fn.label == "prov_y"
+        assert session._providers.stream_fn.label == "prov_y"
+
+        resolver = _ResolverThatAnswersOnce("shared_provider")
+        session.services.register(PROVIDER_RESOLVER_SERVICE, resolver, scope="session")
+        before = composition_digest(session)
+
+        api_x = _kept(session, "prov_x_api")
+        with pytest.raises(LookupError):
+            api_x.register_provider(
+                "shared_provider",
+                ProviderConfig(
+                    stream_fn=NeverStreams(),
+                    model=Model(
+                        id="probe-model",
+                        provider="probe",
+                        context_window=1000,
+                        max_output_tokens=100,
+                    ),
+                    name="shared_provider",
+                ),
+                replace=True,
+            )
+
+        # A failed call changed nothing: not what resolves, not who owns it in
+        # any of the three accounts, not what the session would stream through.
+        assert resolver.calls == 2
+        restored = session.get_provider("shared_provider")
+        assert restored is not None
+        assert restored.stream_fn.label == "prov_y"
+        assert session._providers.stream_fn.label == "prov_y"
+        assert _owner(session, key) == spec_y.module_path
+        assert session._providers.owners()["shared_provider"] == spec_y.module_path
+        assert _composition_differences(before, composition_digest(session)) == ()
+
+        # And the entry that was put back is still the one it was: uninstalling
+        # the winner uncovers x's registration rather than nothing.
+        assert session.uninstall_extension(spec_y)
+        uncovered = session.get_provider("shared_provider")
+        assert uncovered is not None
+        assert uncovered.stream_fn.label == "prov_x"
+        assert _owner(session, key) == spec_x.module_path
+
+
+class _LabelledRenderer:
+    """A trigger renderer a test can tell from another one."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def render(self, trigger: object) -> list[object]:
+        del trigger
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_source_resolves_to_the_last_binding_written(
+    tmp_path: Path,
+) -> None:
+    """A source is a key that resolves, so it resolves by write order.
+
+    Two contexts can bind one source and exactly one renderer is used, which is
+    the test a table has to meet before its rows need numbering -- the same one
+    ``ChainedTools`` states for why a tool name does not. Resolving by link
+    order instead would mean an atom rebinding a source it already holds has
+    silently no effect while a later-linked context holds it, and the ledger
+    naming the writer while the session serves somebody else's renderer.
+    """
+
+    spec_a = _atom(tmp_path, "rend_a", _RENDERER)
+    spec_b = _atom(tmp_path, "rend_b", _RENDERER)
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(spec_a)
+        await session.install_extension(spec_b)
+        assert session.trigger_renderers["shared_src"].label == "rend_b"
+        assert _renderer_owner(session, "shared_src") == spec_b.module_path
+
+        # The earlier-linked atom rebinds the source it lost. The write is the
+        # latest, so it takes the source back, and both accounts say so.
+        api_a = _kept(session, "rend_a_api")
+        api_a.register_trigger_renderer("shared_src", _LabelledRenderer("rend_a-again"))
+        assert session.trigger_renderers["shared_src"].label == "rend_a-again"
+        assert _renderer_owner(session, "shared_src") == spec_a.module_path
+
+        # The host writing last owns it as nobody, the way a service does.
+        session.register_trigger_renderer("shared_src", _LabelledRenderer("host"))
+        assert session.trigger_renderers["shared_src"].label == "host"
+        assert _renderer_owner(session, "shared_src") is None
+
+        # And the loser is uncovered under its own name when the winner leaves.
+        assert session.uninstall_extension(spec_a)
+        assert session.trigger_renderers["shared_src"].label == "host"
+        assert _renderer_owner(session, "shared_src") is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_installations_effect_is_undone_at_shutdown(
+    tmp_path: Path,
+) -> None:
+    """A failed install's context departs, so what it records later comes out.
+
+    ``api.effect`` runs its body where it is called, whatever the context's
+    link state, so an atom that kept its api across a failed installation can
+    still change the world through it. The rollback already decided that this
+    context's residue comes back out; a write made after that decision is under
+    the same decision, just late.
+    """
+
+    spec = _atom(tmp_path, "failing_atom", _FAILING)
+    world: list[str] = []
+
+    def _write() -> EffectInverse:
+        world.append("changed")
+        return lambda: world.remove("changed")
+
+    async with probe_session(str(tmp_path)) as session:
+        with pytest.raises(Exception, match="refuses to install"):
+            await session.install_extension(spec)
+        await asyncio.sleep(0)
+
+        kept = sys.modules[spec.module_path].__dict__["KEPT"]
+        assert kept
+        kept[0].effect(_write, provides="after-a-failed-install")
+        assert world == ["changed"]
+        # Recorded into a log the session does not aggregate, so it is not
+        # reported as something the composition holds.
+        assert all(
+            record.provides != "after-a-failed-install"
+            for record in composition_digest(session).effects
+        )
+
+    assert world == []
+
+
+@pytest.mark.asyncio
+async def test_a_departed_contexts_recorded_inverse_outlives_the_context(
+    tmp_path: Path,
+) -> None:
+    """Holding the context weakly must not mean holding the inverse weakly.
+
+    A context nobody holds has nobody left to write *through* it, which is why
+    the context itself is held weakly. That is a statement about future writes
+    and says nothing about one already made: an inverse that has been recorded
+    is owed, and letting the collector take it would leave the world changed
+    with the undo gone.
+    """
+
+    spec = _atom(tmp_path, "keeper_atom", _KEEPER)
+    world: list[str] = []
+
+    def _write() -> EffectInverse:
+        world.append("changed")
+        return lambda: world.remove("changed")
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(spec)
+        api = _kept(session)
+        watch = weakref.ref(session.context_for(spec.module_path))
+        assert session.uninstall_extension(spec) is True
+
+        api.effect(_write, provides="after-departure")
+        assert world == ["changed"]
+
+        # Nobody can write through it again, and nothing holds it: the context
+        # itself is gone, and only what it recorded is left.
+        del api
+        gc.collect()
+        assert watch() is None
+
+    assert world == []
+
+
+@pytest.mark.asyncio
+async def test_a_restored_survivor_is_no_longer_held_as_departed(
+    tmp_path: Path,
+) -> None:
+    """A rollback that relinks a context takes back the departure with it.
+
+    A superseded atom is noted as departed when it is unlinked, and put back by
+    the restore when its replacement fails to land. If the departure outlived
+    the restore, the survivor would be simultaneously linked and pending an
+    undo, and whether its effects survived would rest on which of the two
+    shutdown loops ran first -- an ordering nothing states and nothing checks.
+    """
+
+    marks: list[str] = []
+    spec = _atom(tmp_path, "eff_atom", _EFFECTFUL)
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("effect_marks", marks, scope="session")
+        await session.install_extension(spec)
+        assert marks == ["eff_atom"]
+        survivor = session.context_for(spec.module_path)
+        assert survivor is not None
+
+        # Loads under the same manifest name, so the supersede really runs and
+        # the survivor really departs before the replacement refuses.
+        failing = _file_atom(tmp_path, "eff_atom_v2", _REFUSES.format(name="eff_atom"))
+        with pytest.raises(Exception, match="v2 broke"):
+            await session.install_extension(failing, replace=True)
+
+        assert session.context_for(spec.module_path) is survivor
+        # Stated as behaviour rather than as bookkeeping: undoing the
+        # departures now, in either order relative to anything else, must not
+        # reach a context the session is holding.
+        assert session._departed.undo() == ()
+        assert marks == ["eff_atom"]
+        assert session.services.get("kept_api") is not None

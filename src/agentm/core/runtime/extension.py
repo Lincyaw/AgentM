@@ -569,6 +569,11 @@ async def install_extension(
             # The failed installation's own context is unlinked by the restore
             # above; its tables go with it, and what it recorded through
             # ``api.effect`` is undone here because nothing else describes it.
+            # An atom that kept its api can go on recording effects through it
+            # afterwards -- a body is arbitrary code and runs where it is
+            # called -- so the context is noted as departed and whatever it
+            # records is undone at shutdown, exactly as a detached atom's is.
+            api.note_departed_context(context)
             context.suspend().revert()
             if superseded_residue is not None:
                 # Nothing to un-revert: the survivor was set aside, not undone,

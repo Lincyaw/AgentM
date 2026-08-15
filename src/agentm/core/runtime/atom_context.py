@@ -36,10 +36,14 @@ a log the session no longer aggregates, so ``composition_digest`` does not
 report it and no uninstall will run it, because the uninstall already happened.
 Refusing the call instead would mean the log asking whether its context is
 still linked, which is a revocation bit read at a write, and that is the shape
-this design exists to remove.  What the session does instead is keep a weak
-hold on the contexts it has removed (``DepartedContexts`` below) and undo, at
-shutdown, whatever such a write recorded while it was still alive.  Past the
-session's own lifetime nothing can be promised, and nothing here promises it.
+this design exists to remove.  What the session does instead is keep hold of
+the effect logs of the contexts it has taken out (``DepartedContexts`` below)
+and undo, at shutdown, whatever such a write recorded.  Taken out covers both
+ways a context leaves: an atom that is detached, and an installation that
+failed and was rolled back.  The rollback reverts that context's residue for
+the same reason the detach does, so an effect recorded through it afterwards is
+under the same decision, just late.  Past the session's own lifetime nothing
+can be promised, and nothing here promises it.
 
 *A failed ``replace=True`` has nothing to un-revert.*  Superseding moves the
 previous context's tables aside rather than running their inverses, so the
@@ -112,6 +116,32 @@ def _policy_key(row: PolicyRow) -> tuple[int, int]:
     return (row.priority, row.order)
 
 
+_RENDERER_ORDER = itertools.count()
+"""Which of two bindings of one trigger source is the later one.
+
+Same shape and same reason as the service registry's write counter.  A trigger
+source *resolves*: two contexts may bind it and exactly one renderer is used,
+so the number decides an outcome, which is the test ``ChainedTools`` states for
+why a tool name needs no such number.  Without it a source would resolve by
+link order, and an atom rebinding a source it already holds would silently have
+no effect while a later-linked context held it.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class RendererRow:
+    """One bound trigger renderer, with what decides which binding wins."""
+
+    renderer: TriggerRenderer
+    order: int
+
+
+def renderer_row(renderer: TriggerRenderer) -> RendererRow:
+    """A row for ``renderer``, numbered so its position is fixed at the write."""
+
+    return RendererRow(renderer=renderer, order=next(_RENDERER_ORDER))
+
+
 @dataclass(slots=True)
 class ContextTables:
     """The tables one context writes into.
@@ -123,7 +153,7 @@ class ContextTables:
 
     tools: list[Tool] = field(default_factory=list)
     policies: list[PolicyRow] = field(default_factory=list)
-    renderers: dict[str, TriggerRenderer] = field(default_factory=dict)
+    renderers: dict[str, RendererRow] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +301,9 @@ class AtomContext:
         """Take back everything ``suspend`` moved out.
 
         Anything written since goes after what is put back, which is the order
-        the writes actually happened in.
+        the writes actually happened in.  Every row goes back as the object it
+        was, so a policy's position and a renderer's binding are the ones they
+        had rather than fresh ones that would sort or resolve differently.
         """
 
         if residue.context is not self:
@@ -357,10 +389,15 @@ class AtomContext:
         source: str,
         renderer: TriggerRenderer,
     ) -> None:
-        """Bind a trigger source to a renderer in this context's table."""
+        """Bind a trigger source to a renderer in this context's table.
 
-        self._tables.renderers[source] = renderer
-        self._session._extensions.note_trigger_renderer(source, self._module_path)
+        The write lands here whatever else holds the source; who the source
+        then *belongs* to is asked of the tree afterwards, because a write that
+        lands under an existing later one changes nothing the session serves.
+        """
+
+        self._tables.renderers[source] = renderer_row(renderer)
+        self._session.refile_trigger_renderer(source)
         self._emit_register_event("trigger_renderer", source, {"renderer": renderer})
 
     def register_trigger_codec(self, source: str, codec: object) -> None:
@@ -506,7 +543,7 @@ class AtomContext:
         return (
             f"AtomContext({self._module_path!r}, tools={len(self._tables.tools)}, "
             f"policies={len(self._tables.policies)}, "
-            f"services={len(self._services.own_names())}, "
+            f"services={len(self._services.own_table())}, "
             f"effects={len(self._effects)})"
         )
 
@@ -602,33 +639,40 @@ class ChainedPolicies(Sequence[ContextPolicy]):
 
 
 class ChainedRenderers(Mapping[str, TriggerRenderer]):
-    """The session's trigger renderers: its own, overlaid by linked contexts.
+    """The session's trigger renderers: the latest binding of each source.
 
-    A later-linked context wins a source the session or an earlier one already
-    bound, which is what a single last-writer-wins table did.  Unlinking gives
-    the shadowed binding back.
+    Resolved by write order across the host's table and every linked context's,
+    the way services are, because a source resolves to exactly one renderer and
+    the number is what picks it.  That is last-writer-wins, which is what the
+    single table this replaced gave: an atom that rebinds a source it already
+    holds takes it back, and linking a context cannot change what a source
+    already resolved to except by writing it.  Unlinking gives the shadowed
+    binding back.
     """
 
     __slots__ = ("_linked", "_own")
 
     def __init__(
         self,
-        own: dict[str, TriggerRenderer],
+        own: dict[str, RendererRow],
         linked: list[AtomContext],
     ) -> None:
         self._own = own
         self._linked = linked
 
-    def _rows(self) -> dict[str, TriggerRenderer]:
+    def _rows(self) -> dict[str, RendererRow]:
         if not self._linked:
             return self._own
         rows = dict(self._own)
         for context in self._linked:
-            rows.update(context.tables.renderers)
+            for source, row in context.tables.renderers.items():
+                held = rows.get(source)
+                if held is None or row.order > held.order:
+                    rows[source] = row
         return rows
 
     def __getitem__(self, key: str) -> TriggerRenderer:
-        return self._rows()[key]
+        return self._rows()[key].renderer
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._rows())
@@ -670,6 +714,7 @@ class ContextOwnership:
 
 def ownership_of(
     own: ServiceRegistry,
+    own_renderers: Mapping[str, RendererRow],
     linked: Sequence[AtomContext],
 ) -> ContextOwnership:
     """Index which linked context holds each tool, policy, renderer, service.
@@ -678,21 +723,17 @@ def ownership_of(
     index that ordered its candidates differently from the reader it describes
     would name one context while the session served another's value.
 
-    Services are the one table where that is not link order.  A key resolves to
-    the highest ``_ServiceEntry.order`` anywhere in the chain — write order, so
-    that linking a registry cannot change what a key already resolved to — and
-    a context can rebind a key long after a later-linked context wrote it.  So
-    the winner is picked by the same number ``ServiceRegistry._lookup`` picks
-    it by, and the session's own registry takes part: a host write that is
-    later than every atom's wins the key and belongs to nobody, which is what a
-    ``None`` owner means.
+    Services and renderers are the two tables where that is not link order.  A
+    service key resolves to the highest ``ServiceEntry.order`` anywhere in the
+    chain and a trigger source to the highest ``RendererRow.order`` — write
+    order, so that linking a context cannot change what either already resolved
+    to — and a context can rebind one long after a later-linked context wrote
+    it.  So each winner is picked by the same number its reader picks it by, and
+    the host's own tables take part: a host write later than every atom's wins
+    and belongs to nobody, which is what a ``None`` owner means.
 
-    The rest need no tiebreak.  Tools and policies are keyed by identity and no
-    two contexts can hold the same object.  Renderers overlay in link order —
-    ``ChainedRenderers`` builds its view the same way, later-linked last — so
-    iterating ``linked`` in order and overwriting is exactly the resolution.
-    The host's own renderers are deliberately absent for the same reason: a
-    linked context wins that source however late the host wrote it.
+    Tools and policies need no tiebreak: they are keyed by identity, and no two
+    contexts can hold the same object.
     """
 
     tools: dict[int, str] = {}
@@ -702,14 +743,18 @@ def ownership_of(
     winning: dict[str, int] = {
         key: entry.order for key, entry in own.own_table().items()
     }
+    bound: dict[str, int] = {source: row.order for source, row in own_renderers.items()}
     for context in linked:
         owner = context.module_path
         for tool in context.tables.tools:
             tools[id(tool)] = owner
         for row in context.tables.policies:
             policies[id(row.policy)] = owner
-        for source in context.tables.renderers:
-            renderers[source] = owner
+        for source, binding in context.tables.renderers.items():
+            latest = bound.get(source)
+            if latest is None or binding.order > latest:
+                bound[source] = binding.order
+                renderers[source] = owner
         for key, entry in context.services.own_table().items():
             held = winning.get(key)
             if held is None or entry.order > held:
@@ -723,8 +768,25 @@ def ownership_of(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Departure:
+    """One removed context: what may still write, and what it has written."""
+
+    context: weakref.ref[AtomContext]
+    effects: EffectLog
+
+    def spent(self) -> bool:
+        """Nothing can record another inverse here, and none is held."""
+
+        return (
+            self.context() is None
+            and not self.effects.entries
+            and not self.effects.unsettled
+        )
+
+
 class DepartedContexts:
-    """The contexts a session has unlinked, held weakly until it shuts down.
+    """The contexts a session has unlinked, and the inverses they still hold.
 
     Here for the one write of a departed atom that is not inert.  A table write
     into an unlinked context reaches nobody because the write *is* the row; an
@@ -733,28 +795,44 @@ class DepartedContexts:
     session no longer aggregates.  Refusing that call instead would be the log
     reading a revocation bit, which is the shape this design removes.
 
-    Weakly, because a context nobody holds has nobody left to write through it,
-    and a session that supersedes an atom on a timer must not accumulate every
-    incarnation it ever removed.
+    So a departure is held two ways, and the difference between them is the
+    difference between a write that may yet happen and one that already has.
+    The context is held *weakly*: a context nobody holds has nobody left to
+    write through it, and a session that supersedes an atom on a timer must not
+    accumulate every incarnation it ever removed.  Its effect log is held
+    *outright*, because the log is the promise — an inverse that has been
+    recorded is owed whether or not anything can still reach the context that
+    recorded it, and a weak hold on that would lose the undo of a write already
+    made.  A departure is dropped only when both are spent.
     """
 
-    __slots__ = ("_refs",)
+    __slots__ = ("_departures",)
 
     def __init__(self) -> None:
-        self._refs: list[weakref.ref[AtomContext]] = []
+        self._departures: list[_Departure] = []
 
     def note(self, context: AtomContext) -> None:
-        """Record one departure, dropping references whose context is gone."""
+        """Record one departure, dropping the ones with nothing left in them."""
 
-        self._refs[:] = [ref for ref in self._refs if ref() is not None]
-        self._refs.append(weakref.ref(context))
+        self._prune()
+        self._departures.append(
+            _Departure(context=weakref.ref(context), effects=context.effects)
+        )
 
     def forget(self, context: AtomContext) -> None:
-        """Drop one context, for a rollback that has linked it again."""
+        """Drop one context, for a rollback that has linked it again.
 
-        self._refs[:] = [
-            ref for ref in self._refs if ref() is not None and ref() is not context
+        Its log goes with it, which is right: a context this session holds
+        again is abandoned with the composition at shutdown like any other, not
+        undone separately.
+        """
+
+        self._departures[:] = [
+            departure
+            for departure in self._departures
+            if departure.context() is not context
         ]
+        self._prune()
 
     def undo(self) -> tuple[BaseException, ...]:
         """Revert what each departed context recorded, newest departure first.
@@ -764,15 +842,21 @@ class DepartedContexts:
         abandoned along with the composition it belongs to, while this one's
         removal already decided that what it wrote comes back out — and a write
         made after that decision is under the same decision, just late.
+
+        The log is reverted directly rather than through the context, because
+        the context may be gone and the log is what the inverses are in.
         """
 
         failures: list[BaseException] = []
-        for ref in reversed(self._refs):
-            context = ref()
-            if context is not None:
-                failures.extend(context.suspend().revert())
-        self._refs.clear()
+        for departure in reversed(self._departures):
+            failures.extend(departure.effects.revert())
+        self._departures.clear()
         return tuple(failures)
+
+    def _prune(self) -> None:
+        self._departures[:] = [
+            departure for departure in self._departures if not departure.spent()
+        ]
 
 
 def unlink_all(session_bus: EventBus, contexts: Sequence[AtomContext]) -> None:
@@ -792,7 +876,9 @@ __all__ = [
     "ContextTables",
     "DepartedContexts",
     "PolicyRow",
+    "RendererRow",
     "ownership_of",
     "policy_row",
+    "renderer_row",
     "unlink_all",
 ]
