@@ -9,6 +9,15 @@ Two collaborators own the state the runtime only routes to: which model
 the session talks to lives in ``provider_registry.py``, and which atom
 registered what lives in ``extension_install.py``.
 
+What an atom registered does not live in this session's tables at all.  Each
+installation gets its own ``AtomContext`` (``atom_context.py``) with its own
+tools, policies, renderers, services, bus segment and effect log, and this
+session's visible state is the union of its *own* tables and every linked
+context's.  Detaching an atom unlinks its context; the methods below are
+therefore the host's write path, attributed to nobody, and an atom never
+reaches them.  The install ledger still records the same ownership from the
+context's side, so the two accounts can be checked against each other.
+
 Runtime boundaries (resource ports, tool execution, permission, effect
 scope, catalogs) are plain service-role bindings; there are no
 per-boundary register/get methods.
@@ -113,6 +122,17 @@ from agentm.core.abi.trigger import (
 )
 from agentm.core.lib.async_cancel import await_known_outcome
 from agentm.core.lib.session_result import compute_session_result
+from agentm.core.runtime.atom_context import (
+    AtomContext,
+    AtomResidue,
+    ChainedPolicies,
+    ChainedRenderers,
+    ChainedTools,
+    ContextOwnership,
+    PolicyRow,
+    ownership_of,
+    policy_row,
+)
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.extension_install import InstallLedger, LedgerSnapshot
 from agentm.core.runtime.provider_registry import ProviderRegistry, ProviderSnapshot
@@ -182,14 +202,21 @@ class CompositionSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class _ExtensionInstallSnapshot:
-    """Mutable session composition captured before one atom installation."""
+    """Mutable session composition captured before one atom installation.
+
+    The host's own tables and the *shape* of the context tree, which is all an
+    installation can move: an atom writes into its own context, so putting the
+    link list back is what takes a failed installation's writes away, and what
+    gives a superseded atom's back.
+    """
 
     bus: EventBus
     services: ServiceRegistry
     codec: CodecRegistry
     tools: tuple[Tool, ...]
-    context_policies: tuple[ContextPolicy, ...]
+    context_policies: tuple[PolicyRow, ...]
     trigger_renderers: dict[str, TriggerRenderer]
+    linked: tuple[AtomContext, ...]
     ledger: LedgerSnapshot
     providers: ProviderSnapshot
 
@@ -236,16 +263,29 @@ class SessionRuntime:
         self.store = store
         self.graph = graph
         self.triggers = TriggerQueue()
-        self.tools: list[Tool] = list(tools or [])
         self.system = runtime.system
-        self.context_policies: list[ContextPolicy] = list(context_policies or [])
-        self.trigger_renderers: dict[str, TriggerRenderer] = dict(
-            trigger_renderers or {}
+        # The host's own tables, and the contexts linked into them. Everything
+        # the session reads is the union of the two, through the live views
+        # below -- the driver takes those once at start and re-reads them at
+        # every turn boundary, so an atom linked mid-run is visible from the
+        # next turn without anything being handed to the driver again.
+        self._own_tools: list[Tool] = list(tools or [])
+        self._own_policies: list[PolicyRow] = [
+            policy_row(policy, 500) for policy in context_policies or []
+        ]
+        self._own_renderers: dict[str, TriggerRenderer] = dict(trigger_renderers or {})
+        self._linked: list[AtomContext] = []
+        self.tools: Sequence[Tool] = ChainedTools(self._own_tools, self._linked)
+        self.context_policies: Sequence[ContextPolicy] = ChainedPolicies(
+            self._own_policies, self._linked
+        )
+        self.trigger_renderers: Mapping[str, TriggerRenderer] = ChainedRenderers(
+            self._own_renderers, self._linked
         )
         self._extensions = InstallLedger(
-            tools=self.tools,
-            context_policies=self.context_policies,
-            trigger_renderers=self.trigger_renderers,
+            tools=self._own_tools,
+            context_policies=[row.policy for row in self._own_policies],
+            trigger_renderers=self._own_renderers,
         )
         store_codec = (
             store.codec if isinstance(store, CodecBackedTrajectoryStore) else None
@@ -314,8 +354,7 @@ class SessionRuntime:
         if self._providers.model is None:
             raise RuntimeError(f"session {self.id}: cannot start without model")
 
-        for policy in self.context_policies:
-            self._bind_context_policy(policy)
+        self._bind_all_context_policies()
 
         self.bus.on(
             TurnCommittedEvent.CHANNEL,
@@ -340,20 +379,45 @@ class SessionRuntime:
             ),
         )
 
-    def _policy_context(self) -> PolicyContext:
+    def _policy_context(self, services: ServiceRegistry) -> PolicyContext:
+        """The context one policy is bound with.
+
+        ``services`` is the registry of whoever registered the policy, so a
+        policy an atom installed writes through its own atom's context and a
+        policy the host installed writes as the host. A policy that could only
+        be handed the session's own registry would be a hole: it outlives no
+        atom, but every service it registered would.
+        """
+
         return PolicyContext(
             session_id=self.id,
             parent_session_id=self.ctx.parent_session_id,
-            services=self.services,
+            services=services,
             store=self.store,
             model=self._providers.model,
             stream_fn=self._providers.stream_fn,
             trigger_renderers=dict(self.trigger_renderers),
         )
 
-    def _bind_context_policy(self, policy: ContextPolicy) -> None:
+    def bind_context_policy(
+        self,
+        policy: ContextPolicy,
+        *,
+        services: ServiceRegistry,
+    ) -> None:
+        """Give one policy its runtime context, writing through ``services``."""
+
         if isinstance(policy, BindableContextPolicy):
-            policy.bind(self._policy_context())
+            policy.bind(self._policy_context(services))
+
+    def _bind_all_context_policies(self) -> None:
+        """Bind every policy the session holds, each through its own writer."""
+
+        for row in self._own_policies:
+            self.bind_context_policy(row.policy, services=self.services)
+        for context in self._linked:
+            for row in context.tables.policies:
+                self.bind_context_policy(row.policy, services=context.services)
 
     async def _run_driver(self) -> None:
         try:
@@ -454,6 +518,14 @@ class SessionRuntime:
             except BaseException as exc:
                 cleanup_errors.append(exc)
         self._cleanup_callbacks.clear()
+        # The session is going away, so every context is unlinked and its
+        # recorded effects are released rather than run -- here rather than by
+        # the collector, because a log can still hold a queued body to close. A
+        # task that survives writes into an unlinked context afterwards, which
+        # nothing reads.
+        for context in tuple(self._linked):
+            context.unlink_from(self)
+            cleanup_errors.extend(context.suspend().dispose())
         self.bus._force_clear()
         if cleanup_errors:
             raise BaseExceptionGroup("session shutdown cleanup failed", cleanup_errors)
@@ -586,7 +658,7 @@ class SessionRuntime:
         return self.id
 
     def get_messages(self) -> list[AgentMessage]:
-        return build_context_sync(self.trajectory.turns, self.trigger_renderers)
+        return build_context_sync(self.trajectory.turns, dict(self.trigger_renderers))
 
     def get_turns(self) -> list[Turn]:
         return list(self.trajectory.turns)
@@ -620,50 +692,45 @@ class SessionRuntime:
         *,
         priority: int = 500,
     ) -> Callable[[], None]:
-        from agentm.core.runtime.extension import current_installing_extension
+        """Subscribe on the session's own segment, owned by nobody.
 
-        owner = current_installing_extension() or None
-        return self.bus.on(channel, handler, priority=priority, owner=owner)
+        This is the host's path. An atom does not reach it: it subscribes into
+        its own context's segment, which is unlinked when it leaves.
+        """
+
+        return self.bus.on(channel, handler, priority=priority)
 
     def add_observer(self, observer: EventBusObserver) -> Callable[[], None]:
         """Register a bus observer for session-scoped instrumentation."""
 
-        from agentm.core.runtime.extension import current_installing_extension
+        return self.bus.add_observer(observer)
 
-        owner = current_installing_extension() or None
-        return self.bus.add_observer(observer, owner=owner)
-
-    # --- Registration ---
+    # --- Registration (the host's own tables) ---
 
     def register_tool(self, tool: Tool) -> None:
-        from agentm.core.runtime.extension import current_installing_extension
-
         existing = {t.name for t in self.tools}
         if tool.name in existing:
             raise ValueError(f"duplicate tool: {tool.name}")
-        self.tools.append(tool)
-        self._extensions.note_tool(tool, current_installing_extension() or None)
+        self._own_tools.append(tool)
+        self._extensions.note_tool(tool, None)
         self._emit_register_event("tool", tool.name, {"tool": tool})
 
     def register_context_policy(
         self, policy: ContextPolicy, *, priority: int = 500
     ) -> None:
-        from agentm.core.runtime.extension import current_installing_extension
-
         if any(existing is policy for existing in self.context_policies):
             raise ValueError("context policy instance is already registered")
-        self.context_policies.append(policy)
-        self._extensions.note_context_policy(
-            policy,
-            current_installing_extension() or None,
-            priority=priority,
-        )
-        self.context_policies.sort(key=self._extensions.priority_of)
+        row = policy_row(policy, priority)
+        self._own_policies.append(row)
+        self._own_policies.sort(key=lambda held: (held.priority, held.order))
+        self._extensions.note_context_policy(policy, None, priority=priority)
         if self._driver_task is not None:
             try:
-                self._bind_context_policy(policy)
+                self.bind_context_policy(policy, services=self.services)
             except BaseException:
-                self.context_policies.remove(policy)
+                self._own_policies[:] = [
+                    held for held in self._own_policies if held is not row
+                ]
                 self._extensions.drop_context_policy(policy)
                 raise
         self._emit_register_event(
@@ -673,12 +740,8 @@ class SessionRuntime:
         )
 
     def register_trigger_renderer(self, source: str, renderer: TriggerRenderer) -> None:
-        from agentm.core.runtime.extension import current_installing_extension
-
-        self.trigger_renderers[source] = renderer
-        self._extensions.note_trigger_renderer(
-            source, current_installing_extension() or None
-        )
+        self._own_renderers[source] = renderer
+        self._extensions.note_trigger_renderer(source, None)
         self._emit_register_event(
             "trigger_renderer",
             source,
@@ -686,11 +749,8 @@ class SessionRuntime:
         )
 
     def register_trigger_codec(self, source: str, codec: object) -> None:
-        from agentm.core.runtime.extension import current_installing_extension
-
         if not isinstance(codec, TriggerCodec):
             raise TypeError("trigger codec must implement serialize and deserialize")
-        owner = current_installing_extension() or None
         # A superseded atom keeps its codec registered so committed turns stay
         # decodable; its replacement takes the source over rather than colliding.
         self.codec.register_trigger_codec(
@@ -698,7 +758,7 @@ class SessionRuntime:
             codec,
             replace=self._extensions.trigger_codec_is_superseded(source),
         )
-        self._extensions.note_trigger_codec(source, owner)
+        self._extensions.note_trigger_codec(source, None)
         self._emit_register_event(
             "trigger_codec",
             source,
@@ -748,25 +808,71 @@ class SessionRuntime:
         *,
         role_bind: bool,
     ) -> None:
-        """Attribute every service write; announce only the role bindings.
+        """A write into the session's own registry — the host's, by definition."""
 
-        Attribution is unconditional because uninstall reads it: a service an
-        atom registered plainly is as much that atom's as one it bound to a
-        role, and one that goes unrecorded outlives the atom forever. The
-        register event stays role-only — plain registrations are frequent and
-        include the driver's per-turn resource transaction, which nothing on
-        the bus wants to hear about once a turn.
+        self.note_service_write(key, service, scope, role_bind=role_bind, context=None)
+
+    def note_service_write(
+        self,
+        key: str,
+        service: object,
+        scope: ServiceScope,
+        *,
+        role_bind: bool,
+        context: AtomContext | None,
+    ) -> None:
+        """Mirror one service write into the ledger; announce role bindings.
+
+        Which registry the write landed in is what decides the owner: an atom
+        holds its own, the host holds the session's, and each registry's write
+        observer is the one belonging to whoever holds it. No caller passes a
+        name and no ambient state is consulted, so the task the write happens on
+        cannot change the answer.
+
+        A write into a context this session does not aggregate is not accounted
+        for at all. That is a read of the session's *own* link list to decide
+        what goes into the session's *own* record -- the same aggregation every
+        other reader performs -- and not a permission check on the writer: the
+        write has already happened, into a table it was entitled to, and
+        nothing here can refuse it or reach it.
+
+        The ledger is not what removal reads any more -- unlinking the context
+        is -- but it is kept up to date so its account and the context tree's
+        can be checked against each other. The register event stays role-only:
+        plain registrations are frequent and include the driver's per-turn
+        resource transaction, which nothing on the bus wants to hear about once
+        a turn.
         """
 
-        from agentm.core.runtime.extension import current_installing_extension
-
-        self._extensions.note_service(key, current_installing_extension() or None)
+        if context is not None and not self.is_linked(context):
+            return
+        owner = None if context is None else context.module_path
+        self._extensions.note_service(key, owner)
         if role_bind:
-            self._emit_register_event(
+            self.emit_register_event(
                 "service",
                 key,
                 {"service": service, "scope": scope},
+                owner=owner,
             )
+
+    def emit_register_event(
+        self,
+        kind: str,
+        name: str,
+        payload: dict[str, object],
+        *,
+        owner: str | None,
+    ) -> None:
+        """Announce one registration, naming the context that made it."""
+
+        event = ApiRegisterEvent(
+            kind=kind,
+            name=name,
+            extension=owner or "",
+            payload=payload,
+        )
+        self.bus.emit_sync(ApiRegisterEvent.CHANNEL, event)
 
     def _emit_register_event(
         self,
@@ -774,15 +880,7 @@ class SessionRuntime:
         name: str,
         payload: dict[str, object],
     ) -> None:
-        from agentm.core.runtime.extension import current_installing_extension
-
-        event = ApiRegisterEvent(
-            kind=kind,
-            name=name,
-            extension=current_installing_extension(),
-            payload=payload,
-        )
-        self.bus.emit_sync(ApiRegisterEvent.CHANNEL, event)
+        self.emit_register_event(kind, name, payload, owner=None)
 
     # --- Providers ---
 
@@ -973,78 +1071,124 @@ class SessionRuntime:
                 f"{', '.join(missing)}"
             )
 
-    def remove_atom_registrations(self, module_path: str) -> None:
-        """Detach everything one atom registered, so a newer version can land.
+    def remove_atom_registrations(self, module_path: str) -> AtomResidue | None:
+        """Unlink one atom's context and move what it held out of it.
+
+        Returns the residue rather than reverting it, because the two callers
+        want opposite things from it. ``uninstall_extension`` reverts it: the
+        atom is gone and whatever it recorded through ``api.effect`` has to be
+        undone. The supersede path holds it until the replacement has landed,
+        and gives it back to the context if it has not — which is why nothing
+        here is reverted eagerly. A failed ``replace=True`` has nothing to
+        un-revert, and that is a property of this method, not a promise made
+        elsewhere.
+
+        Unlinking is what takes the atom's tools, policies, renderers,
+        services and bus handlers out of the session: they were never in the
+        session's tables. Suspending the context additionally empties its own
+        tables, so its *reads* resolve up the chain to whatever replaced it.
 
         Trigger codecs stay registered: a committed turn names its trigger
         source, and a session that could not decode that source would fail to
-        resume. The superseding version registers over the same source.
+        resume. They are the one write recorded as an effect with a retention
+        reason rather than held in a context table, so this leaves them alone
+        and ``revert`` leaves them alone too.
 
-        Two limits the caller has to handle, because neither is repairable
-        from here:
-
-        A replacement lands last within its bus priority band rather than where
-        the original sat, since subscriptions order by ``(priority, seq)`` with
-        a monotonic ``seq``. Where position decides the outcome -- the system
-        prompt is last-writer-wins, the tool list is mapped by each handler in
-        turn -- a caller that cares has to reinstall everything the composition
-        lists after this atom, which is what ``atom_watch`` does; one call here
-        cannot know what those are.
-
-        A service key is unregistered outright, including one this atom bound
-        over another atom's value. Executor decorators bind themselves wrapping
-        whatever they read, so superseding one removes the whole composed chain
-        rather than unwrapping a layer, and the replacement rebuilds from the
-        bare default. Atoms that wrap a service are not supersede-safe.
+        One limit remains and is the caller's, because it is not repairable
+        from here: a replacement lands last within its bus priority band rather
+        than where the original sat, since subscriptions order by
+        ``(priority, seq)`` and the replacement's are new. Where position
+        decides the outcome, a caller that cares reinstalls everything the
+        composition lists after this atom, which is what ``atom_watch`` does.
 
         One sequencing property this leaves behind is load-bearing outside
         core. On the supersede path ``install_extension`` calls this and then
         ``load_extension`` with no await between them, so the window in which
         a superseded atom's keys are absent is not observable by any other
         task. ``atom_watch`` reads its own follower key to tell "superseded"
-        from "detached outright" and would release the session's only polling
-        loop if it ever observed that window. Introducing an await between the
-        detach and the replacement's load would break it.
+        from "detached outright"; after the window it reads the successor's
+        registration through the chain, which is the handover.
         """
 
-        registrations = self._extensions.registrations_of(module_path)
-        if registrations.tool_ids:
-            self.tools[:] = [
-                tool for tool in self.tools if id(tool) not in registrations.tool_ids
-            ]
-        if registrations.context_policy_ids:
-            self.context_policies[:] = [
-                policy
-                for policy in self.context_policies
-                if id(policy) not in registrations.context_policy_ids
-            ]
-        for source in registrations.trigger_renderer_sources:
-            self.trigger_renderers.pop(source, None)
-        for key in registrations.service_keys:
-            self.services.unregister(key)
-        # The provider service key is covered by the loop above, but the
-        # registry keeps its own ownership index and active-provider name, and
-        # both would keep naming a provider whose backing service is gone.
-        removed_providers = [
-            name
-            for name, owner in self._providers.owners().items()
-            if owner == module_path
-        ]
-        for name in removed_providers:
-            self._providers.unregister(name)
-        removed_bus_attachments = self.bus.remove_owner(module_path)
+        context = self.context_for(module_path)
+        if context is None:
+            self._extensions.forget(module_path)
+            return None
+        context.unlink_from(self)
+        residue = context.suspend()
         self._extensions.forget(module_path)
+        removed_providers = self._uncover(residue, module_path)
         logger.debug(
-            "detached atom {}: {} tools, {} policies, {} renderers, "
-            "{} services, {} providers, {} bus subscriptions and observers",
+            "unlinked atom {}: {} tools, {} policies, {} renderers, "
+            "{} services, {} providers, {} bus channels, {} recorded effects",
             module_path,
-            len(registrations.tool_ids),
-            len(registrations.context_policy_ids),
-            len(registrations.trigger_renderer_sources),
-            len(registrations.service_keys),
+            len(residue.tables.tools),
+            len(residue.tables.policies),
+            len(residue.tables.renderers),
+            len(residue.services.own_names()),
             len(removed_providers),
-            removed_bus_attachments,
+            len(residue.segment.handlers),
+            len(residue.effects),
         )
+        return residue
+
+    def _uncover(self, residue: AtomResidue, module_path: str) -> list[str]:
+        """Say who holds the keys an unlinked context was shadowing.
+
+        Unlinking is not the same as removing, and this is where the difference
+        shows. A key two contexts wrote resolves to the survivor the moment the
+        writer leaves, so the session's other accounts of ownership have to be
+        told: the install ledger, whose ``forget`` has just dropped the key
+        outright, and the provider registry, whose ownership index and active
+        name are its own.
+
+        Returns the providers that really went away, as opposed to the ones
+        that were merely uncovered.
+        """
+
+        held = self.ownership()
+        for key in residue.services.own_names():
+            if self.services.has(key):
+                self._extensions.note_service(key, held.service(key))
+        for source in residue.tables.renderers:
+            if source in self.trigger_renderers:
+                self._extensions.note_trigger_renderer(source, held.renderer(source))
+        departed: list[str] = []
+        uncovered: list[str] = []
+        for name, owner in self._providers.owners().items():
+            if owner != module_path:
+                continue
+            if self.services.has(f"provider:{name}"):
+                uncovered.append(name)
+            else:
+                departed.append(name)
+        for name in uncovered:
+            self._providers.note_owner(name, held.service(f"provider:{name}"))
+        for name in departed:
+            self._providers.unregister(name)
+        if uncovered:
+            # Re-resolve, so the session's active stream and model are the ones
+            # the uncovered registration names rather than the departed atom's.
+            self._reactivate_providers()
+        return departed
+
+    def _reactivate_providers(self) -> None:
+        """Pick the active provider again, tolerating a session with none left.
+
+        ``activate`` raises when the session is bound to a provider that is now
+        absent, which is a real error at a registration but not something a
+        detach may propagate: the atom is already gone, and the caller asked to
+        remove it, not to install one.
+        """
+
+        try:
+            self._providers.activate()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            logger.warning(
+                "session {} could not re-resolve its provider after a detach: {}",
+                self.id,
+                exc,
+            )
 
     def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:
         """Detach an atom; report whether one was installed.
@@ -1068,7 +1212,11 @@ class SessionRuntime:
             module_path = self._extensions.installed_module_path(atom)
         if module_path is None:
             return False
-        self.remove_atom_registrations(module_path)
+        residue = self.remove_atom_registrations(module_path)
+        if residue is not None:
+            residue.effects.revert_or_raise(
+                f"undoing the effects of {module_path} failed"
+            )
         logger.info("uninstalled atom {}", module_path)
         return True
 
@@ -1077,14 +1225,80 @@ class SessionRuntime:
 
         return self._extensions.installed_module_path(atom_name)
 
+    # --- Context tree ---
+
+    def link_context(self, context: AtomContext) -> None:
+        """Aggregate one atom context into what this session resolves."""
+
+        if any(existing is context for existing in self._linked):
+            return
+        self._linked.append(context)
+
+    def unlink_context(self, context: AtomContext) -> None:
+        """Stop aggregating one atom context; safe to repeat."""
+
+        self._linked[:] = [
+            existing for existing in self._linked if existing is not context
+        ]
+
+    def is_linked(self, context: AtomContext) -> bool:
+        """Whether this session aggregates ``context`` right now."""
+
+        return any(existing is context for existing in self._linked)
+
+    def linked_contexts(self) -> tuple[AtomContext, ...]:
+        """The atom contexts this session resolves through, in link order."""
+
+        return tuple(self._linked)
+
+    def context_for(self, module_path: str) -> AtomContext | None:
+        """The linked context of one atom, if it is still linked.
+
+        The last one linked under that module path wins, which is what a second
+        incarnation of the same atom means: the first's context, if a task of
+        it survives, is unlinked and answers for nobody.
+        """
+
+        for context in reversed(self._linked):
+            if context.module_path == module_path:
+                return context
+        return None
+
+    def policy_rows(self) -> tuple[PolicyRow, ...]:
+        """Every context policy with the priority it was registered at.
+
+        The view exposes policies; a reader that has to state their priorities
+        -- the composition digest -- needs the rows behind it.
+        """
+
+        rows = list(self._own_policies)
+        for context in self._linked:
+            rows.extend(context.tables.policies)
+        rows.sort(key=lambda row: (row.priority, row.order))
+        return tuple(rows)
+
+    def ownership(self) -> ContextOwnership:
+        """Which context holds each tool, policy, renderer and service."""
+
+        return ownership_of(self._linked)
+
+    @property
+    def driver_running(self) -> bool:
+        """Whether the driver loop has been started."""
+
+        return self._driver_task is not None
+
     def _capture_extension_install_state(self) -> _ExtensionInstallSnapshot:
+        """The host's own tables plus the shape of the context tree."""
+
         return _ExtensionInstallSnapshot(
             bus=self.bus.copy(),
             services=self.services.copy(),
             codec=self.codec.copy(),
-            tools=tuple(self.tools),
-            context_policies=tuple(self.context_policies),
-            trigger_renderers=dict(self.trigger_renderers),
+            tools=tuple(self._own_tools),
+            context_policies=tuple(self._own_policies),
+            trigger_renderers=dict(self._own_renderers),
+            linked=tuple(self._linked),
             ledger=self._extensions.capture(),
             providers=self._providers.capture(),
         )
@@ -1097,13 +1311,19 @@ class SessionRuntime:
         # references to these same container objects, so rebinding the attribute
         # would roll back the session's view while leaving the driver serving
         # whatever the failed install appended.
+        #
+        # Three link lists say the same thing and all three are put back: the
+        # bus's segments, the registry's child registries, and this session's
+        # contexts. A failed installation's context is absent from all of them
+        # afterwards, and a superseded one is present in all of them again.
         self.bus.replace_from(snapshot.bus)
         self.services.replace_from(snapshot.services)
         self.codec.replace_from(snapshot.codec)
-        self.tools[:] = snapshot.tools
-        self.context_policies[:] = snapshot.context_policies
-        self.trigger_renderers.clear()
-        self.trigger_renderers.update(snapshot.trigger_renderers)
+        self._own_tools[:] = snapshot.tools
+        self._own_policies[:] = snapshot.context_policies
+        self._own_renderers.clear()
+        self._own_renderers.update(snapshot.trigger_renderers)
+        self._linked[:] = snapshot.linked
         self._extensions.restore(snapshot.ledger)
         self._providers.restore(snapshot.providers)
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import cast
@@ -491,6 +491,16 @@ def _system_prompt_ref(text: str) -> str:
 # --- Main driver ------------------------------------------------------------
 
 
+def _renderers(config: DriverConfig) -> dict[str, TriggerRenderer]:
+    """The turn's renderer table, taken as a plain dict at the turn boundary.
+
+    The session hands over a live view; a turn is entitled to a fixed picture
+    of it, and the consumers below are typed on the concrete mapping.
+    """
+
+    return dict(config.trigger_renderers or {})
+
+
 @dataclass(slots=True)
 class DriverConfig:
     """Stable dependencies and policy inputs for one session driver."""
@@ -506,13 +516,16 @@ class DriverConfig:
     interrupt: ResettableCancelSource
     shutdown: ResettableCancelSource
     tool_orchestrator: ToolOrchestrator
-    tools: list[Tool] = field(default_factory=list)
+    # Sequences rather than lists: what the session hands over is a live view
+    # over its own tables plus every linked atom context, re-read at each turn
+    # boundary. The driver only ever iterates them.
+    tools: Sequence[Tool] = field(default_factory=list)
     store: TrajectoryStore | None = None
     parent_session_id: str | None = None
     permission_audience: PermissionAudience = "user"
     system: str | None = None
-    context_policies: list[ContextPolicy] | None = None
-    trigger_renderers: dict[str, TriggerRenderer] | None = None
+    context_policies: Sequence[ContextPolicy] | None = None
+    trigger_renderers: Mapping[str, TriggerRenderer] | None = None
     cancel_signal: CancelSignal | None = None
     effect_scope: EffectScope | None = None
     # Runtime installs recorded on the turn that commits them. The driver holds
@@ -572,7 +585,9 @@ async def drive(config: DriverConfig) -> None:
     # Alias the session's own list rather than copying it: an empty list is
     # falsy, so `or []` would bind a fresh list here and every context policy
     # registered after start would be invisible to the running driver.
-    policies = config.context_policies if config.context_policies is not None else []
+    policies: Sequence[ContextPolicy] = (
+        config.context_policies if config.context_policies is not None else []
+    )
     context_projection = config.services.get(
         CONTEXT_PROJECTION_SERVICE,
         cast(type[ContextProjection], ContextProjection),
@@ -770,7 +785,7 @@ async def drive(config: DriverConfig) -> None:
                         tools=tuple(config.tools),
                         system=prompt_run.system_prompt,
                         context_policies=tuple(policies),
-                        trigger_renderers=config.trigger_renderers,
+                        trigger_renderers=_renderers(config),
                         interrupt=_interrupt,
                         shutdown=_shutdown,
                         cancel_signal=config.cancel_signal,
@@ -938,7 +953,7 @@ async def drive(config: DriverConfig) -> None:
                     head_id=node_append_position.head_id,
                     parent_node_id=parent_node_id,
                     logical_parent_id=logical_parent_id,
-                    renderers=config.trigger_renderers,
+                    renderers=_renderers(config),
                 )
                 if sys_node is not None:
                     nodes.insert(0, sys_node)

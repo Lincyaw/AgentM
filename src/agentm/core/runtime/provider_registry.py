@@ -82,8 +82,19 @@ class ProviderRegistry:
         config: ProviderConfig,
         *,
         replace: bool = False,
+        into: ServiceRegistry | None = None,
+        owner: str | None = None,
     ) -> None:
-        """Register an LLM provider and refresh the active provider."""
+        """Register an LLM provider and refresh the active provider.
+
+        ``into`` is the registry the backing ``provider:<name>`` service is
+        written to, and ``owner`` is who that registry belongs to. Both come
+        from the atom context performing the write, never from an argument the
+        atom chose: this method is runtime-internal and unreachable from
+        ``AtomAPI``, which offers ``register_provider(name, config)`` and
+        nothing else. Omitting them is the host writing as itself.
+        """
+
         if not isinstance(name, str) or not name:
             raise ValueError("provider registry name must be a non-empty string")
         if not isinstance(config, ProviderConfig):
@@ -94,6 +105,7 @@ class ProviderRegistry:
                 f"ProviderConfig.name {config.name!r}"
             )
         key = f"{_SERVICE_PREFIX}{name}"
+        target = self._services if into is None else into
         previous = self._services.get(key)
         if previous is not None and not replace:
             raise ValueError(
@@ -113,18 +125,19 @@ class ProviderRegistry:
                 "cannot replace the session-bound provider with model "
                 f"{config.model.id!r}; expected {self._identity.model_id!r}"
             )
-        from agentm.core.runtime.extension import current_installing_extension
-
         previous_owner = self._owners.get(name)
-        self._services.register(key, config, scope="session")
-        self._owners[name] = current_installing_extension() or None
+        target.register(key, config, scope="session")
+        self._owners[name] = owner
         try:
             self.activate()
         except BaseException:
             if previous is None:
-                self.unregister(name)
+                target.unregister(key)
+                self._owners.pop(name, None)
+                if self._active_name == name:
+                    self._active_name = None
             else:
-                self._services.register(key, previous, scope="session")
+                target.register(key, previous, scope="session")
                 self._owners[name] = previous_owner
             raise
         self._emit_register_event("provider", name, {"provider": config})
@@ -150,6 +163,17 @@ class ProviderRegistry:
         self._owners.pop(name, None)
         if self._active_name == name:
             self._active_name = None
+
+    def note_owner(self, name: str, owner: str | None) -> None:
+        """Re-file one provider under the atom whose registration now resolves.
+
+        Unlinking a context uncovers whatever it was shadowing, and this index
+        is the one account of provider ownership that no chain resolves for
+        itself. Not a caller's choice of name: the session reads it off the
+        context tree and passes what it found.
+        """
+
+        self._owners[name] = owner
 
     def has(self, name: str) -> bool:
         return self._services.get(f"{_SERVICE_PREFIX}{name}") is not None
