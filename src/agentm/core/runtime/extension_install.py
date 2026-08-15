@@ -1,185 +1,151 @@
-"""Install ledger — which atom registered what, and how to rebuild it.
+"""Installed atoms — which atoms a session holds, and how to replay them.
 
-Every tool, context policy, trigger renderer, trigger codec, and provider
-a session holds was put there either by an atom installation or by the
-embedder that composed the session.  This ledger records which, and that
-one distinction does two jobs.
+What an atom *registered* is not here.  It went into that atom's own
+``AtomContext`` (``atom_context.py``), the session sees it because the context
+is linked, and detaching unlinks.  Ownership is therefore "which node did the
+write land in", and there is nothing here that could give a second answer.
 
-Rolling back a failed installation needs the before picture, so the
-ledger snapshots itself before each atom runs.  Rebuilding a session for
-a child or a fork needs the opposite: the atoms themselves are replayed
-from their specs, so only the objects nobody claimed — the embedder's —
-are carried over directly.
+What is here is the other half, which no table of the session can answer for:
+which atoms were installed, in which order, from which spec.  A child or a fork
+is rebuilt by replaying those specs, and ``replace=True`` finds the incarnation
+to supersede by manifest name.
+
+Rollback is by inverse rather than by snapshot.  One installation records
+exactly one atom, so undoing it retires exactly that record; superseding one
+hands its record to the caller that took it out, which gives it back if the
+replacement never lands.
+
+``TriggerCodecOwners`` is the one attribution table left, for the one write an
+atom makes that a context table cannot hold — see its docstring.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from agentm.core.abi.codec import CodecRegistry
-from agentm.core.abi.context import ContextPolicy
 from agentm.core.abi.session_api import ExtensionSpec
-from agentm.core.abi.tool import Tool
-from agentm.core.abi.trigger import TriggerRenderer
-
-_DEFAULT_CONTEXT_POLICY_PRIORITY = 500
 
 
 @dataclass(frozen=True, slots=True)
-class AtomRegistrations:
-    """Everything one atom registered, addressed the way each store needs."""
+class InstalledAtom:
+    """One installed atom: what replays it, and what it calls itself.
 
-    tool_ids: frozenset[int]
-    context_policy_ids: frozenset[int]
-    trigger_renderer_sources: frozenset[str]
-    trigger_codec_sources: frozenset[str]
-    service_keys: frozenset[str]
+    ``runtime`` marks an atom installed into a running session rather than
+    composed before start.  The distinction matters for rebuilds: the active
+    set recorded at creation covers the composed atoms only, and a rebuild that
+    replayed a runtime atom would compute a different digest than the one the
+    source session froze into its provider identity.
+    """
+
+    module_path: str
+    spec: ExtensionSpec
+    runtime: bool
+    atom_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
-class LedgerSnapshot:
-    """Ownership bookkeeping captured before one atom installation."""
+class RetiredAtom:
+    """One record ``retire`` took out, and where it goes back.
 
-    tool_owners: dict[int, str | None]
-    context_policy_owners: dict[int, str | None]
-    context_policy_priorities: dict[int, int]
-    trigger_renderer_owners: dict[str, str | None]
-    trigger_codec_owners: dict[str, str | None]
-    service_owners: dict[str, str | None]
-    module_paths: tuple[str, ...]
-    specs: tuple[ExtensionSpec, ...]
-    runtime_module_paths: frozenset[str]
-    atom_names: dict[str, str]
+    The inverse of recording an installation, held by whoever performed the
+    removal.  The position travels with it because the installed set has an
+    order and a rebuild replays in that order: a superseded atom whose
+    replacement fails must come back where it was, not at the end.
+    """
+
+    atom: InstalledAtom
+    position: int
 
 
-class InstallLedger:
-    """Attribution of a session's registrations to the atom that made them."""
+class InstalledAtoms:
+    """The atoms installed into one session, in the order they were installed."""
 
-    def __init__(
-        self,
-        *,
-        tools: Sequence[Tool] = (),
-        context_policies: Sequence[ContextPolicy] = (),
-        trigger_renderers: Collection[str] = (),
-    ) -> None:
-        self._tool_owners: dict[int, str | None] = {id(tool): None for tool in tools}
-        self._context_policy_owners: dict[int, str | None] = {
-            id(policy): None for policy in context_policies
-        }
-        self._context_policy_priorities: dict[int, int] = {
-            id(policy): _DEFAULT_CONTEXT_POLICY_PRIORITY for policy in context_policies
-        }
-        self._trigger_renderer_owners: dict[str, str | None] = {
-            source: None for source in trigger_renderers
-        }
-        self._trigger_codec_owners: dict[str, str | None] = {}
-        self._service_owners: dict[str, str | None] = {}
-        self.module_paths: list[str] = []
-        self._specs: list[ExtensionSpec] = []
-        self._runtime_module_paths: set[str] = set()
-        self._atom_names: dict[str, str] = {}
+    __slots__ = ("_atoms",)
 
-    # --- Attribution ---
+    def __init__(self) -> None:
+        self._atoms: list[InstalledAtom] = []
 
-    def note_tool(self, tool: Tool, owner: str | None) -> None:
-        self._tool_owners[id(tool)] = owner
+    # --- Recording ---
 
-    def note_context_policy(
-        self,
-        policy: ContextPolicy,
-        owner: str | None,
-        *,
-        priority: int,
-    ) -> None:
-        self._context_policy_priorities[id(policy)] = priority
-        self._context_policy_owners[id(policy)] = owner
-
-    def drop_context_policy(self, policy: ContextPolicy) -> None:
-        """Undo ``note_context_policy`` when binding the policy failed."""
-
-        self._context_policy_priorities.pop(id(policy), None)
-        self._context_policy_owners.pop(id(policy), None)
-
-    def priority_of(self, policy: ContextPolicy) -> int:
-        return self._context_policy_priorities[id(policy)]
-
-    def note_trigger_renderer(self, source: str, owner: str | None) -> None:
-        self._trigger_renderer_owners[source] = owner
-
-    def note_trigger_codec(self, source: str, owner: str | None) -> None:
-        self._trigger_codec_owners[source] = owner
-
-    def trigger_codec_is_superseded(self, source: str) -> bool:
-        """True when this source is owned by an atom no longer installed.
-
-        ``forget`` deliberately leaves a codec's ownership entry behind so the
-        source stays decodable. Its owner disappearing from the installed set
-        is exactly the signal that a replacement is expected to take it over.
-        """
-
-        owner = self._trigger_codec_owners.get(source)
-        return owner is not None and owner not in self.module_paths
-
-    def note_service(self, key: str, owner: str | None) -> None:
-        self._service_owners[key] = owner
-
-    def record_installed(
+    def record(
         self,
         spec: ExtensionSpec,
         *,
         runtime: bool = False,
         atom_name: str | None = None,
     ) -> None:
-        """Record one installed atom.
+        """Record one installed atom, at the end of the installed set."""
 
-        ``runtime`` marks an atom installed into a running session rather than
-        composed before start. The distinction matters for rebuilds: the active
-        set recorded at creation covers the composed atoms only, and a rebuild
-        that replayed a runtime atom would compute a different digest than the
-        one the source session froze into its provider identity.
+        self._atoms.append(
+            InstalledAtom(
+                module_path=spec.module_path,
+                spec=ExtensionSpec(source=spec.source, config=spec.config),
+                runtime=runtime,
+                atom_name=atom_name,
+            )
+        )
+
+    def retire(self, module_path: str) -> RetiredAtom | None:
+        """Take one atom out of the installed set and hand back its inverse.
+
+        ``None`` when nothing was installed under that path, which is also the
+        answer a detach of an atom that is not there needs.
         """
 
-        self.module_paths.append(spec.module_path)
-        self._specs.append(ExtensionSpec(source=spec.source, config=spec.config))
-        if runtime:
-            self._runtime_module_paths.add(spec.module_path)
-        if atom_name:
-            self._atom_names[atom_name] = spec.module_path
+        for position, atom in enumerate(self._atoms):
+            if atom.module_path == module_path:
+                del self._atoms[position]
+                return RetiredAtom(atom=atom, position=position)
+        return None
 
-    # --- Composition rebuild ---
+    def reinstate(self, retired: RetiredAtom) -> None:
+        """Put back what ``retire`` took out, where it was."""
 
-    def external_tools(self, tools: Sequence[Tool]) -> list[Tool]:
-        return [tool for tool in tools if self._tool_owners.get(id(tool)) is None]
+        self._atoms.insert(retired.position, retired.atom)
 
-    def external_context_policies(
-        self,
-        policies: Sequence[ContextPolicy],
-    ) -> list[ContextPolicy]:
-        return [
-            policy
-            for policy in policies
-            if self._context_policy_owners.get(id(policy)) is None
-        ]
+    # --- Reading ---
 
-    def external_trigger_renderers(
-        self,
-        renderers: Mapping[str, TriggerRenderer],
-    ) -> dict[str, TriggerRenderer]:
+    @property
+    def module_paths(self) -> list[str]:
+        """Module paths of the installed atoms, in install order."""
+
+        return [atom.module_path for atom in self._atoms]
+
+    def spec_module_paths(self) -> tuple[str, ...]:
+        """Module paths of the replayable specs, in install order."""
+
+        return tuple(atom.spec.module_path for atom in self._atoms)
+
+    def runtime_module_paths(self) -> frozenset[str]:
+        """Module paths installed into the running session."""
+
+        return frozenset(atom.module_path for atom in self._atoms if atom.runtime)
+
+    def atom_names(self) -> dict[str, str]:
+        """Manifest name to module path, for the atoms that carry a manifest."""
+
         return {
-            source: renderer
-            for source, renderer in renderers.items()
-            if self._trigger_renderer_owners.get(source) is None
+            atom.atom_name: atom.module_path
+            for atom in self._atoms
+            if atom.atom_name is not None
         }
 
-    def composition_codec(self, codec: CodecRegistry) -> CodecRegistry:
-        return codec.copy_without_trigger_sources(
-            {
-                source
-                for source, owner in self._trigger_codec_owners.items()
-                if owner is not None
-            }
-        )
+    def installed_module_path(self, atom_name: str) -> str | None:
+        """Module path installed under ``atom_name``, if one is.
+
+        Keyed on the manifest name rather than derived from the module path:
+        a file-backed atom is loaded under a content-addressed module name, so
+        two revisions of one atom share a manifest name and nothing else.
+        """
+
+        return self.atom_names().get(atom_name)
+
+    def installed_atom_names(self) -> frozenset[str]:
+        """Manifest names of the installed atoms, as a requirement spells them."""
+
+        return frozenset(self.atom_names())
 
     def composition_extensions(
         self,
@@ -197,116 +163,79 @@ class InstallLedger:
         """
 
         return [
-            ExtensionSpec(source=spec.source, config=spec.config)
-            for spec in self._specs
-            if spec.module_path not in excluded_module_paths
-            and (include_runtime or spec.module_path not in self._runtime_module_paths)
+            ExtensionSpec(source=atom.spec.source, config=atom.spec.config)
+            for atom in self._atoms
+            if atom.module_path not in excluded_module_paths
+            and (include_runtime or not atom.runtime)
         ]
 
-    def runtime_module_paths(self) -> frozenset[str]:
-        """Module paths installed into the running session."""
 
-        return frozenset(self._runtime_module_paths)
+class TriggerCodecOwners:
+    """Which atom registered each trigger codec.
 
-    # --- Supersede ---
+    The one attribution table that survives the context model, because it
+    describes the one registration an atom makes that a context table cannot
+    hold.  Every other write goes into the atom's own tables and leaves when
+    they do; a trigger codec is registered on the session's shared
+    ``CodecRegistry`` and deliberately stays there after the atom has gone,
+    because a committed turn names its trigger source by name and a session
+    that could no longer decode it would fail to resume.  A record that has to
+    outlive the context cannot be the context.
 
-    def installed_module_path(self, atom_name: str) -> str | None:
-        """Module path installed under ``atom_name``, if one is.
+    Two readers need the retained entry.  ``is_superseded`` tells a replacement
+    that it may take a source over rather than collide with it — the owner
+    having left the installed set is exactly that signal.  ``composition_codec``
+    keeps an atom's sources out of a child's registry, because a child replays
+    the atoms and gets their codecs from the replay.
 
-        Keyed on the manifest name rather than derived from the module path:
-        a file-backed atom is loaded under a content-addressed module name, so
-        two revisions of one atom share a manifest name and nothing else.
-        """
+    ``owner`` is ``None`` for a source the host registered, which is the same
+    "belongs to nobody" the context tree means by it.
+    """
 
-        return self._atom_names.get(atom_name)
+    __slots__ = ("_owners",)
 
-    def installed_atom_names(self) -> frozenset[str]:
-        """Manifest names of the installed atoms, as a requirement spells them."""
+    def __init__(self) -> None:
+        self._owners: dict[str, str | None] = {}
 
-        return frozenset(self._atom_names)
+    def note(self, source: str, owner: str | None) -> None:
+        self._owners[source] = owner
 
-    def registrations_of(self, module_path: str) -> AtomRegistrations:
-        """Everything one atom put into the session, by owner attribution."""
+    def owner(self, source: str) -> str | None:
+        return self._owners.get(source)
 
-        return AtomRegistrations(
-            tool_ids=frozenset(
-                key for key, owner in self._tool_owners.items() if owner == module_path
-            ),
-            context_policy_ids=frozenset(
-                key
-                for key, owner in self._context_policy_owners.items()
-                if owner == module_path
-            ),
-            trigger_renderer_sources=frozenset(
-                key
-                for key, owner in self._trigger_renderer_owners.items()
-                if owner == module_path
-            ),
-            trigger_codec_sources=frozenset(
-                key
-                for key, owner in self._trigger_codec_owners.items()
-                if owner == module_path
-            ),
-            service_keys=frozenset(
-                key
-                for key, owner in self._service_owners.items()
-                if owner == module_path
-            ),
+    def is_superseded(self, source: str, installed: Collection[str]) -> bool:
+        """True when this source is owned by an atom no longer installed."""
+
+        owner = self._owners.get(source)
+        return owner is not None and owner not in installed
+
+    def composition_codec(self, codec: CodecRegistry) -> CodecRegistry:
+        """``codec`` without the sources an atom registered."""
+
+        return codec.copy_without_trigger_sources(
+            {source for source, owner in self._owners.items() if owner is not None}
         )
 
-    def forget(self, module_path: str) -> None:
-        """Drop one atom's attribution and its replayable spec.
+    def copy(self) -> TriggerCodecOwners:
+        """A detached copy, for a caller holding the shape before an install."""
 
-        Trigger codecs are deliberately not forgotten: a persisted trigger
-        still names its source, and a session that could no longer decode it
-        would fail to resume. The superseding version re-registers over the
-        same source instead.
+        copied = TriggerCodecOwners()
+        copied._owners = dict(self._owners)
+        return copied
+
+    def replace_from(self, other: TriggerCodecOwners) -> None:
+        """Take another copy's contents in place, as ``CodecRegistry`` does.
+
+        In place because a failed installation's rollback restores the codec
+        registry the same way, and the two have to be put back together.
         """
 
-        registrations = self.registrations_of(module_path)
-        for tool_id in registrations.tool_ids:
-            self._tool_owners.pop(tool_id, None)
-        for policy_id in registrations.context_policy_ids:
-            self._context_policy_owners.pop(policy_id, None)
-            self._context_policy_priorities.pop(policy_id, None)
-        for source in registrations.trigger_renderer_sources:
-            self._trigger_renderer_owners.pop(source, None)
-        for key in registrations.service_keys:
-            self._service_owners.pop(key, None)
-        self.module_paths = [path for path in self.module_paths if path != module_path]
-        self._specs = [spec for spec in self._specs if spec.module_path != module_path]
-        self._runtime_module_paths.discard(module_path)
-        self._atom_names = {
-            name: path for name, path in self._atom_names.items() if path != module_path
-        }
-
-    # --- Install rollback ---
-
-    def capture(self) -> LedgerSnapshot:
-        return LedgerSnapshot(
-            tool_owners=dict(self._tool_owners),
-            context_policy_owners=dict(self._context_policy_owners),
-            context_policy_priorities=dict(self._context_policy_priorities),
-            trigger_renderer_owners=dict(self._trigger_renderer_owners),
-            trigger_codec_owners=dict(self._trigger_codec_owners),
-            service_owners=dict(self._service_owners),
-            module_paths=tuple(self.module_paths),
-            specs=tuple(self._specs),
-            runtime_module_paths=frozenset(self._runtime_module_paths),
-            atom_names=dict(self._atom_names),
-        )
-
-    def restore(self, snapshot: LedgerSnapshot) -> None:
-        self._tool_owners = dict(snapshot.tool_owners)
-        self._context_policy_owners = dict(snapshot.context_policy_owners)
-        self._context_policy_priorities = dict(snapshot.context_policy_priorities)
-        self._trigger_renderer_owners = dict(snapshot.trigger_renderer_owners)
-        self._trigger_codec_owners = dict(snapshot.trigger_codec_owners)
-        self._service_owners = dict(snapshot.service_owners)
-        self.module_paths = list(snapshot.module_paths)
-        self._specs = list(snapshot.specs)
-        self._runtime_module_paths = set(snapshot.runtime_module_paths)
-        self._atom_names = dict(snapshot.atom_names)
+        self._owners = dict(other._owners)
 
 
-__all__ = ["AtomRegistrations", "InstallLedger", "LedgerSnapshot"]
+__all__ = [
+    "InstalledAtom",
+    "InstalledAtoms",
+    "RetiredAtom",
+    "TriggerCodecOwners",
+]

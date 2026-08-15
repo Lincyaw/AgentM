@@ -228,9 +228,9 @@ class AtomContext:
     def module_path(self) -> str:
         """Which atom this context belongs to.
 
-        Read for diagnostics and for the install ledger's parallel account of
-        the same ownership.  It is never an argument to a write: the write goes
-        where the object is, not where a string says.
+        Read for diagnostics and for naming an owner to a reader that has to
+        print one.  It is never an argument to a write: the write goes where
+        the object is, not where a string says.
         """
 
         return self._module_path
@@ -348,7 +348,6 @@ class AtomContext:
         if any(existing.name == tool.name for existing in self._session.tools):
             raise ValueError(f"duplicate tool: {tool.name}")
         self._tables.tools.append(tool)
-        self._session._extensions.note_tool(tool, self._module_path)
         self._emit_register_event("tool", tool.name, {"tool": tool})
 
     def register_context_policy(
@@ -364,11 +363,6 @@ class AtomContext:
         row = policy_row(policy, priority)
         self._tables.policies.append(row)
         self._tables.policies.sort(key=_policy_key)
-        self._session._extensions.note_context_policy(
-            policy,
-            self._module_path,
-            priority=priority,
-        )
         if self._session.driver_running:
             try:
                 self._session.bind_context_policy(policy, services=self._services)
@@ -376,7 +370,6 @@ class AtomContext:
                 self._tables.policies[:] = [
                     held for held in self._tables.policies if held is not row
                 ]
-                self._session._extensions.drop_context_policy(policy)
                 raise
         self._emit_register_event(
             "context_policy",
@@ -391,13 +384,14 @@ class AtomContext:
     ) -> None:
         """Bind a trigger source to a renderer in this context's table.
 
-        The write lands here whatever else holds the source; who the source
-        then *belongs* to is asked of the tree afterwards, because a write that
-        lands under an existing later one changes nothing the session serves.
+        The write lands here whatever else holds the source. Who the source
+        then *belongs* to is not decided at the write and is not recorded
+        anywhere: a source resolves to the highest write order in the chain, so
+        a binding that lands under an existing later one changes nothing the
+        session serves, and every reader resolves that for itself.
         """
 
         self._tables.renderers[source] = renderer_row(renderer)
-        self._session.refile_trigger_renderer(source)
         self._emit_register_event("trigger_renderer", source, {"renderer": renderer})
 
     def register_trigger_codec(self, source: str, codec: object) -> None:
@@ -511,14 +505,13 @@ class AtomContext:
         *,
         role_bind: bool,
     ) -> None:
-        """Mirror one write of this context's registry into the session.
+        """Let the session announce one write of this context's registry.
 
-        The session attributes it to this context because this observer belongs
-        to this context; there is no argument saying so and no ambient state
-        consulted.
+        The session names this context because this observer belongs to this
+        context; there is no argument saying so and no ambient state consulted.
         """
 
-        self._session.note_service_write(
+        self._session.announce_service_write(
             key,
             service,
             scope,
@@ -617,14 +610,6 @@ class ChainedPolicies(Sequence[ContextPolicy]):
         rows.sort(key=_policy_key)
         return rows
 
-    def priority_of(self, policy: ContextPolicy) -> int | None:
-        """The priority one policy was registered at, or None if it is gone."""
-
-        for row in self._rows():
-            if row.policy is policy:
-                return row.priority
-        return None
-
     def __len__(self) -> int:
         return len(self._rows())
 
@@ -686,12 +671,13 @@ class ChainedRenderers(Mapping[str, TriggerRenderer]):
 
 @dataclass(frozen=True, slots=True)
 class ContextOwnership:
-    """Who holds what, read off the context tree rather than off a ledger.
+    """Who holds what, read off the context tree.
 
-    The one owner table this design has: a thing belongs to the context whose
-    table it is in.  Built for readers that need to state ownership — the
-    composition digest, and the tests that check the install ledger's parallel
-    account agrees with it.
+    The one account of ownership this design has: a thing belongs to the
+    context whose table it is in.  Built fresh for each reader that has to
+    state ownership — the composition digest, the provider registry's uncover
+    path — rather than maintained, because a maintained index would have to be
+    told every time unlinking a context hands a key back to whoever it shadowed.
     """
 
     tools: dict[int, str]
