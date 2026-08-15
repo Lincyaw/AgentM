@@ -34,6 +34,7 @@ from agentm.core.abi.trigger import UserInput
 from agentm.core.runtime.composition_digest import _service_value
 from agentm.extensions import builtin
 from agentm.extensions.builtin.llm_anthropic import AnthropicStreamFn
+from agentm.extensions.builtin.plan_mode import MODE_TRIGGER_SOURCE, ModeChange
 from agentm.testing import (
     assert_revertible,
     composition_digest,
@@ -446,6 +447,40 @@ async def test_plan_mode_reverts_apart_from_its_trigger_codec(tmp_path: Path) ->
             ExtensionSpec.from_module("agentm.extensions.builtin.plan_mode"),
             residue=["trigger_codecs"],
         )
+
+
+@pytest.mark.asyncio
+async def test_a_mode_change_turn_round_trips_through_plan_modes_codec(
+    tmp_path: Path,
+) -> None:
+    """The retained-codec rule, exercised through the atom that declares it.
+
+    ``plan_mode`` is the one shipped atom whose residue is a trigger codec, so
+    it is the atom the retention rule is argued from — and until now nothing
+    put a turn through it. ``_ModeChangeCodec.serialize`` omitted
+    ``__source__``, which ``serialize_trigger`` refuses rather than fills in,
+    so every ModeChange-triggered turn failed to persist and the residue's own
+    justification could not be reached from the atom that claims it.
+    """
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(
+            ExtensionSpec.from_module("agentm.extensions.builtin.plan_mode")
+        )
+        session.trajectory.begin(
+            ModeChange(mode="plan", reason="host toggled"),
+            run_id="mode",
+            run_step=0,
+        )
+        turn = session.trajectory.commit(
+            Outcome(cause=ModelEndTurn()),
+            TurnMeta(model_id="probe-model"),
+        )
+        restored = session.codec.deserialize_turn(session.codec.serialize_turn(turn))
+        assert isinstance(restored.trigger, ModeChange)
+        assert restored.trigger.source == MODE_TRIGGER_SOURCE
+        assert restored.trigger.mode == "plan"
+        assert restored.trigger.reason == "host toggled"
 
 
 @pytest.mark.asyncio
