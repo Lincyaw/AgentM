@@ -220,3 +220,43 @@ def test_taking_and_giving_back_moves_the_log_without_running_it() -> None:
     assert len(moved) == 0
     log.revert()
     assert undone == ["since", "held"]
+
+
+def test_a_write_past_the_system_boundary_is_recorded_as_a_compensation() -> None:
+    """The third answer, so an author does not have to give a wrong one.
+
+    A file created, a container started, a message sent -- there is no inverse
+    for those. Before this the choices were to hand back an approximation
+    dressed as an inverse, which every recovery guarantee here would then cover
+    wrongly, or to ``retain`` it and leak. Neither says what is true.
+
+    It runs at the same moments and composes the same way. What it does not do
+    is inherit the guarantees: everything proved here is proved against exact
+    equality, and a composition holding one of these comes back only up to
+    whatever coarser equivalence its author meant.
+    """
+
+    log = EffectLog()
+    killed: list[str] = []
+
+    log.effect(
+        lambda: lambda: killed.append("container"),
+        provides="sandbox:probe",
+        compensate="the container is killed; the files it wrote are not unwritten",
+    )
+
+    entry = log.entries[0]
+    assert entry.compensate.startswith("the container is killed")
+    assert entry.retain == ""
+
+    # Same moments, same order as any other undo.
+    assert log.revert() == ()
+    assert killed == ["container"]
+
+
+def test_a_write_with_no_way_back_at_all_is_still_refused() -> None:
+    """``compensate`` is a third answer, not a way to stop answering."""
+
+    log = EffectLog()
+    with pytest.raises(EffectWithoutInverse, match="compensate="):
+        log.effect(lambda: None, provides="sandbox:probe")

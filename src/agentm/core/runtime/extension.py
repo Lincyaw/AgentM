@@ -274,12 +274,14 @@ class _AtomAPIFacade:
         *,
         provides: str = "",
         retain: str = "",
+        compensate: str = "",
         subject: object = None,
     ) -> EffectHandle:
         return self.__context.effect(
             body,
             provides=provides,
             retain=retain,
+            compensate=compensate,
             subject=subject,
         )
 

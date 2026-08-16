@@ -236,11 +236,18 @@ class EffectRecord:
     ``settled`` is False for an async body that was queued and has not run; one
     of those is a write that has not happened yet, which is exactly the kind of
     residue a caller comparing two digests needs to see.
+
+    ``compensate`` is why a caller comparing two digests should not read
+    equality as exactness. Everything proved about recovery here is proved
+    against exact equality; a composition holding a compensating write comes
+    back only up to whatever coarser equivalence its author meant, so a digest
+    that matched while one of these was in play is saying less than it looks.
     """
 
     owner: str
     provides: str
     retain: str
+    compensate: str
     settled: bool
 
 
@@ -430,6 +437,7 @@ def _effect_records(owner: str, log: EffectLog) -> list[EffectRecord]:
             owner=owner,
             provides=entry.provides,
             retain=entry.retain,
+            compensate=entry.compensate,
             settled=True,
         )
         for entry in log.entries
@@ -439,6 +447,7 @@ def _effect_records(owner: str, log: EffectLog) -> list[EffectRecord]:
             owner=owner,
             provides=handle.provides,
             retain=handle.retain,
+            compensate=handle.compensate,
             settled=False,
         )
         for handle in log.unsettled

@@ -44,9 +44,9 @@ install-failure rollback and session shutdown alike, rather than one mechanism
 per occasion.
 
 *A write without an inverse is a type error.*  A body that produces no inverse,
-records no nested effect, and names no ``retain`` reason raises
-``EffectWithoutInverse`` where it was registered.  ``retain`` is the escape
-hatch for a write that legitimately has no inverse — a trigger codec a
+records no nested effect, and names neither ``retain`` nor ``compensate``
+raises ``EffectWithoutInverse`` where it was registered.  ``retain`` is the
+escape hatch for a write that legitimately has no inverse — a trigger codec a
 committed turn still names — and it is deliberately noisy at the call site.
 
 An inverse is synchronous.  Detaching an atom is synchronous the whole way up
@@ -56,8 +56,18 @@ genuinely asynchronous cancels a task or schedules a close from a sync inverse,
 which is what the session's own shutdown hooks already do.
 
 An inverse is not a compensation.  It restores the state the write changed; it
-cannot un-send a message or un-charge an API call.  Something whose undo is an
-approximation belongs behind an explicit compensation, not here.
+cannot un-send a message or un-charge an API call.  A write that crossed the
+system boundary — a file created, a container started — hands its undo back
+under ``compensate=`` instead, which says in one word that what runs is a
+*making up for* rather than a restoration.  It composes LIFO like everything
+else and runs at the same moments; what it does not do is inherit the
+guarantees.  Everything here is proved against exact equality, and a
+composition holding a compensation recovers only up to whatever coarser
+equivalence its author meant — any-order recovery in particular has to be
+argued again, not assumed.
+
+Rare by construction.  Every one of them marks a place the system's edge runs
+through.
 """
 
 from __future__ import annotations
@@ -121,6 +131,17 @@ class EffectEntry:
     subject: object
     inverse: EffectInverse | None
     retain: str
+    compensate: str = ""
+    """Why this undo is an approximation rather than an inverse.
+
+    Set when the write crossed the system boundary -- a file created, a
+    container started, a message sent -- and what runs on the way back is a
+    *compensating* action rather than a restoration.  It composes LIFO like any
+    other, and it is what makes the difference visible: everything proved about
+    recovery here is proved against exact equality, and a composition holding a
+    compensation recovers only up to whatever coarser equivalence the atom
+    meant by it.  Any-order claims in particular do not carry over.
+    """
 
 
 class EffectHandle:
@@ -131,11 +152,26 @@ class EffectHandle:
     caller holds this.
     """
 
-    __slots__ = ("_entries", "_settled", "provides", "retain", "subject")
+    __slots__ = (
+        "_entries",
+        "_settled",
+        "compensate",
+        "provides",
+        "retain",
+        "subject",
+    )
 
-    def __init__(self, *, provides: str, retain: str, subject: object) -> None:
+    def __init__(
+        self,
+        *,
+        provides: str,
+        retain: str,
+        subject: object,
+        compensate: str = "",
+    ) -> None:
         self.provides = provides
         self.retain = retain
+        self.compensate = compensate
         self.subject = subject
         self._entries: list[EffectEntry] = []
         self._settled = False
@@ -201,6 +237,7 @@ class EffectLog:
         *,
         provides: str = "",
         retain: str = "",
+        compensate: str = "",
         subject: object = None,
     ) -> EffectHandle:
         """Run ``body`` and record the inverses it hands back.
@@ -215,7 +252,12 @@ class EffectLog:
         is that it needs no separate mechanism.
         """
 
-        handle = EffectHandle(provides=provides, retain=retain, subject=subject)
+        handle = EffectHandle(
+            provides=provides,
+            retain=retain,
+            subject=subject,
+            compensate=compensate,
+        )
         # Held rather than counted: a mark into either list is only an "since
         # here" if nothing is removed from it, and both lists are emptied by
         # ``revert``, which can run while an async body is awaiting. Holding the
@@ -263,6 +305,7 @@ class EffectLog:
             subject=handle.subject,
             inverse=cast("EffectInverse", inverse),
             retain=handle.retain,
+            compensate=handle.compensate,
         )
         self._entries.append(entry)
         handle._add(entry)
@@ -284,7 +327,7 @@ class EffectLog:
         handle._settle()
         if handle.entries:
             return
-        if handle.retain:
+        if handle.retain or handle.compensate:
             # Recorded even though it can never run: "what this context holds"
             # has to include the writes it deliberately leaves behind, or the
             # retention becomes invisible the moment it is granted.
@@ -293,6 +336,7 @@ class EffectLog:
                 subject=handle.subject,
                 inverse=None,
                 retain=handle.retain,
+                compensate=handle.compensate,
             )
             self._entries.append(entry)
             handle._add(entry)
@@ -314,8 +358,10 @@ class EffectLog:
             return
         raise EffectWithoutInverse(
             f"effect {handle.provides or '<unnamed>'} was registered without an "
-            "inverse; hand back the function that undoes it, or pass retain= "
-            "with the reason the write has to stay"
+            "inverse; hand back the function that undoes it, pass retain= with "
+            "the reason the write has to stay, or pass compensate= with what "
+            "makes up for it when the write crossed the system boundary and "
+            "has no inverse to hand back"
         )
 
     # --- Settling ---

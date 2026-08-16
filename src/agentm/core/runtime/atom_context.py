@@ -689,6 +689,7 @@ class AtomContext:
         *,
         provides: str = "",
         retain: str = "",
+        compensate: str = "",
         subject: object = None,
     ) -> EffectHandle:
         """Record a write the platform has no table for, with its inverse."""
@@ -697,6 +698,7 @@ class AtomContext:
             body,
             provides=provides,
             retain=retain,
+            compensate=compensate,
             subject=subject,
         )
 

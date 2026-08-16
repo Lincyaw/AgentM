@@ -468,6 +468,7 @@ class AtomAPI(Protocol):
         *,
         provides: str = "",
         retain: str = "",
+        compensate: str = "",
         subject: object = None,
     ) -> EffectHandle:
         """Perform a write the platform has no table for, handing back its undo.
@@ -477,7 +478,17 @@ class AtomAPI(Protocol):
         returns (or yields) the function that undoes it; the inverse runs when
         this atom is uninstalled, in the reverse of the order the writes
         happened. A body that produces no inverse, records no nested effect and
-        names no ``retain`` reason is refused where it was written.
+        names neither ``retain`` nor ``compensate`` is refused where it was
+        written.
+
+        ``compensate`` is for a write that crossed the system boundary -- a
+        file created, a container started, a message sent. There is no inverse
+        for those; what you hand back makes up for the write rather than
+        undoing it, and saying so is not paperwork: everything this platform
+        guarantees about recovery is guaranteed against exact equality, and a
+        composition holding a compensation recovers only up to whatever coarser
+        equivalence you meant by it. Rare by construction -- each one marks a
+        place the system's edge runs through.
 
         An ``async`` body must be an async generator, and it runs at the next
         ``settle`` rather than here.
