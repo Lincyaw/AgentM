@@ -73,6 +73,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 
 from agentm.core.abi.bus import BusSegment, EventBusObserver, Handler
 from agentm.core.abi.codec import TriggerCodec
@@ -936,8 +938,24 @@ def settle_ranks(linked: Sequence[AtomContext]) -> None:
     Absent targets contribute nothing, which is what makes ``after`` a
     preference rather than a dependency: an atom that names one nobody
     installed sits exactly where it would have without the declaration.
+
+    Every rank is cleared first, so what comes out is a function of the set
+    that is linked right now and of nothing else.  Carrying the previous ranks
+    in would make this an *accumulator*: run it twice on the same atoms and a
+    cycle answers differently the second time, so where a layer folds would
+    depend on how many atoms had come and gone since -- history leaving a
+    trace, which is the one thing the composition is not allowed to do.
+
+    ``requires`` cannot cycle; install order already refuses that.  ``after``
+    can, because it is a preference and two atoms may each prefer to sit
+    outside the other, and nothing rejects the pair at install.  There is no
+    depth to give them -- that is what a cycle means -- so the passes are
+    bounded, the result is whatever the bound leaves, and the session says so
+    rather than serving an order nobody can account for.
     """
 
+    for context in linked:
+        context.set_rank(0)
     for _pass in range(len(linked) + 1):
         moved = False
         for context in linked:
@@ -954,6 +972,12 @@ def settle_ranks(linked: Sequence[AtomContext]) -> None:
                 moved = True
         if not moved:
             return
+    logger.warning(
+        "the `after` declarations of {} form a cycle, so no ordering of them "
+        "follows from what they declared; the depths below are the bounded "
+        "result and say nothing about which should come first",
+        ", ".join(sorted(context.module_path for context in linked)),
+    )
 
 
 def refuse_contested_role(
@@ -976,18 +1000,16 @@ def refuse_contested_role(
 
     Reported only between atoms of equal ``rank``, because rank is what makes
     the difference computable.  When one requires something the other provides,
-    the graph puts them in an order and the later one winning is determined --
-    a normal override, and saying anything about it would be noise on every
-    layered composition.  At equal rank neither declared anything about the
-    other, so nothing says which should win and listing them the other way
-    round changes the answer.
+    or declares it comes after it, the graph puts them in an order and the
+    later one winning is determined -- a normal override, and saying anything
+    about it would be noise on every layered composition.  At equal rank
+    neither declared anything about the other, so nothing says which should win
+    and listing them the other way round changes the answer.
 
-    Reported only between atoms of equal rank.  When one requires or comes
-    after the other, the graph orders them and the later one winning is
-    decided.  Refused rather than warned, because a warning leaves the session
-    running on an answer nobody chose; both fixes are one line -- declare
-    ``after`` and the pair is ordered, or call ``services.layer`` and both
-    contribute -- so this reads as a fix instruction rather than a wall.
+    Refused rather than warned, because a warning leaves the session running on
+    an answer nobody chose; both fixes are one line -- declare ``after`` and
+    the pair is ordered, or call ``services.layer`` and both contribute -- so
+    this reads as a fix instruction rather than a wall.
 
     Never for the embedder: a host write over an atom is a deliberate
     override, and a host is not a peer of the atoms it composes.

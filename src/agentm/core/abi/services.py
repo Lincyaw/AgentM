@@ -214,20 +214,28 @@ class ServiceRegistry:
 
         moved = ServiceRegistry()
         moved._services = self._services
+        moved._layers = self._layers
         self._services = {}
+        self._layers = {}
         return moved
 
     def give_own(self, other: ServiceRegistry) -> None:
         """Take an own table back from a registry ``take_own`` moved it into.
 
         Anything written since keeps its value, because it was written later
-        and later wins; the order numbers already say so.
+        and later wins; the order numbers already say so.  Layers do not
+        compete, so they are concatenated rather than resolved: the fold sorts
+        them by rank and write order at every read, so the list they sit in
+        says nothing.
         """
 
         restored = dict(other._services)
         restored.update(self._services)
         self._services = restored
         other._services = {}
+        for name, rows in other._layers.items():
+            self._layers.setdefault(name, [])[:0] = rows
+        other._layers = {}
 
     def own_table(self) -> dict[str, ServiceEntry]:
         """This node's own entries, chain excluded, with their write order.
@@ -377,6 +385,7 @@ class ServiceRegistry:
                 f"service {name!r}: {type(service).__name__} does not "
                 f"satisfy {protocol.__name__}"
             )
+        displaced = self._services.get(name)
         self._services[name] = ServiceEntry(
             service=service,
             protocol=protocol,
@@ -384,8 +393,22 @@ class ServiceRegistry:
             order=next(_WRITE_ORDER),
             role=role_bind,
         )
-        if self._write_observer is not None:
+        if self._write_observer is None:
+            return
+        try:
             self._write_observer(name, service, scope, role_bind=role_bind)
+        except BaseException:
+            # The observer is where the session refuses a write it will not
+            # serve -- two unordered atoms binding one role. A refusal that
+            # left the entry standing would be a refusal in name only: the
+            # caller sees an exception, the table holds the value anyway, and
+            # an atom that catches it runs on exactly the answer nobody chose.
+            # Put back what was there, which for a first write is nothing.
+            if displaced is None:
+                self._services.pop(name, None)
+            else:
+                self._services[name] = displaced
+            raise
 
     def own_layers(self) -> dict[str, tuple[ServiceEntry, ...]]:
         """This node's own layers, chain excluded, oldest write first.
@@ -433,9 +456,17 @@ class ServiceRegistry:
             scope=scope,
             order=next(_WRITE_ORDER),
         )
-        self._layers.setdefault(name, []).append(entry)
-        if self._write_observer is not None:
+        rows = self._layers.setdefault(name, [])
+        rows.append(entry)
+        if self._write_observer is None:
+            return
+        try:
             self._write_observer(name, entry.service, scope, role_bind=False)
+        except BaseException:
+            # Same reason ``_write`` puts back what it displaced: a refused
+            # write must not be in the table afterwards.
+            rows[:] = [held for held in rows if held is not entry]
+            raise
 
     def bind(
         self,
@@ -450,9 +481,14 @@ class ServiceRegistry:
         Unlike ``register``, binding an already-bound role without
         ``replace=True`` raises — boundary bindings are deliberate, not
         last-writer-wins.
+
+        "Already bound" means something holds the key, not that something has
+        written to it: a layer decorates whatever is underneath and never
+        occupies the cell, so an atom that layered the executor must not make
+        the atom that supplies one fail to bind it.
         """
 
-        if self.has(role.key) and not replace:
+        if _base_entry(self, role.key) is not None and not replace:
             raise ValueError(f"service {role.key!r} already bound")
         effective_scope = role.scope if scope is None else scope
         self._write(
@@ -477,14 +513,11 @@ class ServiceRegistry:
         an absent optional capability, so it raises ``ServiceTypeMismatch``.
         """
 
-        entry = self._lookup(name)
-        if entry is None:
+        if self._lookup(name) is None:
             return None
-        service = entry.service
-        if type(service) is ServiceLayer:
-            service = _fold(self, name)
-            if service is None:
-                return None
+        service = _fold(self, name)
+        if service is None:
+            return None
         if protocol is not None and not isinstance(service, protocol):
             raise ServiceTypeMismatch(
                 f"service {name!r}: expected {protocol.__name__}, got "
@@ -543,13 +576,18 @@ class ServiceRegistry:
     def update_from(self, other: ServiceRegistry) -> None:
         """Merge everything ``other`` resolves into this one (other wins)."""
 
-        self._services.update(other._resolved())
+        self._services.update(
+            {
+                name: _copied(other, name, entry)
+                for name, entry in other._resolved().items()
+            }
+        )
 
     def inherit_from(self, other: ServiceRegistry) -> None:
         """Merge inherited services and leave session-local state behind."""
         self._services.update(
             {
-                name: entry
+                name: _copied(other, name, entry)
                 for name, entry in other._resolved().items()
                 if entry.scope in _INHERITED_SCOPES
             }
@@ -565,6 +603,40 @@ __all__ = [
     "ServiceTypeMismatch",
     "WriteObserver",
 ]
+
+
+def _copied(
+    registry: ServiceRegistry,
+    name: str,
+    entry: ServiceEntry,
+) -> ServiceEntry:
+    """What ``name`` becomes in a registry that copies ``registry``.
+
+    A copy takes what the source *serves*, which for a layered key is the fold
+    and not any one of the writes that make it up.  Both of the other answers
+    are wrong in a way nothing downstream can recover from: handing over the
+    layer gives the reader a ``ServiceLayer`` where it asked for a service, and
+    handing over the base under it gives a value the source never served.
+
+    The fold is written as a plain entry, because that is what it is on the
+    other side -- a value this registry holds, decorated by nobody.  It keeps
+    the winning write's order so the copy resolves in the same relative order
+    the source did, and drops the protocol, which described the write rather
+    than the composite standing in its place.
+
+    A key nothing layered is passed through as the object it is: an entry that
+    is moved between tables has to arrive as itself, or it wins a key it had
+    lost -- see ``ServiceEntry.order``.
+    """
+
+    if not _collect(registry, name):
+        return entry
+    return ServiceEntry(
+        service=_fold(registry, name),
+        protocol=None,
+        scope=entry.scope,
+        order=entry.order,
+    )
 
 
 def _node_entry(registry: ServiceRegistry, name: str) -> ServiceEntry | None:
@@ -652,12 +724,24 @@ def _layered(
 
 
 def _fold(registry: ServiceRegistry, name: str) -> object | None:
-    """A layered key's value: every layer applied over the current base.
+    """What ``name`` serves: every layer on it, applied over the current base.
 
-    The base is the newest write that is not a layer, so a later ``bind``
-    of a fresh implementation is decorated by the layers that are present
-    rather than escaping them -- a layer says "wrap this key", not "wrap
-    the value I happened to find".
+    The base is the newest write that is *not* a layer, so a later ``bind`` of
+    a fresh implementation is decorated by the layers that are present rather
+    than escaping them -- a layer says "wrap this key", not "wrap the value I
+    happened to find".
+
+    Which is why the fold runs whenever the key carries a layer, and not only
+    when a layer happens to be the newest write to it.  Deciding by "is the
+    winning entry a layer" reads the same on the composition the layer was
+    written for and gives the opposite answer on the one where something binds
+    the key afterwards: the base wins the order race, the fold never runs, and
+    every layer on the key stops applying without anything failing.  An atom
+    would go on running and contribute nothing, which is precisely the failure
+    a layer exists to remove.
+
+    A key nothing has layered folds to its base, so this is the resolution of
+    every key rather than a special path for some of them.
     """
 
     found = _base_entry(registry, name)

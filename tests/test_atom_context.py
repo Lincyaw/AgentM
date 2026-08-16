@@ -32,6 +32,7 @@ from agentm.core.abi.events import ApiRegisterEvent, SessionShutdownEvent
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_RESOLVER_SERVICE, RESOURCE_TXN_SERVICE
 from agentm.core.abi.messages import TextContent
+from agentm.core.abi.services import ServiceRegistry, ServiceRole
 from agentm.core.abi.session_api import AtomAPI, ExtensionSpec
 from agentm.core.abi.stream import Model
 from agentm.core.abi.tool import FunctionTool, ToolResult
@@ -2508,6 +2509,237 @@ async def test_a_layer_can_be_taken_out_of_the_middle(tmp_path: Path) -> None:
     # The control: while both were installed the executor really was different.
     assert both != alone
     assert survivor == alone
+
+
+@pytest.mark.asyncio
+async def test_a_value_bound_after_a_layer_is_bound_under_it(
+    tmp_path: Path,
+) -> None:
+    """A layer says "wrap this key", not "wrap what was there when I arrived".
+
+    Which of the two it means is invisible until something writes the key
+    *after* the layer: an atom that supplies the executor installed second, a
+    host binding a boundary once its config resolved, a supersede landing a new
+    implementation. All three are ordinary, and all three are where the two
+    readings come apart.
+
+    They came apart the wrong way. Resolution folded only when a layer happened
+    to be the newest write to the key, so the later value won the order race,
+    the fold never ran, and every layer on the key stopped applying -- silently,
+    with the atoms that wrote them still installed and still reported as
+    contributing. An atom running and contributing nothing is the exact failure
+    a layer exists to remove.
+
+    Asserted through ``bind`` as well as ``register``, because the boundary
+    case is the one that matters: a layer is not a binding, so layering a key
+    must not make the atom that supplies it fail to bind one.
+    """
+
+    layered = _file_atom(
+        tmp_path, "wraps_atom", _LAYERS.format(name="wraps", requires="")
+    )
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(layered)
+        assert session.services.get("layered_cell") == "wraps(None)"
+
+        # A role binding first, with no ``replace``: the key carries a layer
+        # and nothing else, so there is nothing already bound to refuse over.
+        # A layer decorates whatever is underneath and never occupies the cell.
+        cell = ServiceRole("layered_cell", None, "session")
+        session.services.bind(cell, "BOUND")
+        assert session.services.get("layered_cell") == "wraps(BOUND)"
+
+        # The cell is held now, so a second binding is the refusal it always was.
+        with pytest.raises(ValueError, match="already bound"):
+            session.services.bind(cell, "AGAIN")
+
+        # A plain write, later than every layer on the key.
+        session.services.register("layered_cell", "BASE", scope="session")
+        assert session.services.get("layered_cell") == "wraps(BASE)"
+
+        # The layer leaves with its atom, and the base it never owned stays.
+        assert session.uninstall_extension(layered)
+        assert session.services.get("layered_cell") == "BASE"
+
+
+@pytest.mark.asyncio
+async def test_a_child_is_given_what_the_parent_served(tmp_path: Path) -> None:
+    """A copy takes the value, not the machinery that produced it.
+
+    A child session copies its parent rather than linking to it -- linking is
+    for things that share a lifetime, and a child is a separate unit of work.
+    But a layered key is not one write to copy: it is a base and the layers
+    over it, held in different tables, resolved at every read.
+
+    The copy took the newest write, which for a layered key is a ``ServiceLayer``
+    -- the *instruction* to decorate. The child got that where it asked for a
+    service: a build function standing in for a tool executor, failing on the
+    first call, or refused outright by the protocol check. Nothing about it
+    resembled the value the parent was serving.
+
+    Stated as an equality with the parent, because that is the claim a copy
+    makes: at the moment it is taken, the two serve the same thing. What they
+    do afterwards is their own business.
+    """
+
+    layered = _file_atom(
+        tmp_path, "wraps_atom", _LAYERS.format(name="wraps", requires="")
+    )
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(layered)
+        session.services.register("layered_cell", "BASE")
+        assert session.services.get("layered_cell") == "wraps(BASE)"
+
+        child_services = ServiceRegistry()
+        child_services.inherit_from(session.services)
+        assert child_services.get("layered_cell") == "wraps(BASE)"
+
+        # The copy holds a value, so a second copy of it is the same value
+        # again rather than a decoration of a decoration.
+        grandchild = ServiceRegistry()
+        grandchild.inherit_from(child_services)
+        assert grandchild.get("layered_cell") == "wraps(BASE)"
+
+
+def test_a_refused_write_is_not_in_the_table_afterwards() -> None:
+    """The observer is where a write is refused, and it fires after the write.
+
+    ``refuse_contested_role`` runs from the registry's write observer, which is
+    the only place that sees every write. But the entry is already in the table
+    by then, so a refusal that only raised was a refusal in name: the caller
+    saw an exception and the table held the value anyway. An atom that caught
+    it -- which is ordinary, an install may try a binding and fall back -- ran
+    on precisely the answer the session had refused to serve.
+
+    Stated at the registry, because that is the level the guarantee belongs to.
+    An install's rollback happens to unlink the whole context afterwards, which
+    hides this on the one path that has a rollback and on no other.
+    """
+
+    registry = ServiceRegistry()
+    role = ServiceRole("cell", None, "session")
+    registry.bind(role, "first")
+
+    def _refuse(
+        key: str,
+        service: object,
+        scope: str,
+        *,
+        role_bind: bool,
+    ) -> None:
+        del key, service, scope, role_bind
+        raise ValueError("refused")
+
+    registry.set_write_observer(_refuse)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="refused"):
+        registry.bind(role, "second", replace=True)
+    assert registry.get("cell") == "first"
+
+    with pytest.raises(ValueError, match="refused"):
+        registry.layer("cell", lambda inner: f"wrapped({inner})")
+    assert registry.get("cell") == "first"
+
+    with pytest.raises(ValueError, match="refused"):
+        registry.register("fresh", "value")
+    assert registry.get("fresh") is None
+
+
+_PREFERS = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="an atom that prefers to sit outside its peer",
+    after=("atom:{peer}",),
+)
+
+
+def install(api, config):
+    del config
+"""
+
+
+@pytest.mark.asyncio
+async def test_ranks_are_a_function_of_the_set_not_of_its_history(
+    tmp_path: Path,
+) -> None:
+    """Settling ranks again over the same atoms gives the same depths.
+
+    Rank decides where a layer folds and where a bus segment dispatches, so it
+    is part of what the composition means. It is settled again on every link
+    and unlink, which is what keeps it a property of the atoms present -- but
+    only if each settling starts from the atoms and not from the last answer.
+
+    ``requires`` cannot cycle; install order refuses that. ``after`` can, and
+    nothing rejects the pair, because two atoms each preferring to sit outside
+    the other is a thing an author can write by accident across two packages.
+    There is no depth to give them -- that is what a cycle means -- so the
+    passes are bounded and the bound decides where they stop.
+
+    Which is where carrying the last answer in stops being an implementation
+    detail: the bound applies to each settling, so every link and unlink pushed
+    the pair deeper again. The surviving depths became a count of how much had
+    happened to the session rather than a statement about what was in it, and
+    they are read as ordering. A history that leaves a trace, in the one number
+    the composition uses to order the things it cannot otherwise order.
+
+    The warning is the other half. An ordering nobody can account for is not
+    something to serve in silence.
+    """
+
+    first = _file_atom(tmp_path, "ring_one", _PREFERS.format(name="one", peer="two"))
+    second = _file_atom(tmp_path, "ring_two", _PREFERS.format(name="two", peer="one"))
+    unrelated = _atom(tmp_path, "churn_atom", _PROVIDES)
+
+    def _ranks(session: SessionRuntime) -> dict[str, int]:
+        return {
+            entry.name: entry.rank
+            for entry in composition_digest(session).atoms
+            if entry.name in {"one", "two"}
+        }
+
+    reported: list[str] = []
+    sink = logger.add(
+        lambda message: reported.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
+        async with probe_session(str(tmp_path)) as session:
+            await session.install_extension(first)
+            await session.install_extension(second)
+            settled = _ranks(session)
+
+            for _churn in range(3):
+                await session.install_extension(unrelated)
+                assert session.uninstall_extension(unrelated)
+                assert _ranks(session) == settled
+    finally:
+        logger.remove(sink)
+
+    assert [message for message in reported if "form a cycle" in message]
+
+
+@pytest.mark.asyncio
+async def test_a_graph_that_orders_its_atoms_settles_to_what_it_says(
+    tmp_path: Path,
+) -> None:
+    """The control for the cycle above: an acyclic graph is unchanged by churn.
+
+    Settling from zero has to leave the ordinary composition exactly where its
+    declarations put it, or the fix for the cycle would have moved everything
+    else.
+    """
+
+    provider = _atom(tmp_path, "one_atom", _PROVIDES)
+    dependent = _file_atom(tmp_path, "needs_atom", _NEEDS.format(name="needs_atom"))
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(provider)
+        await session.install_extension(dependent)
+        ranks = {entry.name: entry.rank for entry in composition_digest(session).atoms}
+        assert ranks == {"one_atom": 0, "needs_atom": 1}
 
 
 @pytest.mark.asyncio
