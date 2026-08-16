@@ -580,7 +580,11 @@ _BUILTIN_ATOMS: tuple[_Builtin, ...] = (
         config={"api_key": "probe-key"},
         residue=_PROVIDER_RESIDUE,
     ),
-    _Builtin("llm_compaction", config={"keep_last_turns": 4}),
+    _Builtin(
+        "llm_compaction",
+        config={"keep_last_turns": 4},
+        prerequisites=(_LOCAL_BACKEND,),
+    ),
     _Builtin("llm_openai", config={"api_key": "probe-key"}, residue=_PROVIDER_RESIDUE),
     _Builtin(_LOCAL_BACKEND),
     _Builtin("loop_budget"),
@@ -605,11 +609,11 @@ _BUILTIN_ATOMS: tuple[_Builtin, ...] = (
         "structured_output",
         config={"schema": {"type": "object", "properties": {}}},
     ),
-    _Builtin("sub_agent"),
+    _Builtin("sub_agent", prerequisites=("system_prompt",)),
     _Builtin("system_prompt", config={"prompt": "probe", "include_tool_index": True}),
     _Builtin("task_tracking"),
     _Builtin("thinking_retry"),
-    _Builtin("tool_authoring"),
+    _Builtin("tool_authoring", prerequisites=(_LOCAL_BACKEND,)),
     _Builtin("tool_bash", prerequisites=(_LOCAL_BACKEND,)),
     _Builtin("tool_error_messages"),
     _Builtin("tool_policy"),
@@ -643,20 +647,33 @@ def test_every_shipped_atom_is_listed_for_the_revertibility_sweep() -> None:
     assert shipped == {atom.name for atom in _BUILTIN_ATOMS}
 
 
+@pytest.mark.parametrize("started", [False, True], ids=["composed", "running"])
 @pytest.mark.parametrize("atom", _BUILTIN_ATOMS, ids=lambda atom: atom.name)
 @pytest.mark.asyncio
-async def test_every_shipped_atom_reverts(tmp_path: Path, atom: _Builtin) -> None:
+async def test_every_shipped_atom_reverts(
+    tmp_path: Path,
+    atom: _Builtin,
+    started: bool,
+) -> None:
     """Install each shipped atom into a probe session, detach it, and diff.
 
     The obligation the whole context model rests on, discharged against the
     atoms that actually ship rather than against a chosen few. Three residue
     entries survive across twenty-nine atoms, each justified where it is
     declared; everything else comes back.
+
+    Both ways a session takes an atom. Composing one before the driver starts
+    and installing one into a running session are different paths -- the
+    second announces itself, queues a durable record, and is checked against
+    the live capability set -- and the residue declarations are shared, so an
+    atom that reverts one way and not the other fails here rather than being
+    excused twice.
     """
 
     async with probe_session(
         str(tmp_path),
         extensions=[_builtin_spec(name) for name in atom.prerequisites],
+        started=started,
     ) as session:
         await assert_revertible(
             session,

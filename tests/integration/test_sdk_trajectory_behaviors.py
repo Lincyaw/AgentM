@@ -1915,3 +1915,84 @@ async def test_a_superseded_atoms_source_resumes_in_a_fresh_process(
     # revision 1 is the one that encoded the turn and is gone by now.
     assert reported["rendered"][0] == "v2:payload"
     assert reported["installed"] == ["handover"]
+
+
+_RETIRED_ATOM = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+
+MANIFEST = ExtensionManifest(
+    name="retired_probe",
+    description="Registers one service so its presence is observable.",
+    registers=("service:retired_marker",),
+)
+
+
+def install(api, config):
+    del config
+    api.services.register("retired_marker", "present", scope="session")
+"""
+
+
+@pytest.mark.asyncio
+async def test_an_atom_uninstalled_at_runtime_does_not_come_back_on_resume(
+    tmp_path: Path,
+) -> None:
+    """A trajectory says what a session holds, so it has to say leaving too.
+
+    An atom installed into a running session is carried by the turn that
+    commits after it, because the composition describes what the session
+    started with and knows nothing about a late install. Uninstalling one and
+    then resuming used to bring it straight back: the install was on a turn,
+    the removal was on nothing, and the replay believed the only record there
+    was.
+
+    A committed turn is history and is not rewritten. Leaving is appended
+    instead -- the replay keeps the last record per atom -- so what the session
+    reopens with is what the trajectory last said about each atom rather than
+    what it first said.
+    """
+
+    store_path = tmp_path / "retire-turns"
+    atom_path = tmp_path / "retired_probe.py"
+    atom_path.write_text(_RETIRED_ATOM, encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(atom_path.read_bytes()).hexdigest()
+    atom = ExtensionSpec.from_file(str(atom_path), digest=digest)
+
+    provider = _StubProvider("installed", "retired")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        await session.install_extension(atom)
+        # The turn that carries the install into the record. Without one the
+        # resume never learns the atom was there, and the removal has nothing
+        # to answer.
+        await session.run("commit the install")
+        assert session.services.get("retired_marker") == "present"
+
+        assert session.uninstall_extension(atom)
+        await session.run("commit the removal")
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    resumed = await AgentSession.resume(
+        session_id,
+        _jsonl_store(store_path),
+        AgentSessionConfig(
+            stream_fn=_StubProvider("after-resume"),
+            model=_model(),
+        ),
+    )
+    try:
+        assert resumed.installed_atom_module_path("retired_probe") is None
+        assert resumed.services.get("retired_marker") is None
+    finally:
+        await resumed.shutdown()

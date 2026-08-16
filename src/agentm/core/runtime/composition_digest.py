@@ -400,9 +400,7 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
         cleanup_callbacks=tuple(
             _identity(callback) for callback in session._cleanup_callbacks
         ),
-        pending_atom_installs=tuple(
-            install.atom_name for install in session._pending_atom_installs
-        ),
+        pending_atom_installs=session._atom_journal.pending_names(),
         queued_triggers=session.triggers._queue.qsize(),
         pending_background_work=session.triggers._pending_work,
         background_tasks=_background_tasks(),

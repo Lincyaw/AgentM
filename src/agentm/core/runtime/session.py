@@ -103,6 +103,11 @@ async def _reinstall_recorded_atoms(
     for record in records:
         latest[record.atom_name] = record
     for record in latest.values():
+        # An atom the trajectory last recorded as retired was taken out while
+        # the original session ran. Reinstalling it would resume a session the
+        # history says does not have it.
+        if record.retired:
+            continue
         spec = ExtensionSpec(
             source=ExtensionSource(
                 kind=record.source_kind,

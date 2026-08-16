@@ -114,10 +114,7 @@ from agentm.core.abi.session_api import (
 )
 from agentm.core.abi.stream import Model
 from agentm.core.abi.tool import Tool
-from agentm.core.abi.trajectory import (
-    AtomInstall,
-    Turn,
-)
+from agentm.core.abi.trajectory import Turn
 from agentm.core.abi.trigger import (
     Trigger,
     TriggerPriority,
@@ -142,6 +139,7 @@ from agentm.core.runtime.atom_context import (
 )
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.extension_install import (
+    AtomInstallJournal,
     ExtensionInstallSnapshot,
     TriggerCodecOwners,
 )
@@ -253,7 +251,7 @@ class SessionRuntime:
         self._closed = False
         self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
-        self._pending_atom_installs: list[AtomInstall] = []
+        self._atom_journal = AtomInstallJournal()
         self._shutdown_task: asyncio.Task[None] | None = None
         self._cleanup_callbacks: list[Callable[[], Awaitable[None]]] = []
         self._providers = ProviderRegistry(
@@ -373,7 +371,7 @@ class SessionRuntime:
                     model=model,
                     tools=self.tools,
                     store=self.store,
-                    drain_atom_installs=self.drain_atom_installs,
+                    drain_atom_installs=self._atom_journal.drain,
                     session_id=self.id,
                     root_session_id=self.ctx.root_session_id,
                     parent_session_id=self.ctx.parent_session_id,
@@ -945,7 +943,10 @@ class SessionRuntime:
         atom installed at runtime cannot replace the tool executor or the
         permission policy the running driver consults.
         """
-        from agentm.core.runtime.extension import install_extension
+        from agentm.core.runtime.extension import (
+            coerce_extension_spec,
+            install_extension,
+        )
 
         runtime_install = self._driver_task is not None
         if runtime_install:
@@ -959,41 +960,42 @@ class SessionRuntime:
             replace=replace,
         )
         if runtime_install:
-            self._note_atom_install(extension)
+            spec = coerce_extension_spec(extension, None)
+            installed = self.context_for(spec.module_path)
+            if installed is not None:
+                self._journal_atom_change(installed, retired=False)
 
-    def _note_atom_install(self, extension: ExtensionSpec | str) -> None:
-        """Queue a durable record of one runtime install for the next commit."""
+    def _journal_atom_change(self, context: AtomContext, *, retired: bool) -> None:
+        """Tell the journal an atom arrived or left, if a turn can carry it.
 
-        from agentm.core.runtime.extension import (
-            coerce_extension_spec,
-            load_manifest_for_spec,
-        )
+        Only a runtime install is: a composed atom is replayed from the
+        session's own composition and is named nowhere in the record, so
+        taking one out of a running session leaves the composition still
+        naming it and a resume still rebuilding it.
 
-        spec = coerce_extension_spec(extension, None)
-        manifest = load_manifest_for_spec(spec)
-        if manifest is None:
+        Read off the context rather than by loading the manifest again. The
+        name and the spec are fields of the one record the session holds, so
+        an atom cannot be journalled under a name the session does not know it
+        by, and the arrival and the departure cannot disagree about which atom
+        they are talking about. No name means no manifest, and an atom with no
+        manifest has nothing a resume could replay.
+        """
+
+        spec = context.spec
+        if not context.runtime or spec is None:
+            return
+        name = context.atom_name
+        if name is None:
             logger.warning(
                 "atom {} installed at runtime without a MANIFEST; it cannot be "
                 "recorded on the turn and will not survive resume",
-                spec.module_path,
+                context.module_path,
             )
             return
-        self._pending_atom_installs.append(
-            AtomInstall(
-                atom_name=manifest.name,
-                source_kind=spec.source.kind,
-                location=spec.source.location,
-                digest=spec.source.digest,
-                config=spec.config,
-            )
-        )
-
-    def drain_atom_installs(self) -> tuple[AtomInstall, ...]:
-        """Take the runtime installs awaiting a turn to be recorded on."""
-
-        drained = tuple(self._pending_atom_installs)
-        self._pending_atom_installs.clear()
-        return drained
+        if retired:
+            self._atom_journal.note_retire(name, spec)
+        else:
+            self._atom_journal.note_install(name, spec)
 
     def _live_capability_keys(self) -> set[str]:
         """What this session provides right now, keyed as manifests key it.
@@ -1213,11 +1215,14 @@ class SessionRuntime:
             module_path = self.installed_atom_module_path(atom)
         if module_path is None:
             return False
+        context = self.context_for(module_path)
         departure = self.remove_atom_registrations(module_path)
         if departure.residue is not None:
             departure.residue.effects.revert_or_raise(
                 f"undoing the effects of {module_path} failed"
             )
+        if context is not None:
+            self._journal_atom_change(context, retired=True)
         logger.info("uninstalled atom {}", module_path)
         return True
 
@@ -1347,35 +1352,13 @@ class SessionRuntime:
     def _capture_extension_install_state(self) -> ExtensionInstallSnapshot:
         """The contents of the shared stores, for a rollback to put back."""
 
-        return ExtensionInstallSnapshot(
-            bus=self.bus.copy(),
-            services=self.services.copy(),
-            codec=self.codec.copy(),
-            codec_owners=self._codec_owners.copy(),
-            providers=self._providers.capture(),
-        )
+        return ExtensionInstallSnapshot.of(self)
 
     def _restore_extension_install_state(
         self,
         snapshot: ExtensionInstallSnapshot,
     ) -> None:
-        # Restore in place throughout. The driver holds references to these
-        # same container objects, so rebinding the attribute would roll back the
-        # session's view while leaving the driver serving whatever the failed
-        # install appended.
-        #
-        # Contents only. The three link lists that say which contexts the
-        # session holds -- the bus's segments, the registry's child registries,
-        # and this session's contexts -- are not restored from here at all:
-        # they move together through ``link_into``/``unlink_from``, and the
-        # rollback runs the inverse of what the installation itself linked and
-        # unlinked. Putting a picture of them back would undo whatever anybody
-        # else decided while the install was awaiting, in both directions.
-        self.bus.replace_from(snapshot.bus)
-        self.services.replace_from(snapshot.services)
-        self.codec.replace_from(snapshot.codec)
-        self._codec_owners.replace_from(snapshot.codec_owners)
-        self._providers.restore(snapshot.providers)
+        snapshot.restore_into(self)
 
     def note_departed_context(self, context: AtomContext) -> None:
         """Hold a context the session has taken out, for what it records later.

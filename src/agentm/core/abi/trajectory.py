@@ -624,6 +624,14 @@ class AtomInstall:
     executes the code that record names — by a verifier or a scorer as much as
     by a person. A source that changed is caught by the digest; one that is
     gone fails the resume rather than continuing without it.
+
+    ``retired`` is how an atom leaves. A committed turn saying an atom was
+    installed is history and is not rewritten; taking the atom out appends a
+    record saying so, and the replay keeps the last record per name, so the
+    atom is reinstalled or not according to what the trajectory last said
+    about it. An install still waiting for a turn to commit has no history to
+    correct, so it is withdrawn from the queue instead and no record is
+    written at all.
     """
 
     atom_name: str
@@ -633,6 +641,7 @@ class AtomInstall:
     config: Mapping[str, JsonValue] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    retired: bool = False
 
     def __post_init__(self) -> None:
         _require_string(self.atom_name, "atom install atom_name")

@@ -159,12 +159,21 @@ async def probe_session(
     cwd: str,
     *,
     extensions: Sequence[ExtensionSpec] = (),
+    started: bool = False,
 ) -> AsyncIterator[AgentSession]:
     """A session that composes atoms and never runs a turn.
 
-    The driver is deliberately left unstarted: starting it binds context
-    policies and subscribes the provider's turn hook, both of which belong to
-    the running session rather than to the atom under test.
+    Unstarted by default, because starting the driver binds context policies
+    and subscribes the provider's turn hook, and neither belongs to the atom
+    under test. That default is also the weaker claim, and the difference is
+    not cosmetic: a *runtime* install takes a second path through the session
+    -- it is announced on the bus, it queues a durable record for the next
+    committed turn, and it is checked against the session's live capability
+    set -- and none of that runs when the driver is stopped.
+
+    ``started=True`` runs the driver, so an atom installed under it is
+    installed the way a live session installs one. What must come back is the
+    same either way; there is simply more of it.
     """
 
     session = await AgentSession.create(
@@ -175,6 +184,8 @@ async def probe_session(
             model=_PROBE_MODEL,
         )
     )
+    if started:
+        session.start()
     try:
         yield session
     finally:

@@ -442,13 +442,17 @@ def _serialize_atom_install(install: AtomInstall) -> dict[str, Any]:
         data["digest"] = install.digest
     if install.config:
         data["config"] = _json_safe(install.config)
+    # Written only when true, so a trajectory recorded before atoms could be
+    # retired reads back identically and the common record stays the short one.
+    if install.retired:
+        data["retired"] = True
     return data
 
 
 def _deserialize_atom_install(data: Mapping[str, Any]) -> AtomInstall:
     expect_only_fields(
         data,
-        {"atom_name", "source_kind", "location", "digest", "config"},
+        {"atom_name", "source_kind", "location", "digest", "config", "retired"},
         "atom install",
     )
     config = _json_restore(data.get("config", {}))
@@ -467,6 +471,7 @@ def _deserialize_atom_install(data: Mapping[str, Any]) -> AtomInstall:
         ),
         digest=expect_optional_string(data.get("digest"), "atom install.digest"),
         config=config,
+        retired=expect_boolean(data.get("retired", False), "atom install.retired"),
     )
 
 

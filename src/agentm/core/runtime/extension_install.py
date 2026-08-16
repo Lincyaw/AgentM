@@ -21,12 +21,18 @@ that a context table cannot hold — see its docstring.
 from __future__ import annotations
 
 from collections.abc import Collection
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 from agentm.core.abi.bus import EventBus
 from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.session_api import ExtensionSpec
+from agentm.core.abi.trajectory import AtomInstall
 from agentm.core.runtime.provider_registry import ProviderSnapshot
+
+if TYPE_CHECKING:
+    from agentm.core.runtime.session_core import SessionRuntime
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +75,41 @@ class ExtensionInstallSnapshot:
     codec: CodecRegistry
     codec_owners: TriggerCodecOwners
     providers: ProviderSnapshot
+
+    @classmethod
+    def of(cls, session: "SessionRuntime") -> "ExtensionInstallSnapshot":
+        """Copy the stores an installation writes into, before it runs."""
+
+        return cls(
+            bus=session.bus.copy(),
+            services=session.services.copy(),
+            codec=session.codec.copy(),
+            codec_owners=session._codec_owners.copy(),
+            providers=session._providers.capture(),
+        )
+
+    def restore_into(self, session: "SessionRuntime") -> None:
+        """Put the contents back, in place, leaving the link lists alone.
+
+        In place throughout: the driver holds references to these same
+        container objects, so rebinding an attribute would roll the session's
+        view back while leaving the driver serving whatever the failed install
+        appended.
+
+        Contents only. The three lists that say which contexts the session
+        holds -- the bus's segments, the registry's child registries, and the
+        session's own -- are not restored from here at all. They move together
+        through ``link_into``/``unlink_from``, and the rollback runs the
+        inverse of what the installation itself linked and unlinked. A picture
+        of them put back would undo whatever anybody else decided while the
+        install was awaiting, in both directions.
+        """
+
+        session.bus.replace_from(self.bus)
+        session.services.replace_from(self.services)
+        session.codec.replace_from(self.codec)
+        session._codec_owners.replace_from(self.codec_owners)
+        session._providers.restore(self.providers)
 
 
 class TriggerCodecOwners:
@@ -134,4 +175,73 @@ class TriggerCodecOwners:
         self._owners = dict(other._owners)
 
 
-__all__ = ["ExtensionInstallSnapshot", "TriggerCodecOwners"]
+class AtomInstallJournal:
+    """What the next committed turn will say about this session's atom set.
+
+    The composition describes the atoms a session was created with, so an atom
+    installed into a running one is carried by the turn that commits after it
+    and by nothing else.  That makes the record a queue rather than a table:
+    entries wait here until a turn takes them, and until then nothing durable
+    has been said.
+
+    Which is what makes leaving expressible.  An install still waiting is
+    withdrawn -- no history was written, so there is none to correct, and a
+    committed pair that cancelled out would be two records saying nothing.  An
+    install a turn already carries is history, and history is appended to
+    rather than rewritten, so the atom's departure is queued as a record of its
+    own.  A resume keeps the last record per atom name, so what a session
+    reopens with is what the trajectory last said about each atom.
+    """
+
+    def __init__(self) -> None:
+        self._pending: list[AtomInstall] = []
+
+    def pending_names(self) -> tuple[str, ...]:
+        """Atom names awaiting a turn, in queue order."""
+
+        return tuple(install.atom_name for install in self._pending)
+
+    def note_install(self, atom_name: str, spec: ExtensionSpec) -> None:
+        """Queue a durable record of one runtime install."""
+
+        self._pending.append(
+            AtomInstall(
+                atom_name=atom_name,
+                source_kind=spec.source.kind,
+                location=spec.source.location,
+                digest=spec.source.digest,
+                config=spec.config,
+            )
+        )
+
+    def note_retire(self, atom_name: str, spec: ExtensionSpec) -> None:
+        """Withdraw an uncommitted install, or queue the atom's departure."""
+
+        uncommitted = [
+            install for install in self._pending if install.atom_name == atom_name
+        ]
+        if uncommitted:
+            self._pending[:] = [
+                install for install in self._pending if install.atom_name != atom_name
+            ]
+            return
+        self._pending.append(
+            AtomInstall(
+                atom_name=atom_name,
+                source_kind=spec.source.kind,
+                location=spec.source.location,
+                digest=spec.source.digest,
+                config=spec.config,
+                retired=True,
+            )
+        )
+
+    def drain(self) -> tuple[AtomInstall, ...]:
+        """Take everything awaiting a turn to be recorded on."""
+
+        drained = tuple(self._pending)
+        self._pending.clear()
+        return drained
+
+
+__all__ = ["AtomInstallJournal", "ExtensionInstallSnapshot", "TriggerCodecOwners"]
