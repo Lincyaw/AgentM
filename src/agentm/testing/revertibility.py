@@ -174,6 +174,12 @@ async def probe_session(
     ``started=True`` runs the driver, so an atom installed under it is
     installed the way a live session installs one. What must come back is the
     same either way; there is simply more of it.
+
+    It also waits for the session to announce itself. ``start()`` creates the
+    driver task and returns; the announcement is the driver's first act, and it
+    is awaited so that a handler which has to await can finish. A probe that
+    yielded before then would hand a caller a session whose ready handlers may
+    or may not have run, depending on where the caller's next ``await`` fell.
     """
 
     session = await AgentSession.create(
@@ -186,6 +192,7 @@ async def probe_session(
     )
     if started:
         session.start()
+        await session._ready.wait()
     try:
         yield session
     finally:

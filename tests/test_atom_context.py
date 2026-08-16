@@ -33,6 +33,7 @@ from agentm.core.abi.events import ApiRegisterEvent, SessionShutdownEvent
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_RESOLVER_SERVICE, RESOURCE_TXN_SERVICE
 from agentm.core.abi.messages import TextContent
+from agentm import AgentSession, AgentSessionConfig
 from agentm.core.abi.cancel import CancelSignal
 from agentm.core.abi.permission import PermissionDecision, PermissionRequest
 from agentm.core.abi.roles import PERMISSION_POLICY_ROLE
@@ -3092,3 +3093,94 @@ async def test_a_layered_key_belongs_to_its_outermost_layer(tmp_path: Path) -> N
         assert session.uninstall_extension(_builtin("background_exec"))
         await session.install_extension(_builtin("background_exec"))
         assert _owner(session, "tool_executor") == outer
+
+
+_DEFERS = """\
+from agentm.core.abi.events import SessionReadyEvent
+from agentm.core.abi.manifest import ExtensionManifest
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="defers its setup to session ready, the way the runtime says to",
+    registers=("event:session_ready",),
+)
+
+
+def install(api, config):
+    del config
+
+    async def _ready(event):
+        del event
+        api.services.register("deferred_setup", "done", scope="session")
+
+    api.on(SessionReadyEvent.CHANNEL, _ready)
+"""
+
+
+@pytest.mark.asyncio
+async def test_an_atom_can_defer_asynchronous_setup_to_session_ready(
+    tmp_path: Path,
+) -> None:
+    """The one place the runtime tells atoms to defer work to had to work.
+
+    An atom that touches the session during its own ``install`` is refused with
+    a message naming ``SessionReadyEvent`` as where that work belongs. The
+    event was emitted synchronously, so an ``async def`` handler on it was
+    never run at all -- the bus closed the coroutine, logged "async handler
+    skipped", and carried on. The one channel designed for deferred
+    asynchronous setup was the one channel it could not happen on.
+
+    ``skill_loader`` is what that cost. Building the skill index is the whole
+    of its ready handler, so in every session that ever ran there were no
+    skills: nothing injected into the system prompt, and ``load_skill``
+    answering "(none)" whatever was on disk.
+
+    Emitted from the driver now, and awaited, so a handler that has to await
+    finishes before the first turn is composed.
+    """
+
+    spec = _file_atom(tmp_path, "defers_atom", _DEFERS.format(name="defers"))
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(spec)
+        assert session.services.get("deferred_setup") is None
+
+    async with probe_session(str(tmp_path), started=True) as started:
+        assert isinstance(started, SessionRuntime)
+        await started.install_extension(spec)
+        # The announcement is over by the time a runtime install returns, so an
+        # atom that arrives afterwards has missed it -- deterministically, not
+        # because the emission happened to be synchronous. `atom_watch` builds
+        # its handover on exactly this sentence.
+        assert started.services.get("deferred_setup") is None
+
+    # And with no await between ``start()`` and the install, which is where
+    # the guarantee is actually at risk: the driver task is scheduled but has
+    # not run, so without the wait below the install can land first and the
+    # atom would catch an announcement it arrived after.
+    raced = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            stream_fn=NeverStreams(),
+            model=Model(
+                id="probe-model",
+                provider="probe",
+                context_window=1000,
+                max_output_tokens=100,
+            ),
+        )
+    )
+    raced.start()
+    try:
+        await raced.install_extension(spec)
+        assert raced.services.get("deferred_setup") is None
+    finally:
+        await raced.shutdown()
+
+    async with probe_session(
+        str(tmp_path), extensions=[spec], started=True
+    ) as composed:
+        # Delivered before the first turn rather than before ``start()``
+        # returns, which is the one thing this moved -- ``probe_session`` waits
+        # for the announcement, the way a host that cares would.
+        assert composed.services.get("deferred_setup") == "done"

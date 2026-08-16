@@ -252,6 +252,14 @@ class SessionRuntime:
         self._closed = False
         self._driver_error: str | None = None
         self._driver_task: asyncio.Task[None] | None = None
+        #: Set once the driver has announced the session, whether or not
+        #: every handler liked the news. A runtime install waits on it, so
+        #: "an atom installed into a running session does not receive
+        #: SessionReadyEvent" is enforced here rather than left to hold by
+        #: accident -- ``atom_watch`` builds its handover on that sentence,
+        #: and before this it was true only because the announcement
+        #: happened to be synchronous.
+        self._ready = asyncio.Event()
         self._atom_journal = AtomInstallJournal()
         self._shutdown_task: asyncio.Task[None] | None = None
         self._cleanup_callbacks: list[Callable[[], Awaitable[None]]] = []
@@ -303,18 +311,6 @@ class SessionRuntime:
             self._run_driver(),
             name=f"v2-driver-{self.id}",
         )
-        self.bus.emit_sync(
-            SessionReadyEvent.CHANNEL,
-            SessionReadyEvent(
-                session_id=self.id,
-                root_session_id=self.ctx.root_session_id,
-                parent_session_id=self.ctx.parent_session_id,
-                cwd=self.ctx.cwd,
-                tool_names=tuple(t.name for t in self.tools),
-                extension_module_paths=tuple(self.installed_extensions),
-                model=self._providers.model,
-            ),
-        )
 
     def _policy_context(self, services: ServiceRegistry) -> PolicyContext:
         """The context one policy is bound with.
@@ -358,6 +354,41 @@ class SessionRuntime:
 
     async def _run_driver(self) -> None:
         try:
+            # Announced here rather than from ``start()``, and awaited.
+            #
+            # ``SessionReadyEvent`` is what the runtime tells atoms to defer
+            # work to -- ``_INACTIVE_API`` says so in the message an atom gets
+            # for touching the session during its own install. Emitted
+            # synchronously, an async handler could not be run at all: the bus
+            # closed the coroutine, logged "async handler skipped", and moved
+            # on. So the one place designed for deferred asynchronous setup was
+            # the one place it could not happen, and `skill_loader` -- whose
+            # entire job is to build the skill index there -- silently did
+            # nothing in every session that ever ran.
+            #
+            # Ahead of building the driver config, so what a ready handler
+            # registers is in the session before the first turn is composed,
+            # and ahead of the first trigger, because the driver takes one only
+            # after this returns.
+            try:
+                await self.bus.emit(
+                    SessionReadyEvent.CHANNEL,
+                    SessionReadyEvent(
+                        session_id=self.id,
+                        root_session_id=self.ctx.root_session_id,
+                        parent_session_id=self.ctx.parent_session_id,
+                        cwd=self.ctx.cwd,
+                        tool_names=tuple(t.name for t in self.tools),
+                        extension_module_paths=tuple(self.installed_extensions),
+                        model=self._providers.model,
+                    ),
+                )
+            finally:
+                # Set even if a handler raised: this says the announcement is
+                # over, not that it went well. A runtime install waits on it,
+                # and one that waited forever because somebody's handler failed
+                # would turn one atom's bug into a hung session.
+                self._ready.set()
             stream_fn = self._providers.stream_fn
             model = self._providers.model
             assert stream_fn is not None
@@ -968,6 +999,9 @@ class SessionRuntime:
             )
 
         runtime_install = self._driver_task is not None
+        if runtime_install:
+            # After the announcement, always. See ``_ready``.
+            await self._ready.wait()
         # Every install through here, started or not. Composition-time solving
         # orders a whole plan at once, and this is not that entry point -- an
         # atom handed to a session one at a time has no plan to be ordered
