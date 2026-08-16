@@ -258,6 +258,7 @@ class AtomContext:
         "_needs",
         "_provides",
         "_rank",
+        "_requires",
         "_runtime",
         "_segment",
         "_services",
@@ -274,12 +275,14 @@ class AtomContext:
         runtime: bool = False,
         provides: frozenset[str] = frozenset(),
         needs: frozenset[str] = frozenset(),
+        requires: frozenset[str] = frozenset(),
     ) -> None:
         self._session = session
         self._spec = spec
         self._runtime = runtime
         self._provides = provides
         self._needs = needs
+        self._requires = requires
         self._rank = 0
         self._atom_name: str | None = None
         self._installed = False
@@ -300,6 +303,18 @@ class AtomContext:
         """Capability keys this atom asked to come after, hard or soft."""
 
         return self._needs
+
+    @property
+    def requires(self) -> frozenset[str]:
+        """Capability keys this atom said it cannot run without.
+
+        The hard subset of ``needs``: ``after`` is a preference and an absent
+        target declares nothing, so a departure that only breaks an ``after``
+        breaks nothing.  Kept apart from ``needs`` for exactly that reason --
+        one of them orders atoms and the other says what has to be there.
+        """
+
+        return self._requires
 
     @property
     def rank(self) -> int:

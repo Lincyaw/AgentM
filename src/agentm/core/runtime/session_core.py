@@ -1199,7 +1199,49 @@ class SessionRuntime:
         if context is not None:
             self._journal_atom_change(context, retired=True)
         logger.info("uninstalled atom {}", module_path)
+        self._report_unsatisfied_dependents(module_path)
         return True
+
+    def _report_unsatisfied_dependents(self, departed: str) -> None:
+        """Say which remaining atoms asked for something that just left.
+
+        Installing checks an atom's ``requires`` against what the session
+        provides; removing one checked nothing, so a prerequisite could be
+        taken out from under an atom that declared it could not run without it.
+        The dependent stays installed and goes on advertising its tools, and
+        each one runs against whatever it captured at install -- an object
+        belonging to an atom that has left. Silently, which is the part that
+        makes it worth a line.
+
+        Reported after the fact and not refused, unlike a contested role. There
+        the session would have had to serve an answer nobody chose; here the
+        answer is the one the caller asked for. And removal is a teardown path
+        -- shutdown and install rollback both reach it -- so an exception here
+        would strand a session in the middle of coming apart over a composition
+        the caller has already decided to take down.
+
+        Read after the unlink, so what is left is the tree itself rather than a
+        prediction of what it will be.
+        """
+
+        remaining = [
+            context
+            for context in self._linked
+            if context.installed and context.requires
+        ]
+        if not remaining:
+            return
+        available = self._live_capability_keys()
+        for context in remaining:
+            missing = sorted(context.requires - available)
+            if missing:
+                logger.warning(
+                    "atom {} requires {} and {} has left; it is still installed "
+                    "and will run against whatever it resolved at install",
+                    context.module_path,
+                    ", ".join(missing),
+                    departed,
+                )
 
     def installed_atoms(self) -> tuple[ExtensionSpec, ...]:
         """The spec every linked context was installed from, in link order."""

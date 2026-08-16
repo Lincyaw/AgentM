@@ -2911,3 +2911,66 @@ async def test_a_failed_install_leaves_the_embedders_own_writes_alone(
         # The control: the atom's own write went with the rollback.
         assert session.installed_extensions == []
         assert never == []
+
+
+@pytest.mark.asyncio
+async def test_taking_a_prerequisite_away_is_said_out_loud(tmp_path: Path) -> None:
+    """Installing checks requirements; removing checked nothing.
+
+    ``memory`` declares it requires a ``ResourceWriter`` and resolves one at
+    install, holding it in the closures behind its four tools. Uninstall
+    ``local_backend`` -- the atom that supplies it -- and memory stays
+    installed, goes on advertising all four to the model, and each one writes
+    through a store belonging to an atom that has left. Every part of that is
+    silent.
+
+    Reported rather than refused. A contested role is refused because the
+    session would otherwise serve an answer nobody chose; this answer is the
+    one the caller asked for, and removal is a teardown path that shutdown and
+    install rollback both reach, so raising here would strand a session in the
+    middle of coming apart.
+
+    The second half is the control: ``after`` is a preference, so a departure
+    that breaks only an ``after`` breaks nothing and must say nothing.
+    """
+
+    reported: list[str] = []
+    sink = logger.add(
+        lambda message: reported.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
+        async with probe_session(str(tmp_path)) as session:
+            await session.install_extension(_builtin("local_backend"))
+            await session.install_extension(_builtin("memory"))
+            assert session.uninstall_extension(_builtin("local_backend"))
+            # Still there, still offering the model four tools it can no longer
+            # honour -- which is why the line exists rather than the removal
+            # being made to fail.
+            assert [tool.name for tool in session.tools if "memory" in tool.name]
+    finally:
+        logger.remove(sink)
+
+    assert [
+        message
+        for message in reported
+        if "service:resource_writer" in message and "memory" in message
+    ]
+
+    quiet: list[str] = []
+    sink = logger.add(
+        lambda message: quiet.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
+        async with probe_session(str(tmp_path)) as session:
+            for name in ("local_backend", "background_exec", "tool_purpose"):
+                await session.install_extension(_builtin(name))
+            # tool_purpose declares `after=("atom:background_exec",)`, which is
+            # a preference. Its target leaving orders nothing differently and
+            # takes nothing away.
+            assert session.uninstall_extension(_builtin("background_exec"))
+    finally:
+        logger.remove(sink)
+
+    assert [message for message in quiet if "atom:background_exec" in message] == []

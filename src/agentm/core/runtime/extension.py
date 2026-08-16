@@ -528,6 +528,9 @@ async def install_extension(
                 for entry in (*manifest.requires, *manifest.after)
             )
         ),
+        requires=frozenset(
+            () if manifest is None else (requirement_key(e) for e in manifest.requires)
+        ),
     )
     atom_api = _AtomAPIFacade(api, context)
     superseded_departure = None
