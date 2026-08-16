@@ -903,9 +903,16 @@ async def create_child_session(
     child_services.inherit_from(parent.services)
     _register_default_catalog_services(child_services)
     resolved_spec = _compose_config_services(child_services, config)
-    # A child inherits the parent's tree-scoped boundaries via inherit_from
-    # above. Per-child boundary overrides are not a config surface: a host
-    # that needs different boundaries binds them into the parent's registry.
+    # A child copies the parent's tree-scoped boundaries, at this moment and
+    # once. It does not resolve through the parent: a boundary bound into the
+    # parent *after* this call does not reach this child, which
+    # ``test_spawn_inheritance`` pins deliberately. A host that needs different
+    # boundaries binds them into the parent before spawning; per-child
+    # overrides are not a config surface.
+    #
+    # The composability design doc asks for the opposite -- one tree, children
+    # resolving through their parent -- and that is a decision about what a
+    # sub-agent is, not a refactor. See its section 6.
     provider_spec = (
         resolved_spec.provider if resolved_spec is not None else config.provider
     )
