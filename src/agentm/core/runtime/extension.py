@@ -392,6 +392,9 @@ class _AtomAPIFacade:
             extension, config, trigger=trigger, replace=replace
         )
 
+    def installed_atoms(self) -> tuple[ExtensionSpec, ...]:
+        return self.__session.installed_atoms()
+
     def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:
         self._require_active("uninstall extensions")
         return self.__session.uninstall_extension(atom)

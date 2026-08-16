@@ -585,6 +585,23 @@ class AtomAPI(Protocol):
         """
         ...
 
+    def installed_atoms(self) -> tuple[ExtensionSpec, ...]:
+        """The specs this session currently holds, in composition order.
+
+        An atom that installs other atoms needs to know what is already there,
+        and until this existed the only way was to remember what it had
+        installed itself. That is a second account of the session's own
+        composition, kept by an atom that cannot see the first: anything
+        removed by somebody else left the remembered picture naming an atom the
+        session does not hold, with nothing to correct it.
+
+        A read, not a handle. What comes back is what each atom was installed
+        *from*, which is what an installer compares against and what a reload
+        replays; reaching the running atom itself is not offered, because
+        nothing an atom should do needs it.
+        """
+        ...
+
     # --- Model access --------------------------------------------------------
 
     @property

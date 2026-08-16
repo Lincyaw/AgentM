@@ -27,8 +27,8 @@ converges on the scenario; it does not hammer a broken one.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Final, Protocol, runtime_checkable
 
@@ -106,44 +106,33 @@ MANIFEST = ExtensionManifest(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class _Applied:
-    """What the session holds at one position of the followed composition.
+@dataclass(slots=True)
+class _Settled:
+    """The part of a follower's state nothing else records.
 
-    ``running`` is the version actually installed there, which after a reload
-    that did not take is still the previous one: a failed install rolls back
-    and leaves what was there. It is ``None`` at a position nothing ever
-    reached.
+    What the session *holds* is not here: ``AtomAPI.installed_atoms`` answers
+    that, and reading it is what stops this from becoming a second account of
+    the composition.  It used to be one, and it went stale exactly where you
+    would expect -- an atom removed by anybody other than this follower left
+    the remembered picture naming it, and nothing corrected that until the
+    scenario file changed.
 
-    ``failed`` is the version that did not apply, kept so a pass that would
-    otherwise leave the composition alone does not attempt it again. Retrying
-    it there would set the composition rebuilding from this position on every
-    tick, so every healthy atom after it would lose its in-memory state twice a
-    second for as long as the source stayed broken. A pass that is rebuilding
-    this position anyway does retry it, because an install fails for reasons
-    outside the spec that failed.
+    ``failed`` is a version that did not install, keyed by location.  Retrying
+    it every tick would report the same breakage twice a second, so it is
+    attempted again when its spec changes or when anything else lands -- an
+    install fails for reasons outside its own spec.
+
+    ``mine`` is which locations this follower put there.  It scopes removals:
+    the scenario dropping an atom is a reason to detach the one *this* follower
+    installed, and not a licence to detach whatever else the session happens to
+    hold.
     """
 
-    running: ExtensionSpec | None
-    failed: ExtensionSpec | None = None
+    failed: dict[str, ExtensionSpec] = field(default_factory=dict)
+    mine: set[str] = field(default_factory=set)
 
-
-@dataclass(frozen=True, slots=True)
-class _Composition:
-    """Followed scenario positions, keyed by which atom rather than version.
-
-    ``location`` identifies the atom across edits: a file keeps its path while
-    its digest changes, and a module keeps its dotted name while its config
-    does. It is also the only identity an atom whose module body raises still
-    has, since a spec that could not be loaded has no manifest name. The entry
-    held against that key carries the versions.
-    """
-
-    entries: dict[str, _Applied]
-
-    @classmethod
-    def of(cls, resolved: Sequence[ExtensionSpec]) -> _Composition:
-        return cls(entries={_key(spec): _Applied(running=spec) for spec in resolved})
+    def copy(self) -> _Settled:
+        return _Settled(failed=dict(self.failed), mine=set(self.mine))
 
 
 class _Handover(Enum):
@@ -169,13 +158,13 @@ class _Handover(Enum):
 class _Follower(Protocol):
     """What one version of this atom needs from the version replacing it."""
 
-    def take_over(self, applied: Mapping[str, _Applied]) -> bool:
+    def take_over(self, settled: _Settled) -> bool:
         """Follow the scenario from here on; report a loop now running.
 
-        ``applied`` is what the caller converged the session to. It cannot be
-        derived from the scenario, which says what should be installed rather
-        than what is: a position may hold an older version, or nothing at all
-        where an install failed.
+        ``settled`` is the part of the caller's state nothing else records:
+        which versions it tried and could not install, and which atoms it put
+        there itself. What the session *holds* is not handed over, because the
+        session answers that.
 
         Reporting False leaves the caller following, because the reasons a
         successor does not start -- a half-written scenario file, a loader not
@@ -192,7 +181,7 @@ class _ScenarioFollower:
         self._interval = config.interval_seconds
         self._apply_removals = config.apply_removals
         self._task: asyncio.Task[None] | None = None
-        self._applied = _Composition(entries={})
+        self._settled = _Settled()
 
     # --- Lifecycle ---
 
@@ -201,7 +190,7 @@ class _ScenarioFollower:
         # holds the version the scenario names.
         self._start(applied=None)
 
-    def take_over(self, applied: Mapping[str, _Applied]) -> bool:
+    def take_over(self, settled: _Settled) -> bool:
         """Follow the scenario in place of the version this one replaced.
 
         ``SessionReadyEvent`` fires once per session, so a version installed
@@ -210,9 +199,9 @@ class _ScenarioFollower:
         over what it converged the session to.
         """
 
-        return self._start(applied=applied)
+        return self._start(applied=settled)
 
-    def _start(self, *, applied: Mapping[str, _Applied] | None) -> bool:
+    def _start(self, *, applied: _Settled | None) -> bool:
         """Start the polling loop; report whether one is running afterwards."""
 
         if self._task is not None:
@@ -223,17 +212,21 @@ class _ScenarioFollower:
                 "atom watch idle: this session has no scenario to follow",
             )
             return False
-        self._applied = (
-            _Composition.of(resolved)
+        # Starting fresh means the factory has just installed the plan, so
+        # every position the scenario names is one this follower manages --
+        # which is what scopes removals. Taking over from a previous version
+        # inherits its answer instead.
+        self._settled = (
+            _Settled(mine={_key(spec) for spec in resolved})
             if applied is None
-            else _Composition(entries=dict(applied))
+            else applied.copy()
         )
         self._task = asyncio.create_task(self._loop(), name="agentm-atom-watch")
         logger.info(
             "following scenario {} every {}s ({} extensions)",
             self._api.ctx.scenario,
             self._interval,
-            len(self._applied.entries),
+            len(resolved),
         )
         return True
 
@@ -368,7 +361,7 @@ class _ScenarioFollower:
                 type(follower).__name__,
             )
             return _Handover.UNCONFIRMED
-        if not follower.take_over(self._applied.entries):
+        if not follower.take_over(self._settled):
             logger.warning(
                 "atom watch keeping the scenario loop: its replacement has "
                 "not started following",
@@ -381,71 +374,65 @@ class _ScenarioFollower:
         resolved = self._resolve()
         if resolved is None:
             return
-        applied = self._applied.entries
+        settled = self._settled
+        # What the session holds, asked of the session. This used to be
+        # remembered, which meant an atom anybody else removed stayed in the
+        # picture and was never reinstalled: the follower believed it was
+        # there. Reading it makes a missing atom just another position whose
+        # spec disagrees.
+        running = {_key(spec): spec for spec in self._api.installed_atoms()}
 
-        # What this pass has to do is decided per position, from that
-        # position's own spec. It used to be decided from the first position
-        # that disagreed onward: everything after it was reinstalled too, even
-        # an atom whose own spec had not changed, because bus handlers
-        # dispatched in subscription order and leaving the tail alone composed
-        # differently from a cold start. That is no longer true -- dispatch
-        # orders by (priority, rank, seq), layers fold by rank, and a
-        # replacement takes the position it superseded -- so a reload no longer
-        # costs every atom after it its in-memory state.
-        #
-        # Order that genuinely matters is declared now. `after` is the word for
-        # "if that one is here, I come after it", and it does not depend on
-        # where either atom sits in the scenario file.
-        pending: list[tuple[str, ExtensionSpec, _Applied | None, str]] = []
+        # What this pass does is decided per position, from that position's own
+        # spec. It used to be decided from the first disagreement onward:
+        # everything after it was reinstalled too, even an atom whose own spec
+        # had not changed, because bus handlers dispatched in subscription
+        # order and leaving the tail alone composed differently from a cold
+        # start. That is no longer true -- dispatch orders by (priority, rank,
+        # seq), layers fold by rank, and a replacement takes the position it
+        # superseded -- so a reload no longer costs every atom after it its
+        # in-memory state. Order that genuinely matters is declared with
+        # ``after``, which does not depend on where either atom sits in a file.
+        pending: list[tuple[str, ExtensionSpec, ExtensionSpec | None, str]] = []
         for spec in resolved:
             key = _key(spec)
-            previous = applied.get(key)
-            if previous is None:
-                state = "install"
-            elif previous.running == spec:
+            here = running.get(key)
+            if here == spec:
                 state = "settled"
-            elif previous.failed == spec:
-                # This exact version already failed here. Retrying it every
-                # tick would report the same breakage twice a second; the
-                # attempt comes back when the spec does -- for a file that is
-                # its digest, so an edit lifts it -- or when something else
-                # lands, since an install also fails for reasons outside its
-                # own spec: a requirement no atom offered yet, an environment
-                # the composition around it had not set up.
+            elif settled.failed.get(key) == spec:
+                # This exact version already failed here. The attempt comes
+                # back when the spec does -- for a file that is its digest, so
+                # an edit lifts it -- or when something else lands, since an
+                # install also fails for reasons outside its own spec.
                 state = "blocked"
             else:
-                state = "reload"
-            pending.append((key, spec, previous, state))
+                state = "reload" if here is not None else "install"
+            pending.append((key, spec, here, state))
 
-        landing = any(state in {"install", "reload"} for _k, _s, _p, state in pending)
+        landing = any(state in {"install", "reload"} for _k, _s, _h, state in pending)
 
-        landed: dict[str, _Applied] = {}
-        for key, spec, previous, state in pending:
+        for key, spec, here, state in pending:
             if state == "settled":
                 # The scenario came back to what runs here, so any version that
                 # failed against this position is moot.
-                landed[key] = _Applied(running=spec)
+                settled.failed.pop(key, None)
+                settled.mine.add(key)
                 continue
             if state == "blocked" and not landing:
-                assert previous is not None
-                landed[key] = previous
                 continue
-            running = None if previous is None else previous.running
-            if await self._apply(spec, reloading=running is not None):
-                landed[key] = _Applied(running=spec)
+            if await self._apply(spec, reloading=here is not None):
+                settled.failed.pop(key, None)
+                settled.mine.add(key)
             else:
-                # A reload that failed leaves the previous version running, so
-                # the applied picture keeps naming it rather than the edit that
-                # did not take -- and names the edit as the one not to retry.
-                landed[key] = _Applied(running=running, failed=spec)
+                settled.failed[key] = spec
 
         if self._apply_removals:
-            for key, entry in applied.items():
-                if key in landed or entry.running is None:
-                    continue
-                self._detach(entry.running)
-
-        self._applied = _Composition(entries=landed)
+            listed = {_key(spec) for spec in resolved}
+            for key in sorted(settled.mine - listed):
+                held = running.get(key)
+                if held is not None:
+                    self._detach(held)
+                settled.mine.discard(key)
+                settled.failed.pop(key, None)
 
     async def _apply(self, spec: ExtensionSpec, *, reloading: bool) -> bool:
         # One attempt per version, so what is reported below is reported once

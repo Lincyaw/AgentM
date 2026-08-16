@@ -1201,6 +1201,15 @@ class SessionRuntime:
         logger.info("uninstalled atom {}", module_path)
         return True
 
+    def installed_atoms(self) -> tuple[ExtensionSpec, ...]:
+        """The spec every linked context was installed from, in link order."""
+
+        return tuple(
+            context.spec
+            for context in self._linked
+            if context.installed and context.spec is not None
+        )
+
     def installed_atom_module_path(self, atom_name: str) -> str | None:
         """Module path of an installed atom by its manifest name, if present.
 

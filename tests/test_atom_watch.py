@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 
 import pytest
 from loguru import logger
@@ -48,7 +48,7 @@ from agentm.extensions.builtin.atom_watch import (
     _FOLLOWER_SERVICE,
     _MAX_UNCONFIRMED_HANDOVERS,
     AtomWatchConfig,
-    _Applied,
+    _Settled,
     _Handover,
     _ScenarioFollower,
 )
@@ -88,9 +88,10 @@ class _CountingAPI:
         # Every attempt in order, failures included: what a pass asked of the
         # session is what these tests measure.
         self.installed: list[ExtensionSpec] = []
-        # Only the attempts that took. A failed install rolls back, so it
-        # cannot be what satisfies another atom's requirement.
-        self.live: set[str] = set()
+        # Only the attempts that took, by location: a failed install rolls
+        # back, so it cannot satisfy another atom's requirement, and this is
+        # also what the session answers when the follower asks what it holds.
+        self.live: dict[str, ExtensionSpec] = {}
         self.detached: list[ExtensionSpec] = []
         self.broken: set[str] = set()
         # An atom that only installs once another one is there, the way a
@@ -117,12 +118,15 @@ class _CountingAPI:
             raise RuntimeError("module body raised")
         if not satisfied:
             raise RuntimeError(f"nothing offers {required}")
-        self.live.add(extension.source.location)
+        self.live[extension.source.location] = extension
 
     def uninstall_extension(self, atom: ExtensionSpec) -> bool:
         self.detached.append(atom)
-        self.live.discard(atom.source.location)
+        self.live.pop(atom.source.location, None)
         return True
+
+    def installed_atoms(self) -> tuple[ExtensionSpec, ...]:
+        return tuple(self.live.values())
 
 
 def _seeded(
@@ -134,7 +138,7 @@ def _seeded(
 
     loader = _FakeLoader(specs)
     api = _CountingAPI(loader)
-    api.live.update(_names(specs))
+    api.live.update({spec.source.location: spec for spec in specs})
     follower = _ScenarioFollower(  # type: ignore[arg-type]
         api,
         AtomWatchConfig(interval_seconds=interval),
@@ -235,6 +239,30 @@ async def test_rewriting_the_broken_source_retries_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_atom_somebody_else_removed_is_put_back() -> None:
+    """The follower asks the session what it holds instead of remembering.
+
+    It used to keep its own picture of what it had applied. Anything removed by
+    somebody else left that picture naming an atom the session did not hold,
+    and nothing corrected it: the position looked satisfied, so the scenario
+    went on being unfollowed until the file changed.
+
+    Reading the session makes a missing atom just another position whose spec
+    disagrees.
+    """
+
+    seeded = [_spec("a0"), _spec("a1")]
+    api, _loader, follower = await _following(seeded)
+    api.installed.clear()
+
+    # Somebody other than the follower takes one out.
+    api.uninstall_extension(seeded[0])
+    await follower._tick()
+
+    assert _names(api.installed) == ["/atoms/a0.py"]
+
+
+@pytest.mark.asyncio
 async def test_dropping_an_atom_that_failed_still_detaches_it() -> None:
     seeded = [_spec(f"a{i}") for i in range(4)]
     api, loader, follower = await _following(seeded)
@@ -305,7 +333,7 @@ async def test_a_replacement_inherits_what_is_running_not_what_is_asked_for() ->
     await follower._tick()
 
     successor = _ScenarioFollower(api, AtomWatchConfig())  # type: ignore[arg-type]
-    assert successor.take_over(follower._applied.entries) is True
+    assert successor.take_over(follower._settled) is True
     await successor.on_session_shutdown(SessionShutdownEvent())
     del loader.specs[-1]
     await successor._tick()
@@ -333,8 +361,8 @@ class _DecliningFollower:
     def __init__(self) -> None:
         self.calls = 0
 
-    def take_over(self, applied: Mapping[str, _Applied]) -> bool:
-        del applied
+    def take_over(self, settled: _Settled) -> bool:
+        del settled
         self.calls += 1
         return False
 
