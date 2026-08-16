@@ -578,21 +578,17 @@ class ServiceRegistry:
         return None if entry is None else entry.scope
 
     def update_from(self, other: ServiceRegistry) -> None:
-        """Merge everything ``other`` resolves into this one (other wins)."""
+        """Merge every value ``other`` holds into this one (other wins)."""
 
-        self._services.update(
-            {
-                name: _copied(other, name, entry)
-                for name, entry in other._resolved().items()
-            }
-        )
+        self._services.update(_bound_values(other))
 
     def inherit_from(self, other: ServiceRegistry) -> None:
-        """Merge inherited services and leave session-local state behind."""
+        """Merge inherited values and leave session-local state behind."""
+
         self._services.update(
             {
-                name: _copied(other, name, entry)
-                for name, entry in other._resolved().items()
+                name: entry
+                for name, entry in _bound_values(other).items()
                 if entry.scope in _INHERITED_SCOPES
             }
         )
@@ -609,38 +605,45 @@ __all__ = [
 ]
 
 
-def _copied(
-    registry: ServiceRegistry,
-    name: str,
-    entry: ServiceEntry,
-) -> ServiceEntry:
-    """What ``name`` becomes in a registry that copies ``registry``.
+def _bound_values(registry: ServiceRegistry) -> dict[str, ServiceEntry]:
+    """What a registry copying this one takes: the values, not the decorations.
 
-    A copy takes what the source *serves*, which for a layered key is the fold
-    and not any one of the writes that make it up.  Both of the other answers
-    are wrong in a way nothing downstream can recover from: handing over the
-    layer gives the reader a ``ServiceLayer`` where it asked for a service, and
-    handing over the base under it gives a value the source never served.
+    A copy is made for a session that then *replays* the atoms the source held
+    -- that is what ``spawn`` and ``fork`` both do -- so everything those atoms
+    contributed arrives a second time under its own steam.  For a plain
+    registration that is harmless: the replayed write is newer and replaces the
+    copied one, and the value is the same either way.  For a layer it is not,
+    because layers compose instead of replacing.  Copying the fold and then
+    replaying the atoms that make it up produced a child wearing every
+    decoration twice, and a grandchild wearing it four times.
 
-    The fold is written as a plain entry, because that is what it is on the
-    other side -- a value this registry holds, decorated by nobody.  It keeps
-    the winning write's order so the copy resolves in the same relative order
-    the source did, and drops the protocol, which described the write rather
-    than the composite standing in its place.
+    So a copy takes the *bound* value under the layers and leaves the layers to
+    the replay.  The line is the same one that separates linking from copying,
+    one level down: **copy what the target cannot re-derive, replay what it
+    can.**  A boundary -- the executor, the writer, the permission policy -- is
+    a value the child has no other way to obtain.  A layer is one atom's
+    contribution to a boundary, and the atom is coming along.
 
-    A key nothing layered is passed through as the object it is: an entry that
-    is moved between tables has to arrive as itself, or it wins a key it had
-    lost -- see ``ServiceEntry.order``.
+    It is also the right answer for the child that does *not* replay, the one
+    given its own composition: the parent's atoms are not installed in it, and
+    carrying their decorations across would leave a departed atom's code
+    running in a session it was never part of.
+
+    The written limit: a layer the *host* wrote directly, on a key it then
+    hands to a child, is not copied and not replayed, so it does not reach the
+    child.  Nothing in this repository writes one; a host that wants a
+    decoration in a child writes it into the child.
+
+    Entries are passed through as the objects they are -- an entry moved
+    between tables has to arrive as itself, or it wins a key it had lost.
     """
 
-    if not _collect(registry, name):
-        return entry
-    return ServiceEntry(
-        service=_fold(registry, name),
-        protocol=None,
-        scope=entry.scope,
-        order=entry.order,
-    )
+    bound: dict[str, ServiceEntry] = {}
+    for name in registry._resolved():
+        entry = _base_entry(registry, name)
+        if entry is not None:
+            bound[name] = entry
+    return bound
 
 
 def _node_entry(registry: ServiceRegistry, name: str) -> ServiceEntry | None:

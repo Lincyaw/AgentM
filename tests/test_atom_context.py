@@ -2623,23 +2623,29 @@ async def test_a_value_bound_after_a_layer_is_bound_under_it(
 
 
 @pytest.mark.asyncio
-async def test_a_child_is_given_what_the_parent_served(tmp_path: Path) -> None:
-    """A copy takes the value, not the machinery that produced it.
+async def test_a_child_serves_what_its_parent_served_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """A copy takes the value; the replay brings the decorations.
 
-    A child session copies its parent rather than linking to it -- linking is
-    for things that share a lifetime, and a child is a separate unit of work.
-    But a layered key is not one write to copy: it is a base and the layers
-    over it, held in different tables, resolved at every read.
+    A child session copies its parent rather than linking to it, and then
+    replays the parent's atoms. So everything those atoms contributed arrives a
+    second time under its own steam. For a plain registration that is harmless
+    -- the replayed write is newer and replaces the copied one, and the value is
+    the same either way. For a layer it is not, because layers compose instead
+    of replacing.
 
-    The copy took the newest write, which for a layered key is a ``ServiceLayer``
-    -- the *instruction* to decorate. The child got that where it asked for a
-    service: a build function standing in for a tool executor, failing on the
-    first call, or refused outright by the protocol check. Nothing about it
-    resembled the value the parent was serving.
+    Both wrong answers were live. Copying the winning entry hands over a
+    ``ServiceLayer`` -- the *instruction* to decorate -- where the child asked
+    for a service. Copying the fold instead hands over the finished chain and
+    then the replay wraps it again, so the child wears every decoration twice
+    and a grandchild wears it four times. Neither shows up in a session that
+    never spawns, which is why this is stated across a real spawn.
 
-    Stated as an equality with the parent, because that is the claim a copy
-    makes: at the moment it is taken, the two serve the same thing. What they
-    do afterwards is their own business.
+    The rule is the one that separates linking from copying, one level down:
+    copy what the target cannot re-derive, replay what it can. A boundary is a
+    value the child has no other way to obtain. A layer is one atom's
+    contribution to a boundary, and the atom is coming along.
     """
 
     layered = _file_atom(
@@ -2651,15 +2657,25 @@ async def test_a_child_is_given_what_the_parent_served(tmp_path: Path) -> None:
         session.services.register("layered_cell", "BASE")
         assert session.services.get("layered_cell") == "wraps(BASE)"
 
-        child_services = ServiceRegistry()
-        child_services.inherit_from(session.services)
-        assert child_services.get("layered_cell") == "wraps(BASE)"
+        child = await session.spawn(purpose="probe")
+        try:
+            assert isinstance(child, SessionRuntime)
+            # Once, not twice, and not the build function.
+            assert child.services.get("layered_cell") == "wraps(BASE)"
 
-        # The copy holds a value, so a second copy of it is the same value
-        # again rather than a decoration of a decoration.
-        grandchild = ServiceRegistry()
-        grandchild.inherit_from(child_services)
-        assert grandchild.get("layered_cell") == "wraps(BASE)"
+            grandchild = await child.spawn(purpose="probe")
+            try:
+                assert grandchild.services.get("layered_cell") == "wraps(BASE)"
+            finally:
+                await grandchild.shutdown()
+        finally:
+            await child.shutdown()
+
+        # What the copy alone carries: the bound value, with no decoration on
+        # it. The decoration is the atom's, and the atom is replayed.
+        copied = ServiceRegistry()
+        copied.inherit_from(session.services)
+        assert copied.get("layered_cell") == "BASE"
 
 
 def test_a_refused_write_is_not_in_the_table_afterwards() -> None:
