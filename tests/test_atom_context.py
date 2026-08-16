@@ -2144,28 +2144,29 @@ async def test_a_replacement_takes_the_position_it_superseded(
     """
 
     first = _atom(tmp_path, "a_atom", _VICTIM)
-    middle = _atom(tmp_path, "b_atom", _VICTIM)
+    # The reloaded one writes into everything an atom can, including the two
+    # stores that are not its own -- otherwise the comparison below would only
+    # be about the order.
+    middle = _atom(tmp_path, "b_atom", _RICH)
     last = _atom(tmp_path, "c_atom", _VICTIM)
     # Same manifest name, different file, so it really supersedes.
-    replacement = _file_atom(tmp_path, "b_atom_v2", _VICTIM.format(name="b_atom"))
+    replacement = _file_atom(tmp_path, "b_atom_v2", _RICH.format(name="b_atom"))
 
     async with probe_session(str(tmp_path)) as reloaded:
         for spec in (first, middle, last):
             await reloaded.install_extension(spec)
         await reloaded.install_extension(replacement, replace=True)
-        after_reload = [
-            spec.module_path for spec in reloaded.composition_snapshot().extensions
-        ]
+        after_reload = composition_digest(reloaded)
 
     async with probe_session(str(tmp_path)) as cold:
         for spec in (first, replacement, last):
             await cold.install_extension(spec)
-        from_cold = [
-            spec.module_path for spec in cold.composition_snapshot().extensions
-        ]
+        from_cold = composition_digest(cold)
 
-    assert after_reload == from_cold
-    assert after_reload == [
+    # The whole digest, not just the order: a reload that left anything else
+    # behind would be a trace of the history too.
+    assert digest_differences(from_cold, after_reload) == ()
+    assert [entry.module_path for entry in after_reload.atoms] == [
         first.module_path,
         replacement.module_path,
         last.module_path,

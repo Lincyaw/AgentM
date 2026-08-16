@@ -70,6 +70,9 @@ agentm = "agentm.cli:main"
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+module-name = ["agentm", "agentm_toolbox"]
+
 [tool.uv.sources]
 # Local checkout while the replay support this depends on is unreleased: an
 # attempt can be resumed from the middle of a recorded run only if the
