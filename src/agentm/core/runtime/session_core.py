@@ -134,6 +134,7 @@ from agentm.core.runtime.atom_context import (
     PolicyRow,
     RendererRow,
     ownership_of,
+    report_contested_key,
     policy_row,
     renderer_row,
 )
@@ -814,9 +815,12 @@ class SessionRuntime:
 
         The event stays role-only: plain registrations are frequent and include
         the driver's per-turn resource transaction, which nothing on the bus
-        wants to hear about once a turn.
+        wants to hear about once a turn. The collision report below is not
+        role-only, because that is where the collisions are.
         """
 
+        if context is not None and self.is_linked(context):
+            report_contested_key(key, context, self._linked)
         if not role_bind:
             return
         if context is not None and not self.is_linked(context):

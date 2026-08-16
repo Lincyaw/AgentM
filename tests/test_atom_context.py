@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from agentm.core.abi.effects import EffectInverse
 from agentm.core.abi.errors import ExtensionLoadError
@@ -2206,6 +2207,55 @@ def install(api, config):
 
 def _builtin(name: str) -> ExtensionSpec:
     return ExtensionSpec.from_module(f"agentm.extensions.builtin.{name}")
+
+
+_CONTESTS = (
+    _MANIFEST
+    + """
+
+def install(api, config):
+    del config
+    api.services.register("contested_cell", "{name}", scope="session")
+"""
+)
+
+
+@pytest.mark.asyncio
+async def test_two_atoms_writing_one_key_are_reported(tmp_path: Path) -> None:
+    """Nothing orders two atoms that do not depend on each other.
+
+    A key is either set-shaped -- no reader can tell which order two writes
+    went in -- or it is a cell, and then the second writer is a conflict rather
+    than an update. The session resolves a contested cell by write order, which
+    is install order, which is a fact about how the composition was listed
+    rather than about either atom.
+
+    Reported, not refused: an embedder writing over an atom is a deliberate
+    override and says nothing here, and where both atoms really mean to
+    contribute there is now a form that composes. Across the twenty-nine
+    shipped atoms this is silent -- the one collision there was, on the tool
+    executor, is a layer now.
+    """
+
+    first = _atom(tmp_path, "one_atom", _CONTESTS)
+    second = _atom(tmp_path, "two_atom", _CONTESTS)
+    contested: list[str] = []
+    sink = logger.add(
+        lambda message: contested.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
+        async with probe_session(str(tmp_path)) as session:
+            await session.install_extension(first)
+            assert contested == []
+            await session.install_extension(second)
+            assert session.services.get("contested_cell") == "two_atom"
+    finally:
+        logger.remove(sink)
+
+    assert len(contested) == 1
+    assert "contested_cell" in contested[0]
+    assert "services.layer" in contested[0]
 
 
 @pytest.mark.asyncio

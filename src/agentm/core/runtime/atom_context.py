@@ -73,6 +73,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from agentm.core.abi.bus import BusSegment, EventBusObserver, Handler
 from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.context import ContextPolicy
@@ -868,6 +870,47 @@ class ContextOwnership:
         return self.services.get(key)
 
 
+def report_contested_key(
+    key: str,
+    writer: AtomContext,
+    linked: Sequence[AtomContext],
+) -> None:
+    """Say when two atoms write one key, because nothing orders them.
+
+    A key is either set-shaped -- nothing a reader can do distinguishes the
+    order two writes went in -- or it is a cell, and then the second writer
+    is a conflict rather than an update. This session resolves a contested
+    cell by write order, which is install order, which is a fact about the
+    composition rather than about either atom: neither declared a
+    dependency on the other, so nothing says which should win, and the
+    answer changes if the composition is listed differently.
+
+    Reported rather than refused. An embedder writing over an atom is a
+    deliberate override and is not reported at all -- only two *atoms* are
+    unordered with respect to each other. Where both really mean to
+    contribute, ``services.layer`` is the form that composes: each writes
+    its own decoration, and the key resolves to the fold.
+    """
+
+    others = [
+        context.module_path
+        for context in linked
+        if context is not writer and key in context.services.own_table()
+    ]
+    if not others:
+        return
+    logger.warning(
+        "service {!r} is written by {} and by {}; nothing orders two atoms "
+        "that do not depend on each other, so which one the session serves "
+        "is a property of the composition order. If both mean to "
+        "contribute, use services.layer({!r}, ...) instead.",
+        key,
+        ", ".join(sorted(others)),
+        writer.module_path,
+        key,
+    )
+
+
 def ownership_of(
     own: ServiceRegistry,
     own_renderers: Mapping[str, RendererRow],
@@ -1045,6 +1088,7 @@ __all__ = [
     "PolicyRow",
     "RendererRow",
     "ownership_of",
+    "report_contested_key",
     "policy_row",
     "renderer_row",
 ]
