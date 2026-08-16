@@ -116,6 +116,13 @@ MANIFEST = ExtensionManifest(
     config_schema=LlmAnthropicConfig,
     sensitive_config_fields=("api_key", "default_headers"),
     requires=(),
+    # Read at install and built into the stream function, so a retry policy
+    # listed after this atom is a retry policy the session never gets: the
+    # provider is already constructed and nothing rebuilds it. `after` rather
+    # than `requires` because that is exactly the shape -- a composition with
+    # no retry policy is a working composition, and one that has it must put
+    # it first.
+    after=(f"service:{RETRY_POLICY_SERVICE}",),
 )
 
 

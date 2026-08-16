@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from agentm import ExtensionSpec
 from agentm.core.abi.messages import TextContent
@@ -653,9 +654,20 @@ async def test_a_context_policy_reverts(tmp_path: Path) -> None:
     Context policies are the one registration kind whose position is decided by
     a priority rather than by the write order alone, so a restore that put the
     list back at the wrong priority would leave the digest able to tell.
+
+    Composed with the backend it declares it requires, which this used to do
+    without: the atom reads the stores at install and registers what it can
+    build from them, so an empty session got a working install that quietly
+    registered one capability fewer than its manifest advertises. It reverted
+    perfectly, and what it reverted was the wrong composition.
     """
 
-    async with probe_session(str(tmp_path)) as session:
+    async with probe_session(
+        str(tmp_path),
+        extensions=[
+            ExtensionSpec.from_module("agentm.extensions.builtin.local_backend")
+        ],
+    ) as session:
         await assert_revertible(
             session,
             ExtensionSpec.from_module(
@@ -663,6 +675,9 @@ async def test_a_context_policy_reverts(tmp_path: Path) -> None:
                 config={"keep_last_turns": 4},
             ),
         )
+        # The atom is gone, so its capability is gone with it. That it was
+        # ever *built* is what the prerequisite above buys.
+        assert session.services.get("compaction_publisher") is None
 
 
 @pytest.mark.asyncio
@@ -1037,3 +1052,118 @@ async def test_the_digest_sees_a_layer_the_folded_value_cannot(
     assert one.value == two.value  # type: ignore[attr-defined]
     assert [count for _owner, count in one.layers] == [1]  # type: ignore[attr-defined]
     assert [count for _owner, count in two.layers] == [2]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_an_atom_cannot_be_installed_before_what_it_requires(
+    tmp_path: Path,
+) -> None:
+    """The hole between the two checks that enforce ``requires``.
+
+    A composition solves the whole plan at once and orders it. An install into
+    a *running* session has no plan, so its requirements are checked against
+    what the session provides right now. An install into a session that exists
+    and has not started yet is neither, and was checked by nothing.
+
+    ``llm_compaction`` is what that costs. It declares it requires a resource
+    store and a trajectory store, and at install it reads them and registers
+    what it can build from what it finds. Handed to an empty session it
+    installed happily and registered one capability fewer than its own manifest
+    advertises -- no error, no warning, and a session whose compaction quietly
+    could not publish. Which capability you got depended on the order the host
+    happened to hand the atoms over in.
+    """
+
+    compaction = ExtensionSpec.from_module(
+        "agentm.extensions.builtin.llm_compaction",
+        config={"keep_last_turns": 4},
+    )
+    backend = ExtensionSpec.from_module("agentm.extensions.builtin.local_backend")
+
+    async with probe_session(str(tmp_path)) as session:
+        with pytest.raises(ValueError, match="unsatisfied atom dependencies"):
+            await session.install_extension(compaction)
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(backend)
+        await session.install_extension(compaction)
+        # The capability the wrong order silently dropped.
+        assert session.services.get("compaction_publisher") is not None
+        assert session.services.get("session_compactor") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_provider_gets_the_retry_policy_whichever_way_it_is_listed(
+    tmp_path: Path,
+) -> None:
+    """Both shipped providers built the retry policy in and declared nothing.
+
+    Each reads ``retry_policy`` at install and puts what it finds inside its
+    stream function. List the provider before the retry atom and the provider
+    is already constructed by the time the policy exists, nothing rebuilds it,
+    and the session runs with no retries for the rest of its life -- on every
+    model call, silently. ``retry_policy``'s own description says it is
+    "consumed during provider construction", so the coupling was known and
+    written in prose, and expressed nowhere the machinery could read.
+
+    ``after`` is the word for it: a composition with no retry policy is a
+    working composition, and one that has it must put it first. Stated from
+    both listings, because order-independence is the claim.
+    """
+
+    retry = ExtensionSpec.from_module("agentm.extensions.builtin.retry_policy")
+
+    async def _policy_of(provider: str, retry_first: bool) -> str:
+        spec = ExtensionSpec.from_module(
+            f"agentm.extensions.builtin.{provider}", config={"api_key": "probe-key"}
+        )
+        listing = [retry, spec] if retry_first else [spec, retry]
+        key = "provider:openai" if provider == "llm_openai" else "provider:anthropic"
+        async with probe_session(str(tmp_path), extensions=listing) as session:
+            config = session.services.get(key)
+            assert config is not None
+            return type(config.stream_fn.retry_policy).__name__
+
+    for provider in ("llm_openai", "llm_anthropic"):
+        first = await _policy_of(provider, retry_first=True)
+        second = await _policy_of(provider, retry_first=False)
+        assert first == second == "ExponentialBackoffRetry", provider
+
+
+@pytest.mark.asyncio
+async def test_an_order_a_plan_would_have_fixed_is_reported_when_there_is_no_plan(
+    tmp_path: Path,
+) -> None:
+    """``after`` orders a plan. Handing atoms over one at a time is not a plan.
+
+    A composition is solved whole, so an atom that said "if this one is here, I
+    come after it" is placed correctly however the host listed it. Installed
+    one at a time there is nothing to solve: the atom that wanted to be second
+    is already in, and the one it wanted to follow arrives now. The declaration
+    can no longer do anything, which is exactly when it is worth saying.
+    """
+
+    retry = ExtensionSpec.from_module("agentm.extensions.builtin.retry_policy")
+    provider = ExtensionSpec.from_module(
+        "agentm.extensions.builtin.llm_openai", config={"api_key": "probe-key"}
+    )
+
+    async def _install(order: list[ExtensionSpec]) -> list[str]:
+        heard: list[str] = []
+        sink = logger.add(
+            lambda message: heard.append(message.record["message"]),
+            level="WARNING",
+        )
+        try:
+            async with probe_session(str(tmp_path)) as session:
+                for spec in order:
+                    await session.install_extension(spec)
+        finally:
+            logger.remove(sink)
+        return [message for message in heard if "declared it comes after" in message]
+
+    wrong = await _install([provider, retry])
+    assert len(wrong) == 1
+    assert "llm_openai" in wrong[0] and "service:retry_policy" in wrong[0]
+
+    assert await _install([retry, provider]) == []

@@ -946,15 +946,38 @@ class SessionRuntime:
         What the driver captured once at start is not reachable this way: an
         atom installed at runtime cannot replace the tool executor or the
         permission policy the running driver consults.
+
+        ``config`` belongs to the ``str`` form only. An ``ExtensionSpec``
+        already carries its config -- that is what makes it the thing a child
+        replays -- so a second one alongside it is two answers to one question.
+        Passing both used to take the spec's and drop the argument without a
+        word, which surfaces as the atom refusing to install for a missing
+        field the caller believes they supplied.
         """
         from agentm.core.runtime.extension import (
             coerce_extension_spec,
             install_extension,
         )
 
+        if isinstance(extension, ExtensionSpec) and config is not None:
+            raise ValueError(
+                "install_extension takes config= only with a module path; an "
+                "ExtensionSpec carries its own config, so pass it there "
+                "(ExtensionSpec.from_module(path, config=...)) rather than "
+                "beside the spec"
+            )
+
         runtime_install = self._driver_task is not None
-        if runtime_install:
-            self._verify_runtime_requirements(extension)
+        # Every install through here, started or not. Composition-time solving
+        # orders a whole plan at once, and this is not that entry point -- an
+        # atom handed to a session one at a time has no plan to be ordered
+        # within whether or not a driver happens to be running. Checking only
+        # the started case left a hole between the two: install `llm_compaction`
+        # into a created-but-not-yet-started session before the atom that
+        # supplies the stores it declares it requires, and it installed anyway
+        # and quietly registered one fewer capability than its own manifest
+        # says it registers. Nothing failed and nothing said anything.
+        self._verify_runtime_requirements(extension)
         await install_extension(
             cast("Session", self),
             extension,
@@ -963,11 +986,47 @@ class SessionRuntime:
             runtime=runtime_install,
             replace=replace,
         )
-        if runtime_install:
-            spec = coerce_extension_spec(extension, None)
-            installed = self.context_for(spec.module_path)
-            if installed is not None:
-                self._journal_atom_change(installed, retired=False)
+        arrived = self.context_for(coerce_extension_spec(extension, None).module_path)
+        if arrived is not None:
+            self._report_late_arrival(arrived)
+            if runtime_install:
+                self._journal_atom_change(arrived, retired=False)
+
+    def _report_late_arrival(self, arrived: AtomContext) -> None:
+        """Say when an atom lands after one that declared it comes first.
+
+        ``after`` orders a *plan*: a composition is solved whole, so an atom
+        that said "if this one is here, I come after it" is placed correctly
+        however the host listed it. Handing atoms over one at a time is not a
+        plan, and there the declaration can do nothing -- the atom that wanted
+        to be second is already installed, and the one it wanted to follow is
+        arriving now.
+
+        Which is a live composition, not a hypothetical: both shipped provider
+        atoms read the retry policy at install and build it into the stream
+        function. Install one before ``retry_policy`` and the provider is
+        already constructed, nothing rebuilds it, and the session runs with no
+        retries at all for the rest of its life. The declaration is what the
+        solver reads; this is what is left to say when there was no solver.
+        """
+
+        supplied = arrived.provides
+        if not supplied:
+            return
+        for context in self._linked:
+            if context is arrived or not context.installed:
+                continue
+            wanted = sorted((context.needs & supplied) - context.requires)
+            if wanted:
+                logger.warning(
+                    "atom {} declared it comes after {}, and {} was installed "
+                    "afterwards; the order it asked for was not available "
+                    "because the atoms were handed over one at a time rather "
+                    "than composed",
+                    context.module_path,
+                    ", ".join(wanted),
+                    arrived.module_path,
+                )
 
     def _journal_atom_change(self, context: AtomContext, *, retired: bool) -> None:
         """Tell the journal an atom arrived or left, if a turn can carry it.
@@ -1199,11 +1258,12 @@ class SessionRuntime:
         if context is not None:
             self._journal_atom_change(context, retired=True)
         logger.info("uninstalled atom {}", module_path)
-        self._report_unsatisfied_dependents(module_path)
+        if context is not None:
+            self._report_unsatisfied_dependents(context)
         return True
 
-    def _report_unsatisfied_dependents(self, departed: str) -> None:
-        """Say which remaining atoms asked for something that just left.
+    def _report_unsatisfied_dependents(self, departed: AtomContext) -> None:
+        """Say which remaining atoms asked for what this departure took away.
 
         Installing checks an atom's ``requires`` against what the session
         provides; removing one checked nothing, so a prerequisite could be
@@ -1213,34 +1273,47 @@ class SessionRuntime:
         belonging to an atom that has left. Silently, which is the part that
         makes it worth a line.
 
-        Reported after the fact and not refused, unlike a contested role. There
-        the session would have had to serve an answer nobody chose; here the
-        answer is the one the caller asked for. And removal is a teardown path
-        -- shutdown and install rollback both reach it -- so an exception here
-        would strand a session in the middle of coming apart over a composition
-        the caller has already decided to take down.
+        Scoped to what *this* atom supplied, and not to every requirement the
+        session can no longer meet. Reporting the latter names whichever atom
+        happened to be removed next as the cause, which is a different atom
+        from the one that took the capability away and usually an unrelated
+        one; and it says the same thing again on every removal afterwards, so
+        tearing a composition down turns into a wall of warnings that grows
+        with the square of its size. The line is worth printing once, when the
+        thing that answered for the requirement actually leaves.
+
+        Reported and not refused, unlike a contested role. There the session
+        would have had to serve an answer nobody chose; here the answer is the
+        one the caller asked for. And removal is a teardown path -- shutdown
+        and install rollback both reach it -- so an exception here would strand
+        a session in the middle of coming apart over a composition the caller
+        has already decided to take down.
 
         Read after the unlink, so what is left is the tree itself rather than a
         prediction of what it will be.
         """
 
-        remaining = [
-            context
-            for context in self._linked
-            if context.installed and context.requires
-        ]
-        if not remaining:
+        supplied = departed.provides
+        if not supplied:
             return
-        available = self._live_capability_keys()
-        for context in remaining:
-            missing = sorted(context.requires - available)
+        # What this atom answered for that nothing answers for now. A
+        # capability two atoms provide is still there, so its departure took
+        # nothing away and there is nothing to say.
+        gone = supplied - self._live_capability_keys()
+        if not gone:
+            return
+        for context in self._linked:
+            if not context.installed:
+                continue
+            missing = sorted(context.requires & gone)
             if missing:
                 logger.warning(
-                    "atom {} requires {} and {} has left; it is still installed "
-                    "and will run against whatever it resolved at install",
+                    "atom {} requires {}, which {} supplied and has now left; "
+                    "it is still installed and will run against whatever it "
+                    "resolved at install",
                     context.module_path,
                     ", ".join(missing),
-                    departed,
+                    departed.module_path,
                 )
 
     def installed_atoms(self) -> tuple[ExtensionSpec, ...]:

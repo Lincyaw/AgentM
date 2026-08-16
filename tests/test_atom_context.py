@@ -2967,11 +2967,19 @@ async def test_taking_a_prerequisite_away_is_said_out_loud(tmp_path: Path) -> No
     finally:
         logger.remove(sink)
 
-    assert [
+    named = [
         message
         for message in reported
         if "service:resource_writer" in message and "memory" in message
     ]
+    assert named
+    # Once, and naming the atom that actually supplied it. Reporting every
+    # requirement the session can no longer meet, on every removal, blames
+    # whichever atom happens to be taken out next -- usually an unrelated one --
+    # and repeats itself until tearing down a composition costs a wall of
+    # warnings that grows with the square of its size.
+    assert len(named) == 1
+    assert "local_backend" in named[0]
 
     quiet: list[str] = []
     sink = logger.add(
@@ -2990,3 +2998,97 @@ async def test_taking_a_prerequisite_away_is_said_out_loud(tmp_path: Path) -> No
         logger.remove(sink)
 
     assert [message for message in quiet if "atom:background_exec" in message] == []
+
+    # And the composition is torn down completely, so anything that reported
+    # once per removal instead of once per departure shows up as a count.
+    noisy: list[str] = []
+    sink = logger.add(
+        lambda message: noisy.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
+        async with probe_session(str(tmp_path)) as session:
+            names = ("local_backend", "memory", "file_tools", "tool_bash")
+            for name in names:
+                await session.install_extension(_builtin(name))
+            for name in names:
+                session.uninstall_extension(_builtin(name))
+    finally:
+        logger.remove(sink)
+
+    # local_backend leaves first and supplies what three of them named; every
+    # later removal takes away something nobody was still asking for.
+    unsatisfied = [message for message in noisy if "is still installed" in message]
+    assert len(unsatisfied) == 3
+    assert all("local_backend" in message for message in unsatisfied)
+
+
+@pytest.mark.asyncio
+async def test_a_spec_carries_its_own_config_and_will_not_take_a_second(
+    tmp_path: Path,
+) -> None:
+    """Two answers to one question, and the loser used to be silent.
+
+    ``config=`` belongs to the module-path form. An ``ExtensionSpec`` already
+    carries its config -- that is what makes it the thing a child replays -- so
+    one passed beside it was dropped without a word. What the caller saw was
+    the atom refusing to install for a missing required field they were certain
+    they had supplied, with nothing anywhere naming the argument that went
+    nowhere.
+    """
+
+    async with probe_session(str(tmp_path)) as session:
+        spec = ExtensionSpec.from_module("agentm.extensions.builtin.read_history")
+        config = {"tool_result_max_tokens": 200, "total_max_tokens": 1000}
+
+        with pytest.raises(ValueError, match="carries its own config"):
+            await session.install_extension(spec, dict(config))
+
+        # Where it goes instead, and the atom installs.
+        await session.install_extension(
+            ExtensionSpec.from_module(
+                "agentm.extensions.builtin.read_history", config=config
+            )
+        )
+        assert any("read_history" in path for path in session.installed_extensions)
+
+
+@pytest.mark.asyncio
+async def test_a_layered_key_belongs_to_its_outermost_layer(tmp_path: Path) -> None:
+    """Attribution has to be picked by the rule the reader is picked by.
+
+    A binding is resolved by write order, so its owner is the latest write. A
+    layered key is not: the fold sorts by ``(rank, write order)``, and the
+    outermost layer is the one that built the object handed back. Running both
+    through one write-order competition made the answer a fact about history --
+    ``tool_executor`` is layered by two atoms the graph *does* order, and which
+    one the index named depended on which had been installed most recently.
+
+    So churning the inner one renamed the owner of a key the outer one still
+    wraps, and two sessions composed from the same atoms in different orders
+    disagreed about who owned it. Stated across both, because neither alone
+    would have caught it.
+    """
+
+    async def _owner_of(order: tuple[str, ...]) -> str | None:
+        async with probe_session(str(tmp_path)) as session:
+            for name in order:
+                await session.install_extension(_builtin(name))
+            return _owner(session, "tool_executor")
+
+    outer = "agentm.extensions.builtin.tool_purpose"
+    # tool_purpose declares `after=("atom:background_exec",)`, so it is the
+    # outermost layer in both listings and the owner in both.
+    assert await _owner_of(("background_exec", "tool_purpose")) == outer
+    assert await _owner_of(("tool_purpose", "background_exec")) == outer
+
+    async with probe_session(str(tmp_path)) as session:
+        for name in ("background_exec", "tool_purpose"):
+            await session.install_extension(_builtin(name))
+        assert _owner(session, "tool_executor") == outer
+
+        # Reinstall the inner one. It is now the most recent write to the key,
+        # and it is still the innermost thing in the chain.
+        assert session.uninstall_extension(_builtin("background_exec"))
+        await session.install_extension(_builtin("background_exec"))
+        assert _owner(session, "tool_executor") == outer

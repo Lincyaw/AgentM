@@ -1062,15 +1062,25 @@ def ownership_of(
     would name one context while the session served another's value.
 
     Services and renderers are the two tables where that is not link order.  A
-    service key resolves to the highest ``ServiceEntry.order`` anywhere in the
-    chain -- layers included, since a layer is a write to the key even though
-    it decorates rather than replaces -- and a trigger source to the highest
-    ``RendererRow.order`` — write
-    order, so that linking a context cannot change what either already resolved
-    to — and a context can rebind one long after a later-linked context wrote
-    it.  So each winner is picked by the same number its reader picks it by, and
-    the host's own tables take part: a host write later than every atom's wins
-    and belongs to nobody, which is what a ``None`` owner means.
+    trigger source resolves to the highest ``RendererRow.order`` -- write
+    order, so that linking a context cannot change what it already resolved to,
+    and a context can rebind one long after a later-linked context wrote it.
+
+    A service key takes two competitions, because it is resolved by two rules.
+    Bindings compete on write order alone, which is what a lookup does.  Layers
+    compete on ``(rank, write order)``, which is what the fold does -- and where
+    a key carries a layer, the outermost layer is the one that *built* the
+    object the reader is handed, so it is the owner.
+
+    Running both through one write-order competition is what this used to do,
+    and it made attribution a fact about history rather than about the
+    composition: ``tool_executor`` is layered by two atoms the graph orders, and
+    which of them the index named depended on which had been installed most
+    recently.  Reinstall the inner one and the outer one stopped owning the key
+    it still wraps.
+
+    The host's own tables take part in both: a host write later than every
+    atom's wins and belongs to nobody, which is what a ``None`` owner means.
 
     Tools and policies need no tiebreak: they are keyed by identity, and no two
     contexts can hold the same object.
@@ -1080,18 +1090,24 @@ def ownership_of(
     policies: dict[int, str] = {}
     renderers: dict[str, str] = {}
     services: dict[str, str] = {}
-    # Layers count as writes to their key, because that is how the registry
-    # resolves it: what a layered key belongs to is whoever wrote it last,
-    # decoration or value. A layer that did not count would leave a key nobody
-    # owns while an atom is visibly contributing to it.
-    winning: dict[str, int] = {
-        key: entry.order for key, entry in own.own_table().items()
-    }
+    bases: dict[str, tuple[int, str | None]] = {}
+    layers: dict[str, tuple[tuple[int, int], str | None]] = {}
+
+    def _offer_base(key: str, order: int, owner: str | None) -> None:
+        held = bases.get(key)
+        if held is None or order > held[0]:
+            bases[key] = (order, owner)
+
+    def _offer_layer(key: str, rank: int, order: int, owner: str | None) -> None:
+        held = layers.get(key)
+        if held is None or (rank, order) > held[0]:
+            layers[key] = ((rank, order), owner)
+
+    for key, entry in own.own_table().items():
+        _offer_base(key, entry.order, None)
     for key, rows in own.own_layers().items():
         for entry in rows:
-            held = winning.get(key)
-            if held is None or entry.order > held:
-                winning[key] = entry.order
+            _offer_layer(key, own.rank, entry.order, None)
     bound: dict[str, int] = {source: row.order for source, row in own_renderers.items()}
     for context in linked:
         owner = context.module_path
@@ -1105,16 +1121,17 @@ def ownership_of(
                 bound[source] = binding.order
                 renderers[source] = owner
         for key, entry in context.services.own_table().items():
-            held = winning.get(key)
-            if held is None or entry.order > held:
-                winning[key] = entry.order
-                services[key] = owner
+            _offer_base(key, entry.order, owner)
         for key, rows in context.services.own_layers().items():
             for entry in rows:
-                held = winning.get(key)
-                if held is None or entry.order > held:
-                    winning[key] = entry.order
-                    services[key] = owner
+                _offer_layer(key, context.rank, entry.order, owner)
+    # A layered key belongs to its outermost layer; anything else to its
+    # winning binding. Only an atom is named -- a key whose winner is the
+    # host's own write belongs to nobody, which is what an absent entry means.
+    for key in (*bases, *layers):
+        held = layers.get(key) or bases.get(key)
+        if held is not None and held[1] is not None:
+            services[key] = held[1]
     return ContextOwnership(
         tools=tools,
         policies=policies,

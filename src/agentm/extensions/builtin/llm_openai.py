@@ -61,6 +61,7 @@ from agentm.core.abi import (
     PauseTurn,
     ProviderConfig,
     ProviderError,
+    RETRY_POLICY_SERVICE,
     RetryPolicy,
     TerminationHint,
     TextContent,
@@ -127,6 +128,13 @@ MANIFEST = ExtensionManifest(
     config_schema=LlmOpenaiConfig,
     sensitive_config_fields=("api_key", "default_headers", "default_query"),
     requires=(),
+    # Read at install and built into the stream function, so a retry policy
+    # listed after this atom is a retry policy the session never gets: the
+    # provider is already constructed and nothing rebuilds it. `after` rather
+    # than `requires` because that is exactly the shape -- a composition with
+    # no retry policy is a working composition, and one that has it must put
+    # it first.
+    after=(f"service:{RETRY_POLICY_SERVICE}",),
 )
 
 
@@ -1012,8 +1020,6 @@ class _OpenAIProviderRuntime:
         return verify_ssl
 
     def _build_stream_fn(self, *, verify_ssl: bool) -> OpenAIStreamFn:
-        from agentm.core.abi import RETRY_POLICY_SERVICE
-
         return OpenAIStreamFn(
             api_key=self._config.api_key,
             base_url=self._config.base_url,
