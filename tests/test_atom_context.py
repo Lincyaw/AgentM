@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from agentm.core.abi.effects import EffectInverse
+from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.events import ApiRegisterEvent, SessionShutdownEvent
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_RESOLVER_SERVICE, RESOURCE_TXN_SERVICE
@@ -2199,6 +2200,50 @@ def install(api, config):
     raise RuntimeError("{name} refuses to install")
 """
 )
+
+
+@pytest.mark.asyncio
+async def test_a_rollback_that_cannot_put_the_atom_back_says_so(
+    tmp_path: Path,
+) -> None:
+    """A failing install's rollback may not raise over what somebody else did.
+
+    A supersede unlinks the atom it replaces, then runs the replacement's
+    ``install()``. If that refuses, the rollback puts the original back -- but
+    another task may have installed under the same module path in the meantime,
+    and two live contexts for one path is state the session cannot represent.
+
+    The one already there is a decision this rollback did not make. So the
+    superseded context is undone for real rather than forced back, and the
+    caller still sees the error its install actually raised: a rollback that
+    raised would replace it with a group naming both, and a caller catching
+    ``ExtensionLoadError`` would stop catching anything.
+    """
+
+    original = _atom(tmp_path, "coll_atom", _VICTIM)
+    # Same manifest name, different file: a real supersede that then refuses.
+    replacement = _file_atom(
+        tmp_path, "coll_atom_v2", _SLOW_REFUSES.format(name="coll_atom")
+    )
+    gate = asyncio.Event()
+
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("install_gate", gate, scope="session")
+        await session.install_extension(original)
+
+        async def _take_the_path_back() -> None:
+            await gate.wait()
+            await session.install_extension(original)
+
+        racer = asyncio.create_task(_take_the_path_back())
+        with pytest.raises(ExtensionLoadError, match="coll_atom broke"):
+            await session.install_extension(replacement, replace=True)
+        await racer
+
+        # One live context for the path, and it is the one the racer installed.
+        assert session.installed_extensions == [original.module_path]
+        assert session.services.get("coll_atom_write") == "victim"
+        assert session.uninstall_extension(original)
 
 
 @pytest.mark.asyncio

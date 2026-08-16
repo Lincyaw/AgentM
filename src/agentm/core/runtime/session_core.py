@@ -1118,7 +1118,7 @@ class SessionRuntime:
         )
         return AtomDeparture(residue=residue, preceded_by=preceded_by)
 
-    def restore_atom_registrations(self, departure: AtomDeparture) -> None:
+    def restore_atom_registrations(self, departure: AtomDeparture) -> bool:
         """Put back what ``remove_atom_registrations`` took out, where it was.
 
         The inverse of the removal, for a supersede whose replacement never
@@ -1132,14 +1132,34 @@ class SessionRuntime:
         else relinks a context that departed, and relying on the shutdown loops
         running in a particular order would make that order load-bearing and
         unstated.
+
+        Reports whether the atom went back. It does not when somebody else
+        installed under the same module path while the replacement was
+        awaiting: two live contexts for one path is state the session cannot
+        represent, and the one already there is a decision this rollback did
+        not make and may not reverse. So the survivor is undone for real
+        instead of put back -- it is gone either way, and the choice is only
+        between leaving its writes stranded and running its inverses. Reported
+        rather than raised, because this runs inside a failing installation's
+        rollback and an exception here would replace the caller's error with a
+        group naming both.
         """
 
         residue = departure.residue
         if residue is None:
-            return
+            return True
+        if self.context_for(residue.context.module_path) is not None:
+            logger.warning(
+                "not putting {} back: another atom now holds that module path, "
+                "so the superseded one is undone rather than restored",
+                residue.context.module_path,
+            )
+            residue.revert()
+            return False
         residue.context.link_into(self, after=departure.preceded_by)
         residue.context.resume(residue)
         self._departed.forget(residue.context)
+        return True
 
     def _uncover(self, module_path: str) -> list[str]:
         """Say who holds the providers an unlinked context was shadowing.
