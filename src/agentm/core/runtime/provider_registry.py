@@ -14,7 +14,7 @@ identity rather than re-resolved.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import replace
 
 from loguru import logger
@@ -59,7 +59,6 @@ class ProviderRegistry:
         self.stream_fn = stream_fn
         self.model = model
         self._active_name: str | None = None
-        self._owners: dict[str, str | None] = {}
         inherited = services.get_role(PROVIDER_SESSION_IDENTITY)
         self._identity = identity if identity is not None else inherited
         if self._identity is not None:
@@ -133,7 +132,6 @@ class ProviderRegistry:
         # write order, so a registration that had lost the key would win it.
         shadowed = target.swap_entry(key, None)
         target.register(key, config, scope="session")
-        self._owners[name] = owner
         # What the session was streaming through before this write. Restored by
         # the undo below and by nothing else: ``unregister`` deliberately keeps
         # the active pair when an atom *departs*, because the driver is already
@@ -159,12 +157,8 @@ class ProviderRegistry:
             target.swap_entry(key, shadowed)
             self.stream_fn = displaced_stream_fn
             self.model = displaced_model
-            if previous is None:
-                self._owners.pop(name, None)
-                if self._active_name == name:
-                    self._active_name = None
-            else:
-                self._owners[name] = self._service_owner(key)
+            if previous is None and self._active_name == name:
+                self._active_name = None
 
         try:
             self.activate()
@@ -192,20 +186,8 @@ class ProviderRegistry:
         """
 
         self._services.unregister(f"{_SERVICE_PREFIX}{name}")
-        self._owners.pop(name, None)
         if self._active_name == name:
             self._active_name = None
-
-    def note_owner(self, name: str, owner: str | None) -> None:
-        """Re-file one provider under the atom whose registration now resolves.
-
-        Unlinking a context uncovers whatever it was shadowing, and this index
-        is the one account of provider ownership that no chain resolves for
-        itself. Not a caller's choice of name: the session reads it off the
-        context tree and passes what it found.
-        """
-
-        self._owners[name] = owner
 
     def has(self, name: str) -> bool:
         return self._services.get(f"{_SERVICE_PREFIX}{name}") is not None
@@ -235,13 +217,6 @@ class ProviderRegistry:
             if isinstance(provider, ProviderConfig):
                 providers[service_name[len(_SERVICE_PREFIX) :]] = provider
         return providers
-
-    def owners(self) -> dict[str, str | None]:
-        """Which atom registered each provider, by provider name."""
-
-        return dict(self._owners)
-
-    # --- Selection ---
 
     def _resolver(self) -> ProviderResolver | None:
         candidate = self._services.get(PROVIDER_RESOLVER_SERVICE)
@@ -434,32 +409,34 @@ class ProviderRegistry:
 
 def uncover_providers(
     providers: ProviderRegistry,
-    module_path: str,
-    owner_of: Callable[[str], str | None],
+    departed_keys: Collection[str],
 ) -> list[str]:
-    """Say who holds the providers an unlinked context was shadowing.
+    """Drop the providers a departing context really took with it.
 
-    Unlinking is not the same as removing, and this is where the difference
-    shows. A key two contexts wrote resolves to the survivor the moment the
-    writer leaves, and every reader of that resolves it for itself -- except
-    the provider registry, whose ownership index and active name are its
-    own and which nothing else can re-resolve.
+    Which providers it held is read off its own table -- the keys it is
+    carrying out are the registrations it made -- rather than from an index
+    keyed by owner.  The registry kept one for exactly this moment, because by
+    now the context is unlinked and the tree can no longer say what it owned;
+    but the context can, and it is the one leaving.
 
-    Returns the providers that really went away, as opposed to the ones
-    that were merely uncovered.
+    Unlinking is not removing. A name two contexts registered resolves to the
+    survivor the moment the writer leaves, and every reader resolves that for
+    itself. Only the ones nothing else answers for are unregistered here.
+
+    Returns the providers that really went away, as opposed to the ones that
+    were merely uncovered.
     """
 
     departed: list[str] = []
-    uncovered: list[str] = []
-    for name, owner in providers.owners().items():
-        if owner != module_path:
+    uncovered = False
+    for key in departed_keys:
+        if not key.startswith(_SERVICE_PREFIX):
             continue
+        name = key[len(_SERVICE_PREFIX) :]
         if providers.has(name):
-            uncovered.append(name)
+            uncovered = True
         else:
             departed.append(name)
-    for name in uncovered:
-        providers.note_owner(name, owner_of(f"provider:{name}"))
     for name in departed:
         providers.unregister(name)
     if uncovered:

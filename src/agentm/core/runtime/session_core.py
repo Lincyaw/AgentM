@@ -1109,7 +1109,7 @@ class SessionRuntime:
         residue = context.suspend()
         self._departed.note(context)
         removed_providers = uncover_providers(
-            self._providers, module_path, self.ownership().service
+            self._providers, residue.services.own_table()
         )
         logger.debug(
             "unlinked atom {}: {} tools, {} policies, {} renderers, "
@@ -1379,8 +1379,8 @@ class SessionRuntime:
             if include_provider_atoms
             else {
                 owner
-                for owner in self._providers.owners().values()
-                if owner is not None
+                for name in self._providers.names()
+                if (owner := self.ownership().service(f"provider:{name}")) is not None
             }
         )
         return CompositionSnapshot(

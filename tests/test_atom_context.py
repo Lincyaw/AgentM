@@ -1545,7 +1545,6 @@ async def test_a_failed_provider_registration_leaves_one_account_of_it(
 
         assert resolver.calls == 2
         assert _owner(session, "provider:shared_provider") == spec_a.module_path
-        assert session._providers.owners()["shared_provider"] == spec_a.module_path
         assert _composition_differences(before, composition_digest(session)) == ()
 
     # The other branch: the failing registration goes into a table that already
@@ -1558,7 +1557,6 @@ async def test_a_failed_provider_registration_leaves_one_account_of_it(
         await session.install_extension(spec_y)
         key = "provider:shared_provider"
         assert _owner(session, key) == spec_y.module_path
-        assert session._providers.owners()["shared_provider"] == spec_y.module_path
         served = session.get_provider("shared_provider")
         assert served is not None
         assert served.stream_fn.label == "prov_y"
@@ -1593,7 +1591,6 @@ async def test_a_failed_provider_registration_leaves_one_account_of_it(
         assert restored.stream_fn.label == "prov_y"
         assert session._providers.stream_fn.label == "prov_y"
         assert _owner(session, key) == spec_y.module_path
-        assert session._providers.owners()["shared_provider"] == spec_y.module_path
         assert _composition_differences(before, composition_digest(session)) == ()
 
         # And the entry that was put back is still the one it was: uninstalling
@@ -2055,11 +2052,8 @@ async def test_an_install_that_completes_beside_a_failing_one_still_works(
         digest = composition_digest(session)
         codecs = {entry.source: entry.owner for entry in digest.trigger_codecs}
         assert codecs.get("late_atom_source") == late.module_path
-        # Read off the provider registry's own index rather than the digest:
-        # the digest attributes a provider through the context tree, which a
-        # picture of the registry cannot reach, so asking the digest would be
-        # asking the one account that could not be wrong.
-        assert session._providers.owners() == {"late_atom_provider": late.module_path}
+        providers = {entry.name: entry.owner for entry in digest.providers}
+        assert providers == {"late_atom_provider": late.module_path}
         assert session._providers.names() == ["late_atom_provider"]
         # And the other direction: an atom leaving may keep its trigger source
         # registered, but one that never arrived may not. Nothing can be naming
@@ -2111,18 +2105,20 @@ async def test_a_failed_install_leaves_no_provider_behind(tmp_path: Path) -> Non
     whatever anybody else had registered meanwhile, so the write records the
     inverse that takes back this one registration and nothing else.
 
-    Read off ``ProviderRegistry`` rather than the digest: the digest attributes
-    a provider through the context tree, which cannot be wrong about this, so
-    asking it would witness nothing.
+    Read off ``ProviderRegistry.names`` -- the registrations the session
+    actually resolves -- rather than an ownership index, because there is no
+    longer one to read: who owns a provider is a question the context tree
+    answers, and the registry keeping a parallel answer was the last
+    hand-synced mirror in the runtime.
     """
 
     doomed = _atom(tmp_path, "doomed_atom", _PROVIDER_THEN_REFUSES)
     async with probe_session(str(tmp_path)) as session:
-        before = dict(session._providers.owners())
+        before = session._providers.names()
         with pytest.raises(Exception, match="doomed_atom broke"):
             await session.install_extension(doomed)
 
-        assert session._providers.owners() == before
+        assert session._providers.names() == before
         assert "doomed_atom_provider" not in session._providers.names()
         assert session.installed_extensions == []
 
