@@ -413,9 +413,13 @@ class ServiceRegistry:
     def own_layers(self) -> dict[str, tuple[ServiceEntry, ...]]:
         """This node's own layers, chain excluded, oldest write first.
 
-        For a reader that has to say what one context contributes to a key it
-        does not own -- a digest that reported only the fold would call a
-        session with two layers equal to one with the same net executor.
+        For the two readers that have to say what one context contributes to a
+        key it does not own.  Attribution counts a layer as a write to the key,
+        because that is how the registry resolves it.  And the composition
+        digest counts them per node, because the fold cannot: a layer that
+        failed to leave is invisible in the folded value whenever its wrapper
+        shares a type name with one that stayed, which is what an atom layering
+        a key twice produces.
         """
 
         return {name: tuple(rows) for name, rows in self._layers.items() if rows}

@@ -122,6 +122,7 @@ from loguru import logger
 
 from agentm.core.abi.effects import EffectLog
 from agentm.core.abi.services import ServiceScope
+from agentm.core.runtime.atom_context import AtomContext
 from agentm.core.runtime.session_core import SessionRuntime
 
 
@@ -173,12 +174,21 @@ class ServiceEntry:
 
     ``value`` is the structural digest of the registered object, not the object
     — see ``_service_value`` for what it can and cannot tell apart.
+
+    ``layers`` is how many decorations fold into the key, counted per owning
+    context.  It is here because ``value`` alone cannot see a layer that failed
+    to leave: the fold is digested by the wrapper's type name, so a stack that
+    kept one layer too many reads as identical to the stack it should have been
+    whenever two layers build the same class -- which is the ordinary case, an
+    atom that layers a key twice.  A count is order-free, so it says a layer
+    stayed without saying anything about the sequence they were written in.
     """
 
     key: str
     scope: ServiceScope | None
     owner: str | None
     value: str
+    layers: tuple[tuple[str | None, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +314,7 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
     # table to leave behind now, so ``composition_specs`` witnesses the filter
     # rather than a second list: which of the held atoms a child would replay.
     installed = tuple(context for context in linked if context.installed)
+    layer_counts = _layer_counts(session, linked)
 
     return CompositionDigest(
         atoms=tuple(
@@ -359,6 +370,7 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
                 scope=session.services.scope(key),
                 owner=owners.service(key),
                 value=_service_value(session.services.get(key)),
+                layers=layer_counts.get(key, ()),
             )
             for key in sorted(session.services.names())
         ),
@@ -486,6 +498,35 @@ eight levels is past anything a service holds in practice.
 
 _UNSET: Final[object] = object()
 """Stands for a dataclass field that was declared and never assigned."""
+
+
+def _layer_counts(
+    session: SessionRuntime,
+    linked: Sequence[AtomContext],
+) -> dict[str, tuple[tuple[str | None, int], ...]]:
+    """How many layers each context contributes to each key.
+
+    Read per node rather than off the fold, because the fold is the one thing
+    that cannot answer it: a layer that failed to leave shows up in the value
+    only when its wrapper has a type name nothing else there has, and an atom
+    that layers a key twice puts two of the same class on it.
+
+    ``None`` names the host's own layers, the same "belongs to nobody" the
+    context tree means by it.  Sorted by owner, so this says how many each
+    context contributes and nothing about the sequence the writes landed in --
+    the sequence is the fold's business, and it reads the ranks live.
+    """
+
+    counted: dict[str, list[tuple[str | None, int]]] = {}
+    for key, rows in session.services.own_layers().items():
+        counted.setdefault(key, []).append((None, len(rows)))
+    for context in linked:
+        for key, rows in context.services.own_layers().items():
+            counted.setdefault(key, []).append((context.module_path, len(rows)))
+    return {
+        key: tuple(sorted(rows, key=lambda row: (row[0] or "", row[1])))
+        for key, rows in counted.items()
+    }
 
 
 def _service_value(value: object) -> str:

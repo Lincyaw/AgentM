@@ -970,3 +970,70 @@ async def test_a_superseded_atoms_codec_still_decodes_a_committed_turn(
             for entry in composition_digest(session).trigger_codecs
             if entry.source == "codec_probe"
         ] == [spec.module_path]
+
+
+_TWO_LAYERS = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="decorates one key {count} time(s), with one wrapper class",
+    registers=("service:layered_probe",),
+)
+
+
+class Wrapper:
+    def __init__(self, inner):
+        self.inner = inner
+
+
+def install(api, config):
+    del config
+    for _each in range({count}):
+        api.services.layer("layered_probe", Wrapper)
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_digest_sees_a_layer_the_folded_value_cannot(
+    tmp_path: Path,
+) -> None:
+    """A layer that failed to leave hides inside the value it produced.
+
+    The digest reads a service key by resolving it, which for a layered key is
+    the fold. That is the right value to compare -- it is what the session
+    serves -- but it cannot count. A wrapper is not a dataclass, so it digests
+    by its type name alone, and one wrapper around a base digests exactly as
+    two do. An atom that layers a key twice and takes only one layer out on the
+    way back leaves the fold looking untouched.
+
+    Which is the case that matters: the layer exists so a decoration can be
+    taken out of the middle, and an instrument that cannot see one stay is not
+    an instrument for it.
+
+    Asserted against the value being equal, because that is the whole claim --
+    it is not that the two compositions differ somewhere, it is that they
+    differ *only* where the count is.
+    """
+
+    async def _entry(count: int) -> object:
+        spec = _file_atom(
+            tmp_path,
+            f"layers_{count}",
+            _TWO_LAYERS.format(name="layers_probe", count=count),
+        )
+        async with probe_session(str(tmp_path)) as session:
+            await session.install_extension(spec)
+            return next(
+                entry
+                for entry in composition_digest(session).services
+                if entry.key == "layered_probe"
+            )
+
+    one = await _entry(1)
+    two = await _entry(2)
+
+    # What the digest used to have to go on, and it says they are the same.
+    assert one.value == two.value  # type: ignore[attr-defined]
+    assert [count for _owner, count in one.layers] == [1]  # type: ignore[attr-defined]
+    assert [count for _owner, count in two.layers] == [2]  # type: ignore[attr-defined]
