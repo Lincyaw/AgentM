@@ -182,6 +182,36 @@ async def test_the_digest_records_tools_in_advertised_order(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_the_digest_notices_what_an_atom_was_configured_with(
+    tmp_path: Path,
+) -> None:
+    """An atom's config is part of the composition, so the digest reads it.
+
+    A rebuild replays the config as faithfully as it replays the source, so two
+    sessions composing one atom under different settings are two different
+    sessions. Digesting the module path alone called them equal, which would
+    have let every revertibility check here miss the whole config surface --
+    and this digest is the instrument the composability work is verified with.
+    """
+
+    spec = "agentm.extensions.builtin.system_prompt"
+    async with probe_session(str(tmp_path)) as one:
+        await one.install_extension(
+            ExtensionSpec.from_module(spec, config={"prompt": "PROMPT-A"})
+        )
+        first = composition_digest(one)
+
+    async with probe_session(str(tmp_path)) as two:
+        await two.install_extension(
+            ExtensionSpec.from_module(spec, config={"prompt": "PROMPT-B"})
+        )
+        second = composition_digest(two)
+
+    differing = {difference.field for difference in digest_differences(first, second)}
+    assert "composition_specs" in differing
+
+
+@pytest.mark.asyncio
 async def test_taking_a_digest_does_not_freeze_the_provider_identity(
     tmp_path: Path,
 ) -> None:

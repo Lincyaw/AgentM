@@ -301,7 +301,14 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
             for context in installed
         ),
         composition_specs=tuple(
-            context.spec.module_path for context in installed if not context.runtime
+            # With the config, not just the path. Two sessions composing one
+            # atom under different settings hold different sessions, and a
+            # rebuild replays the config as faithfully as it replays the
+            # source -- so a digest blind to it would call them equal and let
+            # every revertibility check in the repo miss a whole surface.
+            f"{context.spec.module_path}/{_service_value(context.spec.config)}"
+            for context in installed
+            if not context.runtime
         ),
         tools=tuple(
             ToolEntry(name=tool.name, owner=owners.tool(tool)) for tool in session.tools
