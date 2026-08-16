@@ -881,7 +881,9 @@ def ownership_of(
 
     Services and renderers are the two tables where that is not link order.  A
     service key resolves to the highest ``ServiceEntry.order`` anywhere in the
-    chain and a trigger source to the highest ``RendererRow.order`` — write
+    chain -- layers included, since a layer is a write to the key even though
+    it decorates rather than replaces -- and a trigger source to the highest
+    ``RendererRow.order`` — write
     order, so that linking a context cannot change what either already resolved
     to — and a context can rebind one long after a later-linked context wrote
     it.  So each winner is picked by the same number its reader picks it by, and
@@ -896,9 +898,18 @@ def ownership_of(
     policies: dict[int, str] = {}
     renderers: dict[str, str] = {}
     services: dict[str, str] = {}
+    # Layers count as writes to their key, because that is how the registry
+    # resolves it: what a layered key belongs to is whoever wrote it last,
+    # decoration or value. A layer that did not count would leave a key nobody
+    # owns while an atom is visibly contributing to it.
     winning: dict[str, int] = {
         key: entry.order for key, entry in own.own_table().items()
     }
+    for key, rows in own.own_layers().items():
+        for entry in rows:
+            held = winning.get(key)
+            if held is None or entry.order > held:
+                winning[key] = entry.order
     bound: dict[str, int] = {source: row.order for source, row in own_renderers.items()}
     for context in linked:
         owner = context.module_path
@@ -916,6 +927,12 @@ def ownership_of(
             if held is None or entry.order > held:
                 winning[key] = entry.order
                 services[key] = owner
+        for key, rows in context.services.own_layers().items():
+            for entry in rows:
+                held = winning.get(key)
+                if held is None or entry.order > held:
+                    winning[key] = entry.order
+                    services[key] = owner
     return ContextOwnership(
         tools=tools,
         policies=policies,

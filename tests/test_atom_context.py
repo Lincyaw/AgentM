@@ -34,7 +34,8 @@ from agentm.core.abi.messages import TextContent
 from agentm.core.abi.session_api import AtomAPI, ExtensionSpec
 from agentm.core.abi.stream import Model
 from agentm.core.abi.tool import FunctionTool, ToolResult
-from agentm.core.runtime.composition_digest import composition_digest
+from agentm.core.abi.roles import TOOL_EXECUTOR
+from agentm.core.runtime.composition_digest import _service_value, composition_digest
 from agentm.core.runtime.session_core import SessionRuntime
 from agentm.testing import NeverStreams, digest_differences, probe_session
 
@@ -2201,6 +2202,48 @@ def install(api, config):
     raise RuntimeError("{name} refuses to install")
 """
 )
+
+
+def _builtin(name: str) -> ExtensionSpec:
+    return ExtensionSpec.from_module(f"agentm.extensions.builtin.{name}")
+
+
+@pytest.mark.asyncio
+async def test_a_layer_can_be_taken_out_of_the_middle(tmp_path: Path) -> None:
+    """Two shipped atoms decorate one key, and either can leave.
+
+    ``background_exec`` and ``tool_purpose`` both want to wrap the tool
+    executor. Both used to do it by reading the role, wrapping what they found
+    and binding the result -- which puts the chain in a closure. Detaching the
+    inner one then unlinked its context, removed its services and took it out
+    of the installed set while its executor went on running inside the outer
+    one, on every tool call, forever.
+
+    Neither atom's own revertibility check could see it: one atom alone is not
+    a chain. It takes two, which is the shape a per-atom instrument is blind to
+    by construction.
+
+    They register layers now, so the chain is folded at each read from the
+    layers that are present. Stated against a session that only ever had the
+    survivor, because that is the property -- what is left after the inner one
+    leaves has to be what never having it produces.
+    """
+
+    async with probe_session(str(tmp_path)) as churned:
+        for name in ("local_backend", "background_exec", "tool_purpose"):
+            await churned.install_extension(_builtin(name))
+        both = _service_value(churned.services.get_role(TOOL_EXECUTOR))
+        assert churned.uninstall_extension(_builtin("background_exec"))
+        survivor = _service_value(churned.services.get_role(TOOL_EXECUTOR))
+
+    async with probe_session(str(tmp_path)) as cold:
+        for name in ("local_backend", "tool_purpose"):
+            await cold.install_extension(_builtin(name))
+        alone = _service_value(cold.services.get_role(TOOL_EXECUTOR))
+
+    # The control: while both were installed the executor really was different.
+    assert both != alone
+    assert survivor == alone
 
 
 @pytest.mark.asyncio

@@ -533,11 +533,15 @@ class _BackgroundExecRuntime:
         )
 
     def install(self) -> None:
-        inner = self._api.services.get_role(TOOL_EXECUTOR) or DirectToolExecutor()
-        self._api.services.bind(
-            TOOL_EXECUTOR,
-            _BackgroundExecutor(inner, self._manager),
-            replace=True,
+        # A layer, not a wrapper this atom builds and binds -- see the same
+        # call in tool_purpose: a bound wrapper holds the executor it found, so
+        # the atom that registered *that* one can never be taken out again.
+        self._api.services.layer(
+            TOOL_EXECUTOR.key,
+            lambda inner: _BackgroundExecutor(
+                inner if isinstance(inner, ToolExecutor) else DirectToolExecutor(),
+                self._manager,
+            ),
         )
         self._api.on(
             SessionShutdownEvent.CHANNEL,

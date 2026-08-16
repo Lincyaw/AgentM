@@ -83,11 +83,16 @@ class _ToolPurposeRuntime:
         self._injected_tools: set[str] = set()
 
     def install(self) -> None:
-        inner = self._api.services.get_role(TOOL_EXECUTOR) or DirectToolExecutor()
-        self._api.services.bind(
-            TOOL_EXECUTOR,
-            _PurposeExecutor(inner, self._injected_tools),
-            replace=True,
+        # A layer, not a wrapper this atom builds and binds. Reading the role,
+        # wrapping what is there and binding the result would capture whatever
+        # executor happened to be installed first, and detaching *that* atom
+        # would leave its executor running inside this one.
+        self._api.services.layer(
+            TOOL_EXECUTOR.key,
+            lambda inner: _PurposeExecutor(
+                inner if isinstance(inner, ToolExecutor) else DirectToolExecutor(),
+                self._injected_tools,
+            ),
         )
         self._api.on(BeforeSendEvent.CHANNEL, self.on_before_send)
 

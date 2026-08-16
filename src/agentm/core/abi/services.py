@@ -28,6 +28,7 @@ to except by writing it.
 from __future__ import annotations
 
 import itertools
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol, TypeVar, cast, overload
 
@@ -99,6 +100,32 @@ class ServiceRole[T]:
 
 
 @dataclass(frozen=True, slots=True)
+class ServiceLayer:
+    """A write that decorates a key rather than replacing what it holds.
+
+    The alternative, and what several atoms did before this existed, is to read
+    the key, wrap what is there, and write the wrapper back.  That captures the
+    chain in a closure: the order is install order, and taking out a link in
+    the middle is unrepresentable -- the outer wrapper goes on calling the
+    inner one long after the atom that registered it has been detached, with
+    its context unlinked and its services gone.
+
+    A layer states the decoration instead of performing it.  ``build`` takes
+    whatever the key resolves to underneath and returns the decorated value,
+    so the chain is *derived* at every read: it is the fold of the layers that
+    are present right now, over the base that is there right now.  Removing an
+    atom removes its layer, and the next read folds without it.
+
+    One key, one writer per layer, so layers are set-shaped -- which is what
+    makes them commute.  The fold order is write order for now; it becomes
+    dependency rank when there is one, and that is a change to one sort key
+    rather than to anything that holds a chain.
+    """
+
+    build: Callable[[object], object]
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceEntry:
     """One registration: the value, how it was checked, and when it was written.
 
@@ -118,10 +145,14 @@ class ServiceEntry:
 class ServiceRegistry:
     """Typed, named service registry with runtime protocol checks."""
 
-    __slots__ = ("_linked", "_parent", "_services", "_write_observer")
+    __slots__ = ("_layers", "_linked", "_parent", "_services", "_write_observer")
 
     def __init__(self, *, parent: ServiceRegistry | None = None) -> None:
         self._services: dict[str, ServiceEntry] = {}
+        #: Decorations of a key, kept beside the entries rather than among
+        #: them: a layer does not compete for the key, and a node has to be
+        #: able to hold a base and a layer for one name, or two layers.
+        self._layers: dict[str, list[ServiceEntry]] = {}
         self._write_observer: WriteObserver | None = None
         #: The registry this one resolves through when it holds no entry for a
         #: key. Set once, at construction, by whoever derives a context; there
@@ -225,11 +256,11 @@ class ServiceRegistry:
         it — so this recursion cannot run away.
         """
 
-        best = self._services.get(name)
+        best = _node_entry(self, name)
         for child in self._linked:
             if child is skip:
                 continue
-            entry = child._services.get(name)
+            entry = _node_entry(child, name)
             if entry is not None and (best is None or entry.order > best.order):
                 best = entry
         parent = self._parent
@@ -246,7 +277,7 @@ class ServiceRegistry:
     ) -> dict[str, ServiceEntry]:
         """Every key this node can see, each at its winning entry."""
 
-        resolved = dict(self._services)
+        resolved: dict[str, ServiceEntry] = {}
 
         def _offer(candidates: dict[str, ServiceEntry]) -> None:
             for key, entry in candidates.items():
@@ -254,10 +285,22 @@ class ServiceRegistry:
                 if held is None or entry.order > held.order:
                     resolved[key] = entry
 
+        def _offer_node(node: ServiceRegistry) -> None:
+            # Layers count: a key nothing binds but something decorates is a
+            # key this registry holds, and a reader that listed only the bound
+            # ones would not see it at all.
+            _offer(node._services)
+            for key, rows in node._layers.items():
+                for entry in rows:
+                    held = resolved.get(key)
+                    if held is None or entry.order > held.order:
+                        resolved[key] = entry
+
+        _offer_node(self)
         for child in self._linked:
             if child is skip:
                 continue
-            _offer(child._services)
+            _offer_node(child)
         parent = self._parent
         if parent is not None and parent is not skip:
             _offer(parent._resolved(skip=self))
@@ -319,6 +362,46 @@ class ServiceRegistry:
         if self._write_observer is not None:
             self._write_observer(name, service, scope, role_bind=role_bind)
 
+    def own_layers(self) -> dict[str, tuple[ServiceEntry, ...]]:
+        """This node's own layers, chain excluded, oldest write first.
+
+        For a reader that has to say what one context contributes to a key it
+        does not own -- a digest that reported only the fold would call a
+        session with two layers equal to one with the same net executor.
+        """
+
+        return {name: tuple(rows) for name, rows in self._layers.items() if rows}
+
+    def layer(
+        self,
+        name: str,
+        build: Callable[[object], object],
+        *,
+        scope: ServiceScope = "tree",
+    ) -> None:
+        """Decorate ``name`` rather than replacing what it holds.
+
+        For the case several atoms genuinely share: each wants to wrap the tool
+        executor, or the permission policy, without any of them owning it. Each
+        writes its own layer into its own table, so the writes do not collide
+        and none of them holds another's value; the key resolves to the fold.
+
+        What this buys is that a layer can be taken out of the middle. Nothing
+        else can: a wrapper built by reading the key and writing itself back is
+        a link in a chain nobody else can see, and detaching the atom that made
+        it leaves the link in place.
+        """
+
+        entry = ServiceEntry(
+            service=ServiceLayer(build=build),
+            protocol=None,
+            scope=scope,
+            order=next(_WRITE_ORDER),
+        )
+        self._layers.setdefault(name, []).append(entry)
+        if self._write_observer is not None:
+            self._write_observer(name, entry.service, scope, role_bind=False)
+
     def bind(
         self,
         role: ServiceRole[T],
@@ -363,6 +446,10 @@ class ServiceRegistry:
         if entry is None:
             return None
         service = entry.service
+        if type(service) is ServiceLayer:
+            service = _fold(self, name)
+            if service is None:
+                return None
         if protocol is not None and not isinstance(service, protocol):
             raise ServiceTypeMismatch(
                 f"service {name!r}: expected {protocol.__name__}, got "
@@ -443,3 +530,86 @@ __all__ = [
     "ServiceTypeMismatch",
     "WriteObserver",
 ]
+
+
+def _node_entry(registry: ServiceRegistry, name: str) -> ServiceEntry | None:
+    """This node's newest write to ``name``, layer or value.
+
+    A layer is a write to the key even though it does not replace what the
+    key holds, so every reader that asks "is this key here, and whose is
+    it" has to count it.  Only ``get`` cares about the difference, and it
+    asks by looking at what it got back.
+    """
+
+    best = registry._services.get(name)
+    for entry in registry._layers.get(name, ()):
+        if best is None or entry.order > best.order:
+            best = entry
+    return best
+
+
+def _base_entry(
+    registry: ServiceRegistry,
+    name: str,
+    *,
+    skip: ServiceRegistry | None = None,
+) -> ServiceEntry | None:
+    """What the layers decorate: the newest write that is not a layer."""
+
+    best = registry._services.get(name)
+    for child in registry._linked:
+        if child is skip:
+            continue
+        entry = child._services.get(name)
+        if entry is not None and (best is None or entry.order > best.order):
+            best = entry
+    parent = registry._parent
+    if parent is not None and parent is not skip:
+        entry = _base_entry(parent, name, skip=registry)
+        if entry is not None and (best is None or entry.order > best.order):
+            best = entry
+    return best
+
+
+def _collect(
+    registry: ServiceRegistry,
+    name: str,
+    *,
+    skip: ServiceRegistry | None = None,
+) -> list[ServiceEntry]:
+    """Every *layer* on ``name`` anywhere in the chain, oldest write first.
+
+    Layers do not compete for the key -- they decorate whatever holds it --
+    so they are kept beside the entries rather than among them.  Two layers
+    from one node, and a base and a layer in one node, both have to be
+    representable, and a single slot per key cannot represent either.
+    """
+
+    found: list[ServiceEntry] = list(registry._layers.get(name, ()))
+    for child in registry._linked:
+        if child is skip:
+            continue
+        found.extend(child._layers.get(name, ()))
+    parent = registry._parent
+    if parent is not None and parent is not skip:
+        found.extend(_collect(parent, name, skip=registry))
+    found.sort(key=lambda entry: entry.order)
+    return found
+
+
+def _fold(registry: ServiceRegistry, name: str) -> object | None:
+    """A layered key's value: every layer applied over the current base.
+
+    The base is the newest write that is not a layer, so a later ``bind``
+    of a fresh implementation is decorated by the layers that are present
+    rather than escaping them -- a layer says "wrap this key", not "wrap
+    the value I happened to find".
+    """
+
+    found = _base_entry(registry, name)
+    value: object | None = None if found is None else found.service
+    for entry in _collect(registry, name):
+        layer = entry.service
+        if type(layer) is ServiceLayer:
+            value = layer.build(value)
+    return value
