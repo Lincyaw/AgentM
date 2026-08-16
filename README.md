@@ -92,8 +92,10 @@ packaged scenario names in this reduced worktree:
 Hosts that need named scenarios beyond these should pass
 `AgentSessionConfig.scenario_loader`.
 
-Provider and backend implementations are optional package extras. For example,
-install `agentm[provider-openai,packaged-minimal]` when using the example above.
+`pip install agentm` is enough to run any atom this package ships, providers
+and observability included. The only extras are storage backends and the Harbor
+adapter, which a deployment opts into by naming one: `agentm[storage-postgres]`,
+`agentm[storage-clickhouse]`, `agentm[harbor]`.
 
 ## Persistence
 

@@ -14,6 +14,11 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from jsonschema import (  # type: ignore[import-untyped]
+    ValidationError,
+    validate,
+)
+
 from agentm.core.abi import (
     AtomAPI,
     FunctionTool,
@@ -50,15 +55,6 @@ MANIFEST = ExtensionManifest(
 
 class _SchemaValidator:
     def __init__(self) -> None:
-        try:
-            from jsonschema import (  # type: ignore[import-untyped]
-                ValidationError,
-                validate,
-            )
-        except ImportError as exc:
-            raise RuntimeError(
-                "structured_output requires the jsonschema dependency"
-            ) from exc
         self._validate_fn: Callable[[JsonValue, dict[str, object]], None] = validate
         self._error_cls: type[Exception] = ValidationError
 

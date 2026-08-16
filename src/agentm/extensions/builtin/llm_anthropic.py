@@ -29,7 +29,6 @@ import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import (
-    TYPE_CHECKING,
     Any,
     Literal,
     Protocol,
@@ -85,10 +84,10 @@ from agentm.core.lib.provider_install import (
     resolve_model_id,
     resolve_provider_name,
 )
-from agentm.extensions import ExtensionManifest
+import anthropic
+from anthropic import AsyncAnthropic
 
-if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
-    from anthropic import AsyncAnthropic
+from agentm.extensions import ExtensionManifest
 
 
 class LlmAnthropicConfig(BaseModel):
@@ -121,16 +120,12 @@ MANIFEST = ExtensionManifest(
 
 
 def _is_anthropic_retryable(exc: BaseException) -> bool:
-    try:
-        import anthropic
-    except ImportError:  # pragma: no cover - SDK dependency is optional here
-        return False
     # RateLimitError: server-side throttle. APIConnectionError /
     # APITimeoutError: transport stalls surfaced by the finite read
     # timeout set in ``_get_client`` — without retry they propagate up and
     # fail the whole firing on a single half-dead connection. Build the
-    # tuple via getattr so a partial SDK / test double missing a name is
-    # tolerated (mirrors ``_is_openai_retryable``).
+    # tuple by name so a partial SDK or a test double missing one is tolerated
+    # (mirrors ``_is_openai_retryable``).
     retryable_types = tuple(
         err_type
         for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
@@ -498,9 +493,6 @@ class AnthropicStreamFn:
     def _get_client(self) -> AsyncAnthropic:
         if self.client is not None:
             return self.client
-        # Imported lazily so module import doesn't require the SDK to be
-        # configured (e.g. in offline test environments using injected client).
-        from anthropic import AsyncAnthropic as _AsyncAnthropic
 
         api_key = self.api_key or os.environ.get("ANTHROPIC_API_KEY")
         kwargs: dict[str, Any] = {"api_key": api_key}
@@ -522,7 +514,7 @@ class AnthropicStreamFn:
         kwargs["timeout"] = httpx.Timeout(
             connect=30.0, read=180.0, write=60.0, pool=30.0
         )
-        self.client = _AsyncAnthropic(**kwargs)
+        self.client = AsyncAnthropic(**kwargs)
         return self.client
 
     def __call__(

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 All commands go through `uv` — pip/poetry/pipenv are forbidden.
 
 ```bash
-uv sync                           # install deps (add --all-packages for workspace members)
+uv sync                           # install deps; this alone is enough to run the suite
 git config core.hooksPath .githooks  # enable tracked pre-commit hook once per clone/worktree
 uv run ruff format src/ tests/     # auto-format
 uv run ruff check src/ tests/      # lint

@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 import httpx
+import openai
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
@@ -129,10 +131,6 @@ MANIFEST = ExtensionManifest(
 
 
 def _is_openai_retryable(exc: BaseException) -> bool:
-    try:
-        import openai
-    except ImportError:  # pragma: no cover - SDK dependency is optional here
-        return False
     # APIConnectionError / APITimeoutError surface read-timeouts and
     # half-dead TCP — without retry these propagate up and waste the
     # whole rollout. Treat them like 429s.
@@ -628,13 +626,8 @@ class OpenAIStreamFn:
     def _get_client(self) -> Any:
         if self.client is not None:
             return self.client
-        # Imported lazily so module import doesn't require the SDK to be
-        # configured (e.g. in offline test environments using injected client).
-
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
         if self.azure_endpoint is not None:
-            from openai import AsyncAzureOpenAI as _AsyncAzureOpenAI
-
             azure_kwargs: dict[str, Any] = {
                 "azure_endpoint": self.azure_endpoint,
                 "api_key": api_key,
@@ -646,10 +639,8 @@ class OpenAIStreamFn:
             if not self.verify_ssl:
                 factory = self.httpx_client_factory or _default_httpx_client
                 azure_kwargs["http_client"] = factory(verify=False)
-            self.client = _AsyncAzureOpenAI(**azure_kwargs)
+            self.client = AsyncAzureOpenAI(**azure_kwargs)
             return self.client
-
-        from openai import AsyncOpenAI as _AsyncOpenAI
 
         kwargs: dict[str, Any] = {"api_key": api_key}
         if self.base_url is not None:
@@ -661,7 +652,7 @@ class OpenAIStreamFn:
         if not self.verify_ssl:
             factory = self.httpx_client_factory or _default_httpx_client
             kwargs["http_client"] = factory(verify=False)
-        self.client = _AsyncOpenAI(**kwargs)
+        self.client = AsyncOpenAI(**kwargs)
         return self.client
 
     def __call__(
