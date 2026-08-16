@@ -134,6 +134,15 @@ class ProviderRegistry:
         shadowed = target.swap_entry(key, None)
         target.register(key, config, scope="session")
         self._owners[name] = owner
+        # What the session was streaming through before this write. Restored by
+        # the undo below and by nothing else: ``unregister`` deliberately keeps
+        # the active pair when an atom *departs*, because the driver is already
+        # streaming through it and a session that lost its model mid-turn would
+        # be worse off. An installation that never landed is the other case --
+        # its model was never legitimately the session's -- and the undo only
+        # ever runs for that one.
+        displaced_stream_fn = self.stream_fn
+        displaced_model = self.model
 
         def _undo() -> None:
             # The undo of the swap is the same swap back: this write leaves,
@@ -148,6 +157,8 @@ class ProviderRegistry:
             # durable session identity, so a name no registration answers must
             # not survive. ``activate`` picks one again from what is left.
             target.swap_entry(key, shadowed)
+            self.stream_fn = displaced_stream_fn
+            self.model = displaced_model
             if previous is None:
                 self._owners.pop(name, None)
                 if self._active_name == name:

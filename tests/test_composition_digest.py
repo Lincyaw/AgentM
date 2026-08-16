@@ -181,6 +181,128 @@ async def test_the_digest_records_tools_in_advertised_order(tmp_path: Path) -> N
         assert composition_digest(session).tools != digest.tools
 
 
+_WRITES_EVERYTHING_THEN_FAILS = """\
+from dataclasses import dataclass
+
+from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.messages import TextContent
+from agentm.core.abi.provider import ProviderConfig
+from agentm.core.abi.stream import Model
+from agentm.core.abi.tool import FunctionTool, ToolResult
+
+
+MANIFEST = ExtensionManifest(
+    name="greedy_atom",
+    description="Writes into every store there is, then refuses to install.",
+    registers=("service:greedy_service",),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class GreedyTrigger:
+    value: str
+    source: str = "greedy_source"
+
+
+class GreedyCodec:
+    def serialize(self, trigger):
+        return {"__source__": "greedy_source", "value": trigger.value}
+
+    def deserialize(self, data):
+        return GreedyTrigger(value=data["value"])
+
+
+class GreedyRenderer:
+    def render(self, trigger):
+        return [TextContent(type="text", text=trigger.value)]
+
+
+class GreedyPolicy:
+    def apply(self, messages, ctx):
+        del ctx
+        return messages
+
+
+class GreedyStream:
+    def __call__(self, **kwargs):
+        raise RuntimeError("a greedy probe never streams")
+
+
+async def _noop(args):
+    del args
+    return ToolResult(content=(TextContent(type="text", text="ok"),))
+
+
+def install(api, config):
+    del config
+    api.services.register("greedy_service", "greedy", scope="session")
+    api.register_tool(
+        FunctionTool(
+            name="greedy_tool",
+            description="a tool that should not survive its install",
+            parameters={"type": "object", "properties": {}},
+            fn=_noop,
+        )
+    )
+    api.register_context_policy(GreedyPolicy(), priority=250)
+    api.register_trigger_renderer("greedy_source", GreedyRenderer())
+    api.register_trigger_codec("greedy_source", GreedyCodec())
+    api.register_provider(
+        "greedy_provider",
+        ProviderConfig(
+            stream_fn=GreedyStream(),
+            model=Model(
+                id="greedy-model",
+                provider="greedy_provider",
+                context_window=1000,
+                max_output_tokens=100,
+            ),
+            name="greedy_provider",
+        ),
+    )
+    api.on("greedy.channel", lambda event: None)
+    api.effect(lambda: (lambda: None), provides="greedy_effect")
+    raise RuntimeError("greedy_atom refuses to install")
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_failed_install_leaves_no_trace_in_the_composition(
+    tmp_path: Path,
+) -> None:
+    """The property the whole rollback is for, asserted once at the top.
+
+    Two sessions composed from the same atoms, one of which additionally
+    survived an installation that wrote into every store there is -- a tool, a
+    context policy, a trigger renderer, a trigger codec, a provider, a service,
+    a bus subscription and a recorded effect -- and then refused.
+
+    Their composition digests have to be equal, field for field, with nothing
+    excused. Not "the atom is absent": *nothing moved*. That is what makes the
+    failure invisible to everything downstream, spawned children included, and
+    it is only true because the rollback is an inverse rather than a picture --
+    a picture would have restored these stores to a moment that also predates
+    the session's own composition.
+    """
+
+    composed = [
+        _builtin_spec("task_tracking"),
+        _builtin_spec("system_prompt", {"prompt": "probe"}),
+        _builtin_spec("loop_budget"),
+    ]
+    greedy = _file_atom(tmp_path, "greedy_atom", _WRITES_EVERYTHING_THEN_FAILS)
+
+    async with probe_session(str(tmp_path), extensions=composed) as cold:
+        untouched = composition_digest(cold)
+
+    async with probe_session(str(tmp_path), extensions=composed) as churned:
+        with pytest.raises(Exception, match="greedy_atom refuses to install"):
+            await churned.install_extension(greedy)
+        after = composition_digest(churned)
+
+    assert digest_differences(untouched, after) == ()
+
+
 @pytest.mark.asyncio
 async def test_the_digest_notices_what_an_atom_was_configured_with(
     tmp_path: Path,
