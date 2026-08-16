@@ -76,6 +76,20 @@ class BusSegment:
     owner: str | None = None
     handlers: dict[str, list[_Subscription]] = field(default_factory=dict)
     observers: list[_ObserverRecord] = field(default_factory=list)
+    rank: int = 0
+    """How deep in the dependency graph the context owning this segment sits.
+
+    Dispatch order across segments is ``(priority, rank, seq)``: the band the
+    subscriber chose, then what the graph says, then when it subscribed.  Seq
+    used to be the whole cross-segment answer, which made dispatch a function
+    of install order -- so reinstalling one atom moved its handlers to the end
+    of their band, and anything that cared had to reinstall every atom after it
+    to put the order back.  Rank is a property of the declarations, so a
+    reinstall lands where the atom belongs and nothing downstream has to move.
+
+    Within one segment ``seq`` still decides, which is what it is good for: two
+    handlers from one atom are ordered by the order that atom subscribed them.
+    """
 
     def on(
         self,
@@ -186,18 +200,27 @@ class EventBus:
         ]
 
     def subscriptions(self, channel: str) -> list[_Subscription]:
-        """Everything ``channel`` dispatches to, in dispatch order."""
+        """Everything ``channel`` dispatches to, in dispatch order.
+
+        ``(priority, rank, seq)``: the band the subscriber chose, then where
+        the dependency graph puts the atom, then when it subscribed.  This
+        bus's own handlers are the host's and sit at rank zero, alongside the
+        atoms that declared nothing.
+        """
 
         own = self._handlers.get(channel)
         if not self._linked:
             return list(own) if own else []
-        merged: list[_Subscription] = list(own) if own else []
+        ranked: list[tuple[int, int, int, _Subscription]] = [
+            (sub.priority, 0, sub.seq, sub) for sub in (own or ())
+        ]
         for segment in self._linked:
-            linked = segment.handlers.get(channel)
-            if linked:
-                merged.extend(linked)
-        merged.sort(key=_sub_key)
-        return merged
+            ranked.extend(
+                (sub.priority, segment.rank, sub.seq, sub)
+                for sub in segment.handlers.get(channel, ())
+            )
+        ranked.sort(key=lambda row: row[:3])
+        return [sub for _priority, _rank, _seq, sub in ranked]
 
     def channels(self) -> list[str]:
         """Every channel with at least one subscription anywhere on the bus."""

@@ -1,14 +1,20 @@
 """The scenario follower converges: a broken atom settles instead of churning.
 
-Position matters to a composition, so the follower rebuilds every atom after
-the first one that disagrees with the scenario. That is what makes a failing
-atom expensive: retrying it on the timer would reinstall the whole tail every
-pass and every one of those atoms would lose what it held in memory. These
-lock down that a failed apply is attempted once, that the tail is left alone
-until the failing source changes, and that a failed atom is still detachable.
+A pass touches the positions whose spec changed and nothing else. It used to
+rebuild every atom after the first disagreement, because bus handlers
+dispatched in subscription order and leaving the tail alone composed
+differently from a cold start; dispatch orders by ``(priority, rank, seq)``
+now, so a healthy atom keeps its place and what it holds in memory. Order that
+genuinely matters is declared with ``after``, which does not depend on where
+either atom sits in the file.
+
+What that leaves is the expensive case: a broken source retried on the timer
+would report the same breakage twice a second. These lock down that a failed
+apply is attempted once, that its neighbours are undisturbed, and that a failed
+atom is still detachable.
 
 Settling is not giving up: an atom fails to install for reasons outside its own
-source, so a pass that rebuilds its position attempts it again, and a follower
+source, so it is attempted again whenever anything else lands, and a follower
 handing the loop to a newer version of itself hands over what the session is
 actually running rather than what the scenario asks for.
 
@@ -176,7 +182,18 @@ async def test_unchanged_scenario_installs_nothing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_broken_atom_is_attempted_once_and_leaves_the_tail_alone() -> None:
+async def test_a_broken_atom_is_attempted_once_and_costs_its_neighbours_nothing() -> (
+    None
+):
+    """Only the position the scenario changed is touched.
+
+    This pass used to reinstall every atom after the first disagreement, on the
+    grounds that bus handlers dispatched in subscription order and leaving the
+    tail alone composed differently from a cold start. Dispatch orders by
+    ``(priority, rank, seq)`` now, so a healthy atom keeps its place and its
+    in-memory state when something before it reloads.
+    """
+
     seeded = [_spec(f"a{i}") for i in range(8)]
     api, loader, follower = await _following(seeded)
     broken = _spec("a3", "v2")
@@ -188,11 +205,10 @@ async def test_broken_atom_is_attempted_once_and_leaves_the_tail_alone() -> None
     for _ in range(4):
         await follower._tick()
 
-    # The first pass rebuilds the tail, because position 3 disagreed and every
-    # position after it composes differently once it is reinstalled.
-    assert _names(after_first_pass) == [f"/atoms/a{i}.py" for i in range(3, 8)]
+    # One attempt, at the one position whose spec changed.
+    assert _names(after_first_pass) == ["/atoms/a3.py"]
     # The four passes after it touch nothing: the broken version is attempted
-    # once, and positions 4-8 are left holding what they hold.
+    # once, and every other position is left holding what it holds.
     assert api.installed == after_first_pass
     assert _names(api.installed).count("/atoms/a3.py") == 1
 
@@ -212,9 +228,9 @@ async def test_rewriting_the_broken_source_retries_once() -> None:
     retried = list(api.installed)
     await follower._tick()
 
-    # The edit is what lifts the block: one retry, the tail rebuilt once
-    # behind it, and nothing after that.
-    assert _names(retried) == [f"/atoms/a{i}.py" for i in range(3, 8)]
+    # The edit is what lifts the block: one retry at that position, nothing
+    # else disturbed, and nothing after that.
+    assert _names(retried) == ["/atoms/a3.py"]
     assert api.installed == retried
 
 
@@ -236,7 +252,16 @@ async def test_dropping_an_atom_that_failed_still_detaches_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_rebuild_retries_an_atom_the_composition_can_now_satisfy() -> None:
+async def test_an_atom_blocked_by_its_surroundings_retries_when_they_change() -> None:
+    """A failed install is not always the spec's fault.
+
+    ``x`` failed because nothing offered what it required. The scenario then
+    supplies it, so ``x`` is attempted again -- not because its own source
+    changed, but because something landed this pass and the cause of the
+    failure may be gone. What does *not* happen any more is reinstalling the
+    healthy atoms that happened to sit between them.
+    """
+
     api, loader, follower = await _following([_spec("a0"), _spec("a1")])
     api.requires["/atoms/x.py"] = "/atoms/dep.py"
     loader.specs.append(_spec("x"))
@@ -247,15 +272,7 @@ async def test_a_rebuild_retries_an_atom_the_composition_can_now_satisfy() -> No
     loader.specs.insert(0, _spec("dep"))
     await follower._tick()
 
-    # x failed for a reason outside its own source, and the scenario just
-    # supplied it. The pass rebuilds from position 0, so x is attempted again
-    # on the way past rather than staying settled against a cause that is gone.
-    assert _names(api.installed) == [
-        "/atoms/dep.py",
-        "/atoms/a0.py",
-        "/atoms/a1.py",
-        "/atoms/x.py",
-    ]
+    assert _names(api.installed) == ["/atoms/dep.py", "/atoms/x.py"]
 
 
 @pytest.mark.asyncio

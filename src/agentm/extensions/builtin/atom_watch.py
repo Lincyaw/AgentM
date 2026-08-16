@@ -383,50 +383,53 @@ class _ScenarioFollower:
             return
         applied = self._applied.entries
 
-        # Install and reload in scenario order, so an atom that requires
-        # another still arrives after it.
+        # What this pass has to do is decided per position, from that
+        # position's own spec. It used to be decided from the first position
+        # that disagreed onward: everything after it was reinstalled too, even
+        # an atom whose own spec had not changed, because bus handlers
+        # dispatched in subscription order and leaving the tail alone composed
+        # differently from a cold start. That is no longer true -- dispatch
+        # orders by (priority, rank, seq), layers fold by rank, and a
+        # replacement takes the position it superseded -- so a reload no longer
+        # costs every atom after it its in-memory state.
         #
-        # From the first position where the session and the scenario disagree,
-        # every atom after it is reinstalled too, even one whose own spec did
-        # not change. Bus handlers dispatch in subscription order, so leaving
-        # the tail alone would compose differently from a cold start of the
-        # same scenario. Reinstalled atoms lose whatever they held in memory;
-        # a session whose scenario did not change reinstalls nothing.
-        applied_order = list(applied)
-        rebuilding = False
-        landed: dict[str, _Applied] = {}
-        for position, spec in enumerate(resolved):
+        # Order that genuinely matters is declared now. `after` is the word for
+        # "if that one is here, I come after it", and it does not depend on
+        # where either atom sits in the scenario file.
+        pending: list[tuple[str, ExtensionSpec, _Applied | None, str]] = []
+        for spec in resolved:
             key = _key(spec)
             previous = applied.get(key)
-            if not rebuilding:
-                # Whether this position is undisturbed is the first thing to
-                # settle, because both of the ways to leave it alone below
-                # depend on it: an atom the scenario moved is one this pass
-                # rebuilds, latched or not.
-                in_place = (
-                    position < len(applied_order) and applied_order[position] == key
-                )
-                if in_place and previous is not None and previous.failed == spec:
-                    # This exact version already failed here and nothing before
-                    # it has moved. The session runs what it ran before, so the
-                    # position is as satisfied as it is going to get: the
-                    # scenario disagreeing with it forever would rebuild every
-                    # atom after it on every pass. The attempt comes back when
-                    # the spec does -- for a file that is its digest, so an edit
-                    # is what lifts this -- or when a pass is rebuilding this
-                    # position anyway, since an install also fails for reasons
-                    # outside its own spec: a requirement no atom offers yet, an
-                    # environment the composition around it had not set up. Both
-                    # keep failures to one report per broken version rather than
-                    # one a tick.
-                    landed[key] = previous
-                    continue
-                if in_place and previous is not None and previous.running == spec:
-                    # The scenario came back to what is running here, so any
-                    # version that failed against this position is moot.
-                    landed[key] = _Applied(running=spec)
-                    continue
-                rebuilding = True
+            if previous is None:
+                state = "install"
+            elif previous.running == spec:
+                state = "settled"
+            elif previous.failed == spec:
+                # This exact version already failed here. Retrying it every
+                # tick would report the same breakage twice a second; the
+                # attempt comes back when the spec does -- for a file that is
+                # its digest, so an edit lifts it -- or when something else
+                # lands, since an install also fails for reasons outside its
+                # own spec: a requirement no atom offered yet, an environment
+                # the composition around it had not set up.
+                state = "blocked"
+            else:
+                state = "reload"
+            pending.append((key, spec, previous, state))
+
+        landing = any(state in {"install", "reload"} for _k, _s, _p, state in pending)
+
+        landed: dict[str, _Applied] = {}
+        for key, spec, previous, state in pending:
+            if state == "settled":
+                # The scenario came back to what runs here, so any version that
+                # failed against this position is moot.
+                landed[key] = _Applied(running=spec)
+                continue
+            if state == "blocked" and not landing:
+                assert previous is not None
+                landed[key] = previous
+                continue
             running = None if previous is None else previous.running
             if await self._apply(spec, reloading=running is not None):
                 landed[key] = _Applied(running=spec)

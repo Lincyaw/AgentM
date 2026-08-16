@@ -321,10 +321,17 @@ class AtomContext:
         return self._rank
 
     def set_rank(self, rank: int) -> None:
-        """Take the depth the session computed for the set it now holds."""
+        """Take the depth the session computed for the set it now holds.
+
+        Pushed into the two stores that order across contexts -- the registry,
+        which folds layers by it, and the bus segment, which dispatches by it.
+        Both read it live, so a rank settled again after somebody else arrives
+        moves this atom's writes with it.
+        """
 
         self._rank = rank
         self._services.rank = rank
+        self._segment.rank = rank
 
     @property
     def module_path(self) -> str:
