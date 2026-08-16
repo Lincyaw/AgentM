@@ -15,7 +15,7 @@ identity rather than re-resolved.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 from loguru import logger
 
@@ -34,17 +34,6 @@ from agentm.core.abi.stream import Model, StreamFn
 from agentm.core.abi.trajectory import Turn
 
 _SERVICE_PREFIX = "provider:"
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderSnapshot:
-    """Provider state captured before one atom installation."""
-
-    stream_fn: StreamFn | None
-    model: Model | None
-    active_provider_name: str | None
-    identity: ProviderSessionIdentity | None
-    owners: dict[str, str | None]
 
 
 class ProviderRegistry:
@@ -86,8 +75,8 @@ class ProviderRegistry:
         replace: bool = False,
         into: ServiceRegistry | None = None,
         owner: str | None = None,
-    ) -> None:
-        """Register an LLM provider and refresh the active provider.
+    ) -> Callable[[], None]:
+        """Register an LLM provider, refresh the active one, hand back the undo.
 
         ``into`` is the registry the backing ``provider:<name>`` service is
         written to, and ``owner`` is who that registry belongs to. Both come
@@ -95,6 +84,12 @@ class ProviderRegistry:
         atom chose: this method is runtime-internal and unreachable from
         ``AtomAPI``, which offers ``register_provider(name, config)`` and
         nothing else. Omitting them is the host writing as itself.
+
+        The returned callable takes this one registration back and nothing
+        else. It is what ``activate()`` failing here runs immediately, and what
+        an atom's context records as the inverse of the write, so a rollback
+        undoes the registrations of the installation that failed rather than
+        putting a picture of the whole registry back over everybody's.
         """
 
         if not isinstance(name, str) or not name:
@@ -139,25 +134,34 @@ class ProviderRegistry:
         shadowed = target.swap_entry(key, None)
         target.register(key, config, scope="session")
         self._owners[name] = owner
-        try:
-            self.activate()
-        except BaseException:
-            # The undo of the swap is the same swap back: the failed write
-            # leaves, and whatever this node held goes back at the number it
-            # had, so whatever the chain resolved before -- in whichever node
-            # held it -- resolves again. Nothing fires for a swap, so this
-            # index is re-filed off the tree rather than guessed from what it
-            # said before.
+
+        def _undo() -> None:
+            # The undo of the swap is the same swap back: this write leaves,
+            # and whatever this node held goes back at the number it had, so
+            # whatever the chain resolved before -- in whichever node held it
+            # -- resolves again. Nothing fires for a swap, so this index is
+            # re-filed off the tree rather than guessed from what it said
+            # before.
+            #
+            # The active name is dropped rather than restored when nothing
+            # backs it any more: the next committed turn freezes it into the
+            # durable session identity, so a name no registration answers must
+            # not survive. ``activate`` picks one again from what is left.
             target.swap_entry(key, shadowed)
-            uncovered_owner = self._service_owner(key)
             if previous is None:
                 self._owners.pop(name, None)
                 if self._active_name == name:
                     self._active_name = None
             else:
-                self._owners[name] = uncovered_owner
+                self._owners[name] = self._service_owner(key)
+
+        try:
+            self.activate()
+        except BaseException:
+            _undo()
             raise
         self._emit_register_event("provider", name, {"provider": config})
+        return _undo
 
     def unregister(self, name: str) -> None:
         """Drop one provider binding, its ownership record, and its active name.
@@ -416,21 +420,5 @@ class ProviderRegistry:
 
     # --- Install rollback ---
 
-    def capture(self) -> ProviderSnapshot:
-        return ProviderSnapshot(
-            stream_fn=self.stream_fn,
-            model=self.model,
-            active_provider_name=self._active_name,
-            identity=self._identity,
-            owners=dict(self._owners),
-        )
 
-    def restore(self, snapshot: ProviderSnapshot) -> None:
-        self.stream_fn = snapshot.stream_fn
-        self.model = snapshot.model
-        self._active_name = snapshot.active_provider_name
-        self._identity = snapshot.identity
-        self._owners = dict(snapshot.owners)
-
-
-__all__ = ["ProviderRegistry", "ProviderSnapshot"]
+__all__ = ["ProviderRegistry"]

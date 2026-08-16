@@ -29,7 +29,6 @@ from agentm.core.abi.codec import CodecRegistry
 from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import ExtensionSpec
 from agentm.core.abi.trajectory import AtomInstall
-from agentm.core.runtime.provider_registry import ProviderSnapshot
 
 if TYPE_CHECKING:
     from agentm.core.runtime.session_core import SessionRuntime
@@ -63,18 +62,27 @@ class ExtensionInstallSnapshot:
     versus ``async def`` and on the store.  Pinned by
     ``test_a_sync_register_handler_writes_into_the_host_during_an_install``.
 
-    What is left is the store contents an install really does move: the bus's
-    own subscriptions, the registry's own entries, and the codec registry,
-    which holds the one write landing outside the atom's context -- with
-    ``codec_owners`` beside it, because who registered a source has to come
-    back with the source.
+    Nor the codec registry or the provider registry any more.  Those are the
+    two stores an atom writes into that are not its own, and each write now
+    records the inverse of itself -- a codec restores whatever source it
+    displaced, a provider registration takes back its own ownership entry and
+    lets the active name be resolved again.  Which is what a picture cannot
+    do: an installation that failed while another finished beside it used to
+    leave the survivor linked and installed with its codec and its provider
+    ownership erased, so the session advertised an atom whose trigger source
+    it could not encode.
+
+    What is left is the two stores whose writes are not yet inverses: the
+    bus's own subscriptions and the registry's own entries.  Both are host
+    tables an atom does not write into -- an atom subscribes into its own
+    segment and registers into its own registry, and both leave with the
+    context -- so what these two put back is what the *host* wrote during the
+    install, which is the re-entrant handler case above.  Two fields is the
+    remaining distance between this rollback and an inverse throughout.
     """
 
     bus: EventBus
     services: ServiceRegistry
-    codec: CodecRegistry
-    codec_owners: TriggerCodecOwners
-    providers: ProviderSnapshot
 
     @classmethod
     def of(cls, session: "SessionRuntime") -> "ExtensionInstallSnapshot":
@@ -83,9 +91,6 @@ class ExtensionInstallSnapshot:
         return cls(
             bus=session.bus.copy(),
             services=session.services.copy(),
-            codec=session.codec.copy(),
-            codec_owners=session._codec_owners.copy(),
-            providers=session._providers.capture(),
         )
 
     def restore_into(self, session: "SessionRuntime") -> None:
@@ -107,9 +112,6 @@ class ExtensionInstallSnapshot:
 
         session.bus.replace_from(self.bus)
         session.services.replace_from(self.services)
-        session.codec.replace_from(self.codec)
-        session._codec_owners.replace_from(self.codec_owners)
-        session._providers.restore(self.providers)
 
 
 class TriggerCodecOwners:
@@ -145,6 +147,17 @@ class TriggerCodecOwners:
     def owner(self, source: str) -> str | None:
         return self._owners.get(source)
 
+    def forget(self, source: str) -> None:
+        """Drop a source's attribution; safe to repeat.
+
+        The counterpart of ``CodecRegistry.forget_trigger_codec``, and for the
+        same one case: an installation that never landed.  An atom that leaves
+        keeps its entry, which is what lets its replacement take the source
+        over.
+        """
+
+        self._owners.pop(source, None)
+
     def is_superseded(self, source: str, installed: Collection[str]) -> bool:
         """True when this source is owned by an atom no longer installed."""
 
@@ -157,22 +170,6 @@ class TriggerCodecOwners:
         return codec.copy_without_trigger_sources(
             {source for source, owner in self._owners.items() if owner is not None}
         )
-
-    def copy(self) -> TriggerCodecOwners:
-        """A detached copy, for a caller holding the shape before an install."""
-
-        copied = TriggerCodecOwners()
-        copied._owners = dict(self._owners)
-        return copied
-
-    def replace_from(self, other: TriggerCodecOwners) -> None:
-        """Take another copy's contents in place, as ``CodecRegistry`` does.
-
-        In place because a failed installation's rollback restores the codec
-        registry the same way, and the two have to be put back together.
-        """
-
-        self._owners = dict(other._owners)
 
 
 class AtomInstallJournal:

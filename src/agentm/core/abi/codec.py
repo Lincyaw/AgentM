@@ -805,6 +805,22 @@ class CodecRegistry:
             raise ValueError(f"trigger codec already registered for {source!r}")
         self._trigger_codecs[source] = codec
 
+    def trigger_codec(self, source: str) -> TriggerCodec | None:
+        """The codec registered for ``source``, or ``None`` if there is none."""
+
+        return self._trigger_codecs.get(source)
+
+    def forget_trigger_codec(self, source: str) -> None:
+        """Drop a source's codec; safe to repeat.
+
+        Not part of detaching an atom, which deliberately leaves a codec
+        registered so committed turns stay decodable. This is for an
+        installation that never landed: its registration was never a fact
+        anything could name.
+        """
+
+        self._trigger_codecs.pop(source, None)
+
     def register_cause_type(self, cls: type[TerminationCause]) -> None:
         """Register a custom TerminationCause subclass for deserialization."""
         if not issubclass(cls, TerminationCause):
@@ -815,18 +831,19 @@ class CodecRegistry:
         self._cause_types[name] = cls
 
     def copy(self) -> CodecRegistry:
-        """Return an independent registry with the same codec registrations."""
+        """Return an independent registry with the same codec registrations.
+
+        For a caller that wants a *derived* registry -- a child's, with an
+        atom's sources left out.  Not for a rollback: a failed installation
+        takes its own codec registrations back through their inverses, so
+        nothing puts a picture of this registry back over whatever else was
+        registered while the install was awaiting.
+        """
 
         copied = CodecRegistry()
         copied._trigger_codecs = dict(self._trigger_codecs)
         copied._cause_types = dict(self._cause_types)
         return copied
-
-    def replace_from(self, other: "CodecRegistry") -> None:
-        """Restore registrations from ``other`` without replacing this object."""
-
-        self._trigger_codecs = dict(other._trigger_codecs)
-        self._cause_types = dict(other._cause_types)
 
     def copy_without_trigger_sources(
         self,

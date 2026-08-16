@@ -572,6 +572,85 @@ async def install(api, config):
 """
 )
 
+# An atom that registers a trigger codec -- the one write an atom may leave
+# behind when it departs, which is exactly why it has to go when the atom never
+# arrived -- and then never finishes installing.
+_CODEC_THEN_REFUSES = (
+    _MANIFEST
+    + """
+
+import asyncio
+
+class DoomedCodec:
+    def serialize(self, trigger):
+        return {{"__source__": "{name}_source"}}
+
+    def deserialize(self, data):
+        del data
+        raise RuntimeError("{name} never installed")
+
+
+async def install(api, config):
+    del config
+    api.register_trigger_codec("{name}_source", DoomedCodec())
+    api.services.require("install_gate", asyncio.Event).set()
+    await asyncio.sleep(0.05)
+    raise RuntimeError("{name} broke")
+"""
+)
+
+# An atom that writes into all three stores a failed install still restores
+# from a picture: the shared codec registry, its owner table, and the provider
+# registry.
+_RICH = (
+    _MANIFEST
+    + """
+
+from dataclasses import dataclass
+
+from agentm.core.abi.provider import ProviderConfig
+from agentm.core.abi.stream import Model
+
+
+@dataclass(frozen=True, slots=True)
+class RichTrigger:
+    value: str
+    source: str = "{name}_source"
+
+
+class RichCodec:
+    def serialize(self, trigger):
+        return {{"__source__": "{name}_source", "value": trigger.value}}
+
+    def deserialize(self, data):
+        return RichTrigger(value=data["value"])
+
+
+class RichStream:
+    def __call__(self, **kwargs):
+        raise RuntimeError("a rich probe never streams")
+
+
+def install(api, config):
+    del config
+    api.services.register("{name}_write", "rich", scope="session")
+    api.register_trigger_codec("{name}_source", RichCodec())
+    api.register_provider(
+        "{name}_provider",
+        ProviderConfig(
+            stream_fn=RichStream(),
+            model=Model(
+                id="{name}-model",
+                provider="{name}_provider",
+                context_window=1000,
+                max_output_tokens=100,
+            ),
+            name="{name}_provider",
+        ),
+    )
+"""
+)
+
 # 22 -- an atom that installs another atom, the way atom_watch and
 # tool_authoring do: from its own code after its installation is over.
 _NESTED = (
@@ -1919,6 +1998,119 @@ async def test_a_failed_supersede_puts_the_atom_back_among_its_neighbours(
             spec.module_path for spec in session.composition_snapshot().extensions
         ] == [middle.module_path, last.module_path]
         assert session.uninstall_extension(middle)
+
+
+@pytest.mark.asyncio
+async def test_an_install_that_completes_beside_a_failing_one_still_works(
+    tmp_path: Path,
+) -> None:
+    """A rollback undoes its own install, not everybody's writes.
+
+    An installation that finished while another was in flight is linked,
+    installed and serving. The failing one's rollback still restored three
+    shared stores from a picture taken before either ran -- the codec
+    registry, its owner table, and the provider registry -- so the survivor
+    kept its context and lost the writes that landed outside it. The session
+    then advertised an atom whose trigger source it could not encode, and
+    handed its spec to every child.
+
+    Asserted on the atom rather than on the stores: what has to be true is
+    that the survivor still works.
+    """
+
+    gate = asyncio.Event()
+    slow = _atom(tmp_path, "slow_atom", _CODEC_THEN_REFUSES)
+    late = _atom(tmp_path, "late_atom", _RICH)
+
+    async with probe_session(str(tmp_path)) as session:
+        session.services.register("install_gate", gate, scope="session")
+
+        async def _install_late() -> None:
+            await gate.wait()
+            await session.install_extension(late)
+
+        arriving = asyncio.create_task(_install_late())
+        with pytest.raises(Exception, match="slow_atom broke"):
+            await session.install_extension(slow)
+        await arriving
+
+        assert session.installed_extensions == [late.module_path]
+        assert session.services.get("late_atom_write") == "rich"
+        # The two writes that land outside the atom's own context, and that a
+        # picture-restore therefore used to take away with it.
+        digest = composition_digest(session)
+        codecs = {entry.source: entry.owner for entry in digest.trigger_codecs}
+        assert codecs.get("late_atom_source") == late.module_path
+        # Read off the provider registry's own index rather than the digest:
+        # the digest attributes a provider through the context tree, which a
+        # picture of the registry cannot reach, so asking the digest would be
+        # asking the one account that could not be wrong.
+        assert session._providers.owners() == {"late_atom_provider": late.module_path}
+        assert session._providers.names() == ["late_atom_provider"]
+        # And the other direction: an atom leaving may keep its trigger source
+        # registered, but one that never arrived may not. Nothing can be naming
+        # a codec no installation ever finished putting there.
+        assert "slow_atom_source" not in codecs
+
+
+# An atom that registers a provider and then refuses, with no awaits at all.
+_PROVIDER_THEN_REFUSES = (
+    _MANIFEST
+    + """
+
+from agentm.core.abi.provider import ProviderConfig
+from agentm.core.abi.stream import Model
+
+
+class DoomedStream:
+    def __call__(self, **kwargs):
+        raise RuntimeError("a doomed probe never streams")
+
+
+def install(api, config):
+    del config
+    api.register_provider(
+        "{name}_provider",
+        ProviderConfig(
+            stream_fn=DoomedStream(),
+            model=Model(
+                id="{name}-model",
+                provider="{name}_provider",
+                context_window=1000,
+                max_output_tokens=100,
+            ),
+            name="{name}_provider",
+        ),
+    )
+    raise RuntimeError("{name} broke")
+"""
+)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_install_leaves_no_provider_behind(tmp_path: Path) -> None:
+    """The provider registry's ownership index is undone by an inverse now.
+
+    A provider config lands in the atom's own service registry and leaves with
+    it, but who owns the name and which name is active are the session's, and a
+    rollback used to put a picture of both back. That picture also erased
+    whatever anybody else had registered meanwhile, so the write records the
+    inverse that takes back this one registration and nothing else.
+
+    Read off ``ProviderRegistry`` rather than the digest: the digest attributes
+    a provider through the context tree, which cannot be wrong about this, so
+    asking it would witness nothing.
+    """
+
+    doomed = _atom(tmp_path, "doomed_atom", _PROVIDER_THEN_REFUSES)
+    async with probe_session(str(tmp_path)) as session:
+        before = dict(session._providers.owners())
+        with pytest.raises(Exception, match="doomed_atom broke"):
+            await session.install_extension(doomed)
+
+        assert session._providers.owners() == before
+        assert "doomed_atom_provider" not in session._providers.names()
+        assert session.installed_extensions == []
 
 
 @pytest.mark.asyncio

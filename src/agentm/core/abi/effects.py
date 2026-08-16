@@ -111,8 +111,10 @@ class EffectEntry:
     ``provides`` and ``subject`` are what let the log answer "what does this
     context hold" without a separate ownership table — the provision label
     reads in a diagnostic, the subject is the object itself for a caller that
-    needs to compare identities.  ``inverse`` is ``None`` only for a retained
-    write, where ``retain`` carries the reason.
+    needs to compare identities.  ``retain``, when set, carries the reason the
+    atom's departure leaves this write standing; ``inverse`` may still be
+    present beside it, for the case where the write should never have happened
+    at all and is taken back by ``withdraw`` rather than by ``revert``.
     """
 
     provides: str
@@ -364,13 +366,45 @@ class EffectLog:
         undoing = self._entries
         self._entries = []
         for entry in reversed(undoing):
-            if entry.inverse is None:
+            if entry.retain or entry.inverse is None:
                 continue
             try:
                 entry.inverse()
             except BaseException as exc:  # noqa: BLE001 - collected, not hidden
                 logger.exception(
                     "inverse of {} failed while reverting",
+                    entry.provides or "<unnamed effect>",
+                )
+                failures.append(exc)
+        return tuple(failures)
+
+    def withdraw(self) -> tuple[BaseException, ...]:
+        """Revert, retained writes included, for a write that never landed.
+
+        ``retain`` says the *atom leaving* does not undo a write -- a trigger
+        codec a committed turn names outlives the atom that registered it.  An
+        installation that failed has no committed turn naming anything: it
+        never landed, so nothing can be depending on what it wrote, and the
+        reason to keep it does not apply.  That is the whole difference between
+        an atom that leaves and one that never arrived, and it is why the two
+        are different verbs rather than one with a flag.
+
+        A retained write with no inverse at all is still skipped; there is
+        nothing to run.  Reporting rather than raising, and emptying first, for
+        the same reasons ``revert`` does.
+        """
+
+        failures = list(self._close_pending())
+        undoing = self._entries
+        self._entries = []
+        for entry in reversed(undoing):
+            if entry.inverse is None:
+                continue
+            try:
+                entry.inverse()
+            except BaseException as exc:  # noqa: BLE001 - collected, not hidden
+                logger.exception(
+                    "inverse of {} failed while withdrawing",
                     entry.provides or "<unnamed effect>",
                 )
                 failures.append(exc)

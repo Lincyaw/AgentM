@@ -603,7 +603,10 @@ async def install_extension(
             # called -- so the context is noted as departed and whatever it
             # records is undone at shutdown, exactly as a detached atom's is.
             api.note_departed_context(context)
-            context.suspend().revert()
+            # ``withdraw`` rather than ``revert``: this atom never arrived, so
+            # even the writes it was allowed to leave behind on departure --
+            # its trigger codecs -- go back. Nothing can be naming them.
+            context.suspend().withdraw()
             if superseded_departure is not None:
                 # Nothing to un-revert: the survivor was set aside, not undone,
                 # so it is simply given back what it held -- its tables, into

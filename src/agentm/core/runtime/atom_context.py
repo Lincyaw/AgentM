@@ -179,9 +179,22 @@ class AtomResidue:
         The tables themselves need nothing done to them: they are out of the
         session and out of the context, which is what "undone" means for a
         write whose whole existence was a row in one of them.
+
+        Writes marked ``retain`` stay: this is an atom leaving, and what they
+        name -- a trigger source a committed turn carries -- outlives it.
         """
 
         return self.effects.revert()
+
+    def withdraw(self) -> tuple[BaseException, ...]:
+        """Revert, retained writes included, for an install that never landed.
+
+        A retention is a promise to whatever already names the write. An
+        installation that failed left nothing able to name anything, so the
+        promise has no one to keep and the write goes with the rest.
+        """
+
+        return self.effects.withdraw()
 
     def dispose(self) -> tuple[BaseException, ...]:
         """Drop the inverses without running them, closing any queued body.
@@ -509,6 +522,14 @@ class AtomContext:
         trigger source by name and must stay decodable after the atom that
         registered it has gone, so the write lands on the session and is
         recorded with the reason it stays.
+
+        It hands back an inverse anyway, which is not a contradiction: the
+        retention is a promise to whatever already names the source, and an
+        installation that failed left nothing able to name it. So the write
+        survives the atom *leaving* and is taken back when the atom never
+        arrived -- ``revert`` and ``withdraw`` respectively. Restoring what was
+        there before rather than merely dropping it, because a supersede
+        registers over a source its previous incarnation owns.
         """
 
         if not isinstance(codec, TriggerCodec):  # code-health: ignore[AM025]
@@ -516,9 +537,21 @@ class AtomContext:
         session = self._session
         module_path = self.module_path
 
-        def _register() -> None:
+        def _register() -> Callable[[], None]:
+            displaced = session.codec.trigger_codec(source)
+            displaced_owner = session._codec_owners.owner(source)
             session.note_atom_trigger_codec(source, codec, module_path)
             self._emit_register_event("trigger_codec", source, {"codec": codec})
+
+            def _undo() -> None:
+                if displaced is None:
+                    session.codec.forget_trigger_codec(source)
+                    session._codec_owners.forget(source)
+                    return
+                session.codec.register_trigger_codec(source, displaced, replace=True)
+                session._codec_owners.note(source, displaced_owner)
+
+            return _undo
 
         self._effects.effect(
             _register,
@@ -570,14 +603,31 @@ class AtomContext:
         *,
         replace: bool = False,
     ) -> None:
-        """Register an LLM provider whose backing service is this context's."""
+        """Register an LLM provider whose backing service is this context's.
 
-        self._session._providers.register(
-            name,
-            config,
-            replace=replace,
-            into=self._services,
-            owner=self.module_path,
+        The config lands in this context's own registry and leaves with it, but
+        the registry's ownership index and its active name are the session's,
+        so the write is recorded with the inverse that takes those back. An
+        installation that fails then undoes its own provider registrations
+        rather than a picture of the registry being put back over everyone's.
+        """
+
+        providers = self._session._providers
+
+        def _register() -> Callable[[], None]:
+            return providers.register(
+                name,
+                config,
+                replace=replace,
+                into=self._services,
+                owner=self.module_path,
+            )
+
+        self._effects.effect(
+            _register,
+            provides=f"provider:{name}",
+            subject=config,
+            retain="the session keeps streaming through the model it resolved",
         )
 
     def effect(
