@@ -9,6 +9,7 @@ import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
+from typing import Final
 
 from loguru import logger
 from sqlalchemy.engine import Connection, CursorResult, Engine
@@ -136,6 +137,31 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
         return TRAJECTORY_HEAD_INDEXES
 
     def create_schema(self) -> None:
+        """Bootstrap the schema, and do nothing at all once it is bootstrapped.
+
+        The early return is not an optimisation.  ``CREATE INDEX IF NOT EXISTS``
+        takes ``ShareLock`` on the table *before* it can find out the index is
+        already there, and ``ShareLock`` conflicts with the ``RowExclusiveLock``
+        an ``INSERT`` holds.  Every store opened therefore reached across a
+        dozen tables taking a lock that blocks writers -- and since this runs on
+        every construction, "opening a store" was a DDL storm rather than a
+        first-run bootstrap.
+
+        Two processes sharing one store then deadlock, which is not exotic: one
+        starting up while another writes a turn is the ordinary state of a
+        gateway running several bots against one database.  Postgres detects
+        the cycle and kills one of them, so the symptom is a random transaction
+        dying with ``DeadlockDetected`` on a session that did nothing wrong.
+        The advisory lock below never covered this; it serialises two
+        bootstraps against each other, and the collision is with ordinary
+        traffic.
+
+        Asking first costs one catalog read, which takes ``AccessShareLock`` on
+        catalog relations and nothing on ours.
+        """
+
+        if self._bootstrapped():
+            return
         with self._transaction() as cur:
             cur.execute(
                 "SELECT pg_advisory_xact_lock(hashtext(%s))",
@@ -335,6 +361,35 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
             )
             for statement in _index_statements(self._schema):
                 cur.execute(statement)
+
+    def _bootstrapped(self) -> bool:
+        """Whether every relation ``create_schema`` creates is already there.
+
+        The whole bootstrap runs in one transaction, so in practice this is
+        all-or-nothing -- but it asks for the whole set rather than a sentinel,
+        because a sentinel answers "a bootstrap committed once" and the
+        question is "is what this version of the code creates present". Adding
+        a table or an index to the bootstrap has to make an already-bootstrapped
+        database answer False, or the addition would never reach any deployment
+        that had run the previous version.
+
+        ``BOOTSTRAP_RELATIONS`` is checked against a real bootstrap by
+        ``test_postgres_bootstrap_declares_everything_it_creates``, so the list
+        cannot drift away from the DDL without a test saying so.
+        """
+
+        with self._transaction() as cur:
+            cur.execute(
+                """
+                SELECT c.relname
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = ANY(%s)
+                """,
+                (self._schema, list(BOOTSTRAP_RELATIONS)),
+            )
+            found = {row[0] for row in cur.fetchall()}
+        return found >= set(BOOTSTRAP_RELATIONS)
 
     def create_session(
         self,
@@ -1230,6 +1285,43 @@ class PostgresTrajectoryStore:  # code-health: ignore[AM009] -- complete store p
 
     def _index(self, name: str) -> str:
         return f"agentm_trajectory_{name}"
+
+
+BOOTSTRAP_RELATIONS: Final[tuple[str, ...]] = (
+    "agentm_trajectory_sessions",
+    "agentm_trajectory_turns",
+    "agentm_trajectory_checkpoints",
+    "agentm_trajectory_diagnostics",
+    "agentm_trajectory_nodes",
+    "agentm_trajectory_heads",
+    "agentm_trajectory_content_states",
+    "agentm_trajectory_turns_session_idx",
+    "agentm_trajectory_turns_session_turn_id_idx",
+    "agentm_trajectory_sessions_parent_idx",
+    "agentm_trajectory_sessions_created_idx",
+    "agentm_trajectory_diagnostics_session_time_idx",
+    "agentm_trajectory_nodes_parent_idx",
+    "agentm_trajectory_nodes_branch_seq_idx",
+    "agentm_trajectory_nodes_logical_parent_idx",
+    "agentm_trajectory_nodes_agent_leaf_idx",
+    "agentm_trajectory_nodes_root_session_seq_idx",
+    "agentm_trajectory_nodes_turn_v3_idx",
+    "agentm_trajectory_nodes_prompt_run_idx",
+    "agentm_trajectory_nodes_tool_call_idx",
+    "agentm_trajectory_nodes_tool_name_idx",
+    "agentm_trajectory_nodes_content_ref_idx",
+    "agentm_trajectory_nodes_visibility_idx",
+    "agentm_trajectory_nodes_session_timestamp_idx",
+    "agentm_trajectory_heads_branch_idx",
+)
+"""Every table and index ``PostgresTrajectoryStore.create_schema`` creates.
+
+Declared so that opening a store can ask one catalog question instead of
+re-running the DDL, which cannot be done without taking locks that block
+writers -- see ``create_schema``. A test bootstraps a fresh schema and compares
+this against what actually appeared, so adding DDL without adding it here fails
+rather than silently leaving the addition out of every existing database.
+"""
 
 
 def _index_statements(schema: str) -> tuple[str, ...]:

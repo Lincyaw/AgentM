@@ -67,6 +67,7 @@ from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
 from agentm.storage.resources import LocalResourceStore
 from agentm.storage.sql import create_sql_engine
 from agentm.storage.trajectory import JsonlTrajectoryStore, PostgresTrajectoryStore
+from agentm.storage.trajectory.postgres import BOOTSTRAP_RELATIONS
 from tests.fixtures.custom_trigger import CustomTrigger
 
 
@@ -271,6 +272,110 @@ def test_postgres_schema_creation_is_concurrency_safe() -> None:
         with ThreadPoolExecutor(max_workers=4) as executor:
             list(executor.map(create_store, range(4)))
     finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
+
+
+def test_postgres_bootstrap_declares_everything_it_creates() -> None:
+    """``BOOTSTRAP_RELATIONS`` is what opening a store asks about instead of
+    re-running the DDL, so it has to be what the DDL actually creates.
+
+    A list that drifts behind the DDL is worse than no list: an added table
+    would be present in the declaration nowhere, an already-bootstrapped
+    database would answer "everything is here", and the addition would never
+    reach any deployment that had run the previous version.
+    """
+
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres schema contract")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    admin = create_sql_engine(database_url)
+    try:
+        engine = create_sql_engine(database_url)
+        try:
+            PostgresTrajectoryStore(engine, schema=schema)
+            with admin.begin() as conn:
+                created = {
+                    row[0]
+                    for row in conn.exec_driver_sql(
+                        # Tables and indexes the DDL names, which means leaving
+                        # out the indexes Postgres builds for PRIMARY KEY and
+                        # UNIQUE: nobody wrote those, so nobody should have to
+                        # declare them. What is left is exactly the set the
+                        # bootstrap statements create, in both directions.
+                        "SELECT c.relname FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "LEFT JOIN pg_constraint k ON k.conindid = c.oid "
+                        "WHERE n.nspname = %s AND c.relkind IN ('r', 'i') "
+                        "AND k.oid IS NULL",
+                        (schema,),
+                    ).fetchall()
+                }
+        finally:
+            engine.dispose()
+        assert created == set(BOOTSTRAP_RELATIONS)
+    finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
+
+
+def test_postgres_store_opens_without_blocking_a_writer() -> None:
+    """Opening a store must not take a lock that fights ordinary traffic.
+
+    ``create_schema`` ran its whole ``CREATE TABLE/INDEX IF NOT EXISTS`` on
+    every construction. ``CREATE INDEX IF NOT EXISTS`` takes ``ShareLock`` on
+    the table before it can discover the index is already there, and
+    ``ShareLock`` conflicts with the ``RowExclusiveLock`` an ``INSERT`` holds --
+    so a process starting up and a process writing a turn each ended up holding
+    what the other wanted, and Postgres killed one of them.
+
+    Two processes sharing one store is the ordinary state of a gateway running
+    several bots against one database, and the symptom was a session that did
+    nothing wrong dying with ``DeadlockDetected``.
+
+    The existing concurrency test runs four bootstraps against each other, which
+    the advisory lock has always handled. The collision was never between two
+    bootstraps; it was between a bootstrap and a writer, which is this.
+    """
+
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres schema contract")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    admin = create_sql_engine(database_url)
+    engine = create_sql_engine(database_url)
+    try:
+        PostgresTrajectoryStore(engine, schema=schema)
+
+        # A writer holding RowExclusiveLock on one of the tables, in an open
+        # transaction, exactly as a session mid-turn does.
+        with engine.begin() as writing:
+            writing.exec_driver_sql(
+                f'INSERT INTO "{schema}"."agentm_trajectory_sessions" '
+                "(id, parent_id, purpose, cwd, created_at, meta_json) "
+                "VALUES ('probe', NULL, 'root', '', 0, '{}'::jsonb)"
+            )
+
+            # ... and another process opening the same store while it holds it.
+            # Before the fix this blocked on ShareLock and, with the writer
+            # going on to touch a second table, deadlocked.
+            opener = create_sql_engine(database_url)
+            try:
+                done = ThreadPoolExecutor(max_workers=1).submit(
+                    PostgresTrajectoryStore, opener, schema=schema
+                )
+                # Generous, because the failure mode is "never returns" rather
+                # than "returns something wrong".
+                done.result(timeout=20)
+            finally:
+                opener.dispose()
+    finally:
+        engine.dispose()
         with admin.begin() as conn:
             conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         admin.dispose()
