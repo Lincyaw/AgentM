@@ -903,16 +903,18 @@ async def create_child_session(
     child_services.inherit_from(parent.services)
     _register_default_catalog_services(child_services)
     resolved_spec = _compose_config_services(child_services, config)
-    # A child copies the parent's tree-scoped boundaries, at this moment and
-    # once. It does not resolve through the parent: a boundary bound into the
-    # parent *after* this call does not reach this child, which
-    # ``test_spawn_inheritance`` pins deliberately. A host that needs different
-    # boundaries binds them into the parent before spawning; per-child
-    # overrides are not a config surface.
+    # Copied once, here, and then this child diverges. Deliberately not a link
+    # to the parent: linking is for things that share a lifetime, and an atom's
+    # context is part of its session -- unlinking is how it leaves -- while a
+    # child session is a separate unit of work whose parent is a predecessor
+    # rather than a container. Both ways of making one say the same thing:
+    # spawn starts a new agent, fork branches an existing one, and neither
+    # means "and keep tracking me".
     #
-    # The composability design doc asks for the opposite -- one tree, children
-    # resolving through their parent -- and that is a decision about what a
-    # sub-agent is, not a refactor. See its section 6.
+    # So a boundary bound into the parent after this call does not reach this
+    # child, which ``test_spawn_inheritance`` pins. A host that wants different
+    # boundaries binds them before spawning; per-child overrides are not a
+    # config surface.
     provider_spec = (
         resolved_spec.provider if resolved_spec is not None else config.provider
     )

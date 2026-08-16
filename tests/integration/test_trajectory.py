@@ -1141,6 +1141,16 @@ async def test_spawn_inheritance() -> None:
     assert graph.descendants(parent.id) == [child.id]
     assert graph.root(child.id) == parent.id
 
+    # A child copies its parent's tree-scoped boundaries once, at this call,
+    # and then diverges. Linking instead -- resolving through the parent, the
+    # way an atom's context resolves through its session -- would make a
+    # boundary the host binds afterwards reach a sub-agent already working,
+    # which is not what either spawn or fork means: both are "start from here,
+    # then go your own way".
+    #
+    # Linking is for things that share a lifetime. An atom's context is part
+    # of its session and unlinking is how it leaves. A child session is a
+    # separate unit of work whose parent is a predecessor, not a container.
     parent.services.register("new_svc", {"new": True})
     assert child.services.get("new_svc") is None
 
