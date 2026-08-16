@@ -996,7 +996,8 @@ def refuse_contested_role(
         for context in linked
         if context is not writer
         and context.rank == writer.rank
-        and key in context.services.own_roles()
+        and (bound := context.services.own_table().get(key)) is not None
+        and bound.role
     ]
     if not others:
         return

@@ -142,6 +142,15 @@ class ServiceEntry:
     protocol: type | None = None
     scope: ServiceScope = "tree"
     order: int = -1
+    role: bool = False
+    """Whether this key was bound as a role rather than plainly registered.
+
+    A role is a cell -- one model, one executor, one permission policy -- and
+    two atoms the graph does not order cannot both bind one.  A plain
+    registration shadows on purpose and uncovers when the writer above it
+    leaves, so the two need telling apart, and the entry is where that fact
+    belongs: it is about this write, not about the node that made it.
+    """
 
 
 class ServiceRegistry:
@@ -151,7 +160,6 @@ class ServiceRegistry:
         "_layers",
         "_linked",
         "_parent",
-        "_roles",
         "_services",
         "_write_observer",
         "rank",
@@ -169,11 +177,6 @@ class ServiceRegistry:
         #: them: a layer does not compete for the key, and a node has to be
         #: able to hold a base and a layer for one name, or two layers.
         self._layers: dict[str, list[ServiceEntry]] = {}
-        #: Which of this node's keys were bound as roles rather than plain
-        #: registrations. A role is a cell -- one model, one executor -- and
-        #: two unordered atoms binding one is refused; a plain key shadows on
-        #: purpose and uncovers when the writer above it leaves.
-        self._roles: set[str] = set()
         self._write_observer: WriteObserver | None = None
         #: The registry this one resolves through when it holds no entry for a
         #: key. Set once, at construction, by whoever derives a context; there
@@ -379,16 +382,10 @@ class ServiceRegistry:
             protocol=protocol,
             scope=scope,
             order=next(_WRITE_ORDER),
+            role=role_bind,
         )
-        if role_bind:
-            self._roles.add(name)
         if self._write_observer is not None:
             self._write_observer(name, service, scope, role_bind=role_bind)
-
-    def own_roles(self) -> frozenset[str]:
-        """The keys this node bound as roles, chain excluded."""
-
-        return frozenset(self._roles)
 
     def own_layers(self) -> dict[str, tuple[ServiceEntry, ...]]:
         """This node's own layers, chain excluded, oldest write first.
