@@ -75,6 +75,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from agentm.core.abi.manifest import requirement_key
+
 from agentm.core.abi.bus import BusSegment, EventBusObserver, Handler
 from agentm.core.abi.codec import TriggerCodec
 from agentm.core.abi.context import ContextPolicy
@@ -254,6 +256,8 @@ class AtomContext:
         "_atom_name",
         "_effects",
         "_installed",
+        "_provides",
+        "_rank",
         "_runtime",
         "_segment",
         "_services",
@@ -268,17 +272,41 @@ class AtomContext:
         spec: ExtensionSpec,
         *,
         runtime: bool = False,
+        provides: frozenset[str] = frozenset(),
+        rank: int = 0,
     ) -> None:
         self._session = session
         self._spec = spec
         self._runtime = runtime
+        self._provides = provides
+        self._rank = rank
         self._atom_name: str | None = None
         self._installed = False
         self._tables = ContextTables()
         self._services = ServiceRegistry(parent=session.services)
+        self._services.rank = rank
         self._services.set_write_observer(self._observe_service_write)
         self._segment = session.bus.segment(spec.module_path)
         self._effects = EffectLog()
+
+    @property
+    def provides(self) -> frozenset[str]:
+        """Capability keys this atom's manifest says it contributes."""
+
+        return self._provides
+
+    @property
+    def rank(self) -> int:
+        """How deep in the dependency graph this atom sits.
+
+        One more than the deepest atom it declared a requirement on, or zero
+        when everything it requires was already there before any atom was. Two
+        contexts at one rank are two the graph does not order: nothing either
+        declared says which comes first, so whatever they both touch has to
+        commute, and where it does not the session says so.
+        """
+
+        return self._rank
 
     @property
     def module_path(self) -> str:
@@ -870,40 +898,74 @@ class ContextOwnership:
         return self.services.get(key)
 
 
+def rank_for(requires: Sequence[str], linked: Sequence[AtomContext]) -> int:
+    """Where the dependency graph puts an atom that declares ``requires``.
+
+    One more than the deepest atom already here that provides something it
+    asked for, and zero when nothing here does -- everything it needs was
+    there before any atom was, so the graph puts it at the bottom.
+
+    Computed against the session rather than read off a plan, so a runtime
+    install lands at the depth its declarations earn instead of after
+    everything merely because it arrived late. A composed plan installs in
+    topological order, so asking here gives the same answer the graph does.
+    """
+
+    needed = {requirement_key(requirement) for requirement in requires}
+    if not needed:
+        return 0
+    return 1 + max(
+        (
+            context.rank
+            for context in linked
+            if context.installed and (context.provides & needed)
+        ),
+        default=-1,
+    )
+
+
 def report_contested_key(
     key: str,
     writer: AtomContext,
     linked: Sequence[AtomContext],
 ) -> None:
-    """Say when two atoms write one key, because nothing orders them.
+    """Say when two atoms the graph does not order write one key.
 
     A key is either set-shaped -- nothing a reader can do distinguishes the
-    order two writes went in -- or it is a cell, and then the second writer
-    is a conflict rather than an update. This session resolves a contested
-    cell by write order, which is install order, which is a fact about the
-    composition rather than about either atom: neither declared a
-    dependency on the other, so nothing says which should win, and the
-    answer changes if the composition is listed differently.
+    order two writes went in -- or it is a cell, and then the second writer is
+    a conflict rather than an update.  A contested cell resolves by write
+    order, which is install order, which is a fact about how the composition
+    was listed rather than about either atom.
 
-    Reported rather than refused. An embedder writing over an atom is a
-    deliberate override and is not reported at all -- only two *atoms* are
-    unordered with respect to each other. Where both really mean to
-    contribute, ``services.layer`` is the form that composes: each writes
-    its own decoration, and the key resolves to the fold.
+    Reported only between atoms of equal ``rank``, because rank is what makes
+    the difference computable.  When one requires something the other provides,
+    the graph puts them in an order and the later one winning is determined --
+    a normal override, and saying anything about it would be noise on every
+    layered composition.  At equal rank neither declared anything about the
+    other, so nothing says which should win and listing them the other way
+    round changes the answer.
+
+    Reported rather than refused, and never for the embedder: a host write over
+    an atom is a deliberate override.  Where two atoms really mean to
+    contribute, ``services.layer`` is the form that composes -- each writes its
+    own decoration and the key resolves to the fold.
     """
 
     others = [
         context.module_path
         for context in linked
-        if context is not writer and key in context.services.own_table()
+        if context is not writer
+        and context.rank == writer.rank
+        and key in context.services.own_table()
     ]
     if not others:
         return
     logger.warning(
-        "service {!r} is written by {} and by {}; nothing orders two atoms "
-        "that do not depend on each other, so which one the session serves "
-        "is a property of the composition order. If both mean to "
-        "contribute, use services.layer({!r}, ...) instead.",
+        "service {!r} is written by {} and by {}, and the dependency graph "
+        "puts them at the same depth -- neither declared anything about the "
+        "other, so which one the session serves is a property of the order the "
+        "composition was listed in. If both mean to contribute, use "
+        "services.layer({!r}, ...) instead.",
         key,
         ", ".join(sorted(others)),
         writer.module_path,
@@ -1088,6 +1150,7 @@ __all__ = [
     "PolicyRow",
     "RendererRow",
     "ownership_of",
+    "rank_for",
     "report_contested_key",
     "policy_row",
     "renderer_row",

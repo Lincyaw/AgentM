@@ -127,11 +127,18 @@ from agentm.core.runtime.session_core import SessionRuntime
 
 @dataclass(frozen=True, slots=True)
 class AtomEntry:
-    """One installed atom, as the installed set accounts for it."""
+    """One installed atom, as the installed set accounts for it.
+
+    ``rank`` is where the dependency graph puts it: one more than the deepest
+    atom it declared a requirement on.  Digested because it decides the order
+    layered keys fold in, so two compositions that differ only in rank serve
+    different values from the same set of atoms.
+    """
 
     module_path: str
     name: str | None
     runtime: bool
+    rank: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +304,7 @@ def composition_digest(session: SessionRuntime) -> CompositionDigest:
                 module_path=context.module_path,
                 name=context.atom_name,
                 runtime=context.runtime,
+                rank=context.rank,
             )
             for context in installed
         ),

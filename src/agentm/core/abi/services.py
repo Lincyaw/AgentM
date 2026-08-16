@@ -117,9 +117,11 @@ class ServiceLayer:
     atom removes its layer, and the next read folds without it.
 
     One key, one writer per layer, so layers are set-shaped -- which is what
-    makes them commute.  The fold order is write order for now; it becomes
-    dependency rank when there is one, and that is a change to one sort key
-    rather than to anything that holds a chain.
+    makes them commute.  They fold by ``ServiceEntry.rank`` and then by write
+    order, so an atom that declared it needs another folds outside it whatever
+    order the composition happened to list them in, and two layers at one rank
+    are two the graph does not order -- which is the case where the fold really
+    does have to commute.
     """
 
     build: Callable[[object], object]
@@ -140,15 +142,37 @@ class ServiceEntry:
     protocol: type | None = None
     scope: ServiceScope = "tree"
     order: int = -1
+    rank: int = 0
+    """How deep in the dependency graph the writer sits.
+
+    Write order says which of two writes happened later, which is a fact about
+    how the composition was listed.  Rank says which of two writers the *graph*
+    puts later, which is a fact about what they declared.  Layers fold by rank
+    first, so a composition listed in a different order folds the same way, and
+    two writers at one rank are exactly the pair the graph does not order --
+    which is what makes "these must commute" a computation rather than a hope.
+    """
 
 
 class ServiceRegistry:
     """Typed, named service registry with runtime protocol checks."""
 
-    __slots__ = ("_layers", "_linked", "_parent", "_services", "_write_observer")
+    __slots__ = (
+        "_layers",
+        "_linked",
+        "_parent",
+        "_services",
+        "_write_observer",
+        "rank",
+    )
 
     def __init__(self, *, parent: ServiceRegistry | None = None) -> None:
         self._services: dict[str, ServiceEntry] = {}
+        #: The dependency depth of whoever owns this node, stamped onto every
+        #: entry it mints. Zero for the host and for an atom that requires
+        #: nothing: the graph puts them at the bottom, and nothing below them
+        #: can be ordered against.
+        self.rank = 0
         #: Decorations of a key, kept beside the entries rather than among
         #: them: a layer does not compete for the key, and a node has to be
         #: able to hold a base and a layer for one name, or two layers.
@@ -358,6 +382,7 @@ class ServiceRegistry:
             protocol=protocol,
             scope=scope,
             order=next(_WRITE_ORDER),
+            rank=self.rank,
         )
         if self._write_observer is not None:
             self._write_observer(name, service, scope, role_bind=role_bind)
@@ -397,6 +422,7 @@ class ServiceRegistry:
             protocol=None,
             scope=scope,
             order=next(_WRITE_ORDER),
+            rank=self.rank,
         )
         self._layers.setdefault(name, []).append(entry)
         if self._write_observer is not None:
@@ -593,7 +619,7 @@ def _collect(
     parent = registry._parent
     if parent is not None and parent is not skip:
         found.extend(_collect(parent, name, skip=registry))
-    found.sort(key=lambda entry: entry.order)
+    found.sort(key=lambda entry: (entry.rank, entry.order))
     return found
 
 

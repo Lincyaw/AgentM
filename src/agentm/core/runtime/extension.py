@@ -34,7 +34,7 @@ from agentm.core.abi.bus import (
 from agentm.core.abi.effects import EffectBody, EffectHandle
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.events import ExtensionInstallEvent
-from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.manifest import ExtensionManifest, provided_capability_keys
 from agentm.core.abi.messages import JsonValue, thaw_json
 from agentm.core.abi.session_api import (
     AgentSessionConfig,
@@ -48,7 +48,7 @@ from agentm.core.abi.session_api import (
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.store import TrajectoryDiagnostic
 from agentm.core.lib.async_cancel import await_known_outcome
-from agentm.core.runtime.atom_context import AtomContext
+from agentm.core.runtime.atom_context import AtomContext, rank_for
 from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
     ValidationIssue,
     extension_helper_imports,
@@ -493,12 +493,32 @@ async def install_extension(
     # Taken before anything moves. The contents of the shared stores only: the
     # context tree is put back by the inverse of what this installation itself
     # linked and unlinked, not by a picture of it.
-    context = AtomContext(api, spec, runtime=runtime)
+    # The manifest before the context, because the context's place in the
+    # dependency graph is a function of what the manifest declares -- and its
+    # rank has to be right from its first write, not from whenever the install
+    # finishes.
+    manifest = load_manifest_for_spec(spec)
+    atom_name = manifest.name if manifest is not None else None
+    context = AtomContext(
+        api,
+        spec,
+        runtime=runtime,
+        provides=frozenset(
+            ()
+            if manifest is None
+            else provided_capability_keys(
+                atom_name=manifest.name,
+                registers=manifest.registers,
+            )
+        ),
+        rank=rank_for(
+            () if manifest is None else manifest.requires,
+            api.linked_contexts(),
+        ),
+    )
     atom_api = _AtomAPIFacade(api, context)
     superseded_departure = None
     try:
-        manifest = load_manifest_for_spec(spec)
-        atom_name = manifest.name if manifest is not None else None
         if replace:
             # Unlink even when the module path is unchanged. It is derived from
             # the source digest, so a config-only reload resolves to the same

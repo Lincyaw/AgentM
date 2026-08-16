@@ -2209,15 +2209,171 @@ def _builtin(name: str) -> ExtensionSpec:
     return ExtensionSpec.from_module(f"agentm.extensions.builtin.{name}")
 
 
-_CONTESTS = (
-    _MANIFEST
-    + """
+# Declares the key it writes, so the graph has an edge to compute rank from:
+# rank is what an atom declared, not what it turned out to do.
+_CONTESTS = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="two atoms, one cell",
+    registers=("service:contested_cell",),
+)
+
 
 def install(api, config):
     del config
     api.services.register("contested_cell", "{name}", scope="session")
 """
+
+
+_NEEDS = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="An atom that declares what it needs.",
+    requires=("service:contested_cell",),
+    registers=("service:{name}_write",),
 )
+
+
+def install(api, config):
+    del config
+    api.services.register("{name}_write", "here", scope="session")
+    api.services.register("contested_cell", "{name}", scope="session")
+"""
+
+
+_LAYERS = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="an atom that decorates a key, twice",
+    requires=({requires}),
+    registers=("service:layered_cell",),
+)
+
+
+def _wrap(tag):
+    return lambda inner: tag + "(" + str(inner) + ")"
+
+
+def install(api, config):
+    del config
+    api.services.layer("layered_cell", _wrap("{name}"))
+    api.on(
+        "add.layer",
+        lambda event: api.services.layer("layered_cell", _wrap("{name}-late")),
+    )
+"""
+
+
+@pytest.mark.asyncio
+async def test_layers_fold_by_rank_not_by_when_they_were_written(
+    tmp_path: Path,
+) -> None:
+    """A shallow atom writing late does not jump outside a deeper one.
+
+    ``deep`` requires what ``shallow`` provides, so the graph puts it further
+    out. Then ``shallow`` adds a second layer *after* ``deep`` installed --
+    from a bus handler, which is ordinary: an atom keeps its api and goes on
+    writing. By write order that late layer is the newest and would wrap
+    everything, including the atom that declared it depends on this one.
+
+    Folding by rank first is what stops the composition's meaning from
+    depending on when each write happened to land.
+    """
+
+    shallow = _file_atom(
+        tmp_path, "shallow_atom", _LAYERS.format(name="shallow", requires="")
+    )
+    deep = _file_atom(
+        tmp_path,
+        "deep_atom",
+        _LAYERS.format(name="deep", requires='"service:layered_cell",'),
+    )
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(shallow)
+        await session.install_extension(deep)
+        session.bus.emit_sync("add.layer", object())
+
+        ranks = {entry.name: entry.rank for entry in composition_digest(session).atoms}
+        assert ranks == {"shallow": 0, "deep": 1}
+        # Both of shallow's layers sit inside both of deep's, even though
+        # shallow's second one was written after deep's first. Write order
+        # alone would interleave them:
+        # deep-late(shallow-late(deep(shallow(None)))).
+        assert (
+            session.services.get("layered_cell")
+            == "deep-late(deep(shallow-late(shallow(None))))"
+        )
+
+
+@pytest.mark.asyncio
+async def test_rank_is_read_off_the_graph_not_off_the_install_order(
+    tmp_path: Path,
+) -> None:
+    """Where an atom sits is what it declared, not when it was listed.
+
+    An atom that requires nothing anything here provides is at the bottom: the
+    graph has nothing to put it after. One that requires what another provides
+    is one deeper. Two that declare nothing about each other land at the same
+    depth, which is the whole point -- that is the pair nothing orders, so
+    whatever they both touch has to commute, and the session can now say which
+    pairs those are instead of treating every pair alike.
+
+    Rank decides the order layered keys fold in, so it is a property of the
+    composition and the digest carries it.
+    """
+
+    provider = _atom(tmp_path, "one_atom", _CONTESTS)
+    peer = _atom(tmp_path, "two_atom", _CONTESTS)
+    dependent = _file_atom(tmp_path, "needs_atom", _NEEDS.format(name="needs_atom"))
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(provider)
+        await session.install_extension(peer)
+        await session.install_extension(dependent)
+        ranks = {entry.name: entry.rank for entry in composition_digest(session).atoms}
+
+    # Neither of the first two declared anything about the other.
+    assert ranks["one_atom"] == ranks["two_atom"] == 0
+    # The third asked for what they provide, so the graph puts it after them.
+    assert ranks["needs_atom"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_atom_that_declared_a_dependency_may_win_a_key_quietly(
+    tmp_path: Path,
+) -> None:
+    """A determined override is not a collision.
+
+    ``needs_atom`` requires the key the other two provide, so the graph puts it
+    after them and its write winning is decided rather than accidental. Saying
+    anything about that would put a warning on every composition that layers
+    one atom over another on purpose.
+    """
+
+    provider = _atom(tmp_path, "one_atom", _CONTESTS)
+    dependent = _file_atom(tmp_path, "needs_atom", _NEEDS.format(name="needs_atom"))
+    reported: list[str] = []
+    sink = logger.add(
+        lambda message: reported.append(message.record["message"]),
+        level="WARNING",
+    )
+    try:
+        async with probe_session(str(tmp_path)) as session:
+            await session.install_extension(provider)
+            await session.install_extension(dependent)
+            assert session.services.get("contested_cell") == "needs_atom"
+    finally:
+        logger.remove(sink)
+
+    assert [message for message in reported if "contested_cell" in message] == []
 
 
 @pytest.mark.asyncio
