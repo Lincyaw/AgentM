@@ -1,117 +1,41 @@
-"""What one installation has to put back, and who registered each codec.
+"""Who registered each trigger codec, and what the next turn will say.
 
-Which atoms a session holds is not here and has no table of its own: an atom's
-installation *is* its ``AtomContext`` (``atom_context.py``), so the session's
-link list is the installed set, in the order the atoms joined.  Linking is
-recording; unlinking is retiring; the spec that replays an atom and the name
-its manifest gives it are fields of that one record.  A second list keyed by
-module path would be a second answer to "which atoms does this session hold",
-and two answers restored by two mechanisms can be driven apart — which is
-exactly what happened, with no concurrency at all, when a third atom was
-removed from inside an installation that then failed.
+A failed installation restores nothing from here, or from anywhere.  There is
+no snapshot of a session taken before an install, because there is no store an
+installation writes into that it does not own: an atom's tools, policies,
+renderers, services and subscriptions live in its own ``AtomContext``
+(``atom_context.py``), and its two writes that land outside it — a trigger
+codec and a provider registration — each record the inverse of themselves.
+Unlinking the context is the rest.
 
-So what a failed installation restores is only what is here: the *contents* of
-the stores an install writes into.  Everything about the shape of the context
-tree is undone by an inverse instead.
+That is not a tidiness argument.  A picture of a store, put back at a moment
+other than the one it was taken at, cannot tell whose decision it is reversing.
+It resurrected a context a third party had unlinked; it erased the codec and
+the provider ownership of an installation that had *finished* while the failing
+one was awaiting, leaving the session advertising an atom whose trigger source
+it could no longer encode; and it undid an embedder's own writes, made from a
+handler running re-entrantly on the install's stack.  Each of those is the same
+defect, and an inverse cannot have any of them, because an inverse names what
+it undoes.
 
-``TriggerCodecOwners`` stays because it describes the one write an atom makes
-that a context table cannot hold — see its docstring.
+Which atoms a session holds is likewise not here and has no table of its own.
+Linking a context is recording the installation; unlinking it is retiring it;
+the spec that replays an atom and the name its manifest gives it are fields of
+that one record.
+
+``TriggerCodecOwners`` stays because it describes the one *attribution* a
+context table cannot hold — see its docstring.  ``AtomInstallJournal`` is the
+other thing here that outlives a context on purpose: what the next committed
+turn will say about the session's atom set.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING
-from dataclasses import dataclass
 
-from agentm.core.abi.bus import EventBus
 from agentm.core.abi.codec import CodecRegistry
-from agentm.core.abi.services import ServiceRegistry
 from agentm.core.abi.session_api import ExtensionSpec
 from agentm.core.abi.trajectory import AtomInstall
-
-if TYPE_CHECKING:
-    from agentm.core.runtime.session_core import SessionRuntime
-
-
-@dataclass(frozen=True, slots=True)
-class ExtensionInstallSnapshot:
-    """The *contents* of the shared stores, before an install.
-
-    Not the shape of the context tree.  A picture of a list put back at a
-    moment other than the one it was taken at overwrites whatever anybody else
-    decided in between, in both directions -- it resurrects a context a third
-    party unlinked and erases one a third party linked -- so which contexts the
-    session holds is undone by the inverse of what this install itself linked
-    and unlinked instead.
-
-    Nor the host's own tools, policies and renderers -- those three tables and
-    no others, which is the whole of the claim and worth stating exactly,
-    because the reachability it rests on is narrower than "a host table"
-    sounds.  No path an *atom* can reach writes into any of them
-    (``test_an_installation_writes_into_no_table_of_the_hosts``).  But every
-    registration emits ``ApiRegisterEvent`` through ``bus.emit_sync``,
-    re-entrantly, from inside the atom's registration call, so an embedder's
-    **synchronous** handler runs on the install's stack and can write anywhere
-    the session lets it.  Its writes into those three tables survive the
-    install's failure; its ``services.register`` and its ``on`` do not,
-    because the registry and the bus are still pictured below.  One handler,
-    two fates, decided by which store it reached for.  An ``async def`` handler
-    reaches neither -- ``emit_sync`` closes the coroutine and logs -- so the
-    same embedder code is atomic, half-atomic or inert depending on ``def``
-    versus ``async def`` and on the store.  Pinned by
-    ``test_a_sync_register_handler_writes_into_the_host_during_an_install``.
-
-    Nor the codec registry or the provider registry any more.  Those are the
-    two stores an atom writes into that are not its own, and each write now
-    records the inverse of itself -- a codec restores whatever source it
-    displaced, a provider registration takes back its own ownership entry and
-    lets the active name be resolved again.  Which is what a picture cannot
-    do: an installation that failed while another finished beside it used to
-    leave the survivor linked and installed with its codec and its provider
-    ownership erased, so the session advertised an atom whose trigger source
-    it could not encode.
-
-    What is left is the two stores whose writes are not yet inverses: the
-    bus's own subscriptions and the registry's own entries.  Both are host
-    tables an atom does not write into -- an atom subscribes into its own
-    segment and registers into its own registry, and both leave with the
-    context -- so what these two put back is what the *host* wrote during the
-    install, which is the re-entrant handler case above.  Two fields is the
-    remaining distance between this rollback and an inverse throughout.
-    """
-
-    bus: EventBus
-    services: ServiceRegistry
-
-    @classmethod
-    def of(cls, session: "SessionRuntime") -> "ExtensionInstallSnapshot":
-        """Copy the stores an installation writes into, before it runs."""
-
-        return cls(
-            bus=session.bus.copy(),
-            services=session.services.copy(),
-        )
-
-    def restore_into(self, session: "SessionRuntime") -> None:
-        """Put the contents back, in place, leaving the link lists alone.
-
-        In place throughout: the driver holds references to these same
-        container objects, so rebinding an attribute would roll the session's
-        view back while leaving the driver serving whatever the failed install
-        appended.
-
-        Contents only. The three lists that say which contexts the session
-        holds -- the bus's segments, the registry's child registries, and the
-        session's own -- are not restored from here at all. They move together
-        through ``link_into``/``unlink_from``, and the rollback runs the
-        inverse of what the installation itself linked and unlinked. A picture
-        of them put back would undo whatever anybody else decided while the
-        install was awaiting, in both directions.
-        """
-
-        session.bus.replace_from(self.bus)
-        session.services.replace_from(self.services)
 
 
 class TriggerCodecOwners:
@@ -241,4 +165,4 @@ class AtomInstallJournal:
         return drained
 
 
-__all__ = ["AtomInstallJournal", "ExtensionInstallSnapshot", "TriggerCodecOwners"]
+__all__ = ["AtomInstallJournal", "TriggerCodecOwners"]

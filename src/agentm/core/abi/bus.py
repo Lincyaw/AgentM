@@ -450,44 +450,6 @@ class EventBus:
         """Block clear() from wiping handlers.  Called after atom install."""
         self._frozen_clear = True
 
-    def copy(self) -> EventBus:
-        """Snapshot subscriptions and observers for composition transactions.
-
-        This bus's *own* subscriptions.  Which segments are linked is not part
-        of it: a segment is linked and unlinked by whoever owns it, together
-        with that owner's other two link lists, and a restore that put a list
-        of segments back would undo linking somebody else did in between while
-        the two lists that move with it stayed as they were.
-        """
-
-        copied = EventBus()
-        copied._handlers = {
-            channel: list(subscriptions)
-            for channel, subscriptions in self._handlers.items()
-        }
-        copied._observers = list(self._observers)
-        copied._next_seq = self._next_seq
-        copied._frozen_clear = self._frozen_clear
-        return copied
-
-    def replace_from(self, other: EventBus) -> None:
-        """Restore subscriptions and observers from ``other``, links untouched.
-
-        ``_next_seq`` is deliberately not restored.  It is an allocator, not
-        state: a sequence number it has handed out is held by the subscription
-        that got it, and a linked segment's subscriptions outlive this call.
-        Rewinding it re-issues numbers that are still in use, two live
-        subscriptions tie on ``(priority, seq)``, and the one subscribed later
-        dispatches first.  Handing out a number nobody holds costs nothing.
-        """
-
-        self._handlers = {
-            channel: list(subscriptions)
-            for channel, subscriptions in other._handlers.items()
-        }
-        self._observers = list(other._observers)
-        self._frozen_clear = other._frozen_clear
-
     def clear(self) -> None:
         """Clear all handlers, linked segments included.  Blocked after freeze_clear().
 

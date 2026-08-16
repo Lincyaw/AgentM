@@ -493,7 +493,6 @@ async def install_extension(
     # Taken before anything moves. The contents of the shared stores only: the
     # context tree is put back by the inverse of what this installation itself
     # linked and unlinked, not by a picture of it.
-    snapshot = api._capture_extension_install_state()
     context = AtomContext(api, spec, runtime=runtime)
     atom_api = _AtomAPIFacade(api, context)
     superseded_departure = None
@@ -587,15 +586,18 @@ async def install_extension(
     except BaseException as exc:
         error = str(exc) or type(exc).__name__
         try:
-            # The inverse of ``link_into``, and the whole of what this
-            # installation did to the session's context tree. Safe to run when
-            # the link never happened, and deliberately narrow: an atom some
-            # other task detached while this install was awaiting stays
-            # detached, because that removal was not this installation's to
-            # undo. Unlinking is also what takes the atom out of the installed
-            # set -- the context is the record.
+            # The whole rollback is an inverse now: no picture of the session
+            # is taken before an install, because there is no store an install
+            # writes into that it does not own. What is undone here is what
+            # this installation did and nothing else -- an atom another task
+            # detached while this one was awaiting stays detached, an atom that
+            # finished installing beside it keeps everything it wrote, and an
+            # embedder's own writes from a re-entrant register handler stand.
+            #
+            # The inverse of ``link_into``, safe to run when the link never
+            # happened. Unlinking is also what takes the atom out of the
+            # installed set -- the context is the record.
             context.unlink_from(api)
-            api._restore_extension_install_state(snapshot)
             # Its tables go with the unlink, and what it recorded through
             # ``api.effect`` is undone here because nothing else describes it.
             # An atom that kept its api can go on recording effects through it

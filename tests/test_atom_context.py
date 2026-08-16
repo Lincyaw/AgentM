@@ -1787,6 +1787,10 @@ async def test_an_installation_writes_into_no_table_of_the_hosts(
         host_tools = list(session._own_tools)
         host_policies = list(session._own_policies)
         host_renderers = dict(session._own_renderers)
+        host_services = dict(session.services.own_table())
+        host_handlers = {
+            channel: list(subs) for channel, subs in session.bus._handlers.items()
+        }
 
         await session.install_extension(spec)
         api = _kept(session, "every_write_api")
@@ -1797,6 +1801,13 @@ async def test_an_installation_writes_into_no_table_of_the_hosts(
         assert session._own_tools == host_tools
         assert session._own_policies == host_policies
         assert session._own_renderers == host_renderers
+        # The host's registry and its own bus table too, which is what makes
+        # the install rollback able to be an inverse throughout: there is no
+        # store an installation writes into that it does not own.
+        assert session.services.own_table() == host_services
+        assert {
+            channel: list(subs) for channel, subs in session.bus._handlers.items()
+        } == host_handlers
 
         # The control: the writes really happened, in the atom's own tables.
         assert _owner(session, "every_write_service") == spec.module_path
@@ -2191,30 +2202,29 @@ def install(api, config):
 
 
 @pytest.mark.asyncio
-async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
+async def test_a_failed_install_leaves_the_embedders_own_writes_alone(
     tmp_path: Path,
 ) -> None:
-    """The real edge on "an installation writes into no table of the host's".
+    """A rollback undoes the installation, and the installation only.
 
-    No path an *atom* reaches writes into a host table. But a registration
-    emits ``ApiRegisterEvent`` through ``bus.emit_sync``, re-entrantly, from
-    inside the atom's own registration call, so an embedder's handler runs on
-    the install's stack and can write into the host's tables from there. The
-    host's tables are not in the install snapshot, so such a write survives the
-    install's failure.
+    Every registration emits ``ApiRegisterEvent`` through ``bus.emit_sync``,
+    re-entrantly, so an embedder's synchronous handler runs on the failing
+    install's stack and can write wherever the session lets it. Those writes
+    are the embedder's decision, not the installation's effect, and undoing
+    them would be the same mistake as resurrecting a context somebody else
+    unlinked: a picture put back at a later moment cannot tell whose decision
+    it is reversing.
 
-    That is the documented behaviour rather than a defect this branch fixes,
-    and it is pinned here because the alternative -- putting the three host
-    tables back into the snapshot -- would restore a whole-state picture beside
-    an inverse-shaped rollback and rebuild the hybrid this round removes.
+    So all three of them stand -- the host tool, the host service, the host
+    subscription -- while the atom's own writes leave with its context. There
+    is no store an installation writes into that it does not own
+    (``test_an_installation_writes_into_no_table_of_the_hosts``), which is what
+    makes "undo your own writes and nobody else's" implementable rather than
+    aspirational.
 
-    Two halves make it worth writing down rather than leaving to be found.
-    One handler gets two fates, decided by which store it reached for: its
-    write into a host table survives, and its service registration and its
-    subscription do not, because the registry and the bus are still restored
-    from a picture. And the same embedder code is atomic, half-atomic or inert
-    depending on ``def`` versus ``async def``, because ``emit_sync`` closes an
-    async handler's coroutine and logs.
+    One asymmetry is left and it is not this rollback's: an ``async def``
+    handler on this channel never runs at all, because ``emit_sync`` closes
+    the coroutine and logs.
     """
 
     spec = _atom(tmp_path, "emitter_atom", _EMITS_THEN_FAILS)
@@ -2248,18 +2258,12 @@ async def test_a_sync_register_handler_writes_into_the_host_during_an_install(
         with pytest.raises(Exception, match="emitter_atom refuses to install"):
             await session.install_extension(spec)
 
-        # It ran on the install's stack, and what it wrote into a host table is
-        # still there.
         assert fired == ["sync"]
         assert host_tool in session._own_tools
         assert [tool.name for tool in session.tools] == ["host_tool"]
-        # The same handler's other two writes are gone, because the registry
-        # and the bus are still restored from a picture. This is the asymmetry
-        # the snapshot's docstring names; it is pinned rather than endorsed.
-        assert session.services.get("host_from_handler") is None
+        assert session.services.get("host_from_handler") == "written mid-install"
         session.bus.emit_sync("host.channel", object())
-        assert heard == []
-        # The atom's own write went with the rollback, which is the control.
+        assert heard == ["host"]
+        # The control: the atom's own write went with the rollback.
         assert session.installed_extensions == []
-        # And the async handler never ran at all: emit_sync closed it.
         assert never == []

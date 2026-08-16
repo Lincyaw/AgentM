@@ -140,7 +140,6 @@ from agentm.core.runtime.atom_context import (
 from agentm.core.runtime.driver import DriverConfig, drive
 from agentm.core.runtime.extension_install import (
     AtomInstallJournal,
-    ExtensionInstallSnapshot,
     TriggerCodecOwners,
 )
 from agentm.core.runtime.provider_registry import ProviderRegistry
@@ -1351,17 +1350,6 @@ class SessionRuntime:
         """Whether the driver loop has been started."""
 
         return self._driver_task is not None
-
-    def _capture_extension_install_state(self) -> ExtensionInstallSnapshot:
-        """The contents of the shared stores, for a rollback to put back."""
-
-        return ExtensionInstallSnapshot.of(self)
-
-    def _restore_extension_install_state(
-        self,
-        snapshot: ExtensionInstallSnapshot,
-    ) -> None:
-        snapshot.restore_into(self)
 
     def note_departed_context(self, context: AtomContext) -> None:
         """Hold a context the session has taken out, for what it records later.

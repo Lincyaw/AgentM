@@ -30,36 +30,3 @@ def test_clearing_a_bus_takes_its_linked_segments_with_it() -> None:
 
     assert bus.subscriptions("probe.channel") == []
     assert bus.channels() == []
-
-
-def test_a_restore_does_not_reissue_a_sequence_number_still_in_use() -> None:
-    """``replace_from`` restores tables, never the allocator.
-
-    An install snapshots the bus, and its rollback restores the snapshot's
-    tables.  Since the rollback stopped putting the link list back, a context
-    that finished installing while the failing one was in flight is still
-    linked afterwards — and its subscriptions still hold the sequence numbers
-    they were issued.  Rewinding the allocator beneath them re-issues those
-    numbers, two live subscriptions tie on ``(priority, seq)``, and the one
-    subscribed later dispatches first.
-
-    A sequence number nobody holds costs nothing, so the allocator only ever
-    moves forward.
-    """
-
-    bus = EventBus()
-    snapshot = bus.copy()
-
-    segment = bus.segment("agentm.late")
-    order: list[str] = []
-    segment.on("probe.channel", lambda event: order.append("segment"))
-    bus.link(segment)
-
-    bus.replace_from(snapshot)
-
-    bus.on("probe.channel", lambda event: order.append("host"))
-    bus.emit_sync("probe.channel", object())
-
-    assert order == ["segment", "host"]
-    seqs = [sub.seq for sub in bus.subscriptions("probe.channel")]
-    assert len(set(seqs)) == len(seqs)
