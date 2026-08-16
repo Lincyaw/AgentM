@@ -33,7 +33,7 @@ def test_code_health_flags_subprocess_in_contrib_atom(tmp_path: Path) -> None:
     rules = _issues_for(
         tmp_path,
         "import subprocess\n\ndef run() -> None:\n    subprocess.run(['ls'])\n",
-        relative="contrib/extensions/policy/src/policy_engine/tooling.py",
+        relative="contrib/extensions/example/src/example_atom/tooling.py",
     )
     assert "AM004" in rules
 
@@ -41,7 +41,7 @@ def test_code_health_flags_subprocess_in_contrib_atom(tmp_path: Path) -> None:
 def test_code_health_allows_subprocess_in_host_code(tmp_path: Path) -> None:
     for relative in (
         "src/agentm/cli/_tools.py",
-        "contrib/scenarios/harbor/src/agentm_harbor/host_adapter.py",
+        "contrib/scenarios/example/src/agentm_example/host_adapter.py",
     ):
         rules = _issues_for(
             tmp_path,
@@ -181,7 +181,7 @@ def _bash_parameters(default_timeout: float) -> dict[str, object]:
 def install(api, config):
     api.register_tool(_BashTool(parameters=_bash_parameters(120.0)))
 """,
-        relative="contrib/extensions/policy/src/policy_engine/__init__.py",
+        relative="contrib/extensions/example/src/example_atom/__init__.py",
     )
     assert rules.count("AM011") == 1
 
@@ -219,7 +219,7 @@ def install(api, config):
     api.register_tool(FunctionTool(parameters=_Args, fn=execute))
     api.register_tool(_CustomTool(parameters=pydantic_to_tool_schema(_Args)))
 """,
-        relative="contrib/extensions/policy/src/policy_engine/__init__.py",
+        relative="contrib/extensions/example/src/example_atom/__init__.py",
     )
     assert "AM011" not in rules
 

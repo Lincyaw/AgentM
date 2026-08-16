@@ -65,11 +65,13 @@ Branch naming: `prefix/description` (e.g. `feat/add-auth`, `fix/crash-on-empty`,
 
 Run `git config core.hooksPath .githooks` once per clone/worktree to enable the tracked pre-commit hook. The hook checks staged Python files with ruff format/check, mypy for staged `src/` files, and code-health for staged `src/`/`contrib/` files. Do not skip it with `--no-verify`.
 
-## Workspace Members
+## Extracted Packages
 
-This is a uv workspace. Members under `contrib/`:
-- `contrib/extensions/policy` — policy-engine
-- `contrib/scenarios/harbor` — Harbor external agent adapter
+This repository ships the SDK only. The policy engine and the scenarios coupled
+to it live in [Lincyaw/policy-engine](https://github.com/Lincyaw/policy-engine):
+the `policy_engine` atom package, the Harbor external-agent adapter, and the
+pattern-miner scenario. That repository depends on `agentm`; nothing here
+depends back on it, which is what lets `pip install agentm` resolve from PyPI.
 
 ## Key Environment Variables
 

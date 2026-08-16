@@ -1,7 +1,0 @@
-name: pattern_miner:distill
-description: |
-  Batch-level checklist distiller. Agent definition: agents/distiller.yaml;
-  prompt contract: prompts/distiller/distill.md.
-
-includes:
-  - agents/distiller.yaml

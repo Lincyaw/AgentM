@@ -43,11 +43,6 @@ storage-postgres = [
 storage-clickhouse = [
     "clickhouse-connect>=0.7.0",
 ]
-harbor = [
-    "agentm-harbor",
-    "arl-env>=0.26.1",
-    "dockerfile-parse",
-]
 
 [dependency-groups]
 dev = [
@@ -56,13 +51,7 @@ dev = [
     # produces a venv the tests cannot run in, and the failures look like real
     # ones: a builtin that cannot import fails that atom's case rather than
     # erroring the run.
-    "agentm[storage-postgres,storage-clickhouse,harbor]",
-    # A contrib atom, not part of the SDK: nothing under src/agentm imports it,
-    # and a scenario opts in by naming it in its extension list. It sits here
-    # rather than in [project.dependencies] because it is not published, and a
-    # hard edge to a package no index carries makes `pip install agentm` fail
-    # during resolution. The dev group keeps `uv sync` installing it locally.
-    "policy-engine",
+    "agentm[storage-postgres,storage-clickhouse]",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
@@ -87,24 +76,6 @@ build-backend = "uv_build"
 # directory into remote sandboxes and run there as `python -m agentm_toolbox`,
 # with no agentm on the path.
 module-name = ["agentm", "agentm_toolbox"]
-
-[tool.uv.sources]
-# Local checkout while the replay support this depends on is unreleased: an
-# attempt can be resumed from the middle of a recorded run only if the
-# environment can rebuild the workspace at that point. Point this back at the
-# published version once it ships.
-arl-env = { path = "../agent-env/sdk/python/arl", editable = true }
-agentm-harbor = { workspace = true }
-policy-engine = { workspace = true, editable = true }
-
-[tool.uv.workspace]
-# Explicitly list nested projects under contrib/. Other contrib/scenarios/*
-# entries are pure manifests with no pyproject.toml and must NOT be picked
-# up as workspace members.
-members = [
-    "contrib/extensions/policy",
-    "contrib/scenarios/harbor",
-]
 
 [tool.pytest.ini_options]
 markers = [
