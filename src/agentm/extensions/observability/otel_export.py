@@ -803,19 +803,25 @@ class SessionTelemetry:
         return self.span_tracker.pop((kind, key), None)
 
     def close_open_spans(self, *, status_description: str) -> None:
-        """End every still-open tracked span with an UNSET status.
+        """End every still-open tracked span, recording why it was forced.
 
         Used by the ``SessionShutdownEvent`` translator to guarantee no
         span leaks past session teardown — paired End events handle the
         happy path; this catches abnormal exits (crash, signal, forced
         shutdown) where the End event never fired.
+
+        The reason goes on an attribute rather than into the status. OTel
+        keeps a description only on an ``ERROR`` status: passing one with
+        ``UNSET`` made the SDK log "description should only be set when
+        status_code is set to StatusCode.ERROR" and *drop the description*,
+        so every session with an open span printed a warning and the reason
+        it printed about was thrown away. Leaving the status unset is
+        deliberate -- End-without-Start happens on ordinary paths and is not
+        an error -- so the reason belongs where an unset status can carry it.
         """
-        # Local import keeps the dataclass body trace-import-light; the
-        # SDK is already imported at module scope so this is free.
-        from opentelemetry.trace import Status, StatusCode
 
         for span in list(self.span_tracker.values()):
-            span.set_status(Status(StatusCode.UNSET, status_description))
+            span.set_attribute("agentm.span.forced_end", status_description)
             span.end()
         self.span_tracker.clear()
 
