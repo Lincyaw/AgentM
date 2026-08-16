@@ -50,6 +50,12 @@ MANIFEST = ExtensionManifest(
     registers=("event:before_send", "executor:tool_purpose"),
     config_schema=ToolPurposeConfig,
     requires=(),
+    # The synthetic argument has to be gone before whatever actually runs the
+    # tool sees it, so this layer belongs outside any executor that dispatches
+    # the call somewhere else. Only ordering, and only if that atom is here:
+    # `background_exec` is not a dependency, and a composition without it
+    # composes exactly the same.
+    after=("atom:background_exec",),
 )
 
 

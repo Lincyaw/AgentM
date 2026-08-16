@@ -2272,6 +2272,47 @@ def install(api, config):
 
 
 @pytest.mark.asyncio
+async def test_after_orders_two_atoms_that_neither_needs_the_other(
+    tmp_path: Path,
+) -> None:
+    """The word for "if you are here, I come after you".
+
+    ``tool_purpose`` strips a synthetic argument before whatever actually runs
+    the tool sees it, so its layer belongs outside any executor that dispatches
+    the call somewhere else. It does not *need* ``background_exec``: a
+    composition without it composes exactly the same. Until there were two
+    words that could not be said -- naming it under ``requires`` would have
+    made a preference into a hard dependency.
+
+    Asserted from both listings and from neither, because that is the claim:
+    the order is what was declared, and an absent target declares nothing.
+    """
+
+    def _spec(name: str) -> ExtensionSpec:
+        return ExtensionSpec.from_module(f"agentm.extensions.builtin.{name}")
+
+    async def _compose(*names: str) -> tuple[dict[str, int], str]:
+        async with probe_session(str(tmp_path)) as session:
+            for name in names:
+                await session.install_extension(_spec(name))
+            ranks = {
+                entry.name: entry.rank for entry in composition_digest(session).atoms
+            }
+            outermost = type(session.services.get("tool_executor")).__name__
+            return ranks, outermost
+
+    listed_after = await _compose("local_backend", "background_exec", "tool_purpose")
+    listed_before = await _compose("local_backend", "tool_purpose", "background_exec")
+    alone = await _compose("local_backend", "tool_purpose")
+
+    assert listed_after == listed_before
+    assert listed_after[0]["tool_purpose"] == 1
+    assert listed_after[1] == "_PurposeExecutor"
+    # The target is absent, so the declaration says nothing at all.
+    assert alone[0]["tool_purpose"] == 0
+
+
+@pytest.mark.asyncio
 async def test_layers_fold_by_rank_not_by_when_they_were_written(
     tmp_path: Path,
 ) -> None:

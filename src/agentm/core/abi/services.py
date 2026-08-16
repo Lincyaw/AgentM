@@ -142,16 +142,6 @@ class ServiceEntry:
     protocol: type | None = None
     scope: ServiceScope = "tree"
     order: int = -1
-    rank: int = 0
-    """How deep in the dependency graph the writer sits.
-
-    Write order says which of two writes happened later, which is a fact about
-    how the composition was listed.  Rank says which of two writers the *graph*
-    puts later, which is a fact about what they declared.  Layers fold by rank
-    first, so a composition listed in a different order folds the same way, and
-    two writers at one rank are exactly the pair the graph does not order --
-    which is what makes "these must commute" a computation rather than a hope.
-    """
 
 
 class ServiceRegistry:
@@ -168,10 +158,11 @@ class ServiceRegistry:
 
     def __init__(self, *, parent: ServiceRegistry | None = None) -> None:
         self._services: dict[str, ServiceEntry] = {}
-        #: The dependency depth of whoever owns this node, stamped onto every
-        #: entry it mints. Zero for the host and for an atom that requires
-        #: nothing: the graph puts them at the bottom, and nothing below them
-        #: can be ordered against.
+        #: The dependency depth of whoever owns this node. Read at fold time
+        #: rather than stamped onto entries, because it is a function of the
+        #: atoms present right now: one arriving can deepen an atom that
+        #: declared it comes after it, and a number copied into an entry at
+        #: write time would be a picture taken before that happened.
         self.rank = 0
         #: Decorations of a key, kept beside the entries rather than among
         #: them: a layer does not compete for the key, and a node has to be
@@ -382,7 +373,6 @@ class ServiceRegistry:
             protocol=protocol,
             scope=scope,
             order=next(_WRITE_ORDER),
-            rank=self.rank,
         )
         if self._write_observer is not None:
             self._write_observer(name, service, scope, role_bind=role_bind)
@@ -422,7 +412,6 @@ class ServiceRegistry:
             protocol=None,
             scope=scope,
             order=next(_WRITE_ORDER),
-            rank=self.rank,
         )
         self._layers.setdefault(name, []).append(entry)
         if self._write_observer is not None:
@@ -603,23 +592,42 @@ def _collect(
     *,
     skip: ServiceRegistry | None = None,
 ) -> list[ServiceEntry]:
-    """Every *layer* on ``name`` anywhere in the chain, oldest write first.
+    """Every *layer* on ``name`` anywhere in the chain, innermost first.
 
-    Layers do not compete for the key -- they decorate whatever holds it --
-    so they are kept beside the entries rather than among them.  Two layers
-    from one node, and a base and a layer in one node, both have to be
+    Layers do not compete for the key -- they decorate whatever holds it -- so
+    they are kept beside the entries rather than among them.  Two layers from
+    one node, and a base and a layer in one node, both have to be
     representable, and a single slot per key cannot represent either.
+
+    Ordered by the writing node's rank and then by write order: the graph first
+    where it has something to say, and the composition's own listing for the
+    pairs it does not order.  The rank is read here rather than stamped on the
+    entry, so an atom arriving and deepening one that declared it comes after
+    it changes the fold rather than leaving an older number behind.
     """
 
-    found: list[ServiceEntry] = list(registry._layers.get(name, ()))
+    return [entry for _rank, _order, entry in _layered(registry, name, skip=skip)]
+
+
+def _layered(
+    registry: ServiceRegistry,
+    name: str,
+    *,
+    skip: ServiceRegistry | None = None,
+) -> list[tuple[int, int, ServiceEntry]]:
+    found: list[tuple[int, int, ServiceEntry]] = [
+        (registry.rank, entry.order, entry) for entry in registry._layers.get(name, ())
+    ]
     for child in registry._linked:
         if child is skip:
             continue
-        found.extend(child._layers.get(name, ()))
+        found.extend(
+            (child.rank, entry.order, entry) for entry in child._layers.get(name, ())
+        )
     parent = registry._parent
     if parent is not None and parent is not skip:
-        found.extend(_collect(parent, name, skip=registry))
-    found.sort(key=lambda entry: (entry.rank, entry.order))
+        found.extend(_layered(parent, name, skip=registry))
+    found.sort(key=lambda row: (row[0], row[1]))
     return found
 
 

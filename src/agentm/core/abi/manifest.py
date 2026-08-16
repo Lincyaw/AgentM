@@ -113,14 +113,26 @@ class ExtensionManifest(BaseModel):
     precedence, and hard composition policy belong to ``AgentSessionConfig``
     and its ``ScenarioLoader``.
 
-    An atom declares what it needs, never where it sits. ``requires`` is the
-    only ordering an atom can state, because it is the only ordering an atom
-    can know: where an atom belongs relative to its independent peers depends
-    on which peers are present, which is a fact about the composition. That
-    order is the scenario's, and it is read from the order its extensions are
-    listed in.
+    An atom declares what it needs, never where it sits.  Two words, because
+    one was doing two jobs and the pair of them could not be stated apart:
 
-    ``requires`` and ``registers`` hold explicit ``kind:name`` references. For
+    * ``requires`` is a hard dependency.  It decides satisfaction *and* order:
+      absent, the composition fails with a message that reads as a fix.
+    * ``after`` is order only.  "If this one is here, I come after it" --
+      absent, nothing happens and nothing is said.
+
+    Conflating them meant an optional dependency could not be declared at all:
+    naming it made it mandatory, so every deliberate probe-and-degrade went
+    undeclared, which in turn made the declarations untrustworthy -- reading a
+    manifest did not tell you what the atom would touch.
+
+    Neither word says where the atom sits among peers it declares nothing
+    about.  That is not knowable from here: it depends on which peers are
+    present, which is a fact about the composition rather than about this atom,
+    and it is read from the order the scenario lists its extensions in.
+
+    ``requires``, ``after`` and ``registers`` hold explicit ``kind:name``
+    references. For
     a service boundary that has a ``ServiceRole``, spell it ``ROLE.capability``
     so the role stays the only place its key is written; anything else — a
     tool, an atom, an event, a service with no role descriptor — is written
@@ -139,6 +151,7 @@ class ExtensionManifest(BaseModel):
     config_schema: type[BaseModel] | None = None
     sensitive_config_fields: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
+    after: tuple[str, ...] = ()
 
 
 __all__ = [

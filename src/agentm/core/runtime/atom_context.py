@@ -75,7 +75,6 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from agentm.core.abi.manifest import requirement_key
 
 from agentm.core.abi.bus import BusSegment, EventBusObserver, Handler
 from agentm.core.abi.codec import TriggerCodec
@@ -256,6 +255,7 @@ class AtomContext:
         "_atom_name",
         "_effects",
         "_installed",
+        "_needs",
         "_provides",
         "_rank",
         "_runtime",
@@ -273,18 +273,18 @@ class AtomContext:
         *,
         runtime: bool = False,
         provides: frozenset[str] = frozenset(),
-        rank: int = 0,
+        needs: frozenset[str] = frozenset(),
     ) -> None:
         self._session = session
         self._spec = spec
         self._runtime = runtime
         self._provides = provides
-        self._rank = rank
+        self._needs = needs
+        self._rank = 0
         self._atom_name: str | None = None
         self._installed = False
         self._tables = ContextTables()
         self._services = ServiceRegistry(parent=session.services)
-        self._services.rank = rank
         self._services.set_write_observer(self._observe_service_write)
         self._segment = session.bus.segment(spec.module_path)
         self._effects = EffectLog()
@@ -296,17 +296,35 @@ class AtomContext:
         return self._provides
 
     @property
+    def needs(self) -> frozenset[str]:
+        """Capability keys this atom asked to come after, hard or soft."""
+
+        return self._needs
+
+    @property
     def rank(self) -> int:
         """How deep in the dependency graph this atom sits.
 
-        One more than the deepest atom it declared a requirement on, or zero
-        when everything it requires was already there before any atom was. Two
-        contexts at one rank are two the graph does not order: nothing either
-        declared says which comes first, so whatever they both touch has to
-        commute, and where it does not the session says so.
+        One more than the deepest atom it declared it comes after, or zero when
+        everything it named was already there before any atom was. Two contexts
+        at one rank are two the graph does not order: nothing either declared
+        says which comes first, so whatever they both touch has to commute, and
+        where it does not the session says so.
+
+        Recomputed whenever the linked set changes rather than fixed when this
+        context was made, because it is a function of the atoms present. An
+        atom arriving can deepen one that declared it comes after it, and a
+        number settled at install time would answer for a session that no
+        longer exists.
         """
 
         return self._rank
+
+    def set_rank(self, rank: int) -> None:
+        """Take the depth the session computed for the set it now holds."""
+
+        self._rank = rank
+        self._services.rank = rank
 
     @property
     def module_path(self) -> str:
@@ -898,30 +916,37 @@ class ContextOwnership:
         return self.services.get(key)
 
 
-def rank_for(requires: Sequence[str], linked: Sequence[AtomContext]) -> int:
-    """Where the dependency graph puts an atom that declares ``requires``.
+def settle_ranks(linked: Sequence[AtomContext]) -> None:
+    """Give every linked context its depth in the graph over the current set.
 
-    One more than the deepest atom already here that provides something it
-    asked for, and zero when nothing here does -- everything it needs was
-    there before any atom was, so the graph puts it at the bottom.
+    A fixpoint rather than a topological walk, because the set is small and the
+    contexts are not held in dependency order -- an atom installed at runtime
+    sits wherever it was linked. Each pass deepens anything sitting above
+    something it declared it comes after; the graph is acyclic, so the number
+    of passes is bounded by the longest chain and the loop below bounds it
+    again in case a caller ever links a cycle.
 
-    Computed against the session rather than read off a plan, so a runtime
-    install lands at the depth its declarations earn instead of after
-    everything merely because it arrived late. A composed plan installs in
-    topological order, so asking here gives the same answer the graph does.
+    Absent targets contribute nothing, which is what makes ``after`` a
+    preference rather than a dependency: an atom that names one nobody
+    installed sits exactly where it would have without the declaration.
     """
 
-    needed = {requirement_key(requirement) for requirement in requires}
-    if not needed:
-        return 0
-    return 1 + max(
-        (
-            context.rank
-            for context in linked
-            if context.installed and (context.provides & needed)
-        ),
-        default=-1,
-    )
+    for _pass in range(len(linked) + 1):
+        moved = False
+        for context in linked:
+            depth = 1 + max(
+                (
+                    other.rank
+                    for other in linked
+                    if other is not context and (other.provides & context.needs)
+                ),
+                default=-1,
+            )
+            if depth != context.rank:
+                context.set_rank(depth)
+                moved = True
+        if not moved:
+            return
 
 
 def report_contested_key(
@@ -1150,7 +1175,7 @@ __all__ = [
     "PolicyRow",
     "RendererRow",
     "ownership_of",
-    "rank_for",
+    "settle_ranks",
     "report_contested_key",
     "policy_row",
     "renderer_row",

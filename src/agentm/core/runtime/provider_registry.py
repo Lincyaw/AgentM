@@ -432,4 +432,58 @@ class ProviderRegistry:
     # --- Install rollback ---
 
 
-__all__ = ["ProviderRegistry"]
+def uncover_providers(
+    providers: ProviderRegistry,
+    module_path: str,
+    owner_of: Callable[[str], str | None],
+) -> list[str]:
+    """Say who holds the providers an unlinked context was shadowing.
+
+    Unlinking is not the same as removing, and this is where the difference
+    shows. A key two contexts wrote resolves to the survivor the moment the
+    writer leaves, and every reader of that resolves it for itself -- except
+    the provider registry, whose ownership index and active name are its
+    own and which nothing else can re-resolve.
+
+    Returns the providers that really went away, as opposed to the ones
+    that were merely uncovered.
+    """
+
+    departed: list[str] = []
+    uncovered: list[str] = []
+    for name, owner in providers.owners().items():
+        if owner != module_path:
+            continue
+        if providers.has(name):
+            uncovered.append(name)
+        else:
+            departed.append(name)
+    for name in uncovered:
+        providers.note_owner(name, owner_of(f"provider:{name}"))
+    for name in departed:
+        providers.unregister(name)
+    if uncovered:
+        # Re-resolve, so the session's active stream and model are the ones
+        # the uncovered registration names rather than the departed atom's.
+        _reactivate(providers)
+    return departed
+
+
+def _reactivate(providers: ProviderRegistry) -> None:
+    """Pick the active provider again, tolerating a session with none left.
+
+    ``activate`` raises when the session is bound to a provider that is now
+    absent, which is a real error at a registration but not something a
+    detach may propagate: the atom is already gone, and the caller asked to
+    remove it, not to install one.
+    """
+
+    try:
+        providers.activate()
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        logger.warning(
+            "could not re-resolve the active provider after a detach: {}", exc
+        )
+
+
+__all__ = ["ProviderRegistry", "uncover_providers"]

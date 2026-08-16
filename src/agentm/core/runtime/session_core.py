@@ -134,6 +134,7 @@ from agentm.core.runtime.atom_context import (
     PolicyRow,
     RendererRow,
     ownership_of,
+    settle_ranks,
     report_contested_key,
     policy_row,
     renderer_row,
@@ -143,7 +144,7 @@ from agentm.core.runtime.extension_install import (
     AtomInstallJournal,
     TriggerCodecOwners,
 )
-from agentm.core.runtime.provider_registry import ProviderRegistry
+from agentm.core.runtime.provider_registry import ProviderRegistry, uncover_providers
 from agentm.core.runtime.session_composition import (
     CompositionSnapshot,
     SessionRuntimeConfig,
@@ -1107,7 +1108,9 @@ class SessionRuntime:
         context.unlink_from(self)
         residue = context.suspend()
         self._departed.note(context)
-        removed_providers = self._uncover(module_path)
+        removed_providers = uncover_providers(
+            self._providers, module_path, self.ownership().service
+        )
         logger.debug(
             "unlinked atom {}: {} tools, {} policies, {} renderers, "
             "{} services, {} providers, {} bus channels, {} recorded effects",
@@ -1164,57 +1167,6 @@ class SessionRuntime:
         residue.context.resume(residue)
         self._departed.forget(residue.context)
         return True
-
-    def _uncover(self, module_path: str) -> list[str]:
-        """Say who holds the providers an unlinked context was shadowing.
-
-        Unlinking is not the same as removing, and this is where the difference
-        shows. A key two contexts wrote resolves to the survivor the moment the
-        writer leaves, and every reader of that resolves it for itself -- except
-        the provider registry, whose ownership index and active name are its
-        own and which nothing else can re-resolve.
-
-        Returns the providers that really went away, as opposed to the ones
-        that were merely uncovered.
-        """
-
-        held = self.ownership()
-        departed: list[str] = []
-        uncovered: list[str] = []
-        for name, owner in self._providers.owners().items():
-            if owner != module_path:
-                continue
-            if self.services.has(f"provider:{name}"):
-                uncovered.append(name)
-            else:
-                departed.append(name)
-        for name in uncovered:
-            self._providers.note_owner(name, held.service(f"provider:{name}"))
-        for name in departed:
-            self._providers.unregister(name)
-        if uncovered:
-            # Re-resolve, so the session's active stream and model are the ones
-            # the uncovered registration names rather than the departed atom's.
-            self._reactivate_providers()
-        return departed
-
-    def _reactivate_providers(self) -> None:
-        """Pick the active provider again, tolerating a session with none left.
-
-        ``activate`` raises when the session is bound to a provider that is now
-        absent, which is a real error at a registration but not something a
-        detach may propagate: the atom is already gone, and the caller asked to
-        remove it, not to install one.
-        """
-
-        try:
-            self._providers.activate()
-        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            logger.warning(
-                "session {} could not re-resolve its provider after a detach: {}",
-                self.id,
-                exc,
-            )
 
     def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:
         """Detach an atom; report whether one was installed.
@@ -1284,13 +1236,14 @@ class SessionRuntime:
 
         ``after`` names the contexts this one was linked behind before it was
         taken out: it lands directly after the last of them still linked, or
-        first if none is. Both halves of superseding use it -- the replacement
-        that lands takes the position its previous incarnation held, and the
-        rollback of one that does not puts the original back in the same
-        place -- so a session that reloaded an atom composes its children the
-        way a cold start would. An index would be wrong the moment anything
-        else left the list. ``None``, the fresh-install case, appends: link
-        order is join order.
+        first if none is. Both halves of superseding use it, so a session that
+        reloaded an atom composes its children the way a cold start would; an
+        index would be wrong the moment anything else left the list. ``None``,
+        the fresh-install case, appends: link order is join order.
+
+        Not to be confused with the manifest's ``after``, which is a
+        declaration about the dependency graph. This one is a position in a
+        list; ranks are settled from the declarations below.
         """
 
         if any(existing is context for existing in self._linked):
@@ -1304,19 +1257,25 @@ class SessionRuntime:
             )
         if after is None:
             self._linked.append(context)
-            return
-        position = 0
-        for index, existing in enumerate(self._linked):
-            if any(existing is anchor for anchor in after):
-                position = index + 1
-        self._linked.insert(position, context)
+        else:
+            position = 0
+            for index, existing in enumerate(self._linked):
+                if any(existing is anchor for anchor in after):
+                    position = index + 1
+            self._linked.insert(position, context)
+        settle_ranks(self._linked)
 
     def unlink_context(self, context: AtomContext) -> None:
-        """Stop aggregating one atom context; safe to repeat."""
+        """Stop aggregating one atom context; settle ranks again; repeatable.
+
+        An atom leaving can lift one that only sat deep because it declared it
+        came after the departed one.
+        """
 
         self._linked[:] = [
             existing for existing in self._linked if existing is not context
         ]
+        settle_ranks(self._linked)
 
     def is_linked(self, context: AtomContext) -> bool:
         """Whether this session aggregates ``context`` right now."""

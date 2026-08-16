@@ -109,6 +109,7 @@ class _ExtensionPlanItem:
     name: str
     manifest: ExtensionManifest | None
     requires: tuple[str, ...]
+    after: tuple[str, ...]
     registers: tuple[str, ...]
     provides: tuple[str, ...]
 
@@ -229,6 +230,7 @@ def _extension_plan(
             name=name,
             manifest=manifest,
             requires=manifest.requires if manifest is not None else (),
+            after=manifest.after if manifest is not None else (),
             registers=manifest.registers if manifest is not None else (),
             provides=provided_capability_keys(
                 atom_name=name,
@@ -258,6 +260,18 @@ def _extension_plan(
         )
         raise ValueError(f"unsatisfied atom dependencies: {detail}")
 
+    # ``after`` constrains order and nothing else, so only the targets this
+    # plan actually contains constrain anything: naming an absent atom is a
+    # preference about a composition that did not happen, and saying nothing
+    # is the whole of what it means.
+    deferred = {
+        item.name: {
+            key
+            for key in (requirement_key(entry) for entry in item.after)
+            if key in plan_capabilities
+        }
+        for item in items
+    }
     remaining = dict(by_name)
     ordered: list[_ExtensionPlanItem] = []
     provided = set(available)
@@ -269,10 +283,13 @@ def _extension_plan(
                 requirement_key(requirement) in provided
                 for requirement in item.requires
             )
+            and deferred[item.name] <= provided
         ]
         if not ready:
             cycle = ", ".join(sorted(remaining))
             raise ValueError(f"cyclic atom dependencies: {cycle}")
+        # Among items the graph does not order, the composition's own listing
+        # decides -- it is the only order left, and it is the author's.
         ready.sort(key=lambda item: item.index)
         chosen = ready[0]
         ordered.append(chosen)

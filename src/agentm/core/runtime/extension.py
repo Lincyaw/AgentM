@@ -34,7 +34,11 @@ from agentm.core.abi.bus import (
 from agentm.core.abi.effects import EffectBody, EffectHandle
 from agentm.core.abi.errors import ExtensionLoadError
 from agentm.core.abi.events import ExtensionInstallEvent
-from agentm.core.abi.manifest import ExtensionManifest, provided_capability_keys
+from agentm.core.abi.manifest import (
+    ExtensionManifest,
+    provided_capability_keys,
+    requirement_key,
+)
 from agentm.core.abi.messages import JsonValue, thaw_json
 from agentm.core.abi.session_api import (
     AgentSessionConfig,
@@ -48,7 +52,7 @@ from agentm.core.abi.session_api import (
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.store import TrajectoryDiagnostic
 from agentm.core.lib.async_cancel import await_known_outcome
-from agentm.core.runtime.atom_context import AtomContext, rank_for
+from agentm.core.runtime.atom_context import AtomContext
 from agentm.extensions.validate import (  # code-health: ignore[AM010] -- constitution-listed contract mechanism
     ValidationIssue,
     extension_helper_imports,
@@ -511,9 +515,13 @@ async def install_extension(
                 registers=manifest.registers,
             )
         ),
-        rank=rank_for(
-            () if manifest is None else manifest.requires,
-            api.linked_contexts(),
+        needs=frozenset(
+            ()
+            if manifest is None
+            else (
+                requirement_key(entry)
+                for entry in (*manifest.requires, *manifest.after)
+            )
         ),
     )
     atom_api = _AtomAPIFacade(api, context)
