@@ -415,6 +415,16 @@ class ServiceRegistry:
         else can: a wrapper built by reading the key and writing itself back is
         a link in a chain nobody else can see, and detaching the atom that made
         it leaves the link in place.
+
+        The fold runs at every read, which is safe only because nothing in this
+        runtime reads a service per tool call: what the driver consults it
+        captures once at start, and what it re-reads -- tools, context
+        policies, trigger renderers -- it re-reads at turn boundaries.  A key
+        that was both layered *and* read per call would let an atom installed
+        mid-turn change behaviour between two calls of one turn, so one
+        transformation would run against two different resolutions.  If you
+        are adding such a reader, resolve it at the turn boundary and hold the
+        result for the turn; do not make this fold cheaper and call it fixed.
         """
 
         entry = ServiceEntry(
