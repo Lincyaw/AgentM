@@ -523,7 +523,21 @@ async def install_extension(
         # Linked before ``install()`` runs, so what the atom writes is part of
         # the session while it is writing it -- the duplicate-tool check, the
         # capability verification and the atom's own reads all depend on that.
-        context.link_into(api)
+        #
+        # A replacement takes the position its previous incarnation held, not
+        # the end of the list. The installed set's order is what a child
+        # replays, so a session that reloaded an atom would otherwise compose
+        # its children differently from a cold start -- and reloading is the
+        # common path, not the rare one: it is what ``atom_watch`` does every
+        # time a scenario file changes.
+        context.link_into(
+            api,
+            after=(
+                None
+                if superseded_departure is None
+                else superseded_departure.preceded_by
+            ),
+        )
         result = load_extension(spec, atom_api)
         if inspect.isawaitable(result):
             await result

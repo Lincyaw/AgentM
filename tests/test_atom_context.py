@@ -1921,6 +1921,53 @@ async def test_a_failed_supersede_puts_the_atom_back_among_its_neighbours(
         assert session.uninstall_extension(middle)
 
 
+@pytest.mark.asyncio
+async def test_a_replacement_takes_the_position_it_superseded(
+    tmp_path: Path,
+) -> None:
+    """Reloading an atom must not reorder the composition a child replays.
+
+    The failure path was hardened first, which left the common one wrong: a
+    supersede that *lands* used to append, so ``a, b, c`` with ``b`` reloaded
+    became ``a, c, b``. Reloading is not the rare case -- it is what
+    ``atom_watch`` does every time a scenario file changes -- and the installed
+    set's order is what every child replays, so a long-running session drifted
+    away from what a cold start of the same atoms produces.
+
+    Stated against a cold start rather than against a literal, because that is
+    the property: the two sessions hold the same atoms, so they must compose
+    their children the same way.
+    """
+
+    first = _atom(tmp_path, "a_atom", _VICTIM)
+    middle = _atom(tmp_path, "b_atom", _VICTIM)
+    last = _atom(tmp_path, "c_atom", _VICTIM)
+    # Same manifest name, different file, so it really supersedes.
+    replacement = _file_atom(tmp_path, "b_atom_v2", _VICTIM.format(name="b_atom"))
+
+    async with probe_session(str(tmp_path)) as reloaded:
+        for spec in (first, middle, last):
+            await reloaded.install_extension(spec)
+        await reloaded.install_extension(replacement, replace=True)
+        after_reload = [
+            spec.module_path for spec in reloaded.composition_snapshot().extensions
+        ]
+
+    async with probe_session(str(tmp_path)) as cold:
+        for spec in (first, replacement, last):
+            await cold.install_extension(spec)
+        from_cold = [
+            spec.module_path for spec in cold.composition_snapshot().extensions
+        ]
+
+    assert after_reload == from_cold
+    assert after_reload == [
+        first.module_path,
+        replacement.module_path,
+        last.module_path,
+    ]
+
+
 # An atom that registers a tool -- which emits ``ApiRegisterEvent`` through
 # ``emit_sync``, re-entrantly -- and then refuses to install.
 _EMITS_THEN_FAILS = (

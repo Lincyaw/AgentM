@@ -1260,11 +1260,14 @@ class SessionRuntime:
         previous context is unlinked before its replacement links.
 
         ``after`` names the contexts this one was linked behind before it was
-        taken out, and is how a rollback puts a superseded atom back among its
-        neighbours: directly after the last of them still linked, or first if
-        none is. An index would be wrong the moment anything else left the
-        list, and the set's order is replayed into every child. ``None``, the
-        fresh-install case, appends -- link order is join order.
+        taken out: it lands directly after the last of them still linked, or
+        first if none is. Both halves of superseding use it -- the replacement
+        that lands takes the position its previous incarnation held, and the
+        rollback of one that does not puts the original back in the same
+        place -- so a session that reloaded an atom composes its children the
+        way a cold start would. An index would be wrong the moment anything
+        else left the list. ``None``, the fresh-install case, appends: link
+        order is join order.
         """
 
         if any(existing is context for existing in self._linked):
