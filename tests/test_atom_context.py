@@ -21,6 +21,7 @@ import hashlib
 import sys
 import weakref
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,9 @@ from agentm.core.abi.events import ApiRegisterEvent, SessionShutdownEvent
 from agentm.core.abi.provider import ProviderConfig
 from agentm.core.abi.roles import PROVIDER_RESOLVER_SERVICE, RESOURCE_TXN_SERVICE
 from agentm.core.abi.messages import TextContent
+from agentm.core.abi.cancel import CancelSignal
+from agentm.core.abi.permission import PermissionDecision, PermissionRequest
+from agentm.core.abi.roles import PERMISSION_POLICY_ROLE
 from agentm.core.abi.services import ServiceRegistry, ServiceRole
 from agentm.core.abi.session_api import AtomAPI, ExtensionSpec
 from agentm.core.abi.stream import Model
@@ -2509,6 +2513,61 @@ async def test_a_layer_can_be_taken_out_of_the_middle(tmp_path: Path) -> None:
     # The control: while both were installed the executor really was different.
     assert both != alone
     assert survivor == alone
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_decorates_the_permission_boundary_it_finds_later(
+    tmp_path: Path,
+) -> None:
+    """The third shipped atom that wrapped what a key already held.
+
+    ``plan_mode`` read the permission role, wrapped whatever was bound, and
+    bound the wrapper -- so the policy it found was held in its instance for
+    the life of the session. Nothing this repository ships binds that role, so
+    unlike the two tool executors it never bit; the permission boundary is the
+    documented place an embedder replaces, which is exactly who it was waiting
+    for.
+
+    Two claims, and the wrap-and-bind form fails both. A boundary bound *after*
+    plan_mode installed was never wrapped at all -- it was simply the newer
+    write and won the key, so the mode stopped being enforced with the atom
+    still installed and still reporting that it was. And plan_mode leaving left
+    its own policy in place, holding whatever it had found.
+    """
+
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(_builtin("plan_mode"))
+        assert (
+            type(session.services.get_role(PERMISSION_POLICY_ROLE)).__name__
+            == "_PlanModePermissionPolicy"
+        )
+
+        # The embedder's boundary, bound after the atom is already installed.
+        host = _AllowAll()
+        session.services.bind(PERMISSION_POLICY_ROLE, host, replace=True)
+        decorated = session.services.get_role(PERMISSION_POLICY_ROLE)
+        assert type(decorated).__name__ == "_PlanModePermissionPolicy"
+        # And it is decorating the host's, not standing in front of nothing.
+        assert decorated.inner is host  # type: ignore[union-attr]
+
+        # The atom leaves and takes its decoration with it, rather than leaving
+        # a policy behind that still holds the embedder's.
+        assert session.uninstall_extension(_builtin("plan_mode"))
+        assert session.services.get_role(PERMISSION_POLICY_ROLE) is host
+
+
+@dataclass(slots=True)
+class _AllowAll:
+    """A permission boundary an embedder might bind, and nothing else."""
+
+    async def decide(
+        self,
+        request: PermissionRequest,
+        *,
+        signal: CancelSignal | None = None,
+    ) -> PermissionDecision:
+        del request, signal
+        return PermissionDecision(kind="allow")
 
 
 @pytest.mark.asyncio

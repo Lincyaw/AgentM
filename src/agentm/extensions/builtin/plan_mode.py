@@ -595,14 +595,18 @@ def install(api: AtomAPI, config: PlanModeConfig) -> None:
         hide_tools=config.hide_tools,
     )
 
-    api.services.bind(
-        PERMISSION_POLICY_ROLE,
-        _PlanModePermissionPolicy(
+    # A layer, not a wrapper this atom builds and binds -- see the same call in
+    # tool_purpose and background_exec. Reading the role, wrapping what is there
+    # and binding the result captures whichever policy happened to be bound
+    # first, and detaching *that* atom would leave its policy deciding every
+    # permission request from inside this one, for the life of the session.
+    api.services.layer(
+        PERMISSION_POLICY_ROLE.key,
+        lambda inner: _PlanModePermissionPolicy(
             state=state,
             detector=detector,
-            inner=api.services.get_role(PERMISSION_POLICY_ROLE),
+            inner=inner if isinstance(inner, PermissionPolicy) else None,
         ),
-        replace=True,
     )
     if api.services.get(PLAN_APPROVER_SERVICE) is None:
         api.services.register(PLAN_APPROVER_SERVICE, AutoApprover(), scope="tree")

@@ -361,6 +361,32 @@ def install(api, config):
     assert rules.count("AM026") == 1
 
 
+def test_code_health_rejects_the_one_liner_form_of_the_same_wrap(
+    tmp_path: Path,
+) -> None:
+    """The read need not be a named local to be the same defect.
+
+    Written on one line the wrapper still holds what the key held, and the
+    check that only followed assignments called it clean -- which is worse than
+    not having the check, because the shape it misses is the shorter of the two
+    ways to write it.
+    """
+
+    rules = _issues_for(
+        tmp_path,
+        """\
+def install(api, config):
+    api.services.bind(
+        TOOL_EXECUTOR,
+        Wrapper(api.services.get_role(TOOL_EXECUTOR) or Direct()),
+        replace=True,
+    )
+""",
+        relative="src/agentm/extensions/builtin/inline_wrapper_atom.py",
+    )
+    assert rules.count("AM026") == 1
+
+
 def test_code_health_allows_an_atom_layering_a_key(tmp_path: Path) -> None:
     rules = _issues_for(
         tmp_path,

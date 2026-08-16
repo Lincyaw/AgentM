@@ -416,8 +416,6 @@ def _check_self_wrapping_bind(
                     and call.args
                 ):
                     read_from[target.id] = ast.dump(call.args[0])
-        if not read_from:
-            continue
         for node in ast.walk(func):
             if (
                 not isinstance(node, ast.Call)
@@ -431,7 +429,13 @@ def _check_self_wrapping_bind(
                 names = {
                     inner.id for inner in ast.walk(value) if isinstance(inner, ast.Name)
                 }
-                if any(read_from.get(name) == key for name in names):
+                # The read may be a name assigned earlier, or the call itself
+                # nested in the value. Same shape and same consequence -- the
+                # wrapper holds what the key held -- and checking only the
+                # first would leave the one-liner form of it unflagged.
+                if any(read_from.get(name) == key for name in names) or _reads_key(
+                    value, key
+                ):
                     issues.append(
                         Issue(
                             path=path,
@@ -448,6 +452,19 @@ def _check_self_wrapping_bind(
                     )
                     break
     return issues
+
+
+def _reads_key(value: ast.expr, key: str) -> bool:
+    """Whether ``value`` reads the same service key it is about to be bound to."""
+
+    return any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"get_role", "get", "require_role"}
+        and bool(call.args)
+        and ast.dump(call.args[0]) == key
+        for call in ast.walk(value)
+    )
 
 
 def _check_atom_raw_io(tree: ast.Module, path: str, file_path: Path) -> list[Issue]:
