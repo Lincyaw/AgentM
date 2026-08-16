@@ -112,10 +112,25 @@ class AtomInstallJournal:
     rather than rewritten, so the atom's departure is queued as a record of its
     own.  A resume keeps the last record per atom name, so what a session
     reopens with is what the trajectory last said about each atom.
+
+    Withdrawing therefore has to ask what the history already says, and not
+    only what is in the queue.  Supersede an atom that a turn has carried and
+    the queue holds a *second* install of the same name; take the atom out and
+    dropping that one leaves the first still standing in the record, so the
+    session reopens running the version it replaced -- which is a version the
+    user has not had since before the supersede.  So the drained names are kept
+    and the queue answers against them: nothing committed means nothing to
+    correct, and anything committed means the departure has to be said.
     """
+
+    __slots__ = ("_committed", "_pending")
 
     def __init__(self) -> None:
         self._pending: list[AtomInstall] = []
+        #: Atom names the record currently says this session holds. Written by
+        #: ``drain``, because being carried by a turn is what makes an install
+        #: history, and that is the only moment it becomes true.
+        self._committed: set[str] = set()
 
     def pending_names(self) -> tuple[str, ...]:
         """Atom names awaiting a turn, in queue order."""
@@ -136,15 +151,19 @@ class AtomInstallJournal:
         )
 
     def note_retire(self, atom_name: str, spec: ExtensionSpec) -> None:
-        """Withdraw an uncommitted install, or queue the atom's departure."""
+        """Withdraw an uncommitted install, and say so if the record needs it.
 
-        uncommitted = [
-            install for install in self._pending if install.atom_name == atom_name
+        The queued install goes either way: it describes an arrival that is
+        over, and a committed pair that cancelled out would be two records
+        saying nothing.  Whether a departure is queued in its place is a
+        question about the *record*, not about the queue -- history is what a
+        resume replays, and it is corrected by appending or not at all.
+        """
+
+        self._pending[:] = [
+            install for install in self._pending if install.atom_name != atom_name
         ]
-        if uncommitted:
-            self._pending[:] = [
-                install for install in self._pending if install.atom_name != atom_name
-            ]
+        if atom_name not in self._committed:
             return
         self._pending.append(
             AtomInstall(
@@ -158,10 +177,21 @@ class AtomInstallJournal:
         )
 
     def drain(self) -> tuple[AtomInstall, ...]:
-        """Take everything awaiting a turn to be recorded on."""
+        """Take everything awaiting a turn to be recorded on.
+
+        Draining is the moment a queued record becomes history, so it is also
+        the moment the drained names become what the record says -- an install
+        puts the atom in, a retirement takes it out, which is exactly what the
+        resume reads back off the last record per name.
+        """
 
         drained = tuple(self._pending)
         self._pending.clear()
+        for install in drained:
+            if install.retired:
+                self._committed.discard(install.atom_name)
+            else:
+                self._committed.add(install.atom_name)
         return drained
 
 

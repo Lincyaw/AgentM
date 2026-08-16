@@ -1996,3 +1996,80 @@ async def test_an_atom_uninstalled_at_runtime_does_not_come_back_on_resume(
         assert resumed.services.get("retired_marker") is None
     finally:
         await resumed.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_atom_superseded_and_then_removed_does_not_come_back_either(
+    tmp_path: Path,
+) -> None:
+    """Withdrawing a queued install has to ask what the record already says.
+
+    An install waiting for a turn is withdrawn when the atom leaves before one
+    arrives: nothing was written, so there is nothing to correct, and a
+    committed pair that cancelled out would be two records saying nothing.
+
+    Supersede breaks that. A turn carries version one; version two supersedes
+    it and queues an install of the same name; the atom is then taken out and
+    the queued install is dropped. What is left in the record is version one's
+    install and no departure at all -- so the session reopens running the
+    version the supersede replaced, which is a version the user has not had
+    since before it. Withdrawn *and* nothing said, when the record needed both.
+
+    The queue answers against the names a turn has carried now, so what is
+    dropped is the arrival that is over and what is appended is the departure
+    the history is missing.
+    """
+
+    store_path = tmp_path / "supersede-turns"
+
+    def _version(stem: str, marker: str) -> ExtensionSpec:
+        path = tmp_path / f"{stem}.py"
+        path.write_text(
+            _RETIRED_ATOM.replace('"present"', f'"{marker}"'), encoding="utf-8"
+        )
+        digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        return ExtensionSpec.from_file(str(path), digest=digest)
+
+    first = _version("retired_probe_v1", "v1")
+    second = _version("retired_probe_v2", "v2")
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            stream_fn=_StubProvider("installed", "superseded", "removed"),
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        await session.install_extension(first)
+        # The turn that makes version one history. Without it there is nothing
+        # for the withdrawal below to leave standing.
+        await session.run("commit the install")
+        assert session.services.get("retired_marker") == "v1"
+
+        await session.install_extension(second, replace=True)
+        assert session.services.get("retired_marker") == "v2"
+
+        assert session.uninstall_extension(second)
+        await session.run("commit the removal")
+        assert session.services.get("retired_marker") is None
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    resumed = await AgentSession.resume(
+        session_id,
+        _jsonl_store(store_path),
+        AgentSessionConfig(
+            stream_fn=_StubProvider("after-resume"),
+            model=_model(),
+        ),
+    )
+    try:
+        assert resumed.installed_atom_module_path("retired_probe") is None
+        # The version the supersede replaced is the one that used to come back.
+        assert resumed.services.get("retired_marker") is None
+    finally:
+        await resumed.shutdown()
