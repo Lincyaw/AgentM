@@ -135,7 +135,7 @@ from agentm.core.runtime.atom_context import (
     RendererRow,
     ownership_of,
     settle_ranks,
-    report_contested_key,
+    refuse_contested_role,
     policy_row,
     renderer_row,
 )
@@ -820,8 +820,8 @@ class SessionRuntime:
         role-only, because that is where the collisions are.
         """
 
-        if context is not None and self.is_linked(context):
-            report_contested_key(key, context, self._linked)
+        if role_bind and context is not None and self.is_linked(context):
+            refuse_contested_role(key, context, self._linked)
         if not role_bind:
             return
         if context is not None and not self.is_linked(context):

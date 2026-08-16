@@ -2209,14 +2209,12 @@ def _builtin(name: str) -> ExtensionSpec:
     return ExtensionSpec.from_module(f"agentm.extensions.builtin.{name}")
 
 
-# Declares the key it writes, so the graph has an edge to compute rank from:
-# rank is what an atom declared, not what it turned out to do.
-_CONTESTS = """\
+_PROVIDES = """\
 from agentm.core.abi.manifest import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
     name="{name}",
-    description="two atoms, one cell",
+    description="declares the key it registers",
     registers=("service:contested_cell",),
 )
 
@@ -2227,8 +2225,31 @@ def install(api, config):
 """
 
 
+# Binds a *role*, which is a cell: one model, one executor, one policy. Also
+# declares the key, so the graph has an edge to compute rank from -- rank is
+# what an atom declared, not what it turned out to do.
+_CONTESTS = """\
+from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.services import ServiceRole
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="two atoms, one cell",
+    registers=("service:contested_cell",),
+)
+
+CELL = ServiceRole("contested_cell", None, "session")
+
+
+def install(api, config):
+    del config
+    api.services.bind(CELL, "{name}", replace=True)
+"""
+
+
 _NEEDS = """\
 from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.services import ServiceRole
 
 
 MANIFEST = ExtensionManifest(
@@ -2242,7 +2263,8 @@ MANIFEST = ExtensionManifest(
 def install(api, config):
     del config
     api.services.register("{name}_write", "here", scope="session")
-    api.services.register("contested_cell", "{name}", scope="session")
+    api.services.bind(ServiceRole("contested_cell", None, "session"), "{name}",
+                      replace=True)
 """
 
 
@@ -2371,8 +2393,10 @@ async def test_rank_is_read_off_the_graph_not_off_the_install_order(
     composition and the digest carries it.
     """
 
-    provider = _atom(tmp_path, "one_atom", _CONTESTS)
-    peer = _atom(tmp_path, "two_atom", _CONTESTS)
+    # Plain registrations of the same key: shadowing is fine, and this test is
+    # about depth rather than contention.
+    provider = _atom(tmp_path, "one_atom", _PROVIDES)
+    peer = _atom(tmp_path, "two_atom", _PROVIDES)
     dependent = _file_atom(tmp_path, "needs_atom", _NEEDS.format(name="needs_atom"))
 
     async with probe_session(str(tmp_path)) as session:
@@ -2399,7 +2423,7 @@ async def test_an_atom_that_declared_a_dependency_may_win_a_key_quietly(
     one atom over another on purpose.
     """
 
-    provider = _atom(tmp_path, "one_atom", _CONTESTS)
+    provider = _atom(tmp_path, "one_atom", _PROVIDES)
     dependent = _file_atom(tmp_path, "needs_atom", _NEEDS.format(name="needs_atom"))
     reported: list[str] = []
     sink = logger.add(
@@ -2418,41 +2442,38 @@ async def test_an_atom_that_declared_a_dependency_may_win_a_key_quietly(
 
 
 @pytest.mark.asyncio
-async def test_two_atoms_writing_one_key_are_reported(tmp_path: Path) -> None:
-    """Nothing orders two atoms that do not depend on each other.
+async def test_two_atoms_binding_one_role_is_refused(tmp_path: Path) -> None:
+    """A role is a cell, and nothing orders two atoms that declare nothing.
 
-    A key is either set-shaped -- no reader can tell which order two writes
-    went in -- or it is a cell, and then the second writer is a conflict rather
-    than an update. The session resolves a contested cell by write order, which
-    is install order, which is a fact about how the composition was listed
-    rather than about either atom.
+    ``bind`` already refuses a second binding unless the caller says
+    ``replace=True``, which is how a deliberate override is spelled. Two atoms
+    overriding each other is not that: which one the session serves would be a
+    property of the order they happened to be listed in, and listing them the
+    other way round would change what the session does.
 
-    Reported, not refused: an embedder writing over an atom is a deliberate
-    override and says nothing here, and where both atoms really mean to
-    contribute there is now a form that composes. Across the twenty-nine
-    shipped atoms this is silent -- the one collision there was, on the tool
-    executor, is a layer now.
+    Refused rather than warned. Both fixes are one line -- declare ``after`` on
+    one of them, or have both call ``services.layer`` and contribute instead of
+    winning -- so the message is the fix.
+
+    A plain ``register`` is not this. Last-writer-wins there is deliberate and
+    has machinery behind it: the shadowed write comes back when the writer
+    above it leaves.
     """
 
     first = _atom(tmp_path, "one_atom", _CONTESTS)
     second = _atom(tmp_path, "two_atom", _CONTESTS)
-    contested: list[str] = []
-    sink = logger.add(
-        lambda message: contested.append(message.record["message"]),
-        level="WARNING",
-    )
-    try:
-        async with probe_session(str(tmp_path)) as session:
-            await session.install_extension(first)
-            assert contested == []
-            await session.install_extension(second)
-            assert session.services.get("contested_cell") == "two_atom"
-    finally:
-        logger.remove(sink)
 
-    assert len(contested) == 1
-    assert "contested_cell" in contested[0]
-    assert "services.layer" in contested[0]
+    async with probe_session(str(tmp_path)) as session:
+        await session.install_extension(first)
+        with pytest.raises(Exception, match="contested_cell") as raised:
+            await session.install_extension(second)
+
+        assert "after=" in str(raised.value)
+        assert "services.layer" in str(raised.value)
+        # The refusal rolls the second one back, so the session still holds a
+        # composition somebody chose.
+        assert session.installed_extensions == [first.module_path]
+        assert session.services.get("contested_cell") == "one_atom"
 
 
 @pytest.mark.asyncio

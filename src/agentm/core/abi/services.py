@@ -151,6 +151,7 @@ class ServiceRegistry:
         "_layers",
         "_linked",
         "_parent",
+        "_roles",
         "_services",
         "_write_observer",
         "rank",
@@ -168,6 +169,11 @@ class ServiceRegistry:
         #: them: a layer does not compete for the key, and a node has to be
         #: able to hold a base and a layer for one name, or two layers.
         self._layers: dict[str, list[ServiceEntry]] = {}
+        #: Which of this node's keys were bound as roles rather than plain
+        #: registrations. A role is a cell -- one model, one executor -- and
+        #: two unordered atoms binding one is refused; a plain key shadows on
+        #: purpose and uncovers when the writer above it leaves.
+        self._roles: set[str] = set()
         self._write_observer: WriteObserver | None = None
         #: The registry this one resolves through when it holds no entry for a
         #: key. Set once, at construction, by whoever derives a context; there
@@ -374,8 +380,15 @@ class ServiceRegistry:
             scope=scope,
             order=next(_WRITE_ORDER),
         )
+        if role_bind:
+            self._roles.add(name)
         if self._write_observer is not None:
             self._write_observer(name, service, scope, role_bind=role_bind)
+
+    def own_roles(self) -> frozenset[str]:
+        """The keys this node bound as roles, chain excluded."""
+
+        return frozenset(self._roles)
 
     def own_layers(self) -> dict[str, tuple[ServiceEntry, ...]]:
         """This node's own layers, chain excluded, oldest write first.

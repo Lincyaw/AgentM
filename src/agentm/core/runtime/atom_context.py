@@ -73,8 +73,6 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from loguru import logger
-
 
 from agentm.core.abi.bus import BusSegment, EventBusObserver, Handler
 from agentm.core.abi.codec import TriggerCodec
@@ -956,18 +954,23 @@ def settle_ranks(linked: Sequence[AtomContext]) -> None:
             return
 
 
-def report_contested_key(
+def refuse_contested_role(
     key: str,
     writer: AtomContext,
     linked: Sequence[AtomContext],
 ) -> None:
-    """Say when two atoms the graph does not order write one key.
+    """Refuse a role two atoms the graph does not order both bind.
 
-    A key is either set-shaped -- nothing a reader can do distinguishes the
-    order two writes went in -- or it is a cell, and then the second writer is
-    a conflict rather than an update.  A contested cell resolves by write
-    order, which is install order, which is a fact about how the composition
-    was listed rather than about either atom.
+    A role is a cell: one model, one executor, one permission policy.  ``bind``
+    already refuses a second one unless the caller passes ``replace=True``,
+    which is how a deliberate override is spelled -- but two atoms overriding
+    each other resolves by write order, which is install order, which is a fact
+    about how the composition was listed rather than about either of them.
+
+    Only roles.  A plain ``register`` is last-writer-wins on purpose here, and
+    the shadowing it allows is a designed behaviour with machinery behind it:
+    the shadowed write comes back when the writer above it leaves.  That is a
+    set of values with one on top, not a cell being fought over.
 
     Reported only between atoms of equal ``rank``, because rank is what makes
     the difference computable.  When one requires something the other provides,
@@ -977,10 +980,15 @@ def report_contested_key(
     other, so nothing says which should win and listing them the other way
     round changes the answer.
 
-    Reported rather than refused, and never for the embedder: a host write over
-    an atom is a deliberate override.  Where two atoms really mean to
-    contribute, ``services.layer`` is the form that composes -- each writes its
-    own decoration and the key resolves to the fold.
+    Reported only between atoms of equal rank.  When one requires or comes
+    after the other, the graph orders them and the later one winning is
+    decided.  Refused rather than warned, because a warning leaves the session
+    running on an answer nobody chose; both fixes are one line -- declare
+    ``after`` and the pair is ordered, or call ``services.layer`` and both
+    contribute -- so this reads as a fix instruction rather than a wall.
+
+    Never for the embedder: a host write over an atom is a deliberate
+    override, and a host is not a peer of the atoms it composes.
     """
 
     others = [
@@ -988,20 +996,17 @@ def report_contested_key(
         for context in linked
         if context is not writer
         and context.rank == writer.rank
-        and key in context.services.own_table()
+        and key in context.services.own_roles()
     ]
     if not others:
         return
-    logger.warning(
-        "service {!r} is written by {} and by {}, and the dependency graph "
-        "puts them at the same depth -- neither declared anything about the "
-        "other, so which one the session serves is a property of the order the "
-        "composition was listed in. If both mean to contribute, use "
-        "services.layer({!r}, ...) instead.",
-        key,
-        ", ".join(sorted(others)),
-        writer.module_path,
-        key,
+    raise ValueError(
+        f"role {key!r} is bound by {', '.join(sorted(others))} and by "
+        f"{writer.module_path}, and the dependency graph puts them at the same "
+        "depth -- neither declared anything about the other, so which one the "
+        "session serves would be a property of the order the composition was "
+        f"listed in. Declare after=(...) on one of them, or have both call "
+        f"services.layer({key!r}, ...) so each contributes instead of winning."
     )
 
 
@@ -1183,7 +1188,7 @@ __all__ = [
     "RendererRow",
     "ownership_of",
     "settle_ranks",
-    "report_contested_key",
+    "refuse_contested_role",
     "policy_row",
     "renderer_row",
 ]
