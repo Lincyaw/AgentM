@@ -266,6 +266,93 @@ def install(api, config):
 """
 
 
+_PLAIN = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+
+MANIFEST = ExtensionManifest(
+    name="{name}",
+    description="Registers a little of everything, and declares nothing.",
+    registers=("service:{name}_key",),
+)
+
+
+def install(api, config):
+    del config
+    api.services.register("{name}_key", "{name}", scope="session")
+    api.on("plain.channel", lambda event: None)
+"""
+
+
+@pytest.mark.asyncio
+async def test_independent_atoms_revert_in_any_order(tmp_path: Path) -> None:
+    """Three atoms that declare nothing about each other, taken out both ways.
+
+    The obligation is not that removal works, which the sweep covers one atom
+    at a time. It is that removing two of them is the same composition
+    whichever goes first -- the paper's any-order recovery, which holds for
+    effects that are independent, and independence is what "declares nothing
+    about each other" means here.
+
+    Compared against a session that only ever had the survivor, so what is
+    asserted is the state and not the sequence that reached it.
+    """
+
+    atoms = {
+        name: _file_atom(tmp_path, f"{name}_atom", _PLAIN.format(name=name))
+        for name in ("keeper", "first", "second")
+    }
+
+    async with probe_session(str(tmp_path)) as cold:
+        await cold.install_extension(atoms["keeper"])
+        alone = composition_digest(cold)
+
+    async with probe_session(str(tmp_path)) as forwards:
+        for spec in atoms.values():
+            await forwards.install_extension(spec)
+        assert forwards.uninstall_extension(atoms["first"])
+        assert forwards.uninstall_extension(atoms["second"])
+        one_way = composition_digest(forwards)
+
+    async with probe_session(str(tmp_path)) as backwards:
+        for spec in atoms.values():
+            await backwards.install_extension(spec)
+        assert backwards.uninstall_extension(atoms["second"])
+        assert backwards.uninstall_extension(atoms["first"])
+        other_way = composition_digest(backwards)
+
+    assert digest_differences(alone, one_way) == ()
+    assert digest_differences(alone, other_way) == ()
+
+
+@pytest.mark.asyncio
+async def test_a_session_taken_apart_is_the_session_it_started_as(
+    tmp_path: Path,
+) -> None:
+    """Everything installed, everything removed, nothing left behind.
+
+    The whole-history form of the property the rest of this file checks in
+    pieces: not "each atom reverts" but "the composition is where it began",
+    with the bus subscriptions, the service table, the effect logs and the
+    departed-context bookkeeping all included, because the digest covers them
+    and nothing is excused here.
+    """
+
+    atoms = [
+        _file_atom(tmp_path, f"{name}_atom", _PLAIN.format(name=name))
+        for name in ("alpha", "beta", "gamma")
+    ]
+
+    async with probe_session(str(tmp_path)) as session:
+        untouched = composition_digest(session)
+        for spec in atoms:
+            await session.install_extension(spec)
+        for spec in reversed(atoms):
+            assert session.uninstall_extension(spec)
+
+        assert digest_differences(untouched, composition_digest(session)) == ()
+
+
 @pytest.mark.asyncio
 async def test_a_failed_install_leaves_no_trace_in_the_composition(
     tmp_path: Path,
