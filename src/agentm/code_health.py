@@ -76,6 +76,11 @@ Rules:
 - **AM024** ``stdlib-logging``: AgentM uses Loguru consistently; importing
   the standard-library ``logging`` package creates split configuration and
   output behavior.
+- **AM026** ``self-wrapping-bind``: An atom reading a service key and binding a
+  value built from what it found. The wrapper holds the value it read, so the
+  chain lives in a closure and the inner layer can never be removed. Use
+  ``services.layer(key, build)``, which states the decoration instead of
+  performing it.
 - **AM025** ``runtime-type-check``: ``isinstance`` branches on runtime shape
   and usually hides a missing typed contract, DTO, Protocol, or dispatch table.
   A precise ignore is required at genuine validation/deserialization boundaries.
@@ -366,6 +371,82 @@ def _check_private_in_all(tree: ast.Module, path: str) -> list[Issue]:
                                 severity="warning",
                             )
                         )
+    return issues
+
+
+def _check_self_wrapping_bind(
+    tree: ast.Module,
+    path: str,
+    file_path: Path,
+) -> list[Issue]:
+    """AM026: an atom reading a service and binding a value built from it.
+
+    The shape is ``inner = api.services.get_role(ROLE)`` followed by
+    ``api.services.bind(ROLE, Wrapper(inner))``.  It reads as decoration and is
+    not: the wrapper holds the value it found, so the chain lives in a closure
+    nobody else can see.  Detaching the atom that registered the *inner* one
+    unlinks its context and removes its services while its object goes on being
+    called from inside the outer wrapper, for the life of the session.
+
+    ``services.layer(key, build)`` states the decoration instead of performing
+    it, so the chain is folded from the layers present at each read and any
+    layer can be taken out of the middle.
+    """
+
+    if not _is_atom_file(file_path):
+        return []
+
+    issues: list[Issue] = []
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        # name -> the key expression it was read from
+        read_from: dict[str, str] = {}
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Name):
+                continue
+            for call in ast.walk(node.value):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr in {"get_role", "get", "require_role"}
+                    and call.args
+                ):
+                    read_from[target.id] = ast.dump(call.args[0])
+        if not read_from:
+            continue
+        for node in ast.walk(func):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or node.func.attr not in {"bind", "register"}
+                or not node.args
+            ):
+                continue
+            key = ast.dump(node.args[0])
+            for value in node.args[1:]:
+                names = {
+                    inner.id for inner in ast.walk(value) if isinstance(inner, ast.Name)
+                }
+                if any(read_from.get(name) == key for name in names):
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM026",
+                            message=(
+                                "this binds a value built from what the same key "
+                                "already held, which puts the chain in a closure "
+                                "and makes the inner layer unremovable — use "
+                                "api.services.layer(key, build)"
+                            ),
+                            severity="warning",
+                        )
+                    )
+                    break
     return issues
 
 
@@ -1575,6 +1656,7 @@ ALL_RULES: Final[tuple[str, ...]] = (
     "AM023",
     "AM024",
     "AM025",
+    "AM026",
 )
 
 
@@ -1605,6 +1687,7 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_missing_slots(tree, rel))
     issues.extend(_check_private_in_all(tree, rel))
     issues.extend(_check_atom_raw_io(tree, rel, file_path))
+    issues.extend(_check_self_wrapping_bind(tree, rel, file_path))
     issues.extend(_check_param_explosion(tree, rel))
     issues.extend(_check_mutable_abi_global(tree, rel, file_path))
     issues.extend(_check_god_file(source_lines, rel))

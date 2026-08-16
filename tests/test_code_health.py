@@ -337,3 +337,37 @@ def test_user_visible_config_redacts_nested_credentials() -> None:
         },
         "nested": {"client_secret": "***"},
     }
+
+
+def test_code_health_rejects_an_atom_wrapping_what_a_key_already_held(
+    tmp_path: Path,
+) -> None:
+    """AM026: decoration performed instead of stated puts the chain in a closure.
+
+    Two shipped atoms did exactly this to the tool executor, and detaching the
+    inner one left its object running inside the outer one for the life of the
+    session. ``services.layer`` is the form that can be taken out again.
+    """
+
+    rules = _issues_for(
+        tmp_path,
+        """\
+def install(api, config):
+    inner = api.services.get_role(TOOL_EXECUTOR) or Direct()
+    api.services.bind(TOOL_EXECUTOR, Wrapper(inner), replace=True)
+""",
+        relative="src/agentm/extensions/builtin/wrapper_atom.py",
+    )
+    assert rules.count("AM026") == 1
+
+
+def test_code_health_allows_an_atom_layering_a_key(tmp_path: Path) -> None:
+    rules = _issues_for(
+        tmp_path,
+        """\
+def install(api, config):
+    api.services.layer(TOOL_EXECUTOR.key, lambda inner: Wrapper(inner or Direct()))
+""",
+        relative="src/agentm/extensions/builtin/layer_atom.py",
+    )
+    assert "AM026" not in rules
