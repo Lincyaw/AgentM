@@ -26,7 +26,13 @@ def create_sql_engine(
             pool_pre_ping=pool_pre_ping,
         )
     except NoSuchModuleError as exc:
-        _raise_driver_hint(url, exc)
+        # SQLAlchemy does not know the dialect at all.
+        _raise_driver_hint(url, exc, missing=None)
+    except ModuleNotFoundError as exc:
+        # SQLAlchemy knows the dialect and imports its DBAPI eagerly, so an
+        # uninstalled driver surfaces here instead -- which is the path an
+        # `agentm` install without the storage extra actually takes.
+        _raise_driver_hint(url, exc, missing=exc.name)
 
 
 def create_sqlite_engine(path: str | Path) -> Engine:
@@ -101,14 +107,19 @@ def _register_clickhouse_dialect() -> None:
         ) from exc
 
 
-def _raise_driver_hint(database_url: URL, exc: NoSuchModuleError) -> NoReturn:
+def _raise_driver_hint(
+    database_url: URL,
+    exc: Exception,
+    *,
+    missing: str | None,
+) -> NoReturn:
     driver = database_url.drivername
-    if driver.startswith("postgres"):
+    if driver.startswith("postgres") and missing in (None, "psycopg"):
         raise RuntimeError(
             "Postgres SQL storage requires the 'agentm[storage-postgres]' "
             "extra (psycopg >= 3.2)."
         ) from exc
-    if driver.startswith("clickhouse"):
+    if driver.startswith("clickhouse") and missing in (None, "clickhouse_connect"):
         raise RuntimeError(
             "ClickHouse SQL storage requires the 'agentm[storage-clickhouse]' "
             "extra (clickhouse-connect)."

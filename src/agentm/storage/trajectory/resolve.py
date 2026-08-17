@@ -31,6 +31,9 @@ class _JsonlLocation:
 class _PostgresLocation:
     dsn: str
     schema: str = "public"
+    # Whoever opens this has to be able to say why Postgres was chosen: the
+    # selection usually comes from a config file the caller never mentioned.
+    source: str = "trajectory configuration"
 
 
 _TrajectoryLocation = _JsonlLocation | _PostgresLocation
@@ -168,7 +171,11 @@ def _environment_location(
             raise ValueError("AGENTM_TRAJECTORY_SCHEMA requires AGENTM_TRAJECTORY_DSN")
         return _JsonlLocation(Path(directory).expanduser())
     if dsn is not None:
-        return _PostgresLocation(dsn=dsn, schema=schema or "public")
+        return _PostgresLocation(
+            dsn=dsn,
+            schema=schema or "public",
+            source="AGENTM_TRAJECTORY_DSN",
+        )
     if schema is not None:
         raise ValueError("AGENTM_TRAJECTORY_SCHEMA requires AGENTM_TRAJECTORY_DSN")
     return None
@@ -207,7 +214,11 @@ def _config_location(path: Path) -> _TrajectoryLocation | None:
             configured_path = path.parent / configured_path
         return _JsonlLocation(configured_path)
     if dsn is not None:
-        return _PostgresLocation(dsn=dsn, schema=schema or "public")
+        return _PostgresLocation(
+            dsn=dsn,
+            schema=schema or "public",
+            source=f"[trajectory].dsn in {path}",
+        )
     if schema is not None:
         raise ValueError(f"[trajectory] schema requires dsn: {path}")
     return None
@@ -258,7 +269,15 @@ def _open_postgres_store(
     location: _PostgresLocation,
 ) -> ResolvedTrajectoryStore:
     with ExitStack() as cleanup:
-        engine = create_sql_engine(location.dsn)
+        try:
+            engine = create_sql_engine(location.dsn)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{exc} The Postgres trajectory backend was selected by "
+                f"{location.source}; drop it, point it at [trajectory].dir, or "
+                "set AGENTM_TRAJECTORY_DIR to store trajectories in files "
+                "instead."
+            ) from exc
         cleanup.callback(engine.dispose)
         store = PostgresTrajectoryStore(
             engine,
