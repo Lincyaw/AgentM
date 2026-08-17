@@ -96,6 +96,7 @@ from agentm.core.abi.roles import (
     ENVIRONMENT_RESTORE_FAILURE_HANDLER,
     ENVIRONMENT_RESTORE_STATUS_ROLE,
     EXPERIMENT_SERVICE,
+    LOOP_BUDGET_SERVICE,
     PERMISSION_POLICY_ROLE,
     RESOLVED_SESSION_SPEC_SERVICE,
     RESOURCE_WRITER,
@@ -108,6 +109,7 @@ from agentm.core.abi.roles import (
 from agentm.core.abi.services import ServiceRegistry, ServiceScope
 from agentm.core.abi.session_api import (
     ExtensionSpec,
+    LoopConfig,
     ResolvedSessionSpec,
     SessionContext,
     SessionResult,
@@ -394,6 +396,7 @@ class SessionRuntime:
             assert stream_fn is not None
             assert model is not None
             audience: PermissionAudience = "user" if self.ctx.depth == 0 else "subagent"
+            budget = self._loop_budget()
             await drive(
                 DriverConfig(
                     trajectory=self.trajectory,
@@ -420,8 +423,8 @@ class SessionRuntime:
                     tool_executor=self.services.get_role(TOOL_EXECUTOR),
                     tool_orchestrator=self.services.require_role(TOOL_ORCHESTRATOR),
                     permission_policy=self.services.get_role(PERMISSION_POLICY_ROLE),
-                    max_turns=self._max_turns,
-                    max_tool_calls=self._max_tool_calls,
+                    max_turns=budget.max_turns,
+                    max_tool_calls=budget.max_tool_calls,
                     tool_allowlist=self._tool_allowlist(),
                     thinking=self._thinking,
                 )
@@ -938,6 +941,23 @@ class SessionRuntime:
 
     def _active_set_fingerprint(self) -> ActiveSetFingerprint | None:
         return self.services.get_role(ACTIVE_SET_FINGERPRINT_ROLE)
+
+    def _loop_budget(self) -> LoopConfig:
+        """The budget this run enforces: the host's, tightened by any atom's.
+
+        Read per run rather than captured at construction, because the atom
+        that sets it installs after the session exists -- and a budget nobody
+        reads is a budget that does not exist.
+        """
+
+        configured = LoopConfig(
+            max_turns=self._max_turns,
+            max_tool_calls=self._max_tool_calls,
+        )
+        registered = self.services.get(LOOP_BUDGET_SERVICE)
+        if not isinstance(registered, LoopConfig):  # code-health: ignore[AM025]
+            return configured
+        return configured.tightened_with(registered)
 
     def _tool_allowlist(self) -> tuple[str, ...] | None:
         raw = self.services.get(TOOL_ALLOWLIST_SERVICE)

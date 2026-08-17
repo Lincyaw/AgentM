@@ -177,12 +177,33 @@ SESSION_CONFIG_PRECEDENCE: tuple[ConfigSource, ...] = (
 )
 
 
+def _lower_ceiling(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return min(left, right)
+
+
 @dataclass(frozen=True, slots=True)
 class LoopConfig:
     """Driver loop budget — max turns and tool calls per session."""
 
     max_turns: int | None = None
     max_tool_calls: int | None = None
+
+    def tightened_with(self, other: LoopConfig) -> LoopConfig:
+        """Compose two budgets: each field takes the lower ceiling.
+
+        A budget is a ceiling, and ``None`` means unbounded, so composing is
+        how a host's cap and an atom's cap coexist -- neither can raise the
+        other's.
+        """
+
+        return LoopConfig(
+            max_turns=_lower_ceiling(self.max_turns, other.max_turns),
+            max_tool_calls=_lower_ceiling(self.max_tool_calls, other.max_tool_calls),
+        )
 
 
 @dataclass(frozen=True, slots=True)

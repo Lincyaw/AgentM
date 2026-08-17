@@ -72,13 +72,30 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: AtomAPI, config: LoopBudgetConfig) -> None:
-    loop_config = LoopConfig(
+    declared = LoopConfig(
         max_turns=_positive_or_none(config.max_turns, "max_turns"),
         max_tool_calls=_positive_or_none(config.max_tool_calls, "max_tool_calls"),
     )
-    api.services.register(LOOP_BUDGET_SERVICE, loop_config, scope="session")
+    # A layer, not a write: several atoms may each want to bound the loop, and
+    # detaching this one has to give back the budget the others agreed on.
+    api.services.layer(
+        LOOP_BUDGET_SERVICE,
+        lambda existing: _tighten(existing, declared),
+        scope="session",
+    )
     if config.reminder is not None:
         _TurnReminderRuntime(api, config.reminder).install()
+
+
+def _tighten(existing: object, declared: LoopConfig) -> LoopConfig:
+    """Combine this atom's budget with one the host already registered.
+
+    Replacing outright would let a scenario silently raise a cap its host set.
+    """
+
+    if not isinstance(existing, LoopConfig):  # code-health: ignore[AM025]
+        return declared
+    return existing.tightened_with(declared)
 
 
 def _positive_or_none(value: int | None, key: str) -> int | None:
