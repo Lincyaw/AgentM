@@ -126,6 +126,10 @@ MANIFEST = ExtensionManifest(
 )
 
 
+_RETRYABLE_STATUS = frozenset({408, 409, 429})
+"""Statuses the SDK's retry loop treats as transient; see ``_get_client``."""
+
+
 def _is_anthropic_retryable(exc: BaseException) -> bool:
     # RateLimitError: server-side throttle. APIConnectionError /
     # APITimeoutError: transport stalls surfaced by the finite read
@@ -138,7 +142,17 @@ def _is_anthropic_retryable(exc: BaseException) -> bool:
         for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
         if isinstance((err_type := anthropic.__dict__.get(name)), type)
     )
-    return bool(retryable_types) and isinstance(exc, retryable_types)
+    if retryable_types and isinstance(exc, retryable_types):
+        return True
+    # What the SDK's own loop treated as transient, repeated because that loop
+    # is switched off whenever a policy is bound (see ``_get_client``). A
+    # policy that covered less than the layer it replaced would read as a
+    # configuration and behave as a downgrade -- which is what happened to
+    # server errors here until a test counted them.
+    if isinstance(exc, anthropic.APIStatusError):
+        code = exc.status_code
+        return code in _RETRYABLE_STATUS or code >= 500
+    return False
 
 
 # --- Model registry ---------------------------------------------------------
@@ -521,6 +535,26 @@ class AnthropicStreamFn:
         kwargs["timeout"] = httpx.Timeout(
             connect=30.0, read=180.0, write=60.0, pool=30.0
         )
+        # The SDK runs its own retry loop -- ``DEFAULT_MAX_RETRIES`` is 2, so
+        # three attempts -- and a bound ``RetryPolicy`` wrapped *around* it
+        # multiplied the two: a composition declaring ``max_retries=7`` sent 24
+        # requests to a rate-limited endpoint, over a backoff schedule nobody
+        # wrote. ``RetryPolicy`` is a behaviour, not a number (see
+        # ``core/abi/retry.py``), so it cannot be handed down into the SDK;
+        # what it can be is the only loop there is.
+        #
+        # Switched off only when a policy is bound. A composition without the
+        # ``retry_policy`` atom keeps the SDK's default, because "no policy
+        # declared" has never meant "no retries" here and turning three
+        # attempts into one would be a fragility nobody asked for.
+        #
+        # What this gives up is the SDK's ``Retry-After`` handling: it reads
+        # the header and the ``x-should-retry`` hint, and the policy replacing
+        # it backs off on its own schedule instead. The exchange is a schedule
+        # the operator wrote for one they cannot see, and honest attempt counts
+        # either way.
+        if self.retry_policy is not None:
+            kwargs["max_retries"] = 0
         self.client = AsyncAnthropic(**kwargs)
         return self.client
 

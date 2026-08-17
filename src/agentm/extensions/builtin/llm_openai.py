@@ -138,6 +138,13 @@ MANIFEST = ExtensionManifest(
 )
 
 
+# What the SDK's own retry loop treats as transient. Repeated here because
+# the SDK's loop is switched off whenever a ``RetryPolicy`` is bound (see
+# ``_get_client``), and a policy that covered less than the layer it replaced
+# would look like a configuration and behave like a downgrade.
+_RETRYABLE_STATUS = frozenset({408, 409, 429})
+
+
 def _is_openai_retryable(exc: BaseException) -> bool:
     # APIConnectionError / APITimeoutError surface read-timeouts and
     # half-dead TCP — without retry these propagate up and waste the
@@ -149,6 +156,10 @@ def _is_openai_retryable(exc: BaseException) -> bool:
     )
     if retryable_types and isinstance(exc, retryable_types):
         return True
+    if isinstance(exc, openai.APIStatusError):
+        code = exc.status_code
+        if code in _RETRYABLE_STATUS or code >= 500:
+            return True
     # openai SDK doesn't wrap httpx transport errors during streaming —
     # raw httpx exceptions (ReadTimeout, ReadError, etc.) escape.
     return bool(isinstance(exc, httpx.TransportError))
@@ -647,6 +658,9 @@ class OpenAIStreamFn:
             if not self.verify_ssl:
                 factory = self.httpx_client_factory or _default_httpx_client
                 azure_kwargs["http_client"] = factory(verify=False)
+            if self.retry_policy is not None:
+                # Same reason as the plain client below.
+                azure_kwargs["max_retries"] = 0
             self.client = AsyncAzureOpenAI(**azure_kwargs)
             return self.client
 
@@ -660,6 +674,26 @@ class OpenAIStreamFn:
         if not self.verify_ssl:
             factory = self.httpx_client_factory or _default_httpx_client
             kwargs["http_client"] = factory(verify=False)
+        # The SDK runs its own retry loop -- ``DEFAULT_MAX_RETRIES`` is 2, so
+        # three attempts -- and a bound ``RetryPolicy`` wrapped *around* it
+        # multiplied the two: a composition declaring ``max_retries=7`` sent 24
+        # requests to a rate-limited endpoint, over a backoff schedule nobody
+        # wrote. ``RetryPolicy`` is a behaviour, not a number (see
+        # ``core/abi/retry.py``), so it cannot be handed down into the SDK;
+        # what it can be is the only loop there is.
+        #
+        # Switched off only when a policy is bound. A composition without the
+        # ``retry_policy`` atom keeps the SDK's default, because "no policy
+        # declared" has never meant "no retries" here and turning three
+        # attempts into one would be a fragility nobody asked for.
+        #
+        # What this gives up is the SDK's ``Retry-After`` handling: it reads
+        # the header and the ``x-should-retry`` hint, and the policy replacing
+        # it backs off on its own schedule instead. The exchange is a schedule
+        # the operator wrote for one they cannot see, and honest attempt counts
+        # either way.
+        if self.retry_policy is not None:
+            kwargs["max_retries"] = 0
         self.client = AsyncOpenAI(**kwargs)
         return self.client
 
