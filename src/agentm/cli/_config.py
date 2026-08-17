@@ -10,7 +10,7 @@ import typer
 from loguru import logger
 
 from agentm import AgentSessionConfig
-from agentm.cli._display import EXIT_ERROR, stderr_console
+from agentm.cli._display import EXIT_ERROR, print_error, stderr_console
 from agentm.config.resolver import DefaultSessionSpecResolver
 from agentm.core.abi.session_api import ExtensionSpec
 from agentm.core.lib.redact import redact_config
@@ -73,7 +73,7 @@ def show(
     try:
         spec = resolver.resolve(config)
     except Exception as exc:
-        stderr_console.print(f"[red]error: config resolution failed: {exc}[/red]")
+        print_error(f"config resolution failed: {exc}")
         raise typer.Exit(EXIT_ERROR)
 
     result = {
@@ -169,9 +169,7 @@ def init(
     target = Path(path) if path else Path.cwd() / "agentm.toml"
 
     if target.exists() and not force:
-        stderr_console.print(
-            f"[red]error: {target} already exists (use --force to overwrite)[/red]"
-        )
+        print_error(f"{target} already exists (use --force to overwrite)")
         raise typer.Exit(EXIT_ERROR)
 
     template = """\

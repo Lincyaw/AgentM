@@ -8,7 +8,7 @@ import sys
 
 import typer
 
-from agentm.cli._display import EXIT_NOT_FOUND, stderr_console
+from agentm.cli._display import EXIT_NOT_FOUND, print_error, stderr_console
 from agentm.core.abi.session_api import (
     ExtensionSpec,
     ScenarioSpec,
@@ -79,7 +79,7 @@ def show_scenario(
     try:
         spec = builtin_scenario_loader(name)
     except ValueError as exc:
-        stderr_console.print(f"[red]error: {exc}[/red]")
+        print_error(f"{exc}")
         raise typer.Exit(EXIT_NOT_FOUND)
 
     extensions = tuple(

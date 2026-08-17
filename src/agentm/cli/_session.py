@@ -10,7 +10,12 @@ from pathlib import Path
 import typer
 
 from agentm import CompactionRequest, CompactionResult
-from agentm.cli._display import EXIT_ERROR, EXIT_NOT_FOUND, is_tty, stderr_console
+from agentm.cli._display import (
+    EXIT_ERROR,
+    EXIT_NOT_FOUND,
+    is_tty,
+    print_error,
+)
 from agentm.control import (
     InterruptDeliveryError,
     send_interrupt,
@@ -53,7 +58,7 @@ def _emit_error(
             + "\n"
         )
         return
-    stderr_console.print(f"[red]error: {detail}[/red]")
+    print_error(f"{detail}")
 
 
 @session_app.command("interrupt")

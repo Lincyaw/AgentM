@@ -15,7 +15,7 @@ from rich.live import Live
 from rich.text import Text
 
 from agentm import AgentSession, AgentSessionConfig
-from agentm.cli._display import SessionStats, stderr_console
+from agentm.cli._display import SessionStats, print_error
 from agentm.config.resolver import DefaultSessionSpecResolver
 from agentm.core.abi.events import StreamDeltaEvent
 from agentm.core.abi.messages import (
@@ -151,7 +151,12 @@ async def _run_chat(
                     receipt = await session.prompt(text)
                     await receipt.wait()
                 except Exception as exc:
-                    console.print(f"[red]error: {exc}[/red]\n")
+                    console.print(
+                        f"error: {exc}\n",
+                        style="red",
+                        markup=False,
+                        highlight=False,
+                    )
                     collector.attach_live(None)
                     continue
                 collector.attach_live(None)
@@ -246,8 +251,8 @@ def chat(
         agentm chat -s minimal --system "You are a translator."
     """
     if not sys.stdin.isatty():
-        stderr_console.print(
-            "[red]error: chat requires a TTY; use 'agentm run' for non-interactive execution[/red]"
+        print_error(
+            "chat requires a TTY; use 'agentm run' for non-interactive execution"
         )
         raise typer.Exit(2)
 

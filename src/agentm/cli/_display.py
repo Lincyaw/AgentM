@@ -25,6 +25,23 @@ def is_tty() -> bool:
     return sys.stdout.isatty()
 
 
+def print_error(message: str) -> None:
+    """Write one error line to stderr, taking the message text literally.
+
+    Error text routinely carries square brackets -- ``agentm[storage-postgres]``,
+    ``[trajectory].dsn`` -- and Rich reads those as markup tags and drops them,
+    so the one line that has to be actionable loses exactly the part that made
+    it actionable.
+    """
+
+    stderr_console.print(
+        f"error: {message}",
+        style="red",
+        markup=False,
+        highlight=False,
+    )
+
+
 class SessionStats:
     """Tracks cumulative session token statistics."""
 

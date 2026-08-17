@@ -16,6 +16,7 @@ from agentm.cli._display import (
     EXIT_ERROR,
     EXIT_USAGE,
     SessionStats,
+    print_error,
     stderr_console,
 )
 from agentm.config.resolver import DefaultSessionSpecResolver
@@ -56,7 +57,7 @@ async def _execute(
     try:
         session = await AgentSession.create(config)
     except Exception as exc:
-        stderr_console.print(f"[red]error: session creation failed: {exc}[/red]")
+        print_error(f"session creation failed: {exc}")
         raise typer.Exit(EXIT_ERROR)
 
     session.start()
@@ -66,7 +67,7 @@ async def _execute(
         receipt = await session.prompt(prompt_text)
         await receipt.wait()
     except Exception as exc:
-        stderr_console.print(f"[red]error: {exc}[/red]")
+        print_error(f"{exc}")
         await session.shutdown()
         raise typer.Exit(EXIT_ERROR)
 
@@ -138,19 +139,17 @@ def run(
         agentm run -m "translate" --system "You are a translator." --format json
     """
     if format not in ("text", "json"):
-        stderr_console.print(
-            f"[red]error: --format must be 'text' or 'json', got {format!r}[/red]"
-        )
+        print_error(f"--format must be 'text' or 'json', got {format!r}")
         raise typer.Exit(EXIT_USAGE)
 
     if message is None:
         if sys.stdin.isatty():
-            stderr_console.print("[red]error: no message — pass -m or pipe stdin[/red]")
+            print_error("no message — pass -m or pipe stdin")
             raise typer.Exit(EXIT_USAGE)
         message = sys.stdin.read().strip()
 
     if not message:
-        stderr_console.print("[red]error: empty message[/red]")
+        print_error("empty message")
         raise typer.Exit(EXIT_USAGE)
 
     asyncio.run(

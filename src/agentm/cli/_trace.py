@@ -13,7 +13,13 @@ from typing import Literal, NotRequired, TypedDict, TypeVar
 
 import typer
 
-from agentm.cli._display import EXIT_NOT_FOUND, EXIT_TIMEOUT, is_tty, stderr_console
+from agentm.cli._display import (
+    EXIT_NOT_FOUND,
+    EXIT_TIMEOUT,
+    is_tty,
+    print_error,
+    stderr_console,
+)
 from agentm.cli._store import resolve_trajectory_store
 from agentm.core.abi.messages import (
     thaw_json,
@@ -442,8 +448,8 @@ def _get_query_store(ctx: typer.Context) -> TrajectoryQueryStore:
         )
         ctx.call_on_close(resolved.close)
         return query
-    stderr_console.print(
-        "[red]error: no trajectory store found[/red]\n"
+    print_error(
+        "no trajectory store found[/red]\n"
         "[dim]Set AGENTM_TRAJECTORY_DSN for Postgres, "
         "AGENTM_TRAJECTORY_DIR for JSONL, or run from a project "
         "with .agentm/trajectory.[/dim]"
@@ -459,7 +465,7 @@ def _resolve_session_id(
         return session
     metas = list(query.sessions())
     if not metas:
-        stderr_console.print("[red]error: no sessions in store[/red]")
+        print_error("no sessions in store")
         raise typer.Exit(EXIT_NOT_FOUND)
     return max(metas, key=lambda item: item.created_at).id
 
@@ -579,7 +585,7 @@ def _follow_session(
             try:
                 turns = list(query.turns(sid))
             except KeyError:
-                stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+                print_error(f"session not found: {sid}")
                 raise typer.Exit(EXIT_NOT_FOUND)
 
             for turn in turns:
@@ -712,7 +718,7 @@ def status_cmd(
     try:
         status = _load_status_record(query, sid)
     except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        print_error(f"session not found: {sid}")
         raise typer.Exit(EXIT_NOT_FOUND)
     _emit_status(status, _resolve_format(fmt))
 
@@ -752,7 +758,7 @@ def wait_cmd(
         try:
             status = _load_status_record(query, sid)
         except KeyError:
-            stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+            print_error(f"session not found: {sid}")
             raise typer.Exit(EXIT_NOT_FOUND)
         enough_turns = (
             min_committed_turns is None
@@ -764,9 +770,7 @@ def wait_cmd(
             return
         if time.monotonic() >= deadline:
             _emit_status(status, chosen_fmt)
-            stderr_console.print(
-                f"[red]error: trace wait timed out after {timeout:g}s[/red]"
-            )
+            print_error(f"trace wait timed out after {timeout:g}s")
             raise typer.Exit(EXIT_TIMEOUT)
         time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
@@ -796,7 +800,7 @@ def watch_cmd(
     try:
         initial = _watch_events(query, sid)
     except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        print_error(f"session not found: {sid}")
         raise typer.Exit(EXIT_NOT_FOUND)
     if not include_existing:
         seen.update(event["event_id"] for event in initial)
@@ -861,7 +865,7 @@ def diagnostics_cmd(
             and (phase is None or diagnostic.phase == phase)
         ]
     except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        print_error(f"session not found: {sid}")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_command_format(ctx, fmt)
 
@@ -990,7 +994,7 @@ def turns_cmd(
     try:
         snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        print_error(f"session not found: {sid}")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_command_format(ctx, fmt)
     summaries = [_turn_summary_record(summary) for summary in snapshot.turns]
@@ -1052,7 +1056,7 @@ def messages_cmd(
     try:
         snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        print_error(f"session not found: {sid}")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_command_format(ctx, fmt)
     all_msgs = _message_records_from_snapshot(
@@ -1097,7 +1101,7 @@ def usage_cmd(
     try:
         turns = list(query.turns(sid))
     except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        print_error(f"session not found: {sid}")
         raise typer.Exit(EXIT_NOT_FOUND)
     if not turns:
         stderr_console.print("[dim]no turns[/dim]")
@@ -1138,7 +1142,7 @@ def view_cmd(
 ) -> None:
     """Interactive trace viewer with turn navigation and expand/collapse."""
     if not sys.stdout.isatty():
-        stderr_console.print("[red]error: interactive viewer requires a terminal[/red]")
+        print_error("interactive viewer requires a terminal")
         raise typer.Exit(2)
 
     query = _get_query_store(ctx)
@@ -1219,7 +1223,7 @@ def tools_cmd(
     try:
         snapshot = _load_trace_snapshot(query, sid)
     except KeyError:
-        stderr_console.print(f"[red]error: session not found: {sid}[/red]")
+        print_error(f"session not found: {sid}")
         raise typer.Exit(EXIT_NOT_FOUND)
     chosen_fmt = _resolve_command_format(ctx, fmt)
     if result_chars is not None and result_chars < 0:
