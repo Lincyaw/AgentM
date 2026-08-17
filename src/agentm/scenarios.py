@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping, Sequence
+from agentm.core.lib import agentm_home
 from pathlib import Path
 from typing import Any
 
@@ -66,8 +67,7 @@ def _scenario_roots() -> tuple[Path, ...]:
 
 
 def _agentm_home() -> Path:
-    configured = os.environ.get("AGENTM_HOME")
-    return Path(configured).expanduser() if configured else Path.home() / ".agentm"
+    return agentm_home()
 
 
 def _scenario_parts(name: str) -> tuple[str, str]:

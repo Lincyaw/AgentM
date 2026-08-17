@@ -10,6 +10,7 @@ import json
 import os
 import tomllib
 from collections.abc import Mapping
+from agentm.core.lib import agentm_home
 from pathlib import Path
 from typing import Any
 
@@ -446,10 +447,7 @@ def _load_toml(path: Path | None) -> dict[str, Any]:
 
 
 def _default_user_config() -> Path:
-    home = os.environ.get("AGENTM_HOME")
-    if home:
-        return Path(home).expanduser() / "config.toml"
-    return Path.home() / ".agentm" / "config.toml"
+    return agentm_home() / "config.toml"
 
 
 def _get_path(data: Mapping[str, Any], path: tuple[str, ...]) -> object:

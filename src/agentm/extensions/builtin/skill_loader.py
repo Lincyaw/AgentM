@@ -30,8 +30,8 @@ from agentm.core.abi import (
     ToolResult,
 )
 from agentm.core.lib import (
+    agentm_home,
     error_result,
-    expand_path,
     expand_path_from_cwd,
     parse_frontmatter,
     pydantic_to_tool_schema,
@@ -41,8 +41,7 @@ from agentm.extensions import ExtensionManifest
 
 
 def _agentm_home_dir() -> Path:
-    home = os.environ.get("AGENTM_HOME")
-    return expand_path(home) if home else Path.home() / ".agentm"
+    return agentm_home()
 
 
 # ---------------------------------------------------------------------------

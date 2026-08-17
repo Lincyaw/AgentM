@@ -9,6 +9,7 @@ from typing import Protocol
 
 from loguru import logger
 
+from agentm.core.lib import agentm_home
 from agentm.core.abi.trigger import TriggerPriority
 
 _MAX_MESSAGE_BYTES = 64 * 1024
@@ -44,7 +45,7 @@ class CompactionDeliveryError(RuntimeError):
 def control_socket_path(session_id: str, root: Path | None = None) -> Path:
     if not session_id or Path(session_id).name != session_id:
         raise ValueError("session id must be a non-empty path-safe name")
-    base = root if root is not None else Path.home() / ".agentm" / "inbox"
+    base = root if root is not None else agentm_home() / "inbox"
     return base / f"{session_id}.sock"
 
 

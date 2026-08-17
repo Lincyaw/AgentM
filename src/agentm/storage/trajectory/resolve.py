@@ -8,6 +8,7 @@ import tomllib
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from agentm.core.lib import agentm_home
 from pathlib import Path
 from threading import Lock
 
@@ -234,10 +235,7 @@ def _optional_nonempty(value: str | None, label: str) -> str | None:
 
 
 def _user_config_path(env: Mapping[str, str]) -> Path:
-    home = env.get("AGENTM_HOME")
-    if home:
-        return Path(home).expanduser() / "config.toml"
-    return Path.home() / ".agentm" / "config.toml"
+    return agentm_home(env) / "config.toml"
 
 
 def _unique_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:

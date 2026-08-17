@@ -8,6 +8,8 @@ from agentm.core.lib.background_tasks import (
 )
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.core.lib.paths import (
+    AGENTM_HOME_ENV,
+    agentm_home,
     expand_optional_path_text,
     expand_path,
     expand_path_from_cwd,
@@ -35,6 +37,8 @@ __all__ = [
     "encode_tool_args",
     "error_result",
     "expand_optional_path_text",
+    "AGENTM_HOME_ENV",
+    "agentm_home",
     "expand_path",
     "expand_path_from_cwd",
     "expand_path_text",

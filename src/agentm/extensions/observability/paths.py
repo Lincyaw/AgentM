@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from agentm.core.lib import agentm_home
 from pathlib import Path
 
 from agentm.core.lib.paths import expand_path
@@ -26,7 +27,4 @@ def resolve_observability_dir() -> Path:
     env_dir = os.environ.get(_ENV_OBSERVABILITY_DIR)
     if env_dir:
         return expand_path(env_dir)
-    home = os.environ.get(_ENV_AGENTM_HOME)
-    if home:
-        return expand_path(home) / "observability"
-    return Path.home() / ".agentm" / "observability"
+    return agentm_home() / "observability"
