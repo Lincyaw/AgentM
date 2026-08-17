@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from agentm.core.lib import agentm_home
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from agentm.core.abi.session_api import (
     AgentSessionConfig,
     ConfigSource,
     ConfigValueProvenance,
+    ExtensionInput,
     ExtensionSpec,
     ResolvedSessionSpec,
     ScenarioSpec,
@@ -79,7 +80,7 @@ class DefaultSessionSpecResolver:
         else:
             scenario_name = None
 
-        extensions = self._resolve_extensions(
+        extensions, scenario_dir = self._resolve_extensions(
             request,
             scenario_name,
             provenance,
@@ -100,6 +101,7 @@ class DefaultSessionSpecResolver:
         return ResolvedSessionSpec(
             scenario=scenario_name,
             extensions=tuple(extensions),
+            scenario_dir=scenario_dir,
             atom_config=atom_config,
             provider=provider,
             provider_identity=provider_identity,
@@ -120,7 +122,7 @@ class DefaultSessionSpecResolver:
         request: AgentSessionConfig,
         scenario: object,
         provenance: list[ConfigValueProvenance],
-    ) -> list[ExtensionSpec]:
+    ) -> tuple[list[ExtensionSpec], str | None]:
         if request.extensions is not None:
             extensions = [normalize_extension_spec(item) for item in request.extensions]
             provenance.append(
@@ -131,12 +133,15 @@ class DefaultSessionSpecResolver:
                     _extension_records(extensions),
                 )
             )
-            return extensions
+            return extensions, None
         if isinstance(scenario, str) and request.scenario_loader is not None:
             loaded = request.scenario_loader(scenario)
-            raw_extensions = (
-                loaded.extensions if isinstance(loaded, ScenarioSpec) else loaded
-            )
+            if isinstance(loaded, ScenarioSpec):
+                raw_extensions: Sequence[ExtensionInput] = loaded.extensions
+                scenario_dir = loaded.base_dir
+            else:
+                raw_extensions = loaded
+                scenario_dir = None
             extensions = [normalize_extension_spec(item) for item in raw_extensions]
             provenance.append(
                 _provenance(
@@ -146,8 +151,8 @@ class DefaultSessionSpecResolver:
                     _extension_records(extensions),
                 )
             )
-            return extensions
-        return []
+            return extensions, scenario_dir
+        return [], None
 
     def _resolve_atom_config(
         self,

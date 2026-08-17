@@ -700,6 +700,11 @@ async def create_session(
         atom_configs=config.atom_configs,
         scenario_loader=effective_loader,
     )
+    if scenario_dir is None and config.resolved_spec is not None:
+        # A resolver already expanded the scenario into a flat extension list,
+        # so the loader is never called here and the scenario's own directory
+        # only survives if the resolver carried it.
+        scenario_dir = config.resolved_spec.scenario_dir
     if effective_loader is not None:
         resolved_services.register(
             SCENARIO_LOADER_SERVICE,

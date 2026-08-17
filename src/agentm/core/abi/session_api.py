@@ -276,6 +276,11 @@ class ResolvedSessionSpec:
 
     scenario: str | None
     extensions: tuple[ExtensionSpec, ...]
+    #: Where the named scenario was found. A resolver hands the runtime a flat
+    #: extension list, so without this the directory the scenario's own files
+    #: are relative to -- prompts, anything an atom loads by relative path --
+    #: is lost between resolving the scenario and installing its atoms.
+    scenario_dir: str | None = None
     atom_config: Mapping[str, Mapping[str, JsonValue]] = field(default_factory=dict)
     provider: ExtensionSpec | None = None
     provider_identity: ProviderSessionIdentity | None = None
