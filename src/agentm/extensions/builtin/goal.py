@@ -135,7 +135,21 @@ class GoalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     condition: str | None = None
-    checker_scenario: str = "local"
+    checker_scenario: str = "empty"
+    """The composition the checker session is built from.
+
+    ``empty`` because the checker is composed *on top of* it: this atom adds
+    ``trace_query`` and the verdict tool, and a child inherits its parent's
+    provider, so nothing else is needed. It is also what the checker's own
+    prompt describes -- it is told it has exactly the three trajectory tools,
+    and a scenario that handed it a shell would contradict the instructions it
+    is given, besides making the verifier able to do the work it is verifying.
+
+    The default was ``local``, which is not a scenario. Every checker spawn
+    failed with "unknown packaged scenario", the atom correctly refused to
+    accept an unverified stop, and the session ran to its rejection cap: 86
+    turns and 123 failed spawns against a goal that ``empty`` settles in 2.
+    """
     checker_max_turns: int = 10
     checker_prompt: str | None = None
     checker_retries: int = 1
