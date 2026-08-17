@@ -277,6 +277,8 @@ _RESOURCE_RESPONSE_KEYS = frozenset({"skill_paths", "extra_skills"})
 
 
 class _LoadSkillParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(description="Skill name from <available_skills>.")
 
 

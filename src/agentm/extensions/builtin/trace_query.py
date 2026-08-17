@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AssistantMessage,
@@ -24,6 +24,7 @@ from agentm.core.abi import (
     ToolCallBlock,
     ToolResult,
 )
+from agentm.core.abi.messages import thaw_json
 from agentm.core.abi.trajectory import Turn
 from agentm.core.lib import pydantic_to_tool_schema, text_result
 from agentm.extensions import ExtensionManifest
@@ -166,11 +167,15 @@ def _clip(text: str, limit: int, full: bool) -> str:
 
 
 class _ListTurnsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     start: int = Field(default=0, description="Start turn index (inclusive)")
     limit: int = Field(default=50, description="Max turns to return")
 
 
 class _ReadTurnArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     role: str | None = Field(
         default=None,
         description="Filter by message role: assistant, tool_result",
@@ -184,6 +189,8 @@ class _ReadTurnArgs(BaseModel):
 
 
 class _GetToolCallsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     tool_name: str | None = Field(
         default=None,
         description="Filter by tool name",
@@ -269,7 +276,12 @@ class _TraceQueryRuntime:
         total = len(records)
         sliced = records[parsed.offset : parsed.offset + parsed.limit]
         parts = [
-            f"Messages: {total} total (showing {parsed.offset}-{parsed.offset + len(sliced) - 1})"
+            f"Messages: {total} total"
+            + (
+                f" (showing {parsed.offset}-{parsed.offset + len(sliced) - 1})"
+                if sliced
+                else ""
+            )
         ]
         for rec in sliced:
             role = rec["role"]
@@ -279,7 +291,9 @@ class _TraceQueryRuntime:
                 if not isinstance(b, dict):
                     continue
                 if b.get("type") == "tool_call":
-                    a = json.dumps(b.get("arguments", {}), ensure_ascii=False)
+                    a = json.dumps(
+                        thaw_json(b.get("arguments", {})), ensure_ascii=False
+                    )
                     rendered.append(
                         f"[tool_call: {b.get('name', '')}({_clip(a, 500, parsed.full)})]"
                     )
@@ -302,7 +316,12 @@ class _TraceQueryRuntime:
             + (f" (filter: {parsed.tool_name})" if parsed.tool_name else "")
         ]
         for rec in sliced:
-            args_str = json.dumps(rec.get("args", {}), ensure_ascii=False)
+            # Through ``thaw_json`` because tool arguments arrive frozen:
+            # every message the runtime holds went through ``freeze_json``,
+            # so ``arguments`` is a ``MappingProxyType`` and ``json.dumps``
+            # refuses it. Every real tool call landed here as a TypeError,
+            # which is every call this tool exists to report.
+            args_str = json.dumps(thaw_json(rec.get("args", {})), ensure_ascii=False)
             parts.append(
                 f"[{rec['tool']}]\n"
                 f"  args: {args_str}\n"

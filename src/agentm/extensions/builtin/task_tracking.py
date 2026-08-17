@@ -216,6 +216,8 @@ MANIFEST = ExtensionManifest(
 
 
 class _CreateParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     subject: str = Field(
         description=(
             "Brief, actionable title in imperative form "
@@ -239,6 +241,8 @@ class _CreateParams(BaseModel):
 
 
 class _UpdateParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str = Field(description="The ID of the task to update.")
     status: _UpdateStatus | None = Field(
         default=None, description="New status. 'deleted' permanently removes the task."
@@ -261,10 +265,14 @@ class _UpdateParams(BaseModel):
 
 
 class _GetParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str = Field(description="The ID of the task to retrieve.")
 
 
 class _ListParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     pass
 
 

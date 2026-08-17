@@ -1112,12 +1112,16 @@ class _WorkflowToolArgs(BaseModel):
 
 
 class _LineageParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     key: str | None = Field(
         default=None, description="Scope to this key + ancestors. Omit for full graph."
     )
 
 
 class _InvalidateParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     key: str = Field(description="Journal key of the wrong agent() result.")
     reason: str = Field(description="Why the result is wrong.")
     feedback: str | None = Field(default=None, description="Guidance for the re-run.")

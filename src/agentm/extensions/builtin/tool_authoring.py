@@ -17,7 +17,7 @@ import textwrap
 from pathlib import Path
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     RESOURCE_WRITER,
@@ -60,6 +60,8 @@ MANIFEST = ExtensionManifest(
 
 
 class WriteToolArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     """Arguments for authoring one tool."""
 
     name: str = Field(

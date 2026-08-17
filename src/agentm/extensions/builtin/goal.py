@@ -85,6 +85,8 @@ _TRACE_QUERY_EXT: Final[tuple[str, dict[str, JsonValue]]] = (
 
 
 class _CheckerVerdictArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     met: bool = Field(description="True only if the condition is fully satisfied.")
     reason: str = Field(description="Concrete justification citing the trajectory.")
     unexplained: list[str] = Field(
