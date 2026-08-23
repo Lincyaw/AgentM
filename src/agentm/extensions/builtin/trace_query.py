@@ -1,43 +1,39 @@
-"""Builtin ``trace_query`` atom — query the parent session's trajectory.
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
+"""Builtin ``trace_query`` atom -- query the parent session's trajectory.
 
 Exposes read-only tools that let a child session inspect its parent's
-conversation trajectory. ClickHouse is used when configured; otherwise the
-tools fall back to the local ``$AGENTM_HOME/observability/<parent>.jsonl``
-trace. Scoped automatically to ``api.parent_session_id`` — no session id
-parameter needed, and no access to other sessions.
+conversation trajectory.  Scoped automatically to ``api.ctx.parent_session_id``.
 
 Typical consumer: the ``goal`` atom's checker agent, which needs to
 verify whether the parent agent's work satisfies a completion condition.
-
-§11: single file; ``MANIFEST`` + ``install(api, config)``; no atom-to-atom
-imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any, Final, Protocol
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
+    AssistantMessage,
+    AtomAPI,
     FunctionTool,
+    JsonValue,
     TextContent,
+    ToolCallBlock,
     ToolResult,
-    TraceReader,
 )
-from agentm.core.lib import resolve_observability_dir
+from agentm.core.abi.messages import thaw_json
+from agentm.core.abi.trajectory import Turn
+from agentm.core.lib import pydantic_to_tool_schema, text_result
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
     name="trace_query",
     description=(
         "Read-only trajectory query tools scoped to the parent session. "
-        "Lets a child agent inspect what its parent did: list turns, "
-        "read specific messages, query tool calls."
+        "Lets a child agent inspect what its parent did."
     ),
     registers=(
         "tool:list_turns",
@@ -45,381 +41,299 @@ MANIFEST = ExtensionManifest(
         "tool:get_tool_calls",
     ),
     requires=(),
-    api_version=1,
-    tier=1,
 )
 
 
-def _text(s: str) -> ToolResult:
-    return ToolResult(content=[TextContent(type="text", text=s)])
+# ---------------------------------------------------------------------------
+# Turn loading -- read parent turns from the trajectory store
+# ---------------------------------------------------------------------------
 
 
-class _TraceBackend(Protocol):
-    def turns(self) -> list[dict[str, Any]]: ...
-
-    def messages(self, *, roles: set[str] | None = None) -> list[dict[str, Any]]: ...
-
-    def tools(self) -> list[dict[str, Any]]: ...
-
-
-class _ClickHouseTraceBackend:
-    def __init__(self, module: Any, url: str, session_id: str) -> None:
-        self._module = module
-        self._url = url
-        self._session_id = session_id
-
-    def turns(self) -> list[dict[str, Any]]:
-        return list(self._module.turns(self._url, self._session_id))
-
-    def messages(self, *, roles: set[str] | None = None) -> list[dict[str, Any]]:
-        return list(self._module.messages(self._url, self._session_id, roles=roles))
-
-    def tools(self) -> list[dict[str, Any]]:
-        return list(self._module.tools(self._url, self._session_id))
-
-
-class _LocalTraceBackend:
-    def __init__(self, path: Path) -> None:
-        self._path = path
-
-    def turns(self) -> list[dict[str, Any]]:
-        return TraceReader(self._path).load_turn_summaries()
-
-    def messages(self, *, roles: set[str] | None = None) -> list[dict[str, Any]]:
-        records = TraceReader(self._path).load_messages()
-        if roles is None:
-            return records
-        return [
-            record
-            for record in records
-            if isinstance(record.get("payload"), dict)
-            and record["payload"].get("role") in roles
-        ]
-
-    def tools(self) -> list[dict[str, Any]]:
-        return [
-            _tool_record(span, args_log, result_log)
-            for span, args_log, result_log in TraceReader(self._path).tool_calls()
-        ]
-
-
-def _tool_record(span: Any, args_log: Any, result_log: Any) -> dict[str, Any]:
-    tool_name = (
-        span.attributes.get("gen_ai.tool.name")
-        or span.name.removeprefix("execute_tool ").strip()
-    )
-    args_payload: Any = args_log.body if args_log is not None else None
-    if args_payload is None:
-        args_payload = _json_attr(span.attributes.get("gen_ai.tool.call.arguments"))
-    result_payload: Any = result_log.body if result_log is not None else None
-    if result_payload is None:
-        result_payload = _json_attr(span.attributes.get("gen_ai.tool.call.result"))
-    return {"tool": tool_name, "args": args_payload, "result": result_payload}
-
-
-def _json_attr(raw: Any) -> Any:
-    if not isinstance(raw, str):
-        return raw
+def _load_parent_turns(api: AtomAPI) -> list[Turn] | None:
+    parent_sid = api.ctx.parent_session_id
+    if parent_sid is None:
+        return None
+    store = api.store
+    if store is None:
+        return None
     try:
-        return json.loads(raw)
-    except (TypeError, ValueError):
-        return raw
-
-
-def _get_clickhouse_backend(
-    parent_sid: str, *, local_trace_path: Path | None
-) -> _TraceBackend | None:
-    """Return a ClickHouse backend, or None when local fallback should be used."""
-    try:
-        from agentm.core.observability import clickhouse
-
-        url = clickhouse.get_url()
-        if url is None:
+        if not store.session_exists(parent_sid):
             return None
-        if local_trace_path is not None:
-            try:
-                if clickhouse.session_header(url, parent_sid) is None:
-                    logger.debug(
-                        "trace_query: ClickHouse has no header for parent session {}; "
-                        "using local JSONL {}",
-                        parent_sid,
-                        local_trace_path,
-                    )
-                    return None
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "trace_query: ClickHouse lookup failed for parent session {}; "
-                    "using local JSONL {}: {}",
-                    parent_sid,
-                    local_trace_path,
-                    exc,
-                )
-                return None
-        return _ClickHouseTraceBackend(clickhouse, url, parent_sid)
+        _, turns = store.load(parent_sid)
+        return turns
     except Exception as exc:  # noqa: BLE001
-        logger.debug("trace_query: clickhouse backend unavailable: {}", exc)
+        logger.debug("trace_query: failed to load parent turns: {}", exc)
         return None
 
 
-def _local_trace_path(parent_sid: str, cwd: str) -> Path | None:
-    path = resolve_observability_dir(cwd) / f"{parent_sid}.jsonl"
-    if not path.is_file():
-        return None
-    return path
+# ---------------------------------------------------------------------------
+# Rendering helpers
+# ---------------------------------------------------------------------------
 
 
-def _get_local_backend(path: Path | None) -> _TraceBackend | None:
-    if path is None:
-        return None
-    return _LocalTraceBackend(path)
+def _turn_summary(turn: Turn) -> dict[str, object]:
+    tool_names: list[str] = []
+    if turn.response is not None:
+        for block in turn.response.content:
+            if isinstance(block, ToolCallBlock):
+                tool_names.append(block.name)
+    return {
+        "turn_index": turn.index,
+        "run_id": turn.run_id,
+        "run_step": turn.run_step,
+        "tool_calls": tool_names,
+        "input_tokens": turn.meta.total_input_tokens,
+        "output_tokens": turn.meta.total_output_tokens,
+    }
 
 
-def _get_backend(parent_sid: str, cwd: str) -> _TraceBackend | None:
-    local_path = _local_trace_path(parent_sid, cwd)
-    return _get_clickhouse_backend(
-        parent_sid, local_trace_path=local_path
-    ) or _get_local_backend(local_path)
-
-
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    del config
-    runtime = _TraceQueryRuntime.from_api(api)
-    if runtime is not None:
-        runtime.install()
-
-
-class _TraceQueryRuntime:
-    def __init__(self, api: ExtensionAPI, *, backend: _TraceBackend) -> None:
-        self._api = api
-        self._backend = backend
-
-    @classmethod
-    def from_api(cls, api: ExtensionAPI) -> _TraceQueryRuntime | None:
-        parent_sid = api.parent_session_id
-        if parent_sid is None:
-            logger.debug(
-                "trace_query: no parent session — tools will return empty results"
+def _message_records(turns: list[Turn]) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for turn in turns:
+        if turn.response is not None:
+            records.append(_assistant_record(turn.response, turn))
+        for tr in turn.tool_results:
+            records.append(
+                {
+                    "role": "tool_result",
+                    "turn_index": turn.index,
+                    "run_id": turn.run_id,
+                    "run_step": turn.run_step,
+                    "blocks": [
+                        {"text": c.text if isinstance(c, TextContent) else str(c)}
+                        for c in (tr.result.content if tr.result else [])
+                    ],
+                    "is_error": tr.result.is_error if tr.result else False,
+                    "tool_name": tr.call.name,
+                }
             )
-            return None
+    return records
 
-        backend = _get_backend(parent_sid, api.cwd)
-        if backend is None:
-            logger.warning(
-                "trace_query: no ClickHouse or local parent trace — tools disabled"
+
+def _assistant_record(msg: AssistantMessage, turn: Turn) -> dict[str, object]:
+    blocks: list[dict[str, object]] = []
+    for block in msg.content:
+        if isinstance(block, TextContent):
+            blocks.append({"type": "text", "text": block.text})
+        elif isinstance(block, ToolCallBlock):
+            blocks.append(
+                {
+                    "type": "tool_call",
+                    "name": block.name,
+                    "arguments": block.arguments,
+                }
             )
-            return None
+    return {
+        "role": "assistant",
+        "turn_index": turn.index,
+        "run_id": turn.run_id,
+        "run_step": turn.run_step,
+        "blocks": blocks,
+    }
 
-        return cls(api, backend=backend)
 
-    def install(self) -> None:
-        self._register_list_turns()
-        self._register_read_turn()
-        self._register_get_tool_calls()
-
-    # -- list_turns --------------------------------------------------------
-
-    def _register_list_turns(self) -> None:
-        self._api.register_tool(
-            FunctionTool(
-                name="list_turns",
-                description=(
-                    "List turn-level summaries of the parent session's trajectory. "
-                    "Shows which tools were called each turn with token counts. "
-                    "Use this first to get an overview, then page through the "
-                    "messages with read_turn."
-                ),
-                parameters=_ListTurnsArgs,
-                fn=self.list_turns,
+def _tool_call_records(turns: list[Turn]) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for turn in turns:
+        for tr in turn.tool_results:
+            result_text = ""
+            if tr.result:
+                for c in tr.result.content:
+                    if isinstance(c, TextContent):
+                        result_text += c.text
+            records.append(
+                {
+                    "turn_index": turn.index,
+                    "run_id": turn.run_id,
+                    "run_step": turn.run_step,
+                    "tool": tr.call.name,
+                    "args": tr.call.arguments,
+                    "result_preview": result_text[:500],
+                    "is_error": tr.result.is_error if tr.result else False,
+                }
             )
-        )
+    return records
 
-    async def list_turns(self, args: dict[str, Any]) -> ToolResult:
-        parsed = _ListTurnsArgs.model_validate(args)
-        records = self._backend.turns()
-        return _text(self._render_turns(records, parsed.start, parsed.limit))
 
-    def _render_turns(
-        self, records: list[dict[str, Any]], start: int, limit: int
-    ) -> str:
-        total = len(records)
-        sliced = records[start : start + limit]
-        lines = [f"Parent session: {total} turns total"]
-        for rec in sliced:
-            idx = rec.get("turn_index", rec.get("turn_id", "?"))
-            tools = rec.get("tool_calls", [])
-            tool_str = ", ".join(tools) if tools else "—"
-            tokens_in = rec.get("input_tokens", "?")
-            tokens_out = rec.get("output_tokens", "?")
-            lines.append(
-                f"  [{idx}] tools=[{tool_str}] in={tokens_in} out={tokens_out}"
-            )
-        return "\n".join(lines)
+def _clip(text: str, limit: int, full: bool) -> str:
+    if full or len(text) <= limit:
+        return text
+    return text[:limit] + f"\n[truncated {len(text) - limit} chars]"
 
-    # -- read_turn ---------------------------------------------------------
 
-    def _register_read_turn(self) -> None:
-        self._api.register_tool(
-            FunctionTool(
-                name="read_turn",
-                description=(
-                    "Page through the parent session's messages. There is NO "
-                    "turn selector — offset/limit paginate the flat message "
-                    "sequence across the whole trajectory, optionally "
-                    "filtered by role (user/assistant/tool_result/system). "
-                    "Use this to inspect what the agent actually did and "
-                    "what results it received. Blocks are clipped previews "
-                    "with explicit truncation markers by default; pass "
-                    "full=true (with a narrow window) for complete content."
-                ),
-                parameters=_ReadTurnArgs,
-                fn=self.read_turn,
-            )
-        )
-
-    async def read_turn(self, args: dict[str, Any]) -> ToolResult:
-        parsed = _ReadTurnArgs.model_validate(args)
-        roles = {parsed.role} if parsed.role else None
-        records = self._backend.messages(roles=roles)
-        return _text(
-            self._render_messages(
-                records, parsed.offset, parsed.limit, full=parsed.full,
-            )
-        )
-
-    @staticmethod
-    def _clip(text: str, limit: int, full: bool) -> str:
-        if full or len(text) <= limit:
-            return text
-        return (
-            text[:limit]
-            + f"\n[truncated {len(text) - limit} chars — re-read this message "
-            "with full=true and a narrow offset/limit window]"
-        )
-
-    def _render_messages(
-        self,
-        records: list[dict[str, Any]],
-        offset: int,
-        limit: int,
-        *,
-        full: bool = False,
-    ) -> str:
-        total = len(records)
-        sliced = records[offset : offset + limit]
-        parts = [
-            f"Messages: {total} total (showing {offset}-{offset + len(sliced) - 1})"
-        ]
-        for rec in sliced:
-            payload = rec.get("payload", {})
-            role = payload.get("role", "?")
-            content = payload.get("content", [])
-            blocks: list[str] = []
-            if isinstance(content, list):
-                for b in content:
-                    if not isinstance(b, dict):
-                        continue
-                    btype = b.get("type", "")
-                    if btype == "tool_call":
-                        name = b.get("name", "")
-                        a = json.dumps(b.get("arguments", {}), ensure_ascii=False)
-                        blocks.append(f"[tool_call: {name}({self._clip(a, 500, full)})]")
-                    elif btype == "tool_result":
-                        sub = b.get("content", [])
-                        txt = ""
-                        if isinstance(sub, list):
-                            for s in sub:
-                                if isinstance(s, dict):
-                                    txt += s.get("text", "")
-                        err = " ERROR" if b.get("is_error") else ""
-                        blocks.append(f"[tool_result{err}] {self._clip(txt, 1000, full)}")
-                    elif b.get("text"):
-                        blocks.append(self._clip(b["text"], 1500, full))
-            body = "\n".join(blocks) if blocks else "(empty)"
-            parts.append(f"[{role}]\n{body}\n")
-        return "\n".join(parts)
-
-    # -- get_tool_calls ----------------------------------------------------
-
-    def _register_get_tool_calls(self) -> None:
-        self._api.register_tool(
-            FunctionTool(
-                name="get_tool_calls",
-                description=(
-                    "Query tool calls from the parent session. "
-                    "Optionally filter by exact tool name. Shows arguments "
-                    "and result previews (first text block, capped at ~500 "
-                    "chars — not full output). Use this to verify what "
-                    "commands the agent actually ran and what they produced."
-                ),
-                parameters=_GetToolCallsArgs,
-                fn=self.get_tool_calls,
-            )
-        )
-
-    async def get_tool_calls(self, args: dict[str, Any]) -> ToolResult:
-        parsed = _GetToolCallsArgs.model_validate(args)
-        records = self._backend.tools()
-        return _text(self._render_tool_calls(records, parsed.tool_name, parsed.limit))
-
-    @staticmethod
-    def _render_tool_calls(
-        records: list[dict[str, Any]], tool_name: str | None, limit: int
-    ) -> str:
-        if tool_name:
-            records = [r for r in records if r.get("tool") == tool_name]
-        total = len(records)
-        sliced = records[:limit]
-        parts = [
-            f"Tool calls: {total} total"
-            + (f" (filter: {tool_name})" if tool_name else "")
-        ]
-        for rec in sliced:
-            name = rec.get("tool", "?")
-            args_data = rec.get("args")
-            result_data = rec.get("result")
-            args_str = json.dumps(args_data, ensure_ascii=False) if args_data else "{}"
-            result_preview = ""
-            if isinstance(result_data, dict):
-                content = result_data.get("content", [])
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("text"):
-                            result_preview = c["text"][:500]
-                            break
-            parts.append(f"[{name}]\n  args: {args_str}\n  result: {result_preview}\n")
-        return "\n".join(parts)
+# ---------------------------------------------------------------------------
+# Tool schemas
+# ---------------------------------------------------------------------------
 
 
 class _ListTurnsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     start: int = Field(default=0, description="Start turn index (inclusive)")
     limit: int = Field(default=50, description="Max turns to return")
 
 
 class _ReadTurnArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     role: str | None = Field(
         default=None,
-        description="Filter by message role: user, assistant, tool_result, system",
+        description="Filter by message role: assistant, tool_result",
     )
     limit: int = Field(default=20, description="Max messages to return")
     offset: int = Field(default=0, description="Skip this many messages")
     full: bool = Field(
         default=False,
-        description=(
-            "false (default): each content block is a preview clipped to a "
-            "few hundred chars, with an explicit '[truncated N chars ...]' "
-            "marker where content was cut. true: return blocks unclipped — "
-            "combine with a narrow offset/limit window (e.g. limit=1) to "
-            "read one message in full without flooding your context."
-        ),
+        description="false: clipped previews. true: full content.",
     )
 
 
 class _GetToolCallsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     tool_name: str | None = Field(
         default=None,
-        description="Filter by tool name (e.g. 'submit_final_report', 'query_sql')",
+        description="Filter by tool name",
     )
     limit: int = Field(default=30, description="Max tool calls to return")
 
 
-__all__: Final = ("MANIFEST", "install")
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+
+
+class _TraceQueryRuntime:
+    def __init__(self, api: AtomAPI, turns: list[Turn]) -> None:
+        self._api = api
+        self._turns = turns
+
+    def install(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="list_turns",
+                description=(
+                    "List turn-level summaries of the parent session. "
+                    "Shows which tools were called each turn with token counts."
+                ),
+                parameters=pydantic_to_tool_schema(_ListTurnsArgs),
+                fn=self.list_turns,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="read_turn",
+                description=(
+                    "Page through the parent session's messages. "
+                    "Paginate with offset/limit, optionally filter by role."
+                ),
+                parameters=pydantic_to_tool_schema(_ReadTurnArgs),
+                fn=self.read_turn,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="get_tool_calls",
+                description=(
+                    "Query tool calls from the parent session. "
+                    "Optionally filter by tool name."
+                ),
+                parameters=pydantic_to_tool_schema(_GetToolCallsArgs),
+                fn=self.get_tool_calls,
+            )
+        )
+
+    def _refresh_turns(self) -> list[Turn]:
+        fresh = _load_parent_turns(self._api)
+        if fresh is not None:
+            self._turns = fresh
+        return self._turns
+
+    async def list_turns(self, args: dict[str, JsonValue]) -> ToolResult:
+        parsed = _ListTurnsArgs.model_validate(args)
+        turns = self._refresh_turns()
+        summaries = [_turn_summary(t) for t in turns]
+        sliced = summaries[parsed.start : parsed.start + parsed.limit]
+        lines = [f"Parent session: {len(summaries)} turns total"]
+        for s in sliced:
+            tool_calls = s["tool_calls"]
+            tool_str = (
+                ", ".join(tool_calls) if isinstance(tool_calls, list) else ""
+            ) or "—"
+            lines.append(
+                f"  [{s['turn_index']}] run={str(s['run_id'])[:8]} "
+                f"step={s['run_step']} tools=[{tool_str}] "
+                f"in={s['input_tokens']} out={s['output_tokens']}"
+            )
+        return text_result("\n".join(lines))
+
+    async def read_turn(self, args: dict[str, JsonValue]) -> ToolResult:
+        parsed = _ReadTurnArgs.model_validate(args)
+        turns = self._refresh_turns()
+        records = _message_records(turns)
+        if parsed.role:
+            records = [r for r in records if r["role"] == parsed.role]
+        total = len(records)
+        sliced = records[parsed.offset : parsed.offset + parsed.limit]
+        parts = [
+            f"Messages: {total} total"
+            + (
+                f" (showing {parsed.offset}-{parsed.offset + len(sliced) - 1})"
+                if sliced
+                else ""
+            )
+        ]
+        for rec in sliced:
+            role = rec["role"]
+            blocks = rec.get("blocks", [])
+            rendered: list[str] = []
+            for b in blocks if isinstance(blocks, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_call":
+                    a = json.dumps(
+                        thaw_json(b.get("arguments", {})), ensure_ascii=False
+                    )
+                    rendered.append(
+                        f"[tool_call: {b.get('name', '')}({_clip(a, 500, parsed.full)})]"
+                    )
+                elif b.get("type") == "tool_result" or "text" in b:
+                    rendered.append(_clip(b.get("text", ""), 1500, parsed.full))
+            body = "\n".join(rendered) if rendered else "(empty)"
+            parts.append(f"[{role}]\n{body}\n")
+        return text_result("\n".join(parts))
+
+    async def get_tool_calls(self, args: dict[str, JsonValue]) -> ToolResult:
+        parsed = _GetToolCallsArgs.model_validate(args)
+        turns = self._refresh_turns()
+        records = _tool_call_records(turns)
+        if parsed.tool_name:
+            records = [r for r in records if r["tool"] == parsed.tool_name]
+        total = len(records)
+        sliced = records[: parsed.limit]
+        parts = [
+            f"Tool calls: {total} total"
+            + (f" (filter: {parsed.tool_name})" if parsed.tool_name else "")
+        ]
+        for rec in sliced:
+            # Through ``thaw_json`` because tool arguments arrive frozen:
+            # every message the runtime holds went through ``freeze_json``,
+            # so ``arguments`` is a ``MappingProxyType`` and ``json.dumps``
+            # refuses it. Every real tool call landed here as a TypeError,
+            # which is every call this tool exists to report.
+            args_str = json.dumps(thaw_json(rec.get("args", {})), ensure_ascii=False)
+            parts.append(
+                f"[{rec['tool']}]\n"
+                f"  args: {args_str}\n"
+                f"  result: {rec.get('result_preview', '')}\n"
+            )
+        return text_result("\n".join(parts))
+
+
+def install(api: AtomAPI, config: dict[str, JsonValue] | None = None) -> None:
+    del config
+    turns = _load_parent_turns(api)
+    if turns is None:
+        logger.debug("trace_query: no parent trajectory available")
+        turns = []
+    _TraceQueryRuntime(api, turns).install()

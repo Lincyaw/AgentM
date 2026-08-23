@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``memory`` atom.
 
 Project-local persistent memory built on a layered model (L2 global /
@@ -30,7 +31,7 @@ context trick — keep only relevance hints in prompt, let the agent decide
 what to expand.
 
 The atom is self-contained and §11-compliant: file reads go through
-``api.get_resource_writer()``.
+``api.services.get_role(RESOURCE_WRITER)``.
 Access bookkeeping is intentionally write-through to disk so it survives
 restarts and can be mined by future evolution/query atoms.
 """
@@ -38,33 +39,56 @@ restarts and can be mined by future evolution/query atoms.
 from __future__ import annotations
 
 import json
-from loguru import logger
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Final, Literal, Protocol, cast
 
+import frontmatter  # type: ignore[import-untyped]
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    BeforeAgentStartEvent,
-    ExtensionAPI,
+    RESOURCE_WRITER,
+    AtomAPI,
+    BeforeRunEvent,
     FunctionTool,
+    ResourceWriter,
     TextContent,
     ToolResult,
 )
-from agentm.core.lib import parse_frontmatter, with_model_note
+from agentm.core.lib import with_model_note
 from agentm.extensions import ExtensionManifest
+
+
+class _FrontmatterPost(Protocol):
+    metadata: object
+    content: str
+
+
+def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
+    """Parse leading YAML frontmatter, returning ``(metadata, body)``."""
+    try:
+        post = cast(_FrontmatterPost, frontmatter.loads(text))
+    except Exception as exc:
+        raise ValueError("invalid memory frontmatter") from exc
+    metadata = post.metadata
+    if not isinstance(metadata, Mapping):
+        raise ValueError("memory frontmatter metadata must be a mapping")
+    return dict(metadata), post.content
 
 
 _VALID_TYPES: Final[tuple[str, ...]] = ("feedback", "project", "user", "reference")
 _NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
 _DEFAULT_MAX_INDEX_LINES: Final[int] = 200
 
+
 class MemoryConfig(BaseModel):
     path: str = ".agentm/memory"
     index_in_system_prompt: bool = True
     max_index_lines: int = _DEFAULT_MAX_INDEX_LINES
+
 
 MANIFEST = ExtensionManifest(
     name="memory",
@@ -74,15 +98,16 @@ MANIFEST = ExtensionManifest(
         "reference) loaded on demand, access counter for evolution evidence."
     ),
     registers=(
-        "event:before_agent_start",
+        "event:before_run",
         "tool:memory_save",
         "tool:memory_read",
         "tool:memory_search",
         "tool:memory_delete",
     ),
     config_schema=MemoryConfig,
-    requires=(),
+    requires=(RESOURCE_WRITER.capability,),
 )
+
 
 class _SaveArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -124,7 +149,12 @@ class _SearchArgs(BaseModel):
             "name + description. Returns up to ``limit`` results."
         ),
     )
-    limit: int = Field(default=10, description="Max results to return (default 10).")
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Max results to return (default 10).",
+    )
 
 
 class _DeleteArgs(BaseModel):
@@ -133,35 +163,41 @@ class _DeleteArgs(BaseModel):
         description="Memory name to delete; also removes its MEMORY.md entry.",
     )
 
-def install(api: ExtensionAPI, config: MemoryConfig) -> None:
-    base_path = _resolve_base(api.cwd, config.path)
+
+def install(api: AtomAPI, config: MemoryConfig) -> None:
+    cwd = api.ctx.cwd
+    base_path = _resolve_base(cwd, config.path)
     index_in_prompt = config.index_in_system_prompt
     max_index_lines = config.max_index_lines
 
-    writer = api.get_resource_writer()
+    writer = api.services.get_role(RESOURCE_WRITER)
+    if writer is None:
+        raise RuntimeError("memory requires a ResourceWriter service")
 
     if index_in_prompt:
 
-        async def _before_agent_start(
-            event: BeforeAgentStartEvent,
-        ) -> None:
+        async def _before_run(
+            event: BeforeRunEvent,
+        ) -> dict[str, str] | None:
             block = await _build_index_block(writer, base_path, max_index_lines)
             if not block:
-                return
+                return None
             current = str(event.system or "")
             updated = f"{block}\n\n{current}" if current else block
-            event.system = updated
+            return {"system": updated}
 
-        api.on(BeforeAgentStartEvent.CHANNEL, _before_agent_start)
+        api.on(BeforeRunEvent.CHANNEL, _before_run)
 
-    async def _save(args: dict[str, Any]) -> ToolResult:
+    async def _save(args: dict[str, object]) -> ToolResult:
         mem_type = str(args["type"])
         name = str(args["name"])
         description = str(args["description"]).strip()
         content = str(args["content"])
 
         if mem_type not in _VALID_TYPES:
-            return _error(f"unknown type {mem_type!r}; expected one of {list(_VALID_TYPES)}")
+            return _error(
+                f"unknown type {mem_type!r}; expected one of {list(_VALID_TYPES)}"
+            )
         if not _NAME_RE.match(name):
             return _error(
                 f"invalid name {name!r}; use letters/digits/underscore/hyphen only"
@@ -169,25 +205,33 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         if "\n" in description:
             return _error("description must be single-line (no newlines)")
 
-        rel_md = _memory_relpath(base_path, mem_type, name, api.cwd)
+        rel_md = _memory_relpath(base_path, mem_type, name, cwd)
         body = _serialize_memory(mem_type, name, description, content)
 
         try:
-            write_result = await writer.write(rel_md, body.encode("utf-8"), rationale="memory_save")
-            if getattr(write_result, "error", None) is not None:
+            write_result = await writer.write(
+                rel_md,
+                body.encode("utf-8"),
+                rationale="memory_save",
+            )
+            if write_result.error is not None:
                 return _error(f"write failed: {write_result.error}")
         except Exception as exc:
             logger.warning("memory save write failed: {}", exc)
             return _error(f"write failed: {exc}")
 
-        index_error = await _rewrite_index(writer, base_path, api.cwd)
+        index_error = await _rewrite_index(writer, base_path, cwd)
         if index_error is not None:
             return _error(index_error)
         return _ok(f"saved memory {mem_type}/{name}")
 
-    async def _read(args: dict[str, Any]) -> ToolResult:
+    async def _read(args: dict[str, object]) -> ToolResult:
         name = str(args["name"])
-        path = await _resolve_memory_path(writer, base_path, name)
+        try:
+            path = await _resolve_memory_path(writer, base_path, name)
+        except Exception as exc:
+            logger.warning("memory lookup failed for {}: {}", name, exc)
+            return _error(f"lookup failed: {exc}")
         if path is None:
             return _error(f"memory {name!r} not found in {base_path}")
         try:
@@ -196,27 +240,33 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             logger.warning("memory read failed for {}: {}", name, exc)
             return _error(f"read failed: {exc}")
         text = data.decode("utf-8", errors="replace")
-        await _record_access(writer, base_path, name, api.cwd)
+        await _record_access(writer, base_path, name, cwd)
         return _ok(text)
 
-    async def _search(args: dict[str, Any]) -> ToolResult:
+    async def _search(args: dict[str, object]) -> ToolResult:
         query = str(args["query"]).lower().strip()
-        limit = int(args.get("limit", 10))
+        raw_limit = args.get("limit", 10)
+        if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
+            return _error("limit must be an integer")
+        limit = raw_limit
         if not query:
             return _error("query is empty")
 
         entries: list[tuple[str, str, str]] = []
         skipped: list[str] = []
-        for path in await _list_memory_files(writer, base_path):
+        try:
+            paths = await _list_memory_files(writer, base_path)
+        except Exception as exc:
+            logger.warning("memory search listing failed for {}: {}", base_path, exc)
+            return _error(f"search failed: {exc}")
+        for path in paths:
             try:
                 data = await writer.read(str(path))
+                meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
             except Exception as exc:  # noqa: BLE001
-                # Skip an unreadable memory file rather than failing the search,
-                # but record it so the model learns recall may be incomplete.
-                logger.debug("memory: skipping unreadable file {}: {}", path, exc)
+                logger.debug("memory: skipping invalid file {}: {}", path, exc)
                 skipped.append(path.name)
                 continue
-            meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
             name = str(meta.get("name", path.stem))
             description = str(meta.get("description", ""))
             mem_type = str(meta.get("type", ""))
@@ -228,29 +278,36 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             result = _ok(f"no memories matched {query!r}")
         else:
             entries.sort(key=lambda row: row[0])
-            lines = [f"- {name} [{mem_type}] — {desc}" for name, mem_type, desc in entries[:limit]]
+            lines = [
+                f"- {name} [{mem_type}] — {desc}"
+                for name, mem_type, desc in entries[:limit]
+            ]
             result = _ok("\n".join(lines))
         if skipped:
             # Surface the silently-skipped files to the model, not just the log.
-            with_model_note(
+            result = with_model_note(
                 result,
                 f"{len(skipped)} memory file(s) could not be read and were "
                 f"skipped ({', '.join(skipped)}); this recall may be incomplete.",
             )
         return result
 
-    async def _delete(args: dict[str, Any]) -> ToolResult:
+    async def _delete(args: dict[str, object]) -> ToolResult:
         name = str(args["name"])
-        path = await _resolve_memory_path(writer, base_path, name)
+        try:
+            path = await _resolve_memory_path(writer, base_path, name)
+        except Exception as exc:
+            logger.warning("memory lookup failed for {}: {}", name, exc)
+            return _error(f"lookup failed: {exc}")
         if path is None:
             return _error(f"memory {name!r} not found in {base_path}")
-        rel = _to_cwd_relative(path, api.cwd)
+        rel = _to_cwd_relative(path, cwd)
         try:
             await writer.delete(rel, rationale="memory_delete")
         except Exception as exc:
             logger.warning("memory delete failed for {}: {}", name, exc)
             return _error(f"delete failed: {exc}")
-        index_error = await _rewrite_index(writer, base_path, api.cwd)
+        index_error = await _rewrite_index(writer, base_path, cwd)
         if index_error is not None:
             return _error(index_error)
         return _ok(f"deleted memory {name}")
@@ -303,13 +360,16 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         )
     )
 
+
 def _resolve_base(cwd: str, raw_path: str) -> Path:
     raw = Path(raw_path).expanduser()
     return raw if raw.is_absolute() else (Path(cwd) / raw).resolve()
 
+
 def _memory_relpath(base: Path, mem_type: str, name: str, cwd: str) -> str:
     abs_path = base / f"{mem_type}_{name}.md"
     return _to_cwd_relative(abs_path, cwd)
+
 
 def _to_cwd_relative(path: Path, cwd: str) -> str:
     cwd_path = Path(cwd).resolve()
@@ -317,6 +377,7 @@ def _to_cwd_relative(path: Path, cwd: str) -> str:
         return str(path.resolve().relative_to(cwd_path))
     except ValueError:
         return str(path)
+
 
 def _serialize_memory(mem_type: str, name: str, description: str, content: str) -> str:
     body = content if content.endswith("\n") else content + "\n"
@@ -329,12 +390,12 @@ def _serialize_memory(mem_type: str, name: str, description: str, content: str) 
         f"{body}"
     )
 
-async def _list_memory_files(writer: Any, base: Path) -> list[Path]:
-    try:
-        names = await writer.list_dir(str(base))
-    except Exception as exc:
-        logger.warning(f"memory: failed to list {base}: {exc}")
-        return []
+
+async def _list_memory_files(
+    writer: ResourceWriter,
+    base: Path,
+) -> list[Path]:
+    names = await writer.list_dir(str(base))
     out: list[Path] = []
     for entry in names:
         if not entry.endswith(".md") or entry == "MEMORY.md":
@@ -342,29 +403,30 @@ async def _list_memory_files(writer: Any, base: Path) -> list[Path]:
         out.append(base / entry)
     return sorted(out)
 
-async def _resolve_memory_path(writer: Any, base: Path, name: str) -> Path | None:
+
+async def _resolve_memory_path(
+    writer: ResourceWriter,
+    base: Path,
+    name: str,
+) -> Path | None:
     """Find ``<type>_<name>.md`` without forcing the caller to know the type."""
 
     for mem_type in _VALID_TYPES:
         candidate = base / f"{mem_type}_{name}.md"
-        try:
-            if await writer.exists(str(candidate)):
-                return candidate
-        except Exception as exc:  # noqa: BLE001
-            # Access check failed for this type variant — try the next one.
-            logger.debug("memory: access check failed for {}: {}", candidate, exc)
-            continue
+        if await writer.exists(str(candidate)):
+            return candidate
     return None
 
-async def _build_index_block(writer: Any, base: Path, max_lines: int) -> str:
+
+async def _build_index_block(
+    writer: ResourceWriter,
+    base: Path,
+    max_lines: int,
+) -> str:
     index_path = base / "MEMORY.md"
-    try:
-        if not await writer.exists(str(index_path)):
-            return ""
-        raw = await writer.read(str(index_path))
-    except Exception as exc:
-        logger.warning(f"memory: failed to read index {index_path}: {exc}")
+    if not await writer.exists(str(index_path)):
         return ""
+    raw = await writer.read(str(index_path))
     text = raw.decode("utf-8", errors="replace").strip()
     if not text:
         return ""
@@ -391,77 +453,108 @@ async def _build_index_block(writer: Any, base: Path, max_lines: int) -> str:
         f"<memory_index>\n{body}\n</memory_index>"
     )
 
+
 async def _rewrite_index(
-    writer: Any,
+    writer: ResourceWriter,
     base: Path,
     cwd: str,
 ) -> str | None:
     """Regenerate MEMORY.md from current files. Returns error string or None."""
 
     entries: list[tuple[str, str, str]] = []
-    for path in await _list_memory_files(writer, base):
+    try:
+        paths = await _list_memory_files(writer, base)
+    except Exception as exc:
+        logger.warning("memory index listing failed for {}: {}", base, exc)
+        return f"index rebuild failed: {exc}"
+    for path in paths:
         try:
             data = await writer.read(str(path))
+            meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
         except Exception as exc:  # noqa: BLE001
-            # Skip an unreadable memory file when rebuilding the index.
-            logger.debug("memory: skipping unreadable file {} during reindex: {}", path, exc)
-            continue
-        meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
+            logger.warning("memory index source failed for {}: {}", path, exc)
+            return f"index rebuild failed for {path.name}: {exc}"
         name = str(meta.get("name", path.stem))
         mem_type = str(meta.get("type", ""))
         description = str(meta.get("description", ""))
         entries.append((name, mem_type, description))
     entries.sort(key=lambda row: row[0])
 
-    lines = [f"- [{mem_type}/{name}] {description}" for name, mem_type, description in entries]
+    lines = [
+        f"- [{mem_type}/{name}] {description}"
+        for name, mem_type, description in entries
+    ]
     body = "\n".join(lines) + ("\n" if lines else "")
     rel = _to_cwd_relative(base / "MEMORY.md", cwd)
     try:
-        result = await writer.write(rel, body.encode("utf-8"), rationale="memory_index_rebuild")
-        if getattr(result, "error", None) is not None:
+        result = await writer.write(
+            rel,
+            body.encode("utf-8"),
+            rationale="memory_index_rebuild",
+        )
+        if result.error is not None:
             return f"index rebuild failed: {result.error}"
     except Exception as exc:
         logger.warning("memory index rebuild failed: {}", exc)
         return f"index rebuild failed: {exc}"
     return None
 
+
 async def _record_access(
-    writer: Any,
+    writer: ResourceWriter,
     base: Path,
     name: str,
     cwd: str,
 ) -> None:
-    """Increment ``access_stats.json[name]``. Best-effort: failures are
-    silent so they never break the read path."""
+    """Increment access statistics without making them read-critical.
+
+    Failures remain visible at debug level but do not break memory reads.
+    """
 
     stats_path = base / "access_stats.json"
-    stats: dict[str, Any] = {}
+    stats: dict[str, object] = {}
     try:
         if await writer.exists(str(stats_path)):
             raw = await writer.read(str(stats_path))
-            stats = json.loads(raw.decode("utf-8", errors="replace"))
-            if not isinstance(stats, dict):
+            decoded: object = json.loads(raw.decode("utf-8", errors="replace"))
+            if not isinstance(decoded, dict):
                 stats = {}
+            else:
+                stats = {str(key): value for key, value in decoded.items()}
     except Exception as exc:
         logger.debug("memory access stats read failed: {}", exc)
         stats = {}
 
     prev = stats.get(name)
-    record: dict[str, Any] = prev if isinstance(prev, dict) else {}
-    record["count"] = int(record.get("count", 0)) + 1
+    record: dict[str, object] = (
+        {str(key): value for key, value in prev.items()}
+        if isinstance(prev, dict)
+        else {}
+    )
+    previous_count = record.get("count", 0)
+    count = (
+        previous_count
+        if isinstance(previous_count, int) and not isinstance(previous_count, bool)
+        else 0
+    )
+    record["count"] = count + 1
     record["last_access"] = time.strftime("%Y-%m-%d %H:%M:%S")
     stats[name] = record
 
     rel = _to_cwd_relative(stats_path, cwd)
     payload = json.dumps(stats, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     try:
-        await writer.write(rel, payload.encode("utf-8"), rationale="memory_access_stats")
+        await writer.write(
+            rel, payload.encode("utf-8"), rationale="memory_access_stats"
+        )
     except Exception as exc:
         logger.debug("memory access stats write failed: {}", exc)
         return
 
+
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
+
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

@@ -1,92 +1,287 @@
-"""Compaction value types — public ABI for compaction-related atoms.
+"""Context projection ABI.
 
-Pure dataclasses an atom (e.g. ``llm_compaction``) reads/constructs.
-The compaction engine itself lives inside the ``llm_compaction`` atom;
-these types are the only stable surface other code should depend on.
+Trajectory is the durable source of truth. A context projection replays the
+provider-visible messages from the committed node chain exactly, honoring
+compaction boundaries, content references, and visibility rules. It does not
+drop history to fit a budget. Compaction is a separate context policy that
+summarizes an old committed prefix into a durable checkpoint; the projection
+then substitutes that checkpoint in place of the covered prefix during replay.
 """
+
+# code-health: ignore-file[AM025] -- validates immutable ABI DTO boundaries
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Final
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
-# Canonical prompt-registry keys shared between compaction_prompts and
-# llm_compaction atoms.  Living here avoids the §11-forbidden
-# atom-to-atom import while giving both a single source of truth.
-PROMPT_SUMMARIZATION_SYSTEM: Final = "compaction.summarization_system"
-PROMPT_SUMMARIZATION: Final = "compaction.summarization"
-PROMPT_UPDATE_SUMMARIZATION: Final = "compaction.update_summarization"
-PROMPT_BRANCH_SUMMARY: Final = "compaction.branch_summary"
-PROMPT_BRANCH_SUMMARY_PREAMBLE: Final = "compaction.branch_summary_preamble"
-
-
-@dataclass(frozen=True, slots=True)
-class CompactionSettings:
-    tool_result_max_tokens: int
-    """Per-tool-result truncation cap used when rendering tool outputs into
-    the summary prompt. Larger values preserve more verbatim tool detail at
-    the cost of longer summary prompts."""
-
-    enabled: bool = True
-    reserve_tokens: int = 16_384
+from agentm.core.abi.cancel import CancelSignal
+from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
+from agentm.core.abi.trajectory import (
+    DEFAULT_TRAJECTORY_BRANCH_ID,
+    DEFAULT_TRAJECTORY_HEAD_ID,
+    TrajectoryBranchId,
+    TrajectoryHead,
+    TrajectoryHeadId,
+    TrajectoryNode,
+    Turn,
+)
 
 
 @dataclass(frozen=True, slots=True)
-class CompactionDetails:
-    read_files: list[str]
-    modified_files: list[str]
+class ContextBudget:
+    """Provider-facing budget available to a context projection."""
+
+    max_messages: int | None = None
+    max_input_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TurnRange:
+    """Inclusive turn-index range represented in a projection decision."""
+
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionSourceAnchor:
+    """Exact committed source state from which an artifact was derived.
+
+    The head distinguishes compactions performed before and after a fork at the
+    same message node.  The final committed turn also detects source progress
+    that does not append a provider-visible message node.
+    """
+
+    head: TrajectoryHead
+    last_turn_id: str
+    last_turn_index: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.head, TrajectoryHead):
+            raise TypeError("compaction source anchor head must be a TrajectoryHead")
+        if not isinstance(self.last_turn_id, str) or not self.last_turn_id:
+            raise ValueError("compaction source anchor last_turn_id must be non-empty")
+        if (
+            not isinstance(self.last_turn_index, int)
+            or isinstance(self.last_turn_index, bool)
+            or self.last_turn_index < 0
+        ):
+            raise ValueError(
+                "compaction source anchor last_turn_index must be non-negative"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionRequest:
+    """Store-driven request to derive a summary from committed history.
+
+    Implementation-specific policy belongs in ``strategy`` and ``options``;
+    the orchestration contract remains independent of any LLM, prompt, or
+    execution backend.
+    """
+
+    source_session_id: str
+    through_turn_id: str | None = None
+    start_after_turn_id: str | None = None
+    previous_summary: str | None = None
+    strategy: str = "llm_structured_checkpoint"
+    options: Mapping[str, JsonValue] = field(default_factory=dict)
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for label, required_value in (
+            ("source_session_id", self.source_session_id),
+            ("strategy", self.strategy),
+        ):
+            if not isinstance(required_value, str) or not required_value:
+                raise ValueError(f"compaction request {label} must be non-empty")
+        for label, optional_value in (
+            ("through_turn_id", self.through_turn_id),
+            ("start_after_turn_id", self.start_after_turn_id),
+            ("previous_summary", self.previous_summary),
+        ):
+            if optional_value is not None and (
+                not isinstance(optional_value, str) or not optional_value
+            ):
+                raise ValueError(
+                    f"compaction request {label} must be non-empty when set"
+                )
+        if (self.start_after_turn_id is None) != (self.previous_summary is None):
+            raise ValueError(
+                "incremental compaction requires both start_after_turn_id "
+                "and previous_summary"
+            )
+        frozen_options = freeze_json(self.options)
+        frozen_metadata = freeze_json(self.metadata)
+        if not isinstance(frozen_options, Mapping) or not isinstance(
+            frozen_metadata, Mapping
+        ):
+            raise TypeError("compaction request options and metadata must be objects")
+        object.__setattr__(self, "options", frozen_options)
+        object.__setattr__(self, "metadata", frozen_metadata)
 
 
 @dataclass(frozen=True, slots=True)
 class CompactionResult:
+    """Auditable summary artifact produced from one committed prefix."""
+
+    source: CompactionSourceAnchor
+    covered: TurnRange
+    covered_through_turn_id: str
     summary: str
-    covered_through_turn: int
-    """The highest turn index folded into this summary. The next compaction
-    starts from ``covered_through_turn + 1`` so already-summarized turns are
-    not re-summarized (incremental chaining)."""
-    tokens_before: int
-    """Provider usage plus tiktoken-estimated trailing tokens before compaction."""
+    producer_ref: str
+    resource_ref: str | None = None
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
-    measured_tokens_before: int
-    """Provider-reported tokens from the latest measured assistant turn."""
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, CompactionSourceAnchor):
+            raise TypeError("compaction result source must be a CompactionSourceAnchor")
+        for label, value in (
+            ("covered_through_turn_id", self.covered_through_turn_id),
+            ("summary", self.summary),
+            ("producer_ref", self.producer_ref),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"compaction result {label} must be non-empty")
+        if not isinstance(self.covered, TurnRange):
+            raise TypeError("compaction result covered must be a TurnRange")
+        if self.resource_ref is not None and (
+            not isinstance(self.resource_ref, str) or not self.resource_ref
+        ):
+            raise ValueError(
+                "compaction result resource_ref must be non-empty when set"
+            )
+        frozen_metadata = freeze_json(self.metadata)
+        if not isinstance(frozen_metadata, Mapping):
+            raise TypeError("compaction result metadata must be an object")
+        object.__setattr__(self, "metadata", frozen_metadata)
 
-    estimated_trailing_tokens_before: int
-    """Tiktoken-estimated tokens in messages after the latest provider usage."""
+    @property
+    def source_session_id(self) -> str:
+        """Session whose exact committed state produced this artifact."""
 
-    details: CompactionDetails
+        return self.source.head.session_id
+
+
+@runtime_checkable
+class SessionCompactor(Protocol):
+    """Generate a summary artifact without mutating the source session."""
+
+    async def compact(
+        self,
+        request: CompactionRequest,
+        *,
+        signal: CancelSignal | None = None,
+    ) -> CompactionResult: ...
+
+
+@runtime_checkable
+class CompactionPublisher(Protocol):
+    """Publish a generated artifact for subsequent context projection."""
+
+    async def publish(
+        self,
+        result: CompactionResult,
+        *,
+        signal: CancelSignal | None = None,
+    ) -> CompactionResult: ...
 
 
 @dataclass(frozen=True, slots=True)
-class ContextUsageSnapshot:
-    tokens: int
-    measured_tokens: int
-    estimated_trailing_tokens: int
-    last_usage_index: int | None
+class ProjectionInput:
+    """Provider/context projection input over the committed node chain.
 
-
-@dataclass(frozen=True, slots=True)
-class CompactionPrompts:
-    """Prompt bodies threaded into the compaction engine by callers.
-
-    Atoms resolve these via ``api.get_service("prompt_templates").get_prompt(...)`` and
-    pass an instance into the compaction engine. Empty strings are legal —
-    they represent the graceful-degradation path used when the
-    ``compaction_prompts`` atom is not installed.
+    ``turns`` is the authoritative committed turn prefix. ``nodes`` is the
+    committed message chain from ``TrajectoryStore``, which is what gives a
+    projection message-level replay, compact-boundary traversal, sidechain
+    filtering, prompt-cache identity, and content references. Projection changes
+    provider input only; it does not create external-world snapshots or make a
+    mid-turn message an executable fork boundary.
     """
 
-    summarization_system: str
-    update_summarization: str
+    turns: Sequence[Turn] = field(default_factory=tuple)
+    nodes: Sequence[TrajectoryNode] = field(default_factory=tuple)
+    session_id: str = ""
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID
+    head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID
+    leaf_node_id: str | None = None
+    logical_parent_id: str | None = None
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionReport:
+    """Explainable metadata for the last projection decision."""
+
+    session_id: str = ""
+    branch_id: TrajectoryBranchId = DEFAULT_TRAJECTORY_BRANCH_ID
+    head_id: TrajectoryHeadId = DEFAULT_TRAJECTORY_HEAD_ID
+    leaf_node_id: str | None = None
+    kept: tuple[TurnRange, ...] = ()
+    summarized: tuple[TurnRange, ...] = ()
+    dropped: tuple[TurnRange, ...] = ()
+    content_refs: tuple[str, ...] = ()
+    synthetic_message_count: int = 0
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+
+@runtime_checkable
+class ContextProjection(Protocol):
+    """Project the committed trajectory chain into model context.
+
+    The runtime materializes the node chain before calling ``project``, which
+    is why a session that registers a projection must also have a trajectory
+    store.
+    """
+
+    def project(
+        self,
+        projection_input: ProjectionInput,
+        budget: ContextBudget,
+    ) -> Sequence[AgentMessage]: ...
+
+    def explain(self) -> ProjectionReport: ...
+
+
+@runtime_checkable
+class ContextCompactionService(Protocol):
+    """Schedule and execute compaction at a driver step boundary."""
+
+    @property
+    def pending(self) -> bool: ...
+
+    def request(self) -> None:
+        """Schedule compaction after the active step without interrupting it."""
+        ...
+
+    async def execute(
+        self,
+        turns: Sequence[Turn],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ProjectionReport | None:
+        """Consume a pending request; called by the session driver only."""
+        ...
 
 
 __all__ = [
-    "CompactionDetails",
-    "CompactionPrompts",
+    "CompactionPublisher",
+    "CompactionRequest",
     "CompactionResult",
-    "CompactionSettings",
-    "ContextUsageSnapshot",
-    "PROMPT_BRANCH_SUMMARY",
-    "PROMPT_BRANCH_SUMMARY_PREAMBLE",
-    "PROMPT_SUMMARIZATION",
-    "PROMPT_SUMMARIZATION_SYSTEM",
-    "PROMPT_UPDATE_SUMMARIZATION",
+    "CompactionSourceAnchor",
+    "ContextBudget",
+    "ContextCompactionService",
+    "ContextProjection",
+    "ProjectionInput",
+    "ProjectionReport",
+    "SessionCompactor",
+    "TurnRange",
 ]

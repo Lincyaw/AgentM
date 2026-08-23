@@ -1,151 +1,354 @@
-"""Singleton-role identifiers + cross-boundary config keys.
+"""Cross-atom service keys and role descriptors used by the minimal SDK.
 
-These constants name the runtime "slots" an atom can fulfil. Each role
-is filled by exactly one atom per session; the discovery layer indexes
-atoms by ``MANIFEST.provides_role`` so the runtime asks for a role
-("who is today's command parser?") rather than a specific atom name.
-
-Constants live in ``agentm.core.abi`` — *not* in any individual atom —
-because they cross the SDK/scenario boundary. A scenario that ships its
-own command parser needs the same role string the runtime checks for.
+String constants name every well-known service. Cross-layer boundaries
+additionally get a ``ServiceRole`` descriptor — the single source for the
+boundary's key, Protocol, and canonical scope — consumed through
+``ServiceRegistry.bind`` / ``get_role`` / ``require_role``. Atom-local or
+peer-to-peer services may keep using plain ``register``/``get`` with the
+string key.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-# --- Singleton roles -------------------------------------------------------
-
-COMMAND_PARSER: Final = "command_parser"
-"""Atom that parses slash commands and dispatches registered handlers.
-
-Default fulfiller: ``agentm.extensions.builtin.slash_commands``.
-Resolved by the session factory to back the ``slash_commands`` service
-and the dispatcher's ``fallback_owner``."""
-
-COMPACTION_PROMPTS: Final = "compaction_prompts"
-"""Atom that registers compaction prompt bodies + entry materializers.
-
-Floor atom: present in every session even when not listed in a scenario
-manifest so the ``llm_compaction`` atom always finds the default English
-prompts.
-Default fulfiller: ``agentm.extensions.builtin.compaction_prompts``."""
-
-PROMPT_REGISTRY: Final = "prompt_registry"
-"""Atom that publishes the in-memory prompt registry (under service key
-``"prompt_templates"``) and the on-disk slash-template loader.
-
-Floor atom: present in every session because ``compaction_prompts`` and
-``llm_compaction`` resolve their bodies through it. Default fulfiller:
-``agentm.extensions.builtin.prompt_templates``."""
-
-SYSTEM_PROMPT_PROVIDER: Final = "system_prompt_provider"
-"""Atom that prepends a system prompt at ``before_agent_start``.
-
-Required whenever ``SUB_AGENT_RUNTIME`` is loaded — sub-agents inject
-inherited prompt text and need this hook in the chain. Default
-fulfiller: ``agentm.extensions.builtin.system_prompt``."""
-
-SUB_AGENT_RUNTIME: Final = "sub_agent_runtime"
-"""Atom that exposes ``dispatch_agent`` and owns the nested-session lifecycle.
-Default fulfiller: ``agentm.extensions.builtin.sub_agent``."""
-
-PROVIDER_INHERITOR: Final = "provider_inheritor"
-"""Atom that re-publishes a parent session's :class:`ProviderConfig` to
-a child session. The session factory installs whichever atom claims this
-role when a child config arrives with ``provider=None``. Default
-fulfiller: ``agentm.extensions.builtin.inherit_provider``."""
-
-
-# --- Cross-boundary config keys -------------------------------------------
-
-PARENT_PROVIDER_CONFIG_KEY: Final = "provider"
-"""Key under which :func:`default_child_provider_factory` hands the
-parent :class:`ProviderConfig` to the ``PROVIDER_INHERITOR`` atom's
-install config. Lives here (rather than on the atom itself) so the
-session factory can build the install spec without importing a specific
-builtin module."""
-
-
-# --- Service registry keys -------------------------------------------------
-
-SLASH_COMMAND_DISPATCHER_SERVICE: Final = "slash_commands"
-"""``service_registry`` key under which the runtime publishes the
-:class:`HarnessCommandDispatcher`. Atoms that need to invoke registered
-slash commands programmatically look it up via
-``api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)``."""
-
-SESSION_STORE_SERVICE: Final = "session_store"
-"""``service_registry`` key under which the session factory publishes
-the :class:`~agentm.core.abi.session_store.SessionStore`. Atoms that
-need to resume existing sessions (e.g. workflow ``agent(session_id=)``)
-look it up via ``api.get_service(SESSION_STORE_SERVICE)``."""
+from agentm.core.abi.catalog import (
+    ActiveSetFingerprint,
+    AtomCatalog,
+    AtomCatalogQuery,
+    VersionedResourceStore,
+)
+from agentm.core.abi.compaction import (
+    CompactionPublisher,
+    ContextCompactionService,
+    SessionCompactor,
+)
+from agentm.core.abi.lifecycle import (
+    EffectScope,
+    EnvironmentRestoreFailureHandler,
+    EnvironmentRestoreStatus,
+)
+from agentm.core.abi.operations import BashOperations, EnvironmentOperations
+from agentm.core.abi.permission import PermissionPolicy
+from agentm.core.abi.provider import ProviderResolver, ProviderSessionIdentity
+from agentm.core.abi.resource import (
+    ResourceReader,
+    ResourceStore,
+    ResourceTxn,
+    ResourceWriter,
+)
+from agentm.core.abi.services import ServiceRegistry, ServiceRole, ServiceScope
+from agentm.core.abi.store import TrajectoryStore
+from agentm.core.abi.telemetry import SessionTelemetry
+from agentm.core.abi.tool_executor import ToolExecutor
+from agentm.core.abi.tool_orchestration import ToolOrchestrator
 
 LOOP_BUDGET_SERVICE: Final = "loop_budget"
-"""``service_registry`` key under which the ``loop_budget`` atom publishes a
-:class:`~agentm.core.abi.loop.LoopConfig`. The session factory reads it just
-before constructing the :class:`AgentLoop` to set the scenario's turn / tool
-budget. Absent ⇒ the substrate falls back to ``LoopConfig()`` (no cap). An
-explicit caller override (CLI ``--max-turns`` / SDK ``loop_config=``) takes
-precedence over whatever the atom registered."""
-
-MODEL_RESOLVER_SERVICE: Final = "model_resolver"
-"""``service_registry`` key under which the session factory publishes a
-callable ``(model_name: str) -> tuple[str, dict[str, Any]] | None`` that
-resolves a ``config.toml`` profile name to a provider tuple suitable for
-``AgentSessionConfig.provider``.  Atoms that need model resolution (e.g.
-``workflow`` for its ``model=`` parameter) use this service instead of
-importing presenter-layer modules directly."""
-
-GATEWAY_SCHEDULER_SERVICE: Final = "gateway_scheduler"
-"""Gateway-injected, session-bound durable schedule service.
-
-Atoms use this optional service for persistent host-level wakeups while keeping
-gateway implementation details out of the atom boundary. The gateway binds the
-service to the current ``session_key`` and route metadata before atom install,
-so consumers cannot target arbitrary sessions.
-"""
-
-PROMPT_TEMPLATES_SERVICE: Final = "prompt_templates"
-"""In-memory :class:`PromptRegistry` published by ``prompt_templates`` atom."""
+"""Service key for a session loop budget config."""
 
 RETRY_POLICY_SERVICE: Final = "retry_policy"
-"""Retry policy callable published by ``retry_policy`` atom."""
+"""Service key for the provider retry policy callable."""
 
-ARTIFACT_STORE_SERVICE: Final = "artifact_store"
-"""Artifact store published by ``artifact_store`` atom."""
+PROVIDER_RESOLVER_SERVICE: Final = "provider_resolver"
+"""Service key for selecting the active provider registration."""
 
-COST_QUERY_SERVICE: Final = "cost_query"
-"""Cost query service published by ``cost_budget`` atom."""
+PROVIDER_SESSION_IDENTITY_SERVICE: Final = "provider_session_identity"
+"""Service key for the provider/model identity bound to a session history."""
 
-WIRE_CHILD_FORWARDER_SERVICE: Final = "child_wire_forwarder"
-"""Callable published by ``wire_driver`` for forwarding child session
-trajectories onto the parent wire. No-op when running outside the gateway."""
 
-WIRE_OUTBOUND_SERVICE: Final = "wire_outbound"
-"""Outbound sink callable published by the gateway session manager."""
+INTERRUPTION_MESSAGE_POLICY_SERVICE: Final = "interruption_message_policy"
+"""Service key for provider-facing interrupted-turn message construction."""
 
-APPROVAL_MANAGER_SERVICE: Final = "approval_manager"
-"""``ApprovalManager`` published by the gateway session manager."""
+RESOURCE_WRITER_SERVICE: Final = "resource_writer"
+"""Service key for the host-provided resource mutation port."""
+
+RESOURCE_READER_SERVICE: Final = "resource_reader"
+"""Service key for backend-neutral ResourceRef reads."""
+
+RESOURCE_STORE_SERVICE: Final = "resource_store"
+"""Service key for durable logical ResourceRef reads and mutations."""
+
+RESOURCE_TXN_SERVICE: Final = "resource_txn"
+"""Service key for the active turn-scoped resource transaction."""
+
+ENVIRONMENT_OPERATIONS_SERVICE: Final = "operations:environment"
+"""Service key for the active environment operations backend."""
+
+BASH_OPERATIONS_SERVICE: Final = "operations:bash"
+"""Service key for shell execution operations."""
+
+HOST_BASH_OPERATIONS_SERVICE: Final = "operations:bash:host"
+"""Service key for host-local shell execution, independent of session environment."""
+
+TOOL_EXECUTOR_SERVICE: Final = "tool_executor"
+"""Service key for the host-provided tool execution boundary."""
+
+TOOL_ORCHESTRATOR_SERVICE: Final = "tool_orchestrator"
+"""Service key for the host-provided batch tool orchestration boundary."""
+
+PERMISSION_POLICY_SERVICE: Final = "permission_policy"
+"""Service key for the host-provided permission decision boundary."""
+
+TRAJECTORY_STORE_SERVICE: Final = "trajectory_store"
+"""Service key for the selected trajectory persistence/query backend."""
+
+TRAJECTORY_QUERY_STORE_SERVICE: Final = "trajectory_query_store"
+"""Service key for session/turn trajectory query."""
+
+CATALOG_QUERY_SERVICE: Final = "catalog_query"
+"""Service key for indexed catalog active-set query."""
+
+RESOLVED_SESSION_SPEC_SERVICE: Final = "resolved_session_spec"
+"""Service key for the resolved composition/config used by this session."""
+
+CONTEXT_PROJECTION_SERVICE: Final = "context_projection"
+"""Service key for host/session context projection policy."""
+
+CONTEXT_COMPACTION_SERVICE: Final = "context_compaction"
+"""Service key for step-boundary context compaction requests."""
+
+SESSION_COMPACTOR_SERVICE: Final = "session_compactor"
+"""Service key for store-driven compaction artifact generation."""
+
+COMPACTION_PUBLISHER_SERVICE: Final = "compaction_publisher"
+"""Service key for publishing compaction artifacts to context projection."""
+
+EFFECT_SCOPE_SERVICE: Final = "effect_scope"
+"""Service key for the host-provided world-effect lifecycle port."""
+
+ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE: Final = (
+    "environment_restore_failure_handler"
+)
+"""Service key for host-enforced degraded read-only restore handling."""
+
+ENVIRONMENT_RESTORE_STATUS_SERVICE: Final = "environment_restore_status"
+"""Service key for the last resume-time environment restore status."""
+
+VERSIONED_RESOURCE_STORE_SERVICE: Final = "versioned_resource_store"
+"""Service key for versioned SDK resources such as atom identity payloads."""
+
+ATOM_CATALOG_SERVICE: Final = "atom_catalog"
+"""Service key for resolved atom composition identity."""
+
+ACTIVE_SET_FINGERPRINT_SERVICE: Final = "active_set_fingerprint"
+"""Service key for the active atom-set fingerprint for this session."""
+
+SCENARIO_LOADER_SERVICE: Final = "scenario_loader"
+"""Service key for a host-provided scenario resolver."""
+
+EXPERIMENT_SERVICE: Final = "experiment"
+"""Service key for the frozen experiment config mapping."""
+
+TOOL_ALLOWLIST_SERVICE: Final = "tool_allowlist"
+"""Service key for the session tool allowlist."""
+
+SESSION_TELEMETRY_SERVICE: Final = "session_telemetry"
+"""Service key for the session telemetry sink."""
+
+
+# --- Cross-layer boundary roles (key + Protocol + canonical scope) ----------
+
+RESOURCE_WRITER: Final[ServiceRole[ResourceWriter]] = ServiceRole(
+    RESOURCE_WRITER_SERVICE, ResourceWriter, "tree"
+)
+RESOURCE_READER: Final[ServiceRole[ResourceReader]] = ServiceRole(
+    RESOURCE_READER_SERVICE, ResourceReader, "tree"
+)
+RESOURCE_STORE: Final[ServiceRole[ResourceStore]] = ServiceRole(
+    RESOURCE_STORE_SERVICE, ResourceStore, "tree"
+)
+RESOURCE_TXN: Final[ServiceRole[ResourceTxn]] = ServiceRole(
+    RESOURCE_TXN_SERVICE, ResourceTxn, "session"
+)
+TOOL_EXECUTOR: Final[ServiceRole[ToolExecutor]] = ServiceRole(
+    TOOL_EXECUTOR_SERVICE, ToolExecutor, "tree"
+)
+TOOL_ORCHESTRATOR: Final[ServiceRole[ToolOrchestrator]] = ServiceRole(
+    TOOL_ORCHESTRATOR_SERVICE, ToolOrchestrator, "tree"
+)
+PERMISSION_POLICY_ROLE: Final[ServiceRole[PermissionPolicy]] = ServiceRole(
+    PERMISSION_POLICY_SERVICE, PermissionPolicy, "tree"
+)
+EFFECT_SCOPE_ROLE: Final[ServiceRole[EffectScope]] = ServiceRole(
+    EFFECT_SCOPE_SERVICE, EffectScope, "tree"
+)
+VERSIONED_RESOURCE_STORE_ROLE: Final[ServiceRole[VersionedResourceStore]] = ServiceRole(
+    VERSIONED_RESOURCE_STORE_SERVICE, VersionedResourceStore, "tree"
+)
+ATOM_CATALOG_ROLE: Final[ServiceRole[AtomCatalog]] = ServiceRole(
+    ATOM_CATALOG_SERVICE, AtomCatalog, "tree"
+)
+CATALOG_QUERY: Final[ServiceRole[AtomCatalogQuery]] = ServiceRole(
+    CATALOG_QUERY_SERVICE, AtomCatalogQuery, "tree"
+)
+ENVIRONMENT_OPERATIONS: Final[ServiceRole[EnvironmentOperations]] = ServiceRole(
+    ENVIRONMENT_OPERATIONS_SERVICE, EnvironmentOperations, "session"
+)
+BASH_OPERATIONS_ROLE: Final[ServiceRole[BashOperations]] = ServiceRole(
+    BASH_OPERATIONS_SERVICE, BashOperations, "session"
+)
+HOST_BASH_OPERATIONS: Final[ServiceRole[BashOperations]] = ServiceRole(
+    HOST_BASH_OPERATIONS_SERVICE, BashOperations, "tree"
+)
+TRAJECTORY_STORE_ROLE: Final[ServiceRole[TrajectoryStore]] = ServiceRole(
+    TRAJECTORY_STORE_SERVICE, TrajectoryStore, "tree"
+)
+TRAJECTORY_QUERY_STORE: Final[ServiceRole[object]] = ServiceRole(
+    TRAJECTORY_QUERY_STORE_SERVICE, None, "tree"
+)
+SESSION_COMPACTOR: Final[ServiceRole[SessionCompactor]] = ServiceRole(
+    SESSION_COMPACTOR_SERVICE, SessionCompactor, "tree"
+)
+COMPACTION_PUBLISHER_ROLE: Final[ServiceRole[CompactionPublisher]] = ServiceRole(
+    COMPACTION_PUBLISHER_SERVICE, CompactionPublisher, "tree"
+)
+CONTEXT_COMPACTION: Final[ServiceRole[ContextCompactionService]] = ServiceRole(
+    CONTEXT_COMPACTION_SERVICE, ContextCompactionService, "session"
+)
+ENVIRONMENT_RESTORE_FAILURE_HANDLER: Final[
+    ServiceRole[EnvironmentRestoreFailureHandler]
+] = ServiceRole(
+    ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE,
+    EnvironmentRestoreFailureHandler,
+    "tree",
+)
+ENVIRONMENT_RESTORE_STATUS_ROLE: Final[ServiceRole[EnvironmentRestoreStatus]] = (
+    ServiceRole(
+        ENVIRONMENT_RESTORE_STATUS_SERVICE,
+        EnvironmentRestoreStatus,
+        "session",
+    )
+)
+PROVIDER_RESOLVER_ROLE: Final[ServiceRole[ProviderResolver]] = ServiceRole(
+    PROVIDER_RESOLVER_SERVICE, ProviderResolver, "tree"
+)
+PROVIDER_SESSION_IDENTITY: Final[ServiceRole[ProviderSessionIdentity]] = ServiceRole(
+    PROVIDER_SESSION_IDENTITY_SERVICE, ProviderSessionIdentity, "session"
+)
+ACTIVE_SET_FINGERPRINT_ROLE: Final[ServiceRole[ActiveSetFingerprint]] = ServiceRole(
+    ACTIVE_SET_FINGERPRINT_SERVICE, ActiveSetFingerprint, "session"
+)
+SCENARIO_LOADER_ROLE: Final[ServiceRole[object]] = ServiceRole(
+    SCENARIO_LOADER_SERVICE, None, "tree"
+)
+SESSION_TELEMETRY_ROLE: Final[ServiceRole[SessionTelemetry]] = ServiceRole(
+    SESSION_TELEMETRY_SERVICE, SessionTelemetry, "session"
+)
+
+
+def bind_resource_store(
+    services: ServiceRegistry,
+    store: ResourceStore,
+    *,
+    replace: bool = False,
+) -> None:
+    """Bind a ResourceStore and keep the read side consistent.
+
+    A durable store is also a reader: when no reader is bound (or the bound
+    reader is the store being replaced), the store becomes the reader too.
+    """
+
+    previous = services.get_role(RESOURCE_STORE)
+    services.bind(RESOURCE_STORE, store, replace=replace)
+    reader = services.get(RESOURCE_READER_SERVICE)
+    if reader is None:
+        services.bind(RESOURCE_READER, store)
+    elif replace and reader is previous:
+        services.bind(RESOURCE_READER, store, replace=True)
+
+
+def bind_atom_catalog(
+    services: ServiceRegistry,
+    catalog: AtomCatalog,
+    *,
+    replace: bool = False,
+) -> None:
+    """Bind an AtomCatalog and expose its query surface when present."""
+
+    services.bind(ATOM_CATALOG_ROLE, catalog, replace=replace)
+    if isinstance(catalog, AtomCatalogQuery):  # code-health: ignore[AM025]
+        services.bind(CATALOG_QUERY, catalog, replace=replace)
+
+
+def bind_environment_operations(
+    services: ServiceRegistry,
+    operations: EnvironmentOperations,
+    *,
+    scope: ServiceScope = "tree",
+    replace: bool = False,
+) -> None:
+    """Bind an EnvironmentOperations and expose its bash sub-port.
+
+    Tree-scoped by default so child sessions inherit a host-injected
+    environment; ``operations.bash`` is bound under the bash role at the same
+    scope.
+    """
+
+    services.bind(ENVIRONMENT_OPERATIONS, operations, replace=replace, scope=scope)
+    services.bind(BASH_OPERATIONS_ROLE, operations.bash, replace=replace, scope=scope)
+
 
 __all__ = [
-    "APPROVAL_MANAGER_SERVICE",
-    "ARTIFACT_STORE_SERVICE",
-    "COMMAND_PARSER",
-    "COMPACTION_PROMPTS",
-    "COST_QUERY_SERVICE",
-    "GATEWAY_SCHEDULER_SERVICE",
+    "ACTIVE_SET_FINGERPRINT_ROLE",
+    "ACTIVE_SET_FINGERPRINT_SERVICE",
+    "ATOM_CATALOG_ROLE",
+    "ATOM_CATALOG_SERVICE",
+    "BASH_OPERATIONS_ROLE",
+    "BASH_OPERATIONS_SERVICE",
+    "CATALOG_QUERY",
+    "CATALOG_QUERY_SERVICE",
+    "COMPACTION_PUBLISHER_ROLE",
+    "COMPACTION_PUBLISHER_SERVICE",
+    "CONTEXT_COMPACTION",
+    "CONTEXT_COMPACTION_SERVICE",
+    "CONTEXT_PROJECTION_SERVICE",
+    "EFFECT_SCOPE_ROLE",
+    "EFFECT_SCOPE_SERVICE",
+    "ENVIRONMENT_OPERATIONS",
+    "ENVIRONMENT_OPERATIONS_SERVICE",
+    "ENVIRONMENT_RESTORE_FAILURE_HANDLER",
+    "ENVIRONMENT_RESTORE_FAILURE_HANDLER_SERVICE",
+    "ENVIRONMENT_RESTORE_STATUS_ROLE",
+    "ENVIRONMENT_RESTORE_STATUS_SERVICE",
+    "EXPERIMENT_SERVICE",
+    "HOST_BASH_OPERATIONS",
+    "HOST_BASH_OPERATIONS_SERVICE",
+    "INTERRUPTION_MESSAGE_POLICY_SERVICE",
     "LOOP_BUDGET_SERVICE",
-    "MODEL_RESOLVER_SERVICE",
-    "PARENT_PROVIDER_CONFIG_KEY",
-    "PROMPT_REGISTRY",
-    "PROMPT_TEMPLATES_SERVICE",
-    "PROVIDER_INHERITOR",
+    "PERMISSION_POLICY_ROLE",
+    "PERMISSION_POLICY_SERVICE",
+    "PROVIDER_RESOLVER_ROLE",
+    "PROVIDER_RESOLVER_SERVICE",
+    "PROVIDER_SESSION_IDENTITY",
+    "PROVIDER_SESSION_IDENTITY_SERVICE",
+    "RESOLVED_SESSION_SPEC_SERVICE",
+    "RESOURCE_READER",
+    "RESOURCE_READER_SERVICE",
+    "RESOURCE_STORE",
+    "RESOURCE_STORE_SERVICE",
+    "RESOURCE_TXN",
+    "RESOURCE_TXN_SERVICE",
+    "RESOURCE_WRITER",
+    "RESOURCE_WRITER_SERVICE",
     "RETRY_POLICY_SERVICE",
-    "SESSION_STORE_SERVICE",
-    "SLASH_COMMAND_DISPATCHER_SERVICE",
-    "SUB_AGENT_RUNTIME",
-    "SYSTEM_PROMPT_PROVIDER",
-    "WIRE_CHILD_FORWARDER_SERVICE",
-    "WIRE_OUTBOUND_SERVICE",
+    "SCENARIO_LOADER_ROLE",
+    "SCENARIO_LOADER_SERVICE",
+    "SESSION_COMPACTOR",
+    "SESSION_COMPACTOR_SERVICE",
+    "SESSION_TELEMETRY_ROLE",
+    "SESSION_TELEMETRY_SERVICE",
+    "TOOL_ALLOWLIST_SERVICE",
+    "TOOL_EXECUTOR",
+    "TOOL_EXECUTOR_SERVICE",
+    "TOOL_ORCHESTRATOR",
+    "TOOL_ORCHESTRATOR_SERVICE",
+    "TRAJECTORY_QUERY_STORE",
+    "TRAJECTORY_QUERY_STORE_SERVICE",
+    "TRAJECTORY_STORE_ROLE",
+    "TRAJECTORY_STORE_SERVICE",
+    "VERSIONED_RESOURCE_STORE_ROLE",
+    "VERSIONED_RESOURCE_STORE_SERVICE",
+    "bind_atom_catalog",
+    "bind_environment_operations",
+    "bind_resource_store",
 ]

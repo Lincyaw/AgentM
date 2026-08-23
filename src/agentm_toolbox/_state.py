@@ -1,22 +1,12 @@
-"""Read-state tracking for read-before-edit coordination.
-
-Records what the agent has read so that write/edit can enforce safety
-guards (read-before-write, partial-read rejection, content-hash
-staleness detection).
-
-State is keyed by normalized path.  In local mode the instance lives
-in-process for the session lifetime.  In sandbox mode the CLI runner
-serializes/deserializes state to a JSON file between exec invocations.
-
-Zero external dependencies.
-"""
+"""Session-local read state for read-before-mutation coordination."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
+
+LineRange = tuple[int, int]
 
 
 @dataclass(slots=True)
@@ -25,6 +15,16 @@ class FileReadState:
     is_partial: bool
     mtime_ns: int = 0
     content_hash: str = ""
+    ranges: tuple[LineRange, ...] = ()
+
+    def covers(self, start_line: int, end_line: int) -> bool:
+        if end_line < start_line:
+            return True
+        if start_line < 1:
+            return False
+        if not self.ranges:
+            return not self.is_partial and end_line <= self.total_lines
+        return _ranges_cover(self.ranges, start_line, end_line)
 
 
 def content_hash_for(data: bytes) -> str:
@@ -32,7 +32,7 @@ def content_hash_for(data: bytes) -> str:
 
 
 class ReadStateStore:
-    """In-memory read-state store, optionally backed by a JSON file."""
+    """In-memory read-state store owned by one file-tool session."""
 
     def __init__(self) -> None:
         self._states: dict[str, FileReadState] = {}
@@ -45,53 +45,100 @@ class ReadStateStore:
         is_partial: bool,
         mtime_ns: int = 0,
         content_hash: str = "",
+        start_line: int | None = None,
+        end_line: int | None = None,
+        ranges: tuple[LineRange, ...] | None = None,
     ) -> None:
         normalized = os.path.normpath(path)
+        read_ranges = _read_ranges(
+            total_lines,
+            is_partial=is_partial,
+            start_line=start_line,
+            end_line=end_line,
+            ranges=ranges,
+        )
+        existing = self._states.get(normalized)
+        if (
+            existing is not None
+            and content_hash
+            and existing.content_hash == content_hash
+            and existing.total_lines == total_lines
+        ):
+            read_ranges = _merge_ranges(existing.ranges + read_ranges)
+        is_partial = not _ranges_cover_full_file(total_lines, read_ranges)
         self._states[normalized] = FileReadState(
             total_lines=total_lines,
             is_partial=is_partial,
             mtime_ns=mtime_ns,
             content_hash=content_hash,
+            ranges=read_ranges,
         )
 
     def get(self, path: str) -> FileReadState | None:
         return self._states.get(os.path.normpath(path))
 
-    def file_modified_since_read(self, path: str) -> bool:
-        normalized = os.path.normpath(path)
-        state = self._states.get(normalized)
-        if state is None or state.mtime_ns == 0:
+
+def _read_ranges(
+    total_lines: int,
+    *,
+    is_partial: bool,
+    start_line: int | None,
+    end_line: int | None,
+    ranges: tuple[LineRange, ...] | None,
+) -> tuple[LineRange, ...]:
+    if ranges is not None:
+        return _normalize_ranges(total_lines, ranges)
+    if start_line is not None and end_line is not None:
+        return _normalize_ranges(total_lines, ((start_line, end_line),))
+    if is_partial or total_lines <= 0:
+        return ()
+    return ((1, total_lines),)
+
+
+def _normalize_ranges(
+    total_lines: int, ranges: tuple[LineRange, ...]
+) -> tuple[LineRange, ...]:
+    if total_lines <= 0:
+        return ()
+    clipped: list[LineRange] = []
+    for start, end in ranges:
+        clipped_start = max(1, int(start))
+        clipped_end = min(total_lines, int(end))
+        if clipped_start <= clipped_end:
+            clipped.append((clipped_start, clipped_end))
+    return _merge_ranges(tuple(clipped))
+
+
+def _merge_ranges(ranges: tuple[LineRange, ...]) -> tuple[LineRange, ...]:
+    if not ranges:
+        return ()
+    ordered = sorted(ranges)
+    merged: list[LineRange] = [ordered[0]]
+    for start, end in ordered[1:]:
+        previous_start, previous_end = merged[-1]
+        if start <= previous_end + 1:
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _ranges_cover(
+    ranges: tuple[LineRange, ...], start_line: int, end_line: int
+) -> bool:
+    cursor = start_line
+    for start, end in ranges:
+        if end < cursor:
+            continue
+        if start > cursor:
             return False
-        try:
-            current_mtime_ns = os.stat(normalized).st_mtime_ns
-        except OSError:
-            return False
-        return current_mtime_ns > state.mtime_ns
+        if end >= end_line:
+            return True
+        cursor = end + 1
+    return False
 
-    # -- serialization (for sandbox CLI mode) --------------------------------
 
-    def dump(self) -> str:
-        return json.dumps(
-            {k: asdict(v) for k, v in self._states.items()},
-            separators=(",", ":"),
-        )
-
-    @classmethod
-    def load(cls, data: str) -> "ReadStateStore":
-        store = cls()
-        for path, fields in json.loads(data).items():
-            store._states[path] = FileReadState(**fields)
-        return store
-
-    def save_to(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
-            f.write(self.dump())
-
-    @classmethod
-    def load_from(cls, path: str) -> "ReadStateStore":
-        try:
-            with open(path) as f:
-                return cls.load(f.read())
-        except (FileNotFoundError, json.JSONDecodeError):
-            return cls()
+def _ranges_cover_full_file(total_lines: int, ranges: tuple[LineRange, ...]) -> bool:
+    if total_lines <= 0:
+        return True
+    return _ranges_cover(ranges, 1, total_lines)

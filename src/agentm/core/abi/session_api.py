@@ -1,0 +1,750 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
+"""Session-facing ABI types.
+
+The session config is shared by embedders and atoms that spawn children.
+Runtime-only objects are allowed here when they are explicitly SDK host
+injection points, but policy stays outside the factory: a session consumes
+extension specs, and optional scenario names are resolved by a caller-supplied
+loader.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal, Protocol, runtime_checkable
+
+from agentm.core.abi.bus import EventBus, Handler
+from agentm.core.abi.cancel import CancelReason, CancelSignal
+from agentm.core.abi.codec import TriggerCodec
+from agentm.core.abi.context import ContextPolicy
+from agentm.core.abi.effects import EffectBody, EffectHandle
+from agentm.core.abi.messages import AgentMessage, JsonValue, freeze_json
+from agentm.core.abi.provider import (
+    ProviderConfig,
+    ProviderSessionIdentity,
+)
+from agentm.core.abi.services import ServiceRegistry, ServiceScope
+from agentm.core.abi.store import (
+    TrajectoryStore,
+)
+from agentm.core.abi.stream import Model, StreamFn
+from agentm.core.abi.tool import Tool
+from agentm.core.abi.trajectory import Turn, TurnRef
+from agentm.core.abi.trigger import Trigger, TriggerPriority, TriggerRenderer
+
+Unsubscribe = Callable[[], None]
+ExtensionSourceKind = Literal["module", "file"]
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionSource:
+    """Portable identity for executable extension code."""
+
+    kind: ExtensionSourceKind
+    location: str
+    digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"module", "file"}:
+            raise ValueError(f"invalid extension source kind: {self.kind!r}")
+        if not isinstance(self.location, str) or not self.location:
+            raise TypeError("extension source location must be non-empty")
+        if self.kind == "module":
+            if self.digest is not None:
+                raise ValueError("module extension source cannot carry a digest")
+            return
+        if not Path(self.location).is_absolute():
+            raise ValueError("file extension source location must be absolute")
+        if (
+            not isinstance(self.digest, str)
+            or _SHA256_RE.fullmatch(self.digest) is None
+        ):
+            raise ValueError(
+                "file extension source digest must be sha256:<64 lowercase hex>"
+            )
+
+    @property
+    def module_name(self) -> str:
+        """Return the stable Python module identity used by the loader."""
+
+        if self.kind == "module":
+            return self.location
+        assert self.digest is not None
+        identity = hashlib.sha256(
+            f"{self.location}\0{self.digest}".encode()
+        ).hexdigest()
+        return f"_agentm_source_{identity}"
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionSpec:
+    """Canonical extension source plus immutable JSON configuration."""
+
+    source: ExtensionSource
+    config: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, ExtensionSource):
+            raise TypeError("extension spec source must be an ExtensionSource")
+        if not isinstance(self.config, Mapping):
+            raise TypeError("extension spec config must be a mapping")
+        if not all(isinstance(key, str) for key in self.config):
+            raise TypeError("extension spec config keys must be strings")
+        frozen = freeze_json(self.config)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("extension spec config must be an object")
+        object.__setattr__(self, "config", frozen)
+
+    @classmethod
+    def from_module(
+        cls,
+        module: str,
+        config: Mapping[str, JsonValue] | None = None,
+    ) -> ExtensionSpec:
+        return cls(
+            source=ExtensionSource(kind="module", location=module),
+            config={} if config is None else config,
+        )
+
+    @classmethod
+    def from_file(
+        cls,
+        path: str,
+        *,
+        digest: str,
+        config: Mapping[str, JsonValue] | None = None,
+    ) -> ExtensionSpec:
+        return cls(
+            source=ExtensionSource(
+                kind="file",
+                location=path,
+                digest=digest,
+            ),
+            config={} if config is None else config,
+        )
+
+    @property
+    def module_path(self) -> str:
+        return self.source.module_name
+
+    def with_config(self, config: Mapping[str, JsonValue]) -> ExtensionSpec:
+        return ExtensionSpec(source=self.source, config=config)
+
+
+type ExtensionShorthand = tuple[str, Mapping[str, JsonValue]]
+type ExtensionInput = ExtensionSpec | ExtensionShorthand
+
+
+def normalize_extension_spec(value: ExtensionInput) -> ExtensionSpec:
+    """Normalize the public module tuple shorthand into a canonical spec."""
+
+    if isinstance(value, ExtensionSpec):
+        return ExtensionSpec(source=value.source, config=value.config)
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or not isinstance(value[0], str)
+        or not isinstance(value[1], Mapping)
+    ):
+        raise TypeError("extension must be ExtensionSpec or (module, config) tuple")
+    return ExtensionSpec.from_module(value[0], value[1])
+
+
+ChildCancellationMode = Literal["inherit", "independent"]
+ConfigSource = Literal[
+    "explicit",
+    "atom_override",
+    "env",
+    "project_config",
+    "user_config",
+    "scenario_default",
+    "provider_default",
+]
+SESSION_CONFIG_PRECEDENCE: tuple[ConfigSource, ...] = (
+    "explicit",
+    "atom_override",
+    "env",
+    "project_config",
+    "user_config",
+    "scenario_default",
+    "provider_default",
+)
+
+
+def _lower_ceiling(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return min(left, right)
+
+
+@dataclass(frozen=True, slots=True)
+class LoopConfig:
+    """Driver loop budget — max turns and tool calls per session."""
+
+    max_turns: int | None = None
+    max_tool_calls: int | None = None
+
+    def tightened_with(self, other: LoopConfig) -> LoopConfig:
+        """Compose two budgets: each field takes the lower ceiling.
+
+        A budget is a ceiling, and ``None`` means unbounded, so composing is
+        how a host's cap and an atom's cap coexist -- neither can raise the
+        other's.
+        """
+
+        return LoopConfig(
+            max_turns=_lower_ceiling(self.max_turns, other.max_turns),
+            max_tool_calls=_lower_ceiling(self.max_tool_calls, other.max_tool_calls),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioSpec:
+    """Resolved scenario configuration.
+
+    ``extensions`` is the only load-bearing output. ``base_dir`` is optional
+    metadata for atoms that resolve scenario-local files, such as
+    ``system_prompt.prompt_file``.
+    """
+
+    extensions: Sequence[ExtensionInput]
+    base_dir: str | None = None
+
+
+@runtime_checkable
+class ScenarioLoader(Protocol):
+    """Resolve a scenario name to extension specs.
+
+    Hosts can back this with files, a database, an in-memory registry, or any
+    other configuration source. The runtime factory does not know those
+    storage locations.
+    """
+
+    def __call__(self, scenario: str) -> ScenarioSpec | Sequence[ExtensionInput]: ...
+
+
+@dataclass(slots=True)
+class AgentSessionConfig:
+    """Configuration for creating or spawning a session.
+
+    Primary path: pass ``extensions`` directly. ``scenario`` is only a named
+    indirection resolved through ``scenario_loader``. The core runtime does not
+    own a built-in scenario registry; packaged helpers live outside core.
+
+    Capability boundaries (resource ports, tool execution, permission, effect
+    scope, catalogs, provider resolver) are not fields here. A host injects
+    them by binding roles into a ``ServiceRegistry`` and passing it as
+    ``host_services`` to ``create``/``resume`` (see ``agentm.core.abi.roles``
+    for the role descriptors and ``bind_*`` helpers). Child sessions inherit
+    their parent's tree-scoped boundaries.
+    """
+
+    cwd: str = ""
+    scenario: str | None = None
+    scenario_loader: ScenarioLoader | None = None
+    spec_resolver: SessionSpecResolver | None = None
+    extensions: list[ExtensionInput] | None = None
+    extra_extensions: list[ExtensionInput] = field(default_factory=list)
+    extra_tools: list[Tool] = field(default_factory=list)
+    atom_config_overrides: dict[str, dict[str, JsonValue]] = field(default_factory=dict)
+    provider: ExtensionInput | None = None
+    stream_fn: StreamFn | None = None
+    model: Model | None = None
+    system: str | None = None
+    bus: EventBus | None = None
+    trajectory_store: TrajectoryStore | None = None
+    initial_turns: list[Turn] = field(default_factory=list)
+    tool_allowlist: list[str] | None = None
+    purpose: str = "subagent"
+    loop_config: LoopConfig | None = None
+    experiment: dict[str, JsonValue] | None = None
+    session_id: str | None = None
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    #: The session this run continues, and the turn it continues from, when it
+    #: was built from another session's prefix. Separate from
+    #: ``parent_session_id`` on purpose: a fork is the same run under a new id,
+    #: while a parent makes it somebody's subagent -- and every atom that asks
+    #: "am I a subagent" reads the parent. Recorded so the lineage survives in
+    #: the store rather than only in whatever launched the run.
+    fork_source_session_id: str | None = None
+    fork_point: TurnRef | None = None
+    cancel_signal: CancelSignal | None = None
+    parent_cancellation: ChildCancellationMode = "inherit"
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigValueProvenance:
+    """Typed provenance for one resolved config value."""
+
+    path: str
+    source: ConfigSource
+    source_ref: str | None = None
+    value_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSessionSpec:
+    """Resolved session composition/config plus provenance."""
+
+    scenario: str | None
+    extensions: tuple[ExtensionSpec, ...]
+    #: Where the named scenario was found. A resolver hands the runtime a flat
+    #: extension list, so without this the directory the scenario's own files
+    #: are relative to -- prompts, anything an atom loads by relative path --
+    #: is lost between resolving the scenario and installing its atoms.
+    scenario_dir: str | None = None
+    atom_config: Mapping[str, Mapping[str, JsonValue]] = field(default_factory=dict)
+    provider: ExtensionSpec | None = None
+    provider_identity: ProviderSessionIdentity | None = None
+    value_provenance: tuple[ConfigValueProvenance, ...] = ()
+    provenance: Mapping[str, object] = field(default_factory=dict)
+
+
+@runtime_checkable
+class SessionSpecResolver(Protocol):
+    """Host-owned resolver for scenario, user config, env, and overrides."""
+
+    def resolve(self, request: AgentSessionConfig) -> ResolvedSessionSpec: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SessionContext:
+    """Propagating identity + config context for the session graph.
+
+    Every child session gets a derived context with updated identity.
+    Atoms read ``api.ctx`` to know who they are and where they sit in
+    the graph.
+    """
+
+    session_id: str = ""
+    root_session_id: str = ""
+    parent_session_id: str | None = None
+    #: Where this run was forked from, when it was. Not inherited by children:
+    #: a subagent spawned inside a forked run is a child of that run, not of
+    #: what the run was forked from.
+    fork_source_session_id: str | None = None
+    fork_point: TurnRef | None = None
+    depth: int = 0
+    cwd: str = ""
+    purpose: str = "root"
+    scenario: str | None = None
+    scenario_dir: str | None = None
+
+    def child(
+        self,
+        *,
+        session_id: str,
+        purpose: str = "subagent",
+        cwd: str | None = None,
+        scenario: str | None = None,
+        scenario_dir: str | None = None,
+    ) -> SessionContext:
+        """Derive a child context with inherited + overridden fields."""
+        return SessionContext(
+            session_id=session_id,
+            root_session_id=self.root_session_id,
+            parent_session_id=self.session_id,
+            depth=self.depth + 1,
+            cwd=self.cwd if cwd is None else cwd,
+            purpose=purpose,
+            scenario=self.scenario if scenario is None else scenario,
+            scenario_dir=scenario_dir
+            if scenario_dir is not None
+            else self.scenario_dir,
+        )
+
+
+@runtime_checkable
+class AtomAPI(Protocol):
+    """The complete surface atoms interact with.
+
+    Atoms receive this at ``install(api, config)`` time.  Every method
+    is typed — no ``Any`` in the signatures.
+    """
+
+    # --- Context (identity + graph position) ---------------------------------
+
+    @property
+    def ctx(self) -> SessionContext:
+        """Session identity, depth, cwd, purpose, scenario."""
+        ...
+
+    # --- Bus (event subscribe + emit) ----------------------------------------
+
+    def on(
+        self,
+        channel: str,
+        handler: Handler,
+        *,
+        priority: int = 500,
+    ) -> Unsubscribe:
+        """Subscribe to a bus channel.  Returns unsubscribe function."""
+        ...
+
+    @property
+    def bus(self) -> EventBus:
+        """Direct bus access for emit/emit_sync."""
+        ...
+
+    # --- Tool / Policy registration ------------------------------------------
+
+    def register_tool(self, tool: Tool) -> None: ...
+
+    def register_context_policy(
+        self, policy: ContextPolicy, *, priority: int = 500
+    ) -> None: ...
+
+    def register_trigger_renderer(
+        self, source: str, renderer: TriggerRenderer
+    ) -> None: ...
+
+    def register_trigger_codec(self, source: str, codec: TriggerCodec) -> None:
+        """Register a codec for custom trigger persistence."""
+        ...
+
+    def register_operations(
+        self,
+        *,
+        replace: bool = False,
+        service_scope: ServiceScope = "session",
+        **kwargs: object,
+    ) -> None:
+        """Register named operation services, such as ``bash``.
+
+        Every other runtime boundary (resource reader/writer/store, tool
+        executor/orchestrator, permission policy, effect scope, catalogs) is
+        reached through ``services`` with the ``ServiceRole`` descriptors in
+        ``agentm.core.abi.roles`` — there are no per-boundary methods.
+        """
+        ...
+
+    def register_provider(
+        self,
+        name: str,
+        config: ProviderConfig,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register or replace an LLM provider."""
+        ...
+
+    def has_provider(self, name: str) -> bool:
+        """Return True when a provider name is already registered."""
+        ...
+
+    def get_provider(self, name: str | None = None) -> ProviderConfig | None:
+        """Return the named provider, or the active provider when omitted."""
+        ...
+
+    # --- Trigger (unified input) ---------------------------------------------
+
+    def push_trigger(
+        self,
+        trigger: Trigger,
+        *,
+        priority: TriggerPriority = "next",
+        target_session_id: str | None = None,
+        target_agent_id: str | None = None,
+        origin: str | None = None,
+        mode: str = "prompt",
+        is_meta: bool = False,
+        skip_commands: bool = False,
+        meta: dict[str, JsonValue] | None = None,
+    ) -> object:
+        """Push a trigger into the session's queue."""
+        ...
+
+    def interrupt(self, reason: CancelReason | str = "user_cancel") -> None:
+        """Request cooperative cancellation of the session's active work."""
+        ...
+
+    def track_background(self) -> AbstractContextManager[None]:
+        """Bracket a background unit so idle() waits for it."""
+        ...
+
+    # --- Session data (read-only) --------------------------------------------
+
+    def get_messages(self) -> list[AgentMessage]:
+        """Message list from committed turns (sync, no policies)."""
+        ...
+
+    def get_turns(self) -> Sequence[Turn]:
+        """Committed turns (read-only)."""
+        ...
+
+    @property
+    def store(self) -> TrajectoryStore | None:
+        """Durable trajectory store, when the host configured persistence."""
+        ...
+
+    # --- Effects (the escape hatch) ------------------------------------------
+
+    def effect(
+        self,
+        body: EffectBody,
+        *,
+        provides: str = "",
+        retain: str = "",
+        compensate: str = "",
+        subject: object = None,
+    ) -> EffectHandle:
+        """Perform a write the platform has no table for, handing back its undo.
+
+        For everything ``register_*`` does not cover — a background task, an
+        open connection, a patched attribute. ``body`` performs the write and
+        returns (or yields) the function that undoes it; the inverse runs when
+        this atom is uninstalled, in the reverse of the order the writes
+        happened. A body that produces no inverse, records no nested effect and
+        names neither ``retain`` nor ``compensate`` is refused where it was
+        written.
+
+        ``compensate`` is for a write that crossed the system boundary -- a
+        file created, a container started, a message sent. There is no inverse
+        for those; what you hand back makes up for the write rather than
+        undoing it, and saying so is not paperwork: everything this platform
+        guarantees about recovery is guaranteed against exact equality, and a
+        composition holding a compensation recovers only up to whatever coarser
+        equivalence you meant by it. Rare by construction -- each one marks a
+        place the system's edge runs through.
+
+        An ``async`` body must be an async generator, and it runs at the next
+        ``settle`` rather than here.
+        """
+        ...
+
+    async def settle(self) -> None:
+        """Run the async effect bodies this atom has queued and not yet run.
+
+        The installation calls this once ``install()`` has returned, which is
+        what runs an async body recorded during installation. An atom that
+        queues one later — from a task of its own — settles it itself. There is
+        no window and nothing to hold: settling is draining your own log.
+        """
+        ...
+
+    # --- Services (typed DI) -------------------------------------------------
+
+    @property
+    def services(self) -> ServiceRegistry:
+        """This atom's own service registry, resolving up into the session's.
+
+        Writes land in the atom's own table and the session sees them because
+        the atom's context is linked into it; uninstalling unlinks it. Reads
+        resolve up the chain, so an atom still reads what the session holds
+        after it has been detached — including whatever replaced it.
+        """
+        ...
+
+    # --- Child session -------------------------------------------------------
+
+    async def spawn(
+        self,
+        *,
+        purpose: str = "subagent",
+        tools: list[Tool] | None = None,
+        system: str | None = None,
+        model: Model | None = None,
+        stream_fn: StreamFn | None = None,
+        scenario: str | None = None,
+        cwd: str | None = None,
+        max_turns: int | None = None,
+        extra_services: ServiceRegistry | None = None,
+        cancel_signal: CancelSignal | None = None,
+        parent_cancellation: ChildCancellationMode = "inherit",
+    ) -> SpawnedSession:
+        """Spawn a lightweight child inheriting parent's config.
+
+        Only override what you need — everything else inherits from
+        the parent (tools, model, system, policies, graph, store).
+        """
+        ...
+
+    async def spawn_child_session(
+        self,
+        config: AgentSessionConfig,
+    ) -> SpawnedSession:
+        """Spawn a fully-constructed child session from config.
+
+        Goes through the factory pipeline: resolves scenario, loads
+        extensions, installs atoms.  Use this when the child needs a
+        different scenario or extension set from the parent.
+        """
+        ...
+
+    async def install_extension(
+        self,
+        extension: ExtensionSpec | str,
+        config: dict[str, JsonValue] | None = None,
+        *,
+        trigger: str = "runtime",
+        replace: bool = False,
+    ) -> None:
+        """Install another atom into this session.
+
+        Works on a running session: the driver re-reads the tool list at each
+        turn boundary, so a tool registered here is callable from the next turn
+        and cannot change the surface the in-flight turn already advertised.
+        What the driver captured at start — the tool executor and the
+        permission policy — is not reachable this way.
+
+        Requirements are solved against the session's live capabilities rather
+        than against a composition plan, and a failed install rolls the
+        session's registrations back before raising.
+
+        ``replace`` supersedes an already-installed atom carrying the same
+        manifest name: its tools, context policies, trigger renderers, services
+        and event handlers are detached first, so a revised version can take
+        the name over instead of colliding with itself. Its trigger codecs stay
+        registered until the replacement re-registers them, because a committed
+        turn naming that source has to remain decodable.
+        """
+        ...
+
+    def uninstall_extension(self, atom: ExtensionSpec | str) -> bool:
+        """Detach an atom; report whether one was installed.
+
+        Accepts the spec it was installed from, or its manifest name.
+
+        Takes away what the atom offers the model — its tools, context
+        policies, trigger renderers, services and event handlers — and leaves
+        its trigger codecs registered, because a committed turn names its
+        trigger source and a session that could no longer decode it would fail
+        to resume.
+        """
+        ...
+
+    def installed_atoms(self) -> tuple[ExtensionSpec, ...]:
+        """The specs this session currently holds, in composition order.
+
+        An atom that installs other atoms needs to know what is already there,
+        and until this existed the only way was to remember what it had
+        installed itself. That is a second account of the session's own
+        composition, kept by an atom that cannot see the first: anything
+        removed by somebody else left the remembered picture naming an atom the
+        session does not hold, with nothing to correct it.
+
+        A read, not a handle. What comes back is what each atom was installed
+        *from*, which is what an installer compares against and what a reload
+        replays; reaching the running atom itself is not offered, because
+        nothing an atom should do needs it.
+        """
+        ...
+
+    # --- Model access --------------------------------------------------------
+
+    @property
+    def model(self) -> Model | None: ...
+
+    @property
+    def experiment(self) -> dict[str, JsonValue] | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SessionResult:
+    """What a session produced when its run ended.
+
+    ``reason`` is the terminating tool's ``ToolTerminate.reason`` (namespaced,
+    e.g. ``"structured_output:submitted"``) when the session ended by a terminal
+    tool, or ``None`` when it ended by the model finishing its turn / running out
+    of turns. ``text`` is the human- and machine-readable payload: the terminal
+    tool result's text (which by SDK convention is the serialized structured
+    result for tools like ``submit_result``), or the trailing assistant text
+    when no terminal tool fired. Callers that expect structured output decode
+    ``text`` against their own schema; ``reason is not None`` distinguishes a
+    real terminal submission from a session that merely stopped talking.
+    """
+
+    reason: str | None
+    text: str
+
+
+@runtime_checkable
+class SpawnedSession(Protocol):
+    """Handle to a spawned child session."""
+
+    @property
+    def session_id(self) -> str: ...
+
+    @property
+    def model(self) -> Model | None: ...
+
+    async def prompt(
+        self,
+        text: str,
+        *,
+        priority: TriggerPriority = "next",
+        origin: str | None = "human",
+        mode: str = "prompt",
+    ) -> object: ...
+
+    async def run(self, text: str) -> list[AgentMessage]:
+        """Start, prompt, wait, return messages (blocking convenience)."""
+        ...
+
+    def final_result(self) -> SessionResult | None:
+        """The terminal outcome of the last run, or None if no turns committed.
+
+        Computed from the recorded termination cause of the final committed
+        turn, so callers never guess at terminal-tool names. Returns None only
+        when the session has not committed any turn yet.
+        """
+        ...
+
+    def push_trigger(
+        self,
+        trigger: Trigger,
+        *,
+        priority: TriggerPriority = "next",
+        target_session_id: str | None = None,
+        target_agent_id: str | None = None,
+        origin: str | None = None,
+        mode: str = "prompt",
+        is_meta: bool = False,
+        skip_commands: bool = False,
+        meta: dict[str, JsonValue] | None = None,
+    ) -> object: ...
+
+    def interrupt(self, reason: CancelReason | str = "user_cancel") -> None: ...
+
+    def compact(self) -> None: ...
+
+    async def idle(self, timeout: float | None = None) -> bool: ...
+
+    async def shutdown(self) -> None: ...
+
+    def get_messages(self) -> list[AgentMessage]: ...
+
+    def status(self) -> dict[str, str | int | list[str]]: ...
+
+
+__all__ = [
+    "SESSION_CONFIG_PRECEDENCE",
+    "AgentSessionConfig",
+    "AtomAPI",
+    "ChildCancellationMode",
+    "ConfigSource",
+    "ConfigValueProvenance",
+    "ExtensionInput",
+    "ExtensionSource",
+    "ExtensionSourceKind",
+    "ExtensionSpec",
+    "LoopConfig",
+    "ResolvedSessionSpec",
+    "ScenarioLoader",
+    "ScenarioSpec",
+    "SessionContext",
+    "SessionResult",
+    "SessionSpecResolver",
+    "SpawnedSession",
+    "Unsubscribe",
+    "normalize_extension_spec",
+]

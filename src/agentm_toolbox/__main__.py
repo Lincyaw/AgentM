@@ -1,73 +1,54 @@
-"""CLI entry point for sandbox execution.
-
-Usage::
-
-    python3 -m agentm_toolbox read '{"path": "/repo/file.py", "offset": 10}'
-    python3 -m agentm_toolbox write '{"path": "/repo/file.py", "content_file": "/tmp/.upload"}'
-    python3 -m agentm_toolbox edit '{"path": "/repo/file.py", "old_string": "x", "new_string": "y"}'
-
-State is persisted to ``/tmp/.agentm-toolbox/state.json`` between
-invocations so read-before-write guards work across exec calls.
-"""
+"""Command-line entry points executed inside remote AgentM sandboxes."""
 
 from __future__ import annotations
 
+import argparse
 import json
-import os
-import sys
-from dataclasses import asdict
+from collections.abc import Sequence
 
-from agentm_toolbox._file_ops import FileToolbox
-from agentm_toolbox._state import ReadStateStore
+from agentm_toolbox._repository_index import (
+    RepositoryIndexWorkerError,
+    load_repository_documents,
+    update_repository_index,
+)
 
-_STATE_FILE = "/tmp/.agentm-toolbox/state.json"
 
-
-def main() -> None:
-    if len(sys.argv) < 2:
-        print(json.dumps({"text": "usage: agentm_toolbox <read|write|edit> [json_args]", "is_error": True}))
-        sys.exit(1)
-
-    tool_name = sys.argv[1]
-    raw_args = sys.argv[2] if len(sys.argv) > 2 else "{}"
-    try:
-        args = json.loads(raw_args)
-    except json.JSONDecodeError as exc:
-        print(json.dumps({"text": f"invalid JSON args: {exc}", "is_error": True}))
-        sys.exit(1)
-
-    state = ReadStateStore.load_from(_STATE_FILE)
-    cwd = args.pop("_cwd", os.getcwd())
-    toolbox = FileToolbox(
-        cwd=cwd,
-        max_size=args.pop("_max_size", 262_144),
-        require_read=args.pop("_require_read", True),
-        default_limit=args.pop("_default_limit", 250),
-        state=state,
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="agentm-toolbox")
+    commands = parser.add_subparsers(dest="command", required=True)
+    repository = commands.add_parser(
+        "repository-index",
+        help="Build or refresh a sandbox-local ast-grep repository index.",
     )
+    repository.add_argument("--root", required=True)
+    repository.add_argument("--target", required=True)
+    repository.add_argument("--db", required=True)
+    repository.add_argument("--replace", action="store_true")
+    repository.add_argument("--include-documents", action="store_true")
+    repository.add_argument("--load-only", action="store_true")
+    args = parser.parse_args(argv)
 
-    if tool_name == "write" and "content_file" in args:
-        cf = args.pop("content_file")
-        try:
-            args["content"] = open(cf).read()
-        except Exception as exc:
-            print(json.dumps({"text": f"Failed to read content_file {cf!r}: {exc}", "is_error": True}))
-            sys.exit(1)
-        finally:
-            try:
-                os.unlink(cf)
-            except OSError:
-                pass
-
-    fn = getattr(toolbox, tool_name, None)
-    if fn is None:
-        print(json.dumps({"text": f"unknown tool: {tool_name!r}", "is_error": True}))
-        sys.exit(1)
-
-    result = fn(**args)
-    toolbox.state.save_to(_STATE_FILE)
-    print(json.dumps(asdict(result)))
+    try:
+        if args.load_only:
+            result = load_repository_documents(
+                root=args.root,
+                target=args.target,
+                db_path=args.db,
+            )
+        else:
+            result = update_repository_index(
+                root=args.root,
+                target=args.target,
+                db_path=args.db,
+                replace=args.replace,
+                include_documents=args.include_documents,
+            )
+    except RepositoryIndexWorkerError as exc:
+        print(json.dumps({"version": 1, "ok": False, "error": str(exc)}))
+        return 1
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

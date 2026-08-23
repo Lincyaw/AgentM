@@ -1,22 +1,25 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """LLM stream boundary.
 
-Implements §3.1 (LLM Stream port) of
-`.claude/designs/pluggable-architecture.md`. The ``StreamFn`` Protocol is the
-single point that touches a real LLM API; the agent loop has zero hard-coded
-provider knowledge. Uses Python ``AsyncIterator`` semantics and a
-Python-native event taxonomy.
+The ``StreamFn`` Protocol is the single point that touches a real LLM API; the
+agent loop has zero hard-coded provider knowledge. Uses Python
+``AsyncIterator`` semantics and a Python-native event taxonomy.
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
+from typing import ClassVar, Literal, Protocol, runtime_checkable
 
-from .messages import AgentMessage, AssistantMessage
+from .cancel import CancelSignal
+from .messages import (
+    AgentMessage,
+    AssistantMessage,
+    JsonValue,
+    freeze_json,
+)
 from .tool import Tool
-
 
 # --- Stream events ----------------------------------------------------------
 
@@ -92,12 +95,13 @@ AssistantStreamEvent = (
     | ToolCallEnd
     | MessageEnd
 )
+type ThinkingLevel = Literal["off", "low", "medium", "high"]
 
 
 # --- Model descriptor -------------------------------------------------------
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class Model:
     """Provider-agnostic model descriptor.
 
@@ -108,7 +112,27 @@ class Model:
     provider: str
     context_window: int
     max_output_tokens: int
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("model id must be a non-empty string")
+        if not isinstance(self.provider, str) or not self.provider:
+            raise ValueError("model provider must be a non-empty string")
+        for label, value in (
+            ("context_window", self.context_window),
+            ("max_output_tokens", self.max_output_tokens),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"model {label} must be a positive integer")
+        if self.max_output_tokens > self.context_window:
+            raise ValueError("model max_output_tokens cannot exceed context_window")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("model metadata must be an object")
+        frozen = freeze_json(self.metadata)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("model metadata must be an object")
+        object.__setattr__(self, "metadata", frozen)
 
 
 # --- Stream protocol --------------------------------------------------------
@@ -130,8 +154,8 @@ class StreamFn(Protocol):
         model: Model,
         tools: list[Tool],
         system: str | None = None,
-        signal: asyncio.Event | None = None,
-        thinking: Literal["off", "low", "medium", "high"] = "off",
+        signal: CancelSignal | None = None,
+        thinking: ThinkingLevel = "off",
     ) -> AsyncIterator[AssistantStreamEvent]: ...
 
 
@@ -142,6 +166,7 @@ __all__ = [
     "StreamFn",
     "TextDelta",
     "ThinkingDelta",
+    "ThinkingLevel",
     "ToolCallArgsDelta",
     "ToolCallArgsParseError",
     "ToolCallEnd",

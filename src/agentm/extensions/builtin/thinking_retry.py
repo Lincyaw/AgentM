@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Retry when the model emits only thinking with no actionable output.
 
 Some models (e.g. doubao-seed-2.0-code) occasionally emit tool-call
@@ -5,7 +6,7 @@ intentions inside ``reasoning_content`` instead of as structured
 ``tool_calls``. The default loop action treats this as a clean end-turn
 (``ModelEndTurn``), terminating the session with no useful work.
 
-This atom hooks ``decide_turn_action`` and overrides ``ModelEndTurn`` with
+This atom hooks ``decide`` and overrides ``Stop(ModelEndTurn)`` with
 ``Step()`` when the assistant message contains only ``ThinkingBlock``
 content — no ``TextContent`` and no ``ToolCallBlock``. A per-session
 counter caps consecutive thinking-only retries to prevent infinite loops.
@@ -13,15 +14,17 @@ counter caps consecutive thinking-only retries to prevent infinite loops.
 
 from __future__ import annotations
 
-from loguru import logger
-from typing import Any
+from collections.abc import Sequence
 
-from pydantic import BaseModel
+from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    DecideTurnActionEvent,
-    ExtensionAPI,
+    AssistantContent,
+    AtomAPI,
+    DecideEvent,
     ModelEndTurn,
+    OpaqueThinkingBlock,
     Step,
     Stop,
     TextContent,
@@ -32,45 +35,49 @@ from agentm.extensions import ExtensionManifest
 
 
 class ThinkingRetryConfig(BaseModel):
-    max_retries: int = 3
+    model_config = ConfigDict(extra="forbid")
+
+    max_retries: int = Field(default=3, ge=0)
 
 
 MANIFEST = ExtensionManifest(
     name="thinking_retry",
     description=(
-        "Override ModelEndTurn with Step() when the assistant message "
+        "Override Stop(ModelEndTurn) with Step() when the assistant message "
         "contains only ThinkingBlock content (no text, no tool calls). "
         "Prevents models that leak tool-call intentions into reasoning "
         "from silently aborting the session."
     ),
-    registers=("event:decide_turn_action",),
+    registers=("event:decide",),
     config_schema=ThinkingRetryConfig,
     requires=(),
 )
 
 
-def _is_thinking_only(content: list[Any]) -> bool:
+def _is_thinking_only(content: Sequence[AssistantContent]) -> bool:
     has_thinking = False
     for block in content:
-        if isinstance(block, ThinkingBlock):
+        if isinstance(block, (ThinkingBlock, OpaqueThinkingBlock)):
             has_thinking = True
-        elif isinstance(block, TextContent) and block.text.strip():
-            return False
-        elif isinstance(block, ToolCallBlock):
+        elif (
+            isinstance(block, TextContent)
+            and block.text.strip()
+            or isinstance(block, ToolCallBlock)
+        ):
             return False
     return has_thinking
 
 
 class _ThinkingRetryRuntime:
-    def __init__(self, api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
+    def __init__(self, api: AtomAPI, config: ThinkingRetryConfig) -> None:
         self._api = api
         self._max_retries = config.max_retries
         self._consecutive_count = 0
 
     def install(self) -> None:
-        self._api.on(DecideTurnActionEvent.CHANNEL, self.on_decide)
+        self._api.on(DecideEvent.CHANNEL, self.on_decide)
 
-    def on_decide(self, event: DecideTurnActionEvent) -> Step | None:
+    def on_decide(self, event: DecideEvent) -> Step | None:
         obs = event.observation
         default = obs.default_action
 
@@ -101,5 +108,5 @@ class _ThinkingRetryRuntime:
         self._consecutive_count = 0
 
 
-def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
+def install(api: AtomAPI, config: ThinkingRetryConfig) -> None:
     _ThinkingRetryRuntime(api, config).install()

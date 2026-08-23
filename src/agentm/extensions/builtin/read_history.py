@@ -1,28 +1,31 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Tool atom: ``read_history`` — recover the original content of past turns.
 
 The ``llm_compaction`` atom replaces old turns with a structured summary that
-cites them as ``[Turn N]``. The raw turns are never deleted from the session
-tree, so this tool reads ``api.session.get_branch()`` and returns the verbatim
-messages for a turn (or turn range) on demand. Turn numbering is shared with
-the compaction engine via :func:`agentm.core.lib.enumerate_turns`, so the
-``[Turn N]`` markers in a summary line up with what this tool accepts.
+cites them as ``[Turn N]``. The raw turns are never deleted from the
+trajectory, so this tool reads ``api.get_turns()`` and returns the verbatim
+messages for a turn (or turn range) on demand. Turns are numbered 1-based over
+the committed sequence so the ``[Turn N]`` markers in a summary line up with
+what this tool accepts.
 
-In-session by design: it reads the live SessionManager (the source of truth),
-not the observability JSONL — so there is no flush lag and no dependency on
-the observability atom. For cross-session trace mining use ``query_traces`` /
+In-session by design: it reads the live committed trajectory (the source of
+truth), not the observability JSONL — so there is no flush lag and no
+dependency on the observability atom. For cross-session trace mining use
 ``agentm trace`` instead.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
-    ExtensionAPI,
+    AtomAPI,
     FunctionTool,
+    OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -30,9 +33,8 @@ from agentm.core.abi import (
     ToolResultMessage,
     UserMessage,
 )
-from pydantic import BaseModel, ConfigDict, Field
-
-from agentm.core.lib import Turn, enumerate_turns, truncate_text_tokens
+from agentm.core.abi.context import turn_to_messages
+from agentm.core.lib.tokens import truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
 
@@ -54,7 +56,7 @@ MANIFEST = ExtensionManifest(
         "(the [Turn N] markers cited in compaction summaries)."
     ),
     registers=("tool:read_history",),
-    requires=(),  # Leaf atom: reads the session branch only.
+    requires=(),  # Leaf atom: reads the committed trajectory only.
     config_schema=ReadHistoryConfig,
 )
 
@@ -72,7 +74,7 @@ class _ReadHistoryArgs(BaseModel):
 
 
 class _ReadHistoryRuntime:
-    def __init__(self, api: ExtensionAPI, config: ReadHistoryConfig) -> None:
+    def __init__(self, api: AtomAPI, config: ReadHistoryConfig) -> None:
         self._api = api
         self._tool_result_max_tokens = config.tool_result_max_tokens
         self._total_max_tokens = config.total_max_tokens
@@ -95,27 +97,39 @@ class _ReadHistoryRuntime:
             )
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(self, args: dict[str, object]) -> ToolResult:
+        params = _ReadHistoryArgs.model_validate(args)
         model_name = self._api.model.id if self._api.model is not None else None
-        start = int(args["start"])
-        end_raw = args.get("end")
-        end = int(end_raw) if end_raw is not None else start
+        start = params.start
+        end = params.end if params.end is not None else start
         if end < start:
             start, end = end, start
 
-        turns = enumerate_turns(self._api.session.get_branch())
-        if not turns:
+        # get_turns() returns committed turns; number them 1-based over the
+        # committed sequence so the tool's contract is independent of the
+        # trajectory's internal index base.
+        committed = list(self._api.get_turns())
+        if not committed:
             return _error("No turns recorded yet.")
-        last = turns[-1].index
+        last = len(committed)
         if start > last:
             return _error(
                 f"No turn {start}; the conversation currently has turns 1–{last}."
             )
 
-        selected = [turn for turn in turns if start <= turn.index <= end]
+        selected = [
+            (position, turn)
+            for position, turn in enumerate(committed, start=1)
+            if start <= position <= end
+        ]
         rendered = "\n\n".join(
-            _render_turn(turn, self._tool_result_max_tokens, model_name)
-            for turn in selected
+            _render_turn(
+                position,
+                turn_to_messages(turn),
+                self._tool_result_max_tokens,
+                model_name,
+            )
+            for position, turn in selected
         )
         truncated = truncate_text_tokens(
             rendered,
@@ -131,13 +145,18 @@ class _ReadHistoryRuntime:
         return _ok(rendered)
 
 
-def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
+def install(api: AtomAPI, config: ReadHistoryConfig) -> None:
     _ReadHistoryRuntime(api, config).install()
 
 
-def _render_turn(turn: Turn, tool_result_cap: int, model_name: str | None) -> str:
-    lines = [f"=== Turn {turn.index} ==="]
-    for message in turn.messages:
+def _render_turn(
+    index: int,
+    messages: list[AgentMessage],
+    tool_result_cap: int,
+    model_name: str | None,
+) -> str:
+    lines = [f"=== Turn {index} ==="]
+    for message in messages:
         lines.append(_render_message(message, tool_result_cap, model_name))
     return "\n".join(lines)
 
@@ -158,6 +177,10 @@ def _render_message(
         for a_block in message.content:
             if isinstance(a_block, ThinkingBlock):
                 a_parts.append(f"[assistant thinking] {a_block.text}")
+            elif isinstance(a_block, OpaqueThinkingBlock):
+                a_parts.append(
+                    f"[assistant opaque thinking] provider={a_block.provider}"
+                )
             elif isinstance(a_block, TextContent):
                 a_parts.append(f"[assistant] {a_block.text}")
             elif isinstance(a_block, ToolCallBlock):
@@ -179,7 +202,7 @@ def _render_message(
     return ""
 
 
-def _dump(value: Any) -> str:
+def _dump(value: object) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, default=str)
     except (TypeError, ValueError):

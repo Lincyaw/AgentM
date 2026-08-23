@@ -1,896 +1,1091 @@
-"""AgentSession construction wiring."""
+# code-health: ignore-file[AM025] -- runtime composes plugin, service, and trajectory boundary values
+"""Build SDK sessions from explicit extension specs.
+
+The factory owns runtime construction only. It does not search source trees,
+home directories, or package contrib locations. Callers either pass
+``extensions`` directly or provide a ``ScenarioLoader`` that resolves a
+scenario name into extension specs.
+"""
 
 from __future__ import annotations
 
-import inspect
-from loguru import logger
-import os
+import asyncio
+import hashlib
+import json
 import time
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass, replace
-from functools import partial
-from pathlib import Path
-from typing import Any
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from agentm.core.abi import AgentLoop, EventBus, LoopConfig, Model, Tool
-from agentm.core.abi.events import DiagnosticEvent
-from agentm.core.lib.ref import Ref
-from agentm.core.abi.roles import (
-    COMMAND_PARSER,
-    COMPACTION_PROMPTS,
-    LOOP_BUDGET_SERVICE,
-    MODEL_RESOLVER_SERVICE,
-    PROMPT_REGISTRY,
-    SESSION_STORE_SERVICE,
-    SLASH_COMMAND_DISPATCHER_SERVICE,
-    SUB_AGENT_RUNTIME,
-    SYSTEM_PROMPT_PROVIDER,
+from loguru import logger
+
+from agentm.core.abi.bus import EventBus
+from agentm.core.abi.cancel import CancelSignal, CompositeCancelSignal
+from agentm.core.abi.catalog import (
+    ActiveSetFingerprint,
+    AtomActivation,
+    CatalogActiveSetInput,
+    ResourceVersion,
+    VersionedResourceStore,
 )
-from agentm.core.runtime.atom_reloader import AtomReloader
-from agentm.core.runtime.atom_sandbox import apply_atom_source_overrides
-from agentm.core.runtime.command_dispatcher import HarnessCommandDispatcher
-from agentm.core.abi.events import (
-    ChildSessionExtendingEvent,
-    ChildSessionStartEvent,
-    ExtensionInstallEvent,
-    SessionReadyEvent,
+from agentm.core.abi.codec import CodecRegistry
+from agentm.core.abi.context import ContextPolicy
+from agentm.core.abi.errors import ExtensionLoadError
+from agentm.core.abi.manifest import (
+    ExtensionManifest,
+    live_capability_keys,
+    parse_capability_ref,
+    provided_capability_keys,
+    requirement_key,
+)
+from agentm.core.abi.messages import JsonValue, freeze_json
+from agentm.core.abi.provider import ProviderSessionIdentity
+from agentm.core.abi.roles import (
+    ACTIVE_SET_FINGERPRINT_ROLE,
+    ATOM_CATALOG_ROLE,
+    ATOM_CATALOG_SERVICE,
+    EXPERIMENT_SERVICE,
+    LOOP_BUDGET_SERVICE,
+    RESOLVED_SESSION_SPEC_SERVICE,
+    SCENARIO_LOADER_SERVICE,
+    TRAJECTORY_QUERY_STORE,
+    TRAJECTORY_QUERY_STORE_SERVICE,
+    TRAJECTORY_STORE_SERVICE,
+    VERSIONED_RESOURCE_STORE_ROLE,
+    VERSIONED_RESOURCE_STORE_SERVICE,
+    bind_atom_catalog,
+)
+from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.session_api import (
+    ExtensionInput,
+    ExtensionSpec,
+    ResolvedSessionSpec,
+    ScenarioLoader,
+    ScenarioSpec,
+    SessionContext,
+    normalize_extension_spec,
+)
+from agentm.core.abi.store import SessionMeta, TrajectoryNodeQuery, TrajectoryStore
+from agentm.core.abi.stream import Model, StreamFn, ThinkingLevel
+from agentm.core.abi.tool import Tool
+from agentm.core.abi.trajectory import (
+    DEFAULT_TRAJECTORY_BRANCH_ID,
+    DEFAULT_TRAJECTORY_HEAD_ID,
+    TrajectoryHead,
+    Turn,
+    TurnRef,
+)
+from agentm.core.abi.tree import SessionGraphProtocol
+from agentm.core.abi.trigger import TriggerRenderer
+from agentm.core.lib.async_cancel import await_known_outcome
+from agentm.core.lib.trajectory_nodes import turns_to_nodes
+from agentm.core.lib.trajectory_query import TrajectoryStoreQueryAdapter
+from agentm.core.runtime.catalog import (
+    InMemoryAtomCatalog,
+    InMemoryVersionedResourceStore,
+    build_atom_identity_payload,
+    normalize_atom_config,
 )
 from agentm.core.runtime.extension import (
-    CommandSpec,
-    ExtensionAPIScopeConfig,
-    ExtensionLoadError,
-    ProviderConfig,
-    ReadonlySession,
-    Renderer,
-    _ExtensionAPIImpl,
-    build_extension_api_scope,
-    load_extension,
+    install_extension,
+    load_extension_module,
 )
-from agentm.core.runtime.provider_resolver import LastRegisteredWins
-from agentm.core.runtime.resource_loader import InMemoryResourceLoader, ResourceLoader
-from agentm.core.runtime.resource_writer import LocalResourceWriter
-from agentm.core.abi.session_config import AgentSessionConfig
-from agentm.core.lib.paths import expand_path
-from agentm.core.runtime.session_helpers import (
-    AtomSource,
-    SessionView,
-    collect_auto_discovered_atoms,
-    ensure_floor_atom,
-    resolve_provider_config,
-)
-from agentm.core.runtime.session_inbox import SessionInbox
-from agentm.core.runtime.session_manager import InMemorySessionManager, SessionManager
+from agentm.core.runtime.session import Session
+from agentm.core.runtime.session_core import SessionRuntimeConfig
+from agentm.core.runtime.session_meta import session_meta_config
+from agentm.core.runtime.trajectory import Trajectory
+
+if TYPE_CHECKING:
+    from agentm.core.abi.session_api import AgentSessionConfig
 
 
-@dataclass(slots=True)
-class SessionRuntime:
-    """Session-scoped runtime bundle passed into ``AgentSession.__init__``."""
-
-    bus: EventBus
-    session_manager: SessionManager
-    resource_loader: ResourceLoader
-    loop: AgentLoop
-    active_provider_ref: Ref[ProviderConfig | None]
-    tools: list[Tool]
-    commands: dict[str, CommandSpec]
-    providers: dict[str, ProviderConfig]
-    renderers: dict[str, Renderer]
-    apis: dict[str, _ExtensionAPIImpl]
-    services: dict[str, Any]
-    reloader: AtomReloader
-    inbox: SessionInbox
+@dataclass(frozen=True, slots=True)
+class _ExtensionPlanItem:
+    spec: ExtensionSpec
+    module_path: str
+    config: dict[str, JsonValue]
+    index: int
+    name: str
+    manifest: ExtensionManifest | None
+    requires: tuple[str, ...]
+    after: tuple[str, ...]
+    registers: tuple[str, ...]
+    provides: tuple[str, ...]
 
 
-def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
-    """Return the spec for whichever atom claims the ``PROVIDER_INHERITOR``
-    role. Looking up by role rather than by atom name lets a scenario ship
-    a customised provider-inheritor without editing the runtime.
-
-    Moved here from ``core.abi.session_config`` to avoid an ``extensions``
-    import in the ABI layer (recovery-floor violation).
-    """
-
-    from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
-    from agentm.extensions import discover as discover_mod
-
-    entry = discover_mod.discover_by_role().get(PROVIDER_INHERITOR)
-    if entry is None:
-        raise RuntimeError(
-            f"no atom claims the {PROVIDER_INHERITOR!r} role; cannot build "
-            "a child-session provider spec"
-        )
-    return (entry.module_path, {PARENT_PROVIDER_CONFIG_KEY: parent_provider})
+def _copy_extension_specs(specs: Sequence[ExtensionInput]) -> list[ExtensionSpec]:
+    return [normalize_extension_spec(spec) for spec in specs]
 
 
-def _session_cwd_path(cwd: str) -> Path:
-    return expand_path(cwd).resolve()
+def _normalize_scenario_result(
+    result: ScenarioSpec | Sequence[ExtensionInput],
+) -> tuple[list[ExtensionSpec], str | None]:
+    if isinstance(result, ScenarioSpec):
+        return _copy_extension_specs(result.extensions), result.base_dir
+    return _copy_extension_specs(result), None
 
 
-def _normalize_session_cwd(cwd: str) -> str:
-    return str(_session_cwd_path(cwd))
-
-
-def apply_child_session_contributions(
-    base_extensions: list[tuple[str, dict[str, Any]]],
-    handler_returns: list[Any],
-) -> list[tuple[str, dict[str, Any]]]:
-    """Concatenate handler-contributed extension entries onto a child's load
-    order, dedupe by ``module_path``.
-
-    See :class:`agentm.core.abi.events.ChildSessionExtendingEvent`. Each
-    element of ``handler_returns`` is either ``None`` (no opinion) or an
-    iterable of ``(module_path, config)`` tuples. Order is preserved:
-    the operator-supplied entries on ``base_extensions`` come first,
-    then handler returns in registration order. The first occurrence of
-    each module wins; later duplicates are dropped silently so handlers
-    don't have to dedupe themselves.
-
-    Exposed at module top-level (not nested inside the factory) so the
-    fail-stop test in ``tests/unit/core/test_child_session_extending_event.py``
-    can drive the dedupe logic directly without standing up a real
-    session.
-    """
-    result: list[tuple[str, dict[str, Any]]] = list(base_extensions)
-    seen: set[str] = {entry[0] for entry in result if isinstance(entry, tuple) and entry}
-    for ret in handler_returns:
-        if ret is None:
-            continue
-        # Permissive: accept any iterable of (module, config) — handlers
-        # may return list, tuple, or generator.
-        try:
-            iterator = list(ret)
-        except TypeError as exc:
-            logger.debug("session_factory: before_agent_start handler returned non-iterable: {}", exc)
-            continue
-        for entry in iterator:
-            if not (isinstance(entry, tuple) and len(entry) == 2):
-                continue
-            module, cfg = entry
-            if not isinstance(module, str) or module in seen:
-                continue
-            if not isinstance(cfg, dict):
-                continue
-            result.append((module, cfg))
-            seen.add(module)
-    return result
-
-
-def _default_model_resolver(model_name: str) -> tuple[str, dict[str, Any]] | None:
-    """Resolve a model name via the default provider registry + user config."""
-    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import resolve_model_profile
-
-    profile = resolve_model_profile(model_name)
-    if profile is None:
-        return None
-    build_config = profile.to_build_config()
-    provider_id = profile.provider
-    try:
-        return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
-    except KeyError:
-        return None
-
-
-def _resolve_model_to_provider(model: str | None) -> tuple[str, dict[str, Any]]:
-    """Resolve ``AgentSessionConfig.model`` to a provider spec tuple.
-
-    Applies the full precedence chain: config.toml profile → env vars →
-    registry default, including ``AGENTM_REASONING_EFFORT`` and
-    ``ProviderRegistry.build()`` env injection (base_url, verify_ssl, …).
-    """
-    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import (
-        apply_reasoning_effort,
-        resolve_provider_model,
+def _resolve_scenario(
+    scenario: str,
+    loader: ScenarioLoader | None,
+) -> tuple[list[ExtensionSpec], str | None]:
+    if loader is not None:
+        return _normalize_scenario_result(loader(scenario))
+    raise ValueError(
+        f"cannot resolve scenario {scenario!r}; pass extensions directly or provide "
+        "AgentSessionConfig.scenario_loader"
     )
 
-    provider_id, _model_id, profile = resolve_provider_model(model_flag=model)
-    build_config = profile.to_build_config() if profile else {"model": _model_id}
-    apply_reasoning_effort(build_config, None)
-    return DEFAULT_PROVIDER_REGISTRY.build(provider_id, dict(build_config))
 
-
-def _refresh_active_provider(
-    active_provider_ref: Ref[ProviderConfig | None],
-    providers: dict[str, ProviderConfig],
-    provider_resolver: Any,
-    loop_ref: Ref[AgentLoop | None],
-) -> None:
-    """Re-resolve the active provider after a registration change."""
-    active_provider_ref.value = (
-        resolve_provider_config(
-            providers, provider_resolver, provider_path="<resolver>"
-        )
-        if providers
-        else None
-    )
-    loop = loop_ref.value
-    active = active_provider_ref.value
-    if loop is not None and active is not None:
-        loop.set_stream_fn(active.stream_fn)
-
-
-async def _spawn_child_session(
-    child_config: AgentSessionConfig,
+def _resolve_extensions(
     *,
-    bus: EventBus,
-    session_id: str,
-    root_session_id: str,
-    child_provider_factory: Callable[..., tuple[str, dict[str, Any]]],
-    provider_getter: Callable[[], ProviderConfig | None],
-    session_cls: type[Any],
-) -> Any:
-    """Create a child session, inheriting trace identity and provider."""
-    if not isinstance(child_config, AgentSessionConfig):
-        raise TypeError(
-            "spawn_child_session expects an AgentSessionConfig; "
-            f"got {type(child_config).__name__}"
-        )
-    # Shallow-copy the caller's config so our mutations never leak back, and
-    # override the child-lifecycle fields in one pass. `replace` is slots-safe
-    # (unlike `__dict__`) and skips any future init=False fields.
-    spec = replace(
-        child_config,
-        bus=None,  # force fresh EventBus — never inherit the parent's
-        parent_bus=bus,
-        parent_session_id=session_id,
-        root_session_id=root_session_id,
-    )
-    if spec.provider is None:
-        parent_provider = provider_getter()
-        if parent_provider is None:
-            raise RuntimeError(
-                "spawn_child_session: AgentSessionConfig.provider is None but "
-                "the parent session has no active provider to inherit."
-            )
-        spec.provider = child_provider_factory(parent_provider)
+    scenario: str | None,
+    extensions: Sequence[ExtensionInput] | None,
+    extra_extensions: Sequence[ExtensionInput],
+    atom_configs: dict[str, dict[str, JsonValue]] | None,
+    scenario_loader: ScenarioLoader | None,
+) -> tuple[list[ExtensionSpec], str | None, str | None]:
+    scenario_name = scenario
+    resolved: list[ExtensionSpec]
+    if extensions is None:
+        if scenario_name is None:
+            resolved, base_dir = [], None
+        else:
+            resolved, base_dir = _resolve_scenario(scenario_name, scenario_loader)
+    else:
+        resolved = _copy_extension_specs(extensions)
+        base_dir = None
 
-    returns = bus.emit_sync(
-        ChildSessionExtendingEvent.CHANNEL,
-        ChildSessionExtendingEvent(
-            parent_session_id=session_id,
-            child_config=spec,
-        ),
-    )
-    spec.extensions = apply_child_session_contributions(
-        list(spec.extensions), returns
-    )
-
-    return await session_cls.create(spec)
-
-
-def _make_api(
-    owner: str,
-    *,
-    scope: Any,
-    reloader: AtomReloader,
-    apis: dict[str, _ExtensionAPIImpl],
-) -> _ExtensionAPIImpl:
-    """Build and register an ``_ExtensionAPIImpl`` for *owner*."""
-    api = _ExtensionAPIImpl(scope, owner_name=owner)
-    reloader.wrap_api_on(api, owner)
-    apis[owner] = api
-    return api
-
-
-async def _install_with_events(
-    module_path: str,
-    ext_cfg: dict[str, Any],
-    *,
-    bus: EventBus,
-    api_factory: Callable[[str], _ExtensionAPIImpl],
-    reloader: AtomReloader,
-    is_provider: bool = False,
-) -> None:
-    """Load an extension, bracketed by install lifecycle events."""
-    await bus.emit(
-        ExtensionInstallEvent.CHANNEL,
-        ExtensionInstallEvent(
-            module_path=module_path, config=dict(ext_cfg), phase="start"
-        ),
-    )
-    t0 = time.perf_counter_ns()
-    try:
-        result = load_extension(module_path, api_factory(module_path), ext_cfg)
-        if inspect.isawaitable(result):
-            await result
-    except Exception as exc:
-        await bus.emit(
-            ExtensionInstallEvent.CHANNEL,
-            ExtensionInstallEvent(
-                module_path=module_path,
-                config=dict(ext_cfg),
-                phase="error",
-                duration_ns=time.perf_counter_ns() - t0,
-                error=repr(exc),
-            ),
-        )
-        raise
-    reloader.record_loaded_atom(module_path, ext_cfg, is_provider=is_provider)
-    await bus.emit(
-        ExtensionInstallEvent.CHANNEL,
-        ExtensionInstallEvent(
-            module_path=module_path,
-            config=dict(ext_cfg),
-            phase="end",
-            duration_ns=time.perf_counter_ns() - t0,
-        ),
-    )
-
-
-async def create_agent_session(
-    session_cls: type[Any], config: AgentSessionConfig
-) -> Any:
-    from agentm.extensions import discover as discover_mod
-
-    config = replace(config, cwd=_normalize_session_cwd(config.cwd))
-
-    if config.provider is None and config.model is not None:
-        config = replace(config, provider=_resolve_model_to_provider(config.model))
-
-    bus = config.bus if config.bus is not None else EventBus()
-    session_manager: SessionManager = (
-        config.session_manager
-        if config.session_manager is not None
-        else InMemorySessionManager(cwd=config.cwd)
-    )
-    resource_loader: ResourceLoader = (
-        config.resource_loader
-        if config.resource_loader is not None
-        else InMemoryResourceLoader()
-    )
-
-    tools: list[Tool] = []
-    commands: dict[str, CommandSpec] = {}
-    providers: dict[str, ProviderConfig] = {}
-    renderers: dict[str, Renderer] = {}
-    inbox = SessionInbox()
-    apis: dict[str, _ExtensionAPIImpl] = {}
-    services: dict[str, Any] = {}
-    services.update(config.initial_services)
-    if SESSION_STORE_SERVICE not in services:
-        from agentm.core.runtime.session_bootstrap import make_default_session_store
-        services[SESSION_STORE_SERVICE] = make_default_session_store(config.cwd)
-
-    if MODEL_RESOLVER_SERVICE not in services:
-        services[MODEL_RESOLVER_SERVICE] = _default_model_resolver
-
-    active_provider_ref: Ref[ProviderConfig | None] = Ref(None)
-    loop_ref: Ref[AgentLoop | None] = Ref(None)
-    loop_config_ref: Ref[LoopConfig] = Ref(config.loop_config or LoopConfig())
-    provider_resolver = config.provider_resolver or LastRegisteredWins()
-    child_provider_factory = (
-        config.child_provider_factory or default_child_provider_factory
-    )
-
-    def _provider_getter() -> ProviderConfig | None:
-        return active_provider_ref.value
-
-    def _model_getter() -> Model | None:
-        cur = _provider_getter()
-        return cur.model if cur is not None else None
-
-    # session_id = OTel span_id (16 hex); root_session_id = OTel trace_id
-    # (32 hex) shared across the agent tree. Honour caller-supplied ids.
-    session_id = (
-        config.session_id
-        or session_manager.get_session_id()
-        or uuid.uuid4().hex[:16]
-    )
-    root_session_id = config.root_session_id or uuid.uuid4().hex
-    session_view: ReadonlySession = SessionView(
-        session_manager,
-        loop_config_getter=lambda: loop_config_ref.value,
-        bus=bus,
-    )
-    atom_source_writer = LocalResourceWriter(cwd=config.cwd)
-    resource_writer = config.resource_writer or atom_source_writer
-
-    _configure_manifest(config.cwd)
-
-    # Resolve extensions (and scenario_dir) before building the scope so
-    # the frozen scope carries the final scenario_dir value.
-    await _prime_contrib_discovery(config, bus)
-    to_load = await _resolve_extensions(config, bus)
-
-    reloader = AtomReloader(
-        cwd=config.cwd,
-        resource_writer=atom_source_writer,
-        bus=bus,
-        tools=tools,
-        commands=commands,
-        providers=providers,
-        renderers=renderers,
-        apis=apis,
-        on_provider_changed=partial(
-            _refresh_active_provider,
-            active_provider_ref, providers, provider_resolver, loop_ref,
-        ),
-    )
-
-    child_session_fn = partial(
-        _spawn_child_session,
-        bus=bus,
-        session_id=session_id,
-        root_session_id=root_session_id,
-        child_provider_factory=child_provider_factory,
-        provider_getter=_provider_getter,
-        session_cls=session_cls,
-    )
-
-    scope = build_extension_api_scope(
-        ExtensionAPIScopeConfig(
-            bus=bus,
-            cwd=config.cwd,
-            scenario_dir=config.scenario_dir,
-            session_id=session_id,
-            root_session_id=root_session_id,
-            parent_session_id=config.parent_session_id,
-            purpose=config.purpose,
-            scenario=config.scenario,
-            lineage=config.lineage,
-            experiment=config.experiment,
-            session=session_view,
-            tools=tools,
-            commands=commands,
-            providers=providers,
-            renderers=renderers,
-            inbox=inbox,
-            model_getter=_model_getter,
-            provider_getter=_provider_getter,
-            gateway=reloader,
-            child_session_factory=child_session_fn,
-            resource_writer=resource_writer,
-            session_file=session_manager.session_file,
-            service_registry=services,
-        )
-    )
-
-    api_factory = partial(_make_api, scope=scope, reloader=reloader, apis=apis)
-    reloader.set_api_factory(api_factory)
-    command_parser_entry = discover_mod.discover_by_role().get(COMMAND_PARSER)
-    services[SLASH_COMMAND_DISPATCHER_SERVICE] = HarnessCommandDispatcher(
-        commands=commands,
-        owners_by_kind=reloader.owners_by_kind,
-        apis=apis,
-        fallback_owner=(
-            command_parser_entry.module_path
-            if command_parser_entry is not None
-            else "<no-command-parser>"
-        ),
-    )
-
-    install = partial(
-        _install_with_events, bus=bus, api_factory=api_factory, reloader=reloader,
-    )
-
-    session_config_payload: dict[str, Any] = {
-        "scenario": config.scenario,
-        "provider": list(config.provider) if config.provider else None,
-        "extensions": [[mod, cfg] for mod, cfg in to_load],
-        "env": {k: v for k, v in os.environ.items() if k.startswith("AGENTM_")},
-    }
-    if config.lineage is not None:
-        session_config_payload["lineage"] = config.lineage
-    if config.experiment is not None:
-        session_config_payload["experiment"] = config.experiment
-    session_manager.set_session_config(session_config_payload)
-
-    install_errors: dict[str, Exception] = {}
-    for module_path, ext_cfg in to_load:
-        try:
-            await install(module_path, ext_cfg)
-        except Exception as exc:  # noqa: BLE001
-            install_errors[module_path] = exc
-            logger.error(f"extension install failed: {module_path}: {exc}")
-            await bus.emit(
-                DiagnosticEvent.CHANNEL,
-                DiagnosticEvent(
-                    level="error",
-                    source="extension_loader",
-                    message=f"{module_path}: {exc}",
-                ),
-            )
-
-    if config.provider is None:
-        raise ExtensionLoadError(
-            "<provider>",
-            RuntimeError(
-                "AgentSessionConfig.provider is None. Root sessions must specify "
-                "a provider explicitly; only spawn_child_session auto-fills None "
-                "with the inherit_provider builtin."
-            ),
-        )
-    provider_path, provider_cfg = config.provider
-    await install(provider_path, provider_cfg, is_provider=True)
-
-    if not providers:
-        raise ExtensionLoadError(
-            provider_path,
-            RuntimeError("provider extension did not call api.register_provider"),
-        )
-
-    if scope.operations.bundle is None:
-        # When the operations atom itself failed to install (e.g. sandbox
-        # allocation error), surface that root cause instead of the generic
-        # missing-registration symptom — callers dispatch on it (bench
-        # retries transient gateway errors).
-        ops_error = next(
-            (
-                exc for module_path, exc in install_errors.items()
-                if "operations" in module_path
-            ),
-            None,
-        )
-        if ops_error is not None:
-            raise ExtensionLoadError("<operations>", ops_error) from ops_error
-        raise ExtensionLoadError(
-            "<operations>",
-            RuntimeError(
-                "no atom registered Operations; the active scenario manifest "
-                "must list an atom that calls api.register_operations(...) "
-                "(default: agentm.extensions.builtin.operations)"
-            ),
-        )
-
-    if config.tool_allowlist is not None:
-        tools[:] = [t for t in tools if t.name in config.tool_allowlist]
-
-    if config.extra_tools:
-        existing_names = {t.name for t in tools}
-        for tool in config.extra_tools:
-            if tool.name in existing_names:
-                raise ExtensionLoadError(
-                    "<extra_tools>",
-                    ValueError(
-                        f"Tool name conflict: '{tool.name}' is already "
-                        f"registered by an atom. Each tool must have a "
-                        f"unique name."
-                    ),
+    resolved.extend(_copy_extension_specs(extra_extensions))
+    if atom_configs:
+        configured: list[ExtensionSpec] = []
+        for spec in resolved:
+            manifest = _load_manifest(spec)
+            atom_name = manifest.name if manifest is not None else spec.module_path
+            configured.append(
+                spec.with_config(
+                    {
+                        **spec.config,
+                        **atom_configs.get(atom_name, {}),
+                    }
                 )
-            tools.append(tool)
-            existing_names.add(tool.name)
+            )
+        resolved = configured
+    return resolved, base_dir, scenario_name
 
-    active_provider = resolve_provider_config(
-        providers, provider_resolver, provider_path=provider_path
-    )
-    active_provider_ref.value = active_provider
 
-    if config.loop_config is None:
-        registered_loop = services.get(LOOP_BUDGET_SERVICE)
-        if isinstance(registered_loop, LoopConfig):
-            loop_config_ref.value = registered_loop
+def _load_manifest(spec: ExtensionSpec) -> ExtensionManifest | None:
+    module_path = spec.module_path
+    module = load_extension_module(spec)
+    manifest = module.__dict__.get("MANIFEST")
+    if manifest is None:
+        return None
+    if not isinstance(manifest, ExtensionManifest):
+        raise ExtensionLoadError(
+            module_path,
+            TypeError("MANIFEST must be an ExtensionManifest"),
+        )
+    return manifest
 
-    loop = AgentLoop(
-        stream_fn=active_provider.stream_fn,
-        bus=bus,
-        config=loop_config_ref.value,
-    )
-    loop_ref.value = loop
 
-    session_manager.attach_bus(bus)
+def _service_capabilities(services: ServiceRegistry | None) -> set[str]:
+    """Host-provided capabilities a cold composition may solve against.
 
-    for msg in config.initial_messages:
-        session_manager.append_message(msg)
+    Only services: nothing else exists yet at composition time, and the
+    embedder's tools are deliberately not offered to the solver — an atom's
+    place in the plan is decided by the atoms in the plan, so letting a host
+    tool satisfy ``tool:x`` would reorder installs behind the embedder's back.
 
-    eval_sandbox = await apply_atom_source_overrides(
-        reloader=reloader,
-        bus=bus,
-        resource_writer=atom_source_writer,
-        cwd=config.cwd,
-        session_id=session_id,
-        overrides=config.atom_source_overrides or {},
-    )
+    A late install solves against a wider set (``SessionRuntime.
+    _live_capability_keys``), and that difference is the contract, not drift:
+    what narrows this set is ordering, and a late install has no plan to be
+    ordered within. So an atom requiring ``tool:x`` that only the embedder
+    provides is rejected at composition time and accepted at runtime — the
+    first because it cannot be placed, the second because there is nothing to
+    place it among.
+    """
 
-    runtime = SessionRuntime(
-        bus=bus,
-        session_manager=session_manager,
-        resource_loader=resource_loader,
-        loop=loop,
-        active_provider_ref=active_provider_ref,
-        tools=tools,
-        commands=commands,
-        providers=providers,
-        renderers=renderers,
-        apis=apis,
-        services=services,
-        reloader=reloader,
-        inbox=inbox,
-    )
-    instance = session_cls(
-        cwd=config.cwd,
-        runtime=runtime,
-        session_id=session_id,
-        parent_bus=config.parent_bus,
-        parent_session_id=config.parent_session_id,
-        eval_sandbox=eval_sandbox,
-    )
-    services["session_interrupt"] = instance.interrupt
+    if services is None:
+        return set()
+    return live_capability_keys(services=services.names())
 
-    await bus.emit(
-        SessionReadyEvent.CHANNEL,
-        SessionReadyEvent(
-            cwd=config.cwd,
-            session_id=session_id,
-            tool_names=tuple(t.name for t in tools),
-            command_names=tuple(
-                name for name, spec in commands.items() if spec.user_invokable
-            ),
-            extension_module_paths=tuple(module_path for module_path, _ in to_load),
-            model=active_provider.model,
-            root_session_id=root_session_id,
-            task_id=config.task_id,
-            persona=config.persona,
-            task_class=config.task_class,
-            eval_run_id=config.eval_run_id,
-            eval_task_id=config.eval_task_id,
-        ),
-    )
 
-    if config.parent_bus is not None:
-        await config.parent_bus.emit(
-            ChildSessionStartEvent.CHANNEL,
-            ChildSessionStartEvent(
-                child_session_id=session_id,
-                parent_session_id=config.parent_session_id or "unknown",
-                purpose=config.purpose,
+def _extension_plan(
+    specs: Sequence[ExtensionSpec],
+    *,
+    available_capabilities: set[str] | None = None,
+) -> list[_ExtensionPlanItem]:
+    items: list[_ExtensionPlanItem] = []
+    by_name: dict[str, _ExtensionPlanItem] = {}
+    for index, spec in enumerate(specs):
+        module_path = spec.module_path
+        manifest = _load_manifest(spec)
+        name = manifest.name if manifest is not None else module_path
+        item = _ExtensionPlanItem(
+            spec=spec,
+            module_path=module_path,
+            config=dict(spec.config),
+            index=index,
+            name=name,
+            manifest=manifest,
+            requires=manifest.requires if manifest is not None else (),
+            after=manifest.after if manifest is not None else (),
+            registers=manifest.registers if manifest is not None else (),
+            provides=provided_capability_keys(
+                atom_name=name,
+                registers=manifest.registers if manifest is not None else (),
             ),
         )
+        if name in by_name:
+            previous = by_name[name]
+            raise ValueError(
+                f"duplicate atom {name!r}: {previous.module_path!r} and {module_path!r}"
+            )
+        items.append(item)
+        by_name[name] = item
 
-    # Surface the trajectory-inspection command for sessions that directly hold
-    # a useful conversation. Programmatic wrapper sessions can suppress this and
-    # log their meaningful child handles instead.
-    if config.log_trace_command:
-        logger.info(
-            "trace ({purpose}):  agentm trace messages --session {sid} --format text",
-            purpose=config.trace_label or config.purpose or "session",
-            sid=session_id,
+    available = set(available_capabilities or ())
+    plan_capabilities = {capability for item in items for capability in item.provides}
+    missing: dict[str, list[str]] = {}
+    for item in items:
+        for requirement in item.requires:
+            key = requirement_key(requirement)
+            if key not in available and key not in plan_capabilities:
+                missing.setdefault(item.name, []).append(requirement)
+    if missing:
+        detail = "; ".join(
+            f"{name} requires {', '.join(deps)}"
+            for name, deps in sorted(missing.items())
+        )
+        raise ValueError(f"unsatisfied atom dependencies: {detail}")
+
+    # ``after`` constrains order and nothing else, so only the targets this
+    # plan actually contains constrain anything: naming an absent atom is a
+    # preference about a composition that did not happen, and saying nothing
+    # is the whole of what it means.
+    deferred = {
+        item.name: {
+            key
+            for key in (requirement_key(entry) for entry in item.after)
+            if key in plan_capabilities
+        }
+        for item in items
+    }
+    remaining = dict(by_name)
+    ordered: list[_ExtensionPlanItem] = []
+    provided = set(available)
+    while remaining:
+        ready = [
+            item
+            for item in remaining.values()
+            if all(
+                requirement_key(requirement) in provided
+                for requirement in item.requires
+            )
+            and deferred[item.name] <= provided
+        ]
+        if not ready:
+            cycle = ", ".join(sorted(remaining))
+            raise ValueError(f"cyclic atom dependencies: {cycle}")
+        # Among items the graph does not order, the composition's own listing
+        # decides -- it is the only order left, and it is the author's.
+        ready.sort(key=lambda item: item.index)
+        chosen = ready[0]
+        ordered.append(chosen)
+        provided.update(chosen.provides)
+        del remaining[chosen.name]
+    return ordered
+
+
+def _verify_registered_capabilities(
+    session: Session,
+    item: _ExtensionPlanItem,
+    *,
+    plan_required_keys: frozenset[str],
+) -> None:
+    """Check manifest ``registers`` declarations against reality after install.
+
+    Dependency solving trusts ``registers``, so a declared-but-missing
+    capability that some plan member required is a composition lie and fails
+    the install. A missing declaration nobody required only logs a warning —
+    provisions may legitimately depend on config (e.g. an enabled-tools
+    subset), and runtime consumers still fail loudly at their own lookup.
+    Kinds without an addressable registry (``event``, ``context_policy``)
+    are skipped; presence is what is verified, so a pre-existing binding the
+    atom deliberately preserved (host override) passes.
+    """
+
+    missing: list[str] = []
+    for declared in item.registers:
+        ref = parse_capability_ref(declared)
+        if ref.kind in {"service", "operations"}:
+            name = ref.name if ref.kind == "service" else f"operations:{ref.name}"
+            present = session.services.has(name)
+        elif ref.kind == "tool":
+            present = any(tool.name == ref.name for tool in session.tools)
+        elif ref.kind == "provider":
+            present = session.has_provider(ref.name)
+        elif ref.kind == "trigger_renderer":
+            present = ref.name in session.trigger_renderers
+        else:
+            continue
+        if not present:
+            missing.append(declared)
+    required_missing = [
+        declared
+        for declared in missing
+        if requirement_key(declared) in plan_required_keys
+    ]
+    if required_missing:
+        raise ExtensionLoadError(
+            item.module_path,
+            RuntimeError(
+                "manifest declares capabilities that other atoms require but "
+                f"install() did not provide: {', '.join(required_missing)}"
+            ),
+        )
+    for declared in missing:
+        logger.warning(
+            "atom {} declares {} in registers but did not provide it",
+            item.name,
+            declared,
         )
 
-    return instance
 
-
-def _configure_manifest(cwd: str) -> None:
-    # Each session binds its own path on the ContextVar — asyncio tasks
-    # copy the context at creation, so concurrent sessions in different
-    # cwds do not race. Sequential ``create_agent_session`` calls inside
-    # the same task overwrite the binding, which matches the desired
-    # "current session's cwd wins" semantics.
-    try:
-        from agentm.core._internal.catalog import manifest as _manifest_mod
-
-        manifest_path = _find_core_manifest(cwd)
-        if manifest_path is not None:
-            _manifest_mod.configure_manifest_path(manifest_path)
-    except Exception as exc:
-        logger.warning(f"agentm core-manifest configuration failed during startup: {exc!r}")
-
-
-def _find_core_manifest(cwd: str) -> Path | None:
-    candidates = [_session_cwd_path(cwd) / "core-manifest.yaml"]
-    project_root = os.environ.get("AGENTM_PROJECT_ROOT")
-    if project_root:
-        candidates.append(expand_path(project_root) / "core-manifest.yaml")
-
-    try:
-        import agentm
-
-        walker = Path(agentm.__file__).parent
-        for _ in range(6):
-            candidates.append(walker / "core-manifest.yaml")
-            if walker.parent == walker:
-                break
-            walker = walker.parent
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("agentm core-manifest package-root discovery failed: {}", exc)
-
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+def _get_scenario_loader(services: ServiceRegistry | None) -> ScenarioLoader | None:
+    if services is None:
+        return None
+    candidate = services.get(SCENARIO_LOADER_SERVICE)
+    if isinstance(candidate, ScenarioLoader):
+        return candidate
     return None
 
 
-async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) -> None:
-    if config.no_extensions:
-        return
-    from agentm.extensions import discover as discover_mod
+async def _cold_fork_head(
+    store: TrajectoryStore | None,
+    *,
+    source_session_id: str,
+    fork_point: TurnRef,
+    ctx: SessionContext,
+) -> TrajectoryHead | None:
+    """A head anchored to the source's node at the fork point.
 
-    for label, discover_fn in [
-        ("contrib", discover_mod.discover_contrib_atoms),
-        ("home", discover_mod.discover_home_atoms),
-    ]:
-        try:
-            discover_fn()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("session_factory: {} discovery failed: {}", label, exc)
-            await bus.emit(
-                DiagnosticEvent.CHANNEL,
-                DiagnosticEvent(
-                    level="error",
-                    source="auto_discovery",
-                    message=f"{label} atom discovery failed: {exc}",
-                ),
-            )
+    A fork built only from a prefix of turns is a run with no logical
+    predecessor: node-level readers see it beginning from nothing, and anything
+    that inherits state across a fork -- compaction being the one that exists
+    today -- has no source to inherit from. The in-process fork sets this
+    anchor; a fork assembled from the store had no way to, so this builds the
+    same one from what the store holds.
 
-
-async def _resolve_extensions(
-    config: AgentSessionConfig, bus: EventBus
-) -> list[tuple[str, dict[str, Any]]]:
-    from agentm.extensions import discover as discover_mod
-
-    roles = discover_mod.discover_by_role()
-    session_cwd = _session_cwd_path(config.cwd)
-
-    def _role_module(role: str) -> str:
-        entry = roles.get(role)
-        if entry is None:
-            raise RuntimeError(
-                f"floor role {role!r} has no atom — no builtin/contrib atom "
-                "declares this role in MANIFEST.provides_role"
-            )
-        return entry.module_path
-
-    command_parser_module = _role_module(COMMAND_PARSER)
-    compaction_prompts_module = _role_module(COMPACTION_PROMPTS)
-    prompt_registry_module = _role_module(PROMPT_REGISTRY)
-    system_prompt_module = _role_module(SYSTEM_PROMPT_PROVIDER)
-    sub_agent_runtime_entry = roles.get(SUB_AGENT_RUNTIME)
-    # Scenario-independent resilience/hygiene atoms, auto-mounted into every
-    # session with default config. A scenario that lists one of these keeps
-    # its own config (ensure_floor_atom skips modules already present).
-    # Mirror any change in ``extensions.loader._FLOOR_ATOM_NAMES``.
-    resilience_floor_modules = (
-        "agentm.extensions.builtin.retry_policy",
-        "agentm.extensions.builtin.tool_result_cap",
-        "agentm.extensions.builtin.tool_error_messages",
-        "agentm.extensions.builtin.thinking_retry",
+    ``None`` when the source's nodes cannot be resolved, which is the previous
+    behaviour: an anchor that cannot be established must not stop the run.
+    """
+    if store is None:
+        return None
+    try:
+        nodes = await asyncio.to_thread(
+            store.query_nodes,
+            TrajectoryNodeQuery(
+                session_id=source_session_id,
+                turn_index=fork_point if isinstance(fork_point, int) else None,
+                turn_id=fork_point if isinstance(fork_point, str) else None,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - lineage is not worth a failed run
+        logger.warning(
+            "fork: no node index for {} at {}: {}", source_session_id, fork_point, exc
+        )
+        return None
+    if not nodes:
+        logger.warning(
+            "fork: {} has no node at {}; the fork will record no logical parent",
+            source_session_id,
+            fork_point,
+        )
+        return None
+    return TrajectoryHead(
+        session_id=ctx.session_id,
+        head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+        branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+        root_session_id=ctx.root_session_id,
+        parent_session_id=ctx.parent_session_id,
+        logical_parent_id=nodes[-1].id,
+        status="active",
+        updated_at=time.time(),
     )
 
-    if config.no_extensions:
-        to_load: list[tuple[str, dict[str, Any]]] = []
-    elif config.extensions:
-        to_load = list(config.extensions)
-        ensure_floor_atom(to_load, prompt_registry_module)
-        ensure_floor_atom(to_load, compaction_prompts_module)
-        ensure_floor_atom(to_load, command_parser_module)
-        for floor_module in resilience_floor_modules:
-            ensure_floor_atom(to_load, floor_module)
-    elif config.scenario is not None:
-        from agentm.extensions.loader import ScenarioLoadError, load_scenario
 
-        try:
-            to_load, _scenario_meta = load_scenario(config.scenario)
-            config.scenario_dir = _scenario_meta.get("scenario_dir")
-        except ScenarioLoadError as exc:
-            await bus.emit(
-                DiagnosticEvent.CHANNEL,
-                DiagnosticEvent(
-                    level="error",
-                    source="scenario_loader",
-                    message=str(exc),
-                ),
+async def _ensure_store_session(
+    store: TrajectoryStore | None,
+    *,
+    meta: SessionMeta,
+    initial_turns: Sequence[Turn],
+    initial_head: TrajectoryHead | None,
+    root_session_id: str,
+    parent_session_id: str | None,
+    trigger_renderers: Mapping[str, TriggerRenderer],
+) -> None:
+    if store is None:
+        return
+    exists = await asyncio.to_thread(store.session_exists, meta.id)
+    if not exists:
+        nodes = (
+            []
+            if initial_head is not None
+            else turns_to_nodes(
+                initial_turns,
+                session_id=meta.id,
+                root_session_id=root_session_id,
+                parent_session_id=parent_session_id,
+                renderers=dict(trigger_renderers),
             )
-            raise
-        except Exception as exc:  # noqa: BLE001
-            await bus.emit(
-                DiagnosticEvent.CHANNEL,
-                DiagnosticEvent(
-                    level="error",
-                    source="scenario_loader",
-                    message=str(exc),
-                ),
-            )
-            raise
-        ensure_floor_atom(to_load, prompt_registry_module)
-        ensure_floor_atom(to_load, compaction_prompts_module)
-        ensure_floor_atom(to_load, command_parser_module)
-        for floor_module in resilience_floor_modules:
-            ensure_floor_atom(to_load, floor_module)
-        # Layer ``<cwd>/.agentm/atoms/`` agent-installed atoms on top of the
-        # scenario. Without this merge, ``api.install_atom`` calls would only
-        # take effect for the lifetime of one session — the next process
-        # start would load the scenario, see no user atoms, and forget
-        # everything the agent installed previously, even though the source
-        # files are still on disk. Skip duplicates so a scenario that
-        # explicitly lists a user-atom module wins over the auto-discovered
-        # entry (preserves config).
-        user_atoms = await collect_auto_discovered_atoms(
-            bus=bus,
-            sources=(
-                AtomSource(
-                    label="home",
-                    discover=discover_mod.discover_home_atoms,
-                    skip_label="home atom ",
-                ),
-                AtomSource(
-                    label="user",
-                    discover=lambda: discover_mod.discover_user_atoms(session_cwd),
-                    skip_label="user atom ",
-                ),
-            ),
         )
-        existing_modules = {module for module, _ in to_load}
-        for module_path, atom_config in user_atoms:
-            if module_path not in existing_modules:
-                to_load.append((module_path, atom_config))
+        last = nodes[-1] if nodes else None
+        head = initial_head or TrajectoryHead(
+            session_id=meta.id,
+            head_id=DEFAULT_TRAJECTORY_HEAD_ID,
+            branch_id=DEFAULT_TRAJECTORY_BRANCH_ID,
+            node_id=last.id if last is not None else None,
+            seq=last.seq if last is not None else None,
+            root_session_id=root_session_id,
+            parent_session_id=parent_session_id,
+            status="active",
+            updated_at=time.time(),
+        )
+        await await_known_outcome(
+            asyncio.to_thread(
+                store.create_session,
+                meta,
+                turns=initial_turns,
+                nodes=nodes,
+                head=head,
+            )
+        )
+
+
+def _register_default_catalog_services(services: ServiceRegistry) -> None:
+    if not services.has(VERSIONED_RESOURCE_STORE_SERVICE):
+        services.bind(
+            VERSIONED_RESOURCE_STORE_ROLE,
+            InMemoryVersionedResourceStore(),
+        )
+    if not services.has(ATOM_CATALOG_SERVICE):
+        bind_atom_catalog(services, InMemoryAtomCatalog())
+
+
+def _register_default_query_store(
+    services: ServiceRegistry,
+    store: TrajectoryStore | None,
+) -> None:
+    if store is None or services.has(TRAJECTORY_QUERY_STORE_SERVICE):
+        return
+    services.bind(
+        TRAJECTORY_QUERY_STORE,
+        TrajectoryStoreQueryAdapter(store),
+    )
+
+
+def _resolve_session_spec(config: AgentSessionConfig) -> ResolvedSessionSpec | None:
+    resolver = config.spec_resolver
+    if resolver is None:
+        return None
+    return resolver.resolve(config)
+
+
+def _compose_config_services(
+    services: ServiceRegistry,
+    config: AgentSessionConfig,
+) -> ResolvedSessionSpec | None:
+    """Register the non-boundary AgentSessionConfig services shared by root/child.
+
+    Single source for the experiment / loop-budget / scenario-loader /
+    resolved-spec composition, so the root and child pipelines cannot diverge.
+    Capability boundaries are not config fields: a host binds them into
+    ``host_services`` before construction (see ``AgentSessionConfig``).
+    """
+
+    if config.experiment is not None:
+        experiment = freeze_json(config.experiment)
+        if not isinstance(experiment, Mapping):
+            raise TypeError("experiment config must be a JSON object")
+        services.register(EXPERIMENT_SERVICE, experiment, scope="tree")
+    if config.loop_config is not None:
+        services.register(LOOP_BUDGET_SERVICE, config.loop_config, scope="session")
+    if config.scenario_loader is not None:
+        services.register(
+            SCENARIO_LOADER_SERVICE,
+            config.scenario_loader,
+            scope="tree",
+        )
+    resolved_spec = _resolve_session_spec(config)
+    if resolved_spec is not None:
+        services.register(
+            RESOLVED_SESSION_SPEC_SERVICE,
+            resolved_spec,
+            ResolvedSessionSpec,
+            scope="session",
+        )
+    return resolved_spec
+
+
+def _resolved_atom_config(
+    spec: ResolvedSessionSpec | None,
+    overrides: dict[str, dict[str, JsonValue]],
+) -> dict[str, dict[str, JsonValue]]:
+    source = overrides if spec is None else spec.atom_config
+    return {module: dict(config) for module, config in source.items()}
+
+
+def _config_fingerprint(config: object) -> str | None:
+    if not config:
+        return None
+    payload = json.dumps(
+        config,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+async def _freeze_atom_version(
+    store: VersionedResourceStore,
+    item: _ExtensionPlanItem,
+) -> ResourceVersion:
+    content, metadata = build_atom_identity_payload(
+        source=item.spec.source,
+        manifest=item.manifest,
+        config=item.config,
+    )
+    version = await store.put(
+        resource_id=f"atom:{item.name}",
+        content=content,
+        media_type="application/vnd.agentm.atom-identity+json",
+        metadata=metadata,
+    )
+    await store.alias(f"atom:{item.name}:active", version)
+    return version
+
+
+def _atom_activation(
+    item: _ExtensionPlanItem,
+    *,
+    version: ResourceVersion | None = None,
+) -> AtomActivation:
+    return AtomActivation(
+        name=item.name,
+        module_path=item.module_path,
+        version=version,
+        requires=tuple(item.requires),
+        registers=tuple(item.registers),
+        required_capabilities=tuple(
+            requirement_key(requirement) for requirement in item.requires
+        ),
+        provided_capabilities=tuple(item.provides),
+        config_fingerprint=_config_fingerprint(
+            normalize_atom_config(item.manifest, item.config)
+        ),
+    )
+
+
+async def _record_active_set(
+    session: Session,
+    plan: Sequence[_ExtensionPlanItem],
+    *,
+    created_at: float,
+) -> ActiveSetFingerprint | None:
+    catalog = session.services.get_role(ATOM_CATALOG_ROLE)
+    if catalog is None:
+        return None
+    version_store = session.services.get_role(VERSIONED_RESOURCE_STORE_ROLE)
+    activations: list[AtomActivation] = []
+    for item in plan:
+        version = (
+            await _freeze_atom_version(version_store, item)
+            if version_store is not None
+            else None
+        )
+        activations.append(_atom_activation(item, version=version))
+    provider_identity = session.provider_session_identity()
+    fingerprint = await catalog.record_active_set(
+        CatalogActiveSetInput(
+            session_id=session.id,
+            root_session_id=session.ctx.root_session_id,
+            parent_session_id=session.ctx.parent_session_id,
+            scenario=session.ctx.scenario,
+            provider=provider_identity.name if provider_identity is not None else None,
+            created_at=created_at,
+            atoms=tuple(activations),
+        )
+    )
+    session.services.bind(ACTIVE_SET_FINGERPRINT_ROLE, fingerprint, replace=True)
+    return fingerprint
+
+
+@dataclass(slots=True)
+class SessionBuildConfig:
+    """Normalized composition and runtime inputs for the low-level factory."""
+
+    scenario: str | None = None
+    stream_fn: StreamFn | None = None
+    model: Model | None = None
+    system: str | None = None
+    cwd: str = ""
+    purpose: str = "root"
+    store: TrajectoryStore | None = None
+    graph: SessionGraphProtocol | None = None
+    session_context: SessionContext | None = None
+    session_id: str | None = None
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    bus: EventBus | None = None
+    initial_turns: list[Turn] | None = None
+    initial_head: TrajectoryHead | None = None
+    fork_point: TurnRef | None = None
+    fork_source_session_id: str | None = None
+    tools: list[Tool] | None = None
+    context_policies: list[ContextPolicy] | None = None
+    trigger_renderers: dict[str, TriggerRenderer] | None = None
+    codec: CodecRegistry | None = None
+    extensions: Sequence[ExtensionInput] | None = None
+    extra_extensions: Sequence[ExtensionInput] = ()
+    provider: ExtensionInput | None = None
+    provider_identity: ProviderSessionIdentity | None = None
+    atom_configs: dict[str, dict[str, JsonValue]] | None = None
+    scenario_loader: ScenarioLoader | None = None
+    services: ServiceRegistry | None = None
+    resolved_spec: ResolvedSessionSpec | None = None
+    max_turns: int | None = None
+    max_tool_calls: int | None = None
+    tool_allowlist: list[str] | None = None
+    thinking: ThinkingLevel = "off"
+    cancel_signal: CancelSignal | None = None
+
+    # Capability boundaries are pre-bound into ``services`` by the caller
+    # (host_services / role bindings), not passed as fields here.
+
+
+async def _cleanup_failed_session(
+    session: Session,
+    creation_error: BaseException,
+) -> None:
+    try:
+        await session.shutdown()
+    except BaseException as cleanup_error:  # noqa: BLE001 - re-raised with the creation error
+        raise BaseExceptionGroup(
+            "session creation and cleanup failed",
+            (creation_error, cleanup_error),
+        ) from creation_error
+
+
+async def create_session(
+    config: SessionBuildConfig,
+    *,
+    session_type: type[Session] = Session,
+) -> Session:
+    """Create a root SDK session."""
+
+    resolved_services = (
+        ServiceRegistry() if config.services is None else config.services
+    )
+    effective_loader = (
+        _get_scenario_loader(resolved_services)
+        if config.scenario_loader is None
+        else config.scenario_loader
+    )
+    extension_specs, scenario_dir, scenario_name = _resolve_extensions(
+        scenario=config.scenario,
+        extensions=config.extensions,
+        extra_extensions=config.extra_extensions,
+        atom_configs=config.atom_configs,
+        scenario_loader=effective_loader,
+    )
+    if scenario_dir is None and config.resolved_spec is not None:
+        # A resolver already expanded the scenario into a flat extension list,
+        # so the loader is never called here and the scenario's own directory
+        # only survives if the resolver carried it.
+        scenario_dir = config.resolved_spec.scenario_dir
+    if effective_loader is not None:
+        resolved_services.register(
+            SCENARIO_LOADER_SERVICE,
+            effective_loader,
+            scope="tree",
+        )
+    _register_default_catalog_services(resolved_services)
+    _register_default_query_store(resolved_services, config.store)
+
+    if config.session_context is None:
+        resolved_session_id = config.session_id or uuid.uuid4().hex[:16]
+        resolved_root_id = config.root_session_id or resolved_session_id
+        ctx = SessionContext(
+            session_id=resolved_session_id,
+            root_session_id=resolved_root_id,
+            parent_session_id=config.parent_session_id,
+            fork_source_session_id=config.fork_source_session_id,
+            fork_point=config.fork_point,
+            cwd=config.cwd or "",
+            purpose=config.purpose,
+            scenario=scenario_name,
+            scenario_dir=scenario_dir,
+        )
     else:
-        to_load = await collect_auto_discovered_atoms(
-            bus=bus,
-            sources=(
-                AtomSource(
-                    label="builtin",
-                    discover=discover_mod.discover_builtin,
-                ),
-                AtomSource(
-                    label="contrib",
-                    discover=discover_mod.discover_contrib_atoms,
-                    skip_label="contrib atom ",
-                ),
-                AtomSource(
-                    label="home",
-                    discover=discover_mod.discover_home_atoms,
-                    skip_label="home atom ",
-                ),
-                AtomSource(
-                    label="user",
-                    discover=lambda: discover_mod.discover_user_atoms(session_cwd),
-                    skip_label="user atom ",
+        ctx = config.session_context
+
+    initial_head = config.initial_head
+    if (
+        initial_head is None
+        and config.fork_source_session_id is not None
+        and config.fork_point is not None
+    ):
+        initial_head = await _cold_fork_head(
+            config.store,
+            source_session_id=config.fork_source_session_id,
+            fork_point=config.fork_point,
+            ctx=ctx,
+        )
+
+    session = session_type(
+        SessionRuntimeConfig(
+            ctx=ctx,
+            trajectory=Trajectory(turns=config.initial_turns),
+            bus=config.bus,
+            stream_fn=config.stream_fn,
+            model=config.model,
+            system=config.system,
+            store=config.store,
+            graph=config.graph,
+            tools=list(config.tools or ()),
+            context_policies=list(config.context_policies or ()),
+            trigger_renderers=dict(config.trigger_renderers or {}),
+            codec=config.codec,
+            max_turns=config.max_turns,
+            max_tool_calls=config.max_tool_calls,
+            tool_allowlist=config.tool_allowlist,
+            thinking=config.thinking,
+            cancel_signal=config.cancel_signal,
+            provider_identity=config.provider_identity,
+            services=resolved_services,
+            cwd=config.cwd,
+            purpose=config.purpose,
+        )
+    )
+    try:
+        plan_specs = list(extension_specs)
+        if config.provider is not None:
+            plan_specs.append(normalize_extension_spec(config.provider))
+        plan = _extension_plan(
+            plan_specs,
+            available_capabilities=_service_capabilities(resolved_services),
+        )
+        plan_required_keys = frozenset(
+            requirement_key(requirement)
+            for planned in plan
+            for requirement in planned.requires
+        )
+        for item in plan:
+            await install_extension(session, item.spec)
+            _verify_registered_capabilities(
+                session,
+                item,
+                plan_required_keys=plan_required_keys,
+            )
+        created_at = time.time()
+        active_set = await _record_active_set(session, plan, created_at=created_at)
+        await _ensure_store_session(
+            config.store,
+            meta=SessionMeta(
+                id=session.id,
+                parent_id=ctx.parent_session_id,
+                fork_point=config.fork_point,
+                purpose=ctx.purpose,
+                cwd=ctx.cwd,
+                created_at=created_at,
+                config=session_meta_config(
+                    ctx,
+                    resolved_spec=config.resolved_spec,
+                    active_set=active_set,
+                    provider_identity=session.provider_session_identity(),
                 ),
             ),
+            initial_turns=config.initial_turns or (),
+            initial_head=initial_head,
+            root_session_id=ctx.root_session_id,
+            parent_session_id=ctx.parent_session_id,
+            trigger_renderers=session.trigger_renderers,
         )
-        ensure_floor_atom(to_load, system_prompt_module)
-        for index, (module_path, _cfg) in enumerate(to_load):
-            if module_path == system_prompt_module:
-                to_load[index] = (module_path, {"prompt": ""})
-                break
+    except BaseException as creation_error:
+        await _cleanup_failed_session(session, creation_error)
+        raise
 
-    if not config.no_extensions and not config.extensions and config.extra_extensions:
-        existing_modules = {m for m, _ in to_load}
-        for module_path, ext_cfg in config.extra_extensions:
-            if module_path not in existing_modules:
-                to_load.append((module_path, ext_cfg))
-                existing_modules.add(module_path)
-    if not config.no_extensions:
-        loaded_modules = {module_path for module_path, _cfg in to_load}
-        # The sub-agent runtime injects inherited prompt text via the
-        # system-prompt hook, so any session that loads it needs an atom
-        # filling the SYSTEM_PROMPT_PROVIDER role even if the scenario
-        # author forgot to list one.
-        if (
-            sub_agent_runtime_entry is not None
-            and sub_agent_runtime_entry.module_path in loaded_modules
-            and system_prompt_module not in loaded_modules
-        ):
-            to_load.insert(0, (system_prompt_module, {"prompt": ""}))
+    return session
 
-        from agentm.core.lib.atom_config import (
-            AtomConfigError,
-            resolve_atom_configs,
-        )
-        from agentm.extensions.loader import sort_extensions_by_requires
 
-        # Bind env (AGENTM_<ATOM>_<KEY>) and --set overrides on top of the
-        # manifest-supplied config before install. Done once here so every
-        # presenter (CLI, channels, embedded SDK) gets identical semantics.
-        # A malformed value degrades like a scenario-load failure: emit a
-        # diagnostic and fall back to the manifest configs rather than
-        # aborting the whole session build.
-        try:
-            to_load = resolve_atom_configs(
-                to_load, overrides=config.atom_config_overrides
+async def create_from_config(
+    config: AgentSessionConfig,
+    *,
+    restored_context: SessionContext | None = None,
+    restored_provider_identity: ProviderSessionIdentity | None = None,
+    session_type: type[Session] = Session,
+    host_services: ServiceRegistry | None = None,
+) -> Session:
+    """Create a root session from the public SDK config dataclass."""
+
+    max_turns = config.loop_config.max_turns if config.loop_config else None
+    max_tool_calls = config.loop_config.max_tool_calls if config.loop_config else None
+    services = ServiceRegistry()
+    if host_services is not None:
+        services.update_from(host_services)
+    resolved_spec = _compose_config_services(services, config)
+    trajectory_store = config.trajectory_store
+    session = await create_session(
+        SessionBuildConfig(
+            scenario=(
+                resolved_spec.scenario if resolved_spec is not None else config.scenario
+            ),
+            extensions=(
+                list(resolved_spec.extensions)
+                if resolved_spec is not None
+                else config.extensions
+            ),
+            extra_extensions=config.extra_extensions,
+            provider=resolved_spec.provider
+            if resolved_spec is not None
+            else config.provider,
+            provider_identity=(
+                restored_provider_identity
+                if restored_provider_identity is not None
+                else (
+                    resolved_spec.provider_identity
+                    if resolved_spec is not None
+                    else None
+                )
+            ),
+            stream_fn=config.stream_fn,
+            model=config.model,
+            system=config.system,
+            atom_configs=_resolved_atom_config(
+                resolved_spec, config.atom_config_overrides
+            ),
+            scenario_loader=config.scenario_loader,
+            cwd=config.cwd,
+            purpose=config.purpose,
+            store=trajectory_store,
+            session_context=restored_context,
+            session_id=config.session_id,
+            root_session_id=config.root_session_id,
+            parent_session_id=config.parent_session_id,
+            fork_source_session_id=config.fork_source_session_id,
+            fork_point=config.fork_point,
+            bus=config.bus,
+            initial_turns=config.initial_turns,
+            services=services,
+            resolved_spec=resolved_spec,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
+            tool_allowlist=config.tool_allowlist,
+            cancel_signal=config.cancel_signal,
+        ),
+        session_type=session_type,
+    )
+
+    try:
+        for tool in config.extra_tools:
+            session.register_tool(tool)
+    except BaseException as creation_error:
+        await _cleanup_failed_session(session, creation_error)
+        raise
+    return session
+
+
+async def create_child_session(
+    *,
+    parent: Session,
+    config: AgentSessionConfig,
+) -> Session:
+    """Create a child session through the same SDK factory pipeline."""
+
+    child_services = ServiceRegistry()
+    child_services.inherit_from(parent.services)
+    _register_default_catalog_services(child_services)
+    resolved_spec = _compose_config_services(child_services, config)
+    # Copied once, here, and then this child diverges. Deliberately not a link
+    # to the parent: linking is for things that share a lifetime, and an atom's
+    # context is part of its session -- unlinking is how it leaves -- while a
+    # child session is a separate unit of work whose parent is a predecessor
+    # rather than a container. Both ways of making one say the same thing:
+    # spawn starts a new agent, fork branches an existing one, and neither
+    # means "and keep tracking me".
+    #
+    # So a boundary bound into the parent after this call does not reach this
+    # child, which ``test_spawn_inheritance`` pins. A host that wants different
+    # boundaries binds them before spawning; per-child overrides are not a
+    # config surface.
+    provider_spec = (
+        resolved_spec.provider if resolved_spec is not None else config.provider
+    )
+    inherit_provider = (
+        provider_spec is None and config.stream_fn is None and config.model is None
+    )
+    if inherit_provider:
+        inherited_provider = parent.get_provider()
+        if inherited_provider is not None:
+            child_services.register(
+                f"provider:{inherited_provider.name}",
+                inherited_provider,
+                scope="session",
             )
-        except AtomConfigError as exc:
-            await bus.emit(
-                DiagnosticEvent.CHANNEL,
-                DiagnosticEvent(
-                    level="error",
-                    source="atom_config",
-                    message=str(exc),
+
+    snapshot = parent.composition_snapshot(
+        include_provider_atoms=inherit_provider,
+    )
+    scenario_loader = (
+        _get_scenario_loader(child_services)
+        if config.scenario_loader is None
+        else config.scenario_loader
+    )
+    inherit_parent_composition = (
+        resolved_spec is None and config.scenario is None and config.extensions is None
+    )
+    if resolved_spec is not None:
+        scenario = resolved_spec.scenario
+    elif config.scenario is not None:
+        scenario = config.scenario
+    else:
+        scenario = parent.ctx.scenario
+    requested_extensions: Sequence[ExtensionInput] | None
+    if resolved_spec is not None:
+        requested_extensions = list(resolved_spec.extensions)
+    elif inherit_parent_composition:
+        requested_extensions = list(snapshot.extensions)
+    else:
+        requested_extensions = config.extensions
+    extensions, scenario_dir, scenario_name = _resolve_extensions(
+        scenario=scenario,
+        extensions=requested_extensions,
+        extra_extensions=() if resolved_spec is not None else config.extra_extensions,
+        atom_configs=_resolved_atom_config(resolved_spec, config.atom_config_overrides),
+        scenario_loader=scenario_loader,
+    )
+    if inherit_parent_composition:
+        scenario_dir = parent.ctx.scenario_dir
+
+    child_id = config.session_id or uuid.uuid4().hex[:16]
+    child_store = (
+        parent.store if config.trajectory_store is None else config.trajectory_store
+    )
+    if child_store is not parent.store:
+        child_services.unregister(TRAJECTORY_QUERY_STORE_SERVICE)
+        child_services.unregister(TRAJECTORY_STORE_SERVICE)
+        _register_default_query_store(child_services, child_store)
+    child_ctx = parent.ctx.child(
+        session_id=child_id,
+        purpose=config.purpose,
+        cwd=config.cwd or None,
+        scenario=scenario_name,
+        scenario_dir=scenario_dir,
+    )
+
+    max_turns = config.loop_config.max_turns if config.loop_config else None
+    max_tool_calls = config.loop_config.max_tool_calls if config.loop_config else None
+
+    if config.parent_cancellation not in {"inherit", "independent"}:
+        raise ValueError("parent_cancellation must be 'inherit' or 'independent'")
+    parent_signal = (
+        snapshot.lineage_cancel if config.parent_cancellation == "inherit" else None
+    )
+    child_cancel_signal = (
+        CompositeCancelSignal(parent_signal, config.cancel_signal)
+        if parent_signal is not None and config.cancel_signal is not None
+        else config.cancel_signal
+        if config.cancel_signal is not None
+        else parent_signal
+    )
+
+    child = type(parent)(
+        SessionRuntimeConfig(
+            ctx=child_ctx,
+            trajectory=Trajectory(turns=config.initial_turns),
+            bus=config.bus,
+            stream_fn=(
+                snapshot.stream_fn if config.stream_fn is None else config.stream_fn
+            ),
+            model=snapshot.model if config.model is None else config.model,
+            system=config.system if config.system is not None else snapshot.system,
+            store=child_store,
+            graph=parent.graph,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
+            tool_allowlist=config.tool_allowlist,
+            cancel_signal=child_cancel_signal,
+            provider_identity=(
+                resolved_spec.provider_identity if resolved_spec is not None else None
+            ),
+            services=child_services,
+            cwd=config.cwd or parent.ctx.cwd,
+            purpose=config.purpose,
+        )
+    )
+    try:
+        plan_specs = list(extensions)
+        if provider_spec is not None:
+            plan_specs.append(normalize_extension_spec(provider_spec))
+        plan = _extension_plan(
+            plan_specs,
+            available_capabilities=_service_capabilities(child_services),
+        )
+        plan_required_keys = frozenset(
+            requirement_key(requirement)
+            for planned in plan
+            for requirement in planned.requires
+        )
+        for item in plan:
+            await install_extension(
+                child,
+                item.spec,
+                trigger="child_session_start",
+            )
+            _verify_registered_capabilities(
+                child,
+                item,
+                plan_required_keys=plan_required_keys,
+            )
+
+        for tool in config.extra_tools:
+            child.register_tool(tool)
+
+        created_at = time.time()
+        active_set = await _record_active_set(child, plan, created_at=created_at)
+        await _ensure_store_session(
+            child_store,
+            meta=SessionMeta(
+                id=child.id,
+                parent_id=parent.id,
+                purpose=config.purpose,
+                cwd=child_ctx.cwd,
+                created_at=created_at,
+                config=session_meta_config(
+                    child_ctx,
+                    resolved_spec=resolved_spec,
+                    active_set=active_set,
+                    provider_identity=child.provider_session_identity(),
                 ),
-            )
-        to_load = sort_extensions_by_requires(to_load, source="session extensions")
-    return to_load
+            ),
+            initial_turns=config.initial_turns,
+            initial_head=None,
+            root_session_id=child_ctx.root_session_id,
+            parent_session_id=child_ctx.parent_session_id,
+            trigger_renderers=child.trigger_renderers,
+        )
+    except BaseException as creation_error:
+        await _cleanup_failed_session(child, creation_error)
+        raise
+
+    return child
 
 
-__all__ = ["create_agent_session"]
+__all__ = [
+    "SessionBuildConfig",
+    "create_child_session",
+    "create_from_config",
+    "create_session",
+]

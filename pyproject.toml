@@ -1,76 +1,63 @@
 [project]
 name = "agentm"
-version = "0.2.5"
-description = "AgentM - an agent framework"
+version = "0.2.6"
+description = "AgentM SDK"
 readme = "README.md"
 authors = [{ name = "Aoyang Fang", email = "aoyangfang@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
+    "pydantic>=2.0",
+    "loguru>=0.7",
     "pyyaml>=6.0",
-    "anthropic>=0.86.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "python-frontmatter>=1.3.0",
+    "textual[syntax]>=2.0",
+    "sqlalchemy>=2.0",
+    "ast-grep-cli>=0.44.1",
+    # What the atoms this package ships actually import. They were extras, and
+    # each one bought a deferred `ImportError` in place of a resolution-time
+    # failure -- which is strictly worse: `pip install agentm` succeeded and the
+    # first model call died, or worse, `_is_openai_retryable` caught the
+    # ImportError and quietly answered "not retryable", so retries stopped
+    # existing instead of anything failing. If we ship the atom, we depend on
+    # what the atom imports.
+    "httpx>=0.28.0",
     "openai>=1.50.0",
-    "python-frontmatter>=1.1.0",
-    "pathspec>=1.0.4",
-    "typer>=0.25.1",
-    "python-dotenv>=1.0",
-    # ``tomllib`` is read-only stdlib; ``tomli-w`` is the writer used by
-    # ``agentm onboard`` to merge model profiles into ``config.toml`` while
-    # preserving existing tables.
-    "tomli-w>=1.0",
-    # Substrate dependency: the ``observability`` atom writes per-session
-    # OTLP/JSON ndjson via the SDK's standard processors + encoders. The
-    # ``otlp_export`` atom (opt-in) additionally fans spans + logs out
-    # over OTLP/gRPC or OTLP/HTTP-protobuf to a remote collector — picks
-    # up standard ``OTEL_EXPORTER_OTLP_*`` env vars.
+    "anthropic>=0.86.0",
+    "tiktoken>=0.12.0",
+    "jsonschema>=4.0",
     "opentelemetry-api>=1.30.0",
     "opentelemetry-sdk>=1.30.0",
     "opentelemetry-exporter-otlp>=1.30.0",
-    # Backs the ``live_inspector`` contrib atom — a WebSocket server that
-    # streams session events to an external UI (aegis-ui). Browsers cannot
-    # speak raw TCP, so WS is the load-bearing transport choice;
-    # ``websockets`` is pure-Python, ~70KB, and has no transitive deps.
-    "websockets>=12.0",
-    "loguru>=0.7",
-    "tiktoken>=0.12.0",
 ]
 
 [project.optional-dependencies]
-# Pulls in the ARL agent-env SDK so the builtin ``operations`` atom can use its
-# ``agent_env`` backend. Install with ``uv sync --extra agent-env``
-# (workspace) or ``pip install agentm[agent-env]``.
-agent-env = [
-    "arl-env>=0.19.8",
+# Only backends a deployment opts into, by writing a DSN or naming a scenario.
+# Nothing here is reached unless something in the configuration asks for it, so
+# an absent one cannot turn into a surprise at runtime the way an absent
+# provider SDK did.
+storage-postgres = [
+    "psycopg[binary]>=3.2.0",
 ]
-eval = [
-    "agentm-eval[all]",
-    "duckdb>=1.5.2",
-    # Fault-propagation-graph schema: the verifier natively emits
-    # ground-truth Scenario files in this format (fpg_scenario.json).
-    "fpg>=0.1.0",
-    # The verifier's hop/judge scenarios mount rca.default.duckdb_sql.
-    "rca-scenario",
-    # tau2-bench gym interface
-    "gymnasium>=1.0.0",
-    "rank_bm25>=0.2",
-    "tenacity>=8.0",
-]
-llmharness = ["llmharness"]
-mcp = ["agentm-mcp-bridge"]
-all-contrib = [
-    "llmharness",
-    "agentm-mcp-bridge",
+storage-clickhouse = [
+    "clickhouse-connect>=0.7.0",
 ]
 
 [dependency-groups]
 dev = [
+    # The suite sweeps every shipped atom and exercises every backend, so the
+    # dev environment installs the opt-in ones too. Without this, `uv sync`
+    # produces a venv the tests cannot run in, and the failures look like real
+    # ones: a builtin that cannot import fails that atom's case rather than
+    # erroring the run.
+    "agentm[storage-postgres,storage-clickhouse]",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "pytest-xdist>=3.5",
     "mypy>=1.0",
     "ruff>=0.4",
-    "types-pyyaml>=6.0.12.20250915",
-    "types-tqdm>=4.66.0.20240417",
 ]
 
 [project.scripts]
@@ -80,48 +67,27 @@ agentm = "agentm.cli:main"
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
-[tool.uv.workspace]
-# Explicitly list nested projects under contrib/. Other contrib/scenarios/*
-# entries are pure manifests with no pyproject.toml and must NOT be picked
-# up as workspace members.
-members = [
-    "contrib/evals",
-    "contrib/extensions/llmharness",
-    "contrib/extensions/mcp_bridge",
-    "contrib/extensions/trajectory_index",
-    "contrib/scenarios/rca",
-    "contrib/gateway-peers/feishu",
-    "contrib/gateway-peers/weixin",
-]
-
-[tool.uv.sources]
-fpg = { git = "https://github.com/Lincyaw/fpg-convention" }
-llmharness = { workspace = true }
-agentm-mcp-bridge = { workspace = true }
-rca-scenario = { workspace = true }
-trajectory-index = { workspace = true }
-agentm-eval = { workspace = true }
-agentm = { workspace = true }
+[tool.uv.build-backend]
+# Both top-level packages under src/ ship in the wheel. The backend would
+# otherwise infer a single module from the project name and silently leave
+# `agentm_toolbox` out, so an installed `agentm` imports fine until the first
+# file or bash tool call and then dies on ModuleNotFoundError. The toolbox stays
+# top-level rather than nesting under `agentm` because it is uploaded as a bare
+# directory into remote sandboxes and run there as `python -m agentm_toolbox`,
+# with no agentm on the path.
+module-name = ["agentm", "agentm_toolbox"]
 
 [tool.pytest.ini_options]
-# UI tests exercise the Textual TUI; they pass but don't map to any
-# fail-stop core position (per CLAUDE.md "Testing Philosophy" §1). Run
-# them explicitly with ``pytest -m ui`` when touching the TUI.
 markers = [
-    "ui: tests for the Textual TUI rendering layer",
     "slow: tests that may run for many minutes (real-LLM E2E)",
     "requires_api_key: tests that hit a real LLM provider; skipped without env",
-    "smoke: wiring/happy-path tests (manifest-load, atoms-install, yaml-parse) that don't gate on a fail-stop position; included by default, filter out with `-m 'not smoke'`",
 ]
-# Nested workspace projects own their own tests/ trees and pyproject. The
-# top-level pytest must not recurse into them — both define a ``tests``
-# package and the import paths collide.
 testpaths = ["tests"]
-addopts = "-m 'not ui'"
+addopts = ""
 norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "runs", "jobs"]
 
 [tool.ruff.lint]
-# Default rule set (E/F) plus high-signal correctness guards:
+# The E/F core plus high-signal correctness guards:
 #   S110 — try/except/pass
 #   S112 — try/except/continue
 #   B007 — unused loop control variables
@@ -132,22 +98,38 @@ norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules"
 # expected/benign, warning+ for error-hiding) — see the silent-exception
 # discipline applied across src/agentm. Suppress with an explicit
 # ``# noqa: S110`` + reason only when logging is truly impossible.
-extend-select = ["B007", "B905", "RUF006", "S110", "S112"]
+#
+# Stated as an explicit ``select`` rather than ``extend-select``: the baseline
+# ruff calls "default" is not stable across releases, and 0.16 widened it. The
+# list below is the rule set this project actually enforces, so a ruff upgrade
+# changes the tree only when we change this line.
+#
+# Deliberately not enforced, because each conflicts with a chosen discipline:
+#   BLE001 — broad ``except`` is fine here when it logs or surfaces, which is
+#            what AM001 in agentm.code_health already checks; S110/S112 above
+#            catch the silent cases, which are the ones that actually hurt.
+#   TRY004 — storage and wire decoders raise ValueError for malformed persisted
+#            data, and callers catch ValueError. TypeError is for a caller
+#            passing the wrong type, which is not what these guards detect.
+#   B008   — typer expresses CLI options as call-valued defaults; there is no
+#            other way to write a typer command.
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "B007",
+    "B905",
+    "RUF006",
+    "S110",
+    "S112",
+]
 
 [tool.mypy]
 python_version = "3.12"
-mypy_path = ["src", "contrib/scenarios/rca/src", "contrib/extensions/llmharness/src"]
+mypy_path = ["src"]
 namespace_packages = true
 explicit_package_bases = true
-ignore_missing_imports = true
-exclude = [
-    "^contrib/extensions/llmharness/",
-    "^contrib/scenarios/rca/",
-    "^contrib/scenarios/rca/",
-]
-
-[[tool.mypy.overrides]]
-module = ["rcabench_platform", "rcabench_platform.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

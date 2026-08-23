@@ -1,6 +1,6 @@
 """Default user-visible text for kernel-emitted ``ToolErrorEvent``s.
 
-The kernel ``AgentLoop`` emits :class:`ToolErrorEvent` whenever a tool call
+The kernel emits :class:`ToolErrorEvent` whenever a tool call
 cannot produce a normal result — execution raised, the tool name is
 unknown, or a ``tool_call`` handler blocked it. The kernel itself only
 constructs an empty :class:`ToolResult` (``is_error=True``); writing the
@@ -18,10 +18,15 @@ suppress those strings without patching the kernel.
 
 from __future__ import annotations
 
-from typing import Any
+from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import ExtensionAPI, TextContent, ToolErrorEvent
+from agentm.core.abi import AtomAPI, ToolErrorEvent
 from agentm.extensions import ExtensionManifest
+
+
+class ToolErrorMessagesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
 
 MANIFEST = ExtensionManifest(
     name="tool_error_messages",
@@ -30,7 +35,7 @@ MANIFEST = ExtensionManifest(
         "ToolErrorEvent (execution_failed / unknown_tool / blocked)."
     ),
     registers=("event:tool_error",),
-    config_schema=None,
+    config_schema=ToolErrorMessagesConfig,
     requires=(),  # Leaf atom: formats tool_error events only.
 )
 
@@ -50,18 +55,14 @@ def _extract_exception_summary(reason: str) -> str:
 
 
 class _ToolErrorMessagesRuntime:
-    def __init__(self, api: ExtensionAPI) -> None:
-        self._api = api
+    def __init__(self, session: AtomAPI) -> None:
+        self._session = session
 
     def install(self) -> None:
-        self._api.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
+        self._session.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
 
-    def on_tool_error(self, event: ToolErrorEvent) -> None:
-        if event.result.content:
-            return
-        event.result.content.append(
-            TextContent(type="text", text=self._message_for(event))
-        )
+    def on_tool_error(self, event: ToolErrorEvent) -> dict[str, str]:
+        return {"text": self._message_for(event)}
 
     def _message_for(self, event: ToolErrorEvent) -> str:
         if event.kind == "execution_failed":
@@ -88,6 +89,6 @@ class _ToolErrorMessagesRuntime:
         return f"tool_error: {event.kind} ({event.tool_name})"  # pragma: no cover
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(session: AtomAPI, config: ToolErrorMessagesConfig) -> None:
     del config
-    _ToolErrorMessagesRuntime(api).install()
+    _ToolErrorMessagesRuntime(session).install()

@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
 """Builtin ``task`` atom — session-scoped structured task tracking.
 
 The agent creates, decomposes, and tracks progress on tasks during a
@@ -17,20 +18,23 @@ Tools:
 Dependency model: ``blocks`` / ``blocked_by`` edges between tasks.
 Completing a task auto-removes it from downstream ``blocked_by`` lists.
 
-§11: single file; ``MANIFEST`` + ``install(api, config)``; no atom-to-atom
-imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
+§11: ``MANIFEST`` + ``install(api, config)``; no atom-to-atom imports;
+``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 State is per-session and in-memory.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Literal  # noqa: UP035
+from collections.abc import Mapping
 
-from pydantic import BaseModel, Field
+# code-health: ignore-file[AM022]
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    ExtensionAPI,
+    AtomAPI,
     FunctionTool,
     TextContent,
     ToolResult,
@@ -39,19 +43,20 @@ from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
 _Status = Literal["pending", "in_progress", "completed"]
+_UpdateStatus = Literal["pending", "in_progress", "completed", "deleted"]
 
 
 class _Task:
     __slots__ = (
-        "id",
-        "subject",
-        "description",
         "active_form",
-        "status",
-        "parent_id",
-        "blocks",
         "blocked_by",
+        "blocks",
+        "description",
+        "id",
         "metadata",
+        "parent_id",
+        "status",
+        "subject",
     )
 
     def __init__(
@@ -120,7 +125,7 @@ class _TaskManager:
         *,
         active_form: str | None = None,
         parent_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> _Task:
         tid = self._alloc_id()
         task = _Task(
@@ -183,6 +188,11 @@ class _TaskManager:
 # MANIFEST
 # ---------------------------------------------------------------------------
 
+
+class TaskTrackingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 MANIFEST = ExtensionManifest(
     name="task_tracking",
     description=(
@@ -196,6 +206,7 @@ MANIFEST = ExtensionManifest(
         "tool:task_get",
     ),
     requires=(),
+    config_schema=TaskTrackingConfig,
 )
 
 
@@ -205,6 +216,8 @@ MANIFEST = ExtensionManifest(
 
 
 class _CreateParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     subject: str = Field(
         description=(
             "Brief, actionable title in imperative form "
@@ -228,8 +241,10 @@ class _CreateParams(BaseModel):
 
 
 class _UpdateParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str = Field(description="The ID of the task to update.")
-    status: Literal["pending", "in_progress", "completed", "deleted"] | None = Field(
+    status: _UpdateStatus | None = Field(
         default=None, description="New status. 'deleted' permanently removes the task."
     )
     subject: str | None = Field(default=None, description="New subject.")
@@ -250,10 +265,14 @@ class _UpdateParams(BaseModel):
 
 
 class _GetParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str = Field(description="The ID of the task to retrieve.")
 
 
 class _ListParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     pass
 
 
@@ -262,7 +281,7 @@ class _ListParams(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _ok(payload: Any) -> ToolResult:
+def _ok(payload: object) -> ToolResult:
     text = (
         json.dumps(payload, ensure_ascii=False)
         if not isinstance(payload, str)
@@ -275,15 +294,6 @@ def _error(msg: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=msg)], is_error=True)
 
 
-def _optional_id_list(args: dict[str, Any], key: str) -> list[str] | ToolResult | None:
-    value = args.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        return _error(f"{key} must be a list of task ids")
-    return [str(x) for x in value]
-
-
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
@@ -293,7 +303,7 @@ class _TaskTrackingRuntime:
     def __init__(self) -> None:
         self._mgr = _TaskManager()
 
-    def install(self, api: ExtensionAPI) -> None:
+    def install(self, api: AtomAPI) -> None:
         api.register_tool(
             FunctionTool(
                 name="task_create",
@@ -347,23 +357,25 @@ class _TaskTrackingRuntime:
         )
 
     async def create(self, args: dict[str, Any]) -> ToolResult:
-        parent_id = args.get("parent_id")
-        if parent_id is not None and self._mgr.get(str(parent_id)) is None:
+        params = _CreateParams.model_validate(args)
+        parent_id = params.parent_id
+        if parent_id is not None and self._mgr.get(parent_id) is None:
             return _error(f"parent task {parent_id!r} not found")
 
         task = self._mgr.create(
-            subject=str(args["subject"]),
-            description=str(args["description"]),
-            active_form=args.get("active_form"),
-            parent_id=str(parent_id) if parent_id is not None else None,
-            metadata=args.get("metadata"),
+            subject=params.subject,
+            description=params.description,
+            active_form=params.active_form,
+            parent_id=parent_id,
+            metadata=params.metadata,
         )
         return _ok(task.to_detail())
 
     async def update(self, args: dict[str, Any]) -> ToolResult:
-        task_id = str(args["task_id"])
+        params = _UpdateParams.model_validate(args)
+        task_id = params.task_id
 
-        status = args.get("status")
+        status = params.status
         if status == "deleted":
             removed = self._mgr.delete(task_id)
             if removed is None:
@@ -374,74 +386,67 @@ class _TaskTrackingRuntime:
         if task is None:
             return _error(f"task {task_id!r} not found")
 
-        self._update_fields(task, args)
-        if error := self._update_metadata(task, args):
-            return error
-        if error := self._update_dependencies(task_id, args):
+        self._update_fields(task, params)
+        self._update_metadata(task, params.metadata)
+        if error := self._update_dependencies(task_id, params):
             return error
         if error := self._update_status(task, status):
             return error
 
         return _ok(task.to_detail())
 
-    async def list_tasks(self, args: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+    async def list_tasks(self, args: dict[str, Any]) -> ToolResult:
         tasks = self._mgr.list_all()
         if not tasks:
             return _ok({"tasks": [], "summary": "No tasks."})
         return _ok({"tasks": [t.to_summary() for t in tasks]})
 
     async def get(self, args: dict[str, Any]) -> ToolResult:
-        task = self._mgr.get(str(args["task_id"]))
+        params = _GetParams.model_validate(args)
+        task = self._mgr.get(params.task_id)
         if task is None:
-            return _error(f"task {args['task_id']!r} not found")
+            return _error(f"task {params.task_id!r} not found")
         return _ok(task.to_detail())
 
     @staticmethod
-    def _update_fields(task: _Task, args: dict[str, Any]) -> None:
-        subject = args.get("subject")
-        if subject is not None:
-            task.subject = str(subject)
-        description = args.get("description")
-        if description is not None:
-            task.description = str(description)
-        if "active_form" in args:
-            active_form = args.get("active_form")
-            task.active_form = str(active_form) if active_form is not None else None
+    def _update_fields(task: _Task, params: _UpdateParams) -> None:
+        if params.subject is not None:
+            task.subject = params.subject
+        if params.description is not None:
+            task.description = params.description
+        if "active_form" in params.model_fields_set:
+            task.active_form = params.active_form
 
     @staticmethod
-    def _update_metadata(task: _Task, args: dict[str, Any]) -> ToolResult | None:
-        metadata = args.get("metadata")
-        if isinstance(metadata, dict):
-            for k, v in metadata.items():
-                if v is None:
-                    task.metadata.pop(k, None)
-                else:
-                    task.metadata[k] = v
-        elif metadata is not None:
-            return _error("metadata must be an object")
-        return None
+    def _update_metadata(
+        task: _Task,
+        metadata: Mapping[str, Any] | None,
+    ) -> None:
+        if metadata is None:
+            return
+        for key, value in metadata.items():
+            if value is None:
+                task.metadata.pop(key, None)
+            else:
+                task.metadata[key] = value
 
     def _update_dependencies(
-        self, task_id: str, args: dict[str, Any]
+        self,
+        task_id: str,
+        params: _UpdateParams,
     ) -> ToolResult | None:
-        add_blocks = _optional_id_list(args, "add_blocks")
-        if isinstance(add_blocks, ToolResult):
-            return add_blocks
-        if add_blocks:
-            err = self._mgr.add_blocks(task_id, add_blocks)
+        if params.add_blocks:
+            err = self._mgr.add_blocks(task_id, params.add_blocks)
             if err:
                 return _error(err)
 
-        add_blocked_by = _optional_id_list(args, "add_blocked_by")
-        if isinstance(add_blocked_by, ToolResult):
-            return add_blocked_by
-        if add_blocked_by:
-            err = self._mgr.add_blocked_by(task_id, add_blocked_by)
+        if params.add_blocked_by:
+            err = self._mgr.add_blocked_by(task_id, params.add_blocked_by)
             if err:
                 return _error(err)
         return None
 
-    def _update_status(self, task: _Task, status: Any) -> ToolResult | None:
+    def _update_status(self, task: _Task, status: _Status | None) -> ToolResult | None:
         if status is not None:
             if status == "completed":
                 self._mgr.complete(task)
@@ -449,11 +454,9 @@ class _TaskTrackingRuntime:
                 task.status = "pending"
             elif status == "in_progress":
                 task.status = "in_progress"
-            else:
-                return _error(f"invalid status {status!r}")
         return None
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: AtomAPI, config: TaskTrackingConfig) -> None:
     del config
     _TaskTrackingRuntime().install(api)

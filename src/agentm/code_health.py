@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- AST checks require node-class discrimination
 """Project-level code health checks — AST-based static analysis.
 
 Complements ``ruff`` (general Python style) and ``mypy`` (type correctness)
@@ -31,13 +32,15 @@ Rules:
   are ignored. Swiss-army-knife signal — consider splitting into composable
   facades.
 - **AM010** ``cross-layer-import``: Imports that violate the layer
-  hierarchy (e.g. gateway → extensions/builtin, extensions → gateway,
-  abi → runtime). Extends §11 to cover the full dependency graph.
-- **AM011** ``hand-written-schema``: Tool ``parameters`` defined as a
-  dict literal instead of ``pydantic_to_tool_schema(Model)``. Pydantic
-  schemas are the project convention — they stay in sync with
-  validation, generate descriptions from ``Field()``, and avoid
-  hand-maintained JSON Schema boilerplate.
+  hierarchy (e.g. core → extension/backend, storage → runtime,
+  gateway → builtin atoms, or ABI → runtime). Extends §11 to cover the
+  full dependency graph. Constitution-listed exceptions require a precise
+  line-level ignore.
+- **AM011** ``hand-written-schema``: Tool ``parameters`` defined from a
+  dict literal or schema-factory helper instead of a Pydantic model or
+  ``pydantic_to_tool_schema(Model)``. Pydantic schemas are the project
+  convention — they stay in sync with validation, generate descriptions
+  from ``Field()``, and avoid hand-maintained JSON Schema boilerplate.
 - **AM012** ``config-dict-splat``: ``**dict`` unpacking into a core typed
   contract — ``AgentSessionConfig(...)``, ``FunctionTool(...)``, or
   ``spawn_child_session(...)``. These are typed contracts — build them
@@ -54,12 +57,37 @@ Rules:
   ``path.resolve().parents[...]``. Resolve-before-parent hides intent and
   silently follows symlinks; split into ``real = path.resolve(); real.parent``
   only when symlink resolution is intentional.
-- **AM015** ``event-source-drift``: After any mutable event hook is emitted,
-  downstream code must read the event's final fields, not stale source locals
-  or values derived before dispatch. Mutable events must be bound to a local
-  event object rather than constructed inline at the emit call.
-- **AM016** ``hook-contract-integrity``: Event hook mutation contracts must
-  declare machine-readable ``mutable_fields`` that exist on the event class.
+- **AM017** ``core-atom-policy``: Core runtime must not name concrete builtin
+  atom implementations. Default composition belongs in scenario manifests.
+- **AM018** ``scenario-loader-execution``: Scenario discovery returns durable
+  extension data and must not execute local Python or mutate ``sys.modules``.
+- **AM019** ``legacy-extension-shape``: Canonical ``ExtensionSpec`` values
+  must not be treated as legacy ``(module, config)`` tuples.
+- **AM020** ``raw-cli-extension-config``: CLI output must not materialize
+  secret-bearing extension config without redaction.
+- **AM021** ``dynamic-attribute-access``: ``getattr`` / ``hasattr`` /
+  ``setattr`` / ``delattr`` bypass typed contracts. A precise ignore is
+  required at genuine reflection or vendor-adapter boundaries.
+- **AM022** ``typing-any``: Source annotations must not erase values to
+  ``typing.Any``. Genuine vendor/reflection/serialization boundaries require
+  a precise ignore.
+- **AM023** ``bare-dict``: Source annotations must parameterize ``dict`` or
+  use a more precise DTO / Protocol.
+- **AM024** ``stdlib-logging``: AgentM uses Loguru consistently; importing
+  the standard-library ``logging`` package creates split configuration and
+  output behavior.
+- **AM026** ``self-wrapping-bind``: An atom reading a service key and binding a
+  value built from what it found. The wrapper holds the value it read, so the
+  chain lives in a closure and the inner layer can never be removed. Use
+  ``services.layer(key, build)``, which states the decoration instead of
+  performing it.
+- **AM025** ``runtime-type-check``: ``isinstance`` branches on runtime shape
+  and usually hides a missing typed contract, DTO, Protocol, or dispatch table.
+  A precise ignore is required at genuine validation/deserialization boundaries.
+
+AM015 and AM016 intentionally do not exist in v2. They guarded the old mutable
+event/HookContract model; v2 events are frozen DTOs and handlers return typed
+control values, so those failure modes are structurally impossible.
 
 Invocation::
 
@@ -73,15 +101,13 @@ Exit code 0 = clean, 1 = violations found.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 import typer
-from loguru import logger
-
-from agentm.core.abi.events import MUTABLE_EVENT_FIELDS_BY_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +125,7 @@ class Issue:
 # Rule implementations
 # ---------------------------------------------------------------------------
 
-_SURFACE_CALL_NAMES: Final[frozenset[str]] = frozenset(
-    {"print", "warn"}
-)
+_SURFACE_CALL_NAMES: Final[frozenset[str]] = frozenset({"print", "warn"})
 _SURFACE_METHOD_NAMES: Final[frozenset[str]] = frozenset(
     {
         "critical",
@@ -112,6 +136,7 @@ _SURFACE_METHOD_NAMES: Final[frozenset[str]] = frozenset(
         "exception",
         "info",
         "log",
+        "print",
         "print_exc",
         "print_exception",
         "put",
@@ -136,9 +161,7 @@ _PUBLIC_MODULE_METADATA_DUNDERS: Final[frozenset[str]] = frozenset(
 _CLI_DECORATOR_METHODS: Final[frozenset[str]] = frozenset(
     {"callback", "command", "group"}
 )
-_CLI_DECORATOR_NAMES: Final[frozenset[str]] = frozenset(
-    {"command", "group"}
-)
+_CLI_DECORATOR_NAMES: Final[frozenset[str]] = frozenset({"command", "group"})
 
 
 def _is_atom_file(path: Path) -> bool:
@@ -179,18 +202,15 @@ class _ExceptionSurfaceVisitor(ast.NodeVisitor):
             for child in ast.walk(node)
         )
 
-    def visit_Raise(self, node: ast.Raise) -> None:  # noqa: N802
+    def visit_Raise(self, node: ast.Raise) -> None:
         self.surfaced = True
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         if isinstance(func, ast.Name) and func.id in _SURFACE_CALL_NAMES:
             self.surfaced = True
             return
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr in _SURFACE_METHOD_NAMES
-        ):
+        if isinstance(func, ast.Attribute) and func.attr in _SURFACE_METHOD_NAMES:
             self.surfaced = True
             return
         if (
@@ -202,27 +222,25 @@ class _ExceptionSurfaceVisitor(ast.NodeVisitor):
             return
         self.generic_visit(node)
 
-    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+    def visit_Return(self, node: ast.Return) -> None:
         if self._references_exception(node.value):
             self.surfaced = True
 
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:  # noqa: N802
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         # A nested handler surfacing its own exception does not surface the
         # outer exception currently being checked.
         return
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
 
-    def visit_AsyncFunctionDef(  # noqa: N802
-        self, node: ast.AsyncFunctionDef
-    ) -> None:
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         return
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
         return
 
-    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+    def visit_Lambda(self, node: ast.Lambda) -> None:
         return
 
 
@@ -245,15 +263,17 @@ def _check_silent_except(tree: ast.Module, path: str) -> list[Issue]:
         if not caught.intersection({"<bare>", "BaseException", "Exception"}):
             continue
         if not _handler_surfaces_exception(node):
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM001",
-                message=(
-                    "broad exception handler without reporting — "
-                    "log, surface to the caller, or re-raise"
-                ),
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM001",
+                    message=(
+                        "broad exception handler without reporting — "
+                        "log, surface to the caller, or re-raise"
+                    ),
+                )
+            )
     return issues
 
 
@@ -267,15 +287,21 @@ def _check_missing_slots(tree: ast.Module, path: str) -> list[Issue]:
             is_dataclass = False
             has_slots = False
 
-            if isinstance(deco, ast.Name) and deco.id == "dataclass":
-                is_dataclass = True
-            elif isinstance(deco, ast.Attribute) and deco.attr == "dataclass":
+            if (
+                isinstance(deco, ast.Name)
+                and deco.id == "dataclass"
+                or isinstance(deco, ast.Attribute)
+                and deco.attr == "dataclass"
+            ):
                 is_dataclass = True
             elif isinstance(deco, ast.Call):
                 func = deco.func
-                if isinstance(func, ast.Name) and func.id == "dataclass":
-                    is_dataclass = True
-                elif isinstance(func, ast.Attribute) and func.attr == "dataclass":
+                if (
+                    isinstance(func, ast.Name)
+                    and func.id == "dataclass"
+                    or isinstance(func, ast.Attribute)
+                    and func.attr == "dataclass"
+                ):
                     is_dataclass = True
                 if is_dataclass:
                     for kw in deco.keywords:
@@ -285,21 +311,35 @@ def _check_missing_slots(tree: ast.Module, path: str) -> list[Issue]:
 
             if is_dataclass and not has_slots:
                 bases = [
-                    b.id if isinstance(b, ast.Name) else
-                    b.attr if isinstance(b, ast.Attribute) else ""
+                    b.id
+                    if isinstance(b, ast.Name)
+                    else b.attr
+                    if isinstance(b, ast.Attribute)
+                    else ""
                     for b in node.bases
                 ]
-                if any(b in ("Exception", "BaseException", "ValueError",
-                             "RuntimeError", "TypeError", "KeyError")
-                       for b in bases):
+                if any(
+                    b
+                    in (
+                        "Exception",
+                        "BaseException",
+                        "ValueError",
+                        "RuntimeError",
+                        "TypeError",
+                        "KeyError",
+                    )
+                    for b in bases
+                ):
                     continue
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM002",
-                    message=f"dataclass {node.name!r} missing slots=True",
-                    severity="warning",
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM002",
+                        message=f"dataclass {node.name!r} missing slots=True",
+                        severity="warning",
+                    )
+                )
     return issues
 
 
@@ -310,32 +350,140 @@ def _check_private_in_all(tree: ast.Module, path: str) -> list[Issue]:
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "__all__":
-                if isinstance(node.value, (ast.List, ast.Tuple)):
-                    for elt in node.value.elts:
-                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                            if (
-                                elt.value.startswith("_")
-                                and elt.value not in _PUBLIC_MODULE_METADATA_DUNDERS
-                            ):
-                                issues.append(Issue(
-                                    path=path,
-                                    line=elt.lineno,
-                                    rule="AM003",
-                                    message=f"private name {elt.value!r} in __all__",
-                                    severity="warning",
-                                ))
+            if (
+                isinstance(target, ast.Name)
+                and target.id == "__all__"
+                and isinstance(node.value, (ast.List, ast.Tuple))
+            ):
+                for elt in node.value.elts:
+                    if (
+                        isinstance(elt, ast.Constant)
+                        and isinstance(elt.value, str)
+                        and elt.value.startswith("_")
+                        and elt.value not in _PUBLIC_MODULE_METADATA_DUNDERS
+                    ):
+                        issues.append(
+                            Issue(
+                                path=path,
+                                line=elt.lineno,
+                                rule="AM003",
+                                message=f"private name {elt.value!r} in __all__",
+                                severity="warning",
+                            )
+                        )
     return issues
 
 
-def _check_atom_raw_io(
-    tree: ast.Module, path: str, file_path: Path
+def _check_self_wrapping_bind(
+    tree: ast.Module,
+    path: str,
+    file_path: Path,
 ) -> list[Issue]:
-    """AM004: open()/subprocess in atom files."""
+    """AM026: an atom reading a service and binding a value built from it.
+
+    The shape is ``inner = api.services.get_role(ROLE)`` followed by
+    ``api.services.bind(ROLE, Wrapper(inner))``.  It reads as decoration and is
+    not: the wrapper holds the value it found, so the chain lives in a closure
+    nobody else can see.  Detaching the atom that registered the *inner* one
+    unlinks its context and removes its services while its object goes on being
+    called from inside the outer wrapper, for the life of the session.
+
+    ``services.layer(key, build)`` states the decoration instead of performing
+    it, so the chain is folded from the layers present at each read and any
+    layer can be taken out of the middle.
+    """
+
+    if not _is_atom_file(file_path):
+        return []
+
+    issues: list[Issue] = []
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        # name -> the key expression it was read from
+        read_from: dict[str, str] = {}
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Name):
+                continue
+            for call in ast.walk(node.value):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr in {"get_role", "get", "require_role"}
+                    and call.args
+                ):
+                    read_from[target.id] = ast.dump(call.args[0])
+        for node in ast.walk(func):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or node.func.attr not in {"bind", "register"}
+                or not node.args
+            ):
+                continue
+            key = ast.dump(node.args[0])
+            for value in node.args[1:]:
+                names = {
+                    inner.id for inner in ast.walk(value) if isinstance(inner, ast.Name)
+                }
+                # The read may be a name assigned earlier, or the call itself
+                # nested in the value. Same shape and same consequence -- the
+                # wrapper holds what the key held -- and checking only the
+                # first would leave the one-liner form of it unflagged.
+                if any(read_from.get(name) == key for name in names) or _reads_key(
+                    value, key
+                ):
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM026",
+                            message=(
+                                "this binds a value built from what the same key "
+                                "already held, which puts the chain in a closure "
+                                "and makes the inner layer unremovable — use "
+                                "api.services.layer(key, build)"
+                            ),
+                            severity="warning",
+                        )
+                    )
+                    break
+    return issues
+
+
+def _reads_key(value: ast.expr, key: str) -> bool:
+    """Whether ``value`` reads the same service key it is about to be bound to."""
+
+    return any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"get_role", "get", "require_role"}
+        and bool(call.args)
+        and ast.dump(call.args[0]) == key
+        for call in ast.walk(value)
+    )
+
+
+def _check_atom_raw_io(tree: ast.Module, path: str, file_path: Path) -> list[Issue]:
+    """AM004: open()/subprocess in atom files.
+
+    Atom code is builtin extensions plus contrib extension workspace members
+    (everything under ``contrib/extensions/`` is atom-reachable, mirroring the
+    load-time validator's package rule). Scenario packages stay out: they mix
+    atoms with host-level adapters, and the load-time validator covers their
+    mounted atom modules.
+    """
     parts = file_path.parts
-    is_atom = ("extensions" in parts and "builtin" in parts
-               and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name))
-    if not is_atom:
+    is_builtin_atom = (
+        "extensions" in parts
+        and "builtin" in parts
+        and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name)
+    )
+    is_contrib_atom = "contrib" in parts and "extensions" in parts
+    if not (is_builtin_atom or is_contrib_atom):
         return []
 
     issues: list[Issue] = []
@@ -343,23 +491,36 @@ def _check_atom_raw_io(
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "open":
-                issues.append(Issue(
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM004",
+                        message=(
+                            "raw open() in atom — use the resource_writer "
+                            "service: api.services.get_role(RESOURCE_WRITER)"
+                        ),
+                        severity="warning",
+                    )
+                )
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "subprocess"
+        ):
+            issues.append(
+                Issue(
                     path=path,
                     line=node.lineno,
                     rule="AM004",
-                    message="raw open() in atom — use api.get_resource_writer() instead",
+                    message=(
+                        "subprocess usage in atom — use the operations:bash "
+                        "service: api.services.require(BASH_OPERATIONS_SERVICE, "
+                        "BashOperations)"
+                    ),
                     severity="warning",
-                ))
-        if isinstance(node, ast.Attribute):
-            if (isinstance(node.value, ast.Name)
-                    and node.value.id == "subprocess"):
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM004",
-                    message="subprocess usage in atom — use api.get_operations().bash instead",
-                    severity="warning",
-                ))
+                )
+            )
     return issues
 
 
@@ -379,7 +540,9 @@ def _is_cli_command_decorator(decorator: ast.expr) -> bool:
 
 
 def _is_cli_command_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    return any(_is_cli_command_decorator(decorator) for decorator in node.decorator_list)
+    return any(
+        _is_cli_command_decorator(decorator) for decorator in node.decorator_list
+    )
 
 
 def _check_param_explosion(tree: ast.Module, path: str) -> list[Issue]:
@@ -390,20 +553,21 @@ def _check_param_explosion(tree: ast.Module, path: str) -> list[Issue]:
             continue
         if _is_cli_command_function(node):
             continue
-        n = (len(node.args.args) + len(node.args.posonlyargs)
-             + len(node.args.kwonlyargs))
+        n = len(node.args.args) + len(node.args.posonlyargs) + len(node.args.kwonlyargs)
         if node.args.vararg:
             n += 1
         if node.args.kwarg:
             n += 1
         if n > 15:
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM005",
-                message=f"{node.name}() has {n} parameters — consider a config object",
-                severity="warning",
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM005",
+                    message=f"{node.name}() has {n} parameters — consider a config object",
+                    severity="warning",
+                )
+            )
     return issues
 
 
@@ -424,15 +588,22 @@ def _check_mutable_abi_global(
             if target.id == "__all__":
                 continue
             ann_str = ast.dump(node.annotation) if node.annotation else ""
-            if any(t in ann_str for t in ("Dict", "List", "Set", "dict", "list", "set")):
-                if "Final" not in ann_str and "ClassVar" not in ann_str:
-                    issues.append(Issue(
+            if (
+                any(
+                    t in ann_str for t in ("Dict", "List", "Set", "dict", "list", "set")
+                )
+                and "Final" not in ann_str
+                and "ClassVar" not in ann_str
+            ):
+                issues.append(
+                    Issue(
                         path=path,
                         line=node.lineno,
                         rule="AM006",
                         message=f"mutable module-level {target.id!r} in ABI — wrap in Final or move to runtime",
                         severity="warning",
-                    ))
+                    )
+                )
         elif isinstance(node, ast.Assign):
             for tgt in node.targets:
                 if not isinstance(tgt, ast.Name):
@@ -442,13 +613,15 @@ def _check_mutable_abi_global(
                 if isinstance(node.value, (ast.Dict, ast.List, ast.Set)):
                     if tgt.id.startswith("_") and tgt.id.isupper():
                         continue
-                    issues.append(Issue(
-                        path=path,
-                        line=node.lineno,
-                        rule="AM006",
-                        message=f"mutable module-level {tgt.id!r} in ABI — use Final or move to runtime",
-                        severity="warning",
-                    ))
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM006",
+                            message=f"mutable module-level {tgt.id!r} in ABI — use Final or move to runtime",
+                            severity="warning",
+                        )
+                    )
     return issues
 
 
@@ -456,13 +629,15 @@ def _check_god_file(source_lines: list[str], path: str) -> list[Issue]:
     """AM007: Files exceeding 1500 LOC."""
     n = len(source_lines)
     if n > 1500:
-        return [Issue(
-            path=path,
-            line=1,
-            rule="AM007",
-            message=f"file has {n} lines (>1500) — consider splitting",
-            severity="warning",
-        )]
+        return [
+            Issue(
+                path=path,
+                line=1,
+                rule="AM007",
+                message=f"file has {n} lines (>1500) — consider splitting",
+                severity="warning",
+            )
+        ]
     return []
 
 
@@ -486,24 +661,28 @@ def _check_redundant_local_import(tree: ast.Module, path: str) -> list[Issue]:
                 for alias in child.names:
                     name = alias.asname or alias.name.split(".")[0]
                     if name in toplevel_names:
-                        issues.append(Issue(
-                            path=path,
-                            line=child.lineno,
-                            rule="AM008",
-                            message=f"redundant local import of {name!r} — already at module level",
-                            severity="warning",
-                        ))
+                        issues.append(
+                            Issue(
+                                path=path,
+                                line=child.lineno,
+                                rule="AM008",
+                                message=f"redundant local import of {name!r} — already at module level",
+                                severity="warning",
+                            )
+                        )
             elif isinstance(child, ast.ImportFrom):
                 for alias in child.names:
                     name = alias.asname or alias.name
                     if name in toplevel_names:
-                        issues.append(Issue(
-                            path=path,
-                            line=child.lineno,
-                            rule="AM008",
-                            message=f"redundant local import of {name!r} — already at module level",
-                            severity="warning",
-                        ))
+                        issues.append(
+                            Issue(
+                                path=path,
+                                line=child.lineno,
+                                rule="AM008",
+                                message=f"redundant local import of {name!r} — already at module level",
+                                severity="warning",
+                            )
+                        )
     return issues
 
 
@@ -551,27 +730,71 @@ def _check_god_class(tree: ast.Module, path: str) -> list[Issue]:
         if _is_protocol_class(node):
             continue
         method_count = sum(
-            1 for child in node.body
+            1
+            for child in node.body
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
             and not _has_decorator(child, "overload")
             and not _has_decorator(child, "property")
         )
         if method_count > 25:
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM009",
-                message=f"class {node.name!r} has {method_count} methods (>25) — consider splitting",
-                severity="warning",
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM009",
+                    message=f"class {node.name!r} has {method_count} methods (>25) — consider splitting",
+                    severity="warning",
+                )
+            )
     return issues
 
 
 _LAYER_RULES: Final[list[tuple[str, str, str]]] = [
-    ("gateway/", "extensions/builtin/", "gateway must not import from builtin atoms"),
-    ("extensions/", "gateway/", "extensions must not import from gateway"),
-    ("core/abi/", "core/runtime/", "ABI must not import from runtime"),
-    ("core/abi/", "core/_internal/", "ABI must not import from _internal"),
+    (
+        "gateway/",
+        "agentm.extensions.builtin",
+        "gateway must not import from builtin atoms",
+    ),
+    ("extensions/", "agentm.gateway", "extensions must not import from gateway"),
+    (
+        "extensions/",
+        "agentm.core.runtime",
+        "extensions must depend on core ABI/lib ports, not runtime",
+    ),
+    ("cli/", "agentm.core.runtime", "CLI presenters must not import runtime internals"),
+    ("authoring/", "agentm.presenter", "authoring must not import from presenter"),
+    (
+        "presenter/",
+        "agentm.core.runtime",
+        "presenters must depend on core ABI/lib ports, not runtime",
+    ),
+    ("core/abi/", "agentm.core.runtime", "ABI must not import from runtime"),
+    ("core/abi/", "agentm.core._internal", "ABI must not import from _internal"),
+    ("core/", "agentm.authoring", "core must not import authoring"),
+    ("core/", "agentm.cli", "core must not import CLI presenters"),
+    ("core/", "agentm.config", "core must not import host config resolution"),
+    ("core/", "agentm.environments", "core must not import environment backends"),
+    ("core/", "agentm.extensions", "core must not import extension implementations"),
+    ("core/", "agentm.gateway", "core must not import gateway hosts"),
+    ("core/", "agentm.observability", "core must not import observability backends"),
+    ("core/", "agentm.scenarios", "core must not import scenario loaders"),
+    ("core/", "agentm.sdk", "core must not import the SDK presenter"),
+    ("core/", "agentm.storage", "core must not import storage backends"),
+    (
+        "environments/",
+        "agentm.core.runtime",
+        "environment backends must depend on core ABI/lib ports, not runtime",
+    ),
+    (
+        "execution/",
+        "agentm.core.runtime",
+        "execution backends must depend on core ABI/lib ports, not runtime",
+    ),
+    (
+        "storage/",
+        "agentm.core.runtime",
+        "storage backends must depend on core ABI/lib ports, not runtime",
+    ),
 ]
 
 
@@ -593,31 +816,37 @@ def _check_cross_layer_import(
                 lineno = node.lineno
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    target_dotted = forbidden_target.replace("/", ".").rstrip(".")
-                    if target_dotted not in alias.name:
+                    if not _module_matches(alias.name, forbidden_target):
                         continue
                     if _find_parent_if(tree, node) is not None:
                         continue
-                    issues.append(Issue(
-                        path=path,
-                        line=node.lineno,
-                        rule="AM010",
-                        message=f"cross-layer import: {msg} ({alias.name})",
-                    ))
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM010",
+                            message=f"cross-layer import: {msg} ({alias.name})",
+                        )
+                    )
                 continue
             if module_str is None:
                 continue
-            target_dotted = forbidden_target.replace("/", ".").rstrip(".")
-            if target_dotted in module_str:
+            if _module_matches(module_str, forbidden_target):
                 if _find_parent_if(tree, node) is not None:
                     continue
-                issues.append(Issue(
-                    path=path,
-                    line=lineno,
-                    rule="AM010",
-                    message=f"cross-layer import: {msg} ({module_str})",
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=lineno,
+                        rule="AM010",
+                        message=f"cross-layer import: {msg} ({module_str})",
+                    )
+                )
     return issues
+
+
+def _module_matches(module: str, forbidden: str) -> bool:
+    return module == forbidden or module.startswith(f"{forbidden}.")
 
 
 def _find_parent_if(tree: ast.Module, target: ast.AST) -> ast.If | None:
@@ -654,57 +883,233 @@ def _collect_dict_schema_names(tree: ast.Module) -> set[str]:
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and _is_dict_with_type_object(node.value):
+                if isinstance(target, ast.Name) and _is_dict_with_type_object(
+                    node.value
+                ):
                     names.add(target.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.value is not None and _is_dict_with_type_object(node.value):
-                names.add(node.target.id)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+            and _is_dict_with_type_object(node.value)
+        ):
+            names.add(node.target.id)
     return names
+
+
+def _returned_schema_dict_names(node: ast.FunctionDef) -> set[str]:
+    names: set[str] = set()
+    for statement in node.body:
+        if isinstance(statement, ast.Assign):
+            if not _is_dict_with_type_object(statement.value):
+                continue
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
+            and _is_dict_with_type_object(statement.value)
+        ):
+            names.add(statement.target.id)
+    return names
+
+
+class _SchemaReturnVisitor(ast.NodeVisitor):
+    """Find schema returns without descending into nested definitions."""
+
+    def __init__(self, local_schema_names: set[str]) -> None:
+        self.returns_schema = False
+        self._local_schema_names = local_schema_names
+
+    def visit_Return(self, node: ast.Return) -> None:
+        value = node.value
+        if value is None:
+            return
+        if (
+            _is_dict_with_type_object(value)
+            or isinstance(value, ast.Name)
+            and value.id in self._local_schema_names
+        ):
+            self.returns_schema = True
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+def _returns_dict_schema(node: ast.FunctionDef) -> bool:
+    """Return whether a helper function returns a hand-written tool schema."""
+    local_schema_names = _returned_schema_dict_names(node)
+    visitor = _SchemaReturnVisitor(local_schema_names)
+    for statement in node.body:
+        visitor.visit(statement)
+        if visitor.returns_schema:
+            return True
+    return False
+
+
+def _collect_dict_schema_factory_names(tree: ast.Module) -> set[str]:
+    """Return module-level helpers that return a ``{"type": "object", ...}`` dict."""
+    return {
+        node.name
+        for node in ast.iter_child_nodes(tree)
+        if isinstance(node, ast.FunctionDef) and _returns_dict_schema(node)
+    }
+
+
+def _is_schema_factory_call(
+    node: ast.expr,
+    schema_factory_names: set[str],
+) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and (func_name := _call_name(node)) is not None
+        and func_name in schema_factory_names
+    )
+
+
+def _target_named_parameters(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Name) and node.id == "parameters") or (
+        isinstance(node, ast.Attribute) and node.attr == "parameters"
+    )
+
+
+def _declares_atom(tree: ast.Module) -> bool:
+    has_manifest = False
+    has_install = False
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(target, ast.Name) and target.id == "MANIFEST"
+                for target in targets
+            ):
+                has_manifest = True
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            node.name == "install"
+        ):
+            has_install = True
+    return has_manifest and has_install
 
 
 def _check_hand_written_schema(
     tree: ast.Module, path: str, file_path: Path
 ) -> list[Issue]:
-    """AM011: Tool parameters as dict literal instead of pydantic schema."""
-    parts = file_path.parts
-    is_atom = ("extensions" in parts and "builtin" in parts
-               and not any(p.startswith("_") for p in parts[-2:] if p != file_path.name))
-    if not is_atom:
+    """AM011: Tool parameters as dict/factory instead of pydantic schema."""
+    if not _declares_atom(tree):
         return []
 
     schema_names = _collect_dict_schema_names(tree)
+    schema_factory_names = _collect_dict_schema_factory_names(tree)
     issues: list[Issue] = []
     for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if not any(_target_named_parameters(target) for target in targets):
+                continue
+            if _is_dict_with_type_object(value):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=value.lineno,
+                        rule="AM011",
+                        message=(
+                            "hand-written tool schema — use a Pydantic model or "
+                            "pydantic_to_tool_schema(Model) instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            elif isinstance(value, ast.Name) and value.id in schema_names:
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=value.lineno,
+                        rule="AM011",
+                        message=(
+                            f"hand-written tool schema ({value.id}) — use a "
+                            "Pydantic model or pydantic_to_tool_schema(Model) "
+                            "instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            elif _is_schema_factory_call(value, schema_factory_names):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=value.lineno,
+                        rule="AM011",
+                        message=(
+                            "hand-written tool schema factory — use a Pydantic "
+                            "model or pydantic_to_tool_schema(Model) instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            continue
+
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        func_name = ""
-        if isinstance(func, ast.Name):
-            func_name = func.id
-        elif isinstance(func, ast.Attribute):
-            func_name = func.attr
-        if func_name != "FunctionTool":
-            continue
+        is_function_tool = _call_name(node) == "FunctionTool"
         for kw in node.keywords:
             if kw.arg != "parameters":
                 continue
-            if isinstance(kw.value, ast.Dict):
-                issues.append(Issue(
-                    path=path,
-                    line=kw.value.lineno,
-                    rule="AM011",
-                    message="hand-written tool schema — use pydantic_to_tool_schema(Model) instead",
-                    severity="warning",
-                ))
-            elif (isinstance(kw.value, ast.Name)
-                  and kw.value.id in schema_names):
-                issues.append(Issue(
-                    path=path,
-                    line=kw.value.lineno,
-                    rule="AM011",
-                    message=f"hand-written tool schema ({kw.value.id}) — use pydantic_to_tool_schema(Model) instead",
-                    severity="warning",
-                ))
+            if isinstance(kw.value, ast.Dict) and (
+                is_function_tool or _is_dict_with_type_object(kw.value)
+            ):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=kw.value.lineno,
+                        rule="AM011",
+                        message=(
+                            "hand-written tool schema — use a Pydantic model or "
+                            "pydantic_to_tool_schema(Model) instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            elif isinstance(kw.value, ast.Name) and kw.value.id in schema_names:
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=kw.value.lineno,
+                        rule="AM011",
+                        message=(
+                            f"hand-written tool schema ({kw.value.id}) — use a "
+                            "Pydantic model or pydantic_to_tool_schema(Model) "
+                            "instead"
+                        ),
+                        severity="warning",
+                    )
+                )
+            elif _is_schema_factory_call(kw.value, schema_factory_names):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=kw.value.lineno,
+                        rule="AM011",
+                        message=(
+                            "hand-written tool schema factory — use a Pydantic "
+                            "model or pydantic_to_tool_schema(Model) instead"
+                        ),
+                        severity="warning",
+                    )
+                )
     return issues
 
 
@@ -733,15 +1138,17 @@ def _check_config_dict_splat(tree: ast.Module, path: str) -> list[Issue]:
             continue
         # ``**x`` in a call is a keyword whose ``arg`` is None.
         if any(kw.arg is None for kw in node.keywords):
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM012",
-                message=(
-                    f"dict-splat into {name}() — pass explicit typed fields, "
-                    "not **dict"
-                ),
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM012",
+                    message=(
+                        f"dict-splat into {name}() — pass explicit typed fields, "
+                        "not **dict"
+                    ),
+                )
+            )
     return issues
 
 
@@ -761,15 +1168,17 @@ def _check_legacy_asyncio_timeout_error(tree: ast.Module, path: str) -> list[Iss
                 and isinstance(exc_type.value, ast.Name)
                 and exc_type.value.id == "asyncio"
             ):
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM013",
-                    message=(
-                        "catch builtin TimeoutError instead of "
-                        "asyncio.TimeoutError on Python 3.12+"
-                    ),
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM013",
+                        message=(
+                            "catch builtin TimeoutError instead of "
+                            "asyncio.TimeoutError on Python 3.12+"
+                        ),
+                    )
+                )
                 break
     return issues
 
@@ -788,42 +1197,68 @@ def _check_resolved_parent_chain(tree: ast.Module, path: str) -> list[Issue]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "parent":
             if _is_resolve_call(node.value):
-                issues.append(Issue(
-                    path=path,
-                    line=node.lineno,
-                    rule="AM014",
-                    message=(
-                        "avoid path.resolve().parent — split resolve() from "
-                        "parent access when symlink resolution is intentional"
-                    ),
-                ))
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM014",
+                        message=(
+                            "avoid path.resolve().parent — split resolve() from "
+                            "parent access when symlink resolution is intentional"
+                        ),
+                    )
+                )
         elif (
             isinstance(node, ast.Subscript)
             and isinstance(node.value, ast.Attribute)
             and node.value.attr == "parents"
             and _is_resolve_call(node.value.value)
         ):
-            issues.append(Issue(
-                path=path,
-                line=node.lineno,
-                rule="AM014",
-                message=(
-                    "avoid path.resolve().parents[...] — split resolve() from "
-                    "parent access when symlink resolution is intentional"
-                ),
-            ))
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM014",
+                    message=(
+                        "avoid path.resolve().parents[...] — split resolve() from "
+                        "parent access when symlink resolution is intentional"
+                    ),
+                )
+            )
     return issues
 
 
-def _assigned_name(node: ast.Assign | ast.AnnAssign) -> str | None:
-    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-    if len(targets) != 1 or not isinstance(targets[0], ast.Name):
-        return None
-    return targets[0].id
+_CONCRETE_ATOM_PREFIX: Final = "agentm.extensions.builtin."
+_SCENARIO_EXECUTION_CALLS: Final[frozenset[str]] = frozenset(
+    {
+        "exec",
+        "import_module",
+        "module_from_spec",
+        "spec_from_file_location",
+    }
+)
+_DYNAMIC_ATTRIBUTE_CALLS: Final[frozenset[str]] = frozenset(
+    {"delattr", "getattr", "hasattr", "setattr"}
+)
+_IGNORE_DIRECTIVE: Final[re.Pattern[str]] = re.compile(
+    r"#\s*code-health:\s*ignore\[(?P<rules>[^\]]+)\]"
+)
+_IGNORE_FILE_DIRECTIVE: Final[re.Pattern[str]] = re.compile(
+    r"#\s*code-health:\s*ignore-file\[(?P<rules>[^\]]+)\]"
+)
 
 
-def _assigned_value(node: ast.Assign | ast.AnnAssign) -> ast.expr | None:
-    return node.value
+def _path_parts(path: Path) -> tuple[str, ...]:
+    return tuple(part.replace("\\", "/") for part in path.parts)
+
+
+def _contains_parts(path: Path, expected: tuple[str, ...]) -> bool:
+    parts = _path_parts(path)
+    width = len(expected)
+    return any(
+        parts[index : index + width] == expected
+        for index in range(len(parts) - width + 1)
+    )
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -834,322 +1269,380 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def _is_emit_of(node: ast.Call, event_name: str) -> bool:
-    if _call_name(node) not in {"emit", "emit_sync"}:
-        return False
-    return any(
-        isinstance(arg, ast.Name) and arg.id == event_name
-        for arg in node.args
-    ) or any(
-        isinstance(keyword.value, ast.Name)
-        and keyword.value.id == event_name
-        for keyword in node.keywords
-    )
+def _attribute_named(node: ast.AST | None, name: str) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == name
 
 
-class _CurrentScopeCollector(ast.NodeVisitor):
-    """Collect nodes in one function without descending into nested scopes."""
-
-    def __init__(self) -> None:
-        self.nodes: list[ast.AST] = []
-
-    def generic_visit(self, node: ast.AST) -> None:
-        self.nodes.append(node)
-        super().generic_visit(node)
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
-        return
-
-    def visit_AsyncFunctionDef(  # noqa: N802
-        self,
-        node: ast.AsyncFunctionDef,
-    ) -> None:
-        return
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
-        return
-
-    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
-        return
+def _tuple_target(node: ast.AST | None) -> bool:
+    return isinstance(node, (ast.Tuple, ast.List)) and len(node.elts) > 1
 
 
-def _scope_nodes(
-    scope: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> list[ast.AST]:
-    collector = _CurrentScopeCollector()
-    for statement in scope.body:
-        collector.visit(statement)
-    return collector.nodes
-
-
-def _loaded_names(node: ast.AST | None) -> set[str]:
-    if node is None:
-        return set()
-    return {
-        child.id
-        for child in ast.walk(node)
-        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-    }
-
-
-def _mutable_constructor_in_emit(node: ast.Call) -> ast.Call | None:
-    if _call_name(node) not in {"emit", "emit_sync"}:
-        return None
-    values = [*node.args, *(keyword.value for keyword in node.keywords)]
-    for value in values:
-        if (
-            isinstance(value, ast.Call)
-            and _call_name(value) in MUTABLE_EVENT_FIELDS_BY_TYPE
-        ):
-            return value
-    return None
-
-
-def _check_event_source_drift(tree: ast.Module, path: str) -> list[Issue]:
-    """AM015: mutable event payloads are the post-dispatch source of truth."""
-    issues: list[Issue] = []
-    scopes = [
-        node
+def _check_core_atom_policy(
+    tree: ast.Module,
+    path: str,
+    file_path: Path,
+) -> list[Issue]:
+    """AM017: core runtime must not append concrete atom implementations."""
+    if not _contains_parts(file_path, ("core", "runtime")):
+        return []
+    return [
+        Issue(
+            path=path,
+            line=node.lineno,
+            rule="AM017",
+            message=(
+                "core runtime names a concrete builtin atom; put default "
+                "composition in a host scenario manifest"
+            ),
+        )
         for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith(_CONCRETE_ATOM_PREFIX)
     ]
-    for scope in scopes:
-        nodes = _scope_nodes(scope)
-        for node in nodes:
-            if not isinstance(node, ast.Call):
-                continue
-            inline = _mutable_constructor_in_emit(node)
-            if inline is None:
-                continue
+
+
+def _check_scenario_loader_execution(
+    tree: ast.Module,
+    path: str,
+    file_path: Path,
+) -> list[Issue]:
+    """AM018: scenario discovery returns data and never executes Python."""
+    if not file_path.as_posix().endswith("src/agentm/scenarios.py"):
+        return []
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _call_name(node) in _SCENARIO_EXECUTION_CALLS:
             issues.append(
                 Issue(
                     path=path,
-                    line=inline.lineno,
-                    rule="AM015",
+                    line=node.lineno,
+                    rule="AM018",
                     message=(
-                        f"mutable {_call_name(inline)} must be assigned to a "
-                        "local before emit so downstream code can consume its "
-                        "final fields"
+                        "scenario loader executes Python; return a durable "
+                        "ExtensionSpec and let the runtime loader validate it"
                     ),
                 )
             )
-
-        event_assignments: list[tuple[str, ast.Call, int, tuple[str, ...]]] = []
-        for node in nodes:
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            event_name = _assigned_name(node)
-            value = _assigned_value(node)
-            constructor_name = (
-                _call_name(value) if isinstance(value, ast.Call) else None
-            )
-            if (
-                event_name is None
-                or not isinstance(value, ast.Call)
-                or constructor_name not in MUTABLE_EVENT_FIELDS_BY_TYPE
-            ):
-                continue
-            event_assignments.append(
-                (
-                    event_name,
-                    value,
-                    node.lineno,
-                    MUTABLE_EVENT_FIELDS_BY_TYPE[constructor_name],
-                )
-            )
-
-        for (
-            event_name,
-            constructor,
-            assignment_line,
-            mutable_fields,
-        ) in event_assignments:
-            emit_lines = sorted(
-                node.lineno
-                for node in nodes
-                if (
-                    isinstance(node, ast.Call)
-                    and node.lineno > assignment_line
-                    and _is_emit_of(node, event_name)
-                )
-            )
-            if not emit_lines:
-                continue
-            emit_line = emit_lines[0]
-            source_fields = {
-                keyword.value.id: keyword.arg
-                for keyword in constructor.keywords
-                if (
-                    keyword.arg in mutable_fields
-                    and isinstance(keyword.value, ast.Name)
-                )
-            }
-            tainted = dict(source_fields)
-            assignments = sorted(
-                (
-                    node
-                    for node in nodes
-                    if isinstance(node, (ast.Assign, ast.AnnAssign))
-                ),
-                key=lambda node: (node.lineno, node.col_offset),
-            )
-            for assignment in assignments:
-                if assignment.lineno >= emit_line:
-                    break
-                target_name = _assigned_name(assignment)
-                if target_name is None or target_name == event_name:
-                    continue
-                origins = [
-                    tainted[name]
-                    for name in _loaded_names(_assigned_value(assignment))
-                    if name in tainted
-                ]
-                if origins:
-                    tainted[target_name] = origins[0]
-
-            for source_name, field_name in tainted.items():
-                fresh_line: int | None = None
-                for assignment in assignments:
-                    if (
-                        assignment.lineno <= emit_line
-                        or _assigned_name(assignment) != source_name
-                    ):
-                        continue
-                    if not (
-                        _loaded_names(_assigned_value(assignment))
-                        & set(tainted)
-                    ):
-                        fresh_line = assignment.lineno
-                        break
-                stale_reads = sorted(
-                    node.lineno
-                    for node in nodes
-                    if (
-                        isinstance(node, ast.Name)
-                        and isinstance(node.ctx, ast.Load)
-                        and node.id == source_name
-                        and node.lineno > emit_line
-                        and (fresh_line is None or node.lineno < fresh_line)
-                    )
-                )
-                if not stale_reads:
-                    continue
-                issues.append(Issue(
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "sys"
+            and node.attr == "modules"
+        ):
+            issues.append(
+                Issue(
                     path=path,
-                    line=stale_reads[0],
-                    rule="AM015",
+                    line=node.lineno,
+                    rule="AM018",
                     message=(
-                        f"{source_name!r} is read after {event_name!r} was "
-                        f"emitted — use {event_name}.{field_name} or explicitly "
-                        "rebind the local from the final event payload"
+                        "scenario loader mutates sys.modules; represent local "
+                        "code as a content-addressed file source"
                     ),
-                ))
+                )
+            )
     return issues
 
 
-def _hook_contract_call(node: ast.ClassDef) -> ast.Call | None:
-    for statement in node.body:
-        target: ast.expr | None = None
-        value: ast.expr | None = None
-        if isinstance(statement, ast.AnnAssign):
-            target = statement.target
-            value = statement.value
-        elif isinstance(statement, ast.Assign) and len(statement.targets) == 1:
-            target = statement.targets[0]
-            value = statement.value
-        if (
-            isinstance(target, ast.Name)
-            and target.id == "HOOK"
-            and isinstance(value, ast.Call)
-            and _call_name(value) == "HookContract"
-        ):
-            return value
-    return None
-
-
-def _constant_string_tuple(node: ast.expr | None) -> tuple[str, ...]:
-    if not isinstance(node, (ast.Tuple, ast.List)):
-        return ()
-    values: list[str] = []
-    for item in node.elts:
-        if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
-            return ()
-        values.append(item.value)
-    return tuple(values)
-
-
-def _check_hook_contract_integrity(
+def _check_legacy_extension_shape(
     tree: ast.Module,
     path: str,
 ) -> list[Issue]:
-    """AM016: mutation prose and machine-readable mutable fields stay paired."""
+    """AM019: canonical ExtensionSpec values are not tuples or indexable pairs."""
     issues: list[Issue] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
+        if (
+            isinstance(node, ast.Subscript)
+            and _attribute_named(node.value, "provider")
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, int)
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM019",
+                    message=(
+                        "ResolvedSessionSpec.provider is an ExtensionSpec; "
+                        "read source/config fields instead of tuple indexes"
+                    ),
+                )
+            )
+        if (
+            isinstance(node, (ast.For, ast.AsyncFor))
+            and _tuple_target(node.target)
+            and _attribute_named(node.iter, "extensions")
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.target.lineno,
+                    rule="AM019",
+                    message=(
+                        "resolved extensions are ExtensionSpec values; "
+                        "do not unpack them as (module, config)"
+                    ),
+                )
+            )
+        if (
+            isinstance(node, ast.comprehension)
+            and _tuple_target(node.target)
+            and _attribute_named(node.iter, "extensions")
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.target.lineno,
+                    rule="AM019",
+                    message=(
+                        "resolved extensions are ExtensionSpec values; "
+                        "do not unpack them as (module, config)"
+                    ),
+                )
+            )
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(_tuple_target(target) for target in targets) and _attribute_named(
+                node.value, "provider"
+            ):
+                issues.append(
+                    Issue(
+                        path=path,
+                        line=node.lineno,
+                        rule="AM019",
+                        message=(
+                            "ResolvedSessionSpec.provider is an ExtensionSpec; "
+                            "do not unpack it as (module, config)"
+                        ),
+                    )
+                )
+    return issues
+
+
+def _check_raw_cli_extension_config(
+    tree: ast.Module,
+    path: str,
+    file_path: Path,
+) -> list[Issue]:
+    """AM020: presenter output must not directly materialize secret-bearing config."""
+    if not _contains_parts(file_path, ("agentm", "cli")):
+        return []
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _call_name(node) != "dict":
             continue
-        hook_call = _hook_contract_call(node)
-        if hook_call is None:
+        if not node.args or not _attribute_named(node.args[0], "config"):
             continue
-        keywords = {
-            keyword.arg: keyword.value
-            for keyword in hook_call.keywords
-            if keyword.arg is not None
-        }
-        mutable_fields = _constant_string_tuple(keywords.get("mutable_fields"))
-        mutation_node = keywords.get("mutation_contract")
-        has_mutation_contract = not (
-            mutation_node is None
-            or (
-                isinstance(mutation_node, ast.Constant)
-                and mutation_node.value is None
+        issues.append(
+            Issue(
+                path=path,
+                line=node.lineno,
+                rule="AM020",
+                message=(
+                    "CLI materializes raw extension config; use redact_config() "
+                    "before rendering or serializing it"
+                ),
             )
         )
-        if has_mutation_contract and not mutable_fields:
+    return issues
+
+
+def _check_dynamic_attribute_access(
+    tree: ast.Module,
+    path: str,
+) -> list[Issue]:
+    """AM021: dynamic attribute lookup obscures typed contracts."""
+    return [
+        Issue(
+            path=path,
+            line=node.lineno,
+            rule="AM021",
+            message=(
+                f"{_call_name(node)}() bypasses a typed contract; use an "
+                "explicit protocol, field, or dispatch table"
+            ),
+        )
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node) in _DYNAMIC_ATTRIBUTE_CALLS
+    ]
+
+
+def _check_typing_any(
+    tree: ast.Module,
+    path: str,
+) -> list[Issue]:
+    """AM022: source annotations must not erase values to typing.Any."""
+    return [
+        Issue(
+            path=path,
+            line=node.lineno,
+            rule="AM022",
+            message=(
+                "typing.Any erases the typed contract; use object, JsonValue, "
+                "a concrete DTO, or a Protocol"
+            ),
+        )
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "Any"
+    ]
+
+
+def _annotation_nodes(tree: ast.Module) -> list[ast.expr]:
+    annotations: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+            annotations.extend(
+                arg.annotation for arg in args if arg.annotation is not None
+            )
+            if node.args.vararg is not None and node.args.vararg.annotation:
+                annotations.append(node.args.vararg.annotation)
+            if node.args.kwarg is not None and node.args.kwarg.annotation:
+                annotations.append(node.args.kwarg.annotation)
+            if node.returns is not None:
+                annotations.append(node.returns)
+    return annotations
+
+
+def _bare_dict_names(annotation: ast.expr) -> list[ast.Name]:
+    parents = {
+        id(child): parent
+        for parent in ast.walk(annotation)
+        for child in ast.iter_child_nodes(parent)
+    }
+    return [
+        node
+        for node in ast.walk(annotation)
+        if isinstance(node, ast.Name)
+        and node.id == "dict"
+        and not (
+            isinstance((parent := parents.get(id(node))), ast.Subscript)
+            and parent.value is node
+        )
+    ]
+
+
+def _check_bare_dict(
+    tree: ast.Module,
+    path: str,
+) -> list[Issue]:
+    """AM023: annotations must not contain an unparameterized dict."""
+    return [
+        Issue(
+            path=path,
+            line=node.lineno,
+            rule="AM023",
+            message=(
+                "bare dict erases key/value contracts; parameterize it or "
+                "use Mapping, a dataclass, or a Protocol"
+            ),
+        )
+        for annotation in _annotation_nodes(tree)
+        for node in _bare_dict_names(annotation)
+    ]
+
+
+def _check_stdlib_logging(tree: ast.Module, path: str) -> list[Issue]:
+    """AM024: source code must use Loguru rather than stdlib logging."""
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "logging" or alias.name.startswith("logging."):
+                    issues.append(
+                        Issue(
+                            path=path,
+                            line=node.lineno,
+                            rule="AM024",
+                            message=(
+                                "stdlib logging is prohibited; use "
+                                "'from loguru import logger'"
+                            ),
+                        )
+                    )
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and (node.module == "logging" or node.module.startswith("logging."))
+        ):
             issues.append(
                 Issue(
                     path=path,
-                    line=hook_call.lineno,
-                    rule="AM016",
+                    line=node.lineno,
+                    rule="AM024",
                     message=(
-                        f"{node.name}.HOOK has mutation_contract but no "
-                        "mutable_fields"
-                    ),
-                )
-            )
-        if mutable_fields and not has_mutation_contract:
-            issues.append(
-                Issue(
-                    path=path,
-                    line=hook_call.lineno,
-                    rule="AM016",
-                    message=(
-                        f"{node.name}.HOOK declares mutable_fields without a "
-                        "mutation_contract"
-                    ),
-                )
-            )
-        event_fields = {
-            statement.target.id
-            for statement in node.body
-            if (
-                isinstance(statement, ast.AnnAssign)
-                and isinstance(statement.target, ast.Name)
-            )
-        }
-        unknown = sorted(set(mutable_fields) - event_fields)
-        if unknown:
-            issues.append(
-                Issue(
-                    path=path,
-                    line=hook_call.lineno,
-                    rule="AM016",
-                    message=(
-                        f"{node.name}.HOOK mutable_fields are not event fields: "
-                        f"{unknown}"
+                        "stdlib logging is prohibited; use 'from loguru import logger'"
                     ),
                 )
             )
     return issues
+
+
+def _check_runtime_type_check(tree: ast.Module, path: str) -> list[Issue]:
+    """AM025: isinstance() should not replace typed contracts."""
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "isinstance":
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM025",
+                    message=(
+                        "isinstance() branches on runtime shape; prefer a typed "
+                        "contract, DTO, Protocol, or dispatch table"
+                    ),
+                )
+            )
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "isinstance"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "builtins"
+        ):
+            issues.append(
+                Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM025",
+                    message=(
+                        "builtins.isinstance() branches on runtime shape; prefer "
+                        "a typed contract, DTO, Protocol, or dispatch table"
+                    ),
+                )
+            )
+    return issues
+
+
+def _directive_rules(line: str, pattern: re.Pattern[str]) -> frozenset[str]:
+    match = pattern.search(line)
+    if match is None:
+        return frozenset()
+    return frozenset(
+        item.strip() for item in match.group("rules").split(",") if item.strip()
+    )
+
+
+def _suppressed(issue: Issue, source_lines: list[str]) -> bool:
+    line_index = issue.line - 1
+    if 0 <= line_index < len(source_lines):
+        line = source_lines[line_index]
+        if "# type: ignore" in line or "# noqa" in line:
+            return True
+        if issue.rule in _directive_rules(line, _IGNORE_DIRECTIVE):
+            return True
+    return any(
+        issue.rule in _directive_rules(line, _IGNORE_FILE_DIRECTIVE)
+        for line in source_lines
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1157,9 +1650,30 @@ def _check_hook_contract_integrity(
 # ---------------------------------------------------------------------------
 
 ALL_RULES: Final[tuple[str, ...]] = (
-    "AM001", "AM002", "AM003", "AM004", "AM005", "AM006", "AM007",
-    "AM008", "AM009", "AM010", "AM011", "AM012", "AM013", "AM014",
-    "AM015", "AM016",
+    "AM001",
+    "AM002",
+    "AM003",
+    "AM004",
+    "AM005",
+    "AM006",
+    "AM007",
+    "AM008",
+    "AM009",
+    "AM010",
+    "AM011",
+    "AM012",
+    "AM013",
+    "AM014",
+    "AM017",
+    "AM018",
+    "AM019",
+    "AM020",
+    "AM021",
+    "AM022",
+    "AM023",
+    "AM024",
+    "AM025",
+    "AM026",
 )
 
 
@@ -1175,14 +1689,22 @@ def check_file(file_path: Path) -> list[Issue]:
 
     try:
         tree = ast.parse(source, filename=rel)
-    except SyntaxError:
-        return []
+    except SyntaxError as exc:
+        return [
+            Issue(
+                path=rel,
+                line=exc.lineno or 1,
+                rule="AM000",
+                message=f"cannot parse Python source: {exc.msg}",
+            )
+        ]
 
     issues: list[Issue] = []
     issues.extend(_check_silent_except(tree, rel))
     issues.extend(_check_missing_slots(tree, rel))
     issues.extend(_check_private_in_all(tree, rel))
     issues.extend(_check_atom_raw_io(tree, rel, file_path))
+    issues.extend(_check_self_wrapping_bind(tree, rel, file_path))
     issues.extend(_check_param_explosion(tree, rel))
     issues.extend(_check_mutable_abi_global(tree, rel, file_path))
     issues.extend(_check_god_file(source_lines, rel))
@@ -1193,9 +1715,16 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_config_dict_splat(tree, rel))
     issues.extend(_check_legacy_asyncio_timeout_error(tree, rel))
     issues.extend(_check_resolved_parent_chain(tree, rel))
-    issues.extend(_check_event_source_drift(tree, rel))
-    issues.extend(_check_hook_contract_integrity(tree, rel))
-    return issues
+    issues.extend(_check_core_atom_policy(tree, rel, file_path))
+    issues.extend(_check_scenario_loader_execution(tree, rel, file_path))
+    issues.extend(_check_legacy_extension_shape(tree, rel))
+    issues.extend(_check_raw_cli_extension_config(tree, rel, file_path))
+    issues.extend(_check_dynamic_attribute_access(tree, rel))
+    issues.extend(_check_typing_any(tree, rel))
+    issues.extend(_check_bare_dict(tree, rel))
+    issues.extend(_check_stdlib_logging(tree, rel))
+    issues.extend(_check_runtime_type_check(tree, rel))
+    return [issue for issue in issues if not _suppressed(issue, source_lines)]
 
 
 def check_paths(paths: list[Path]) -> list[Issue]:
@@ -1212,12 +1741,14 @@ def check_paths(paths: list[Path]) -> list[Issue]:
     return all_issues
 
 
-def changed_files(base: str = "main") -> list[Path]:
+def changed_files(base: str = "origin/main") -> list[Path]:
     """Return Python files changed since merge-base with *base*."""
     try:
         merge_base = subprocess.run(
             ["git", "merge-base", "HEAD", base],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         merge_base = base
@@ -1225,13 +1756,16 @@ def changed_files(base: str = "main") -> list[Path]:
     try:
         diff_output = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=ACMR", merge_base],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
 
     return [
-        Path(f) for f in diff_output.splitlines()
+        Path(f)
+        for f in diff_output.splitlines()
         if f.endswith(".py") and Path(f).exists()
     ]
 
@@ -1243,25 +1777,32 @@ def changed_files(base: str = "main") -> list[Path]:
 app = typer.Typer(
     name="lint",
     help="Project-level code health checks (AST-based).",
+    context_settings={"allow_interspersed_args": True},
 )
 
 
 @app.callback(invoke_without_command=True)
 def lint_cmd(
-    paths: list[str] = typer.Argument(
+    paths: list[str] | None = typer.Argument(
         None,
         help="Files or directories to check. Default: src/agentm/",
     ),
     changed: bool = typer.Option(
-        False, "--changed", "-c",
+        False,
+        "--changed",
+        "-c",
         help="Check only files changed since merge-base with main.",
     ),
-    rule: list[str] = typer.Option(
-        None, "--rule", "-r",
+    rule: list[str] | None = typer.Option(
+        None,
+        "--rule",
+        "-r",
         help="Run only specific rules (e.g. -r AM001 -r AM002).",
     ),
     warnings_as_errors: bool = typer.Option(
-        False, "--strict", "-s",
+        False,
+        "--strict",
+        "-s",
         help="Treat warnings as errors.",
     ),
 ) -> None:
@@ -1269,7 +1810,7 @@ def lint_cmd(
     if changed:
         files = changed_files()
         if not files:
-            logger.info("No changed Python files.")
+            typer.echo("No changed Python files.", err=True)
             raise typer.Exit(0)
         issues = check_paths(files)
     elif paths:
@@ -1279,17 +1820,23 @@ def lint_cmd(
 
     if rule:
         rule_set = set(rule)
+        unknown = rule_set - set(ALL_RULES)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise typer.BadParameter(f"unknown code-health rule(s): {names}")
         issues = [i for i in issues if i.rule in rule_set]
 
     if not issues:
-        logger.info("No code health issues found.")
+        typer.echo("No code health issues found.", err=True)
         raise typer.Exit(0)
 
     issues.sort(key=lambda i: (i.path, i.line))
 
     for issue in issues:
         severity_mark = "E" if issue.severity == "error" else "W"
-        print(f"{issue.path}:{issue.line}: {issue.rule} [{severity_mark}] {issue.message}")
+        typer.echo(
+            f"{issue.path}:{issue.line}: {issue.rule} [{severity_mark}] {issue.message}"
+        )
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity != "error"]
@@ -1297,12 +1844,15 @@ def lint_cmd(
         errors.extend(warnings)
         warnings = []
 
-    summary_parts = []
+    summary_parts: list[str] = []
     if errors:
         summary_parts.append(f"{len(errors)} error(s)")
     if warnings:
         summary_parts.append(f"{len(warnings)} warning(s)")
-    logger.info("Code health: {}", ", ".join(summary_parts))
+    typer.echo(
+        f"Code health: {', '.join(summary_parts)}",
+        err=True,
+    )
 
     raise typer.Exit(1 if errors else 0)
 

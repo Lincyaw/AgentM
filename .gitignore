@@ -63,3 +63,10 @@ evolution_runs
 
 .agent
 run_bench_v4.sh
+
+# Loop work dir: harbor job configs and per-run logs, regenerated every run.
+.policy-loop-work/
+.policy-loop/
+
+# MCP browser session state.
+.playwright-mcp/

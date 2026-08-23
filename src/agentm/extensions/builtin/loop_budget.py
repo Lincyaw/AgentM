@@ -1,95 +1,104 @@
-"""Builtin ``loop_budget`` atom — sets the agent-loop turn / tool budget.
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
+"""Builtin ``loop_budget`` atom -- sets the agent-loop turn / tool budget and,
+optionally, warns the model as it approaches that budget.
 
-The loop budget is a *policy*, so it lives as an atom rather than a privileged
-manifest field: a scenario that wants a hard ceiling lists this atom with
-``config``, exactly like any other capability. The atom registers a
-:class:`LoopConfig` under :data:`LOOP_BUDGET_SERVICE`; the session factory
-reads it just before constructing the loop.
+A scenario that wants a hard ceiling lists this atom with ``config``.
 
-```yaml
-extensions:
-  - module: agentm.extensions.builtin.loop_budget
-    config:
-      max_turns: 128        # omit / null ⇒ no turn cap
-      max_tool_calls: 400   # omit / null ⇒ no tool-call cap
-```
+The optional ``reminder`` sub-config turns on budget-aware runway warnings.
+When it is omitted the atom only sets the budget and stays silent. When
+present, the atom appends a short reminder as the agent nears the
+``max_turns`` / ``max_tool_calls`` cap so the model can wrap up instead of
+being hard-stopped mid-thought.
 
-Precedence: an explicit caller override (CLI ``--max-turns`` / SDK
-``loop_config=``) wins over whatever this atom registers; with neither, the
-substrate default (``LoopConfig()`` — no cap) applies.
+The reminder is a new message at the end of the send-list, marked synthetic,
+never an edit to the system prompt or to a message already in it: editing
+either invalidates the KV prefix everything before it shares, while a trailing
+message leaves that prefix byte-identical.
 """
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+import time as _time
 
-from agentm.core.abi import CommandSpec, ExtensionAPI, LOOP_BUDGET_SERVICE, LoopConfig
+from pydantic import BaseModel, ConfigDict, Field
+
+from agentm.core.abi import (
+    LOOP_BUDGET_SERVICE,
+    AgentMessage,
+    AtomAPI,
+    BeforeRunEvent,
+    BeforeSendEvent,
+    LoopConfig,
+    MessageMeta,
+    TextContent,
+    ToolResultEvent,
+    TurnBeginEvent,
+    UserMessage,
+)
 from agentm.extensions import ExtensionManifest
 
 
+class ReminderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    warn_within: int = Field(default=5, ge=0)
+    finalize_tool: str = ""
+
+
 class LoopBudgetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_turns: int | None = None
     max_tool_calls: int | None = None
+    reminder: ReminderConfig | None = None
 
 
 MANIFEST = ExtensionManifest(
     name="loop_budget",
-    description="Sets the agent-loop turn / tool-call budget for the session.",
-    registers=("command:loop",),
+    description=(
+        "Sets the agent-loop turn / tool-call budget and, when a reminder is "
+        "configured, warns the model as it approaches the cap."
+    ),
+    registers=(
+        "service:loop_budget",
+        "event:before_run",
+        "event:turn_begin",
+        "event:tool_result",
+        "event:before_send",
+    ),
     config_schema=LoopBudgetConfig,
     requires=(),
-    api_version=1,
-    tier=1,
 )
 
 
-class _LoopBudgetRuntime:
-    def __init__(self, api: ExtensionAPI, config: LoopBudgetConfig) -> None:
-        self._api = api
-        self._loop_config = LoopConfig(
-            max_turns=_positive_int_or_none_from_model(config.max_turns, "max_turns"),
-            max_tool_calls=_positive_int_or_none_from_model(
-                config.max_tool_calls, "max_tool_calls"
-            ),
-        )
-
-    def install(self) -> None:
-        self._api.set_service(LOOP_BUDGET_SERVICE, self._loop_config)
-        self._api.register_command(
-            "loop",
-            CommandSpec(
-                description="Show this session's agent-loop turn/tool budget.",
-                handler=self.loop_command,
-            ),
-        )
-
-    async def loop_command(self, _args: str, cmd_api: ExtensionAPI) -> None:
-        cfg = cmd_api.session.get_loop_config()
-        cmd_api.send_user_message(
-            "Loop budget: "
-            f"max_turns={_render_limit(cfg.max_turns)}, "
-            f"max_tool_calls={_render_limit(cfg.max_tool_calls)}, "
-            f"max_tool_calls_per_turn={_render_limit(cfg.max_tool_calls_per_turn)}."
-        )
+def install(api: AtomAPI, config: LoopBudgetConfig) -> None:
+    declared = LoopConfig(
+        max_turns=_positive_or_none(config.max_turns, "max_turns"),
+        max_tool_calls=_positive_or_none(config.max_tool_calls, "max_tool_calls"),
+    )
+    # A layer, not a write: several atoms may each want to bound the loop, and
+    # detaching this one has to give back the budget the others agreed on.
+    api.services.layer(
+        LOOP_BUDGET_SERVICE,
+        lambda existing: _tighten(existing, declared),
+        scope="session",
+    )
+    if config.reminder is not None:
+        _TurnReminderRuntime(api, config.reminder).install()
 
 
-def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
-    _LoopBudgetRuntime(api, config).install()
+def _tighten(existing: object, declared: LoopConfig) -> LoopConfig:
+    """Combine this atom's budget with one the host already registered.
 
-
-def _render_limit(value: int | None) -> str:
-    return str(value) if value is not None else "unlimited"
-
-
-def _positive_int_or_none_from_model(value: int | None, key: str) -> int | None:
-    """Validate a value as a positive int (``None`` ⇒ no cap).
-
-    Fail fast on a non-positive value rather than silently dropping
-    it — a silently-ignored budget would let two "identical" runs diverge.
-    ``bool`` is rejected explicitly: ``isinstance(True, int)`` is True, so a
-    stray ``max_turns: true`` would otherwise slip through as 1.
+    Replacing outright would let a scenario silently raise a cap its host set.
     """
 
+    if not isinstance(existing, LoopConfig):  # code-health: ignore[AM025]
+        return declared
+    return existing.tightened_with(declared)
+
+
+def _positive_or_none(value: int | None, key: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -99,8 +108,143 @@ def _positive_int_or_none_from_model(value: int | None, key: str) -> int | None:
     return value
 
 
-__all__ = (
-    "LoopBudgetConfig",
-    "MANIFEST",
-    "install",
-)
+class _TurnReminderRuntime:
+    def __init__(self, api: AtomAPI, config: ReminderConfig) -> None:
+        self._api = api
+        self._warn_within = config.warn_within
+        self._finalize_tool = config.finalize_tool
+        self._turn_index = 0
+        self._tool_calls_used = 0
+
+    def install(self) -> None:
+        self._api.on(BeforeRunEvent.CHANNEL, self._on_before_run)
+        self._api.on(TurnBeginEvent.CHANNEL, self._on_turn_begin)
+        self._api.on(ToolResultEvent.CHANNEL, self._on_tool_result)
+        self._api.on(BeforeSendEvent.CHANNEL, self._before_send)
+
+    def _on_before_run(self, _: BeforeRunEvent) -> None:
+        self._turn_index = 0
+        self._tool_calls_used = 0
+
+    def _on_turn_begin(self, event: TurnBeginEvent) -> None:
+        self._turn_index = event.turn_index
+
+    def _on_tool_result(self, _: ToolResultEvent) -> None:
+        self._tool_calls_used += 1
+
+    def _before_send(
+        self, event: BeforeSendEvent
+    ) -> dict[str, list[AgentMessage]] | None:
+        runway = self._runway()
+        if runway is None:
+            return None
+        turns_left, tools_left = runway
+        if not _warning_triggered(turns_left, tools_left, self._warn_within):
+            return None
+
+        messages = list(event.messages)
+        if _last_step(turns_left, tools_left, threshold=2) and self._finalize_tool:
+            messages.append(_finalize_now_message(self._finalize_tool))
+            return {"messages": messages}
+
+        text = _format_warning(turns_left, tools_left, self._finalize_tool)
+        messages.append(_reminder_message(text))
+        return {"messages": messages}
+
+    def _runway(self) -> tuple[int | None, int | None] | None:
+        cfg = self._api.services.get(LOOP_BUDGET_SERVICE)
+        if not isinstance(cfg, LoopConfig):
+            return None
+        if cfg.max_turns is None and cfg.max_tool_calls is None:
+            return None
+        turns_left = (
+            cfg.max_turns - self._turn_index if cfg.max_turns is not None else None
+        )
+        tools_left = (
+            cfg.max_tool_calls - self._tool_calls_used
+            if cfg.max_tool_calls is not None
+            else None
+        )
+        return turns_left, tools_left
+
+
+def _warning_triggered(
+    turns_left: int | None,
+    tools_left: int | None,
+    warn_within: int,
+) -> bool:
+    return (turns_left is not None and turns_left <= warn_within) or (
+        tools_left is not None and tools_left <= warn_within
+    )
+
+
+def _last_step(
+    turns_left: int | None,
+    tools_left: int | None,
+    *,
+    threshold: int,
+) -> bool:
+    return (turns_left is not None and turns_left <= threshold) or (
+        tools_left is not None and tools_left <= threshold
+    )
+
+
+def _budget_meta(kind: str) -> MessageMeta:
+    return MessageMeta(synthetic=True, synthetic_kind=kind, origin="loop_budget")
+
+
+def _reminder_message(text: str) -> UserMessage:
+    return UserMessage(
+        role="user",
+        content=[TextContent(type="text", text=text)],
+        timestamp=_time.time(),
+        meta=_budget_meta("budget_reminder"),
+    )
+
+
+def _finalize_now_message(finalize_tool: str) -> UserMessage:
+    return UserMessage(
+        role="user",
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"SYSTEM: Your investigation time is up. You MUST call "
+                    f"`{finalize_tool}` NOW with your best findings. "
+                    f"Do NOT make any more investigation calls."
+                ),
+            )
+        ],
+        timestamp=_time.time(),
+        meta=_budget_meta("budget_finalize"),
+    )
+
+
+def _format_warning(
+    turns_left: int | None,
+    tools_left: int | None,
+    finalize_tool: str = "",
+) -> str:
+    parts: list[str] = []
+    if turns_left is not None:
+        parts.append(f"{max(turns_left, 0)} turn(s)")
+    if tools_left is not None:
+        parts.append(f"{max(tools_left, 0)} tool call(s)")
+    budget = " and ".join(parts)
+    tool_hint = (
+        f" Call `{finalize_tool}` NOW."
+        if finalize_tool
+        else " Submit your final response NOW."
+    )
+    last = (turns_left is not None and turns_left <= 1) or (
+        tools_left is not None and tools_left <= 1
+    )
+    if last:
+        return (
+            f"[budget] This is effectively your LAST step ({budget} left before a "
+            f"hard stop with no chance to summarize).{tool_hint}"
+        )
+    return (
+        f"[budget] Only {budget} remaining before a hard stop. "
+        f"Start wrapping up.{tool_hint}"
+    )

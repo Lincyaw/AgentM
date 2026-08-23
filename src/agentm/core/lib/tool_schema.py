@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
 """Convert a Pydantic model into a provider-neutral JSON tool schema.
 
 Pydantic's :meth:`pydantic.BaseModel.model_json_schema` produces output
@@ -28,6 +29,8 @@ atoms and core code (see :mod:`agentm.core.lib.frontmatter`,
 :mod:`agentm.core.lib.redact`).
 """
 
+# code-health: ignore-file[AM022] -- normalizes third-party JSON Schema trees
+
 from __future__ import annotations
 
 from typing import Any
@@ -53,11 +56,9 @@ def pydantic_to_tool_schema(
     return _resolve_refs({k: v for k, v in raw.items() if k != "$defs"}, defs)
 
 
-# Backward-compatible alias — deprecated, use pydantic_to_tool_schema.
-pydantic_to_openai_tool_schema = pydantic_to_tool_schema
-
-
-def _resolve_refs(node: Any, defs: dict[str, Any], *, _inside_properties: bool = False) -> Any:
+def _resolve_refs(
+    node: Any, defs: dict[str, Any], *, _inside_properties: bool = False
+) -> Any:
     if isinstance(node, dict):
         ref = node.get("$ref")
         if isinstance(ref, str) and ref.startswith("#/$defs/"):
@@ -102,4 +103,4 @@ def _force_strict(node: Any) -> Any:
     return node
 
 
-__all__ = ["pydantic_to_openai_tool_schema", "pydantic_to_tool_schema"]
+__all__ = ["pydantic_to_tool_schema"]

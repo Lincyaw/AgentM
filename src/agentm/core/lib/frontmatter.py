@@ -1,32 +1,31 @@
-"""Thin wrapper around ``python-frontmatter``.
-
-Keeps the rest of AgentM on a tiny internal API surface so third-party parser
-choices stay localized to one module.
-"""
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
+"""Parse YAML frontmatter from Markdown text."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import cast
 
-import frontmatter  # type: ignore[import-untyped]
-from loguru import logger
+import frontmatter as _fm  # type: ignore[import-untyped]
 
 
-def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    """Parse leading frontmatter and return ``(metadata, body)``.
+def parse_frontmatter(
+    text: str, *, strict: bool = False
+) -> tuple[dict[str, object], str]:
+    """Return ``(metadata, body)`` from text with optional YAML frontmatter.
 
-    On parse failure, fall back to the original text unchanged so callers can
-    decide whether malformed metadata is fatal for their own use case.
+    When ``strict=False`` (default), parse failures return ``({}, text)``.
+    When ``strict=True``, parse failures raise ``ValueError``.
     """
-
     try:
-        post = frontmatter.loads(text)
+        post = _fm.loads(text)
     except Exception as exc:
-        logger.debug("frontmatter: parse failed, returning raw text: {}", exc)
+        if strict:
+            raise ValueError("invalid frontmatter") from exc
         return {}, text
-
     metadata = post.metadata
     if not isinstance(metadata, Mapping):
+        if strict:
+            raise ValueError("frontmatter metadata must be a mapping")
         return {}, cast(str, post.content)
     return dict(metadata), cast(str, post.content)

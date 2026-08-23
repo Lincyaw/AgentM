@@ -1,39 +1,127 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Provider selection port."""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Protocol, runtime_checkable
 
 from .stream import Model, StreamFn
 
-ProviderT = TypeVar("ProviderT", contravariant=True)
+ProviderMetaScalar = str | int | float | bool | None
+ProviderMeta = Mapping[str, ProviderMetaScalar]
+
+
+def _nonempty_string(value: object, label: str, *, optional: bool = False) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+
+
+def _freeze_metadata(value: ProviderMeta, label: str) -> ProviderMeta:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be an object")
+    copied: dict[str, ProviderMetaScalar] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{label} keys must be strings")
+        if not isinstance(item, (str, int, float, bool, type(None))):
+            raise TypeError(f"{label}[{key!r}] must be a scalar")
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"{label}[{key!r}] must be finite")
+        copied[key] = item
+    return MappingProxyType(copied)
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderConfig:
-    """LLM provider registration record shared across provider and runtime layers."""
+    """Session-local LLM provider registration.
+
+    Provider atoms install through the normal ``ExtensionManifest`` path, then
+    register one of these records with the session. Host selection policy lives
+    separately in ``ProviderResolver``.
+    """
 
     stream_fn: StreamFn
     model: Model
     name: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.stream_fn, StreamFn):
+            raise TypeError("provider stream_fn must implement StreamFn")
+        if not isinstance(self.model, Model):
+            raise TypeError("provider model must be Model")
+        _nonempty_string(self.name, "provider name")
+
 
 @dataclass(frozen=True, slots=True)
-class ProviderManifest:
-    """Provider extension metadata that stays inside the core ABI boundary."""
+class ProviderSessionIdentity:
+    """Provider/model identity bound to a session history.
+
+    Once a session has committed a turn, this identity is frozen. Changing it
+    requires a fork/new session or an explicit future config-change control
+    node; silent mid-history provider drift is not allowed.
+    """
 
     name: str
-    description: str
-    registers: tuple[str, ...]
-    config_schema: dict[str, Any] | None = None
+    model_id: str | None = None
+    active_set_digest: str | None = None
+    frozen_after_turn_index: int | None = None
+    metadata: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        _nonempty_string(self.name, "provider identity name")
+        _nonempty_string(
+            self.model_id,
+            "provider identity model_id",
+            optional=True,
+        )
+        _nonempty_string(
+            self.active_set_digest,
+            "provider identity active_set_digest",
+            optional=True,
+        )
+        if self.frozen_after_turn_index is not None and (
+            not isinstance(self.frozen_after_turn_index, int)
+            or isinstance(self.frozen_after_turn_index, bool)
+            or self.frozen_after_turn_index < 0
+        ):
+            raise ValueError(
+                "provider identity frozen_after_turn_index must be a "
+                "non-negative integer"
+            )
+        object.__setattr__(
+            self,
+            "metadata",
+            _freeze_metadata(self.metadata, "provider identity metadata"),
+        )
 
 
-class ProviderResolver(Protocol[ProviderT]):
-    """Select the active provider registration from a provider registry."""
-
-    def resolve_provider(self, providers: Mapping[str, ProviderT]) -> str | None: ...
+ProviderRegistry = Mapping[str, ProviderConfig]
 
 
-__all__ = ["ProviderConfig", "ProviderManifest", "ProviderResolver"]
+@runtime_checkable
+class ProviderResolver(Protocol):
+    """Tree-scoped host policy for selecting the active provider.
+
+    A resolver must return one registered name whenever ``providers`` is
+    non-empty. Returning ``None`` is only valid for an empty registry.
+    """
+
+    def resolve_provider(self, providers: ProviderRegistry) -> str | None: ...
+
+
+__all__ = [
+    "ProviderConfig",
+    "ProviderMeta",
+    "ProviderMetaScalar",
+    "ProviderRegistry",
+    "ProviderResolver",
+    "ProviderSessionIdentity",
+]

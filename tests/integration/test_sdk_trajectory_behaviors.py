@@ -1,0 +1,2180 @@
+"""SDK-user behavior contracts for durable trajectory workflows."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from agentm import (
+    AgentSession,
+    AgentSessionConfig,
+    ExtensionSpec,
+    Model,
+    ProviderRequestFailed,
+)
+from agentm.core.abi.cancel import CancelSignal, cancel_reason
+from agentm.core.abi.errors import ExtensionLoadError
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantMessage,
+    TextContent,
+    ToolCallBlock,
+    ToolResultBlock,
+    Usage,
+    text_message,
+)
+from agentm.core.abi.roles import (
+    EFFECT_SCOPE_ROLE,
+    RESOURCE_WRITER,
+    bind_resource_store,
+)
+from agentm.core.abi.services import ServiceRegistry
+from agentm.core.abi.store import (
+    SessionMeta,
+    TrajectoryDiagnostic,
+    TrajectoryNodeQuery,
+    TrajectoryStore,
+)
+from agentm.core.abi.stream import MessageEnd, TextDelta
+from agentm.core.abi.tool import FunctionTool, ToolResult
+from agentm.core.abi.tool_executor import ToolExecutionRequirements
+from agentm.core.abi.trajectory import (
+    TrajectoryForkPoint,
+    TrajectoryHead,
+    TurnCheckpoint,
+)
+from agentm.core.abi.trigger import UserInput
+from agentm.core.runtime.extension import load_extension_module
+from agentm.environments import LocalSnapshotEffectScope, LocalSnapshotStore
+from agentm.extensions.validate import validate_atom_package
+from agentm.extensions.builtin.llm_openai import (
+    OpenAIStreamFn,
+)
+from agentm.scenarios import builtin_scenario_loader, packaged_scenario_names
+from agentm.storage.resources import LocalResourceStore
+from agentm.storage.sql import create_sql_engine
+from agentm.storage.trajectory import JsonlTrajectoryStore, PostgresTrajectoryStore
+from agentm.storage.trajectory.postgres import BOOTSTRAP_RELATIONS
+from tests.fixtures.custom_trigger import CustomTrigger
+
+
+def _resource_host_services(
+    resource_store: object,
+    resource_writer: object,
+    effect_scope: object | None = None,
+) -> ServiceRegistry:
+    """Bind resource/effect boundaries into a host registry for create/resume."""
+
+    services = ServiceRegistry()
+    bind_resource_store(services, resource_store)  # type: ignore[arg-type]
+    services.bind(RESOURCE_WRITER, resource_writer)  # type: ignore[arg-type]
+    if effect_scope is not None:
+        services.bind(EFFECT_SCOPE_ROLE, effect_scope)  # type: ignore[arg-type]
+    return services
+
+
+_LLM_COMPACTION = "agentm.extensions.builtin.llm_compaction"
+_MESSAGE_PATTERNS = "agentm.extensions.builtin.message_patterns"
+_CUSTOM_TRIGGER = "tests.fixtures.custom_trigger"
+_FILE_TOOLS = "agentm.extensions.builtin.file_tools"
+_LOCAL_RESOURCES = "agentm.extensions.builtin.local_backend"
+_OPERATIONS = "agentm.extensions.builtin.local_backend"
+_BACKGROUND_EXEC = "agentm.extensions.builtin.background_exec"
+_MEMORY = "agentm.extensions.builtin.memory"
+_SYSTEM_PROMPT = "agentm.extensions.builtin.system_prompt"
+_SUB_AGENT = "agentm.extensions.builtin.sub_agent"
+_WAIT_FOR_CANCEL = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _TrajectoryBackend:
+    open_store: Callable[[], TrajectoryStore]
+
+    def connect(self) -> TrajectoryStore:
+        return self.open_store()
+
+
+def _jsonl_store(root: Path) -> TrajectoryStore:
+    return JsonlTrajectoryStore(root)
+
+
+class _StubProvider:
+    """Deterministic provider double at the public StreamFn boundary."""
+
+    def __init__(self, *actions: str | AssistantMessage | object) -> None:
+        self._actions = list(actions)
+        self.requests: list[tuple[AgentMessage, ...]] = []
+        self.stream_started = asyncio.Event()
+        self.observed_cancel_reason: str | None = None
+
+    async def __call__(
+        self,
+        *,
+        messages: list[AgentMessage],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: CancelSignal | None = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[TextDelta | MessageEnd]:
+        del model, tools, system, thinking
+        self.requests.append(tuple(messages))
+        if not self._actions:
+            raise RuntimeError("stub provider has no queued response")
+        action = self._actions.pop(0)
+        if action is _WAIT_FOR_CANCEL:
+            if signal is None:
+                raise AssertionError("SDK did not pass a cancellation signal")
+            self.stream_started.set()
+            await signal.wait()
+            self.observed_cancel_reason = cancel_reason(signal)
+            raise RuntimeError("provider request cancelled")
+        if isinstance(action, Exception):
+            raise action
+        if isinstance(action, AssistantMessage):
+            yield MessageEnd(message=action)
+            return
+        if not isinstance(action, str):
+            raise TypeError(f"unsupported provider action: {action!r}")
+        response = AssistantMessage(
+            role="assistant",
+            content=(TextContent(type="text", text=action),),
+            timestamp=0.0,
+            stop_reason="end_turn",
+        )
+        yield TextDelta(text=action)
+        yield MessageEnd(message=response)
+
+
+def _tool_call(
+    call_id: str, name: str, arguments: dict[str, object]
+) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=(
+            ToolCallBlock(
+                type="tool_call",
+                id=call_id,
+                name=name,
+                arguments=arguments,
+            ),
+        ),
+        timestamp=0.0,
+        stop_reason="tool_use",
+    )
+
+
+@pytest.fixture(params=("jsonl", "postgres"))
+def trajectory_backend(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> Iterator[_TrajectoryBackend]:
+    if request.param == "jsonl":
+        root = tmp_path / "trajectory"
+        yield _TrajectoryBackend(
+            open_store=lambda: JsonlTrajectoryStore(root),
+        )
+        return
+
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run Postgres behavior contracts")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    admin = create_sql_engine(database_url)
+    engines = [admin]
+    with admin.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+
+    def open_store() -> TrajectoryStore:
+        engine = create_sql_engine(database_url)
+        engines.append(engine)
+        return PostgresTrajectoryStore(engine, schema=schema)
+
+    try:
+        yield _TrajectoryBackend(open_store=open_store)
+    finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        for engine in engines:
+            engine.dispose()
+
+
+def _model() -> Model:
+    return Model(
+        id="stub-model",
+        provider="stub",
+        context_window=128_000,
+        max_output_tokens=4_096,
+    )
+
+
+def test_selected_trajectory_backend_round_trips_diagnostics(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    session_id = f"diagnostics-{uuid.uuid4().hex}"
+    store = trajectory_backend.connect()
+    store.create_session(
+        SessionMeta(id=session_id, created_at=1.0),
+        head=TrajectoryHead(session_id=session_id),
+    )
+    expected = TrajectoryDiagnostic(
+        id="diagnostic-1",
+        session_id=session_id,
+        timestamp=2.0,
+        level="error",
+        source="driver",
+        phase="trajectory_commit",
+        message="turn abandoned",
+        error_type="UniqueViolation",
+        error_detail="duplicate key",
+        turn_id="turn-1",
+        turn_index=0,
+        checkpoint_id="turn-1",
+    )
+
+    store.append_diagnostic(expected)
+
+    assert trajectory_backend.connect().list_diagnostics(session_id) == [expected]
+
+
+def test_postgres_schema_creation_is_concurrency_safe() -> None:
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres schema contract")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    admin = create_sql_engine(database_url)
+    with admin.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+
+    def create_store(_: int) -> None:
+        engine = create_sql_engine(database_url)
+        try:
+            PostgresTrajectoryStore(engine, schema=schema)
+        finally:
+            engine.dispose()
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(create_store, range(4)))
+    finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
+
+
+def test_postgres_bootstrap_declares_everything_it_creates() -> None:
+    """``BOOTSTRAP_RELATIONS`` is what opening a store asks about instead of
+    re-running the DDL, so it has to be what the DDL actually creates.
+
+    A list that drifts behind the DDL is worse than no list: an added table
+    would be present in the declaration nowhere, an already-bootstrapped
+    database would answer "everything is here", and the addition would never
+    reach any deployment that had run the previous version.
+    """
+
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres schema contract")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    admin = create_sql_engine(database_url)
+    try:
+        engine = create_sql_engine(database_url)
+        try:
+            PostgresTrajectoryStore(engine, schema=schema)
+            with admin.begin() as conn:
+                created = {
+                    row[0]
+                    for row in conn.exec_driver_sql(
+                        # Tables and indexes the DDL names, which means leaving
+                        # out the indexes Postgres builds for PRIMARY KEY and
+                        # UNIQUE: nobody wrote those, so nobody should have to
+                        # declare them. What is left is exactly the set the
+                        # bootstrap statements create, in both directions.
+                        "SELECT c.relname FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "LEFT JOIN pg_constraint k ON k.conindid = c.oid "
+                        "WHERE n.nspname = %s AND c.relkind IN ('r', 'i') "
+                        "AND k.oid IS NULL",
+                        (schema,),
+                    ).fetchall()
+                }
+        finally:
+            engine.dispose()
+        assert created == set(BOOTSTRAP_RELATIONS)
+    finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
+
+
+def test_postgres_store_opens_without_blocking_a_writer() -> None:
+    """Opening a store must not take a lock that fights ordinary traffic.
+
+    ``create_schema`` ran its whole ``CREATE TABLE/INDEX IF NOT EXISTS`` on
+    every construction. ``CREATE INDEX IF NOT EXISTS`` takes ``ShareLock`` on
+    the table before it can discover the index is already there, and
+    ``ShareLock`` conflicts with the ``RowExclusiveLock`` an ``INSERT`` holds --
+    so a process starting up and a process writing a turn each ended up holding
+    what the other wanted, and Postgres killed one of them.
+
+    Two processes sharing one store is the ordinary state of a gateway running
+    several bots against one database, and the symptom was a session that did
+    nothing wrong dying with ``DeadlockDetected``.
+
+    The existing concurrency test runs four bootstraps against each other, which
+    the advisory lock has always handled. The collision was never between two
+    bootstraps; it was between a bootstrap and a writer, which is this.
+    """
+
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres schema contract")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    admin = create_sql_engine(database_url)
+    engine = create_sql_engine(database_url)
+    try:
+        PostgresTrajectoryStore(engine, schema=schema)
+
+        # A writer holding RowExclusiveLock on one of the tables, in an open
+        # transaction, exactly as a session mid-turn does.
+        with engine.begin() as writing:
+            writing.exec_driver_sql(
+                f'INSERT INTO "{schema}"."agentm_trajectory_sessions" '
+                "(id, parent_id, purpose, cwd, created_at, meta_json) "
+                "VALUES ('probe', NULL, 'root', '', 0, '{}'::jsonb)"
+            )
+
+            # ... and another process opening the same store while it holds it.
+            # Before the fix this blocked on ShareLock and, with the writer
+            # going on to touch a second table, deadlocked.
+            opener = create_sql_engine(database_url)
+            try:
+                done = ThreadPoolExecutor(max_workers=1).submit(
+                    PostgresTrajectoryStore, opener, schema=schema
+                )
+                # Generous, because the failure mode is "never returns" rather
+                # than "returns something wrong".
+                done.result(timeout=20)
+            finally:
+                opener.dispose()
+    finally:
+        engine.dispose()
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sdk_dsn_selects_one_postgres_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.environ.get("AGENTM_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("set AGENTM_TEST_POSTGRES_URL to run the Postgres DSN contract")
+
+    schema = f"agentm_test_{uuid.uuid4().hex}"
+    monkeypatch.setenv("AGENTM_TRAJECTORY_DSN", database_url)
+    monkeypatch.setenv("AGENTM_TRAJECTORY_SCHEMA", schema)
+    monkeypatch.delenv("AGENTM_TRAJECTORY_DIR", raising=False)
+
+    provider = _StubProvider("dsn-answer")
+    admin = create_sql_engine(database_url)
+    with admin.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+    try:
+        session = await AgentSession.create(
+            AgentSessionConfig(
+                cwd=str(tmp_path),
+                extensions=[],
+                stream_fn=provider,
+                model=_model(),
+            )
+        )
+        session_id = session.session_id
+        try:
+            await session.run("dsn-question")
+        finally:
+            await session.shutdown()
+
+        engine = create_sql_engine(database_url)
+        try:
+            store = PostgresTrajectoryStore(
+                engine,
+                schema=schema,
+                create_schema=False,
+            )
+            metadata, turns = store.load(session_id)
+            nodes = store.query_nodes(TrajectoryNodeQuery(session_id=session_id))
+
+            assert metadata.id == session_id
+            assert len(turns) == 1
+            assert turns[0].index == 0
+            assert _text(
+                [node.message for node in nodes if node.message is not None]
+            ) == ["dsn-question", "dsn-answer"]
+        finally:
+            engine.dispose()
+    finally:
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        admin.dispose()
+
+
+@pytest.mark.asyncio
+async def test_selected_trajectory_backend_preserves_session_scope(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    provider = _StubProvider("first-answer", "second-answer")
+    first = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    second = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    try:
+        await first.run("first-question")
+        await second.run("second-question")
+    finally:
+        await second.shutdown()
+        await first.shutdown()
+
+    store = trajectory_backend.connect()
+    second_head = store.get_head(second.session_id)
+    assert second_head is not None
+    assert second_head.node_id is not None
+
+    with pytest.raises(KeyError):
+        store.query_nodes(TrajectoryNodeQuery(session_id="missing-session"))
+    with pytest.raises(KeyError):
+        store.get_head("missing-session")
+    with pytest.raises(ValueError, match="unknown trajectory leaf node"):
+        store.load_chain(
+            first.session_id,
+            second_head.node_id,
+            include_logical_parent=True,
+        )
+
+    ordered = store.query_nodes(TrajectoryNodeQuery())
+    identities = [(node.session_id, node.seq) for node in ordered]
+    assert identities == sorted(identities)
+    descending = store.query_nodes(TrajectoryNodeQuery(sort="desc"))
+    assert [(node.session_id, node.seq) for node in descending] == list(
+        reversed(identities)
+    )
+
+
+def _text(messages: Sequence[AgentMessage]) -> list[str]:
+    return [
+        block.text
+        for message in messages
+        for block in message.content
+        if isinstance(block, TextContent)
+    ]
+
+
+def _write_local_scenario(root: Path, name: str) -> Path:
+    scenario_dir = root / "contrib" / "scenarios" / name
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "manifest.yaml").write_text(
+        "\n".join(
+            (
+                f"name: {name}",
+                "extensions:",
+                "  - local: local_echo",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    source = scenario_dir / "local_echo.py"
+    source.write_text(
+        """\
+from agentm.core.abi.manifest import ExtensionManifest
+from agentm.core.abi.messages import TextContent
+from agentm.core.abi.tool import ToolResult
+
+
+MANIFEST = ExtensionManifest(
+    name="local_echo",
+    description="Behavior-test local echo tool.",
+    registers=("tool:local_echo",),
+)
+
+
+class LocalEcho:
+    name = "local_echo"
+    description = "Echo one value."
+    parameters = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    }
+
+    async def execute(self, args, *, signal=None):
+        del signal
+        return ToolResult(
+            content=(TextContent(type="text", text=f"local:{args['value']}"),),
+        )
+
+
+def install(api, config):
+    del config
+    api.register_tool(LocalEcho())
+""",
+        encoding="utf-8",
+    )
+    return source
+
+
+@pytest.mark.asyncio
+async def test_sdk_scenario_local_extension_survives_fork(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_local_scenario(tmp_path, "local_source")
+    monkeypatch.chdir(tmp_path)
+    provider = _StubProvider(
+        "parent-answer",
+        _tool_call("local-call", "local_echo", {"value": "fork"}),
+        "fork-answer",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            scenario="local_source",
+            scenario_loader=builtin_scenario_loader,
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    forked: AgentSession | None = None
+    try:
+        await session.run("seed")
+        forked = await AgentSession.fork(session, at=0, purpose="local-source-fork")
+        await forked.run("use the local tool")
+    finally:
+        if forked is not None:
+            await forked.shutdown()
+        await session.shutdown()
+
+    local_results = [
+        block
+        for message in provider.requests[-1]
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.tool_call_id == "local-call"
+    ]
+    assert len(local_results) == 1
+    assert [
+        content.text
+        for content in local_results[0].content
+        if isinstance(content, TextContent)
+    ] == ["local:fork"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_rejects_changed_scenario_local_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_local_scenario(tmp_path, "tampered_source")
+    monkeypatch.chdir(tmp_path)
+    spec = builtin_scenario_loader("tampered_source")
+    source.write_text(
+        source.read_text(encoding="utf-8") + "\n# changed after resolution\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ExtensionLoadError, match="source digest changed"):
+        await AgentSession.create(
+            AgentSessionConfig(
+                extensions=list(spec.extensions),
+                stream_fn=_StubProvider("unused"),
+                model=_model(),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_sdk_all_packaged_scenarios_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENTM_HOME", str(tmp_path / "agentm-home"))
+
+    scenarios = set(packaged_scenario_names())
+    assert {"chat", "empty", "minimal"} <= scenarios
+
+    for scenario in sorted(scenarios):
+        session = await AgentSession.create(
+            AgentSessionConfig(
+                cwd=str(tmp_path),
+                scenario=scenario,
+                scenario_loader=builtin_scenario_loader,
+                stream_fn=_StubProvider("unused"),
+                model=_model(),
+            )
+        )
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sdk_persists_provider_failure_without_replaying_it(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    provider = _StubProvider(RuntimeError("provider unavailable"))
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    session_id = session.session_id
+    try:
+        with pytest.raises(RuntimeError, match="ProviderRequestFailed"):
+            await session.run("failed-question")
+    finally:
+        await session.shutdown()
+
+    _, failed_turns = trajectory_backend.connect().load(session_id)
+    assert len(failed_turns) == 1
+    failure = failed_turns[0].outcome.cause
+    assert isinstance(failure, ProviderRequestFailed)
+    assert failure.error_type == "RuntimeError"
+    assert failure.detail == "provider unavailable"
+
+    resumed_provider = _StubProvider("recovered-answer")
+    resumed = await AgentSession.resume(
+        session_id,
+        trajectory_backend.connect(),
+        config=AgentSessionConfig(
+            extensions=[],
+            stream_fn=resumed_provider,
+            model=_model(),
+        ),
+    )
+    try:
+        await resumed.run("retry-question")
+    finally:
+        await resumed.shutdown()
+
+    assert _text(resumed_provider.requests[0]) == ["retry-question"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_fork_replays_only_the_selected_prefix(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    provider = _StubProvider("answer-one", "parent-answer", "branch-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    forked: AgentSession | None = None
+    try:
+        await session.run("question-one")
+        await session.run("parent-only-question")
+        forked = await AgentSession.fork(session, at=0, purpose="alternate")
+        transcript = await forked.run("branch-only-question")
+    finally:
+        if forked is not None:
+            await forked.shutdown()
+        await session.shutdown()
+
+    assert _text(provider.requests[2]) == [
+        "question-one",
+        "answer-one",
+        "branch-only-question",
+    ]
+    assert _text(transcript) == [
+        "question-one",
+        "answer-one",
+        "branch-only-question",
+        "branch-answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_cold_fork_appends_to_stored_prefix(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    source_provider = _StubProvider("source-answer")
+    store = trajectory_backend.connect()
+    source = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=source_provider,
+            model=_model(),
+            trajectory_store=store,
+        )
+    )
+    await source.run("source-question")
+    source_session_id = source.session_id
+    await source.shutdown()
+
+    source_meta, prefix = trajectory_backend.connect().load_prefix(
+        source_session_id,
+        0,
+    )
+    root_session_id = source_meta.config.get("root_session_id")
+    assert isinstance(root_session_id, str)
+    source_nodes = trajectory_backend.connect().query_nodes(
+        TrajectoryNodeQuery(
+            session_id=source_session_id,
+            turn_index=0,
+        )
+    )
+    assert source_nodes
+
+    fork_provider = _StubProvider("fork-answer")
+    forked = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=fork_provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+            initial_turns=prefix,
+            root_session_id=root_session_id,
+            parent_session_id=None,
+            fork_source_session_id=source_session_id,
+            fork_point=0,
+        )
+    )
+    try:
+        transcript = await forked.run("fork-question")
+    finally:
+        await forked.shutdown()
+
+    fork_store = trajectory_backend.connect()
+    fork_meta, _ = fork_store.load(forked.session_id)
+    fork_nodes = fork_store.query_nodes(
+        TrajectoryNodeQuery(session_id=forked.session_id)
+    )
+    fork_head = fork_store.get_head(forked.session_id)
+
+    assert _text(transcript)[-2:] == ["fork-question", "fork-answer"]
+    assert fork_meta.parent_id is None
+    assert fork_meta.config["fork_source_session_id"] == source_session_id
+    assert fork_nodes[0].parent_id is None
+    assert fork_nodes[0].logical_parent_id == source_nodes[-1].id
+    assert fork_head is not None
+    assert fork_head.parent_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_sdk_node_fork_selectors_require_executable_turn_boundaries(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    provider = _StubProvider("answer-one", "answer-two", "branch-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_backend.connect(),
+        )
+    )
+    forked: AgentSession | None = None
+    try:
+        await session.run("question-one")
+        await session.run("question-two")
+        store = trajectory_backend.connect()
+        nodes = store.query_nodes(TrajectoryNodeQuery(session_id=session.session_id))
+        head = store.get_head(session.session_id)
+        assert head is not None
+        assert head.node_id is not None
+
+        with pytest.raises(
+            ValueError,
+            match="final message of a committed turn",
+        ):
+            await AgentSession.fork(
+                session,
+                at=TrajectoryForkPoint(
+                    session_id=session.session_id,
+                    node_id=nodes[0].id,
+                ),
+            )
+        with pytest.raises(
+            ValueError,
+            match="session_id must match",
+        ):
+            await AgentSession.fork(
+                session,
+                at=TrajectoryForkPoint(
+                    session_id="another-session",
+                    node_id=head.node_id,
+                ),
+            )
+
+        forked = await AgentSession.fork(
+            session,
+            at=TrajectoryForkPoint(
+                session_id=session.session_id,
+                head_id=head.head_id,
+            ),
+            purpose="head-selected",
+        )
+        transcript = await forked.run("branch-question")
+    finally:
+        if forked is not None:
+            await forked.shutdown()
+        await session.shutdown()
+
+    assert _text(provider.requests[2]) == [
+        "question-one",
+        "answer-one",
+        "question-two",
+        "answer-two",
+        "branch-question",
+    ]
+    assert _text(transcript)[-2:] == ["branch-question", "branch-answer"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_fork_reinstalls_atoms_in_an_isolated_environment(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    snapshot_root = tmp_path / "snapshots"
+    resource_root = tmp_path / "resources"
+    trajectory_store = _jsonl_store(tmp_path / "environment-fork")
+    snapshots = LocalSnapshotStore(
+        workspace_root=workspace,
+        snapshot_root=snapshot_root,
+    )
+    resources = LocalResourceStore(
+        workspace_root=workspace,
+        root=resource_root,
+    )
+    provider = _StubProvider(
+        _tool_call(
+            "write-parent",
+            "write",
+            {"path": "parent.txt", "content": "parent"},
+        ),
+        "parent-written",
+        _tool_call(
+            "write-branch",
+            "write",
+            {"path": "branch.txt", "content": "branch"},
+        ),
+        "branch-written",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(workspace),
+            extensions=[
+                (_OPERATIONS, {}),
+                (_FILE_TOOLS, {"tools": ["write"]}),
+            ],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=trajectory_store,
+        ),
+        host_services=_resource_host_services(
+            resources,
+            resources,
+            LocalSnapshotEffectScope(snapshotter=snapshots),
+        ),
+    )
+    forked: AgentSession | None = None
+    resumed: AgentSession | None = None
+    try:
+        await session.run("write the parent file")
+        forked = await AgentSession.fork(session, at=0, purpose="isolated")
+        child_workspace = Path(forked.cwd)
+        assert child_workspace != workspace
+        assert (child_workspace / "parent.txt").read_text() == "parent"
+        await forked.shutdown()
+
+        child_snapshots = LocalSnapshotStore(
+            workspace_root=child_workspace,
+            snapshot_root=snapshot_root,
+        )
+        child_resources = LocalResourceStore(
+            workspace_root=child_workspace,
+            root=resource_root,
+        )
+        resumed = await AgentSession.resume(
+            forked.session_id,
+            trajectory_store,
+            AgentSessionConfig(
+                extensions=[
+                    (_OPERATIONS, {}),
+                    (_FILE_TOOLS, {"tools": ["write"]}),
+                ],
+                stream_fn=provider,
+                model=_model(),
+            ),
+            host_services=_resource_host_services(
+                child_resources,
+                child_resources,
+                LocalSnapshotEffectScope(snapshotter=child_snapshots),
+            ),
+        )
+        await resumed.run("write the branch file")
+
+        assert (child_workspace / "branch.txt").read_text() == "branch"
+        assert (workspace / "parent.txt").read_text() == "parent"
+        assert not (workspace / "branch.txt").exists()
+    finally:
+        if resumed is not None:
+            await resumed.shutdown()
+        if forked is not None:
+            await forked.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_local_environment_restore_does_not_rewind_sdk_control_plane(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    control_plane = workspace / ".agentm"
+    workspace.mkdir()
+    control_plane.mkdir()
+    world_file = workspace / "world.txt"
+    control_file = control_plane / "state.json"
+    world_file.write_text("before")
+    control_file.write_text("before")
+    snapshots = LocalSnapshotStore(
+        workspace_root=workspace,
+        snapshot_root=tmp_path / "snapshots",
+    )
+    before = await snapshots.snapshot(
+        session_id="session-1",
+        ref=0,
+        metadata={"checkpoint": "before_turn", "turn_id": "turn-1"},
+    )
+
+    world_file.write_text("after")
+    control_file.write_text("committed-control-state")
+    await snapshots.restore_to(before)
+
+    assert world_file.read_text() == "before"
+    assert control_file.read_text() == "committed-control-state"
+
+
+@pytest.mark.asyncio
+async def test_sdk_file_toolbox_transactions_share_behavior_and_protect_constitution(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    protected = workspace / "src" / "agentm" / "core" / "abi"
+    protected.mkdir(parents=True)
+    (workspace / "core-manifest.yaml").write_text(
+        "version: 1\nconstitution:\n  paths:\n    - src/agentm/core/**\n    - core-manifest.yaml\nmanaged:\n  globs: []\n"
+    )
+    (workspace / "note.txt").write_text("hello\n")
+    provider = _StubProvider(
+        _tool_call("read-note", "read", {"path": "note.txt"}),
+        _tool_call(
+            "edit-note-1",
+            "edit",
+            {
+                "path": "note.txt",
+                "old_string": "hello",
+                "new_string": "world",
+            },
+        ),
+        _tool_call(
+            "edit-note-2",
+            "edit",
+            {
+                "path": "note.txt",
+                "old_string": "world",
+                "new_string": "done",
+            },
+        ),
+        "file-updated",
+        _tool_call(
+            "write-kernel",
+            "write",
+            {
+                "path": "src/agentm/core/abi/hacked.py",
+                "content": "unsafe",
+            },
+        ),
+        "write-refused",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(workspace),
+            extensions=[
+                (_LOCAL_RESOURCES, {}),
+                (_FILE_TOOLS, {}),
+            ],
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    try:
+        await session.run("update the note twice")
+        await session.run("modify the SDK kernel")
+    finally:
+        await session.shutdown()
+
+    assert (workspace / "note.txt").read_text() == "done\n"
+    assert not (protected / "hacked.py").exists()
+    edit_turns = [
+        turn
+        for turn in session.trajectory.turns
+        if turn.tool_results
+        and turn.tool_results[0].call.id in {"edit-note-1", "edit-note-2"}
+    ]
+    assert len(edit_turns) == 2
+    edit_transactions = []
+    for turn in edit_turns:
+        assert len(turn.meta.resource_mutations) == 1
+        transaction = turn.meta.resource_mutations[0].transaction
+        assert transaction is not None
+        assert (transaction.turn_id, transaction.turn_index) == (
+            turn.id,
+            turn.index,
+        )
+        edit_transactions.append(transaction.id)
+    assert len(set(edit_transactions)) == 2
+    protected_results = [
+        block
+        for message in provider.requests[-1]
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.tool_call_id == "write-kernel"
+    ]
+    assert protected_results[0].is_error
+    assert (
+        "constitution"
+        in " ".join(
+            content.text
+            for content in protected_results[0].content
+            if isinstance(content, TextContent)
+        ).lower()
+    )
+
+
+@pytest.mark.asyncio
+async def test_sdk_interrupt_cancels_one_request_and_session_continues(
+    tmp_path: Path,
+) -> None:
+    provider = _StubProvider(_WAIT_FOR_CANCEL, "continued-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[(_MESSAGE_PATTERNS, {})],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(tmp_path / "interrupt"),
+        )
+    )
+    interrupted = asyncio.create_task(session.run("long-running-question"))
+    try:
+        await asyncio.wait_for(provider.stream_started.wait(), timeout=2.0)
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(interrupted, timeout=2.0)
+        transcript = await session.run("question-after-interrupt")
+    finally:
+        if not interrupted.done():
+            interrupted.cancel()
+        await session.shutdown()
+
+    assert provider.observed_cancel_reason == "user_cancel"
+    assert _text(provider.requests[1]) == [
+        "long-running-question",
+        "[Request interrupted by user]",
+        "question-after-interrupt",
+    ]
+    assert _text(transcript)[-2:] == [
+        "question-after-interrupt",
+        "continued-answer",
+    ]
+    assert session.status()["phase"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_sdk_background_tool_owns_cancellation_after_detach(
+    tmp_path: Path,
+) -> None:
+    provider = _StubProvider(
+        _tool_call("slow-call", "slow_tool", {}),
+        _WAIT_FOR_CANCEL,
+        "background-completion-observed",
+    )
+    completed = asyncio.Event()
+
+    async def slow_tool(
+        args: dict[str, object],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult:
+        del args
+        await asyncio.sleep(0.1)
+        if signal is not None and signal.is_set():
+            raise AssertionError("parent cancellation leaked into detached tool")
+        completed.set()
+        return ToolResult(
+            content=(TextContent(type="text", text="background-success"),)
+        )
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            extra_extensions=[
+                ExtensionSpec.from_module(
+                    _BACKGROUND_EXEC,
+                    {"timeout": 0.01},
+                )
+            ],
+            extra_tools=[
+                FunctionTool(
+                    name="slow_tool",
+                    description="Complete after the foreground timeout.",
+                    parameters={"type": "object", "properties": {}},
+                    fn=slow_tool,
+                )
+            ],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(tmp_path / "background"),
+        )
+    )
+    interrupted = asyncio.create_task(session.run("detach-the-tool"))
+    try:
+        await asyncio.wait_for(provider.stream_started.wait(), timeout=2.0)
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(interrupted, timeout=2.0)
+        assert await session.idle(timeout=2.0)
+    finally:
+        if not interrupted.done():
+            interrupted.cancel()
+        await session.shutdown()
+
+    assert provider.observed_cancel_reason == "user_cancel"
+    assert completed.is_set()
+    assert any(
+        "Background task" in text and "background-success" in text
+        for text in _text(provider.requests[-1])
+    )
+
+
+@pytest.mark.asyncio
+async def test_sdk_memory_round_trip_is_provider_visible(tmp_path: Path) -> None:
+    provider = _StubProvider(
+        _tool_call(
+            "save-memory",
+            "memory_save",
+            {
+                "type": "project",
+                "name": "release_rule",
+                "description": "Release branches require a smoke test.",
+                "content": "Run the SDK smoke test before every release.",
+            },
+        ),
+        "memory-saved",
+        _tool_call(
+            "read-memory",
+            "memory_read",
+            {"name": "release_rule"},
+        ),
+        "memory-read",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ExtensionSpec.from_module(_LOCAL_RESOURCES),
+                ExtensionSpec.from_module(_MEMORY),
+            ],
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    try:
+        await session.run("remember the release rule")
+        await session.run("recall the release rule")
+    finally:
+        await session.shutdown()
+
+    visible_results = [
+        block
+        for message in provider.requests[-1]
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.tool_call_id == "read-memory"
+    ]
+    assert len(visible_results) == 1
+    assert "Run the SDK smoke test before every release." in " ".join(
+        content.text
+        for content in visible_results[0].content
+        if isinstance(content, TextContent)
+    )
+
+
+@pytest.mark.asyncio
+async def test_sdk_background_child_has_an_independent_cancel_domain(
+    tmp_path: Path,
+) -> None:
+    parent_waiting = asyncio.Event()
+    child_done = asyncio.Event()
+    parent_cancel_reason: list[str | None] = []
+    completion_seen = asyncio.Event()
+
+    async def provider(
+        *,
+        messages: list[AgentMessage],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: CancelSignal | None = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[TextDelta | MessageEnd]:
+        del model, tools, system, thinking
+        texts = _text(messages)
+        if "child-work" in texts:
+            await asyncio.sleep(0.1)
+            if signal is not None and signal.is_set():
+                raise AssertionError(
+                    f"parent cancellation leaked into child: {signal.reason}"
+                )
+            child_done.set()
+            yield MessageEnd(
+                message=AssistantMessage(
+                    role="assistant",
+                    content=(TextContent(type="text", text="child-finished"),),
+                    timestamp=0.0,
+                    stop_reason="end_turn",
+                )
+            )
+            return
+        if any("<subagent_result" in text for text in texts):
+            assert any("child-finished" in text for text in texts)
+            completion_seen.set()
+            yield MessageEnd(
+                message=AssistantMessage(
+                    role="assistant",
+                    content=(TextContent(type="text", text="child-result-observed"),),
+                    timestamp=0.0,
+                    stop_reason="end_turn",
+                )
+            )
+            return
+        if any(
+            isinstance(block, ToolResultBlock)
+            and block.tool_call_id == "dispatch-child"
+            for message in messages
+            for block in message.content
+        ):
+            if signal is None:
+                raise AssertionError("parent request has no cancellation signal")
+            parent_waiting.set()
+            await signal.wait()
+            parent_cancel_reason.append(cancel_reason(signal))
+            raise RuntimeError("parent provider cancelled")
+        if "start-child" in texts:
+            yield MessageEnd(
+                message=_tool_call(
+                    "dispatch-child",
+                    "dispatch_agent",
+                    {
+                        "purpose": "cancel-domain-test",
+                        "prompt": "child-work",
+                        "background": True,
+                    },
+                )
+            )
+            return
+        raise AssertionError(f"unexpected provider context: {texts!r}")
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[
+                ExtensionSpec.from_module(
+                    _SYSTEM_PROMPT,
+                    {"prompt": "Test child-session cancellation."},
+                ),
+                ExtensionSpec.from_module(
+                    _SUB_AGENT,
+                    {"max_workers": 2},
+                ),
+            ],
+            stream_fn=provider,
+            model=_model(),
+        )
+    )
+    parent_run = asyncio.create_task(session.run("start-child"))
+    try:
+        await asyncio.wait_for(parent_waiting.wait(), timeout=2.0)
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(parent_run, timeout=2.0)
+        assert await session.idle(timeout=2.0)
+    finally:
+        if not parent_run.done():
+            parent_run.cancel()
+        await session.shutdown()
+
+    assert parent_cancel_reason == ["user_cancel"]
+    assert child_done.is_set()
+    assert completion_seen.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sdk_checkpoints_materialized_steps_without_replaying_them(
+    trajectory_backend: _TrajectoryBackend,
+) -> None:
+    store = trajectory_backend.connect()
+    tool_response = AssistantMessage(
+        role="assistant",
+        content=(
+            ToolCallBlock(
+                type="tool_call",
+                id="fast-call",
+                name="fast_tool",
+                arguments={},
+            ),
+            ToolCallBlock(
+                type="tool_call",
+                id="blocking-call",
+                name="blocking_tool",
+                arguments={},
+            ),
+        ),
+        timestamp=0.0,
+        stop_reason="tool_use",
+    )
+    provider = _StubProvider(tool_response)
+    tool_started = asyncio.Event()
+    fast_completed = asyncio.Event()
+
+    async def fast_tool(args: dict[str, object]) -> ToolResult:
+        del args
+        fast_completed.set()
+        return ToolResult(
+            content=(TextContent(type="text", text="fast-result"),),
+        )
+
+    async def blocking_tool(
+        args: dict[str, object],
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult:
+        del args
+        if signal is None:
+            raise AssertionError("SDK did not pass a cancellation signal")
+        tool_started.set()
+        await signal.wait()
+        return ToolResult(
+            content=(TextContent(type="text", text="cancelled"),),
+            is_error=True,
+        )
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=store,
+            extra_tools=[
+                FunctionTool(
+                    name="fast_tool",
+                    description="Complete immediately.",
+                    parameters={"type": "object", "properties": {}},
+                    fn=fast_tool,
+                    execution_requirements=ToolExecutionRequirements(
+                        concurrency="parallel_safe"
+                    ),
+                ),
+                FunctionTool(
+                    name="blocking_tool",
+                    description="Wait for cancellation.",
+                    parameters={"type": "object", "properties": {}},
+                    fn=blocking_tool,
+                    execution_requirements=ToolExecutionRequirements(
+                        concurrency="parallel_safe"
+                    ),
+                ),
+            ],
+        )
+    )
+    run_task = asyncio.create_task(session.run("checkpoint-question"))
+    try:
+        await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+        await asyncio.wait_for(fast_completed.wait(), timeout=2.0)
+
+        checkpoint = None
+        for _attempt in range(200):
+            checkpoint = store.load_checkpoint(session.session_id)
+            if (
+                checkpoint is not None
+                and checkpoint.response is not None
+                and checkpoint.tool_results
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert checkpoint is not None
+        assert checkpoint.index == 0
+        assert checkpoint.response == tool_response
+        assert [record.call.id for record in checkpoint.tool_results] == ["fast-call"]
+        assert [
+            block.text
+            for record in checkpoint.tool_results
+            for block in record.result.content
+            if isinstance(block, TextContent)
+        ] == ["fast-result"]
+        assert store.load(session.session_id)[1] == []
+
+        session.interrupt("user_cancel")
+        await asyncio.wait_for(run_task, timeout=2.0)
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+        await session.shutdown()
+
+    _, committed = store.load(session.session_id)
+    assert len(committed) == 1
+    assert store.load_checkpoint(session.session_id) is None
+
+    orphan_response = AssistantMessage(
+        role="assistant",
+        content=(TextContent(type="text", text="orphan-answer"),),
+        timestamp=0.0,
+        stop_reason="end_turn",
+    )
+    store.save_checkpoint(
+        session.session_id,
+        TurnCheckpoint(
+            index=1,
+            id="orphan-turn",
+            run_id="orphan-run",
+            run_step=0,
+            trigger=UserInput(
+                content=(TextContent(type="text", text="orphan-question"),)
+            ),
+            response=orphan_response,
+            tool_results=(),
+            updated_at=time.time(),
+        ),
+    )
+    recovery_provider = _StubProvider("recovered-answer")
+    resumed = await AgentSession.resume(
+        session.session_id,
+        store,
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=recovery_provider,
+            model=_model(),
+        ),
+    )
+    try:
+        assert store.load_checkpoint(session.session_id) is None
+        await resumed.run("recovery-question")
+    finally:
+        await resumed.shutdown()
+
+    request_text = _text(recovery_provider.requests[0])
+    assert "orphan-question" not in request_text
+    assert "orphan-answer" not in request_text
+    assert "recovery-question" in request_text
+    assert len(store.load(session.session_id)[1]) == 2
+
+
+@pytest.mark.asyncio
+async def test_sdk_child_cancellation_domain_is_explicit(
+    tmp_path: Path,
+) -> None:
+    inherited_provider = _StubProvider(_WAIT_FOR_CANCEL)
+    store = _jsonl_store(tmp_path / "children")
+    parent = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=_StubProvider("unused"),
+            model=_model(),
+            trajectory_store=store,
+        )
+    )
+    inherited = await parent.spawn(
+        stream_fn=inherited_provider,
+        model=_model(),
+        parent_cancellation="inherit",
+    )
+    inherited_run = asyncio.create_task(inherited.run("foreground-work"))
+    try:
+        await asyncio.wait_for(
+            inherited_provider.stream_started.wait(),
+            timeout=2.0,
+        )
+        parent.interrupt("user_cancel")
+        await asyncio.wait_for(inherited_run, timeout=2.0)
+    finally:
+        await inherited.shutdown()
+        await parent.shutdown()
+    assert inherited_provider.observed_cancel_reason == "user_cancel"
+
+    independent_provider = _StubProvider(_WAIT_FOR_CANCEL)
+    parent = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=_StubProvider("unused"),
+            model=_model(),
+            trajectory_store=store,
+        )
+    )
+    independent = await parent.spawn(
+        stream_fn=independent_provider,
+        model=_model(),
+        parent_cancellation="independent",
+    )
+    independent_run = asyncio.create_task(independent.run("background-work"))
+    try:
+        await asyncio.wait_for(
+            independent_provider.stream_started.wait(),
+            timeout=2.0,
+        )
+        parent.interrupt("user_cancel")
+        await asyncio.sleep(0)
+        assert not independent_run.done()
+        independent.interrupt("task_stop")
+        await asyncio.wait_for(independent_run, timeout=2.0)
+    finally:
+        await independent.shutdown()
+        await parent.shutdown()
+    assert independent_provider.observed_cancel_reason == "task_stop"
+
+
+@pytest.mark.asyncio
+async def test_sdk_compaction_ignores_model_max_output_tokens(tmp_path: Path) -> None:
+    first = AssistantMessage(
+        role="assistant",
+        content=(TextContent(type="text", text="answer-one"),),
+        timestamp=0.0,
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=150, output_tokens=4),
+    )
+    provider = _StubProvider(first, "answer-two")
+    resources = LocalResourceStore(
+        workspace_root=tmp_path,
+        root=tmp_path / "max-output-resources",
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[
+                (
+                    _LLM_COMPACTION,
+                    {"keep_last_turns": 1},
+                )
+            ],
+            stream_fn=provider,
+            model=Model(
+                id="large-output-model",
+                provider="stub",
+                context_window=200,
+                max_output_tokens=160,
+            ),
+            trajectory_store=_jsonl_store(tmp_path / "max-output-trajectory"),
+        ),
+        host_services=_resource_host_services(resources, resources),
+    )
+    try:
+        await session.run("question-one")
+        await session.run("question-two")
+    finally:
+        await session.shutdown()
+
+    assert len(provider.requests) == 2
+    assert _text(provider.requests[1]) == [
+        "question-one",
+        "answer-one",
+        "question-two",
+    ]
+
+
+class _EmptyOpenAIStream:
+    def __aiter__(self) -> _EmptyOpenAIStream:
+        return self
+
+    async def __anext__(self) -> object:
+        raise StopAsyncIteration
+
+    async def close(self) -> None:
+        return None
+
+
+class _OpenAIChunkStream:
+    def __init__(self, *chunks: object) -> None:
+        self._chunks = iter(chunks)
+
+    def __aiter__(self) -> _OpenAIChunkStream:
+        return self
+
+    async def __anext__(self) -> object:
+        try:
+            return next(self._chunks)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def close(self) -> None:
+        return None
+
+
+class _OpenAICompletionsStub:
+    def __init__(self, stream: object | None = None) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self._stream = stream
+
+    async def create(self, **body: Any) -> object:
+        self.requests.append(body)
+        return self._stream if self._stream is not None else _EmptyOpenAIStream()
+
+
+class _OpenAIClientStub:
+    def __init__(self, stream: object | None = None) -> None:
+        self.completions = _OpenAICompletionsStub(stream)
+        self.chat = type("_Chat", (), {"completions": self.completions})()
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_rejects_malformed_sdk_usage() -> None:
+    usage = type(
+        "_Usage",
+        (),
+        {
+            "prompt_tokens": "12",
+            "completion_tokens": 3,
+            "prompt_tokens_details": None,
+        },
+    )()
+    chunk = type("_Chunk", (), {"usage": usage, "choices": []})()
+    stream_fn = OpenAIStreamFn(client=_OpenAIClientStub(_OpenAIChunkStream(chunk)))
+
+    with pytest.raises(TypeError, match="prompt_tokens"):
+        _ = [
+            event
+            async for event in stream_fn(
+                messages=[text_message("hello")],
+                model=Model(
+                    id="gpt-test",
+                    provider="openai",
+                    context_window=8_192,
+                    max_output_tokens=1_024,
+                ),
+                tools=[],
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_trigger_envelope_is_routed_and_persisted(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "trigger-envelope-turns"
+    provider = _StubProvider("envelope-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        receipt = session.push_trigger(
+            UserInput(content=(TextContent(type="text", text="enveloped-question"),)),
+            target_session_id=session.session_id,
+            target_agent_id=session.session_id,
+            origin="channel",
+            mode="task-notification",
+            is_meta=True,
+            meta={"request_id": "request-1"},
+        )
+        await receipt.wait()
+        with pytest.raises(ValueError, match="route to the target session"):
+            session.push_trigger(
+                UserInput(content=(TextContent(type="text", text="misrouted"),)),
+                target_session_id="another-session",
+            )
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    request_message = provider.requests[0][0]
+    assert request_message.meta.origin == "channel"
+    assert request_message.meta.mode == "task-notification"
+    assert request_message.meta.visibility == "hidden"
+    assert request_message.meta.tags["request_id"] == "request-1"
+
+    _, turns = JsonlTrajectoryStore(store_path).load(session_id)
+    assert turns[0].trigger_metadata is not None
+    assert turns[0].trigger_metadata.target_session_id == session_id
+    assert turns[0].trigger_metadata.meta["request_id"] == "request-1"
+
+
+@pytest.mark.asyncio
+async def test_sdk_resume_rehydrates_atom_defined_trigger(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "custom-trigger-turns"
+    provider = _StubProvider("custom-answer")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            extensions=[(_CUSTOM_TRIGGER, {})],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        await session.push_trigger(CustomTrigger("first")).wait()
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    resumed_provider = _StubProvider("resumed-answer")
+    resumed = await AgentSession.resume(
+        session_id,
+        _jsonl_store(store_path),
+        config=AgentSessionConfig(
+            extensions=[(_CUSTOM_TRIGGER, {})],
+            stream_fn=resumed_provider,
+            model=_model(),
+        ),
+    )
+    try:
+        await resumed.run("after-resume")
+    finally:
+        await resumed.shutdown()
+
+    assert _text(resumed_provider.requests[0]) == [
+        "custom:first",
+        "custom-answer",
+        "after-resume",
+    ]
+
+
+def _write_package_atom(root: Path, name: str, extra_import: str = "") -> None:
+    package = root / name
+    (package / "inner").mkdir(parents=True)
+    (package / "inner" / "__init__.py").write_text("")
+    (package / "inner" / "helper.py").write_text("GREETING = 'hi'\n")
+    (package / "__init__.py").write_text(
+        "from agentm.core.abi import ExtensionManifest\n"
+        f"from {name}.inner.helper import GREETING\n"
+        "from .inner.helper import GREETING as RELATIVE\n"
+        f"{extra_import}"
+        "MANIFEST = ExtensionManifest(\n"
+        f"    name={name!r},\n"
+        "    description=GREETING + RELATIVE,\n"
+        ")\n\n\n"
+        "def install(api, config):\n"
+        "    return None\n"
+    )
+
+
+def test_package_atom_loads_and_keeps_atoms_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An atom may be a package; it may import itself but not another atom."""
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_package_atom(tmp_path, "good_atom")
+    _write_package_atom(
+        tmp_path,
+        "coupled_atom",
+        extra_import="from agentm.extensions.builtin.tool_bash import BASH_OUTPUT_TAILS_SERVICE\n",
+    )
+
+    module = load_extension_module(ExtensionSpec.from_module("good_atom"))
+    assert module.MANIFEST.name == "good_atom"
+
+    with pytest.raises(ExtensionLoadError, match="atom-to-atom coupling"):
+        load_extension_module(ExtensionSpec.from_module("coupled_atom"))
+
+
+def test_package_atom_cannot_reach_a_sibling_by_relative_import(
+    tmp_path: Path,
+) -> None:
+    """A relative import is resolved before it is checked, so it cannot escape."""
+
+    package = tmp_path / "pkg"
+    (package / "inner").mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "inner" / "__init__.py").write_text("")
+    (package / "inner" / "escape.py").write_text(
+        "from ...tool_bash import BASH_OUTPUT_TAILS_SERVICE\n"
+    )
+
+    issues = validate_atom_package(
+        package,
+        atom_package="agentm.extensions.builtin.pkg",
+    )
+    assert [issue.rule for issue in issues] == ["forbidden-import"]
+    assert "agentm.extensions.builtin.tool_bash" in issues[0].message
+
+
+_HANDOVER_ATOM = '''\
+"""Revision {rev} of one atom that owns a trigger source."""
+
+from dataclasses import dataclass
+
+from agentm.core.abi.messages import text_message
+from agentm.extensions import ExtensionManifest
+
+MANIFEST = ExtensionManifest(
+    name="handover",
+    description="owns the 'handover' trigger source",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HandoverTrigger:
+    value: str
+    source: str = "handover"
+
+
+class _Codec:
+    def serialize(self, trigger):
+        return {{"__source__": trigger.source, "value": trigger.value}}
+
+    def deserialize(self, data):
+        value = data.get("value")
+        if not isinstance(value, str):
+            raise ValueError("handover trigger value must be a string")
+        return HandoverTrigger(value=value)
+
+
+class _Renderer:
+    def render(self, trigger):
+        return [text_message("{rev}:" + trigger.value)]
+
+
+def install(api, config):
+    del config
+    api.register_trigger_codec("handover", _Codec())
+    api.register_trigger_renderer("handover", _Renderer())
+    api.services.register("handover_trigger", HandoverTrigger, scope="session")
+'''
+
+_RESUME_IN_A_FRESH_PROCESS = """\
+import asyncio
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+from agentm import AgentSession, AgentSessionConfig, ExtensionSpec, Model
+from agentm.storage.trajectory import JsonlTrajectoryStore
+from agentm.testing import NeverStreams
+
+
+async def main() -> None:
+    store_path, atom_path, session_id = sys.argv[1:4]
+    digest = "sha256:" + hashlib.sha256(Path(atom_path).read_bytes()).hexdigest()
+    resumed = await AgentSession.resume(
+        session_id,
+        JsonlTrajectoryStore(Path(store_path)),
+        AgentSessionConfig(
+            extensions=[ExtensionSpec.from_file(atom_path, digest=digest)],
+            stream_fn=NeverStreams(),
+            model=Model(
+                id="stub-model",
+                provider="stub",
+                context_window=128_000,
+                max_output_tokens=4_096,
+            ),
+        ),
+    )
+    try:
+        turn = resumed.get_turns()[0]
+        print(json.dumps({
+            "trigger_type": type(turn.trigger).__name__,
+            "value": getattr(turn.trigger, "value", None),
+            "installed": [
+                resumed.context_for(path).atom_name
+                for path in resumed.installed_extensions
+            ],
+            "rendered": [
+                block.text
+                for message in resumed.get_messages()
+                for block in message.content
+                if getattr(block, "type", None) == "text"
+            ],
+        }))
+    finally:
+        await resumed.shutdown()
+
+
+asyncio.run(main())
+"""
+
+
+def _handover_atom(root: Path, name: str, rev: str) -> ExtensionSpec:
+    path = root / f"{name}.py"
+    path.write_text(_HANDOVER_ATOM.format(rev=rev), encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    return ExtensionSpec.from_file(str(path), digest=digest)
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_atoms_source_resumes_in_a_fresh_process(
+    tmp_path: Path,
+) -> None:
+    """What the retained codec is for, measured end to end instead of argued.
+
+    Revision 1 of an atom owns a trigger source; a turn commits under it;
+    revision 2 supersedes the atom while the session runs, and the next turn
+    records that install durably. Then a second Python process -- no module
+    cache, no registry, nothing carried over -- resumes the trajectory off
+    disk and has to make sense of a trigger encoded by a codec that no revision
+    still installed ever registered.
+
+    It works because the source is *owned* rather than merely present. The
+    resume replays the composition, which installs revision 1 and registers the
+    source under it, and then replays the recorded runtime install, which
+    supersedes revision 1 -- and it is the owner having left the installed set
+    that lets revision 2 take the source over rather than collide with a codec
+    nobody can remove. The committed turn then decodes through revision 2.
+    Without the takeover the resume fails outright; without the retention there
+    would be no source to take over.
+    """
+
+    store_path = tmp_path / "handover-turns"
+    v1 = _handover_atom(tmp_path, "handover_v1", "v1")
+    v2 = _handover_atom(tmp_path, "handover_v2", "v2")
+    provider = _StubProvider("answered", "after-supersede")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=[v1],
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        make_trigger = session.services.get("handover_trigger")
+        assert make_trigger is not None
+        await session.push_trigger(make_trigger("payload")).wait()
+        await session.install_extension(v2, replace=True)
+        assert session.installed_atom_module_path("handover") == v2.module_path
+        # The turn that carries the runtime install into the record; without
+        # one the resume would never learn the atom set had changed.
+        await session.run("after-supersede")
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    script = tmp_path / "resume_probe.py"
+    script.write_text(_RESUME_IN_A_FRESH_PROCESS, encoding="utf-8")
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [
+            sys.executable,
+            str(script),
+            str(store_path),
+            str(tmp_path / "handover_v1.py"),
+            session_id,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert completed.returncode == 0, completed.stderr
+    reported = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert reported["trigger_type"] == "HandoverTrigger"
+    assert reported["value"] == "payload"
+    # Rendered by revision 2, which is the atom the resumed session holds --
+    # revision 1 is the one that encoded the turn and is gone by now.
+    assert reported["rendered"][0] == "v2:payload"
+    assert reported["installed"] == ["handover"]
+
+
+_RETIRED_ATOM = """\
+from agentm.core.abi.manifest import ExtensionManifest
+
+
+MANIFEST = ExtensionManifest(
+    name="retired_probe",
+    description="Registers one service so its presence is observable.",
+    registers=("service:retired_marker",),
+)
+
+
+def install(api, config):
+    del config
+    api.services.register("retired_marker", "present", scope="session")
+"""
+
+
+@pytest.mark.asyncio
+async def test_an_atom_uninstalled_at_runtime_does_not_come_back_on_resume(
+    tmp_path: Path,
+) -> None:
+    """A trajectory says what a session holds, so it has to say leaving too.
+
+    An atom installed into a running session is carried by the turn that
+    commits after it, because the composition describes what the session
+    started with and knows nothing about a late install. Uninstalling one and
+    then resuming used to bring it straight back: the install was on a turn,
+    the removal was on nothing, and the replay believed the only record there
+    was.
+
+    A committed turn is history and is not rewritten. Leaving is appended
+    instead -- the replay keeps the last record per atom -- so what the session
+    reopens with is what the trajectory last said about each atom rather than
+    what it first said.
+    """
+
+    store_path = tmp_path / "retire-turns"
+    atom_path = tmp_path / "retired_probe.py"
+    atom_path.write_text(_RETIRED_ATOM, encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(atom_path.read_bytes()).hexdigest()
+    atom = ExtensionSpec.from_file(str(atom_path), digest=digest)
+
+    provider = _StubProvider("installed", "retired")
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            stream_fn=provider,
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        await session.install_extension(atom)
+        # The turn that carries the install into the record. Without one the
+        # resume never learns the atom was there, and the removal has nothing
+        # to answer.
+        await session.run("commit the install")
+        assert session.services.get("retired_marker") == "present"
+
+        assert session.uninstall_extension(atom)
+        await session.run("commit the removal")
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    resumed = await AgentSession.resume(
+        session_id,
+        _jsonl_store(store_path),
+        AgentSessionConfig(
+            stream_fn=_StubProvider("after-resume"),
+            model=_model(),
+        ),
+    )
+    try:
+        assert resumed.installed_atom_module_path("retired_probe") is None
+        assert resumed.services.get("retired_marker") is None
+    finally:
+        await resumed.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_atom_superseded_and_then_removed_does_not_come_back_either(
+    tmp_path: Path,
+) -> None:
+    """Withdrawing a queued install has to ask what the record already says.
+
+    An install waiting for a turn is withdrawn when the atom leaves before one
+    arrives: nothing was written, so there is nothing to correct, and a
+    committed pair that cancelled out would be two records saying nothing.
+
+    Supersede breaks that. A turn carries version one; version two supersedes
+    it and queues an install of the same name; the atom is then taken out and
+    the queued install is dropped. What is left in the record is version one's
+    install and no departure at all -- so the session reopens running the
+    version the supersede replaced, which is a version the user has not had
+    since before it. Withdrawn *and* nothing said, when the record needed both.
+
+    The queue answers against the names a turn has carried now, so what is
+    dropped is the arrival that is over and what is appended is the departure
+    the history is missing.
+    """
+
+    store_path = tmp_path / "supersede-turns"
+
+    def _version(stem: str, marker: str) -> ExtensionSpec:
+        path = tmp_path / f"{stem}.py"
+        path.write_text(
+            _RETIRED_ATOM.replace('"present"', f'"{marker}"'), encoding="utf-8"
+        )
+        digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        return ExtensionSpec.from_file(str(path), digest=digest)
+
+    first = _version("retired_probe_v1", "v1")
+    second = _version("retired_probe_v2", "v2")
+
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            stream_fn=_StubProvider("installed", "superseded", "removed"),
+            model=_model(),
+            trajectory_store=_jsonl_store(store_path),
+        )
+    )
+    session.start()
+    try:
+        await session.install_extension(first)
+        # The turn that makes version one history. Without it there is nothing
+        # for the withdrawal below to leave standing.
+        await session.run("commit the install")
+        assert session.services.get("retired_marker") == "v1"
+
+        await session.install_extension(second, replace=True)
+        assert session.services.get("retired_marker") == "v2"
+
+        assert session.uninstall_extension(second)
+        await session.run("commit the removal")
+        assert session.services.get("retired_marker") is None
+        session_id = session.session_id
+    finally:
+        await session.shutdown()
+
+    resumed = await AgentSession.resume(
+        session_id,
+        _jsonl_store(store_path),
+        AgentSessionConfig(
+            stream_fn=_StubProvider("after-resume"),
+            model=_model(),
+        ),
+    )
+    try:
+        assert resumed.installed_atom_module_path("retired_probe") is None
+        # The version the supersede replaced is the one that used to come back.
+        assert resumed.services.get("retired_marker") is None
+    finally:
+        await resumed.shutdown()

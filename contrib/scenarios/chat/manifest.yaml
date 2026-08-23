@@ -1,0 +1,38 @@
+name: chat
+description: |
+  General-purpose chat agent with file I/O and shell access.
+
+extensions:
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.local_backend
+
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      include_runtime_context: true
+      include_tool_index: true
+      prompt: |
+        You are a helpful assistant with file and shell access.
+        Be concise. Reply in the user's language.
+  - module: agentm.extensions.builtin.skill_loader
+  - module: agentm.extensions.builtin.memory
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      keep_last_turns: 4
+  - module: agentm.extensions.builtin.message_patterns
+
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.tool_error_messages
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 200
+      total_max_tokens: 1000
+  - module: agentm.extensions.builtin.tool_policy
+    config:
+      protect_file_mutations: true
+  - module: agentm.extensions.builtin.thinking_retry
+  - module: agentm.extensions.builtin.loop_budget
+    config:
+      max_turns: 128
+      reminder: {}

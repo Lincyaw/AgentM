@@ -1,7 +1,0 @@
-# Budget-awareness overlay: injects countdown warnings as the agent
-# approaches max_turns, prompting it to call submit_final_report.
-extensions:
-  - module: agentm.extensions.builtin.turn_reminder
-    config:
-      warn_within: 15
-      finalize_tool: submit_final_report

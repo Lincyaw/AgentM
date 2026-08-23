@@ -11,21 +11,29 @@ command is still running. No key bound → no buffering.
 
 from __future__ import annotations
 
-import asyncio
 import time
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
-from typing import Any, Callable, Final
+from typing import Final
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
+    BASH_OPERATIONS_ROLE,
+    AtomAPI,
     BashOperations,
-    ExtensionAPI,
+    CancelSignal,
+    EnvironmentOperations,
     TextContent,
+    ToolExecutionRequirements,
     ToolResult,
 )
+from agentm.core.abi.services import ServiceNotFound, ServiceTypeMismatch
+from agentm.core.abi.tool_executor import EnvironmentExecutableTool
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
+from agentm_toolbox._shell_state import ShellStateStore
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
 
@@ -105,10 +113,40 @@ class BashOutputTails:
 
 
 class ToolBashConfig(BaseModel):
-    model_config = {"extra": "allow"}
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-    bash_ops: Any = None
-    default_timeout: float = _DEFAULT_TIMEOUT_SECONDS
+    default_timeout: float = Field(
+        default=_DEFAULT_TIMEOUT_SECONDS,
+        gt=0,
+        allow_inf_nan=False,
+    )
+
+
+_DEFAULT_SHELL: Final[str] = "default"
+
+
+class _BashArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    cmd: str = Field(min_length=1, description="Shell command to execute.")
+    timeout: float = Field(
+        default=_DEFAULT_TIMEOUT_SECONDS,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Max seconds the command may run before it is killed and the "
+            "result is flagged TIMED OUT."
+        ),
+    )
+    shell: str = Field(
+        default=_DEFAULT_SHELL,
+        min_length=1,
+        description=(
+            "Named shell session. Each session maintains its own working "
+            "directory across commands (cd persists). Use different names "
+            "to work in multiple directories simultaneously."
+        ),
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -116,97 +154,127 @@ MANIFEST = ExtensionManifest(
     description="Register the bash tool backed by BashOperations.",
     registers=("tool:bash",),
     config_schema=ToolBashConfig,
-    requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
+    requires=(BASH_OPERATIONS_ROLE.capability,),
 )
 
 
-_PARAMETERS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "cmd": {
-            "type": "string",
-            "description": "Shell command to execute.",
-        },
-        "timeout": {
-            "type": "number",
-            "description": (
-                "Max seconds the command may run before it is killed and "
-                "the result is flagged TIMED OUT."
-            ),
-        },
-    },
-    "required": ["cmd"],
-    "additionalProperties": False,
-}
-
-
 class _ToolBashRuntime:
-    def __init__(self, api: ExtensionAPI, config: ToolBashConfig) -> None:
-        self._api = api
-        self._bash_ops = _coerce_bash_ops(api, config.bash_ops)
-        self._default_timeout = float(config.default_timeout)
+    def __init__(self, session: AtomAPI, config: ToolBashConfig) -> None:
+        self._session = session
+        _require_bash_ops(session)
+        self._default_timeout = config.default_timeout
 
     def install(self) -> None:
         tails = BashOutputTails()
-        self._api.set_service(BASH_OUTPUT_TAILS_SERVICE, tails)
-        self._api.register_tool(
+        self._session.services.register(
+            BASH_OUTPUT_TAILS_SERVICE,
+            tails,
+            scope="session",
+        )
+        shells = ShellStateStore(default_cwd=self._session.ctx.cwd)
+        self._session.register_tool(
             _BashTool(
-                api=self._api,
-                bash_ops=self._bash_ops,
+                session=self._session,
                 default_timeout=self._default_timeout,
-                parameters=self._parameters(),
+                parameters=pydantic_to_tool_schema(_BashArgs),
                 tails=tails,
+                shells=shells,
             )
         )
 
-    def _parameters(self) -> dict[str, Any]:
-        return {
-            **_PARAMETERS,
-            "properties": {
-                **_PARAMETERS["properties"],
-                "timeout": {
-                    **_PARAMETERS["properties"]["timeout"],
-                    "default": self._default_timeout,
-                },
-            },
-        }
+
+def install(session: AtomAPI, config: ToolBashConfig) -> None:
+    _ToolBashRuntime(session, config).install()
 
 
-def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
-    _ToolBashRuntime(api, config).install()
-
-
-class _BashTool:
+class _BashTool(EnvironmentExecutableTool):
     name = "bash"
+    execution_requirements = ToolExecutionRequirements(
+        interrupt="cancel",
+    )
     description = (
-        "Execute a shell command in the session cwd. The result reports the "
-        "exit code, wall time, stdout/stderr line counts, and the captured "
-        "stdout/stderr; a non-zero exit or timeout is flagged as an error."
+        "Execute a shell command. Each named shell session maintains its "
+        "own working directory across commands (cd persists). The result "
+        "reports exit code, wall time, stdout/stderr line counts, and the "
+        "captured stdout/stderr; a non-zero exit or timeout is flagged as "
+        "an error."
     )
 
     def __init__(
         self,
         *,
-        api: ExtensionAPI,
-        bash_ops: BashOperations,
+        session: AtomAPI,
         default_timeout: float,
-        parameters: dict[str, Any],
+        parameters: dict[str, object],
         tails: BashOutputTails | None = None,
+        shells: ShellStateStore | None = None,
     ) -> None:
         self.parameters = parameters
-        self._api = api
-        self._bash_ops = bash_ops
+        self._session = session
         self._default_timeout = default_timeout
         self._tails = tails
+        self._shells = shells
 
     async def execute(
         self,
-        args: dict[str, Any],
+        args: dict[str, object],
         *,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
     ) -> ToolResult:
-        cmd = str(args["cmd"])
-        timeout = float(args.get("timeout", self._default_timeout))
+        return await self._execute_with(
+            args,
+            bash_ops=_require_bash_ops(self._session),
+            cwd=self._session.ctx.cwd,
+            signal=signal,
+        )
+
+    async def execute_in_environment(
+        self,
+        args: Mapping[str, object],
+        *,
+        environment: EnvironmentOperations,
+        cwd: str | None = None,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult:
+        resolved_cwd = cwd
+        if resolved_cwd is None:
+            candidate = environment.ref.metadata.get("cwd")
+            match candidate:
+                case str() if candidate:
+                    resolved_cwd = candidate
+                case _:
+                    return _error(
+                        f"Environment {environment.ref.id!r} does not declare a cwd"
+                    )
+        return await self._execute_with(
+            args,
+            bash_ops=environment.bash,
+            cwd=resolved_cwd,
+            signal=signal,
+        )
+
+    async def _execute_with(
+        self,
+        args: Mapping[str, object],
+        *,
+        bash_ops: BashOperations,
+        cwd: str,
+        signal: CancelSignal | None,
+    ) -> ToolResult:
+        try:
+            parsed = _BashArgs.model_validate(dict(args))
+        except ValidationError as exc:
+            return _error(f"Invalid bash call: {exc}")
+        cmd = parsed.cmd
+        shell_name = parsed.shell
+        timeout = parsed.timeout if "timeout" in args else self._default_timeout
+
+        wrapped = False
+        if self._shells is not None:
+            cmd = self._shells.wrap_with_inline_cwd(cmd, shell_name)
+            cwd = self._shells.effective_cwd(shell_name)
+            wrapped = True
+
         on_data: Callable[[bytes], None] | None = None
         log_path: str | None = None
         if self._tails is not None:
@@ -216,9 +284,9 @@ class _BashTool:
                 log_path = self._tails.log_path(tail_key)
         t0 = time.monotonic()
         try:
-            result = await self._bash_ops.exec(
+            result = await bash_ops.exec(
                 cmd,
-                cwd=self._api.cwd,
+                cwd=cwd,
                 timeout=timeout,
                 signal=signal,
                 on_data=on_data,
@@ -227,13 +295,21 @@ class _BashTool:
         except Exception as exc:
             logger.debug("tool_bash: exec failed for {!r}: {}", cmd, exc)
             return _error(f"Failed to run command {cmd!r}: {exc}")
-        wall_time = round(time.monotonic() - t0, 1)
+        elapsed_s = time.monotonic() - t0
+        duration_ms = max(0, round(elapsed_s * 1000))
+        wall_time = round(elapsed_s, 1)
 
         stdout = result.stdout.decode("utf-8", errors="replace")
         stderr = result.stderr.decode("utf-8", errors="replace")
+
+        if wrapped and self._shells is not None:
+            stdout = self._shells.strip_inline_cwd(stdout, shell_name)
+
         is_error = result.exit_code != 0 or result.timed_out
 
         sections: list[str] = []
+        if shell_name != _DEFAULT_SHELL:
+            sections.append(f"Shell: {shell_name}")
         sections.append(f"Exit code: {result.exit_code}")
         sections.append(f"Wall time: {wall_time}s")
         if result.timed_out:
@@ -254,11 +330,29 @@ class _BashTool:
         return ToolResult(
             content=[TextContent(type="text", text=text)],
             is_error=is_error,
+            extras={
+                "exit_code": result.exit_code,
+                "duration_ms": duration_ms,
+                "wall_time_s": wall_time,
+                "timed_out": result.timed_out,
+                "timeout_s": timeout,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_lines": stdout_lines,
+                "stderr_lines": stderr_lines,
+                "log_path": log_path,
+                "shell": shell_name,
+            },
         )
 
 
-def _coerce_bash_ops(api: ExtensionAPI, candidate: Any) -> BashOperations:
-    return candidate if candidate is not None else api.get_operations().bash
+def _require_bash_ops(session: AtomAPI) -> BashOperations:
+    try:
+        return session.services.require_role(BASH_OPERATIONS_ROLE)
+    except (ServiceNotFound, ServiceTypeMismatch) as exc:
+        raise RuntimeError(
+            "tool_bash requires the operations atom to register bash"
+        ) from exc
 
 
 def _error(text: str) -> ToolResult:

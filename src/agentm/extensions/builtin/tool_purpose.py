@@ -1,32 +1,45 @@
-"""Inject a ``purpose`` parameter into every registered tool's schema.
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
+"""Builtin ``tool_purpose`` atom: require intent on tool calls.
 
-Forces the model to state *why* it is calling a tool (a few words or one
-sentence). The field is stripped from ``args`` on the ``tool_call`` event
-before the real tool executes, so existing tools need no changes.
+Injects a ``purpose`` parameter into tool schemas sent to the model, then
+strips that synthetic argument before delegating to the real tool.
 
-Configurable via ``exclude`` to skip tools where a purpose field would be
-noise (e.g. terminal tools like ``finish``).
+The strip happens on the way inward, and the real tool is always innermost, so
+this executor works wherever it lands among other executor decorators. Nothing
+here depends on being the outermost one.
 """
 
 from __future__ import annotations
 
-from typing import Any, Final
+import copy
+from dataclasses import dataclass, replace
+from typing import Final
 
-from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import AgentStartEvent, ExtensionAPI, ToolCallEvent
-from agentm.extensions import ChannelEffects, ExtensionManifest
+from agentm.core.abi import (
+    TOOL_EXECUTOR,
+    AtomAPI,
+    BeforeSendEvent,
+    CancelSignal,
+    Tool,
+    ToolExecutionRequest,
+    ToolExecutor,
+    ToolOutcome,
+    ToolResult,
+)
+from agentm.core.lib.tool_executor import DirectToolExecutor
+from agentm.extensions import ExtensionManifest
 
-_FIELD_NAME: Final = "purpose"
-_FIELD_SCHEMA: Final[dict[str, Any]] = {
+_FIELD_NAME: Final[str] = "purpose"
+_FIELD_SCHEMA: Final[dict[str, object]] = {
     "type": "string",
     "description": "Why you are calling this tool (a few words).",
 }
 
 
 class ToolPurposeConfig(BaseModel):
-    model_config = {"extra": "allow"}
+    model_config = ConfigDict(extra="forbid")
 
     exclude: list[str] = []
 
@@ -34,48 +47,91 @@ class ToolPurposeConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="tool_purpose",
     description="Add a purpose parameter to every tool so the model states intent.",
-    registers=("event:agent_start", "event:tool_call"),
+    registers=("event:before_send", "executor:tool_purpose"),
     config_schema=ToolPurposeConfig,
     requires=(),
-    effects={
-        "agent_start": ChannelEffects(appends=("tools",)),
-        "tool_call": ChannelEffects(mutates=("args",)),
-    },
+    # The synthetic argument has to be gone before whatever actually runs the
+    # tool sees it, so this layer belongs outside any executor that dispatches
+    # the call somewhere else. Only ordering, and only if that atom is here:
+    # `background_exec` is not a dependency, and a composition without it
+    # composes exactly the same.
+    after=("atom:background_exec",),
 )
 
 
-class _ToolPurposeRuntime:
-    __slots__ = ("_api", "_exclude", "_injected")
+@dataclass(slots=True)
+class _PurposeExecutor:
+    _executor: ToolExecutor
+    _injected_tools: set[str]
 
-    def __init__(self, api: ExtensionAPI, config: ToolPurposeConfig) -> None:
+    async def execute(
+        self,
+        request: ToolExecutionRequest,
+        *,
+        signal: CancelSignal | None = None,
+    ) -> ToolResult | ToolOutcome:
+        if request.tool.name not in self._injected_tools:
+            return await self._executor.execute(request, signal=signal)
+        if _FIELD_NAME not in request.args:
+            return await self._executor.execute(request, signal=signal)
+        clean_args = dict(request.args)
+        clean_args.pop(_FIELD_NAME, None)
+        return await self._executor.execute(
+            replace(request, args=clean_args),
+            signal=signal,
+        )
+
+
+class _ToolPurposeRuntime:
+    def __init__(self, api: AtomAPI, exclude: set[str]) -> None:
         self._api = api
-        self._exclude = set(config.exclude)
-        self._injected: set[str] = set()
+        self._exclude = exclude
+        self._injected_tools: set[str] = set()
 
     def install(self) -> None:
-        self._api.on(AgentStartEvent.CHANNEL, self._on_agent_start)
-        self._api.on(ToolCallEvent.CHANNEL, self._on_tool_call)
+        # A layer, not a wrapper this atom builds and binds. Reading the role,
+        # wrapping what is there and binding the result would capture whatever
+        # executor happened to be installed first, and detaching *that* atom
+        # would leave its executor running inside this one.
+        self._api.services.layer(
+            TOOL_EXECUTOR.key,
+            lambda inner: _PurposeExecutor(
+                inner if isinstance(inner, ToolExecutor) else DirectToolExecutor(),
+                self._injected_tools,
+            ),
+        )
+        self._api.on(BeforeSendEvent.CHANNEL, self.on_before_send)
 
-    def _on_agent_start(self, _event: AgentStartEvent) -> None:
-        for tool in self._api.tools:
-            if tool.name in self._exclude:
-                continue
-            props = tool.parameters.get("properties")
-            if not isinstance(props, dict):
-                continue
-            if _FIELD_NAME in props:
-                continue
-            props[_FIELD_NAME] = _FIELD_SCHEMA
-            req = tool.parameters.get("required")
-            if isinstance(req, list) and _FIELD_NAME not in req:
-                req.append(_FIELD_NAME)
-            self._injected.add(tool.name)
-        if self._injected:
-            logger.debug("tool_purpose: injected into {} tools", len(self._injected))
+    def on_before_send(self, event: BeforeSendEvent) -> dict[str, list[Tool]]:
+        return {"tools": [self._inject(tool) for tool in event.tools]}
 
-    def _on_tool_call(self, event: ToolCallEvent) -> None:
-        event.args.pop(_FIELD_NAME, None)
+    def _inject(self, tool: Tool) -> Tool:
+        if tool.name in self._exclude:
+            return tool
+        properties = tool.parameters.get("properties")
+        if not isinstance(properties, dict) or _FIELD_NAME in properties:
+            return tool
+
+        cloned = copy.copy(tool)
+        cloned.parameters = copy.deepcopy(tool.parameters)
+        parameters = cloned.parameters
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
+            raise TypeError("copied tool schema lost its properties object")
+        properties[_FIELD_NAME] = dict(_FIELD_SCHEMA)
+        required = parameters.get("required")
+        if isinstance(required, list) and _FIELD_NAME not in required:
+            required.append(_FIELD_NAME)
+        elif isinstance(required, tuple):
+            updated = list(required)
+            if _FIELD_NAME not in updated:
+                updated.append(_FIELD_NAME)
+            parameters["required"] = updated
+        elif not isinstance(required, list):
+            parameters["required"] = [_FIELD_NAME]
+        self._injected_tools.add(tool.name)
+        return cloned
 
 
-def install(api: ExtensionAPI, config: ToolPurposeConfig) -> None:
-    _ToolPurposeRuntime(api, config).install()
+def install(api: AtomAPI, config: ToolPurposeConfig) -> None:
+    _ToolPurposeRuntime(api, {str(name) for name in config.exclude}).install()

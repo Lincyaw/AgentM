@@ -1,3 +1,4 @@
+# code-health: ignore-file[AM025] -- ABI DTOs and codecs enforce runtime invariants at trust boundaries
 """Provider-agnostic termination hint sum-type.
 
 The kernel must decide what a turn's end means without speaking any specific
@@ -28,6 +29,90 @@ Variants are intentionally narrow:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar, Literal
+
+
+@dataclass(frozen=True, slots=True)
+class TerminationCause:
+    """Typed, durable reason why a committed turn ended."""
+
+    overridable: ClassVar[bool] = True
+    session_terminal: ClassVar[bool] = False
+    replayable: ClassVar[bool] = True
+
+
+@dataclass(frozen=True, slots=True)
+class ModelEndTurn(TerminationCause):
+    """The model chose to finish this turn; the session remains active."""
+
+
+@dataclass(frozen=True, slots=True)
+class PromptRunContinued(TerminationCause):
+    """The durable turn completed and the same prompt run needs another turn."""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolTerminated(TerminationCause):
+    """A tool explicitly terminated the session."""
+
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+    tool_name: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MaxTurnsExhausted(TerminationCause):
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+
+
+@dataclass(frozen=True, slots=True)
+class SignalAborted(TerminationCause):
+    """The current turn was interrupted; the session remains reusable."""
+
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = False
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderTruncated(TerminationCause):
+    kind: Literal["max_tokens", "error"] = "max_tokens"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestFailed(TerminationCause):
+    """A provider request failed after provider-side retry policy completed."""
+
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+    replayable: ClassVar[bool] = False
+
+    error_type: str
+    detail: str
+    partial_event_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.error_type, str) or not self.error_type:
+            raise ValueError("provider failure error_type must be non-empty")
+        if not isinstance(self.detail, str):
+            raise TypeError("provider failure detail must be a string")
+        if (
+            not isinstance(self.partial_event_count, int)
+            or isinstance(self.partial_event_count, bool)
+            or self.partial_event_count < 0
+        ):
+            raise ValueError(
+                "provider failure partial_event_count must be non-negative"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetExhausted(TerminationCause):
+    overridable: ClassVar[bool] = False
+    session_terminal: ClassVar[bool] = True
+    detail: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,11 +184,20 @@ TerminationHint = (
 
 __all__ = [
     "Aborted",
+    "BudgetExhausted",
     "EndTurn",
     "MaxTokens",
+    "MaxTurnsExhausted",
+    "ModelEndTurn",
     "PauseTurn",
+    "PromptRunContinued",
     "ProviderError",
+    "ProviderRequestFailed",
+    "ProviderTruncated",
+    "SignalAborted",
+    "TerminationCause",
     "TerminationHint",
+    "ToolTerminated",
     "ToolUseExpected",
     "VendorSpecific",
 ]

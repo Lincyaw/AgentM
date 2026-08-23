@@ -1,10 +1,8 @@
+# code-health: ignore-file[AM025] -- vendor LLM adapters normalize untyped provider SDK payloads
 """Anthropic Messages API provider — native ``StreamFn`` implementation.
 
-This module is the first concrete LLM provider for AgentM v2. It plugs into
-the kernel via the ``StreamFn`` Protocol described in
-``.claude/designs/pluggable-architecture.md`` §3.1 and is loaded through the
-extension mechanism described in ``.claude/designs/extension-as-scenario.md``
-§7 (LLM providers as extensions).
+This module plugs into the kernel via the ``StreamFn`` Protocol and extension
+composition contracts.
 
 Boundaries:
 
@@ -21,28 +19,39 @@ Conversion layout:
   raw event into a kernel ``AssistantStreamEvent``.
 """
 
+# code-health: ignore-file[AM022] -- adapts untyped Anthropic SDK request and stream objects
+
 from __future__ import annotations
 
-import asyncio
 import base64
-from loguru import logger
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import (
+    Any,
+    Literal,
+    Protocol,
+    runtime_checkable,
+)
+
+from loguru import logger
+from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
+    RETRY_POLICY_SERVICE,
     Aborted,
     AgentMessage,
     AssistantContent,
     AssistantMessage,
     AssistantStreamEvent,
+    CancelSignal,
     EndTurn,
     ImageContent,
     MaxTokens,
     MessageEnd,
     Model,
+    OpaqueThinkingBlock,
     PauseTurn,
     ProviderConfig,
     RetryPolicy,
@@ -63,69 +72,96 @@ from agentm.core.abi import (
     UserMessage,
     VendorSpecific,
 )
-from pydantic import BaseModel, ConfigDict
+from agentm.core.abi.messages import thaw_json
+from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib.async_cancel import (
+    OperationCancelledBySignal,
+    await_with_cancel_signal,
+)
+from agentm.core.lib.provider_install import (
+    ProviderInstallSpec,
+    SdkFieldReader,
+    resolve_model_id,
+    resolve_provider_name,
+)
+import anthropic
+from anthropic import AsyncAnthropic
 
 from agentm.extensions import ExtensionManifest
 
-from agentm.core.abi import RETRY_POLICY_SERVICE
-from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
-
-if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
-    from anthropic import AsyncAnthropic
-
 
 class LlmAnthropicConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     model: str = "claude-sonnet-4-6"
     api_key: str | None = None
     base_url: str | None = None
+    name: str | None = None
     default_headers: dict[str, str] | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
     thinking_budgets: dict[str, int] | None = None
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="llm_anthropic",
     description="Register an Anthropic Messages API LLM stream provider.",
-    registers=("provider:anthropic",),
+    # No provider capability is declared: the registry name is config-driven
+    # (config['name'], defaulting to "anthropic") and only known at install,
+    # so it cannot be a statically declarable/verifiable capability. Providers
+    # are resolved through ProviderResolver, not the dependency solver.
+    registers=(),
     config_schema=LlmAnthropicConfig,
-    requires=("retry_policy",),
+    sensitive_config_fields=("api_key", "default_headers"),
+    requires=(),
+    # Read at install and built into the stream function, so a retry policy
+    # listed after this atom is a retry policy the session never gets: the
+    # provider is already constructed and nothing rebuilds it. `after` rather
+    # than `requires` because that is exactly the shape -- a composition with
+    # no retry policy is a working composition, and one that has it must put
+    # it first.
+    after=(f"service:{RETRY_POLICY_SERVICE}",),
 )
 
+
+_RETRYABLE_STATUS = frozenset({408, 409, 429})
+"""Statuses the SDK's retry loop treats as transient; see ``_get_client``."""
+
+
 def _is_anthropic_retryable(exc: BaseException) -> bool:
-    try:
-        import anthropic
-    except ImportError:  # pragma: no cover - SDK dependency is optional here
-        return False
     # RateLimitError: server-side throttle. APIConnectionError /
     # APITimeoutError: transport stalls surfaced by the finite read
     # timeout set in ``_get_client`` — without retry they propagate up and
     # fail the whole firing on a single half-dead connection. Build the
-    # tuple via getattr so a partial SDK / test double missing a name is
-    # tolerated (mirrors ``_is_openai_retryable``).
+    # tuple by name so a partial SDK or a test double missing one is tolerated
+    # (mirrors ``_is_openai_retryable``).
     retryable_types = tuple(
         err_type
         for name in ("RateLimitError", "APIConnectionError", "APITimeoutError")
-        if isinstance((err_type := getattr(anthropic, name, None)), type)
+        if isinstance((err_type := anthropic.__dict__.get(name)), type)
     )
-    return bool(retryable_types) and isinstance(exc, retryable_types)
+    if retryable_types and isinstance(exc, retryable_types):
+        return True
+    # What the SDK's own loop treated as transient, repeated because that loop
+    # is switched off whenever a policy is bound (see ``_get_client``). A
+    # policy that covered less than the layer it replaced would read as a
+    # configuration and behave as a downgrade -- which is what happened to
+    # server errors here until a test counted them.
+    if isinstance(exc, anthropic.APIStatusError):
+        code = exc.status_code
+        return code in _RETRYABLE_STATUS or code >= 500
+    return False
 
-class _IdentityRetryPolicy:
-    async def run(
-        self,
-        fn: Callable[[], Any],
-        *,
-        is_retryable: Callable[[BaseException], bool],
-    ) -> Any:
-        del is_retryable
-        return await fn()
 
 # --- Model registry ---------------------------------------------------------
+
 
 def _build_model(
     model_id: str,
     *,
+    provider: str = "anthropic",
     context_window: int = 1_000_000,
     max_output_tokens: int = 64_000,
 ) -> Model:
@@ -141,12 +177,14 @@ def _build_model(
 
     return Model(
         id=model_id,
-        provider="anthropic",
+        provider=provider,
         context_window=context_window,
         max_output_tokens=max_output_tokens,
     )
 
+
 # --- Message / tool serialization ------------------------------------------
+
 
 def _encode_image(image: ImageContent) -> dict[str, Any]:
     """Convert kernel ``ImageContent`` to an Anthropic image content block."""
@@ -159,6 +197,7 @@ def _encode_image(image: ImageContent) -> dict[str, Any]:
             "data": base64.b64encode(image.data).decode("ascii"),
         },
     }
+
 
 def _encode_user_content(
     blocks: list[TextContent | ImageContent],
@@ -173,6 +212,7 @@ def _encode_user_content(
             raise TypeError(f"unexpected user content type: {type(block)!r}")
     return out
 
+
 def _encode_assistant_content(
     blocks: list[AssistantContent],
 ) -> list[dict[str, Any]]:
@@ -185,6 +225,24 @@ def _encode_assistant_content(
             if block.signature is not None:
                 entry["signature"] = block.signature
             out.append(entry)
+        elif isinstance(block, OpaqueThinkingBlock):
+            if block.provider != "anthropic":
+                raise ValueError(
+                    "AnthropicStreamFn cannot encode opaque reasoning owned by "
+                    f"provider {block.provider!r}"
+                )
+            block_type = block.payload.get("type")
+            data = block.payload.get("data")
+            if (
+                block_type != "redacted_thinking"
+                or not isinstance(data, str)
+                or set(block.payload) != {"type", "data"}
+            ):
+                raise ValueError(
+                    "AnthropicStreamFn supports only a redacted_thinking "
+                    "opaque reasoning payload"
+                )
+            out.append(dict(block.payload))
         elif isinstance(block, ToolCallBlock):
             out.append(
                 {
@@ -198,6 +256,7 @@ def _encode_assistant_content(
             raise TypeError(f"unexpected assistant content type: {type(block)!r}")
     return out
 
+
 def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
     return {
         "type": "tool_result",
@@ -205,6 +264,7 @@ def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
         "content": _encode_user_content(list(block.content)),
         "is_error": block.is_error,
     }
+
 
 def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
     """Convert kernel messages to the Anthropic Messages API request shape.
@@ -218,9 +278,14 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
     was_tool_result_user = False
     for msg in messages:
         if isinstance(msg, UserMessage):
-            out.append(
-                {"role": "user", "content": _encode_user_content(list(msg.content))}
-            )
+            blocks = _encode_user_content(list(msg.content))
+            if out and previous_role == "user":
+                # Anthropic takes one user turn at a time. A synthetic trailing
+                # message after tool results would otherwise emit a second
+                # consecutive user entry, so it joins the turn it follows.
+                out[-1]["content"].extend(blocks)
+            else:
+                out.append({"role": "user", "content": blocks})
             previous_role = "user"
             was_tool_result_user = False
         elif isinstance(msg, AssistantMessage):
@@ -244,6 +309,7 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
+
 @dataclass(frozen=True, slots=True)
 class AnthropicToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to Anthropic Messages API tool specs."""
@@ -258,11 +324,14 @@ class AnthropicToolSpecAdapter(ToolSpecAdapter):
     def encode_tool_args(self, args: Mapping[str, Any]) -> str:
         return encode_tool_args(args)
 
+
 def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     adapter = AnthropicToolSpecAdapter()
     return [adapter.vendor_spec(t) for t in tools]
 
+
 # --- Streaming bridge -------------------------------------------------------
+
 
 @dataclass(slots=True)
 class _StreamState:
@@ -273,6 +342,7 @@ class _StreamState:
     usage: Usage | None = None
     stop_reason: str | None = None
     termination: TerminationHint | None = None
+
 
 def _map_stop_reason(raw: str | None) -> TerminationHint | None:
     """Translate Anthropic ``stop_reason`` into a kernel ``TerminationHint``."""
@@ -292,18 +362,36 @@ def _map_stop_reason(raw: str | None) -> TerminationHint | None:
         return PauseTurn()
     return VendorSpecific(raw=raw)
 
+
 def _extract_usage(message_obj: Any) -> Usage | None:
     """Pull ``Usage`` out of an Anthropic ``Message`` (or partial)."""
 
-    raw = getattr(message_obj, "usage", None)
+    raw = _optional_sdk_attr(message_obj, "usage")
     if raw is None:
         return None
     return Usage(
-        input_tokens=int(getattr(raw, "input_tokens", 0) or 0),
-        output_tokens=int(getattr(raw, "output_tokens", 0) or 0),
-        cache_read=int(getattr(raw, "cache_read_input_tokens", 0) or 0),
-        cache_write=int(getattr(raw, "cache_creation_input_tokens", 0) or 0),
+        input_tokens=_nonnegative_sdk_int(
+            raw,
+            "input_tokens",
+            default=0,
+        ),
+        output_tokens=_nonnegative_sdk_int(
+            raw,
+            "output_tokens",
+            default=0,
+        ),
+        cache_read=_nonnegative_sdk_int(
+            raw,
+            "cache_read_input_tokens",
+            default=0,
+        ),
+        cache_write=_nonnegative_sdk_int(
+            raw,
+            "cache_creation_input_tokens",
+            default=0,
+        ),
     )
+
 
 def _finalize_block(state: _StreamState, index: int) -> None:
     """Flush provider scratch for one Anthropic content block."""
@@ -317,15 +405,71 @@ def _finalize_block(state: _StreamState, index: int) -> None:
     elif kind == "thinking":
         state.accumulator.add_thinking(index, scratch.get("text", ""))
         state.accumulator.set_thinking_signature(index, scratch.get("signature"))
+    elif kind == "opaque_thinking":
+        payload = scratch.get("payload")
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                f"Anthropic opaque thinking block at index {index} has no payload"
+            )
+        state.accumulator.add_opaque_thinking(
+            index,
+            provider="anthropic",
+            payload=payload,
+        )
     elif kind == "tool_use":
+        tool_id = scratch.get("id")
+        tool_name = scratch.get("name")
+        partial_json = scratch.get("partial_json")
+        if not isinstance(tool_id, str) or not tool_id:
+            raise ValueError(f"Anthropic tool block at index {index} has no id")
+        if not isinstance(tool_name, str) or not tool_name:
+            raise ValueError(f"Anthropic tool block at index {index} has no name")
+        if not isinstance(partial_json, str):
+            raise TypeError(
+                f"Anthropic tool arguments at index {index} must be a string"
+            )
         state.accumulator.add_tool_call(
-            id=scratch.get("id", ""),
-            name=scratch.get("name", ""),
-            args_delta=scratch.get("partial_json", ""),
+            id=tool_id,
+            name=tool_name,
+            args_delta=partial_json,
             index=index,
         )
+    else:
+        raise ValueError(
+            f"unknown Anthropic scratch block kind at index {index}: {kind!r}"
+        )
+
+
+_SDK = SdkFieldReader("Anthropic")
+
+_optional_sdk_attr = _SDK.optional_attr
+_required_sdk_attr = _SDK.required_attr
+_optional_sdk_string = _SDK.optional_string
+_required_sdk_string = _SDK.required_string
+_nonnegative_sdk_int = _SDK.nonnegative_int
+
+
+@runtime_checkable
+class _AnthropicAsyncStream(Protocol):
+    def __aiter__(self) -> AsyncIterator[object]: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class _AnthropicStreamContext(Protocol):
+    async def __aenter__(self) -> object: ...
+
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> object: ...
+
 
 # --- Public callable -------------------------------------------------------
+
 
 @dataclass(slots=True)
 class AnthropicStreamFn:
@@ -353,20 +497,23 @@ class AnthropicStreamFn:
     def __post_init__(self) -> None:
         budgets = {"low": 1_024, "medium": 4_096, "high": 16_384}
         if self.thinking_budgets is not None:
-            budgets.update(
-                {
-                    str(key): int(value)
-                    for key, value in self.thinking_budgets.items()
-                }
-            )
+            unknown = set(self.thinking_budgets) - set(budgets)
+            if unknown:
+                raise ValueError(
+                    "AnthropicStreamFn thinking_budgets has unknown levels: "
+                    f"{sorted(unknown)}"
+                )
+            for key, value in self.thinking_budgets.items():
+                if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    raise ValueError(
+                        "AnthropicStreamFn thinking budgets must be positive integers"
+                    )
+                budgets[key] = value
         self.thinking_budgets = budgets
 
     def _get_client(self) -> AsyncAnthropic:
         if self.client is not None:
             return self.client
-        # Imported lazily so module import doesn't require the SDK to be
-        # configured (e.g. in offline test environments using injected client).
-        from anthropic import AsyncAnthropic as _AsyncAnthropic
 
         api_key = self.api_key or os.environ.get("ANTHROPIC_API_KEY")
         kwargs: dict[str, Any] = {"api_key": api_key}
@@ -388,7 +535,27 @@ class AnthropicStreamFn:
         kwargs["timeout"] = httpx.Timeout(
             connect=30.0, read=180.0, write=60.0, pool=30.0
         )
-        self.client = _AsyncAnthropic(**kwargs)
+        # The SDK runs its own retry loop -- ``DEFAULT_MAX_RETRIES`` is 2, so
+        # three attempts -- and a bound ``RetryPolicy`` wrapped *around* it
+        # multiplied the two: a composition declaring ``max_retries=7`` sent 24
+        # requests to a rate-limited endpoint, over a backoff schedule nobody
+        # wrote. ``RetryPolicy`` is a behaviour, not a number (see
+        # ``core/abi/retry.py``), so it cannot be handed down into the SDK;
+        # what it can be is the only loop there is.
+        #
+        # Switched off only when a policy is bound. A composition without the
+        # ``retry_policy`` atom keeps the SDK's default, because "no policy
+        # declared" has never meant "no retries" here and turning three
+        # attempts into one would be a fragility nobody asked for.
+        #
+        # What this gives up is the SDK's ``Retry-After`` handling: it reads
+        # the header and the ``x-should-retry`` hint, and the policy replacing
+        # it backs off on its own schedule instead. The exchange is a schedule
+        # the operator wrote for one they cannot see, and honest attempt counts
+        # either way.
+        if self.retry_policy is not None:
+            kwargs["max_retries"] = 0
+        self.client = AsyncAnthropic(**kwargs)
         return self.client
 
     def __call__(
@@ -398,7 +565,7 @@ class AnthropicStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None = None,
-        signal: asyncio.Event | None = None,
+        signal: CancelSignal | None = None,
         thinking: Literal["off", "low", "medium", "high"] = "off",
     ) -> AsyncIterator[AssistantStreamEvent]:
         return self._iter(
@@ -417,7 +584,7 @@ class AnthropicStreamFn:
         model: Model,
         tools: list[Tool],
         system: str | None,
-        signal: asyncio.Event | None,
+        signal: CancelSignal | None,
         thinking: Literal["off", "low", "medium", "high"],
     ) -> AsyncIterator[AssistantStreamEvent]:
         client = self._get_client()
@@ -437,7 +604,7 @@ class AnthropicStreamFn:
                 "budget_tokens": self.thinking_budgets[thinking],
             }
 
-        extra = dict(self.extra_body or {})
+        extra: dict[str, Any] = thaw_json(self.extra_body) if self.extra_body else {}  # type: ignore[assignment]
         if self.reasoning_effort is not None:
             extra.setdefault("output_config", {"effort": self.reasoning_effort})
         if extra:
@@ -446,23 +613,48 @@ class AnthropicStreamFn:
         state = _StreamState()
         aborted = False
 
-        retry_policy = self.retry_policy or _IdentityRetryPolicy()
-
-        async def _open_stream() -> tuple[Any, Any]:
+        async def _open_stream() -> tuple[
+            _AnthropicStreamContext, _AnthropicAsyncStream
+        ]:
             ctx = client.messages.stream(**body)
-            stream = await ctx.__aenter__()
-            return ctx, stream
+            if not isinstance(ctx, _AnthropicStreamContext):
+                raise TypeError("Anthropic client must return an async stream context")
+            opened = await ctx.__aenter__()
+            if not isinstance(opened, _AnthropicAsyncStream):
+                raise TypeError(
+                    "Anthropic stream context must yield an async iterable "
+                    "stream with an async close() method"
+                )
+            return ctx, opened
 
-        stream_ctx, stream = await retry_policy.run(
-            _open_stream,
-            is_retryable=_is_anthropic_retryable,
-        )
+        stream_ctx: _AnthropicStreamContext | None = None
         try:
-            async for event in stream:
-                if signal is not None and signal.is_set():
+            open_operation = (
+                _open_stream()
+                if self.retry_policy is None
+                else self.retry_policy.run(
+                    _open_stream,
+                    is_retryable=_is_anthropic_retryable,
+                )
+            )
+            opened_ctx, opened_stream = await await_with_cancel_signal(
+                open_operation,
+                signal,
+            )
+            stream_ctx = opened_ctx
+            iterator = opened_stream.__aiter__()
+            while True:
+                try:
+                    event = await await_with_cancel_signal(
+                        iterator.__anext__(),
+                        signal,
+                    )
+                except StopAsyncIteration:
+                    break
+                except OperationCancelledBySignal:
                     aborted = True
                     try:
-                        await stream.close()
+                        await opened_stream.close()
                     except Exception:
                         # Best-effort close; do not let cleanup mask the abort.
                         logger.opt(exception=True).debug(
@@ -471,8 +663,18 @@ class AnthropicStreamFn:
                     break
                 async for kernel_event in _translate_event(event, state):
                     yield kernel_event
+        except OperationCancelledBySignal:
+            aborted = True
         finally:
-            await stream_ctx.__aexit__(None, None, None)
+            if stream_ctx is not None:
+                try:
+                    await stream_ctx.__aexit__(None, None, None)
+                except Exception:
+                    if not aborted:
+                        raise
+                    logger.opt(exception=True).debug(
+                        "anthropic: error while closing aborted stream context"
+                    )
 
         if aborted:
             state.stop_reason = "aborted"
@@ -491,6 +693,7 @@ class AnthropicStreamFn:
             yield parse_error
         yield MessageEnd(message=assembled)
 
+
 async def _translate_event(
     event: Any,
     state: _StreamState,
@@ -502,31 +705,56 @@ async def _translate_event(
     Pydantic models.
     """
 
-    etype = getattr(event, "type", None)
+    etype = _required_sdk_string(event, "type", allow_empty=False)
 
     if etype == "message_start":
-        message = getattr(event, "message", None)
-        if message is not None:
-            usage = _extract_usage(message)
-            if usage is not None:
-                state.usage = usage
+        message = _required_sdk_attr(event, "message")
+        usage = _extract_usage(message)
+        if usage is not None:
+            state.usage = usage
         return
 
     if etype == "content_block_start":
-        index = int(getattr(event, "index", 0))
-        block = getattr(event, "content_block", None)
-        block_type = getattr(block, "type", None)
+        index = _nonnegative_sdk_int(event, "index")
+        if index in state.scratch:
+            raise ValueError(f"Anthropic content block index {index} started twice")
+        block = _required_sdk_attr(event, "content_block")
+        block_type = _required_sdk_string(
+            block,
+            "type",
+            allow_empty=False,
+        )
         if block_type == "text":
             state.scratch[index] = {"kind": "text", "text": ""}
         elif block_type == "thinking":
             state.scratch[index] = {
                 "kind": "thinking",
-                "text": getattr(block, "thinking", "") or "",
-                "signature": getattr(block, "signature", None),
+                "text": _optional_sdk_string(block, "thinking") or "",
+                "signature": _optional_sdk_string(block, "signature"),
+            }
+        elif block_type == "redacted_thinking":
+            state.scratch[index] = {
+                "kind": "opaque_thinking",
+                "payload": {
+                    "type": "redacted_thinking",
+                    "data": _required_sdk_string(
+                        block,
+                        "data",
+                        allow_empty=False,
+                    ),
+                },
             }
         elif block_type == "tool_use":
-            tool_id = getattr(block, "id", "") or ""
-            tool_name = getattr(block, "name", "") or ""
+            tool_id = _required_sdk_string(
+                block,
+                "id",
+                allow_empty=False,
+            )
+            tool_name = _required_sdk_string(
+                block,
+                "name",
+                allow_empty=False,
+            )
             state.scratch[index] = {
                 "kind": "tool_use",
                 "id": tool_id,
@@ -534,75 +762,106 @@ async def _translate_event(
                 "partial_json": "",
             }
             yield ToolCallStart(id=tool_id, name=tool_name)
+        else:
+            raise ValueError(
+                f"Anthropic content block type is not modeled by AgentM: {block_type!r}"
+            )
         return
 
     if etype == "content_block_delta":
-        index = int(getattr(event, "index", 0))
-        delta = getattr(event, "delta", None)
-        delta_type = getattr(delta, "type", None)
+        index = _nonnegative_sdk_int(event, "index")
+        delta = _required_sdk_attr(event, "delta")
+        delta_type = _required_sdk_string(
+            delta,
+            "type",
+            allow_empty=False,
+        )
         scratch = state.scratch.get(index)
         if delta_type == "text_delta":
-            text = getattr(delta, "text", "") or ""
-            if scratch is not None and scratch.get("kind") == "text":
-                scratch["text"] = scratch.get("text", "") + text
+            if scratch is None or scratch.get("kind") != "text":
+                raise ValueError(
+                    f"Anthropic text delta has no text block at index {index}"
+                )
+            text = _required_sdk_string(delta, "text")
+            scratch["text"] = scratch.get("text", "") + text
             yield TextDelta(text=text)
         elif delta_type == "input_json_delta":
-            partial = getattr(delta, "partial_json", "") or ""
-            if scratch is not None and scratch.get("kind") == "tool_use":
-                scratch["partial_json"] = scratch.get("partial_json", "") + partial
-                yield ToolCallArgsDelta(
-                    id=scratch.get("id", ""),
-                    args_json_delta=partial,
+            if scratch is None or scratch.get("kind") != "tool_use":
+                raise ValueError(
+                    f"Anthropic input JSON delta has no tool block at index {index}"
                 )
+            partial = _required_sdk_string(delta, "partial_json")
+            scratch["partial_json"] = scratch.get("partial_json", "") + partial
+            yield ToolCallArgsDelta(
+                id=scratch["id"],
+                args_json_delta=partial,
+            )
         elif delta_type == "thinking_delta":
-            text = getattr(delta, "thinking", "") or ""
-            if scratch is not None and scratch.get("kind") == "thinking":
-                scratch["text"] = scratch.get("text", "") + text
+            if scratch is None or scratch.get("kind") != "thinking":
+                raise ValueError(
+                    f"Anthropic thinking delta has no thinking block at index {index}"
+                )
+            text = _required_sdk_string(delta, "thinking")
+            scratch["text"] = scratch.get("text", "") + text
             yield ThinkingDelta(text=text, signature=None)
         elif delta_type == "signature_delta":
-            sig = getattr(delta, "signature", None)
-            if scratch is not None and scratch.get("kind") == "thinking":
-                # Anthropic delivers signatures as a single delta; concatenate
-                # defensively in case multiple are sent.
-                prev = scratch.get("signature") or ""
-                scratch["signature"] = (prev + sig) if sig is not None else prev
+            if scratch is None or scratch.get("kind") != "thinking":
+                raise ValueError(
+                    f"Anthropic signature delta has no thinking block at index {index}"
+                )
+            sig = _required_sdk_string(delta, "signature")
+            # Multiple signature deltas are valid; preserve stream order.
+            prev = scratch.get("signature") or ""
+            scratch["signature"] = prev + sig
+        elif delta_type == "citations_delta":
+            raise ValueError("Anthropic citation deltas are not modeled by AgentM")
+        else:
+            raise ValueError(f"unknown Anthropic content delta type: {delta_type!r}")
         return
 
     if etype == "content_block_stop":
-        index = int(getattr(event, "index", 0))
+        index = _nonnegative_sdk_int(event, "index")
         scratch = state.scratch.get(index)
+        if scratch is None:
+            raise ValueError(
+                f"Anthropic content block stop has no start at index {index}"
+            )
         kind = scratch.get("kind") if scratch is not None else None
         _finalize_block(state, index)
         if kind == "tool_use" and scratch is not None:
-            yield ToolCallEnd(id=scratch.get("id", ""))
+            yield ToolCallEnd(id=scratch["id"])
         return
 
     if etype == "message_delta":
-        delta = getattr(event, "delta", None)
-        raw_stop = getattr(delta, "stop_reason", None) if delta is not None else None
+        delta = _required_sdk_attr(event, "delta")
+        raw_stop = _optional_sdk_string(delta, "stop_reason")
         if raw_stop is not None:
             state.stop_reason = raw_stop
             state.termination = _map_stop_reason(raw_stop)
         # Anthropic emits a final usage update on message_delta.
-        usage = getattr(event, "usage", None)
-        if usage is not None:
+        raw_usage = _optional_sdk_attr(event, "usage")
+        if raw_usage is not None:
             existing = state.usage
             state.usage = Usage(
-                input_tokens=int(
-                    getattr(usage, "input_tokens", None)
-                    or (existing.input_tokens if existing else 0)
+                input_tokens=_nonnegative_sdk_int(
+                    raw_usage,
+                    "input_tokens",
+                    default=existing.input_tokens if existing else 0,
                 ),
-                output_tokens=int(
-                    getattr(usage, "output_tokens", None)
-                    or (existing.output_tokens if existing else 0)
+                output_tokens=_nonnegative_sdk_int(
+                    raw_usage,
+                    "output_tokens",
+                    default=existing.output_tokens if existing else 0,
                 ),
-                cache_read=int(
-                    getattr(usage, "cache_read_input_tokens", None)
-                    or (existing.cache_read if existing else 0)
+                cache_read=_nonnegative_sdk_int(
+                    raw_usage,
+                    "cache_read_input_tokens",
+                    default=existing.cache_read if existing else 0,
                 ),
-                cache_write=int(
-                    getattr(usage, "cache_creation_input_tokens", None)
-                    or (existing.cache_write if existing else 0)
+                cache_write=_nonnegative_sdk_int(
+                    raw_usage,
+                    "cache_creation_input_tokens",
+                    default=existing.cache_write if existing else 0,
                 ),
             )
         return
@@ -613,35 +872,59 @@ async def _translate_event(
             _finalize_block(state, idx)
         return
 
-    # Unknown events are ignored on purpose; the SDK occasionally adds new ones.
-    return
+    raise ValueError(f"unknown Anthropic stream event type: {etype!r}")
+
 
 # --- Extension entrypoint --------------------------------------------------
+
+
+# Canonical Anthropic base URLs — anything else is treated as a custom endpoint
+# (mimo, MiniMax, Doubao and other Anthropic-compatible gateways). When ``name``
+# is omitted for such an endpoint the provider would otherwise silently register
+# under the default key ``"anthropic"`` and overwrite an earlier registration.
+_CANONICAL_ANTHROPIC_BASE_URLS: frozenset[str] = frozenset(
+    {
+        "https://api.anthropic.com",
+        "https://api.anthropic.com/",
+        "https://api.anthropic.com/v1",
+        "https://api.anthropic.com/v1/",
+    }
+)
+
+
+_INSTALL_SPEC = ProviderInstallSpec(
+    atom="agentm.extensions.builtin.llm_anthropic",
+    label="Anthropic",
+    default_name="anthropic",
+    canonical_base_urls=_CANONICAL_ANTHROPIC_BASE_URLS,
+    name_examples=("mimo", "minimax", "doubao"),
+    model_examples=("claude-opus-4-7",),
+)
+
 
 class _AnthropicProviderRuntime:
     """Install-time provider registration runtime for Anthropic-compatible models."""
 
-    def __init__(self, api: Any, config: LlmAnthropicConfig) -> None:
-        self._api = api
+    def __init__(self, session: Any, config: LlmAnthropicConfig) -> None:
+        self._session = session
         self._config = config
 
     def install(self) -> None:
         model_id = self._model_id()
         stream_fn = self._build_stream_fn()
-        model = _build_model(model_id, **self._model_kwargs())
-        self._api.register_provider(
-            "anthropic",
-            ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
+        name = self._provider_name()
+        model = _build_model(
+            model_id,
+            provider=name,
+            **self._model_kwargs(),
+        )
+        self._session.register_provider(
+            name,
+            ProviderConfig(stream_fn=stream_fn, model=model, name=name),
         )
 
     def _model_id(self) -> str:
-        model_id = self._config.model
-        if not model_id or not isinstance(model_id, str):
-            raise ValueError(
-                "agentm.extensions.builtin.llm_anthropic.install: config.model is required and must "
-                "be a non-empty string (e.g. 'claude-opus-4-7')."
-            )
-        return model_id
+        return resolve_model_id(self._config.model, spec=_INSTALL_SPEC)
 
     def _build_stream_fn(self) -> AnthropicStreamFn:
         default_headers = self._config.default_headers
@@ -650,16 +933,21 @@ class _AnthropicProviderRuntime:
                 "agentm.extensions.builtin.llm_anthropic.install: config.default_headers "
                 "must be a mapping of header name to string value."
             )
-        # Access extra fields from the Pydantic model for pass-through config.
-        extra = self._config.model_extra or {}
         return AnthropicStreamFn(
             api_key=self._config.api_key,
             base_url=self._config.base_url,
             default_headers=default_headers,
             thinking_budgets=self._config.thinking_budgets,
-            reasoning_effort=extra.get("reasoning_effort"),
-            extra_body=extra.get("extra_body"),
-            retry_policy=self._api.get_service(RETRY_POLICY_SERVICE),
+            reasoning_effort=self._config.reasoning_effort,
+            extra_body=self._config.extra_body,
+            retry_policy=self._session.services.get(RETRY_POLICY_SERVICE),
+        )
+
+    def _provider_name(self) -> str:
+        return resolve_provider_name(
+            self._config.name,
+            self._config.base_url,
+            spec=_INSTALL_SPEC,
         )
 
     def _model_kwargs(self) -> dict[str, int]:
@@ -672,15 +960,16 @@ class _AnthropicProviderRuntime:
         return model_kwargs
 
 
-def install(api: Any, config: LlmAnthropicConfig) -> None:
+def install(session: Any, config: LlmAnthropicConfig) -> None:
     """Provider extension entrypoint.
 
     Reads ``config.model`` (required), optional ``config.api_key`` and
     ``config.base_url``, then registers the resulting ``AnthropicStreamFn``
-    on the given :class:`ExtensionAPI` under the name ``"anthropic"``.
+    on the given :class:`AtomAPI` under the name ``"anthropic"``.
 
     """
 
-    _AnthropicProviderRuntime(api, config).install()
+    _AnthropicProviderRuntime(session, config).install()
 
-__all__ = ("AnthropicStreamFn", "MANIFEST", "install")
+
+__all__ = ("MANIFEST", "AnthropicStreamFn", "install")

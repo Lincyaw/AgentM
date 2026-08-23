@@ -1,14 +1,10 @@
-"""Builtin skill loader atom.
+# code-health: ignore-file[AM025] -- atom tools validate untyped tool, config, and service payloads
+"""Builtin ``skill_loader`` atom.
 
-Discovers SKILL.md files (default agent dir, project dirs supplied by the
-:class:`agentm.core.abi.project_layout.ProjectLayout`, explicit paths, peer
+Discovers SKILL.md files (default agent dir, explicit paths, peer
 contributions via ``ResourcesDiscoverEvent``) and injects an
-``<available_skills>`` index into the system prompt.
-
-The skill discovery + prompt formatting engine is inlined below; it
-previously lived in ``core/_internal/skills.py`` and was reached via
-``api.skills``. Now that the only consumer is this atom, the indirection
-adds nothing.
+``<available_skills>`` index into the system prompt.  Provides the
+``load_skill`` tool for on-demand reading.
 """
 
 from __future__ import annotations
@@ -16,95 +12,72 @@ from __future__ import annotations
 import html
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
-    BeforeAgentStartEvent,
-    DiagnosticEvent,
-    ExtensionAPI,
+    AtomAPI,
+    BeforeRunEvent,
+    EventBusObserver,
     FunctionTool,
+    Handler,
+    JsonValue,
     ResourcesDiscoverEvent,
     SessionReadyEvent,
-    SkillDiagnostic,
-    SkillRecord,
-    TextContent,
     ToolResult,
 )
-from pydantic import BaseModel, Field
-
-from agentm.core.lib import agentm_home_dir, expand_path_from_cwd, parse_frontmatter
-from agentm.core.lib import pydantic_to_tool_schema
+from agentm.core.lib import (
+    agentm_home,
+    error_result,
+    expand_path_from_cwd,
+    parse_frontmatter,
+    pydantic_to_tool_schema,
+    text_result,
+)
 from agentm.extensions import ExtensionManifest
 
 
-class SkillLoaderConfig(BaseModel):
-    skill_paths: list[str] = []
-    include_defaults: bool = True
-    inherit_claude: bool | None = None
+def _agentm_home_dir() -> Path:
+    return agentm_home()
 
 
-MANIFEST = ExtensionManifest(
-    name="skill_loader",
-    description="Discover SKILL.md files and inject an <available_skills> index.",
-    registers=(
-        "tool:load_skill",
-        "event:before_agent_start",
-        "event:resources_discover",
-        "event:session_ready",
-    ),
-    config_schema=SkillLoaderConfig,
-    requires=(),  # Leaf atom: consumes resource-discovery responses from any peer.
-)
-
-# === Skills engine (inlined; previously core/_internal/skills.py) ==========
-
-DEFAULT_MAX_NAME_LENGTH = 64
-DEFAULT_MAX_DESCRIPTION_LENGTH = 1024
-_NAME_PATTERN = r"^[a-z0-9-]+$"
+# ---------------------------------------------------------------------------
+# Skill records
+# ---------------------------------------------------------------------------
 
 
-def _validate_name(
-    name: str, parent_dir_name: str, *, max_name_length: int
-) -> list[str]:
-    issues: list[str] = []
-    if name != parent_dir_name:
-        issues.append(
-            f'name "{name}" does not match parent directory "{parent_dir_name}"'
-        )
-    if len(name) > max_name_length:
-        issues.append(f"name exceeds {max_name_length} characters ({len(name)})")
-    if not re.match(_NAME_PATTERN, name):
-        issues.append(
-            "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
-        )
-    if name.startswith("-") or name.endswith("-"):
-        issues.append("name must not start or end with a hyphen")
-    if "--" in name:
-        issues.append("name must not contain consecutive hyphens")
-    return issues
+@dataclass(frozen=True, slots=True)
+class SkillDiagnostic:
+    level: Literal["warning", "collision"]
+    message: str
+    path: str
 
 
-def _validate_description(
-    description: str | None, *, max_description_length: int
-) -> list[str]:
-    issues: list[str] = []
-    if description is None or description.strip() == "":
-        issues.append("description is required")
-    elif len(description) > max_description_length:
-        issues.append(
-            f"description exceeds {max_description_length} characters "
-            f"({len(description)})"
-        )
-    return issues
+@dataclass(frozen=True, slots=True)
+class SkillRecord:
+    name: str
+    description: str
+    file_path: str
+    base_dir: str
+    disable_model_invocation: bool
+    source: str
+
+
+# ---------------------------------------------------------------------------
+# Skill discovery engine
+# ---------------------------------------------------------------------------
+
+_MAX_NAME_LEN = 64
+_MAX_DESC_LEN = 1024
+_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
 
 def _parse_skill_file(
     file_path: str,
     source: str,
-    *,
-    max_name_length: int,
-    max_description_length: int,
 ) -> tuple[SkillRecord | None, list[SkillDiagnostic]]:
     diagnostics: list[SkillDiagnostic] = []
     try:
@@ -114,39 +87,26 @@ def _parse_skill_file(
             SkillDiagnostic(level="warning", message=str(exc), path=file_path)
         ]
 
-    metadata, _body = parse_frontmatter(text)
+    metadata, _ = parse_frontmatter(text)
     skill_dir = str(Path(file_path).parent)
     parent_dir_name = Path(skill_dir).name
 
-    description_value = metadata.get("description")
-    description = description_value if isinstance(description_value, str) else None
-    for issue in _validate_description(
-        description, max_description_length=max_description_length
-    ):
-        diagnostics.append(
-            SkillDiagnostic(level="warning", message=issue, path=file_path)
-        )
+    description = metadata.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return None, diagnostics
 
     raw_name = metadata.get("name")
     name = raw_name if isinstance(raw_name, str) and raw_name else parent_dir_name
-    for issue in _validate_name(name, parent_dir_name, max_name_length=max_name_length):
-        diagnostics.append(
-            SkillDiagnostic(level="warning", message=issue, path=file_path)
-        )
-
-    disable_value = metadata.get("disable-model-invocation")
-    disable_model_invocation = disable_value is True
-    if disable_value is not None and not isinstance(disable_value, bool):
+    if not _NAME_RE.match(name) or len(name) > _MAX_NAME_LEN:
         diagnostics.append(
             SkillDiagnostic(
                 level="warning",
-                message="disable-model-invocation must be a boolean",
+                message=f"invalid skill name: {name!r}",
                 path=file_path,
             )
         )
 
-    if description is None or description.strip() == "":
-        return None, diagnostics
+    disable = metadata.get("disable-model-invocation") is True
 
     return (
         SkillRecord(
@@ -154,7 +114,7 @@ def _parse_skill_file(
             description=description,
             file_path=file_path,
             base_dir=skill_dir,
-            disable_model_invocation=disable_model_invocation,
+            disable_model_invocation=disable,
             source=source,
         ),
         diagnostics,
@@ -166,8 +126,6 @@ def _load_skills_from_dir(
     source: str,
     *,
     include_root_files: bool,
-    max_name_length: int,
-    max_description_length: int,
 ) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
     skills: list[SkillRecord] = []
     diagnostics: list[SkillDiagnostic] = []
@@ -175,32 +133,22 @@ def _load_skills_from_dir(
         return skills, diagnostics
 
     visited: set[str] = set()
-
     for dirpath, dirnames, filenames in os.walk(
-        directory,
-        topdown=True,
-        followlinks=True,
+        directory, topdown=True, followlinks=True
     ):
         real_dir = os.path.realpath(dirpath)
         if real_dir in visited:
             dirnames[:] = []
             continue
         visited.add(real_dir)
-
         dirnames[:] = sorted(dirnames)
-        filenames = sorted(filenames)
 
         skill_path = os.path.join(dirpath, "SKILL.md")
         if "SKILL.md" in filenames and os.path.isfile(skill_path):
-            skill, skill_diags = _parse_skill_file(
-                os.path.abspath(skill_path),
-                source,
-                max_name_length=max_name_length,
-                max_description_length=max_description_length,
-            )
+            skill, diags = _parse_skill_file(os.path.abspath(skill_path), source)
             if skill is not None:
                 skills.append(skill)
-            diagnostics.extend(skill_diags)
+            diagnostics.extend(diags)
             dirnames[:] = []
             continue
 
@@ -208,141 +156,83 @@ def _load_skills_from_dir(
             directory
         ):
             continue
-
-        for filename in filenames:
+        for filename in sorted(filenames):
             if not filename.endswith(".md"):
                 continue
-            file_path = os.path.join(dirpath, filename)
-            if not os.path.isfile(file_path):
+            fp = os.path.join(dirpath, filename)
+            if not os.path.isfile(fp):
                 continue
-            skill, skill_diags = _parse_skill_file(
-                os.path.abspath(file_path),
-                source,
-                max_name_length=max_name_length,
-                max_description_length=max_description_length,
-            )
+            skill, diags = _parse_skill_file(os.path.abspath(fp), source)
             if skill is not None:
                 skills.append(skill)
-            diagnostics.extend(skill_diags)
+            diagnostics.extend(diags)
 
     return skills, diagnostics
 
 
-def load_skills(
+def _load_skills(
     *,
     cwd: str,
     agent_dir: str,
-    skill_paths: list[str] | tuple[str, ...] = (),
+    skill_paths: tuple[str, ...] = (),
     include_defaults: bool = True,
-    project_skill_dirs: list[str] | tuple[str, ...] | None = None,
-    max_name_length: int = DEFAULT_MAX_NAME_LENGTH,
-    max_description_length: int = DEFAULT_MAX_DESCRIPTION_LENGTH,
-) -> tuple[list[SkillRecord], list[SkillDiagnostic]]:
+) -> list[SkillRecord]:
     discovered: list[SkillRecord] = []
-    diagnostics: list[SkillDiagnostic] = []
-    seen_real_files: set[str] = set()
-    seen_names: dict[str, str] = {}
+    seen_files: set[str] = set()
+    seen_names: set[str] = set()
 
-    def add_batch(
-        batch_skills: list[SkillRecord], batch_diagnostics: list[SkillDiagnostic]
-    ) -> None:
-        diagnostics.extend(batch_diagnostics)
-        for skill in batch_skills:
-            real_path = os.path.realpath(skill.file_path)
-            if real_path in seen_real_files:
+    def add_batch(batch: list[SkillRecord]) -> None:
+        for skill in batch:
+            real = os.path.realpath(skill.file_path)
+            if real in seen_files or skill.name in seen_names:
                 continue
-            seen_real_files.add(real_path)
-            existing_path = seen_names.get(skill.name)
-            if existing_path is not None:
-                diagnostics.append(
-                    SkillDiagnostic(
-                        level="collision",
-                        message=(
-                            f"skill name collision: {skill.name!r} already loaded from "
-                            f"{existing_path}"
-                        ),
-                        path=skill.file_path,
-                    )
-                )
-                continue
-            seen_names[skill.name] = skill.file_path
+            seen_files.add(real)
+            seen_names.add(skill.name)
             discovered.append(skill)
 
     if include_defaults:
-        add_batch(
-            *_load_skills_from_dir(
-                os.path.join(agent_dir, "skills"),
-                "user",
-                include_root_files=True,
-                max_name_length=max_name_length,
-                max_description_length=max_description_length,
-            )
+        skills, _ = _load_skills_from_dir(
+            os.path.join(agent_dir, "skills"),
+            "user",
+            include_root_files=True,
         )
-        # Project-scope skill directories are policy, not kernel — they MUST be
-        # supplied by the harness via ``ProjectLayout.skills_dirs()``. The
-        # kernel no longer hard-codes ``<cwd>/.agentm/skills``; minimal/no-layout
-        # sessions simply have no project skills.
-        project_dirs: tuple[str, ...] = (
-            tuple(project_skill_dirs) if project_skill_dirs is not None else ()
-        )
-        for project_dir in project_dirs:
-            add_batch(
-                *_load_skills_from_dir(
-                    project_dir,
-                    "project",
-                    include_root_files=True,
-                    max_name_length=max_name_length,
-                    max_description_length=max_description_length,
-                )
-            )
+        add_batch(skills)
 
-    for raw_path in skill_paths:
-        resolved_path = str(expand_path_from_cwd(raw_path, cwd))
-        if os.path.isdir(resolved_path):
-            add_batch(
-                *_load_skills_from_dir(
-                    resolved_path,
-                    "path",
-                    include_root_files=True,
-                    max_name_length=max_name_length,
-                    max_description_length=max_description_length,
-                )
-            )
-            continue
-        if os.path.isfile(resolved_path):
-            skill, skill_diags = _parse_skill_file(
-                os.path.abspath(resolved_path),
-                "path",
-                max_name_length=max_name_length,
-                max_description_length=max_description_length,
-            )
-            add_batch([skill] if skill is not None else [], skill_diags)
+    for raw in skill_paths:
+        resolved = str(expand_path_from_cwd(raw, cwd))
+        if os.path.isdir(resolved):
+            skills, _ = _load_skills_from_dir(resolved, "path", include_root_files=True)
+            add_batch(skills)
+        elif os.path.isfile(resolved):
+            skill, _ = _parse_skill_file(os.path.abspath(resolved), "path")
+            if skill is not None:
+                add_batch([skill])
 
-    return discovered, diagnostics
+    return discovered
 
 
-def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
-    visible_skills = [skill for skill in skills if not skill.disable_model_invocation]
-    if not visible_skills:
+def _format_skills_for_prompt(skills: list[SkillRecord]) -> str:
+    visible = [s for s in skills if not s.disable_model_invocation]
+    if not visible:
         return ""
 
     lines = [
         "\n\n# Skills",
         "",
-        "You have access to a skill system that extends your capabilities with "
-        "specialized, up-to-date instructions for specific domains.",
-        "Each skill below has a description of when it applies. When you receive "
-        "a task that matches a skill's description, you MUST call the `load_skill` "
-        "tool with that skill's name to read the full instructions BEFORE "
-        "responding to the task.",
-        "Do not answer from your own knowledge when a relevant skill is available "
-        "— the skill may contain project-specific conventions, current procedures, "
-        "or constraints you are not aware of.",
-        "If no skill matches, proceed normally without loading any.",
+        (
+            "You have access to a skill system that extends your capabilities with "
+            "specialized, up-to-date instructions for specific domains."
+        ),
+        (
+            "Each skill below has a description of when it applies. When you receive "
+            "a task that matches a skill's description, you MUST call the `load_skill` "
+            "tool with that skill's name to read the full instructions BEFORE "
+            "responding to the task."
+        ),
         "",
         "<available_skills>",
     ]
-    for skill in visible_skills:
+    for skill in visible:
         lines.append("  <skill>")
         lines.append(f"    <name>{html.escape(skill.name, quote=True)}</name>")
         lines.append(
@@ -356,57 +246,71 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     return "\n".join(lines)
 
 
-# Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
+# ---------------------------------------------------------------------------
+# MANIFEST
 # ---------------------------------------------------------------------------
 
 
-class _LoadSkillParams(BaseModel):
-    name: str = Field(description="Skill name from <available_skills>.")
+class SkillLoaderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skill_paths: list[str] = Field(default_factory=list)
+    include_defaults: bool = True
+    inherit_claude: bool | None = None
 
 
-# === Atom install ==========================================================
+MANIFEST = ExtensionManifest(
+    name="skill_loader",
+    description="Discover SKILL.md files and inject an <available_skills> index.",
+    registers=(
+        "tool:load_skill",
+        "event:before_run",
+        "event:resources_discover",
+        "event:session_ready",
+    ),
+    config_schema=SkillLoaderConfig,
+    requires=(),
+)
 
 _RESOURCE_RESPONSE_KEYS = frozenset({"skill_paths", "extra_skills"})
 
 
-class _ResourceResponseObserver:
+class _LoadSkillParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="Skill name from <available_skills>.")
+
+
+class _ResourceResponseObserver(EventBusObserver):
     def __init__(self) -> None:
         self.response_owners: dict[int, str] = {}
-
-    def on_emit_start(self, channel: str, event: Any) -> None:
-        del channel, event
 
     def on_handler_done(
         self,
         channel: str,
-        handler: Any,
-        event: Any,
-        value: Any,
-        err: BaseException | None,
+        handler: Handler,
+        event: object,
+        result: object,
+        error: BaseException | None,
         duration_ns: int,
+        dispatch_id: str,
         owner: str | None = None,
     ) -> None:
-        del handler, event, err, duration_ns
-        if channel == ResourcesDiscoverEvent.CHANNEL and isinstance(value, dict):
-            self.response_owners[id(value)] = owner or "<unknown>"
-
-    def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
-        del channel, event, results
+        del handler, event, error, duration_ns, dispatch_id
+        if channel == ResourcesDiscoverEvent.CHANNEL and isinstance(result, dict):
+            self.response_owners[id(result)] = owner or "<unknown>"
 
 
 class _SkillLoaderRuntime:
-    def __init__(self, api: ExtensionAPI, config: SkillLoaderConfig) -> None:
+    def __init__(self, api: AtomAPI, config: SkillLoaderConfig) -> None:
         self._api = api
         self._include_defaults = config.include_defaults
-        # ``inherit_claude`` defaults to ``include_defaults`` — when callers turn
-        # off the standard agentm defaults (e.g. test isolation) they should not
-        # silently pick up the real user's ``~/.claude/skills`` either.
         self._inherit_claude = (
             config.inherit_claude
             if config.inherit_claude is not None
             else self._include_defaults
         )
-        self._configured_skill_paths = list(config.skill_paths)
+        self._configured_paths = list(config.skill_paths)
         self._cached_prompt_block = ""
         self._skills_by_name: dict[str, SkillRecord] = {}
 
@@ -417,87 +321,60 @@ class _SkillLoaderRuntime:
                 description=(
                     "Load the full content of a skill by name. "
                     "Use this to read detailed instructions from "
-                    "<available_skills>. You may also pass the basename of a "
-                    "sibling .md file bundled next to a skill to load its "
-                    "referenced material. An unknown name returns the list "
-                    "of available skills."
+                    "<available_skills>."
                 ),
                 parameters=pydantic_to_tool_schema(_LoadSkillParams),
                 fn=self.load_skill,
             )
         )
         self._api.on(SessionReadyEvent.CHANNEL, self.populate)
-        self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
+        self._api.on(BeforeRunEvent.CHANNEL, self.inject)
 
     async def populate(self, _: SessionReadyEvent) -> None:
         discovered_paths = self._discovery_paths()
-        responses, response_owners = await self._discover_peer_resources()
-        contributed_skills = await self._merge_resource_responses(
-            responses,
-            response_owners=response_owners,
-            discovered_paths=discovered_paths,
+        responses, owners = await self._discover_peer_resources()
+        self._merge_resource_responses(responses, owners, discovered_paths)
+        skills = _load_skills(
+            cwd=self._api.ctx.cwd,
+            agent_dir=str(_agentm_home_dir()),
+            skill_paths=tuple(discovered_paths),
+            include_defaults=self._include_defaults,
         )
-        skills = self._load_disk_skills(discovered_paths)
-        self._append_contributed_skills(skills, contributed_skills)
-        self._cached_prompt_block = format_skills_for_prompt(skills)
-        self._skills_by_name = {skill.name: skill for skill in skills}
+        self._cached_prompt_block = _format_skills_for_prompt(skills)
+        self._skills_by_name = {s.name: s for s in skills}
 
-    def inject(self, event: BeforeAgentStartEvent) -> None:
+    def inject(self, event: BeforeRunEvent) -> dict[str, str] | None:
         if not self._cached_prompt_block:
-            return
-        updated = f"{event.system or ''}{self._cached_prompt_block}"
-        event.system = updated
+            return None
+        return {"system": f"{event.system or ''}{self._cached_prompt_block}"}
 
-    async def load_skill(self, args: dict[str, Any]) -> Any:
+    async def load_skill(self, args: dict[str, JsonValue]) -> ToolResult:
         name = str(args.get("name", "")).strip()
         if not name:
-            return ToolResult(
-                content=[TextContent(type="text", text="error: name is required")],
-                is_error=True,
-            )
+            return error_result("error: name is required")
         target = self._skill_target(name)
         if target is None:
             available = ", ".join(sorted(self._skills_by_name)) or "(none)"
-            return ToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=(
-                            f"error: skill {name!r} not found. Available: {available}"
-                        ),
-                    )
-                ],
-                is_error=True,
+            return error_result(
+                f"error: skill {name!r} not found. Available: {available}"
             )
         try:
             content = target.read_text(encoding="utf-8")
         except OSError as exc:
-            return ToolResult(
-                content=[TextContent(type="text", text=f"error reading skill: {exc}")],
-                is_error=True,
-            )
-        return ToolResult(content=[TextContent(type="text", text=content)])
+            return error_result(f"error reading skill: {exc}")
+        return text_result(content)
 
     def _discovery_paths(self) -> list[str]:
-        discovered_paths = list(self._configured_skill_paths)
+        paths = list(self._configured_paths)
         if not self._inherit_claude:
-            return discovered_paths
-        # Auto-pick up Claude Code skill directories so users can reuse the
-        # same `.claude/skills/<name>/SKILL.md` layout. Non-existent paths are
-        # silently ignored by ``load_skills``.
-        discovered_paths.append(str(Path.home() / ".claude" / "skills"))
-        discovered_paths.append(
-            str(expand_path_from_cwd(".claude/skills", self._api.cwd))
-        )
-        discovered_paths.extend(self._claude_plugin_skill_dirs())
-        return discovered_paths
+            return paths
+        paths.append(str(Path.home() / ".claude" / "skills"))
+        paths.append(str(expand_path_from_cwd(".claude/skills", self._api.ctx.cwd)))
+        paths.extend(self._claude_plugin_skill_dirs())
+        return paths
 
-    def _claude_plugin_skill_dirs(self) -> list[str]:
-        # Also walk Claude Code's installed-plugin skills:
-        # ``~/.claude/plugins/cache/<source>/<plugin>/<version>/skills/``.
-        # Plugins are how the bulk of Claude Code's library ships
-        # (autoharness, workbuddy, codex, ...); ignoring them would leave
-        # agentm with only the user's personal ``~/.claude/skills``.
+    @staticmethod
+    def _claude_plugin_skill_dirs() -> list[str]:
         plugin_cache = Path.home() / ".claude" / "plugins" / "cache"
         if not plugin_cache.is_dir():
             return []
@@ -516,84 +393,30 @@ class _SkillLoaderRuntime:
                         paths.append(str(skills_dir))
         return paths
 
-    async def _discover_peer_resources(self) -> tuple[list[Any], dict[int, str]]:
+    async def _discover_peer_resources(self) -> tuple[list[object], dict[int, str]]:
         observer = _ResourceResponseObserver()
-        unsubscribe = self._api.add_observer(observer)
+        unsubscribe = self._api.bus.add_observer(observer)
         try:
-            responses = await self._api.events.emit(
+            responses = await self._api.bus.emit_decision(
                 ResourcesDiscoverEvent.CHANNEL,
-                ResourcesDiscoverEvent(cwd=self._api.cwd, reason="startup"),
+                ResourcesDiscoverEvent(cwd=self._api.ctx.cwd, reason="startup"),
             )
         finally:
             unsubscribe()
         return responses, observer.response_owners
 
-    async def _merge_resource_responses(
-        self,
-        responses: list[Any],
-        *,
-        response_owners: dict[int, str],
+    @staticmethod
+    def _merge_resource_responses(
+        responses: list[object],
+        owners: dict[int, str],
         discovered_paths: list[str],
-    ) -> list[SkillRecord]:
-        contributed_skills: list[SkillRecord] = []
+    ) -> None:
         for response in responses:
             if not isinstance(response, dict):
                 continue
-            origin = response_owners.get(id(response), "<unknown>")
-            await self._warn_unknown_resource_keys(response, origin)
             extra_paths = response.get("skill_paths")
             if isinstance(extra_paths, list):
-                discovered_paths.extend(str(path) for path in extra_paths)
-            extra_skills = response.get("extra_skills")
-            if isinstance(extra_skills, list):
-                contributed_skills.extend(
-                    entry for entry in extra_skills if isinstance(entry, SkillRecord)
-                )
-        return contributed_skills
-
-    async def _warn_unknown_resource_keys(
-        self, response: dict[Any, Any], origin: str
-    ) -> None:
-        for key in sorted(set(response) - _RESOURCE_RESPONSE_KEYS):
-            await self._api.events.emit(
-                DiagnosticEvent.CHANNEL,
-                DiagnosticEvent(
-                    level="warning",
-                    source="skill_loader",
-                    message=(
-                        f"ignored unknown ResourcesDiscoverEvent response key "
-                        f"{key!r} from {origin}"
-                    ),
-                ),
-            )
-
-    def _load_disk_skills(self, discovered_paths: list[str]) -> list[SkillRecord]:
-        # Resolve project-scope skill dirs from the harness-supplied layout
-        # (previously the SkillsService injected this; now the atom does it
-        # directly).
-        layout = self._api.get_project_layout()
-        project_dirs = tuple(str(p) for p in layout.skills_dirs())
-        skills, _diagnostics = load_skills(
-            cwd=self._api.cwd,
-            agent_dir=str(agentm_home_dir()),
-            skill_paths=tuple(discovered_paths),
-            include_defaults=self._include_defaults,
-            project_skill_dirs=project_dirs,
-        )
-        return skills
-
-    @staticmethod
-    def _append_contributed_skills(
-        skills: list[SkillRecord], contributed_skills: list[SkillRecord]
-    ) -> None:
-        # Append peer-contributed records last so they don't shadow disk-based
-        # skills with the same name.
-        seen_names = {skill.name for skill in skills}
-        for record in contributed_skills:
-            if record.name in seen_names:
-                continue
-            seen_names.add(record.name)
-            skills.append(record)
+                discovered_paths.extend(str(p) for p in extra_paths)
 
     def _skill_target(self, name: str) -> Path | None:
         record = self._skills_by_name.get(name)
@@ -602,7 +425,6 @@ class _SkillLoaderRuntime:
         return self._resolve_sibling(name)
 
     def _resolve_sibling(self, name: str) -> Path | None:
-        """Check if *name* is a sibling file of any registered skill."""
         filename = name if name.endswith(".md") else f"{name}.md"
         for record in self._skills_by_name.values():
             candidate = Path(record.base_dir) / filename
@@ -611,5 +433,5 @@ class _SkillLoaderRuntime:
         return None
 
 
-async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
+async def install(api: AtomAPI, config: SkillLoaderConfig) -> None:
     _SkillLoaderRuntime(api, config).install()

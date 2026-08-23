@@ -1,10 +1,12 @@
+# code-health: ignore-file[AM025] -- core helpers normalize serialization, schema, and stream boundary data
 """Provider-neutral stream accumulator for LLM ``StreamFn`` adapters.
 
 Holds the kernel-side accumulator used by all provider adapters (Anthropic,
 OpenAI-compatible, ...) to build an ``AssistantMessage`` from a sequence of
 provider-specific stream events. Lives in ``core.lib`` because the logic is
 purely about kernel data types (``AssistantContent``, ``ThinkingBlock``,
-``ToolCallBlock``, ``Usage``) and has no provider knowledge.
+``OpaqueThinkingBlock``, ``ToolCallBlock``, ``Usage``) and has no provider
+knowledge.
 """
 
 from __future__ import annotations
@@ -12,33 +14,38 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Protocol
 
 from agentm.core.abi.messages import (
     AssistantContent,
     AssistantMessage,
+    JsonValue,
+    OpaqueThinkingBlock,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
     Usage,
+    freeze_json,
 )
 from agentm.core.abi.stream import ToolCallArgsParseError
 from agentm.core.abi.termination import TerminationHint
 from agentm.core.abi.tool import Tool
 
 
-def encode_tool_args(args: Mapping[str, Any]) -> str:
+def encode_tool_args(args: Mapping[str, JsonValue]) -> str:
     """Encode tool arguments consistently across provider adapters."""
 
-    return json.dumps(dict(args), ensure_ascii=False)
+    from agentm.core.abi.messages import thaw_json
+
+    return json.dumps(thaw_json(args), ensure_ascii=False)
 
 
 class ToolSpecAdapter(Protocol):
     """Provider-specific conversion from AgentM tools to vendor specs."""
 
-    def vendor_spec(self, tool: Tool) -> dict[str, Any]: ...
+    def vendor_spec(self, tool: Tool) -> dict[str, object]: ...
 
-    def encode_tool_args(self, args: Mapping[str, Any]) -> str: ...
+    def encode_tool_args(self, args: Mapping[str, JsonValue]) -> str: ...
 
 
 @dataclass(slots=True)
@@ -48,6 +55,8 @@ class _ContentEntry:
     index: int | None = None
     text: str = ""
     signature: str | None = None
+    provider: str = ""
+    payload: Mapping[str, JsonValue] | None = None
     tool_call_id: str = ""
     tool_name: str = ""
     args_json: str = ""
@@ -87,6 +96,20 @@ class StreamAccumulator:
             self._by_thinking_index[index] = entry
         entry.signature = (entry.signature or "") + signature
 
+    def add_opaque_thinking(
+        self,
+        index: int | None,
+        *,
+        provider: str,
+        payload: Mapping[str, JsonValue],
+    ) -> None:
+        entry = self._append("opaque_thinking", index=index)
+        entry.provider = provider
+        frozen = freeze_json(payload)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("opaque thinking payload must be an object")
+        entry.payload = frozen
+
     def add_tool_call(
         self, id: str, name: str, args_delta: str, *, index: int | None = None
     ) -> None:
@@ -125,6 +148,16 @@ class StreamAccumulator:
                             signature=entry.signature,
                         )
                     )
+            elif entry.kind == "opaque_thinking":
+                if entry.payload is None:
+                    raise ValueError("opaque thinking entry has no payload")
+                content.append(
+                    OpaqueThinkingBlock(
+                        type="opaque_thinking",
+                        provider=entry.provider,
+                        payload=entry.payload,
+                    )
+                )
             elif entry.kind == "tool_call":
                 content.append(
                     ToolCallBlock(
@@ -158,12 +191,12 @@ class StreamAccumulator:
             ),
         )
 
-    def _parse_tool_args(self, entry: _ContentEntry) -> dict[str, Any]:
+    def _parse_tool_args(self, entry: _ContentEntry) -> dict[str, JsonValue]:
         raw = entry.args_json
         if not raw:
             return {}
         try:
-            args = json.loads(raw)
+            args: object = json.loads(raw)
         except json.JSONDecodeError as exc:
             self.parse_errors.append(
                 ToolCallArgsParseError(
@@ -182,4 +215,16 @@ class StreamAccumulator:
                 )
             )
             return {}
-        return args
+        if not all(isinstance(key, str) for key in args):
+            self.parse_errors.append(
+                ToolCallArgsParseError(
+                    tool_call_id=entry.tool_call_id,
+                    raw=raw,
+                    error="expected JSON object with string keys",
+                )
+            )
+            return {}
+        frozen = freeze_json(args)
+        if not isinstance(frozen, Mapping):
+            raise TypeError("validated tool arguments must remain an object")
+        return dict(frozen)
