@@ -565,7 +565,7 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
             dev=status.st_dev,
             ino=status.st_ino,
         )
-        records, end_offset, whole = _read_records_from(path, 0)
+        records, end_offset, resumable = _read_records_from(path, 0)
         if not records:
             raise ValueError(f"corrupt empty trajectory journal: {path}")
         session_record, session_size = records[0]
@@ -576,7 +576,7 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
             cache.account(record.get("record_type"), size)
         cache.offset = end_offset
         cache.fingerprint = _fingerprint(path, end_offset)
-        if whole:
+        if resumable:
             self._cache[session_id] = cache
         return cache
 
@@ -586,13 +586,13 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
         path: Path,
         cache: _SessionCache,
     ) -> None:
-        records, end_offset, whole = _read_records_from(path, cache.offset)
+        records, end_offset, resumable = _read_records_from(path, cache.offset)
         for record, size in records:
             self._apply_record(cache.state, session_id, record, path)
             cache.account(record.get("record_type"), size)
         cache.offset = end_offset
         cache.fingerprint = _fingerprint(path, end_offset)
-        if not whole:
+        if not resumable:
             # A torn tail was applied but is not at a boundary we can resume
             # from. Drop the cache rather than remember a position that a
             # later append will invalidate.
@@ -634,7 +634,7 @@ class JsonlTrajectoryStore:  # code-health: ignore[AM009] -- complete store port
         path: Path,
         state: InMemoryTrajectoryStore,
     ) -> None:
-        records, _end_offset, _whole = _read_records_from(path, 0)
+        records, _end_offset, _resumable = _read_records_from(path, 0)
         if not records:
             raise ValueError(f"corrupt empty trajectory journal: {path}")
         session_record, _size = records[0]
@@ -971,10 +971,17 @@ def _read_records_from(
     """Read records starting at ``offset``, with each record's byte length.
 
     Returns the records, the offset just past the last *terminated* record,
-    and whether the read ended on a record boundary. A valid-but-unterminated
-    trailing record is still returned -- it is real data a crash left behind --
-    but it does not advance the resumable offset, because the next append will
-    terminate it in place and change the bytes at that position.
+    and whether a caller may resume from that offset later.
+
+    The offset is always a record boundary: unterminated bytes never advance
+    it. What the third value adds is whether every record returned is covered
+    by it. A valid-but-unterminated trailing record is real data a crash left
+    behind, so it is returned and applied -- but resuming past it would apply
+    it a second time once an append terminates it in place, so the read is not
+    resumable. Trailing bytes that fail to parse are not a record at all:
+    nothing is returned for them, so there is nothing to double-apply, and the
+    boundary before them stays resumable. Reading them again is a no-op, and
+    any append truncates them first.
     """
 
     with path.open("rb") as handle:
@@ -983,7 +990,7 @@ def _read_records_from(
     lines = raw.splitlines(keepends=True)
     records: list[tuple[Mapping[str, object], int]] = []
     end_offset = offset
-    whole = True
+    resumable = True
     for line_number, line in enumerate(lines, start=1):
         terminated = line.endswith((b"\n", b"\r"))
         try:
@@ -1007,8 +1014,8 @@ def _read_records_from(
         if terminated:
             end_offset += len(line)
         else:
-            whole = False
-    return records, end_offset, whole
+            resumable = False
+    return records, end_offset, resumable
 
 
 def _required_mapping(
