@@ -890,6 +890,67 @@ async def test_resume_rejects_unversioned_session_metadata() -> None:
         )
 
 
+def test_jsonl_vacuum_reclaims_checkpoints_without_changing_replay(
+    tmp_path: Path,
+) -> None:
+    """Reclaiming superseded checkpoints must be invisible to every reader."""
+
+    store = JsonlTrajectoryStore(tmp_path)
+    meta = SessionMeta(id="session")
+    store.create_session(meta, head=_empty_head(meta.id))
+    blob = "x" * 4096
+    sizes: list[int] = []
+
+    def checkpoint(index: int, step: int) -> TurnCheckpoint:
+        return TurnCheckpoint(
+            index=index,
+            id=f"turn-{index}",
+            run_id=f"run-{index}",
+            run_step=0,
+            trigger=UserInput(content=(TextContent(type="text", text=blob),)),
+            response=text_response(blob * step),
+            tool_results=(),
+            updated_at=float(step),
+        )
+
+    for index in range(24):
+        for step in range(1, 7):
+            store.save_checkpoint(meta.id, checkpoint(index, step))
+        store.commit_turn(
+            meta.id,
+            TrajectoryCommit(
+                Turn(
+                    index=index,
+                    id=f"turn-{index}",
+                    run_id=f"run-{index}",
+                    run_step=0,
+                    trigger=UserInput(content=(TextContent(type="text", text=blob),)),
+                    response=text_response(blob * 6),
+                    tool_results=(),
+                    outcome=Outcome(cause=ModelEndTurn()),
+                    timestamp=float(index),
+                ),
+                (),
+                None,
+            ),
+        )
+        sizes.append(store.file_path(meta.id).stat().st_size)
+    live = checkpoint(24, 3)
+    store.save_checkpoint(meta.id, live)
+
+    # Reclamation is automatic: an append-only journal can only shrink because
+    # something rewrote it without the records replay would have discarded.
+    assert min(sizes) < max(sizes)
+    assert sizes[-1] < max(sizes)
+
+    # A reader with no cache of its own sees exactly what the writer sees.
+    cold = JsonlTrajectoryStore(tmp_path)
+    assert cold.load(meta.id) == store.load(meta.id)
+    assert cold.load_checkpoint(meta.id) == live
+    assert cold.list_heads(meta.id) == store.list_heads(meta.id)
+    assert len(cold.load(meta.id)[1]) == 24
+
+
 def test_jsonl_torn_tail_recovers_but_interior_corruption_fails(
     tmp_path: Path,
 ) -> None:
