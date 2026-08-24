@@ -890,6 +890,54 @@ async def test_resume_rejects_unversioned_session_metadata() -> None:
         )
 
 
+def test_jsonl_unparseable_tail_does_not_desync_a_warm_reader(
+    tmp_path: Path,
+) -> None:
+    """A crash mid-write leaves bytes a resumed replay must neither lose nor reapply."""
+
+    store = JsonlTrajectoryStore(tmp_path)
+    meta = SessionMeta(id="session")
+    store.create_session(meta, head=_empty_head(meta.id))
+
+    def commit(index: int) -> None:
+        store.commit_turn(
+            meta.id,
+            TrajectoryCommit(
+                Turn(
+                    index=index,
+                    id=f"turn-{index}",
+                    run_id=f"run-{index}",
+                    run_step=0,
+                    trigger=UserInput(content=(TextContent(type="text", text="hi"),)),
+                    response=text_response("ok"),
+                    tool_results=(),
+                    outcome=Outcome(cause=ModelEndTurn()),
+                    timestamp=float(index),
+                ),
+                (),
+                None,
+            ),
+        )
+
+    for index in range(3):
+        commit(index)
+
+    # This store has replayed up to the end of turn 2 and cached that position.
+    path = store.file_path(meta.id)
+    with path.open("ab") as handle:
+        handle.write(b'{"version":2,"record_typ')
+
+    warm = store.load(meta.id)
+    assert len(warm[1]) == 3
+    assert store.load(meta.id) == warm, "re-reading the torn tail changed the state"
+    assert JsonlTrajectoryStore(tmp_path).load(meta.id) == warm
+
+    # The next write clears the tail rather than growing a record around it.
+    commit(3)
+    reread = JsonlTrajectoryStore(tmp_path).load(meta.id)
+    assert [turn.index for turn in reread[1]] == [0, 1, 2, 3]
+
+
 def test_jsonl_vacuum_reclaims_checkpoints_without_changing_replay(
     tmp_path: Path,
 ) -> None:
