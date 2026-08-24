@@ -10,7 +10,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentm"
-version = "0.2.5"
+version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
